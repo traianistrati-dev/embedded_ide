@@ -1,0 +1,10 @@
+[package]
+name = "embedded_ide_0"
+version = "0.1.0"
+edition = "2024"
+author = "Traian Istrati"
+
+[dependencies]
+eframe = "0.27"
+egui = "0.34.1"
+# egui-rotate="0.1.3"
