@@ -1,4 +1,4 @@
-use crate::panels::mcu::pin::{Pin, draw_horizontal_text, draw_vertical_text};
+use crate::panels::mcu::pin::Pin;
 use eframe::egui;
 
 const PIN_HEIGHT: f32 = 50.0;
@@ -67,36 +67,17 @@ impl Mcu {
         // RIGHT PINS
         for (i, pin) in self.right_pins.iter().enumerate() {
             let y = chip_rect.top() + PIN_SPACING + (i as f32 * (PIN_WIDTH + PIN_SPACING));
+            let x = chip_rect.right();
 
-            let pin_rect = egui::Rect::from_min_size(
-                egui::pos2(chip_rect.right(), y),
-                egui::vec2(PIN_HEIGHT, PIN_WIDTH),
-            );
-
-            _ = painter.rect_filled(pin_rect, 0.0, pin.get_pin_collor());
-
-            draw_horizontal_text(
-                &painter,
-                egui::pos2(pin_rect.left() + 2.0, pin_rect.center().y),
-                &pin,
-            );
+            pin.draw_right(&painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(&ui));
         }
 
         // LEFT PINS
         for (i, pin) in self.left_pins.iter().enumerate() {
             let y = chip_rect.top() + PIN_SPACING + (i as f32 * (PIN_WIDTH + PIN_SPACING));
             let x = chip_rect.left() - PIN_HEIGHT;
-            let start_position = egui::pos2(x, y);
-            let pin_rect =
-                egui::Rect::from_min_size(start_position, egui::vec2(PIN_HEIGHT, PIN_WIDTH));
 
-            _ = painter.rect_filled(pin_rect, 0.0, pin.get_pin_collor());
-
-            draw_horizontal_text(
-                &painter,
-                egui::pos2(pin_rect.left() + 2.0, pin_rect.center().y),
-                &pin,
-            );
+            pin.draw_left(&painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(&ui));
         }
 
         // TOP PINS
@@ -104,18 +85,7 @@ impl Mcu {
             let x = chip_rect.left() + PIN_SPACING + (i as f32 * (PIN_WIDTH + PIN_SPACING));
             let y = chip_rect.top() - PIN_HEIGHT;
 
-            let start_position = egui::pos2(x, y);
-
-            let pin_rect =
-                egui::Rect::from_min_size(start_position, egui::vec2(PIN_WIDTH, PIN_HEIGHT));
-
-            _ = painter.rect_filled(pin_rect, 0.0, pin.get_pin_collor());
-
-            draw_vertical_text(
-                &painter,
-                egui::pos2(x + (PIN_WIDTH / 3.4), y + PIN_HEIGHT - 4.0),
-                &pin,
-            );
+            pin.draw_top(&painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(&ui));
         }
 
         // BOTTOM PINS
@@ -123,18 +93,7 @@ impl Mcu {
             let x = chip_rect.left() + PIN_SPACING + (i as f32 * (PIN_WIDTH + PIN_SPACING));
             let y = chip_rect.bottom();
 
-            let start_position = egui::pos2(x, y);
-
-            let pin_rect =
-                egui::Rect::from_min_size(start_position, egui::vec2(PIN_WIDTH, PIN_HEIGHT));
-
-            _ = painter.rect_filled(pin_rect, 0.0, pin.get_pin_collor());
-
-            draw_vertical_text(
-                &painter,
-                egui::pos2(x + (PIN_WIDTH / 3.4), y + PIN_HEIGHT - 4.0),
-                &pin,
-            );
+            pin.draw_bottom(&painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(&ui));
         }
     }
 }

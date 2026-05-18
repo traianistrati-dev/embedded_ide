@@ -1,47 +1,13 @@
-use eframe::egui::epaint::TextShape;
-use eframe::egui::{Color32, FontId};
-
-use eframe::egui::Shape;
-
-//use eframe::egui;
+use eframe::egui;
 
 const PIN_FONT_SIZE: f32 = 10.0;
+const PIN_ROUNDING: f32 = 0.0;
 
 pub struct Pin {
     name: String,
     number: usize,
     reserved: bool,
-}
-
-pub fn draw_horizontal_text(painter: &eframe::egui::Painter, pos: eframe::egui::Pos2, pin: &Pin) {
-    painter.text(
-        pos,
-        eframe::egui::Align2::LEFT_CENTER,
-        pin.name.as_str(),
-        eframe::egui::FontId::monospace(PIN_FONT_SIZE),
-        pin.get_pin_text_collor(),
-    );
-}
-
-pub fn draw_vertical_text(painter: &eframe::egui::Painter, pos: eframe::egui::Pos2, pin: &Pin) {
-    let galley = painter.layout_no_wrap(
-        pin.name.to_owned(),
-        FontId::monospace(PIN_FONT_SIZE),
-        Color32::BLACK,
-    );
-
-    let text_shape = TextShape {
-        pos,
-        galley,
-        underline: eframe::egui::epaint::Stroke::NONE, //Default::default(),
-        override_text_color: Some(pin.get_pin_text_collor()),
-        angle: -std::f32::consts::FRAC_PI_2,
-        fallback_color: Color32::BLACK,
-        opacity_factor: 1.0,
-    };
-
-    let shape = Shape::Text(text_shape);
-    painter.add(shape);
+    // rect: egui::Rect,
 }
 
 impl Pin {
@@ -61,24 +27,157 @@ impl Pin {
         }
     }
 
-    pub fn get_pin_collor(&self) -> eframe::egui::Color32 {
+    pub fn get_pin_collor(&self) -> egui::Color32 {
         match self.reserved {
             true => match self.name.as_str() {
-                "VDD" | "VDDA" => eframe::egui::Color32::RED,
-                "VBAT" => eframe::egui::Color32::LIGHT_RED,
-                "VSS" | "VSSA" => eframe::egui::Color32::BLACK,
-                _ => eframe::egui::Color32::LIGHT_GRAY,
+                "VDD" | "VDDA" => egui::Color32::RED,
+                "VBAT" => egui::Color32::LIGHT_RED,
+                "VSS" | "VSSA" => egui::Color32::BLACK,
+                _ => egui::Color32::LIGHT_GRAY,
             },
-            false => eframe::egui::Color32::LIGHT_BLUE,
+            false => egui::Color32::LIGHT_BLUE,
         }
     }
-    pub fn get_pin_text_collor(&self) -> eframe::egui::Color32 {
+    pub fn get_pin_text_collor(&self) -> egui::Color32 {
         match self.reserved {
             true => match self.name.as_str().trim() {
-                "VSS" | "VSSA" => eframe::egui::Color32::WHITE,
-                _ => eframe::egui::Color32::BLACK,
+                "VSS" | "VSSA" => egui::Color32::WHITE,
+                _ => egui::Color32::BLACK,
             },
-            false => eframe::egui::Color32::BLACK,
+            false => egui::Color32::BLACK,
         }
+    }
+
+    pub fn draw_vertical_text(&self, painter: &egui::Painter, pos: egui::Pos2) {
+        let galley = painter.layout_no_wrap(
+            self.name.to_owned(),
+            egui::FontId::monospace(PIN_FONT_SIZE),
+            egui::Color32::BLACK,
+        );
+
+        let text_shape = egui::epaint::TextShape {
+            pos,
+            galley,
+            underline: egui::epaint::Stroke::NONE, //Default::default(),
+            override_text_color: Some(self.get_pin_text_collor()),
+            angle: -std::f32::consts::FRAC_PI_2,
+            fallback_color: egui::Color32::BLACK,
+            opacity_factor: 1.0,
+        };
+
+        let shape = egui::Shape::Text(text_shape);
+        painter.add(shape);
+    }
+
+    pub fn draw_horizontal_text(&self, painter: &egui::Painter, pos: egui::Pos2) {
+        painter.text(
+            pos,
+            egui::Align2::LEFT_CENTER,
+            self.name.as_str(),
+            egui::FontId::monospace(PIN_FONT_SIZE),
+            self.get_pin_text_collor(),
+        );
+    }
+
+    pub fn listen(&self, painter: &egui::Painter, ui: &egui::Ui, rect: egui::Rect) {
+        let response = ui.interact(rect, ui.id().with(&self.number), egui::Sense::click());
+
+        let color = if response.hovered() {
+            egui::Color32::DARK_GRAY
+        } else {
+            self.get_pin_collor()
+        };
+
+        painter.rect_filled(rect, PIN_ROUNDING, color);
+    }
+
+    pub fn draw_right(
+        &self,
+        painter: &egui::Painter,
+        x: f32,
+        y: f32,
+        heigt: f32,
+        width: f32,
+        ui: Option<&egui::Ui>,
+    ) -> egui::Rect {
+        let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(heigt, width));
+
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+
+        if let Some(ui) = ui {
+            self.listen(&painter, ui, rect);
+        }
+
+        self.draw_horizontal_text(&painter, egui::pos2(rect.left() + 2.0, rect.center().y));
+
+        rect
+    }
+
+    pub fn draw_left(
+        &self,
+        painter: &egui::Painter,
+        x: f32,
+        y: f32,
+        heigt: f32,
+        width: f32,
+        ui: Option<&egui::Ui>,
+    ) -> egui::Rect {
+        let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(heigt, width));
+
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+
+        if let Some(ui) = ui {
+            self.listen(&painter, ui, rect);
+        }
+
+        self.draw_horizontal_text(&painter, egui::pos2(rect.left() + 2.0, rect.center().y));
+
+        rect
+    }
+
+    pub fn draw_top(
+        &self,
+        painter: &egui::Painter,
+        x: f32,
+        y: f32,
+        heigt: f32,
+        width: f32,
+        ui: Option<&egui::Ui>,
+    ) -> egui::Rect {
+        let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, heigt));
+
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+
+        if let Some(ui) = ui {
+            self.listen(&painter, ui, rect);
+        }
+
+        self.draw_vertical_text(&painter, egui::pos2(x + (width / 3.4), y + heigt - 4.0));
+
+        rect
+    }
+
+    pub fn draw_bottom(
+        &self,
+        painter: &egui::Painter,
+        x: f32,
+        y: f32,
+        heigt: f32,
+        width: f32,
+        ui: Option<&egui::Ui>,
+    ) -> egui::Rect {
+        self.draw_vertical_text(&painter, egui::pos2(x + (width / 3.4), y + heigt - 4.0));
+
+        let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, heigt));
+
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+
+        if let Some(ui) = ui {
+            self.listen(&painter, ui, rect);
+        }
+
+        self.draw_vertical_text(&painter, egui::pos2(x + (width / 3.4), y + heigt - 4.0));
+
+        rect
     }
 }
