@@ -39,7 +39,9 @@ impl Mcu {
 
     /// Resets all non-reserved pins to Unset and clears selection/info state.
     pub fn reset_all_pins(&mut self) {
-        for pin in self.top_pins.iter_mut()
+        for pin in self
+            .top_pins
+            .iter_mut()
             .chain(self.bottom_pins.iter_mut())
             .chain(self.left_pins.iter_mut())
             .chain(self.right_pins.iter_mut())
@@ -284,7 +286,14 @@ impl Mcu {
                     );
                 }
                 if btn_response.clicked() {
-                    new_function = Some((num, func.clone()));
+                    // Click on the already-selected function → deselect (Unset);
+                    // click on a different function → select it.
+                    let next = if func == &selected_func {
+                        PinFunction::Unset
+                    } else {
+                        func.clone()
+                    };
+                    new_function = Some((num, next));
                 }
 
                 // Hover / click — info button
@@ -318,11 +327,12 @@ impl Mcu {
             );
         }
 
-        // Apply the selected function to the pin
+        // Apply the selected function to the pin; always close the info popup.
         if let Some((pin_num, func)) = new_function {
             if let Some(pin) = self.find_pin_mut(pin_num) {
                 pin.selected_function = func;
             }
+            self.show_info = None;
         }
 
         // Toggle the info popup
@@ -340,12 +350,9 @@ impl Mcu {
             let mut open = true;
 
             // Anchor to chip body center so the window opens within the MCU panel
-            let popup_pos = egui::pos2(
-                chip_rect.center().x - 170.0,
-                chip_rect.center().y - 100.0,
-            );
+            let popup_pos = egui::pos2(chip_rect.center().x - 170.0, chip_rect.center().y - 100.0);
 
-            egui::Window::new(format!("[i]  {}", func.label()))
+            egui::Window::new(format!("{}", func.label()))
                 .open(&mut open)
                 .resizable(true)
                 .default_width(340.0)
@@ -354,8 +361,8 @@ impl Mcu {
                     // Description
                     ui.label(
                         egui::RichText::new(&info.description)
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(200, 200, 220)),
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(20, 20, 20)),
                     );
 
                     if !info.specs.is_empty() {
@@ -372,13 +379,13 @@ impl Mcu {
                                 for (key, value) in &info.specs {
                                     ui.label(
                                         egui::RichText::new(key)
-                                            .size(11.0)
-                                            .color(egui::Color32::from_rgb(160, 160, 180)),
+                                            .size(12.0)
+                                            .color(egui::Color32::from_rgb(0, 50, 250)),
                                     );
                                     ui.label(
                                         egui::RichText::new(value)
-                                            .size(11.0)
-                                            .color(egui::Color32::WHITE),
+                                            .size(12.0)
+                                            .color(egui::Color32::DARK_GRAY),
                                     );
                                     ui.end_row();
                                 }
