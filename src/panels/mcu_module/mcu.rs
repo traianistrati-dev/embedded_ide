@@ -7,13 +7,15 @@ const PIN_WIDTH: f32 = 30.0;
 const PIN_SPACING: f32 = 3.0;
 
 pub struct Mcu {
-    name: String,
-    top_pins: Vec<Pin>,
-    bottom_pins: Vec<Pin>,
-    left_pins: Vec<Pin>,
-    right_pins: Vec<Pin>,
+    pub name: String,
+    pub top_pins: Vec<Pin>,
+    pub bottom_pins: Vec<Pin>,
+    pub left_pins: Vec<Pin>,
+    pub right_pins: Vec<Pin>,
     /// Currently selected pin number (None = no pin selected)
     selected_pin: Option<usize>,
+    /// Function whose ⓘ info window is open (None = closed)
+    show_info: Option<PinFunction>,
 }
 
 impl Mcu {
@@ -31,7 +33,23 @@ impl Mcu {
             left_pins,
             right_pins,
             selected_pin: None,
+            show_info: None,
         }
+    }
+
+    /// Resets all non-reserved pins to Unset and clears selection/info state.
+    pub fn reset_all_pins(&mut self) {
+        for pin in self.top_pins.iter_mut()
+            .chain(self.bottom_pins.iter_mut())
+            .chain(self.left_pins.iter_mut())
+            .chain(self.right_pins.iter_mut())
+        {
+            if !pin.reserved {
+                pin.selected_function = PinFunction::Unset;
+            }
+        }
+        self.selected_pin = None;
+        self.show_info = None;
     }
 
     /// Finds a pin by number (immutable)
@@ -175,6 +193,7 @@ impl Mcu {
 
         let chip_name = self.name.clone();
         let mut new_function: Option<(usize, PinFunction)> = None;
+        let mut toggle_info: Option<PinFunction> = None;
 
         if let Some((num, pin_name, funcs, selected_func)) = inner_data {
             // Header — pin number and name
@@ -198,7 +217,9 @@ impl Mcu {
             );
 
             // Function buttons
-            let btn_w = chip_rect.width() - 24.0;
+            let info_btn_w = 22.0;
+            let gap = 4.0;
+            let btn_w = chip_rect.width() - 24.0 - info_btn_w - gap;
             let btn_h = 28.0;
             let btn_x = chip_rect.left() + 12.0;
             let mut btn_y = sep_y + 12.0;
@@ -206,6 +227,10 @@ impl Mcu {
             for (i, func) in funcs.iter().enumerate() {
                 let btn_rect =
                     egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, btn_h));
+                let info_rect = egui::Rect::from_min_size(
+                    egui::pos2(btn_x + btn_w + gap, btn_y),
+                    egui::vec2(info_btn_w, btn_h),
+                );
 
                 let is_sel = func == &selected_func;
                 let bg = if is_sel {
@@ -225,7 +250,26 @@ impl Mcu {
                     egui::Color32::WHITE,
                 );
 
-                // Hover border
+                // ⓘ button — drawn with painter primitives (avoids missing-glyph issue)
+                let info_open = self.show_info.as_ref() == Some(func);
+                let info_bg = if info_open {
+                    egui::Color32::from_rgb(80, 120, 200)
+                } else {
+                    egui::Color32::from_rgb(55, 55, 75)
+                };
+                painter.rect_filled(info_rect, 5.0, info_bg);
+                // Draw circle outline
+                let ic = info_rect.center();
+                let ir = 7.5_f32;
+                painter.circle_stroke(ic, ir, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                // Draw the "i" glyph: top dot + vertical stem
+                painter.circle_filled(egui::pos2(ic.x, ic.y - 2.5), 1.3, egui::Color32::WHITE);
+                painter.line_segment(
+                    [egui::pos2(ic.x, ic.y - 0.5), egui::pos2(ic.x, ic.y + 4.0)],
+                    egui::Stroke::new(1.8, egui::Color32::WHITE),
+                );
+
+                // Hover / click — main button
                 let btn_response = ui.interact(
                     btn_rect,
                     ui.id().with(("fn_btn", num, i)),
@@ -241,6 +285,24 @@ impl Mcu {
                 }
                 if btn_response.clicked() {
                     new_function = Some((num, func.clone()));
+                }
+
+                // Hover / click — info button
+                let info_response = ui.interact(
+                    info_rect,
+                    ui.id().with(("info_btn", num, i)),
+                    egui::Sense::click(),
+                );
+                if info_response.hovered() {
+                    painter.rect_stroke(
+                        info_rect,
+                        5.0,
+                        egui::Stroke::new(1.5, egui::Color32::WHITE),
+                        egui::StrokeKind::Middle,
+                    );
+                }
+                if info_response.clicked() {
+                    toggle_info = Some(func.clone());
                 }
 
                 btn_y += btn_h + 6.0;
@@ -260,6 +322,72 @@ impl Mcu {
         if let Some((pin_num, func)) = new_function {
             if let Some(pin) = self.find_pin_mut(pin_num) {
                 pin.selected_function = func;
+            }
+        }
+
+        // Toggle the info popup
+        if let Some(func) = toggle_info {
+            if self.show_info.as_ref() == Some(&func) {
+                self.show_info = None;
+            } else {
+                self.show_info = Some(func);
+            }
+        }
+
+        // ── Info popup window ────────────────────────────────────────────────
+        if let Some(ref func) = self.show_info.clone() {
+            let info = func.info();
+            let mut open = true;
+
+            // Anchor to chip body center so the window opens within the MCU panel
+            let popup_pos = egui::pos2(
+                chip_rect.center().x - 170.0,
+                chip_rect.center().y - 100.0,
+            );
+
+            egui::Window::new(format!("[i]  {}", func.label()))
+                .open(&mut open)
+                .resizable(true)
+                .default_width(340.0)
+                .default_pos(popup_pos)
+                .show(ui.ctx(), |ui| {
+                    // Description
+                    ui.label(
+                        egui::RichText::new(&info.description)
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(200, 200, 220)),
+                    );
+
+                    if !info.specs.is_empty() {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // Specs grid
+                        egui::Grid::new("info_specs_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (key, value) in &info.specs {
+                                    ui.label(
+                                        egui::RichText::new(key)
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(160, 160, 180)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(value)
+                                            .size(11.0)
+                                            .color(egui::Color32::WHITE),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+
+            if !open {
+                self.show_info = None;
             }
         }
     }

@@ -12,7 +12,7 @@ pub struct Pin {
 }
 
 impl Pin {
-    /// Standard GPIO pin (Input + Output)
+    /// Standard GPIO pin — Input + Output only
     pub fn new(number: usize, name: &str) -> Self {
         Self {
             number,
@@ -23,8 +23,8 @@ impl Pin {
         }
     }
 
-    /// GPIO pin with ADC support (Input + Output + Analog)
-    pub fn new_with_analog(number: usize, name: &str) -> Self {
+    /// GPIO pin with ADC — Input + Output + AdcChannel{adc, channel}
+    pub fn new_with_analog(number: usize, name: &str, adc: u8, channel: u8) -> Self {
         Self {
             number,
             name: name.to_owned(),
@@ -32,7 +32,7 @@ impl Pin {
             available_functions: vec![
                 PinFunction::GpioInput,
                 PinFunction::GpioOutput,
-                PinFunction::Analog,
+                PinFunction::AdcChannel { adc, channel },
             ],
             selected_function: PinFunction::Unset,
         }
@@ -49,13 +49,19 @@ impl Pin {
         }
     }
 
+    /// Builder — appends additional peripheral functions to the pin
+    pub fn with_functions(mut self, extra: Vec<PinFunction>) -> Self {
+        self.available_functions.extend(extra);
+        self
+    }
+
     pub fn get_background_color(&self) -> eframe::egui::Color32 {
         if self.reserved {
             return match self.name.as_str() {
                 "VDD" | "VDDA" => eframe::egui::Color32::from_rgb(200, 50, 50),
-                "VBAT" => eframe::egui::Color32::from_rgb(220, 100, 100),
+                "VBAT"         => eframe::egui::Color32::from_rgb(220, 100, 100),
                 "VSS" | "VSSA" => eframe::egui::Color32::from_rgb(30, 30, 30),
-                _ => eframe::egui::Color32::LIGHT_GRAY,
+                _              => eframe::egui::Color32::LIGHT_GRAY,
             };
         }
         self.selected_function.color()
@@ -65,13 +71,9 @@ impl Pin {
         if self.reserved {
             return match self.name.as_str() {
                 "VSS" | "VSSA" => eframe::egui::Color32::WHITE,
-                _ => eframe::egui::Color32::BLACK,
+                _              => eframe::egui::Color32::BLACK,
             };
         }
-        text_color_for(&self.selected_function)
+        eframe::egui::Color32::BLACK
     }
-}
-
-fn text_color_for(_func: &PinFunction) -> eframe::egui::Color32 {
-    eframe::egui::Color32::BLACK
 }

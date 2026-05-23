@@ -1,3 +1,4 @@
+pub mod codegen;
 pub mod mcu;
 pub mod mcu_catalog;
 pub mod mock_mcu;
