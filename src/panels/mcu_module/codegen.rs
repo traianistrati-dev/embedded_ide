@@ -23,11 +23,11 @@ impl Mcu {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 struct PinMeta {
-    port:     char,
-    pin_num:  u8,
-    var:      String,       // "pa0", "pb15"
-    port_var: String,       // "gpioa", "gpiob"
-    crx:      &'static str, // "crl" (0-7) | "crh" (8-15)
+    port: char,
+    pin_num: u8,
+    var: String,       // "pa0", "pb15"
+    port_var: String,  // "gpioa", "gpiob"
+    crx: &'static str, // "crl" (0-7) | "crh" (8-15)
 }
 
 fn parse_pin(name: &str) -> Option<PinMeta> {
@@ -44,47 +44,43 @@ fn parse_pin(name: &str) -> Option<PinMeta> {
     Some(PinMeta {
         port,
         pin_num,
-        var:      format!("p{}{}", lc, pin_num),
+        var: format!("p{}{}", lc, pin_num),
         port_var: format!("gpio{}", lc),
-        crx:      if pin_num < 8 { "crl" } else { "crh" },
+        crx: if pin_num < 8 { "crl" } else { "crh" },
     })
 }
 
 /// Returns the `.into_xxx(&mut port.crx)` expression for a pin.
 fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
     match func {
-        PinFunction::GpioInput =>
-            format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::GpioOutput =>
-            format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::AdcChannel { .. } =>
-            format!("into_analog(&mut {pv}.{crx})"),
-        PinFunction::TimerPwm { .. } =>
-            format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::UsartTx(_) | PinFunction::UsartCk(_) =>
-            format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::UsartRx(_) | PinFunction::UsartCts(_) =>
-            format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::UsartRts(_) =>
-            format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::SpiSck(_) | PinFunction::SpiMosi(_) =>
-            format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::SpiNss(_) =>
-            format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::SpiMiso(_) =>
-            format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::I2cScl(_) | PinFunction::I2cSda(_) =>
-            format!("into_alternate_open_drain(&mut {pv}.{crx})"),
-        PinFunction::Mco =>
-            format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::CanTx =>
-            format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::CanRx =>
-            format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::UsbDm | PinFunction::UsbDp =>
-            "// USB — configured automatically by the USB peripheral".to_owned(),
-        PinFunction::SwdIo | PinFunction::SwdClk =>
-            "// SWD — active by default, no config needed".to_owned(),
+        PinFunction::GpioInput => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::GpioOutput => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::AdcChannel { .. } => format!("into_analog(&mut {pv}.{crx})"),
+        PinFunction::TimerPwm { .. } => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
+        PinFunction::UsartTx(_) | PinFunction::UsartCk(_) => {
+            format!("into_alternate_push_pull(&mut {pv}.{crx})")
+        }
+        PinFunction::UsartRx(_) | PinFunction::UsartCts(_) => {
+            format!("into_floating_input(&mut {pv}.{crx})")
+        }
+        PinFunction::UsartRts(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::SpiSck(_) | PinFunction::SpiMosi(_) => {
+            format!("into_alternate_push_pull(&mut {pv}.{crx})")
+        }
+        PinFunction::SpiNss(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::SpiMiso(_) => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::I2cScl(_) | PinFunction::I2cSda(_) => {
+            format!("into_alternate_open_drain(&mut {pv}.{crx})")
+        }
+        PinFunction::Mco => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
+        PinFunction::CanTx => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
+        PinFunction::CanRx => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::UsbDm | PinFunction::UsbDp => {
+            "// USB — configured automatically by the USB peripheral".to_owned()
+        }
+        PinFunction::SwdIo | PinFunction::SwdClk => {
+            "// SWD — active by default, no config needed".to_owned()
+        }
         PinFunction::Unset => unreachable!(),
     }
 }
@@ -115,34 +111,54 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
     // ── HAL imports ──────────────────────────────────────────────────────────
     let mut use_items: Vec<&str> = vec!["pac", "prelude::*"];
 
-    let has_serial = configured.iter().any(|(p, _)| matches!(
-        p.selected_function, PinFunction::UsartTx(_) | PinFunction::UsartRx(_)
-    ));
-    let has_spi = configured.iter().any(|(p, _)| matches!(
-        p.selected_function, PinFunction::SpiSck(_) | PinFunction::SpiMosi(_)
-    ));
-    let has_i2c = configured.iter().any(|(p, _)| matches!(
-        p.selected_function, PinFunction::I2cScl(_) | PinFunction::I2cSda(_)
-    ));
-    let has_adc = configured.iter().any(|(p, _)| matches!(
-        p.selected_function, PinFunction::AdcChannel { .. }
-    ));
-    let has_timer = configured.iter().any(|(p, _)| matches!(
-        p.selected_function, PinFunction::TimerPwm { .. }
-    ));
+    let has_serial = configured.iter().any(|(p, _)| {
+        matches!(
+            p.selected_function,
+            PinFunction::UsartTx(_) | PinFunction::UsartRx(_)
+        )
+    });
+    let has_spi = configured.iter().any(|(p, _)| {
+        matches!(
+            p.selected_function,
+            PinFunction::SpiSck(_) | PinFunction::SpiMosi(_)
+        )
+    });
+    let has_i2c = configured.iter().any(|(p, _)| {
+        matches!(
+            p.selected_function,
+            PinFunction::I2cScl(_) | PinFunction::I2cSda(_)
+        )
+    });
+    let has_adc = configured
+        .iter()
+        .any(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }));
+    let has_timer = configured
+        .iter()
+        .any(|(p, _)| matches!(p.selected_function, PinFunction::TimerPwm { .. }));
     let needs_afio = has_serial || has_spi || has_i2c || has_timer;
 
-    if has_serial { use_items.push("serial::{Config, Serial}"); }
-    if has_spi    { use_items.push("spi::{Mode, Phase, Polarity, Spi}"); }
-    if has_i2c    { use_items.push("i2c::{BlockingI2c, Mode as I2cMode}"); }
-    if has_adc    { use_items.push("adc"); }
-    if has_timer  { use_items.push("timer::Timer"); }
+    if has_serial {
+        use_items.push("serial::{Config, Serial}");
+    }
+    if has_spi {
+        use_items.push("spi::{Mode, Phase, Polarity, Spi}");
+    }
+    if has_i2c {
+        use_items.push("i2c::{BlockingI2c, Mode as I2cMode}");
+    }
+    if has_adc {
+        use_items.push("adc");
+    }
+    if has_timer {
+        use_items.push("timer::Timer");
+    }
 
     // deduplicate while preserving order
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let use_items: Vec<&str> = use_items.into_iter().filter(|s| seen.insert(s)).collect();
 
-    let use_block = use_items.iter()
+    let use_block = use_items
+        .iter()
         .map(|s| format!("    {s},"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -151,18 +167,22 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
     let mut port_groups: BTreeMap<char, Vec<String>> = BTreeMap::new();
 
     for (pin, meta) in &configured {
-        let expr    = into_expr(&pin.selected_function, &meta.port_var, meta.crx);
+        let expr = into_expr(&pin.selected_function, &meta.port_var, meta.crx);
         let comment = pin.selected_function.label();
         let line = if is_comment_expr(&expr) {
-            format!("    // {name}: {expr_inner}",
-                name       = pin.name,
-                expr_inner = expr.trim_start_matches("//").trim())
+            format!(
+                "    // {name}: {expr_inner}",
+                name = pin.name,
+                expr_inner = expr.trim_start_matches("//").trim()
+            )
         } else {
-            format!("    let {var} = {pv}.{var}.{expr}; // {comment}",
-                var     = meta.var,
-                pv      = meta.port_var,
-                expr    = expr,
-                comment = comment)
+            format!(
+                "    let {var} = {pv}.{var}.{expr}; // {comment}",
+                var = meta.var,
+                pv = meta.port_var,
+                expr = expr,
+                comment = comment
+            )
         };
         port_groups.entry(meta.port).or_default().push(line);
     }
@@ -184,7 +204,8 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
     if has_adc {
         periph_section.push_str("    // ── ADC ──\n");
         periph_section.push_str("    let mut adc1 = adc::Adc::adc1(dp.ADC1, clocks);\n");
-        for (_, meta) in configured.iter()
+        for (_, meta) in configured
+            .iter()
             .filter(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
         {
             periph_section.push_str(&format!(
@@ -200,24 +221,33 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         periph_section.push_str("    // ── Timers (PWM) ──\n");
         periph_section.push_str("    // Configure timers as needed, e.g.:\n");
         periph_section.push_str(
-            "    // let pwm = Timer::tim2(dp.TIM2, &clocks).pwm_hz::<Tim2NoRemap, _, _>(\n"
+            "    // let pwm = Timer::tim2(dp.TIM2, &clocks).pwm_hz::<Tim2NoRemap, _, _>(\n",
         );
-        periph_section.push_str(
-            "    //     (pa0, pa1), &mut afio.mapr, 1.kHz());\n\n"
-        );
+        periph_section.push_str("    //     (pa0, pa1), &mut afio.mapr, 1.kHz());\n\n");
     }
 
     // USART instances
     for n in 1u8..=3 {
-        let tx = configured.iter().find(|(p, _)| p.selected_function == PinFunction::UsartTx(n));
-        let rx = configured.iter().find(|(p, _)| p.selected_function == PinFunction::UsartRx(n));
-        if tx.is_none() && rx.is_none() { continue; }
+        let tx = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::UsartTx(n));
+        let rx = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::UsartRx(n));
+        if tx.is_none() && rx.is_none() {
+            continue;
+        }
 
-        let tx_var = tx.map(|(_, m)| m.var.clone()).unwrap_or_else(|| format!("_tx{n}"));
-        let rx_var = rx.map(|(_, m)| m.var.clone()).unwrap_or_else(|| format!("_rx{n}"));
+        let tx_var = tx
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or_else(|| format!("_tx{n}"));
+        let rx_var = rx
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or_else(|| format!("_rx{n}"));
 
         periph_section.push_str(&format!("    // ── USART{n} ──\n"));
-        periph_section.push_str(&format!(r#"    let serial{n} = Serial::new(
+        periph_section.push_str(&format!(
+            r#"    let serial{n} = Serial::new(
         dp.USART{n},
         ({tx_var}, {rx_var}),
         &mut afio.mapr,
@@ -226,22 +256,38 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
     );
     let (mut tx{n}, mut rx{n}) = serial{n}.split();
 
-"#));
+"#
+        ));
     }
 
     // SPI instances
     for n in 1u8..=2 {
-        let sck  = configured.iter().find(|(p, _)| p.selected_function == PinFunction::SpiSck(n));
-        let miso = configured.iter().find(|(p, _)| p.selected_function == PinFunction::SpiMiso(n));
-        let mosi = configured.iter().find(|(p, _)| p.selected_function == PinFunction::SpiMosi(n));
-        if sck.is_none() && mosi.is_none() { continue; }
+        let sck = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::SpiSck(n));
+        let miso = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::SpiMiso(n));
+        let mosi = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::SpiMosi(n));
+        if sck.is_none() && mosi.is_none() {
+            continue;
+        }
 
-        let sck_v  = sck .map(|(_, m)| m.var.clone()).unwrap_or_else(|| format!("_sck{n}"));
-        let miso_v = miso.map(|(_, m)| m.var.clone()).unwrap_or_else(|| format!("_miso{n}"));
-        let mosi_v = mosi.map(|(_, m)| m.var.clone()).unwrap_or_else(|| format!("_mosi{n}"));
+        let sck_v = sck
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or_else(|| format!("_sck{n}"));
+        let miso_v = miso
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or_else(|| format!("_miso{n}"));
+        let mosi_v = mosi
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or_else(|| format!("_mosi{n}"));
 
         periph_section.push_str(&format!("    // ── SPI{n} ──\n"));
-        periph_section.push_str(&format!(r#"    let spi{n} = Spi::spi{n}(
+        periph_section.push_str(&format!(
+            r#"    let spi{n} = Spi::spi{n}(
         dp.SPI{n},
         ({sck_v}, {miso_v}, {mosi_v}),
         &mut afio.mapr,
@@ -253,20 +299,28 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         &clocks,
     );
 
-"#));
+"#
+        ));
     }
 
     // I2C instances
     for n in 1u8..=2 {
-        let scl = configured.iter().find(|(p, _)| p.selected_function == PinFunction::I2cScl(n));
-        let sda = configured.iter().find(|(p, _)| p.selected_function == PinFunction::I2cSda(n));
-        if scl.is_none() || sda.is_none() { continue; }
+        let scl = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::I2cScl(n));
+        let sda = configured
+            .iter()
+            .find(|(p, _)| p.selected_function == PinFunction::I2cSda(n));
+        if scl.is_none() || sda.is_none() {
+            continue;
+        }
 
         let scl_v = scl.unwrap().1.var.clone();
         let sda_v = sda.unwrap().1.var.clone();
 
         periph_section.push_str(&format!("    // ── I2C{n} ──\n"));
-        periph_section.push_str(&format!(r#"    let i2c{n} = BlockingI2c::i2c{n}(
+        periph_section.push_str(&format!(
+            r#"    let i2c{n} = BlockingI2c::i2c{n}(
         dp.I2C{n},
         ({scl_v}, {sda_v}),
         &mut afio.mapr,
@@ -275,15 +329,24 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         1000, 10, 1000, 1000,
     );
 
-"#));
+"#
+        ));
     }
 
     // CAN
-    let can_rx = configured.iter().find(|(p, _)| p.selected_function == PinFunction::CanRx);
-    let can_tx = configured.iter().find(|(p, _)| p.selected_function == PinFunction::CanTx);
+    let can_rx = configured
+        .iter()
+        .find(|(p, _)| p.selected_function == PinFunction::CanRx);
+    let can_tx = configured
+        .iter()
+        .find(|(p, _)| p.selected_function == PinFunction::CanTx);
     if can_rx.is_some() || can_tx.is_some() {
-        let rx_v = can_rx.map(|(_, m)| m.var.clone()).unwrap_or("_can_rx".into());
-        let tx_v = can_tx.map(|(_, m)| m.var.clone()).unwrap_or("_can_tx".into());
+        let rx_v = can_rx
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or("_can_rx".into());
+        let tx_v = can_tx
+            .map(|(_, m)| m.var.clone())
+            .unwrap_or("_can_tx".into());
         periph_section.push_str("    // ── CAN ──\n");
         periph_section.push_str(&format!(
             r#"    // let can = Can::new(dp.CAN1, ({rx_v}, {tx_v}));
@@ -294,7 +357,8 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
     }
 
     // ── Assemble output ──────────────────────────────────────────────────────
-    let port_splits = ports_used.iter()
+    let port_splits = ports_used
+        .iter()
         .map(|p| {
             let lc = p.to_ascii_lowercase();
             format!("    let mut gpio{lc} = dp.GPIO{p}.split();")

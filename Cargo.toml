@@ -7,4 +7,4 @@ author = "Traian Istrati"
 [dependencies]
 eframe = "0.34.1"
 egui = "0.34.1"
-# egui-rotate="0.1.3"
+egui_code_editor = "0.3.2"

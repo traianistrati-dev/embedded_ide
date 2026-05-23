@@ -4,6 +4,7 @@ use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
 use eframe::egui;
+use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
 // ── Tab bar ──────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,8 @@ pub struct AppIde {
     active_tab: McuTab,
     /// Shown briefly after a successful copy
     copy_flash: u8,
+    /// Rust syntax definition for the code editor (created once, reused every frame)
+    syntax: Syntax,
 }
 
 impl AppIde {
@@ -50,6 +53,7 @@ impl AppIde {
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
             copy_flash: 0,
+            syntax: Syntax::rust(),
         }
     }
 
@@ -114,17 +118,14 @@ impl eframe::App for AppIde {
 
                 ui.separator();
 
-                // Code display — regenerated every frame so edits are discarded
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.generated_code)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(50)
-                                .code_editor(),
-                        );
-                    });
+                // Syntax-highlighted code view — regenerated every frame
+                CodeEditor::default()
+                    .id_source("hal_code_editor")
+                    .with_rows(50)
+                    .with_fontsize(13.0)
+                    .with_theme(ColorTheme::GRUVBOX)
+                    .with_numlines(true)
+                    .show(ui, &mut self.generated_code, &self.syntax);
             });
 
         // ── Right panel: MCU Configurator ────────────────────────────────────
