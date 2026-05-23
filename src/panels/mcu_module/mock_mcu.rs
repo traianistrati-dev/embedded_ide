@@ -1,6 +1,9 @@
+use super::mcu::Mcu;
 use super::pin_module::pin::Pin;
 
-pub fn draw_mock_mcu_stm32f103c8tx(ui: &mut eframe::egui::Ui) {
+/// Builds the STM32F103C8Tx MCU with all 48 pins correctly mapped.
+/// PA0–PA7, PB0, PB1 have ADC support (new_with_analog).
+pub fn create_stm32f103c8tx() -> Mcu {
     let top_pins = vec![
         Pin::new_reserved(48, "VDD"),
         Pin::new_reserved(47, "VSS"),
@@ -17,13 +20,13 @@ pub fn draw_mock_mcu_stm32f103c8tx(ui: &mut eframe::egui::Ui) {
     ];
 
     let bottom_pins = vec![
-        Pin::new(13, "PA3"),
-        Pin::new(14, "PA4"),
-        Pin::new(15, "PA5"),
-        Pin::new(16, "PA6"),
-        Pin::new(17, "PA7"),
-        Pin::new(18, "PB0"),
-        Pin::new(19, "PB1"),
+        Pin::new_with_analog(13, "PA3"),
+        Pin::new_with_analog(14, "PA4"),
+        Pin::new_with_analog(15, "PA5"),
+        Pin::new_with_analog(16, "PA6"),
+        Pin::new_with_analog(17, "PA7"),
+        Pin::new_with_analog(18, "PB0"),
+        Pin::new_with_analog(19, "PB1"),
         Pin::new(20, "PB2"),
         Pin::new(21, "PB10"),
         Pin::new(22, "PB11"),
@@ -41,9 +44,9 @@ pub fn draw_mock_mcu_stm32f103c8tx(ui: &mut eframe::egui::Ui) {
         Pin::new_reserved(7, "NRST"),
         Pin::new_reserved(8, "VSSA"),
         Pin::new_reserved(9, "VDDA"),
-        Pin::new(10, "PA0"),
-        Pin::new(11, "PA1"),
-        Pin::new(12, "PA2"),
+        Pin::new_with_analog(10, "PA0"),
+        Pin::new_with_analog(11, "PA1"),
+        Pin::new_with_analog(12, "PA2"),
     ];
 
     let right_pins = vec![
@@ -61,13 +64,11 @@ pub fn draw_mock_mcu_stm32f103c8tx(ui: &mut eframe::egui::Ui) {
         Pin::new(25, "PB12"),
     ];
 
-    let mcu = super::mcu::Mcu::new(
+    Mcu::new(
         "STM32F103C8Tx".to_owned(),
         top_pins,
         bottom_pins,
         left_pins,
         right_pins,
-    );
-
-    mcu.draw(ui);
+    )
 }
