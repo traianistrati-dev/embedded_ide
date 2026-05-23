@@ -1,1 +1,1 @@
-pub mod mcu;
+pub mod mcu_module;

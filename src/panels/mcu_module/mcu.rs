@@ -1,4 +1,4 @@
-use crate::panels::mcu::pin::Pin;
+use crate::panels::mcu_module::pin_module::pin::Pin;
 use eframe::egui;
 
 const PIN_HEIGHT: f32 = 50.0;

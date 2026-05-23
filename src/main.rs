@@ -14,6 +14,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Embedded IDE",
         options,
-        Box::new(|cc| Box::new(AppIde::new(cc))),
+        Box::new(|cc| Ok(Box::new(AppIde::new(cc)))),
     )
 }

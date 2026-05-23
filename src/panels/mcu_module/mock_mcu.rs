@@ -1,4 +1,4 @@
-use super::pin::Pin;
+use super::pin_module::pin::Pin;
 
 pub fn draw_mock_mcu_stm32f103c8tx(ui: &mut eframe::egui::Ui) {
     let top_pins = vec![
@@ -49,16 +49,16 @@ pub fn draw_mock_mcu_stm32f103c8tx(ui: &mut eframe::egui::Ui) {
     let right_pins = vec![
         Pin::new_reserved(36, "VDD"),
         Pin::new_reserved(35, "VSS"),
-        Pin::new(34, "PC14"),
-        Pin::new(33, "PC15"),
-        Pin::new(32, "PD0"),
-        Pin::new(31, "PD1"),
-        Pin::new(30, "NRST"),
-        Pin::new(29, "VSSA"),
-        Pin::new(28, "VDDA"),
-        Pin::new(27, "PA0"),
-        Pin::new(26, "PA1"),
-        Pin::new(25, "PA2"),
+        Pin::new(34, "PA13"),
+        Pin::new(33, "PA12"),
+        Pin::new(32, "PA11"),
+        Pin::new(31, "PA10"),
+        Pin::new(30, "PA9"),
+        Pin::new(29, "PA8"),
+        Pin::new(28, "PB15"),
+        Pin::new(27, "PB14"),
+        Pin::new(26, "PB13"),
+        Pin::new(25, "PB12"),
     ];
 
     let mcu = super::mcu::Mcu::new(

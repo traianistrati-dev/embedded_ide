@@ -13,14 +13,15 @@ impl AppIde {
 }
 
 impl eframe::App for AppIde {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let screen_width = ctx.available_rect().width();
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let screen_width = ctx.content_rect().width();
         let left_width = screen_width * 0.5;
 
-        egui::SidePanel::left("code_editor")
+        egui::Panel::left("code_editor")
             .resizable(true)
-            .default_width(left_width)
-            .show(ctx, |ui| {
+            .default_size(left_width)
+            .show_inside(ui, |ui| {
                 ui.heading("Code Editor");
 
                 ui.add(
@@ -30,21 +31,21 @@ impl eframe::App for AppIde {
                 );
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading("MCU Configurator");
 
             ui.horizontal(|ui| {
-                let pins = ui.selectable_label(true, "Pins");
-                let clock = ui.selectable_label(false, "Clock");
-                let periferals = ui.selectable_label(false, "Peripherals");
-                let system = ui.selectable_label(false, "System");
+                let _pins = ui.selectable_label(true, "Pins");
+                let _clock = ui.selectable_label(false, "Clock");
+                let _periferals = ui.selectable_label(false, "Peripherals");
+                let _system = ui.selectable_label(false, "System");
             });
 
             ui.separator();
 
             ui.label("MCU Canvas");
 
-            crate::panels::mcu::mock_mcu::draw_mock_mcu_stm32f103c8tx(ui);
+            crate::panels::mcu_module::mock_mcu::draw_mock_mcu_stm32f103c8tx(ui);
         });
     }
 }

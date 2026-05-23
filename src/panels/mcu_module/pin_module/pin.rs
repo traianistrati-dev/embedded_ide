@@ -1,12 +1,12 @@
 use eframe::egui;
 
-const PIN_FONT_SIZE: f32 = 10.0;
-const PIN_ROUNDING: f32 = 0.0;
+pub const PIN_FONT_SIZE: f32 = 10.0;
+pub const PIN_ROUNDING: f32 = 0.0;
 
 pub struct Pin {
-    name: String,
-    number: usize,
-    reserved: bool,
+    pub name: String,
+    pub number: usize,
+    pub reserved: bool,
     // rect: egui::Rect,
 }
 
@@ -27,7 +27,7 @@ impl Pin {
         }
     }
 
-    pub fn get_pin_collor(&self) -> egui::Color32 {
+    pub fn get_backgroung_collor(&self) -> egui::Color32 {
         match self.reserved {
             true => match self.name.as_str() {
                 "VDD" | "VDDA" => egui::Color32::RED,
@@ -38,7 +38,7 @@ impl Pin {
             false => egui::Color32::LIGHT_BLUE,
         }
     }
-    pub fn get_pin_text_collor(&self) -> egui::Color32 {
+    pub fn get_text_collor(&self) -> egui::Color32 {
         match self.reserved {
             true => match self.name.as_str().trim() {
                 "VSS" | "VSSA" => egui::Color32::WHITE,
@@ -59,7 +59,7 @@ impl Pin {
             pos,
             galley,
             underline: egui::epaint::Stroke::NONE, //Default::default(),
-            override_text_color: Some(self.get_pin_text_collor()),
+            override_text_color: Some(self.get_text_collor()),
             angle: -std::f32::consts::FRAC_PI_2,
             fallback_color: egui::Color32::BLACK,
             opacity_factor: 1.0,
@@ -75,20 +75,8 @@ impl Pin {
             egui::Align2::LEFT_CENTER,
             self.name.as_str(),
             egui::FontId::monospace(PIN_FONT_SIZE),
-            self.get_pin_text_collor(),
+            self.get_text_collor(),
         );
-    }
-
-    pub fn listen(&self, painter: &egui::Painter, ui: &egui::Ui, rect: egui::Rect) {
-        let response = ui.interact(rect, ui.id().with(&self.number), egui::Sense::click());
-
-        let color = if response.hovered() {
-            egui::Color32::DARK_GRAY
-        } else {
-            self.get_pin_collor()
-        };
-
-        painter.rect_filled(rect, PIN_ROUNDING, color);
     }
 
     pub fn draw_right(
@@ -102,7 +90,7 @@ impl Pin {
     ) -> egui::Rect {
         let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(heigt, width));
 
-        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_backgroung_collor());
 
         if let Some(ui) = ui {
             self.listen(&painter, ui, rect);
@@ -124,7 +112,7 @@ impl Pin {
     ) -> egui::Rect {
         let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(heigt, width));
 
-        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_backgroung_collor());
 
         if let Some(ui) = ui {
             self.listen(&painter, ui, rect);
@@ -146,7 +134,7 @@ impl Pin {
     ) -> egui::Rect {
         let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, heigt));
 
-        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_backgroung_collor());
 
         if let Some(ui) = ui {
             self.listen(&painter, ui, rect);
@@ -170,7 +158,7 @@ impl Pin {
 
         let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, heigt));
 
-        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_pin_collor());
+        _ = painter.rect_filled(rect, PIN_ROUNDING, self.get_backgroung_collor());
 
         if let Some(ui) = ui {
             self.listen(&painter, ui, rect);
