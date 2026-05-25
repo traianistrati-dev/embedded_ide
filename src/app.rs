@@ -3,6 +3,7 @@ use crate::panels::mcu_module::mcu_catalog::McuType;
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
+use crate::panels::mcu_module::project_gen;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 
@@ -39,6 +40,10 @@ pub struct AppIde {
     active_tab: McuTab,
     /// Shown briefly after a successful copy
     copy_flash: u8,
+    /// >0: show "✔ Exported!" countdown; reuses copy_flash pattern
+    export_flash: u8,
+    /// Last export result message ("✔ Exported to …" or "✗ …")
+    export_msg: String,
     /// Rust syntax definition for the code editor (created once, reused every frame)
     syntax: Syntax,
 }
@@ -53,6 +58,8 @@ impl AppIde {
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
             copy_flash: 0,
+            export_flash: 0,
+            export_msg: String::new(),
             syntax: Syntax::rust(),
         }
     }
@@ -74,10 +81,9 @@ impl eframe::App for AppIde {
             self.generated_code = mcu.generate_code();
         }
 
-        // Tick the copy flash counter down
-        if self.copy_flash > 0 {
-            self.copy_flash -= 1;
-        }
+        // Tick flash counters down
+        if self.copy_flash   > 0 { self.copy_flash   -= 1; }
+        if self.export_flash > 0 { self.export_flash -= 1; }
 
         let left_width = ui.available_width() * 0.5;
 
@@ -89,12 +95,8 @@ impl eframe::App for AppIde {
                 ui.horizontal(|ui| {
                     ui.heading("Code Editor");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Copy button
-                        let copy_label = if self.copy_flash > 0 {
-                            "✔ Copied!"
-                        } else {
-                            "⧉ Copy"
-                        };
+                        // ── Copy button ──────────────────────────────────────
+                        let copy_label = if self.copy_flash > 0 { "✔ Copied!" } else { "⧉ Copy" };
                         let copy_btn = ui.add(egui::Button::new(
                             egui::RichText::new(copy_label).size(11.0),
                         ));
@@ -104,8 +106,68 @@ impl eframe::App for AppIde {
                                     self.generated_code.clone(),
                                 ));
                             });
-                            self.copy_flash = 60; // ~1 second at 60fps
+                            self.copy_flash = 60;
                         }
+
+                        ui.add_space(4.0);
+
+                        // ── Export Project button ────────────────────────────
+                        let can_export = self.selected_mcu_type.project_config().is_some();
+
+                        let export_label = if self.export_flash > 0 {
+                            &self.export_msg
+                        } else if can_export {
+                            "⬇ Export Project"
+                        } else {
+                            "⬇ Export (N/A)"
+                        };
+
+                        let export_btn = ui.add_enabled(
+                            can_export && self.export_flash == 0,
+                            egui::Button::new(
+                                egui::RichText::new(export_label)
+                                    .size(11.0)
+                                    .color(if self.export_flash > 0 && self.export_msg.starts_with('✔') {
+                                        egui::Color32::from_rgb(100, 220, 100)
+                                    } else if self.export_flash > 0 {
+                                        egui::Color32::from_rgb(230, 100, 80)
+                                    } else {
+                                        egui::Color32::WHITE
+                                    }),
+                            ),
+                        );
+
+                        if export_btn.clicked() {
+                            if let Some(config) = self.selected_mcu_type.project_config() {
+                                let picked = rfd::FileDialog::new()
+                                    .set_title("Choose folder for the exported project")
+                                    .pick_folder();
+
+                                if let Some(dest) = picked {
+                                    let code = self.generated_code.clone();
+                                    match project_gen::write_project(&dest, &config, &code) {
+                                        Ok(()) => {
+                                            self.export_msg = format!(
+                                                "✔  {}",
+                                                dest.file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or("exported")
+                                            );
+                                            self.export_flash = 180; // ~3 s at 60 fps
+                                        }
+                                        Err(e) => {
+                                            self.export_msg = format!("✗  {e}");
+                                            self.export_flash = 180;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        export_btn.on_hover_text(
+                            "Exports a complete Cargo project:\n\
+                             Cargo.toml · .cargo/config.toml · memory.x · build.rs · src/main.rs"
+                        );
 
                         ui.add_space(8.0);
                         ui.label(
