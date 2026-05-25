@@ -137,7 +137,7 @@ impl AppIde {
         cc.egui_ctx.set_fonts(fonts);
 
         let mcu = create_stm32f103c8tx();
-        let generated_code = mcu.generate_code();
+        let generated_code = mcu.fresh_main_rs();
         Self {
             selected_mcu_type: McuType::Stm32f103c8t6,
             generated_code,
@@ -166,13 +166,14 @@ impl AppIde {
 
 impl eframe::App for AppIde {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // ── Rebuild generated code only when MCU config changes ──────────────
-        // Comparing the output avoids overwriting the user's manual edits on
-        // every frame; we only regenerate when pin/peripheral config differs.
+        // ── Update generated section when pin config changes ─────────────────
+        // update_main_rs() splices only the GENERATED block (between markers),
+        // leaving custom_config() and loop_code() untouched.
+        // Comparing the result avoids touching the string when nothing changed.
         if let Some(mcu) = &self.mcu {
-            let fresh = mcu.generate_code();
-            if fresh != self.generated_code {
-                self.generated_code = fresh;
+            let updated = mcu.update_main_rs(&self.generated_code);
+            if updated != self.generated_code {
+                self.generated_code = updated;
             }
         }
 
@@ -661,6 +662,13 @@ impl eframe::App for AppIde {
 
                 if prev_type != self.selected_mcu_type {
                     self.mcu = Self::init_mcu(&self.selected_mcu_type);
+                    // Build a fresh file with new stubs — user had no edits yet
+                    // for this MCU type, and pin layout is completely different.
+                    self.generated_code = self
+                        .mcu
+                        .as_ref()
+                        .map(|m| m.fresh_main_rs())
+                        .unwrap_or_default();
                     self.active_tab = McuTab::Pins;
                     self.selected_file = ProjectFileId::MainRs;
                     // Stop old RA session; it will auto-restart on the next frame

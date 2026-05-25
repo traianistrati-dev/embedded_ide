@@ -3,95 +3,117 @@ use super::pin_module::pin::Pin;
 use super::pin_module::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
 
-// ── Public entry point ────────────────────────────────────────────────────────
+// ── Section markers ───────────────────────────────────────────────────────────
+//
+// Everything between these two comment lines is auto-generated and will be
+// replaced whenever the pin configuration changes.  The user-editable
+// functions (custom_config, loop_code) live *outside* the markers and are
+// therefore preserved across pin changes.
+
+pub const GEN_BEGIN: &str = "// <<< GENERATED BEGIN — do not edit between these markers >>>";
+pub const GEN_END: &str = "// <<< GENERATED END >>>";
+
+// ── User-section template ─────────────────────────────────────────────────────
+//
+// Written once on first generation; preserved forever after.
+
+const USER_SECTION: &str = r#"fn custom_config() {
+    // Add your custom peripheral configuration here.
+    // This function is called after generated_pins_config().
+    // Preserved when you change pin assignments.
+}
+
+fn loop_code() {
+    // Add your main loop logic here.
+    // Preserved when you change pin assignments.
+    loop {
+
+    }
+}
+
+#[entry]
+fn main() -> ! {
+    generated_pins_config();
+    custom_config();
+    loop_code();
+}
+"#;
+
+// ── Public API on Mcu ─────────────────────────────────────────────────────────
 
 impl Mcu {
-    /// Generates a complete `src/main.rs` for `stm32f1xx-hal` from the
-    /// current pin configuration. Called each frame by `AppIde`.
+    /// Build a brand-new `src/main.rs` (called when the MCU type is first
+    /// selected or reset).  Contains the generated section + user stubs.
+    pub fn fresh_main_rs(&self) -> String {
+        let all = self.all_pins();
+        let gen_ = make_generated_section(&self.name, &all);
+        format!(
+            "{header}{gen_}\n{user}",
+            header = invariant_header(&self.name),
+            user = USER_SECTION,
+        )
+    }
+
+    /// Update `existing` in-place: replace only the generated section
+    /// (between the markers), preserving the user-editable parts.
+    ///
+    /// If the markers are missing (old format), builds a fresh file instead.
+    pub fn update_main_rs(&self, existing: &str) -> String {
+        let all = self.all_pins();
+        let new_section = make_generated_section(&self.name, &all);
+        splice_section(existing, &new_section, &self.name)
+    }
+
+    /// Kept for any remaining call sites — delegates to `fresh_main_rs`.
+    #[allow(dead_code)]
     pub fn generate_code(&self) -> String {
-        let all: Vec<&Pin> = self
-            .top_pins
+        self.fresh_main_rs()
+    }
+
+    fn all_pins(&self) -> Vec<&Pin> {
+        self.top_pins
             .iter()
             .chain(self.bottom_pins.iter())
             .chain(self.left_pins.iter())
             .chain(self.right_pins.iter())
-            .collect();
-        generate_hal_code(&self.name, &all)
+            .collect()
     }
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// ── Section splicing ──────────────────────────────────────────────────────────
 
-struct PinMeta {
-    port: char,
-    pin_num: u8,
-    var: String,       // "pa0", "pb15"
-    port_var: String,  // "gpioa", "gpiob"
-    crx: &'static str, // "crl" (0-7) | "crh" (8-15)
-}
-
-fn parse_pin(name: &str) -> Option<PinMeta> {
-    let bytes = name.as_bytes();
-    if bytes.len() < 3 || bytes[0] != b'P' {
-        return None;
-    }
-    let port = bytes[1] as char;
-    if !port.is_ascii_uppercase() {
-        return None;
-    }
-    let pin_num: u8 = name[2..].parse().ok()?;
-    let lc = port.to_ascii_lowercase();
-    Some(PinMeta {
-        port,
-        pin_num,
-        var: format!("p{}{}", lc, pin_num),
-        port_var: format!("gpio{}", lc),
-        crx: if pin_num < 8 { "crl" } else { "crh" },
-    })
-}
-
-/// Returns the `.into_xxx(&mut port.crx)` expression for a pin.
-fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
-    match func {
-        PinFunction::GpioInput => format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::GpioOutput => format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::AdcChannel { .. } => format!("into_analog(&mut {pv}.{crx})"),
-        PinFunction::TimerPwm { .. } => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::UsartTx(_) | PinFunction::UsartCk(_) => {
-            format!("into_alternate_push_pull(&mut {pv}.{crx})")
-        }
-        PinFunction::UsartRx(_) | PinFunction::UsartCts(_) => {
-            format!("into_floating_input(&mut {pv}.{crx})")
-        }
-        PinFunction::UsartRts(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::SpiSck(_) | PinFunction::SpiMosi(_) => {
-            format!("into_alternate_push_pull(&mut {pv}.{crx})")
-        }
-        PinFunction::SpiNss(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::SpiMiso(_) => format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::I2cScl(_) | PinFunction::I2cSda(_) => {
-            format!("into_alternate_open_drain(&mut {pv}.{crx})")
-        }
-        PinFunction::Mco => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::CanTx => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::CanRx => format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::UsbDm | PinFunction::UsbDp => {
-            "// USB — configured automatically by the USB peripheral".to_owned()
-        }
-        PinFunction::SwdIo | PinFunction::SwdClk => {
-            "// SWD — active by default, no config needed".to_owned()
-        }
-        PinFunction::Unset => unreachable!(),
+fn splice_section(existing: &str, new_section: &str, mcu_name: &str) -> String {
+    if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
+        let end = end_start + GEN_END.len();
+        // Strip ALL leading newlines after GEN_END, then re-add exactly one
+        // blank line.  This makes splice idempotent: running it N times always
+        // produces the same result instead of accumulating newlines.
+        let after = existing[end..].trim_start_matches('\n');
+        // new_section already ends with  "// <<< GENERATED END >>>\n"
+        // + one more "\n" gives the single blank line before custom_config.
+        format!("{}{}\n{}", &existing[..begin], new_section, after)
+    } else {
+        // Markers not found (old format) — rebuild from scratch.
+        format!("{}{}\n{}", invariant_header(mcu_name), new_section, USER_SECTION)
     }
 }
 
-fn is_comment_expr(expr: &str) -> bool {
-    expr.trim_start().starts_with("//")
+// ── Invariant file header ─────────────────────────────────────────────────────
+
+fn invariant_header(mcu_name: &str) -> String {
+    format!(
+        "// Auto-generated by Embedded IDE\n\
+         // MCU: {mcu_name} | HAL: stm32f1xx-hal\n\n\
+         #![no_std]\n\
+         #![no_main]\n\n\
+         use panic_halt as _;\n\
+         use cortex_m_rt::entry;\n\n"
+    )
 }
 
-// ── Code generator ────────────────────────────────────────────────────────────
+// ── Generated section builder ─────────────────────────────────────────────────
 
-fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
+fn make_generated_section(mcu_name: &str, all_pins: &[&Pin]) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
@@ -99,7 +121,7 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         .collect();
 
     if configured.is_empty() {
-        return default_template(mcu_name);
+        return make_default_gen_section(mcu_name);
     }
 
     // ── Ports used ───────────────────────────────────────────────────────────
@@ -136,7 +158,7 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
     let needs_afio = has_serial || has_spi || has_i2c || has_timer;
     let has_periph_fns = has_serial || has_spi || has_i2c || has_adc;
 
-    // ── SPI instances actually used ───────────────────────────────────────────
+    // ── SPI instances ────────────────────────────────────────────────────────
     let mut spi_instances: BTreeSet<u8> = BTreeSet::new();
     for (pin, _) in &configured {
         match pin.selected_function {
@@ -150,10 +172,8 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         }
     }
 
-    // ── HAL imports ──────────────────────────────────────────────────────────
-    // Use `self` so the module is in scope for fn signatures (serial::Pins, etc.)
+    // ── HAL use block ────────────────────────────────────────────────────────
     let mut use_items: Vec<String> = vec!["pac".into(), "prelude::*".into()];
-
     if has_periph_fns || needs_afio {
         if needs_afio {
             use_items.push("afio".into());
@@ -189,9 +209,8 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // ── Pin declaration lines grouped by port ────────────────────────────────
+    // ── Pin declaration lines ────────────────────────────────────────────────
     let mut port_groups: BTreeMap<char, Vec<String>> = BTreeMap::new();
-
     for (pin, meta) in &configured {
         let expr = into_expr(&pin.selected_function, &meta.port_var, meta.crx);
         let comment = pin.selected_function.label();
@@ -206,8 +225,6 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
                 "    let {var} = {pv}.{var}.{expr}; // {comment}",
                 var = meta.var,
                 pv = meta.port_var,
-                expr = expr,
-                comment = comment
             )
         };
         port_groups.entry(meta.port).or_default().push(line);
@@ -223,11 +240,9 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         pin_section.push('\n');
     }
 
-    // ── Peripheral init functions (defined outside main) ─────────────────────
-
+    // ── Peripheral helper function definitions ───────────────────────────────
     let mut fn_defs = String::new();
 
-    // USART
     for n in 1u8..=3 {
         let tx = configured
             .iter()
@@ -238,7 +253,6 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         if tx.is_none() && rx.is_none() {
             continue;
         }
-
         fn_defs.push_str(&format!(
             r#"fn init_usart{n}(
     usart:  pac::USART{n},
@@ -260,7 +274,6 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         ));
     }
 
-    // SPI
     for n in 1u8..=2 {
         let sck = configured
             .iter()
@@ -271,7 +284,6 @@ fn generate_hal_code(mcu_name: &str, all_pins: &[&Pin]) -> String {
         if sck.is_none() && mosi.is_none() {
             continue;
         }
-
         let remap = format!("Spi{n}NoRemap");
         fn_defs.push_str(&format!(
             r#"fn init_spi{n}<PINS>(
@@ -300,7 +312,6 @@ where
         ));
     }
 
-    // I2C
     for n in 1u8..=2 {
         let scl = configured
             .iter()
@@ -311,7 +322,6 @@ where
         if scl.is_none() || sda.is_none() {
             continue;
         }
-
         fn_defs.push_str(&format!(
             r#"fn init_i2c{n}<PINS>(
     i2c:    pac::I2C{n},
@@ -336,7 +346,6 @@ where
         ));
     }
 
-    // ADC
     if has_adc {
         fn_defs
             .push_str("fn init_adc1(adc1: pac::ADC1, clocks: &Clocks) -> adc::Adc<pac::ADC1> {\n");
@@ -344,12 +353,10 @@ where
         fn_defs.push_str("}\n\n");
     }
 
-    // ── Peripheral init calls (inside main) ───────────────────────────────────
-
+    // ── Peripheral init calls (inside generated_pins_config) ─────────────────
     let mut fn_calls = String::new();
     let mut any_call = false;
 
-    // Adds the section header exactly once.
     macro_rules! header {
         () => {
             if !any_call {
@@ -359,7 +366,6 @@ where
         };
     }
 
-    // USART calls
     for n in 1u8..=3 {
         let tx = configured
             .iter()
@@ -370,7 +376,6 @@ where
         if tx.is_none() && rx.is_none() {
             continue;
         }
-
         header!();
         let tx_v = tx
             .map(|(_, m)| m.var.clone())
@@ -379,12 +384,11 @@ where
             .map(|(_, m)| m.var.clone())
             .unwrap_or_else(|| format!("_rx{n}"));
         fn_calls.push_str(&format!(
-            "    let (mut tx{n}, mut rx{n}) = \
+            "    let (mut _tx{n}, mut _rx{n}) = \
              init_usart{n}(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
         ));
     }
 
-    // SPI calls
     for n in 1u8..=2 {
         let sck = configured
             .iter()
@@ -398,7 +402,6 @@ where
         if sck.is_none() && mosi.is_none() {
             continue;
         }
-
         header!();
         let sck_v = sck
             .map(|(_, m)| m.var.clone())
@@ -410,12 +413,11 @@ where
             .map(|(_, m)| m.var.clone())
             .unwrap_or_else(|| format!("_mosi{n}"));
         fn_calls.push_str(&format!(
-            "    let spi{n} = \
+            "    let _spi{n} = \
              init_spi{n}(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks);\n"
         ));
     }
 
-    // I2C calls
     for n in 1u8..=2 {
         let scl = configured
             .iter()
@@ -426,32 +428,29 @@ where
         if scl.is_none() || sda.is_none() {
             continue;
         }
-
         header!();
         let scl_v = scl.unwrap().1.var.clone();
         let sda_v = sda.unwrap().1.var.clone();
         fn_calls.push_str(&format!(
-            "    let i2c{n} = \
+            "    let _i2c{n} = \
              init_i2c{n}(dp.I2C{n}, ({scl_v}, {sda_v}), &mut afio, &clocks);\n"
         ));
     }
 
-    // ADC call
     if has_adc {
         header!();
-        fn_calls.push_str("    let mut adc1 = init_adc1(dp.ADC1, &clocks);\n");
+        fn_calls.push_str("    let mut _adc1 = init_adc1(dp.ADC1, &clocks);\n");
         for (_, meta) in configured
             .iter()
             .filter(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
         {
             fn_calls.push_str(&format!(
-                "    // let val: u16 = adc1.read(&mut {}).unwrap();\n",
+                "    // let val: u16 = _adc1.read(&mut {}).unwrap();\n",
                 meta.var
             ));
         }
     }
 
-    // Timer — no separate fn (timer types are circuit-specific), just a comment
     if has_timer {
         header!();
         fn_calls.push_str("    // ── Timers / PWM ──\n");
@@ -461,24 +460,23 @@ where
         );
     }
 
-    // CAN — no separate fn (needs external bxcan crate), just a comment
     let can_rx = configured
         .iter()
         .find(|(p, _)| p.selected_function == PinFunction::CanRx);
-    let can_tx = configured
+    let can_tx_pin = configured
         .iter()
         .find(|(p, _)| p.selected_function == PinFunction::CanTx);
-    if can_rx.is_some() || can_tx.is_some() {
+    if can_rx.is_some() || can_tx_pin.is_some() {
         header!();
         let rx_v = can_rx
             .map(|(_, m)| m.var.clone())
             .unwrap_or("_can_rx".into());
-        let tx_v = can_tx
+        let tx_v = can_tx_pin
             .map(|(_, m)| m.var.clone())
             .unwrap_or("_can_tx".into());
         fn_calls.push_str("    // ── CAN ──\n");
         fn_calls.push_str(&format!(
-            "    // let can = Can::new(dp.CAN1, ({rx_v}, {tx_v})); // needs bxcan crate\n"
+            "    // let _can = Can::new(dp.CAN1, ({rx_v}, {tx_v})); // needs bxcan crate\n"
         ));
     }
 
@@ -486,7 +484,7 @@ where
         fn_calls.push('\n');
     }
 
-    // ── Assemble output ──────────────────────────────────────────────────────
+    // ── Assemble port splits ─────────────────────────────────────────────────
     let port_splits = ports_used
         .iter()
         .map(|p| {
@@ -506,26 +504,20 @@ where
         String::new()
     } else {
         format!(
-            "// ── Peripheral init functions \
-             ────────────────────────────────────────────────\n\n\
+            "// ── Peripheral init helpers \
+             ─────────────────────────────────────────────────\n\n\
              {fn_defs}"
         )
     };
 
+    // ── Put it all together ──────────────────────────────────────────────────
     format!(
-        "// Auto-generated by Embedded IDE\n\
-         // MCU: {mcu_name}\n\
-         // HAL: stm32f1xx-hal\n\n\
-         #![no_std]\n\
-         #![no_main]\n\n\
-         use panic_halt as _;\n\
-         use cortex_m_rt::entry;\n\
+        "{GEN_BEGIN}\n\
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
          }};\n\n\
          {fn_defs_block}\
-         #[entry]\n\
-         fn main() -> ! {{\n\
+         fn generated_pins_config() {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
@@ -538,37 +530,97 @@ where
          {port_splits}\n\n\
          {pin_section}\
          {fn_calls}\
-             loop {{}}\n\
-         }}\n"
+         }}\n\
+         {GEN_END}\n"
     )
 }
 
-// ── Default template ──────────────────────────────────────────────────────────
+// ── Default generated section (no pins configured yet) ────────────────────────
 
-fn default_template(mcu_name: &str) -> String {
+fn make_default_gen_section(mcu_name: &str) -> String {
     format!(
-        "// Auto-generated by Embedded IDE\n\
+        "{GEN_BEGIN}\n\
          // MCU: {mcu_name}\n\
-         // HAL: stm32f1xx-hal\n\
-         //\n\
-         // Select a pin in the MCU Configurator and assign a function\n\
-         // to generate code here automatically.\n\n\
-         #![no_std]\n\
-         #![no_main]\n\n\
-         use panic_halt as _;\n\
-         use cortex_m_rt::entry;\n\
          use stm32f1xx_hal::{{pac, prelude::*}};\n\n\
-         #[entry]\n\
-         fn main() -> ! {{\n\
+         fn generated_pins_config() {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
-             let clocks = rcc.cfgr\n\
+             let _clocks = rcc.cfgr\n\
                  .use_hse(8.MHz())\n\
                  .sysclk(72.MHz())\n\
                  .pclk1(36.MHz())\n\
                  .freeze(&mut flash.acr);\n\n\
-             loop {{}}\n\
-         }}\n"
+             // Select pins in the MCU Configurator to generate code here.\n\
+         }}\n\
+         {GEN_END}\n"
     )
+}
+
+// ── Pin helpers (unchanged) ───────────────────────────────────────────────────
+
+struct PinMeta {
+    port: char,
+    pin_num: u8,
+    var: String,
+    port_var: String,
+    crx: &'static str,
+}
+
+fn parse_pin(name: &str) -> Option<PinMeta> {
+    let bytes = name.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'P' {
+        return None;
+    }
+    let port = bytes[1] as char;
+    if !port.is_ascii_uppercase() {
+        return None;
+    }
+    let pin_num: u8 = name[2..].parse().ok()?;
+    let lc = port.to_ascii_lowercase();
+    Some(PinMeta {
+        port,
+        pin_num,
+        var: format!("p{}{}", lc, pin_num),
+        port_var: format!("gpio{}", lc),
+        crx: if pin_num < 8 { "crl" } else { "crh" },
+    })
+}
+
+fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
+    match func {
+        PinFunction::GpioInput => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::GpioOutput => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::AdcChannel { .. } => format!("into_analog(&mut {pv}.{crx})"),
+        PinFunction::TimerPwm { .. } => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
+        PinFunction::UsartTx(_) | PinFunction::UsartCk(_) => {
+            format!("into_alternate_push_pull(&mut {pv}.{crx})")
+        }
+        PinFunction::UsartRx(_) | PinFunction::UsartCts(_) => {
+            format!("into_floating_input(&mut {pv}.{crx})")
+        }
+        PinFunction::UsartRts(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::SpiSck(_) | PinFunction::SpiMosi(_) => {
+            format!("into_alternate_push_pull(&mut {pv}.{crx})")
+        }
+        PinFunction::SpiNss(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::SpiMiso(_) => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::I2cScl(_) | PinFunction::I2cSda(_) => {
+            format!("into_alternate_open_drain(&mut {pv}.{crx})")
+        }
+        PinFunction::Mco => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
+        PinFunction::CanTx => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
+        PinFunction::CanRx => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::UsbDm | PinFunction::UsbDp => {
+            "// USB — configured automatically by the USB peripheral".to_owned()
+        }
+        PinFunction::SwdIo | PinFunction::SwdClk => {
+            "// SWD — active by default, no config needed".to_owned()
+        }
+        PinFunction::Unset => unreachable!(),
+    }
+}
+
+fn is_comment_expr(expr: &str) -> bool {
+    expr.trim_start().starts_with("//")
 }
