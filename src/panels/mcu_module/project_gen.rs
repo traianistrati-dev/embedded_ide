@@ -16,22 +16,46 @@
 use super::mcu_catalog::McuProjectConfig;
 use std::{fs, io, path::Path};
 
+// ── Public types ──────────────────────────────────────────────────────────────
+
+/// All generated file contents for one project snapshot.
+/// Cheap to build (pure string formatting); regenerated every UI frame.
+pub struct ProjectFiles {
+    pub main_rs:      String,
+    pub cargo_toml:   String,
+    pub cargo_config: String,
+    pub memory_x:     String,
+    pub build_rs:     String,
+    pub gitignore:    String,
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
+
+/// Builds all file contents in memory without touching the filesystem.
+pub fn build_project_files(config: &McuProjectConfig, main_rs: &str) -> ProjectFiles {
+    ProjectFiles {
+        main_rs:      main_rs.to_owned(),
+        cargo_toml:   cargo_toml(config),
+        cargo_config: cargo_config(config),
+        memory_x:     memory_x(config),
+        build_rs:     build_rs(),
+        gitignore:    "/target\n".to_owned(),
+    }
+}
 
 /// Writes all project files into `dest` (creates the directory tree as needed).
 pub fn write_project(dest: &Path, config: &McuProjectConfig, main_rs: &str) -> io::Result<()> {
+    let files = build_project_files(config, main_rs);
+
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
 
-    fs::write(dest.join("Cargo.toml"), cargo_toml(config))?;
-    fs::write(
-        dest.join(".cargo").join("config.toml"),
-        cargo_config(config),
-    )?;
-    fs::write(dest.join("memory.x"), memory_x(config))?;
-    fs::write(dest.join("build.rs"), build_rs())?;
-    fs::write(dest.join("src").join("main.rs"), main_rs)?;
-    fs::write(dest.join(".gitignore"), "/target\n")?;
+    fs::write(dest.join("Cargo.toml"),                    &files.cargo_toml)?;
+    fs::write(dest.join(".cargo").join("config.toml"),    &files.cargo_config)?;
+    fs::write(dest.join("memory.x"),                      &files.memory_x)?;
+    fs::write(dest.join("build.rs"),                      &files.build_rs)?;
+    fs::write(dest.join("src").join("main.rs"),           &files.main_rs)?;
+    fs::write(dest.join(".gitignore"),                    &files.gitignore)?;
 
     Ok(())
 }
