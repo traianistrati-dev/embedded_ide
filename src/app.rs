@@ -166,9 +166,14 @@ impl AppIde {
 
 impl eframe::App for AppIde {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // ── Rebuild generated code each frame ────────────────────────────────
+        // ── Rebuild generated code only when MCU config changes ──────────────
+        // Comparing the output avoids overwriting the user's manual edits on
+        // every frame; we only regenerate when pin/peripheral config differs.
         if let Some(mcu) = &self.mcu {
-            self.generated_code = mcu.generate_code();
+            let fresh = mcu.generate_code();
+            if fresh != self.generated_code {
+                self.generated_code = fresh;
+            }
         }
 
         // Tick flash counters down
@@ -528,10 +533,10 @@ impl eframe::App for AppIde {
                     let show_panel = cargo_has || lsp_active;
 
                     if show_panel {
-                        egui::TopBottomPanel::bottom("build_output_inner")
+                        egui::Panel::bottom("build_output_inner")
                             .resizable(true)
-                            .min_height(56.0)
-                            .default_height(180.0)
+                            .min_size(56.0)
+                            .default_size(180.0)
                             .show_inside(ui, |ui| {
                                 show_diag_panel(
                                     ui,
@@ -553,6 +558,15 @@ impl eframe::App for AppIde {
                     .with_theme(ColorTheme::GRUVBOX)
                     .with_numlines(true)
                     .show(ui, &mut display_code, &display_syntax);
+
+                // ── Write user edits back for the main source file ────────────
+                // display_code is a local clone; we must persist changes here.
+                // Only main.rs is user-editable; other files are generated/fixed.
+                if self.selected_file == ProjectFileId::MainRs
+                    && display_code != self.generated_code
+                {
+                    self.generated_code = display_code.clone();
+                }
 
                 // ── RA error lane (right-edge overlay on editor rect) ─────────
                 // Proportional tick marks showing where errors/warnings are in
