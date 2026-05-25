@@ -113,12 +113,15 @@ impl BuildState {
 
 /// Marks state as `Building`, then spawns a thread running `cargo check`.
 ///
-/// When the thread completes it writes `BuildState::Done` (or `Failed`) into
-/// `state` and calls `ctx.request_repaint()` so the UI refreshes.
+/// `target` is the Rust target triple for this MCU (e.g. `"thumbv7m-none-eabi"`).
+/// The background thread calls `rustup target add <target>` first so the build
+/// works even when the user hasn't installed the target manually.  The call is
+/// a no-op if the target is already present, so it adds only negligible overhead.
 ///
 /// The caller must have already written the project files to `project_dir`.
 pub fn start_build(
     project_dir: PathBuf,
+    target: String,
     state: Arc<Mutex<BuildState>>,
     ctx: eframe::egui::Context,
 ) {
@@ -126,7 +129,7 @@ pub fn start_build(
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let next = run_check(&project_dir);
+        let next = run_check(&project_dir, &target);
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -134,7 +137,20 @@ pub fn start_build(
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 
-fn run_check(dir: &Path) -> BuildState {
+/// Ensure the rustup target is installed, then run `cargo check`.
+fn run_check(dir: &Path, target: &str) -> BuildState {
+    // ── Step 1: install target if needed ────────────────────────────────────
+    // `rustup target add` is idempotent — exits 0 immediately when already
+    // installed, so the overhead on subsequent builds is negligible.
+    if let Err(e) = ensure_target(target) {
+        return BuildState::Failed(format!(
+            "Could not install target `{target}` via rustup: {e}\n\n\
+             Make sure `rustup` is in PATH or install the target manually:\n\
+             rustup target add {target}"
+        ));
+    }
+
+    // ── Step 2: cargo check ──────────────────────────────────────────────────
     let mut child = match Command::new("cargo")
         .current_dir(dir)
         .args(["check", "--message-format=json", "--color=never"])
@@ -181,6 +197,25 @@ fn run_check(dir: &Path) -> BuildState {
     }
 
     BuildState::Done(result)
+}
+
+/// Run `rustup target add <target>`, returning an error only if rustup itself
+/// couldn't be launched (target already installed → exit 0, not an error).
+fn ensure_target(target: &str) -> std::io::Result<()> {
+    let status = Command::new("rustup")
+        .args(["target", "add", target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    // rustup exits 0 whether the target was freshly installed or already present.
+    // A non-zero exit usually means a network error; we surface it as a string.
+    if !status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("`rustup target add {target}` exited with {status}"),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_diagnostic(msg: &serde_json::Value) -> Option<Diagnostic> {

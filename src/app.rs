@@ -491,6 +491,7 @@ impl eframe::App for AppIde {
                                         self.build_tab = BuildPanelTab::Cargo;
                                         build::start_build(
                                             build_dir,
+                                            config.target.to_string(),
                                             Arc::clone(&self.build_state),
                                             self.egui_ctx.clone(),
                                         );

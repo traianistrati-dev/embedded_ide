@@ -23,7 +23,7 @@ const USER_SECTION: &str = r#"fn custom_config() {
     // Preserved when you change pin assignments.
 }
 
-fn loop_code() {
+fn loop_code() -> !{
     // Add your main loop logic here.
     // Preserved when you change pin assignments.
     loop {
@@ -32,7 +32,7 @@ fn loop_code() {
 }
 
 #[entry]
-fn main() -> ! {
+fn main() -> !{
     generated_pins_config();
     custom_config();
     loop_code();
@@ -94,7 +94,12 @@ fn splice_section(existing: &str, new_section: &str, mcu_name: &str) -> String {
         format!("{}{}\n{}", &existing[..begin], new_section, after)
     } else {
         // Markers not found (old format) — rebuild from scratch.
-        format!("{}{}\n{}", invariant_header(mcu_name), new_section, USER_SECTION)
+        format!(
+            "{}{}\n{}",
+            invariant_header(mcu_name),
+            new_section,
+            USER_SECTION
+        )
     }
 }
 
