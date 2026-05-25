@@ -1,4 +1,5 @@
 use crate::build::{self, BuildState};
+use crate::lsp::{self, LspStatus};
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::McuType;
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
@@ -85,6 +86,15 @@ impl McuTab {
     }
 }
 
+// ── Build panel tab ──────────────────────────────────────────────────────────
+
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
+enum BuildPanelTab {
+    #[default]
+    RustAnalyzer,
+    Cargo,
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AppIde {
@@ -108,8 +118,15 @@ pub struct AppIde {
     egui_ctx: egui::Context,
     /// Shared state written by the background build thread
     build_state: Arc<Mutex<BuildState>>,
-    /// Index of the diagnostic currently expanded in the build panel
+    /// Index of the diagnostic currently expanded in the cargo build panel
     selected_diagnostic: Option<usize>,
+    // ── rust-analyzer LSP ────────────────────────────────────────────────────
+    /// Shared LSP client state (updated from background threads)
+    lsp_state: Arc<Mutex<lsp::LspState>>,
+    /// Which tab is active in the bottom diagnostics panel
+    build_tab: BuildPanelTab,
+    /// Index of the RA diagnostic row that is expanded
+    lsp_selected_diagnostic: Option<usize>,
 }
 
 impl AppIde {
@@ -133,6 +150,9 @@ impl AppIde {
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             selected_diagnostic: None,
+            lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
+            build_tab: BuildPanelTab::RustAnalyzer,
+            lsp_selected_diagnostic: None,
         }
     }
 
@@ -157,6 +177,45 @@ impl eframe::App for AppIde {
         }
         if self.export_flash > 0 {
             self.export_flash -= 1;
+        }
+
+        // ── LSP lifecycle ─────────────────────────────────────────────────────
+        // Drive rust-analyzer: start it once, send didOpen/didChange as needed.
+        {
+            let lsp_status = self.lsp_state.lock().unwrap().status.clone();
+            match lsp_status {
+                LspStatus::Stopped => {
+                    // Auto-start when we have a supported chip (project on disk needed).
+                    if self.selected_mcu_type.project_config().is_some() {
+                        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+                        if let Some(config) = self.selected_mcu_type.project_config() {
+                            if project_gen::write_project(&build_dir, &config, &self.generated_code)
+                                .is_ok()
+                            {
+                                lsp::start(
+                                    &build_dir,
+                                    Arc::clone(&self.lsp_state),
+                                    self.egui_ctx.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                LspStatus::Indexing => {
+                    // Handshake complete — open the main file so RA starts analysing.
+                    let mut lsp = self.lsp_state.lock().unwrap();
+                    if !lsp.did_open_sent {
+                        let code = self.generated_code.clone();
+                        lsp.did_open(&code);
+                    }
+                }
+                LspStatus::Ready => {
+                    // Sync any code change incrementally.
+                    let code = self.generated_code.clone();
+                    self.lsp_state.lock().unwrap().did_change(&code);
+                }
+                _ => {}
+            }
         }
 
         // ── Build project files snapshot ─────────────────────────────────────
@@ -186,11 +245,13 @@ impl eframe::App for AppIde {
                         let build_guard = self.build_state.lock().unwrap();
                         let build_result = build_guard.result().cloned();
                         drop(build_guard);
+                        let lsp_guard = self.lsp_state.lock().unwrap();
                         show_project_tree(
                             ui,
                             cfg.pkg_name,
                             &mut self.selected_file,
                             build_result.as_ref(),
+                            Some(&*lsp_guard),
                         );
                     }
                     _ => {
@@ -301,6 +362,65 @@ impl eframe::App for AppIde {
 
                         ui.add_space(4.0);
 
+                        // ── rust-analyzer status badge ────────────────────────
+                        {
+                            let lsp = self.lsp_state.lock().unwrap();
+                            let (icon, color, tip) = match &lsp.status {
+                                LspStatus::Stopped => (
+                                    ph::PLUGS,
+                                    egui::Color32::DARK_GRAY,
+                                    "rust-analyzer: not running",
+                                ),
+                                LspStatus::Starting => (
+                                    ph::CIRCLE_NOTCH,
+                                    egui::Color32::from_rgb(180, 180, 80),
+                                    "rust-analyzer: starting…",
+                                ),
+                                LspStatus::Indexing => (
+                                    ph::CIRCLE_NOTCH,
+                                    egui::Color32::from_rgb(180, 180, 80),
+                                    "rust-analyzer: indexing…",
+                                ),
+                                LspStatus::Ready if lsp.total_errors() > 0 => (
+                                    ph::X_CIRCLE,
+                                    egui::Color32::from_rgb(220, 80, 70),
+                                    "rust-analyzer: errors",
+                                ),
+                                LspStatus::Ready if lsp.total_warnings() > 0 => (
+                                    ph::WARNING,
+                                    egui::Color32::from_rgb(210, 170, 40),
+                                    "rust-analyzer: warnings",
+                                ),
+                                LspStatus::Ready => (
+                                    ph::CHECK_CIRCLE,
+                                    egui::Color32::from_rgb(80, 200, 100),
+                                    "rust-analyzer: no errors",
+                                ),
+                                LspStatus::Failed(_) => (
+                                    ph::X_CIRCLE,
+                                    egui::Color32::from_rgb(220, 80, 70),
+                                    "rust-analyzer: failed",
+                                ),
+                            };
+                            // Spin the icon while indexing
+                            let is_spinning =
+                                matches!(lsp.status, LspStatus::Starting | LspStatus::Indexing);
+                            let badge = format!("RA {icon}");
+                            ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new(&badge).size(11.0).color(color),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text(tip);
+                            if is_spinning {
+                                ui.ctx()
+                                    .request_repaint_after(std::time::Duration::from_millis(200));
+                            }
+                        }
+
+                        ui.add_space(4.0);
+
                         // ── Build button ──────────────────────────────────────
                         let build_guard = self.build_state.lock().unwrap();
                         let is_building = build_guard.is_building();
@@ -362,6 +482,7 @@ impl eframe::App for AppIde {
                                 match project_gen::write_project(&build_dir, &config, &code) {
                                     Ok(()) => {
                                         self.selected_diagnostic = None;
+                                        self.build_tab = BuildPanelTab::Cargo;
                                         build::start_build(
                                             build_dir,
                                             Arc::clone(&self.build_state),
@@ -400,35 +521,81 @@ impl eframe::App for AppIde {
 
                 ui.separator();
 
-                // ── Build output panel (anchored to bottom of this panel) ─────
+                // ── Diagnostics panel (bottom, shown when RA active or cargo ran) ──
                 {
-                    let state_guard = self.build_state.lock().unwrap();
-                    let show_panel = !matches!(*state_guard, BuildState::Idle);
-                    drop(state_guard);
+                    let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
+                    let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
+                    let show_panel = cargo_has || lsp_active;
 
                     if show_panel {
                         egui::TopBottomPanel::bottom("build_output_inner")
                             .resizable(true)
                             .min_height(56.0)
-                            .default_height(160.0)
+                            .default_height(180.0)
                             .show_inside(ui, |ui| {
-                                show_build_panel(
+                                show_diag_panel(
                                     ui,
                                     &self.build_state,
+                                    &self.lsp_state,
+                                    &mut self.build_tab,
                                     &mut self.selected_diagnostic,
+                                    &mut self.lsp_selected_diagnostic,
                                     &mut self.selected_file,
                                 );
                             });
                     }
                 }
 
-                CodeEditor::default()
+                let editor_resp = CodeEditor::default()
                     .id_source("hal_code_editor")
                     .with_rows(50)
                     .with_fontsize(13.0)
                     .with_theme(ColorTheme::GRUVBOX)
                     .with_numlines(true)
                     .show(ui, &mut display_code, &display_syntax);
+
+                // ── RA error lane (right-edge overlay on editor rect) ─────────
+                // Proportional tick marks showing where errors/warnings are in
+                // the file — useful even when the lines are scrolled out of view.
+                if self.selected_file == ProjectFileId::MainRs {
+                    let lsp = self.lsp_state.lock().unwrap();
+                    if let Some(diags) = lsp.diagnostics.get("src/main.rs") {
+                        if !diags.is_empty() {
+                            let total = display_code.lines().count().max(1) as f32;
+                            let rect = editor_resp.galley.rect;
+                            let lane = egui::Rect::from_min_max(
+                                egui::pos2(rect.right() - 6.0, rect.top()),
+                                egui::pos2(rect.right(), rect.bottom()),
+                            );
+                            ui.painter().rect_filled(
+                                lane,
+                                0.0,
+                                egui::Color32::from_black_alpha(50),
+                            );
+                            for d in diags {
+                                let t = (d.line.saturating_sub(1) as f32) / total;
+                                let y = rect.top() + t * rect.height();
+                                let color = match d.severity {
+                                    lsp::DiagSeverity::Error => {
+                                        egui::Color32::from_rgb(210, 60, 50)
+                                    }
+                                    lsp::DiagSeverity::Warning => {
+                                        egui::Color32::from_rgb(190, 155, 30)
+                                    }
+                                    _ => egui::Color32::from_rgb(80, 130, 200),
+                                };
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(lane.left(), y - 2.0),
+                                        egui::pos2(lane.right(), y + 2.0),
+                                    ),
+                                    0.0,
+                                    color,
+                                );
+                            }
+                        }
+                    }
+                }
             });
 
         // ── Panel 3: MCU Configurator ─────────────────────────────────────────
@@ -482,6 +649,10 @@ impl eframe::App for AppIde {
                     self.mcu = Self::init_mcu(&self.selected_mcu_type);
                     self.active_tab = McuTab::Pins;
                     self.selected_file = ProjectFileId::MainRs;
+                    // Stop old RA session; it will auto-restart on the next frame
+                    // for supported chips (generation counter prevents stale updates).
+                    self.lsp_state.lock().unwrap().reset();
+                    self.lsp_selected_diagnostic = None;
                 }
             });
 
@@ -568,6 +739,7 @@ fn show_project_tree(
     pkg_name: &str,
     selected: &mut ProjectFileId,
     build_result: Option<&build::BuildResult>,
+    lsp: Option<&lsp::LspState>,
 ) {
     let dim = egui::Color32::from_rgb(140, 150, 165);
     let hi = egui::Color32::from_rgb(100, 180, 255);
@@ -615,19 +787,25 @@ fn show_project_tree(
                     egui::Stroke::new(1.0, dim),
                 );
             }
-            // Diagnostic dot — only for files rustc reports on
+            // Diagnostic dots — cargo check and/or RA
             if let Some(cargo_path) = id.cargo_path() {
-                if let Some(result) = build_result {
-                    let (dot, dot_color) = if result.has_errors_in(cargo_path) {
-                        (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-                    } else if result.has_warnings_in(cargo_path) {
-                        (ph::WARNING, egui::Color32::from_rgb(220, 180, 50))
-                    } else {
-                        ("", egui::Color32::TRANSPARENT)
-                    };
-                    if !dot.is_empty() {
-                        ui.label(egui::RichText::new(dot).size(10.0).color(dot_color));
-                    }
+                let cargo_err = build_result.map_or(false, |r| r.has_errors_in(cargo_path));
+                let cargo_warn = build_result.map_or(false, |r| r.has_warnings_in(cargo_path));
+                let lsp_err = lsp.map_or(false, |l| l.error_count_for(cargo_path) > 0);
+                let lsp_warn = lsp.map_or(false, |l| l.warning_count_for(cargo_path) > 0);
+
+                let has_err = cargo_err || lsp_err;
+                let has_warn = cargo_warn || lsp_warn;
+
+                let (dot, dot_color) = if has_err {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                } else if has_warn {
+                    (ph::WARNING, egui::Color32::from_rgb(220, 180, 50))
+                } else {
+                    ("", egui::Color32::TRANSPARENT)
+                };
+                if !dot.is_empty() {
+                    ui.label(egui::RichText::new(dot).size(10.0).color(dot_color));
                 }
             }
         });
@@ -821,13 +999,112 @@ fn periph_section(ui: &mut egui::Ui, title: &str, pins: &[&Pin], color: egui::Co
     ui.separator();
 }
 
-// ── Build output panel ────────────────────────────────────────────────────────
+// ── Diagnostics panel (tabbed: Cargo Check | rust-analyzer) ──────────────────
 
-/// Rendered inside the bottom panel of the code editor column.
-/// Shows a summary line, then a compact scrollable list of diagnostics.
-/// Clicking a diagnostic navigates to its file in the project tree; selecting
-/// one expands the full rustc-rendered block below.
-fn show_build_panel(
+fn show_diag_panel(
+    ui: &mut egui::Ui,
+    build_state: &Arc<Mutex<BuildState>>,
+    lsp_state: &Arc<Mutex<lsp::LspState>>,
+    tab: &mut BuildPanelTab,
+    cargo_sel: &mut Option<usize>,
+    lsp_sel: &mut Option<usize>,
+    selected_file: &mut ProjectFileId,
+) {
+    // ── Tab header ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        // Cargo tab button
+        {
+            let st = build_state.lock().unwrap();
+            let (badge, col) = match &*st {
+                BuildState::Done(r) if r.error_count() > 0 => (
+                    format!(" {} {}", r.error_count(), ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                BuildState::Done(r) if r.warning_count() > 0 => (
+                    format!(" {} {}", r.warning_count(), ph::WARNING),
+                    egui::Color32::from_rgb(210, 170, 40),
+                ),
+                BuildState::Done(r) if r.success => (
+                    format!(" {}", ph::CHECK_CIRCLE),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                BuildState::Building => (" …".to_owned(), egui::Color32::GRAY),
+                _ => (String::new(), egui::Color32::GRAY),
+            };
+            let label = format!("{} Cargo Check{badge}", ph::HAMMER);
+            let active = *tab == BuildPanelTab::Cargo;
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Cargo;
+            }
+        }
+
+        ui.separator();
+
+        // RA tab button
+        {
+            let lsp = lsp_state.lock().unwrap();
+            let (badge, col) = match &lsp.status {
+                LspStatus::Starting | LspStatus::Indexing => {
+                    (" …".to_owned(), egui::Color32::from_rgb(180, 180, 80))
+                }
+                LspStatus::Ready if lsp.total_errors() > 0 => (
+                    format!(" {} {}", lsp.total_errors(), ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                LspStatus::Ready if lsp.total_warnings() > 0 => (
+                    format!(" {} {}", lsp.total_warnings(), ph::WARNING),
+                    egui::Color32::from_rgb(210, 170, 40),
+                ),
+                LspStatus::Ready => (
+                    format!(" {}", ph::CHECK_CIRCLE),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                LspStatus::Failed(_) => (
+                    format!(" {}", ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                _ => (String::new(), egui::Color32::DARK_GRAY),
+            };
+            let label = format!("rust-analyzer{badge}");
+            let active = *tab == BuildPanelTab::RustAnalyzer;
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::RustAnalyzer;
+            }
+        }
+    });
+
+    ui.separator();
+
+    // ── Tab content ───────────────────────────────────────────────────────────
+    match tab {
+        BuildPanelTab::Cargo => {
+            show_cargo_tab(ui, build_state, cargo_sel, selected_file);
+        }
+        BuildPanelTab::RustAnalyzer => {
+            show_ra_tab(ui, lsp_state, lsp_sel, selected_file);
+        }
+    }
+}
+
+// ── Cargo Check tab ───────────────────────────────────────────────────────────
+
+fn show_cargo_tab(
     ui: &mut egui::Ui,
     build_state: &Arc<Mutex<BuildState>>,
     selected_diagnostic: &mut Option<usize>,
@@ -1058,6 +1335,291 @@ fn show_build_panel(
                             egui::RichText::new(&diag.rendered)
                                 .size(11.0)
                                 .monospace()
+                                .color(egui::Color32::from_rgb(220, 215, 200)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+    }
+}
+
+// ── rust-analyzer tab ─────────────────────────────────────────────────────────
+
+fn show_ra_tab(
+    ui: &mut egui::Ui,
+    lsp_state: &Arc<Mutex<lsp::LspState>>,
+    selected: &mut Option<usize>,
+    selected_file: &mut ProjectFileId,
+) {
+    // Extract everything we need while holding the lock, then drop it
+    // before we start drawing so there's no risk of a deadlock.
+    let (status, total_err, total_warn, all_diags, failed_msg) = {
+        let lsp = lsp_state.lock().unwrap();
+        let failed_msg = if let lsp::LspStatus::Failed(ref m) = lsp.status {
+            Some(m.clone())
+        } else {
+            None
+        };
+        // Flatten all diagnostics into (rel_path, LspDiagnostic) pairs
+        let mut flat: Vec<(String, lsp::LspDiagnostic)> = lsp
+            .diagnostics
+            .iter()
+            .flat_map(|(path, diags)| diags.iter().map(move |d| (path.clone(), d.clone())))
+            .collect();
+        // Errors first, then warnings
+        flat.sort_by_key(|(_, d)| (d.severity != lsp::DiagSeverity::Error, d.line));
+        (
+            lsp.status.clone(),
+            lsp.total_errors(),
+            lsp.total_warnings(),
+            flat,
+            failed_msg,
+        )
+    };
+
+    // ── Status bar ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        let (icon, text, color) = match &status {
+            lsp::LspStatus::Stopped => (
+                ph::PLUGS,
+                "rust-analyzer not running".to_owned(),
+                egui::Color32::DARK_GRAY,
+            ),
+            lsp::LspStatus::Starting => (
+                ph::CIRCLE_NOTCH,
+                "rust-analyzer starting…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 80),
+            ),
+            lsp::LspStatus::Indexing => (
+                ph::CIRCLE_NOTCH,
+                "Indexing project…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 80),
+            ),
+            lsp::LspStatus::Ready if total_err > 0 => (
+                ph::X_CIRCLE,
+                format!(
+                    "{} error{}{}",
+                    total_err,
+                    if total_err == 1 { "" } else { "s" },
+                    if total_warn > 0 {
+                        format!(
+                            ",  {} warning{}",
+                            total_warn,
+                            if total_warn == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+            lsp::LspStatus::Ready if total_warn > 0 => (
+                ph::WARNING,
+                format!(
+                    "{} warning{}",
+                    total_warn,
+                    if total_warn == 1 { "" } else { "s" }
+                ),
+                egui::Color32::from_rgb(230, 190, 50),
+            ),
+            lsp::LspStatus::Ready => (
+                ph::CHECK_CIRCLE,
+                "No issues — rust-analyzer ready".to_owned(),
+                egui::Color32::from_rgb(80, 200, 100),
+            ),
+            lsp::LspStatus::Failed(_) => (
+                ph::X_CIRCLE,
+                "rust-analyzer failed to start".to_owned(),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+        };
+
+        ui.label(egui::RichText::new(icon).size(13.0).color(color));
+        ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
+    });
+
+    // Spinner repaint
+    if matches!(status, lsp::LspStatus::Starting | lsp::LspStatus::Indexing) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    // Failed detail
+    if let Some(msg) = failed_msg {
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("ra_failed_scroll")
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&msg)
+                            .size(11.0)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(230, 90, 80)),
+                    )
+                    .wrap(),
+                );
+            });
+        return;
+    }
+
+    if all_diags.is_empty() {
+        return;
+    }
+
+    ui.separator();
+
+    // ── Diagnostic list ───────────────────────────────────────────────────────
+    let sel = *selected;
+    let list_height = if sel.is_some() {
+        ui.available_height() * 0.45
+    } else {
+        ui.available_height()
+    };
+
+    egui::ScrollArea::vertical()
+        .id_salt("ra_diag_list")
+        .max_height(list_height)
+        .show(ui, |ui| {
+            for (i, (path, diag)) in all_diags.iter().enumerate() {
+                let is_sel = sel == Some(i);
+
+                let (level_icon, level_color) = match diag.severity {
+                    lsp::DiagSeverity::Error => {
+                        (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                    }
+                    lsp::DiagSeverity::Warning => {
+                        (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                    }
+                    lsp::DiagSeverity::Info | lsp::DiagSeverity::Hint => {
+                        (ph::INFO, egui::Color32::from_rgb(80, 140, 210))
+                    }
+                };
+
+                let location = format!("{}:{}", path, diag.line);
+
+                let row_bg = if is_sel {
+                    egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 18.0),
+                    egui::Sense::click(),
+                );
+
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, row_bg);
+
+                    let cy = rect.center().y;
+                    let mut x = rect.left() + 4.0;
+
+                    // Severity icon
+                    let r = painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        level_icon,
+                        egui::FontId::proportional(11.0),
+                        level_color,
+                    );
+                    x = r.right() + 4.0;
+
+                    // file:line
+                    let r = painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &location,
+                        egui::FontId::monospace(10.5),
+                        egui::Color32::from_rgb(120, 160, 200),
+                    );
+                    x = r.right() + 6.0;
+
+                    // Error code [E0308]
+                    if let Some(code) = &diag.code {
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            format!("[{code}]"),
+                            egui::FontId::monospace(10.0),
+                            egui::Color32::from_rgb(150, 130, 80),
+                        );
+                        x = r.right() + 6.0;
+                    }
+
+                    // Message
+                    let msg_color = if is_sel {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(210, 210, 220)
+                    };
+                    painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &diag.message,
+                        egui::FontId::proportional(11.0),
+                        msg_color,
+                    );
+                }
+
+                if resp.clicked() {
+                    *selected = if is_sel { None } else { Some(i) };
+
+                    // Navigate to file
+                    let target = match path.as_str() {
+                        "src/main.rs" => Some(ProjectFileId::MainRs),
+                        "build.rs" => Some(ProjectFileId::BuildRs),
+                        "Cargo.toml" => Some(ProjectFileId::CargoToml),
+                        _ => None,
+                    };
+                    if let Some(id) = target {
+                        *selected_file = id;
+                    }
+                }
+            }
+        });
+
+    // ── Detail view ───────────────────────────────────────────────────────────
+    if let Some(idx) = sel {
+        if let Some((_, diag)) = all_diags.get(idx) {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("ra_diag_detail")
+                .show(ui, |ui| {
+                    // Header: severity + code + location
+                    ui.horizontal(|ui| {
+                        let (sev_icon, sev_col) = match diag.severity {
+                            lsp::DiagSeverity::Error => {
+                                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                            }
+                            lsp::DiagSeverity::Warning => {
+                                (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                            }
+                            _ => (ph::INFO, egui::Color32::from_rgb(80, 140, 210)),
+                        };
+                        ui.label(egui::RichText::new(sev_icon).size(13.0).color(sev_col));
+                        if let Some(code) = &diag.code {
+                            ui.label(
+                                egui::RichText::new(format!("[{code}]"))
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(egui::Color32::from_rgb(180, 155, 80)),
+                            );
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("line {}  col {}", diag.line, diag.col))
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    });
+
+                    // Full message body
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&diag.message)
+                                .size(11.5)
                                 .color(egui::Color32::from_rgb(220, 215, 200)),
                         )
                         .wrap(),
