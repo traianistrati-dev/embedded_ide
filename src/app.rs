@@ -1,3 +1,4 @@
+use crate::build::{self, BuildState};
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::McuType;
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
@@ -7,6 +8,7 @@ use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 use egui_phosphor::regular as ph;
+use std::sync::{Arc, Mutex};
 
 // ── Project file selector ─────────────────────────────────────────────────────
 
@@ -49,6 +51,17 @@ impl ProjectFileId {
         // TOML/memory.x use the same for now (no other built-in syntax available).
         Syntax::rust()
     }
+
+    /// Path as reported by `rustc` in JSON diagnostics (relative to project root).
+    /// Returns `None` for files that rustc never reports errors for.
+    fn cargo_path(self) -> Option<&'static str> {
+        match self {
+            Self::MainRs => Some("src/main.rs"),
+            Self::BuildRs => Some("build.rs"),
+            Self::CargoToml => Some("Cargo.toml"),
+            _ => None,
+        }
+    }
 }
 
 // ── Tab bar ──────────────────────────────────────────────────────────────────
@@ -90,6 +103,13 @@ pub struct AppIde {
     export_flash: u8,
     /// Last export result message
     export_msg: String,
+    // ── Build ────────────────────────────────────────────────────────────────
+    /// egui context stored for cross-thread repaint requests
+    egui_ctx: egui::Context,
+    /// Shared state written by the background build thread
+    build_state: Arc<Mutex<BuildState>>,
+    /// Index of the diagnostic currently expanded in the build panel
+    selected_diagnostic: Option<usize>,
 }
 
 impl AppIde {
@@ -110,6 +130,9 @@ impl AppIde {
             copy_flash: 0,
             export_flash: 0,
             export_msg: String::new(),
+            egui_ctx: cc.egui_ctx.clone(),
+            build_state: Arc::new(Mutex::new(BuildState::Idle)),
+            selected_diagnostic: None,
         }
     }
 
@@ -160,7 +183,15 @@ impl eframe::App for AppIde {
 
                 match (&project_files, self.selected_mcu_type.project_config()) {
                     (Some(_), Some(cfg)) => {
-                        show_project_tree(ui, cfg.pkg_name, &mut self.selected_file);
+                        let build_guard = self.build_state.lock().unwrap();
+                        let build_result = build_guard.result().cloned();
+                        drop(build_guard);
+                        show_project_tree(
+                            ui,
+                            cfg.pkg_name,
+                            &mut self.selected_file,
+                            build_result.as_ref(),
+                        );
                     }
                     _ => {
                         ui.add_space(12.0);
@@ -268,6 +299,95 @@ impl eframe::App for AppIde {
                              Cargo.toml · .cargo/config.toml · memory.x · build.rs · src/main.rs",
                         );
 
+                        ui.add_space(4.0);
+
+                        // ── Build button ──────────────────────────────────────
+                        let build_guard = self.build_state.lock().unwrap();
+                        let is_building = build_guard.is_building();
+
+                        // Animate trailing dots while building
+                        let build_label = if is_building {
+                            let dots = match (ui.ctx().cumulative_frame_nr() / 15) % 3 {
+                                0 => ".",
+                                1 => "..",
+                                _ => "...",
+                            };
+                            format!("Building{dots}")
+                        } else {
+                            format!("{} Build", ph::HAMMER)
+                        };
+
+                        // Badge: error/warning/ok count shown to the left of the button
+                        let badge_text = match &*build_guard {
+                            BuildState::Done(r) if r.error_count() > 0 => Some((
+                                format!("{} {}", r.error_count(), ph::X_CIRCLE),
+                                egui::Color32::from_rgb(230, 90, 80),
+                            )),
+                            BuildState::Done(r) if r.warning_count() > 0 => Some((
+                                format!("{} {}", r.warning_count(), ph::WARNING),
+                                egui::Color32::from_rgb(230, 190, 50),
+                            )),
+                            BuildState::Done(r) if r.success => Some((
+                                format!("{}", ph::CHECK_CIRCLE),
+                                egui::Color32::from_rgb(80, 200, 100),
+                            )),
+                            BuildState::Failed(_) => Some((
+                                format!("{}", ph::X_CIRCLE),
+                                egui::Color32::from_rgb(230, 90, 80),
+                            )),
+                            _ => None,
+                        };
+                        drop(build_guard);
+
+                        if let Some((badge, color)) = badge_text {
+                            ui.label(egui::RichText::new(badge).size(11.0).color(color));
+                        }
+
+                        let build_enabled = !is_building && project_files.is_some();
+                        let build_btn = ui.add_enabled(
+                            build_enabled,
+                            egui::Button::new(egui::RichText::new(&build_label).size(11.0).color(
+                                if build_enabled {
+                                    egui::Color32::from_rgb(100, 220, 100)
+                                } else {
+                                    egui::Color32::GRAY
+                                },
+                            )),
+                        );
+
+                        if build_btn.clicked() {
+                            if let Some(config) = self.selected_mcu_type.project_config() {
+                                let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+                                let code = self.generated_code.clone();
+                                match project_gen::write_project(&build_dir, &config, &code) {
+                                    Ok(()) => {
+                                        self.selected_diagnostic = None;
+                                        build::start_build(
+                                            build_dir,
+                                            Arc::clone(&self.build_state),
+                                            self.egui_ctx.clone(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        *self.build_state.lock().unwrap() = BuildState::Failed(
+                                            format!("Could not write project to temp dir: {e}"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        build_btn.on_hover_text(
+                            "Run `cargo check` on the generated project.\n\
+                             Requires the Rust toolchain + thumbv7m-none-eabi target:\n\
+                             rustup target add thumbv7m-none-eabi",
+                        );
+
+                        // Keep UI refreshing while build is running (drives dot animation)
+                        if is_building {
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(120));
+                        }
+
                         ui.add_space(8.0);
                         // Show which file is open
                         ui.label(
@@ -279,6 +399,28 @@ impl eframe::App for AppIde {
                 });
 
                 ui.separator();
+
+                // ── Build output panel (anchored to bottom of this panel) ─────
+                {
+                    let state_guard = self.build_state.lock().unwrap();
+                    let show_panel = !matches!(*state_guard, BuildState::Idle);
+                    drop(state_guard);
+
+                    if show_panel {
+                        egui::TopBottomPanel::bottom("build_output_inner")
+                            .resizable(true)
+                            .min_height(56.0)
+                            .default_height(160.0)
+                            .show_inside(ui, |ui| {
+                                show_build_panel(
+                                    ui,
+                                    &self.build_state,
+                                    &mut self.selected_diagnostic,
+                                    &mut self.selected_file,
+                                );
+                            });
+                    }
+                }
 
                 CodeEditor::default()
                     .id_source("hal_code_editor")
@@ -421,7 +563,12 @@ impl eframe::App for AppIde {
 
 // ── Project tree ──────────────────────────────────────────────────────────────
 
-fn show_project_tree(ui: &mut egui::Ui, pkg_name: &str, selected: &mut ProjectFileId) {
+fn show_project_tree(
+    ui: &mut egui::Ui,
+    pkg_name: &str,
+    selected: &mut ProjectFileId,
+    build_result: Option<&build::BuildResult>,
+) {
     let dim = egui::Color32::from_rgb(140, 150, 165);
     let hi = egui::Color32::from_rgb(100, 180, 255);
     let normal = egui::Color32::from_rgb(200, 205, 215);
@@ -436,7 +583,7 @@ fn show_project_tree(ui: &mut egui::Ui, pkg_name: &str, selected: &mut ProjectFi
 
     ui.add_space(2.0);
 
-    // Helper: single file row
+    // Helper: single file row with optional build diagnostic indicator
     let mut file_row = |ui: &mut egui::Ui, indent: f32, name: &str, id: ProjectFileId| {
         ui.horizontal(|ui| {
             ui.add_space(indent);
@@ -462,12 +609,26 @@ fn show_project_tree(ui: &mut egui::Ui, pkg_name: &str, selected: &mut ProjectFi
                 *selected = id;
             }
             if resp.hovered() && !is_sel {
-                // Underline on hover via a thin rect under the text
                 let r = resp.rect;
                 ui.painter().line_segment(
                     [r.left_bottom(), r.right_bottom()],
                     egui::Stroke::new(1.0, dim),
                 );
+            }
+            // Diagnostic dot — only for files rustc reports on
+            if let Some(cargo_path) = id.cargo_path() {
+                if let Some(result) = build_result {
+                    let (dot, dot_color) = if result.has_errors_in(cargo_path) {
+                        (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                    } else if result.has_warnings_in(cargo_path) {
+                        (ph::WARNING, egui::Color32::from_rgb(220, 180, 50))
+                    } else {
+                        ("", egui::Color32::TRANSPARENT)
+                    };
+                    if !dot.is_empty() {
+                        ui.label(egui::RichText::new(dot).size(10.0).color(dot_color));
+                    }
+                }
             }
         });
     };
@@ -658,4 +819,250 @@ fn periph_section(ui: &mut egui::Ui, title: &str, pins: &[&Pin], color: egui::Co
 
     ui.add_space(2.0);
     ui.separator();
+}
+
+// ── Build output panel ────────────────────────────────────────────────────────
+
+/// Rendered inside the bottom panel of the code editor column.
+/// Shows a summary line, then a compact scrollable list of diagnostics.
+/// Clicking a diagnostic navigates to its file in the project tree; selecting
+/// one expands the full rustc-rendered block below.
+fn show_build_panel(
+    ui: &mut egui::Ui,
+    build_state: &Arc<Mutex<BuildState>>,
+    selected_diagnostic: &mut Option<usize>,
+    selected_file: &mut ProjectFileId,
+) {
+    let state = build_state.lock().unwrap().clone();
+
+    // ── Status bar ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        let (icon, text, color) = match &state {
+            BuildState::Idle => return,
+            BuildState::Building => (
+                ph::HAMMER,
+                "Building…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 180),
+            ),
+            BuildState::Failed(msg) => (
+                ph::X_CIRCLE,
+                format!("Build failed: {}", msg.lines().next().unwrap_or(msg)),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+            BuildState::Done(r) if r.error_count() > 0 => (
+                ph::X_CIRCLE,
+                format!(
+                    "{} error{}{}",
+                    r.error_count(),
+                    if r.error_count() == 1 { "" } else { "s" },
+                    if r.warning_count() > 0 {
+                        format!(
+                            ",  {} warning{}",
+                            r.warning_count(),
+                            if r.warning_count() == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+            BuildState::Done(r) if r.warning_count() > 0 => (
+                ph::WARNING,
+                format!(
+                    "{} warning{}",
+                    r.warning_count(),
+                    if r.warning_count() == 1 { "" } else { "s" }
+                ),
+                egui::Color32::from_rgb(230, 190, 50),
+            ),
+            BuildState::Done(_) => (
+                ph::CHECK_CIRCLE,
+                "Build succeeded — no errors".to_owned(),
+                egui::Color32::from_rgb(80, 200, 100),
+            ),
+        };
+
+        ui.label(egui::RichText::new(icon).size(13.0).color(color));
+        ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
+
+        // Clear button
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{} Clear", ph::X))
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                ))
+                .clicked()
+            {
+                *build_state.lock().unwrap() = BuildState::Idle;
+                *selected_diagnostic = None;
+            }
+        });
+    });
+
+    let BuildState::Done(result) = &state else {
+        // For Building/Failed we've shown what we can
+        if let BuildState::Failed(msg) = &state {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("build_failed_scroll")
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(msg)
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(230, 90, 80)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+        return;
+    };
+
+    if result.diagnostics.is_empty() {
+        return;
+    }
+
+    ui.separator();
+
+    // ── Compact diagnostic list ───────────────────────────────────────────────
+    let sel = *selected_diagnostic;
+
+    // If something is selected, split the panel: list on top, detail below
+    let list_height = if sel.is_some() {
+        ui.available_height() * 0.45
+    } else {
+        ui.available_height()
+    };
+
+    egui::ScrollArea::vertical()
+        .id_salt("build_diag_list")
+        .max_height(list_height)
+        .show(ui, |ui| {
+            for (i, diag) in result.diagnostics.iter().enumerate() {
+                let is_sel = sel == Some(i);
+
+                let (level_icon, level_color) = if diag.is_error() {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                } else {
+                    (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                };
+
+                let location = match (diag.file.as_deref(), diag.line) {
+                    (Some(f), Some(l)) => format!("{f}:{l}"),
+                    (Some(f), None) => f.to_owned(),
+                    _ => String::new(),
+                };
+
+                let row_bg = if is_sel {
+                    egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 18.0),
+                    egui::Sense::click(),
+                );
+
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, row_bg);
+
+                    // painter.text() returns the Rect of the rendered text,
+                    // letting us advance x without needing &mut Fonts.
+                    let cy = rect.center().y;
+                    let mut x = rect.left() + 4.0;
+
+                    // Level icon
+                    let r = painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        level_icon,
+                        egui::FontId::proportional(11.0),
+                        level_color,
+                    );
+                    x = r.right() + 4.0;
+
+                    // File:line location
+                    if !location.is_empty() {
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            &location,
+                            egui::FontId::monospace(10.5),
+                            egui::Color32::from_rgb(120, 160, 200),
+                        );
+                        x = r.right() + 6.0;
+                    }
+
+                    // Error code [E0308]
+                    if let Some(code) = &diag.code {
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            format!("[{code}]"),
+                            egui::FontId::monospace(10.0),
+                            egui::Color32::from_rgb(150, 130, 80),
+                        );
+                        x = r.right() + 6.0;
+                    }
+
+                    // Message text
+                    let msg_color = if is_sel {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(210, 210, 220)
+                    };
+                    painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &diag.message,
+                        egui::FontId::proportional(11.0),
+                        msg_color,
+                    );
+                }
+
+                if resp.clicked() {
+                    *selected_diagnostic = if is_sel { None } else { Some(i) };
+
+                    // Navigate to the file if possible
+                    if let Some(file) = &diag.file {
+                        let target = match file.as_str() {
+                            "src/main.rs" => Some(ProjectFileId::MainRs),
+                            "build.rs" => Some(ProjectFileId::BuildRs),
+                            "Cargo.toml" => Some(ProjectFileId::CargoToml),
+                            _ => None,
+                        };
+                        if let Some(id) = target {
+                            *selected_file = id;
+                        }
+                    }
+                }
+            }
+        });
+
+    // ── Detail view for selected diagnostic ───────────────────────────────────
+    if let Some(idx) = sel {
+        if let Some(diag) = result.diagnostics.get(idx) {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("build_diag_detail")
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&diag.rendered)
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(220, 215, 200)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+    }
 }

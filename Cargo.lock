@@ -980,6 +980,7 @@ dependencies = [
  "egui-phosphor",
  "egui_code_editor",
  "rfd",
+ "serde_json",
 ]
 
 [[package]]
