@@ -6,6 +6,7 @@ use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
+use egui_phosphor::regular as ph;
 
 // ── Project file selector ─────────────────────────────────────────────────────
 
@@ -92,7 +93,12 @@ pub struct AppIde {
 }
 
 impl AppIde {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Load Phosphor icon font alongside egui's default fonts
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
+
         let mcu = create_stm32f103c8tx();
         let generated_code = mcu.generate_code();
         Self {
@@ -180,10 +186,12 @@ impl eframe::App for AppIde {
                     ui.heading("Code Editor");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Copy button — copies the currently displayed file
-                        let copy_label = if self.copy_flash > 0 {
-                            "✔ Copied!"
+                        let copy_ok = format!("{} Copied!", ph::CHECK);
+                        let copy_def = format!("{} Copy", ph::COPY);
+                        let copy_label: &str = if self.copy_flash > 0 {
+                            &copy_ok
                         } else {
-                            "⧉ Copy"
+                            &copy_def
                         };
                         let copy_btn = ui.add(egui::Button::new(
                             egui::RichText::new(copy_label).size(11.0),
@@ -201,12 +209,14 @@ impl eframe::App for AppIde {
 
                         // Export Project button
                         let can_export = project_files.is_some();
+                        let export_idle = format!("{} Export Project", ph::EXPORT);
+                        let export_na = format!("{} Export (N/A)", ph::EXPORT);
                         let export_label: &str = if self.export_flash > 0 {
                             &self.export_msg
                         } else if can_export {
-                            "⬇ Export Project"
+                            &export_idle
                         } else {
-                            "⬇ Export (N/A)"
+                            &export_na
                         };
 
                         let export_color =
@@ -286,9 +296,12 @@ impl eframe::App for AppIde {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let reset_btn = ui
                         .add(egui::Button::new(
-                            egui::RichText::new("↺ Reset pins")
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(220, 100, 80)),
+                            egui::RichText::new(format!(
+                                "{} Reset pins",
+                                ph::ARROW_COUNTER_CLOCKWISE
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(220, 100, 80)),
                         ))
                         .on_hover_text("Clear all pin function selections");
                     if reset_btn.clicked() {
@@ -365,7 +378,8 @@ impl eframe::App for AppIde {
                             ui.centered_and_justified(|ui| {
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "⚙  {}  —  support coming soon",
+                                        "{}  {}  —  support coming soon",
+                                        ph::GEAR,
                                         self.selected_mcu_type.label()
                                     ))
                                     .size(18.0)
@@ -379,18 +393,24 @@ impl eframe::App for AppIde {
                 McuTab::Clock => {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            egui::RichText::new("🕐  Clock configuration — coming soon")
-                                .size(16.0)
-                                .color(egui::Color32::GRAY),
+                            egui::RichText::new(format!(
+                                "{}  Clock configuration — coming soon",
+                                ph::CLOCK
+                            ))
+                            .size(16.0)
+                            .color(egui::Color32::GRAY),
                         );
                     });
                 }
                 McuTab::System => {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            egui::RichText::new("⚙  System configuration — coming soon")
-                                .size(16.0)
-                                .color(egui::Color32::GRAY),
+                            egui::RichText::new(format!(
+                                "{}  System configuration — coming soon",
+                                ph::GEAR
+                            ))
+                            .size(16.0)
+                            .color(egui::Color32::GRAY),
                         );
                     });
                 }
@@ -422,6 +442,13 @@ fn show_project_tree(ui: &mut egui::Ui, pkg_name: &str, selected: &mut ProjectFi
             ui.add_space(indent);
             let is_sel = *selected == id;
             let color = if is_sel { hi } else { normal };
+            let icon_color = if is_sel {
+                egui::Color32::from_rgb(180, 210, 255)
+            } else {
+                egui::Color32::from_rgb(160, 170, 190)
+            };
+            // File icon
+            ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
             let resp = ui.add(
                 egui::Label::new(
                     egui::RichText::new(name)

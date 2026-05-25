@@ -8,4 +8,5 @@ author = "Traian Istrati"
 eframe           = "0.34.1"
 egui             = "0.34.1"
 egui_code_editor = "0.3.2"
+egui-phosphor    = { version = "0.12.0", features = ["regular"] }
 rfd              = "0.15"
