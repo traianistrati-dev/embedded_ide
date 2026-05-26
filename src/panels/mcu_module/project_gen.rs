@@ -21,12 +21,12 @@ use std::{fs, io, path::Path};
 /// All generated file contents for one project snapshot.
 /// Cheap to build (pure string formatting); regenerated every UI frame.
 pub struct ProjectFiles {
-    pub main_rs:      String,
-    pub cargo_toml:   String,
+    pub main_rs: String,
+    pub cargo_toml: String,
     pub cargo_config: String,
-    pub memory_x:     String,
-    pub build_rs:     String,
-    pub gitignore:    String,
+    pub memory_x: String,
+    pub build_rs: String,
+    pub gitignore: String,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -34,12 +34,12 @@ pub struct ProjectFiles {
 /// Builds all file contents in memory without touching the filesystem.
 pub fn build_project_files(config: &McuProjectConfig, main_rs: &str) -> ProjectFiles {
     ProjectFiles {
-        main_rs:      main_rs.to_owned(),
-        cargo_toml:   cargo_toml(config),
+        main_rs: main_rs.to_owned(),
+        cargo_toml: cargo_toml(config),
         cargo_config: cargo_config(config),
-        memory_x:     memory_x(config),
-        build_rs:     build_rs(),
-        gitignore:    "/target\n".to_owned(),
+        memory_x: memory_x(config),
+        build_rs: build_rs(),
+        gitignore: "/target\n".to_owned(),
     }
 }
 
@@ -57,12 +57,12 @@ pub fn write_project(
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
 
-    fs::write(dest.join("Cargo.toml"),                    &files.cargo_toml)?;
-    fs::write(dest.join(".cargo").join("config.toml"),    &files.cargo_config)?;
-    fs::write(dest.join("memory.x"),                      &files.memory_x)?;
-    fs::write(dest.join("build.rs"),                      &files.build_rs)?;
-    fs::write(dest.join("src").join("main.rs"),           &files.main_rs)?;
-    fs::write(dest.join(".gitignore"),                    &files.gitignore)?;
+    fs::write(dest.join("Cargo.toml"), &files.cargo_toml)?;
+    fs::write(dest.join(".cargo").join("config.toml"), &files.cargo_config)?;
+    fs::write(dest.join("memory.x"), &files.memory_x)?;
+    fs::write(dest.join("build.rs"), &files.build_rs)?;
+    fs::write(dest.join("src").join("main.rs"), &files.main_rs)?;
+    fs::write(dest.join(".gitignore"), &files.gitignore)?;
 
     for (rel_path, content) in user_src_files {
         let full = dest.join("src").join(rel_path);
@@ -99,12 +99,14 @@ fn cargo_toml(c: &McuProjectConfig) -> String {
          # Debug with:  cargo run   --release   (requires probe-rs in PATH)\n\
          \n\
          [profile.release]\n\
+         panic = \"abort\"\n\
          codegen-units = 1\n\
          debug         = true\n\
          lto           = true\n\
          opt-level     = \"s\"\n\
          \n\
          [profile.dev]\n\
+         panic = \"abort\"\n\
          opt-level = 1\n",
         name = c.pkg_name,
         hal = c.hal_dep,

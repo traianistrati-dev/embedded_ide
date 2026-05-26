@@ -113,6 +113,11 @@ struct PersistedState {
     user_src_files: Vec<(String, String)>,
     /// Explicitly-created empty folders inside src/.
     user_src_folders: Vec<String>,
+    /// Display name of the last opened/exported project folder.
+    /// Stored as a plain String (not PathBuf) to avoid any platform
+    /// path-separator issues with eframe's JSON storage on Windows.
+    #[serde(default)]
+    project_name: Option<String>,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -170,8 +175,8 @@ pub struct AppIde {
     // ── Project management ────────────────────────────────────────────────────
     /// `true` while the "New Project" confirmation dialog is open.
     confirm_new_project: bool,
-    /// Path of the last opened/exported project (shown in the panel heading).
-    open_project_path: Option<std::path::PathBuf>,
+    /// Display name of the last opened/exported project (shown in the panel heading).
+    project_name: Option<String>,
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Receives filesystem events from the background notify thread.
     /// Polled every frame; used to detect files created/removed by external tools.
@@ -240,7 +245,7 @@ impl AppIde {
             renaming_file: None,
             renaming_folder: None,
             confirm_new_project: false,
-            open_project_path: None,
+            project_name: persisted.project_name,
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
         }
@@ -278,7 +283,7 @@ impl AppIde {
         self.new_src_name = None;
         self.new_src_folder_name = None;
         self.new_file_in_folder = None;
-        self.open_project_path = Some(root.to_path_buf());
+        self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
     }
 
     /// Recursively scans `dir` (relative to `root`) and fills `files` and `folders`.
@@ -430,6 +435,7 @@ impl eframe::App for AppIde {
             &PersistedState {
                 user_src_files: self.user_src_files.clone(),
                 user_src_folders: self.user_src_folders.clone(),
+                project_name: self.project_name.clone(),
             },
         );
     }
@@ -549,12 +555,8 @@ impl eframe::App for AppIde {
                     });
                 });
 
-                // Show project path under the heading when one is loaded
-                if let Some(p) = &self.open_project_path {
-                    let name = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                // Show project name under the heading when one is loaded
+                if let Some(name) = &self.project_name {
                     ui.label(
                         egui::RichText::new(format!("  {}", name))
                             .size(10.5)
@@ -644,7 +646,7 @@ impl eframe::App for AppIde {
                             self.user_src_files.clear();
                             self.user_src_folders.clear();
                             self.selected_file = ProjectFileId::MainRs;
-                            self.open_project_path = None;
+                            self.project_name = None;
                             self.renaming_file = None;
                             self.renaming_folder = None;
                             self.new_src_name = None;
@@ -773,13 +775,18 @@ impl eframe::App for AppIde {
                                         &self.user_src_files,
                                     ) {
                                         Ok(()) => {
-                                            self.export_msg = format!(
-                                                "✔  {}",
-                                                dest.file_name()
-                                                    .and_then(|n| n.to_str())
-                                                    .unwrap_or("exported")
-                                            );
+                                            let name = dest
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("exported")
+                                                .to_string();
+                                            self.export_msg = format!("✔  {name}");
                                             self.export_flash = 180;
+                                            // Track the exported folder name so it is visible
+                                            // in the panel heading and persisted across restarts
+                                            // even for projects that were never opened via
+                                            // "Open Project".
+                                            self.project_name = Some(name);
                                         }
                                         Err(e) => {
                                             self.export_msg = format!("✗  {e}");
@@ -1051,18 +1058,19 @@ impl eframe::App for AppIde {
                 // rendered galley when switching to a new file.
                 let editor_id: String = match &self.selected_file {
                     ProjectFileId::UserFile(i) => {
-                        let path = self.user_src_files
+                        let path = self
+                            .user_src_files
                             .get(*i)
                             .map(|(p, _)| p.as_str())
                             .unwrap_or("?");
                         format!("code_editor:user:{path}")
                     }
-                    ProjectFileId::MainRs      => "code_editor:main_rs".into(),
-                    ProjectFileId::CargoToml   => "code_editor:cargo_toml".into(),
+                    ProjectFileId::MainRs => "code_editor:main_rs".into(),
+                    ProjectFileId::CargoToml => "code_editor:cargo_toml".into(),
                     ProjectFileId::CargoConfig => "code_editor:cargo_config".into(),
-                    ProjectFileId::MemoryX     => "code_editor:memory_x".into(),
-                    ProjectFileId::BuildRs     => "code_editor:build_rs".into(),
-                    ProjectFileId::GitIgnore   => "code_editor:gitignore".into(),
+                    ProjectFileId::MemoryX => "code_editor:memory_x".into(),
+                    ProjectFileId::BuildRs => "code_editor:build_rs".into(),
+                    ProjectFileId::GitIgnore => "code_editor:gitignore".into(),
                 };
 
                 let editor_resp = CodeEditor::default()
@@ -1297,13 +1305,14 @@ fn show_project_tree(
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
 ) {
-    let normal = egui::Color32::from_rgb(200, 205, 215);
+    let normal = egui::Color32::from_rgb(100, 105, 115);
 
     ui.label(
-        egui::RichText::new(format!("{pkg_name}-project/"))
+        egui::RichText::new(format!("package: {pkg_name}"))
             .size(12.0)
             .strong()
-            .color(egui::Color32::WHITE),
+            // .background_color(egui::Color32::LIGHT_GRAY)
+            .color(egui::Color32::DARK_RED),
     );
     ui.add_space(2.0);
 
