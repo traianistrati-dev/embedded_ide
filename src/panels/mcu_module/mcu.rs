@@ -2,6 +2,40 @@ use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
 use eframe::egui;
 
+// ── Peripheral pin groups ─────────────────────────────────────────────────────
+// Defines which functions must be co-selected / co-deselected as a group.
+// Selecting any member of a group auto-assigns the rest to the nearest
+// available Unset pin; deselecting one member removes the whole group.
+
+fn partner_functions(func: &PinFunction) -> Vec<PinFunction> {
+    match func {
+        // USART — basic full-duplex pair
+        PinFunction::UsartTx(n)  => vec![PinFunction::UsartRx(*n)],
+        PinFunction::UsartRx(n)  => vec![PinFunction::UsartTx(*n)],
+        // USART — hardware flow-control pair (optional, separate from TX/RX)
+        PinFunction::UsartCts(n) => vec![PinFunction::UsartRts(*n)],
+        PinFunction::UsartRts(n) => vec![PinFunction::UsartCts(*n)],
+        // SPI — three-wire bus (NSS is optional, not auto-assigned)
+        PinFunction::SpiSck(n)  => vec![PinFunction::SpiMiso(*n), PinFunction::SpiMosi(*n)],
+        PinFunction::SpiMiso(n) => vec![PinFunction::SpiSck(*n),  PinFunction::SpiMosi(*n)],
+        PinFunction::SpiMosi(n) => vec![PinFunction::SpiSck(*n),  PinFunction::SpiMiso(*n)],
+        // I²C — two-wire bus
+        PinFunction::I2cScl(n) => vec![PinFunction::I2cSda(*n)],
+        PinFunction::I2cSda(n) => vec![PinFunction::I2cScl(*n)],
+        // CAN — differential pair
+        PinFunction::CanRx => vec![PinFunction::CanTx],
+        PinFunction::CanTx => vec![PinFunction::CanRx],
+        // USB — differential pair
+        PinFunction::UsbDm => vec![PinFunction::UsbDp],
+        PinFunction::UsbDp => vec![PinFunction::UsbDm],
+        // SWD — two-wire debug
+        PinFunction::SwdIo  => vec![PinFunction::SwdClk],
+        PinFunction::SwdClk => vec![PinFunction::SwdIo],
+        // GPIO, ADC, Timer, MCO, SpiNss, UsartCk — no automatic partners
+        _ => vec![],
+    }
+}
+
 const PIN_HEIGHT: f32 = 50.0;
 const PIN_WIDTH: f32 = 30.0;
 const PIN_SPACING: f32 = 3.0;
@@ -74,6 +108,47 @@ impl Mcu {
             .chain(self.bottom_pins.iter())
             .chain(self.left_pins.iter())
             .chain(self.right_pins.iter())
+    }
+
+    /// Auto-assigns partner functions when `source_pin` receives `func`.
+    /// For each partner function defined by `partner_functions()`, finds the
+    /// first Unset pin (other than `source_pin`) that lists it as available
+    /// and assigns it automatically.
+    fn auto_assign_partners(&mut self, source_pin: usize, func: &PinFunction) {
+        for partner in partner_functions(func) {
+            // Resolve the target pin number before any mutable borrow
+            let target = self
+                .iter_all_pins()
+                .find(|p| {
+                    p.number != source_pin
+                        && p.selected_function == PinFunction::Unset
+                        && p.available_functions.contains(&partner)
+                })
+                .map(|p| p.number);
+
+            if let Some(num) = target {
+                if let Some(pin) = self.find_pin_mut(num) {
+                    pin.selected_function = partner;
+                }
+            }
+        }
+    }
+
+    /// Removes the partner functions of `old_func` from whichever pins
+    /// currently hold them (called when `source_pin` is deselected).
+    fn deselect_partners(&mut self, source_pin: usize, old_func: &PinFunction) {
+        for partner in partner_functions(old_func) {
+            let target = self
+                .iter_all_pins()
+                .find(|p| p.number != source_pin && p.selected_function == partner)
+                .map(|p| p.number);
+
+            if let Some(num) = target {
+                if let Some(pin) = self.find_pin_mut(num) {
+                    pin.selected_function = PinFunction::Unset;
+                }
+            }
+        }
     }
 
     /// Finds a pin by number (immutable)
@@ -374,13 +449,28 @@ impl Mcu {
 
         // Apply the selected function to the pin; always close the info popup.
         // Capture what changed so the caller can react (e.g. create pin source files).
+        // Also auto-select / auto-deselect partner pins (USART RX when TX chosen, etc.)
         let mut pin_changed: Option<(usize, String, PinFunction)> = None;
         if let Some((pin_num, func)) = new_function {
+            // Remember the old function BEFORE overwriting (needed for deselect partners)
+            let old_func = self
+                .find_pin(pin_num)
+                .map(|p| p.selected_function.clone())
+                .unwrap_or(PinFunction::Unset);
+
             if let Some(pin) = self.find_pin_mut(pin_num) {
                 pin_changed = Some((pin.number, pin.name.clone(), func.clone()));
-                pin.selected_function = func;
+                pin.selected_function = func.clone();
             }
             self.show_info = None;
+
+            if func == PinFunction::Unset {
+                // Pin was deselected — also clear its peripheral partners
+                self.deselect_partners(pin_num, &old_func);
+            } else {
+                // Pin received a function — auto-assign its peripheral partners
+                self.auto_assign_partners(pin_num, &func);
+            }
         }
 
         // Toggle the info popup
