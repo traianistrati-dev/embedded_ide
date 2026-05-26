@@ -67,6 +67,15 @@ impl Mcu {
         self.show_info = None;
     }
 
+    /// Iterator over every pin (all four sides), immutable.
+    fn iter_all_pins(&self) -> impl Iterator<Item = &Pin> {
+        self.top_pins
+            .iter()
+            .chain(self.bottom_pins.iter())
+            .chain(self.left_pins.iter())
+            .chain(self.right_pins.iter())
+    }
+
     /// Finds a pin by number (immutable)
     fn find_pin(&self, number: usize) -> Option<&Pin> {
         self.top_pins
@@ -193,14 +202,37 @@ impl Mcu {
         }
 
         // ── Inner chip panel ─────────────────────────────────────────────────
-        // Extract selected pin data BEFORE any mutable borrow
+        // Extract selected pin data BEFORE any mutable borrow.
+        //
+        // Peripheral functions (ADC, USART, SPI, I2C, …) that are already
+        // assigned to ANOTHER pin are excluded from the displayed list so the
+        // user cannot accidentally assign the same peripheral twice.
+        // GPIO Input / Output are never excluded — they are never "exclusive".
         let inner_data: Option<(usize, String, Vec<PinFunction>, PinFunction)> =
             self.selected_pin.and_then(|n| {
+                // Collect functions owned by other configured pins
+                let used_elsewhere: Vec<PinFunction> = self
+                    .iter_all_pins()
+                    .filter(|p| p.number != n && p.selected_function != PinFunction::Unset)
+                    .map(|p| p.selected_function.clone())
+                    .collect();
+
                 self.find_pin(n).map(|p| {
+                    // Keep GPIO always; hide peripheral functions in use elsewhere
+                    let visible_funcs: Vec<PinFunction> = p
+                        .available_functions
+                        .iter()
+                        .filter(|f| {
+                            matches!(f, PinFunction::GpioInput | PinFunction::GpioOutput)
+                                || !used_elsewhere.contains(f)
+                        })
+                        .cloned()
+                        .collect();
+
                     (
                         p.number,
                         p.name.clone(),
-                        p.available_functions.clone(),
+                        visible_funcs,
                         p.selected_function.clone(),
                     )
                 })
