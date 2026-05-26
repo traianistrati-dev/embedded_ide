@@ -127,6 +127,10 @@ pub struct AppIde {
     build_tab: BuildPanelTab,
     /// Index of the RA diagnostic row that is expanded
     lsp_selected_diagnostic: Option<usize>,
+    // ── Diagnostics panel layout ─────────────────────────────────────────────
+    /// Height of the bottom diagnostics panel in pixels — persisted so the
+    /// user's drag position is remembered across show/hide cycles.
+    diag_panel_height: f32,
 }
 
 impl AppIde {
@@ -153,6 +157,7 @@ impl AppIde {
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
+            diag_panel_height: 180.0,
         }
     }
 
@@ -528,18 +533,68 @@ impl eframe::App for AppIde {
 
                 ui.separator();
 
-                // ── Diagnostics panel (bottom, shown when RA active or cargo ran) ──
+                // ── Diagnostics panel (bottom, manually resizable) ────────────
                 {
                     let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
                     let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
                     let show_panel = cargo_has || lsp_active;
 
                     if show_panel {
-                        egui::Panel::bottom("build_output_inner")
-                            .resizable(true)
-                            .min_size(56.0)
-                            .default_size(180.0)
+                        const HANDLE_H: f32 = 6.0;
+                        const MIN_H: f32 = 56.0;
+
+                        // Keep height in valid range for current window size.
+                        let max_h = (ui.available_height() - 60.0).max(MIN_H);
+                        self.diag_panel_height = self.diag_panel_height.clamp(MIN_H, max_h);
+
+                        // TopBottomPanel::bottom takes space from the bottom
+                        // of the remaining area before the editor is laid out.
+                        // exact_height gives us full control — no egui-internal
+                        // default_height that would reset on show/hide.
+                        egui::TopBottomPanel::bottom("diag_panel")
+                            .exact_height(self.diag_panel_height + HANDLE_H)
                             .show_inside(ui, |ui| {
+                                // ── Drag handle (top edge of panel) ───────
+                                let (handle_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), HANDLE_H),
+                                    egui::Sense::hover(),
+                                );
+                                let drag_resp = ui.interact(
+                                    handle_rect,
+                                    egui::Id::new("diag_panel_resize"),
+                                    egui::Sense::drag(),
+                                );
+
+                                let mid_y = handle_rect.center().y;
+                                let line_color = if drag_resp.hovered() || drag_resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                    egui::Color32::from_rgb(100, 140, 200)
+                                } else {
+                                    egui::Color32::from_gray(65)
+                                };
+
+                                // Line + three grip dots
+                                ui.painter().hline(
+                                    handle_rect.x_range(),
+                                    mid_y,
+                                    egui::Stroke::new(1.5, line_color),
+                                );
+                                for dx in [-6.0_f32, 0.0, 6.0] {
+                                    ui.painter().circle_filled(
+                                        egui::pos2(handle_rect.center().x + dx, mid_y),
+                                        1.5,
+                                        line_color,
+                                    );
+                                }
+
+                                if drag_resp.dragged() {
+                                    // Dragging up → negative delta.y → panel grows
+                                    self.diag_panel_height =
+                                        (self.diag_panel_height - drag_resp.drag_delta().y)
+                                            .clamp(MIN_H, max_h);
+                                }
+
+                                // ── Content ────────────────────────────────
                                 show_diag_panel(
                                     ui,
                                     &self.build_state,
