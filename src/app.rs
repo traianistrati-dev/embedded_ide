@@ -9,6 +9,7 @@ use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 use egui_phosphor::regular as ph;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 // ── Project file selector ─────────────────────────────────────────────────────
@@ -22,6 +23,8 @@ enum ProjectFileId {
     MemoryX,
     BuildRs,
     GitIgnore,
+    /// Index into `AppIde::user_src_files`
+    UserFile(usize),
 }
 
 impl ProjectFileId {
@@ -33,6 +36,7 @@ impl ProjectFileId {
             Self::MemoryX => "memory.x",
             Self::BuildRs => "build.rs",
             Self::GitIgnore => ".gitignore",
+            Self::UserFile(_) => "src/???",  // resolved at call site
         }
     }
 
@@ -44,6 +48,7 @@ impl ProjectFileId {
             Self::MemoryX => &files.memory_x,
             Self::BuildRs => &files.build_rs,
             Self::GitIgnore => &files.gitignore,
+            Self::UserFile(_) => "",  // handled separately before calling this
         }
     }
 
@@ -131,6 +136,12 @@ pub struct AppIde {
     /// Height of the bottom diagnostics panel in pixels — persisted so the
     /// user's drag position is remembered across show/hide cycles.
     diag_panel_height: f32,
+    // ── User source files ─────────────────────────────────────────────────────
+    /// Extra .rs files created by the user inside src/
+    /// Each entry is `(path_relative_to_src, content)`, e.g. `("utils.rs", "")`.
+    user_src_files: Vec<(String, String)>,
+    /// While `Some(s)`, a text-input for naming a new file is shown in the tree.
+    new_src_name: Option<String>,
 }
 
 impl AppIde {
@@ -158,6 +169,8 @@ impl AppIde {
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
+            user_src_files: Vec::new(),
+            new_src_name: None,
         }
     }
 
@@ -200,7 +213,7 @@ impl eframe::App for AppIde {
                     if self.selected_mcu_type.project_config().is_some() {
                         let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                         if let Some(config) = self.selected_mcu_type.project_config() {
-                            if project_gen::write_project(&build_dir, &config, &self.generated_code)
+                            if project_gen::write_project(&build_dir, &config, &self.generated_code, &self.user_src_files)
                                 .is_ok()
                             {
                                 lsp::start(
@@ -237,9 +250,16 @@ impl eframe::App for AppIde {
             .map(|cfg| project_gen::build_project_files(&cfg, &self.generated_code));
 
         // Content to display in the editor (cloned so CodeEditor gets &mut String)
-        let mut display_code: String = match &project_files {
-            Some(files) => self.selected_file.content(files).to_owned(),
-            None => self.generated_code.clone(),
+        let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
+            self.user_src_files
+                .get(i)
+                .map(|(_, c)| c.clone())
+                .unwrap_or_default()
+        } else {
+            match &project_files {
+                Some(files) => self.selected_file.content(files).to_owned(),
+                None => self.generated_code.clone(),
+            }
         };
         let display_syntax = self.selected_file.syntax();
 
@@ -263,6 +283,8 @@ impl eframe::App for AppIde {
                             &mut self.selected_file,
                             build_result.as_ref(),
                             Some(&*lsp_guard),
+                            &mut self.user_src_files,
+                            &mut self.new_src_name,
                         );
                     }
                     _ => {
@@ -347,7 +369,7 @@ impl eframe::App for AppIde {
                                     .pick_folder()
                                 {
                                     let code = self.generated_code.clone();
-                                    match project_gen::write_project(&dest, &config, &code) {
+                                    match project_gen::write_project(&dest, &config, &code, &self.user_src_files) {
                                         Ok(()) => {
                                             self.export_msg = format!(
                                                 "✔  {}",
@@ -490,7 +512,7 @@ impl eframe::App for AppIde {
                             if let Some(config) = self.selected_mcu_type.project_config() {
                                 let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                                 let code = self.generated_code.clone();
-                                match project_gen::write_project(&build_dir, &config, &code) {
+                                match project_gen::write_project(&build_dir, &config, &code, &self.user_src_files) {
                                     Ok(()) => {
                                         self.selected_diagnostic = None;
                                         self.build_tab = BuildPanelTab::Cargo;
@@ -523,8 +545,16 @@ impl eframe::App for AppIde {
 
                         ui.add_space(8.0);
                         // Show which file is open
+                        let open_label = match self.selected_file {
+                            ProjectFileId::UserFile(i) => self
+                                .user_src_files
+                                .get(i)
+                                .map(|(name, _)| format!("src/{name}"))
+                                .unwrap_or_else(|| "src/???".to_string()),
+                            other => other.label().to_string(),
+                        };
                         ui.label(
-                            egui::RichText::new(self.selected_file.label())
+                            egui::RichText::new(&open_label)
                                 .size(10.0)
                                 .color(egui::Color32::from_rgb(120, 160, 200)),
                         );
@@ -616,10 +646,15 @@ impl eframe::App for AppIde {
                     .with_numlines(true)
                     .show(ui, &mut display_code, &display_syntax);
 
-                // ── Write user edits back for the main source file ────────────
-                // display_code is a local clone; we must persist changes here.
-                // Only main.rs is user-editable; other files are generated/fixed.
-                if self.selected_file == ProjectFileId::MainRs
+                // ── Write user edits back ────────────────────────────────────
+                // display_code is a local clone; persist changes here.
+                if let ProjectFileId::UserFile(i) = self.selected_file {
+                    if let Some((_, content)) = self.user_src_files.get_mut(i) {
+                        if display_code != *content {
+                            *content = display_code.clone();
+                        }
+                    }
+                } else if self.selected_file == ProjectFileId::MainRs
                     && display_code != self.generated_code
                 {
                     self.generated_code = display_code.clone();
@@ -818,9 +853,9 @@ fn show_project_tree(
     selected: &mut ProjectFileId,
     build_result: Option<&build::BuildResult>,
     lsp: Option<&lsp::LspState>,
+    user_src_files: &mut Vec<(String, String)>,
+    new_src_name: &mut Option<String>,
 ) {
-    let dim = egui::Color32::from_rgb(140, 150, 165);
-    let hi = egui::Color32::from_rgb(100, 180, 255);
     let normal = egui::Color32::from_rgb(200, 205, 215);
 
     // Root folder label (non-clickable)
@@ -833,92 +868,252 @@ fn show_project_tree(
 
     ui.add_space(2.0);
 
-    // Helper: single file row with optional build diagnostic indicator
-    let mut file_row = |ui: &mut egui::Ui, indent: f32, name: &str, id: ProjectFileId| {
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
-            let is_sel = *selected == id;
-            let color = if is_sel { hi } else { normal };
-            let icon_color = if is_sel {
-                egui::Color32::from_rgb(180, 210, 255)
-            } else {
-                egui::Color32::from_rgb(160, 170, 190)
-            };
-            // File icon
-            ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
-            let resp = ui.add(
-                egui::Label::new(
-                    egui::RichText::new(name)
-                        .size(11.5)
-                        .monospace()
-                        .color(color),
-                )
-                .sense(egui::Sense::click()),
-            );
-            if resp.clicked() {
-                *selected = id;
-            }
-            if resp.hovered() && !is_sel {
-                let r = resp.rect;
-                ui.painter().line_segment(
-                    [r.left_bottom(), r.right_bottom()],
-                    egui::Stroke::new(1.0, dim),
-                );
-            }
-            // Diagnostic dots — cargo check and/or RA
-            if let Some(cargo_path) = id.cargo_path() {
-                let cargo_err = build_result.map_or(false, |r| r.has_errors_in(cargo_path));
-                let cargo_warn = build_result.map_or(false, |r| r.has_warnings_in(cargo_path));
-                let lsp_err = lsp.map_or(false, |l| l.error_count_for(cargo_path) > 0);
-                let lsp_warn = lsp.map_or(false, |l| l.warning_count_for(cargo_path) > 0);
-
-                let has_err = cargo_err || lsp_err;
-                let has_warn = cargo_warn || lsp_warn;
-
-                let (dot, dot_color) = if has_err {
-                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-                } else if has_warn {
-                    (ph::WARNING, egui::Color32::from_rgb(220, 180, 50))
-                } else {
-                    ("", egui::Color32::TRANSPARENT)
-                };
-                if !dot.is_empty() {
-                    ui.label(egui::RichText::new(dot).size(10.0).color(dot_color));
-                }
-            }
-        });
-    };
-
     // ── .cargo/ ───────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new(
-        egui::RichText::new(".cargo/")
-            .size(11.5)
-            .monospace()
-            .color(normal),
+        egui::RichText::new(".cargo/").size(11.5).monospace().color(normal),
     )
     .default_open(true)
     .show(ui, |ui| {
-        file_row(ui, 8.0, "config.toml", ProjectFileId::CargoConfig);
+        file_row(ui, 8.0, "config.toml", ProjectFileId::CargoConfig, selected, build_result, lsp);
     });
 
     // ── src/ ──────────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new(
-        egui::RichText::new("src/")
-            .size(11.5)
-            .monospace()
-            .color(normal),
+        egui::RichText::new("src/").size(11.5).monospace().color(normal),
     )
     .default_open(true)
     .show(ui, |ui| {
-        file_row(ui, 8.0, "main.rs", ProjectFileId::MainRs);
+        file_row(ui, 8.0, "main.rs", ProjectFileId::MainRs, selected, build_result, lsp);
+
+        // ── User files: group by first path segment ──────────────────────
+        let mut direct: Vec<usize> = vec![];
+        let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+
+        for (i, (path, _)) in user_src_files.iter().enumerate() {
+            if let Some(slash) = path.find('/') {
+                folders.entry(path[..slash].to_string()).or_default().push(i);
+            } else {
+                direct.push(i);
+            }
+        }
+
+        let mut to_delete: Option<usize> = None;
+
+        // Direct files
+        for &i in &direct {
+            let name = user_src_files[i].0.clone();
+            user_file_row(ui, 8.0, &name, i, selected, &mut to_delete);
+        }
+
+        // Folder groups
+        for (folder_name, indices) in &folders {
+            egui::CollapsingHeader::new(
+                egui::RichText::new(format!("{folder_name}/"))
+                    .size(11.5)
+                    .monospace()
+                    .color(normal),
+            )
+            .default_open(true)
+            .show(ui, |ui| {
+                for &i in indices {
+                    let full = &user_src_files[i].0;
+                    let file_name = full.split('/').last().unwrap_or(full).to_string();
+                    user_file_row(ui, 16.0, &file_name, i, selected, &mut to_delete);
+                }
+            });
+        }
+
+        // ── New file input ────────────────────────────────────────────────
+        let mut confirm_new = false;
+        let mut cancel_new = false;
+
+        if let Some(name) = new_src_name {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let te = egui::TextEdit::singleline(name)
+                    .hint_text("e.g. utils.rs or drivers/spi.rs")
+                    .desired_width(ui.available_width());
+                let resp = ui.add(te);
+                resp.request_focus();
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirm_new = true;
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel_new = true;
+                }
+            });
+        }
+
+        if confirm_new {
+            if let Some(name) = new_src_name.take() {
+                let clean = name.trim().replace('\\', "/");
+                let clean = clean.trim_start_matches('/').to_string();
+                if !clean.is_empty()
+                    && !user_src_files.iter().any(|(p, _)| p == &clean)
+                {
+                    user_src_files.push((clean, String::new()));
+                    *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
+                }
+            }
+        } else if cancel_new {
+            *new_src_name = None;
+        }
+
+        // ── + New file button ─────────────────────────────────────────────
+        if new_src_name.is_none() {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} New file", ph::PLUS))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(100, 165, 100)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Add a file to src/\nType e.g. utils.rs or drivers/spi.rs")
+                    .clicked()
+                {
+                    *new_src_name = Some(String::new());
+                }
+            });
+        }
+
+        // ── Handle deletion ───────────────────────────────────────────────
+        if let Some(idx) = to_delete {
+            if *selected == ProjectFileId::UserFile(idx) {
+                *selected = ProjectFileId::MainRs;
+            }
+            if let ProjectFileId::UserFile(j) = selected {
+                if *j > idx {
+                    *j -= 1;
+                }
+            }
+            user_src_files.remove(idx);
+        }
     });
 
     // ── Root files ────────────────────────────────────────────────────────────
     ui.add_space(2.0);
-    file_row(ui, 4.0, ".gitignore", ProjectFileId::GitIgnore);
-    file_row(ui, 4.0, "build.rs", ProjectFileId::BuildRs);
-    file_row(ui, 4.0, "Cargo.toml", ProjectFileId::CargoToml);
-    file_row(ui, 4.0, "memory.x", ProjectFileId::MemoryX);
+    file_row(ui, 4.0, ".gitignore", ProjectFileId::GitIgnore, selected, build_result, lsp);
+    file_row(ui, 4.0, "build.rs", ProjectFileId::BuildRs, selected, build_result, lsp);
+    file_row(ui, 4.0, "Cargo.toml", ProjectFileId::CargoToml, selected, build_result, lsp);
+    file_row(ui, 4.0, "memory.x", ProjectFileId::MemoryX, selected, build_result, lsp);
+}
+
+// ── Single file row for fixed project files (with diagnostic indicators) ──────
+
+fn file_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    name: &str,
+    id: ProjectFileId,
+    selected: &mut ProjectFileId,
+    build_result: Option<&build::BuildResult>,
+    lsp: Option<&lsp::LspState>,
+) {
+    let dim = egui::Color32::from_rgb(140, 150, 165);
+    let hi = egui::Color32::from_rgb(100, 180, 255);
+    let normal = egui::Color32::from_rgb(200, 205, 215);
+
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let is_sel = *selected == id;
+        let color = if is_sel { hi } else { normal };
+        let icon_color = if is_sel {
+            egui::Color32::from_rgb(180, 210, 255)
+        } else {
+            egui::Color32::from_rgb(160, 170, 190)
+        };
+        ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
+        let resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(name).size(11.5).monospace().color(color),
+            )
+            .sense(egui::Sense::click()),
+        );
+        if resp.clicked() {
+            *selected = id;
+        }
+        if resp.hovered() && !is_sel {
+            let r = resp.rect;
+            ui.painter().line_segment(
+                [r.left_bottom(), r.right_bottom()],
+                egui::Stroke::new(1.0, dim),
+            );
+        }
+        if let Some(cargo_path) = id.cargo_path() {
+            let cargo_err = build_result.map_or(false, |r| r.has_errors_in(cargo_path));
+            let cargo_warn = build_result.map_or(false, |r| r.has_warnings_in(cargo_path));
+            let lsp_err = lsp.map_or(false, |l| l.error_count_for(cargo_path) > 0);
+            let lsp_warn = lsp.map_or(false, |l| l.warning_count_for(cargo_path) > 0);
+            let has_err = cargo_err || lsp_err;
+            let has_warn = cargo_warn || lsp_warn;
+            let (dot, dot_color) = if has_err {
+                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+            } else if has_warn {
+                (ph::WARNING, egui::Color32::from_rgb(220, 180, 50))
+            } else {
+                ("", egui::Color32::TRANSPARENT)
+            };
+            if !dot.is_empty() {
+                ui.label(egui::RichText::new(dot).size(10.0).color(dot_color));
+            }
+        }
+    });
+}
+
+// ── Single file row for user-created source files (with delete button) ────────
+
+fn user_file_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    name: &str,
+    idx: usize,
+    selected: &mut ProjectFileId,
+    to_delete: &mut Option<usize>,
+) {
+    let hi = egui::Color32::from_rgb(100, 180, 255);
+    let normal = egui::Color32::from_rgb(200, 205, 215);
+    let id = ProjectFileId::UserFile(idx);
+
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let is_sel = *selected == id;
+        let color = if is_sel { hi } else { normal };
+        let icon_color = if is_sel {
+            egui::Color32::from_rgb(180, 210, 255)
+        } else {
+            egui::Color32::from_rgb(160, 170, 190)
+        };
+        ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
+        let resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(name).size(11.5).monospace().color(color),
+            )
+            .sense(egui::Sense::click()),
+        );
+        if resp.clicked() {
+            *selected = id;
+        }
+        // Delete button — shown only on hover or when selected
+        if resp.hovered() || is_sel {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let del = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("×")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(190, 80, 70)),
+                    )
+                    .frame(false),
+                );
+                if del.clicked() {
+                    *to_delete = Some(idx);
+                }
+                del.on_hover_text("Delete file");
+            });
+        }
+    });
 }
 
 // ── Peripherals tab ───────────────────────────────────────────────────────────

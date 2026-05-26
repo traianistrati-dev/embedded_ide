@@ -44,7 +44,14 @@ pub fn build_project_files(config: &McuProjectConfig, main_rs: &str) -> ProjectF
 }
 
 /// Writes all project files into `dest` (creates the directory tree as needed).
-pub fn write_project(dest: &Path, config: &McuProjectConfig, main_rs: &str) -> io::Result<()> {
+/// `user_src_files` is a list of `(path_relative_to_src, content)` pairs for
+/// user-created files (e.g. `("utils.rs", "...")` or `("drivers/spi.rs", "...")`).
+pub fn write_project(
+    dest: &Path,
+    config: &McuProjectConfig,
+    main_rs: &str,
+    user_src_files: &[(String, String)],
+) -> io::Result<()> {
     let files = build_project_files(config, main_rs);
 
     fs::create_dir_all(dest.join("src"))?;
@@ -56,6 +63,14 @@ pub fn write_project(dest: &Path, config: &McuProjectConfig, main_rs: &str) -> i
     fs::write(dest.join("build.rs"),                      &files.build_rs)?;
     fs::write(dest.join("src").join("main.rs"),           &files.main_rs)?;
     fs::write(dest.join(".gitignore"),                    &files.gitignore)?;
+
+    for (rel_path, content) in user_src_files {
+        let full = dest.join("src").join(rel_path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(full, content)?;
+    }
 
     Ok(())
 }
