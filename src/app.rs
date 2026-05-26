@@ -37,7 +37,7 @@ impl ProjectFileId {
             Self::MemoryX => "memory.x",
             Self::BuildRs => "build.rs",
             Self::GitIgnore => ".gitignore",
-            Self::UserFile(_) => "src/???",  // resolved at call site
+            Self::UserFile(_) => "src/???", // resolved at call site
         }
     }
 
@@ -49,7 +49,7 @@ impl ProjectFileId {
             Self::MemoryX => &files.memory_x,
             Self::BuildRs => &files.build_rs,
             Self::GitIgnore => &files.gitignore,
-            Self::UserFile(_) => "",  // handled separately before calling this
+            Self::UserFile(_) => "", // handled separately before calling this
         }
     }
 
@@ -110,7 +110,7 @@ const STORAGE_KEY: &str = "embedded_ide_project_v1";
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedState {
     /// `(path_relative_to_src, content)` for every user-created file.
-    user_src_files:   Vec<(String, String)>,
+    user_src_files: Vec<(String, String)>,
     /// Explicitly-created empty folders inside src/.
     user_src_folders: Vec<String>,
 }
@@ -232,7 +232,7 @@ impl AppIde {
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
-            user_src_files:   persisted.user_src_files,
+            user_src_files: persisted.user_src_files,
             user_src_folders: persisted.user_src_folders,
             new_src_name: None,
             new_src_folder_name: None,
@@ -266,34 +266,38 @@ impl AppIde {
         }
 
         let mut files: Vec<(String, String)> = Vec::new();
-        let mut folders: Vec<String>          = Vec::new();
+        let mut folders: Vec<String> = Vec::new();
 
         Self::scan_src_dir(&src_dir, &src_dir, &mut files, &mut folders);
 
-        self.user_src_files   = files;
+        self.user_src_files = files;
         self.user_src_folders = folders;
-        self.selected_file    = ProjectFileId::MainRs;
-        self.renaming_file    = None;
-        self.renaming_folder  = None;
-        self.new_src_name     = None;
+        self.selected_file = ProjectFileId::MainRs;
+        self.renaming_file = None;
+        self.renaming_folder = None;
+        self.new_src_name = None;
         self.new_src_folder_name = None;
-        self.new_file_in_folder  = None;
-        self.open_project_path   = Some(root.to_path_buf());
+        self.new_file_in_folder = None;
+        self.open_project_path = Some(root.to_path_buf());
     }
 
     /// Recursively scans `dir` (relative to `root`) and fills `files` and `folders`.
     /// Skips `main.rs` and any non-`.rs` files.
     fn scan_src_dir(
-        root:    &std::path::Path,
-        dir:     &std::path::Path,
-        files:   &mut Vec<(String, String)>,
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut Vec<(String, String)>,
         folders: &mut Vec<String>,
     ) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let Ok(rel) = path.strip_prefix(root) else { continue };
+                let Ok(rel) = path.strip_prefix(root) else {
+                    continue;
+                };
                 let rel = rel.to_string_lossy().replace('\\', "/");
                 if !folders.contains(&rel) {
                     folders.push(rel);
@@ -303,7 +307,9 @@ impl AppIde {
                 if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                let Ok(rel) = path.strip_prefix(root) else { continue };
+                let Ok(rel) = path.strip_prefix(root) else {
+                    continue;
+                };
                 let rel = rel.to_string_lossy().replace('\\', "/");
                 if rel == "main.rs" {
                     continue; // always generated — skip
@@ -340,7 +346,9 @@ impl AppIde {
             let _ = w.watch(&workspace_src, notify::RecursiveMode::Recursive);
         }
 
-        let Some(rx) = self.fs_rx.as_ref() else { return };
+        let Some(rx) = self.fs_rx.as_ref() else {
+            return;
+        };
 
         for event in rx.try_iter().flatten() {
             match event.kind {
@@ -350,9 +358,13 @@ impl AppIde {
                         if abs.extension().and_then(|e| e.to_str()) != Some("rs") {
                             continue;
                         }
-                        let Ok(rel) = abs.strip_prefix(&workspace_src) else { continue };
+                        let Ok(rel) = abs.strip_prefix(&workspace_src) else {
+                            continue;
+                        };
                         let rel = rel.to_string_lossy().replace('\\', "/");
-                        if rel == "main.rs" { continue; }
+                        if rel == "main.rs" {
+                            continue;
+                        }
                         if !self.user_src_files.iter().any(|(p, _)| p == &rel) {
                             // Read the file content so the editor shows it correctly
                             let content = std::fs::read_to_string(abs).unwrap_or_default();
@@ -363,7 +375,9 @@ impl AppIde {
                 // ── File removed externally ──────────────────────────────────
                 Remove(_) => {
                     for abs in &event.paths {
-                        let Ok(rel) = abs.strip_prefix(&workspace_src) else { continue };
+                        let Ok(rel) = abs.strip_prefix(&workspace_src) else {
+                            continue;
+                        };
                         let rel = rel.to_string_lossy().replace('\\', "/");
                         self.user_src_files.retain(|(p, _)| p != &rel);
                         // If a whole directory was removed, drop its folder entry
@@ -375,12 +389,18 @@ impl AppIde {
                 Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
                     let old = &event.paths[0];
                     let new = &event.paths[1];
-                    let Ok(old_rel) = old.strip_prefix(&workspace_src) else { continue };
-                    let Ok(new_rel) = new.strip_prefix(&workspace_src) else { continue };
+                    let Ok(old_rel) = old.strip_prefix(&workspace_src) else {
+                        continue;
+                    };
+                    let Ok(new_rel) = new.strip_prefix(&workspace_src) else {
+                        continue;
+                    };
                     let old_rel = old_rel.to_string_lossy().replace('\\', "/");
                     let new_rel = new_rel.to_string_lossy().replace('\\', "/");
                     // File rename
-                    if let Some((p, _)) = self.user_src_files.iter_mut().find(|(p, _)| p == &old_rel) {
+                    if let Some((p, _)) =
+                        self.user_src_files.iter_mut().find(|(p, _)| p == &old_rel)
+                    {
                         *p = new_rel.clone();
                     }
                     // Folder rename — update folder list + all child paths
@@ -408,7 +428,7 @@ impl eframe::App for AppIde {
             storage,
             STORAGE_KEY,
             &PersistedState {
-                user_src_files:   self.user_src_files.clone(),
+                user_src_files: self.user_src_files.clone(),
                 user_src_folders: self.user_src_folders.clone(),
             },
         );
@@ -450,8 +470,13 @@ impl eframe::App for AppIde {
                     if self.selected_mcu_type.project_config().is_some() {
                         let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                         if let Some(config) = self.selected_mcu_type.project_config() {
-                            if project_gen::write_project(&build_dir, &config, &self.generated_code, &self.user_src_files)
-                                .is_ok()
+                            if project_gen::write_project(
+                                &build_dir,
+                                &config,
+                                &self.generated_code,
+                                &self.user_src_files,
+                            )
+                            .is_ok()
                             {
                                 lsp::start(
                                     &build_dir,
@@ -486,27 +511,13 @@ impl eframe::App for AppIde {
             .project_config()
             .map(|cfg| project_gen::build_project_files(&cfg, &self.generated_code));
 
-        // Content to display in the editor (cloned so CodeEditor gets &mut String)
-        let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
-            self.user_src_files
-                .get(i)
-                .map(|(_, c)| c.clone())
-                .unwrap_or_default()
-        } else {
-            match &project_files {
-                Some(files) => self.selected_file.content(files).to_owned(),
-                None => self.generated_code.clone(),
-            }
-        };
-        let display_syntax = self.selected_file.syntax();
-
         // ── Panel 1: Project Tree ─────────────────────────────────────────────
         // Set to true inside the tree when files are added/deleted, so we
         // write the whole project to the workspace directory afterwards.
         let mut save_project_needed = false;
         // Signals set inside the panel closure, acted on outside.
         let mut open_project_clicked = false;
-        let mut new_project_clicked  = false;
+        let mut new_project_clicked = false;
 
         egui::Panel::left("project_tree")
             .resizable(true)
@@ -523,7 +534,12 @@ impl eframe::App for AppIde {
                             .on_hover_text(tip)
                             .clicked()
                         };
-                        if btn(ui, ph::FOLDER_OPEN, "Open", "Open an existing project folder") {
+                        if btn(
+                            ui,
+                            ph::FOLDER_OPEN,
+                            "Open",
+                            "Open an existing project folder",
+                        ) {
                             open_project_clicked = true;
                         }
                         ui.add_space(2.0);
@@ -535,7 +551,8 @@ impl eframe::App for AppIde {
 
                 // Show project path under the heading when one is loaded
                 if let Some(p) = &self.open_project_path {
-                    let name = p.file_name()
+                    let name = p
+                        .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     ui.label(
@@ -553,8 +570,7 @@ impl eframe::App for AppIde {
                         let build_result = build_guard.result().cloned();
                         drop(build_guard);
                         let lsp_guard = self.lsp_state.lock().unwrap();
-                        let workspace_dir =
-                            std::env::temp_dir().join("embedded_ide_0_check");
+                        let workspace_dir = std::env::temp_dir().join("embedded_ide_0_check");
                         show_project_tree(
                             ui,
                             cfg.pkg_name,
@@ -618,19 +634,22 @@ impl eframe::App for AppIde {
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button(
-                            egui::RichText::new(format!("{} New Project", ph::NOTE_PENCIL))
-                                .color(egui::Color32::from_rgb(220, 80, 60)),
-                        ).clicked() {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} New Project", ph::NOTE_PENCIL))
+                                    .color(egui::Color32::from_rgb(220, 80, 60)),
+                            )
+                            .clicked()
+                        {
                             self.user_src_files.clear();
                             self.user_src_folders.clear();
-                            self.selected_file    = ProjectFileId::MainRs;
+                            self.selected_file = ProjectFileId::MainRs;
                             self.open_project_path = None;
-                            self.renaming_file    = None;
-                            self.renaming_folder  = None;
-                            self.new_src_name     = None;
+                            self.renaming_file = None;
+                            self.renaming_folder = None;
+                            self.new_src_name = None;
                             self.new_src_folder_name = None;
-                            self.new_file_in_folder  = None;
+                            self.new_file_in_folder = None;
                             self.confirm_new_project = false;
                             save_project_needed = true;
                         }
@@ -657,6 +676,26 @@ impl eframe::App for AppIde {
                 );
             }
         }
+
+        // ── Compute editor content AFTER the project tree ─────────────────────
+        // IMPORTANT: display_code must be computed AFTER the project tree panel
+        // so that self.selected_file reflects any click the user just made.
+        // Computing it before the tree caused a write-back bug: when the user
+        // clicked a user file, self.selected_file was already updated by the
+        // click handler, but display_code still held the OLD file's content.
+        // The write-back then wrongly stored the old content into the new file.
+        let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
+            self.user_src_files
+                .get(i)
+                .map(|(_, c)| c.clone())
+                .unwrap_or_default()
+        } else {
+            match &project_files {
+                Some(files) => self.selected_file.content(files).to_owned(),
+                None => self.generated_code.clone(),
+            }
+        };
+        let display_syntax = self.selected_file.syntax();
 
         // ── Panel 2: Code Editor ──────────────────────────────────────────────
         let editor_width = ui.available_width() * 0.5;
@@ -727,7 +766,12 @@ impl eframe::App for AppIde {
                                     .pick_folder()
                                 {
                                     let code = self.generated_code.clone();
-                                    match project_gen::write_project(&dest, &config, &code, &self.user_src_files) {
+                                    match project_gen::write_project(
+                                        &dest,
+                                        &config,
+                                        &code,
+                                        &self.user_src_files,
+                                    ) {
                                         Ok(()) => {
                                             self.export_msg = format!(
                                                 "✔  {}",
@@ -870,7 +914,12 @@ impl eframe::App for AppIde {
                             if let Some(config) = self.selected_mcu_type.project_config() {
                                 let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                                 let code = self.generated_code.clone();
-                                match project_gen::write_project(&build_dir, &config, &code, &self.user_src_files) {
+                                match project_gen::write_project(
+                                    &build_dir,
+                                    &config,
+                                    &code,
+                                    &self.user_src_files,
+                                ) {
                                     Ok(()) => {
                                         self.selected_diagnostic = None;
                                         self.build_tab = BuildPanelTab::Cargo;
@@ -977,9 +1026,9 @@ impl eframe::App for AppIde {
 
                                 if drag_resp.dragged() {
                                     // Dragging up → negative delta.y → panel grows
-                                    self.diag_panel_height =
-                                        (self.diag_panel_height - drag_resp.drag_delta().y)
-                                            .clamp(MIN_H, max_h);
+                                    self.diag_panel_height = (self.diag_panel_height
+                                        - drag_resp.drag_delta().y)
+                                        .clamp(MIN_H, max_h);
                                 }
 
                                 // ── Content ────────────────────────────────
@@ -996,8 +1045,28 @@ impl eframe::App for AppIde {
                     }
                 }
 
+                // Use a unique id per file so egui's TextEditState (galley,
+                // cursor, undo stack) is never shared between files.
+                // A fixed id caused the editor to keep the previous file's
+                // rendered galley when switching to a new file.
+                let editor_id: String = match &self.selected_file {
+                    ProjectFileId::UserFile(i) => {
+                        let path = self.user_src_files
+                            .get(*i)
+                            .map(|(p, _)| p.as_str())
+                            .unwrap_or("?");
+                        format!("code_editor:user:{path}")
+                    }
+                    ProjectFileId::MainRs      => "code_editor:main_rs".into(),
+                    ProjectFileId::CargoToml   => "code_editor:cargo_toml".into(),
+                    ProjectFileId::CargoConfig => "code_editor:cargo_config".into(),
+                    ProjectFileId::MemoryX     => "code_editor:memory_x".into(),
+                    ProjectFileId::BuildRs     => "code_editor:build_rs".into(),
+                    ProjectFileId::GitIgnore   => "code_editor:gitignore".into(),
+                };
+
                 let editor_resp = CodeEditor::default()
-                    .id_source("hal_code_editor")
+                    .id_source(editor_id)
                     .with_rows(50)
                     .with_fontsize(13.0)
                     .with_theme(ColorTheme::GRUVBOX)
@@ -1011,8 +1080,7 @@ impl eframe::App for AppIde {
                         if display_code != entry.1 {
                             entry.1 = display_code.clone();
                             // Auto-save to workspace so LSP and build see the change
-                            let workspace =
-                                std::env::temp_dir().join("embedded_ide_0_check");
+                            let workspace = std::env::temp_dir().join("embedded_ide_0_check");
                             let dest = workspace.join("src").join(&entry.0);
                             if let Some(parent) = dest.parent() {
                                 let _ = std::fs::create_dir_all(parent);
@@ -1241,20 +1309,42 @@ fn show_project_tree(
 
     // ── .cargo/ ───────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new(
-        egui::RichText::new(".cargo/").size(11.5).monospace().color(normal),
+        egui::RichText::new(".cargo/")
+            .size(11.5)
+            .monospace()
+            .color(normal),
     )
     .default_open(true)
     .show(ui, |ui| {
-        file_row(ui, 8.0, "config.toml", ProjectFileId::CargoConfig, selected, build_result, lsp);
+        file_row(
+            ui,
+            8.0,
+            "config.toml",
+            ProjectFileId::CargoConfig,
+            selected,
+            build_result,
+            lsp,
+        );
     });
 
     // ── src/ ──────────────────────────────────────────────────────────────────
     let src_ch = egui::CollapsingHeader::new(
-        egui::RichText::new("src/").size(11.5).monospace().color(normal),
+        egui::RichText::new("src/")
+            .size(11.5)
+            .monospace()
+            .color(normal),
     )
     .default_open(true)
     .show(ui, |ui| {
-        file_row(ui, 8.0, "main.rs", ProjectFileId::MainRs, selected, build_result, lsp);
+        file_row(
+            ui,
+            8.0,
+            "main.rs",
+            ProjectFileId::MainRs,
+            selected,
+            build_result,
+            lsp,
+        );
 
         // ── Build folder map: explicit folders ∪ implicit from file paths ─
         let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
@@ -1264,7 +1354,10 @@ fn show_project_tree(
         let mut direct: Vec<usize> = vec![];
         for (i, (path, _)) in user_src_files.iter().enumerate() {
             if let Some(slash) = path.find('/') {
-                folders.entry(path[..slash].to_string()).or_default().push(i);
+                folders
+                    .entry(path[..slash].to_string())
+                    .or_default()
+                    .push(i);
             } else {
                 direct.push(i);
             }
@@ -1289,8 +1382,15 @@ fn show_project_tree(
         for &i in &direct {
             let name = user_src_files[i].0.clone();
             user_file_row(
-                ui, 8.0, &name, i, selected, &mut to_delete,
-                renaming_file, &mut do_rename_file, &mut cancel_rename_file,
+                ui,
+                8.0,
+                &name,
+                i,
+                selected,
+                &mut to_delete,
+                renaming_file,
+                &mut do_rename_file,
+                &mut cancel_rename_file,
             );
         }
 
@@ -1321,7 +1421,7 @@ fn show_project_tree(
                             ui.memory_mut(|m| m.data.insert_temp(fid, false));
                         }
                         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let esc   = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
                         if enter {
                             do_rename_folder = true;
                         } else if esc || resp.lost_focus() {
@@ -1354,8 +1454,15 @@ fn show_project_tree(
                         let full = user_src_files[i].0.clone();
                         let fname = full.split('/').last().unwrap_or(&full).to_string();
                         user_file_row(
-                            ui, 16.0, &fname, i, selected, &mut to_delete,
-                            renaming_file, &mut do_rename_file, &mut cancel_rename_file,
+                            ui,
+                            16.0,
+                            &fname,
+                            i,
+                            selected,
+                            &mut to_delete,
+                            renaming_file,
+                            &mut do_rename_file,
+                            &mut cancel_rename_file,
                         );
                     }
 
@@ -1390,14 +1497,19 @@ fn show_project_tree(
                 let fname_ctx = folder_name.clone();
                 ch.header_response.context_menu(|ui| {
                     if ui
-                        .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
+                        .button(
+                            egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5),
+                        )
                         .clicked()
                     {
                         open_input_for_folder = Some(fname_ctx.clone());
                         ui.close();
                     }
                     if ui
-                        .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
+                        .button(
+                            egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS))
+                                .size(11.5),
+                        )
                         .clicked()
                     {
                         ctx_open_new_folder = true;
@@ -1406,8 +1518,7 @@ fn show_project_tree(
                     ui.separator();
                     if ui
                         .button(
-                            egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE))
-                                .size(11.5),
+                            egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5),
                         )
                         .clicked()
                     {
@@ -1433,9 +1544,12 @@ fn show_project_tree(
         // Apply folder-level file input results
         if confirm_in_folder {
             if let Some((folder, name)) = new_file_in_folder.take() {
-                ui.memory_mut(|m| m.data.insert_temp::<bool>(
-                    egui::Id::new(("__folder_file_focus__", folder.as_str())), true,
-                ));
+                ui.memory_mut(|m| {
+                    m.data.insert_temp::<bool>(
+                        egui::Id::new(("__folder_file_focus__", folder.as_str())),
+                        true,
+                    )
+                });
                 let clean = name.trim().replace('\\', "/");
                 let clean = clean.trim_start_matches('/').to_string();
                 if !clean.is_empty() {
@@ -1449,9 +1563,12 @@ fn show_project_tree(
             }
         } else if cancel_in_folder {
             if let Some((folder, _)) = new_file_in_folder.as_ref() {
-                ui.memory_mut(|m| m.data.insert_temp::<bool>(
-                    egui::Id::new(("__folder_file_focus__", folder.as_str())), true,
-                ));
+                ui.memory_mut(|m| {
+                    m.data.insert_temp::<bool>(
+                        egui::Id::new(("__folder_file_focus__", folder.as_str())),
+                        true,
+                    )
+                });
             }
             *new_file_in_folder = None;
         }
@@ -1489,7 +1606,10 @@ fn show_project_tree(
             });
         }
         if confirm_file {
-            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true));
+            ui.memory_mut(|m| {
+                m.data
+                    .insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true)
+            });
             if let Some(name) = new_src_name.take() {
                 let clean = name.trim().replace('\\', "/");
                 let clean = clean.trim_start_matches('/').to_string();
@@ -1500,7 +1620,10 @@ fn show_project_tree(
                 }
             }
         } else if cancel_file {
-            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true));
+            ui.memory_mut(|m| {
+                m.data
+                    .insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true)
+            });
             *new_src_name = None;
         }
 
@@ -1531,7 +1654,10 @@ fn show_project_tree(
             });
         }
         if confirm_folder {
-            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true));
+            ui.memory_mut(|m| {
+                m.data
+                    .insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true)
+            });
             if let Some(name) = new_src_folder_name.take() {
                 let clean: String = name
                     .trim()
@@ -1548,7 +1674,10 @@ fn show_project_tree(
                 }
             }
         } else if cancel_folder {
-            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true));
+            ui.memory_mut(|m| {
+                m.data
+                    .insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true)
+            });
             *new_src_folder_name = None;
         }
 
@@ -1587,7 +1716,11 @@ fn show_project_tree(
             }
             user_src_folders.retain(|f| f != dname);
             // Also close any active input for this folder
-            if new_file_in_folder.as_ref().map(|(f, _)| f == dname).unwrap_or(false) {
+            if new_file_in_folder
+                .as_ref()
+                .map(|(f, _)| f == dname)
+                .unwrap_or(false)
+            {
                 *new_file_in_folder = None;
             }
             let dest = workspace_dir.join("src").join(dname.as_str());
@@ -1599,10 +1732,8 @@ fn show_project_tree(
         if let Some(confirm_idx) = do_rename_file {
             if let Some((_, new_name)) = renaming_file.take() {
                 ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(
-                        egui::Id::new(("__rename_file__", confirm_idx)),
-                        true,
-                    )
+                    m.data
+                        .insert_temp::<bool>(egui::Id::new(("__rename_file__", confirm_idx)), true)
                 });
                 let old_path = user_src_files[confirm_idx].0.clone();
                 let clean = new_name.trim().to_string();
@@ -1612,9 +1743,7 @@ fn show_project_tree(
                     } else {
                         clean
                     };
-                    if new_path != old_path
-                        && !user_src_files.iter().any(|(p, _)| p == &new_path)
-                    {
+                    if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path) {
                         let old_dest = workspace_dir.join("src").join(&old_path);
                         let new_dest = workspace_dir.join("src").join(&new_path);
                         let _ = std::fs::rename(&old_dest, &new_dest);
@@ -1626,10 +1755,8 @@ fn show_project_tree(
         } else if cancel_rename_file {
             if let Some((idx, _)) = renaming_file.as_ref() {
                 ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(
-                        egui::Id::new(("__rename_file__", *idx)),
-                        true,
-                    )
+                    m.data
+                        .insert_temp::<bool>(egui::Id::new(("__rename_file__", *idx)), true)
                 });
             }
             *renaming_file = None;
@@ -1645,10 +1772,7 @@ fn show_project_tree(
                     )
                 });
                 let clean = new_name.trim().to_string();
-                if !clean.is_empty()
-                    && clean != old_name
-                    && !user_src_folders.contains(&clean)
-                {
+                if !clean.is_empty() && clean != old_name && !user_src_folders.contains(&clean) {
                     let old_dest = workspace_dir.join("src").join(&old_name);
                     let new_dest = workspace_dir.join("src").join(&clean);
                     let _ = std::fs::rename(&old_dest, &new_dest);
@@ -1706,10 +1830,42 @@ fn show_project_tree(
 
     // ── Root files ────────────────────────────────────────────────────────────
     ui.add_space(2.0);
-    file_row(ui, 4.0, ".gitignore", ProjectFileId::GitIgnore, selected, build_result, lsp);
-    file_row(ui, 4.0, "build.rs", ProjectFileId::BuildRs, selected, build_result, lsp);
-    file_row(ui, 4.0, "Cargo.toml", ProjectFileId::CargoToml, selected, build_result, lsp);
-    file_row(ui, 4.0, "memory.x", ProjectFileId::MemoryX, selected, build_result, lsp);
+    file_row(
+        ui,
+        4.0,
+        ".gitignore",
+        ProjectFileId::GitIgnore,
+        selected,
+        build_result,
+        lsp,
+    );
+    file_row(
+        ui,
+        4.0,
+        "build.rs",
+        ProjectFileId::BuildRs,
+        selected,
+        build_result,
+        lsp,
+    );
+    file_row(
+        ui,
+        4.0,
+        "Cargo.toml",
+        ProjectFileId::CargoToml,
+        selected,
+        build_result,
+        lsp,
+    );
+    file_row(
+        ui,
+        4.0,
+        "memory.x",
+        ProjectFileId::MemoryX,
+        selected,
+        build_result,
+        lsp,
+    );
 }
 
 // ── Single file row for fixed project files (with diagnostic indicators) ──────
@@ -1739,7 +1895,10 @@ fn file_row(
         ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
         let resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(name).size(11.5).monospace().color(color),
+                egui::RichText::new(name)
+                    .size(11.5)
+                    .monospace()
+                    .color(color),
             )
             .sense(egui::Sense::click()),
         );
@@ -1803,16 +1962,14 @@ fn user_file_row(
             );
             if let Some((_, new_name)) = renaming.as_mut() {
                 let fid = egui::Id::new(("__rename_file__", idx));
-                let resp = ui.add(
-                    egui::TextEdit::singleline(new_name)
-                        .desired_width(ui.available_width()),
-                );
+                let resp = ui
+                    .add(egui::TextEdit::singleline(new_name).desired_width(ui.available_width()));
                 if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
                     resp.request_focus();
                     ui.memory_mut(|m| m.data.insert_temp(fid, false));
                 }
                 let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let esc   = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if enter {
                     *do_rename = Some(idx);
                 } else if esc || resp.lost_focus() {
@@ -1836,7 +1993,10 @@ fn user_file_row(
         ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
         let resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(name).size(11.5).monospace().color(color),
+                egui::RichText::new(name)
+                    .size(11.5)
+                    .monospace()
+                    .color(color),
             )
             .sense(egui::Sense::click()),
         );
@@ -1845,10 +2005,7 @@ fn user_file_row(
         }
         resp.context_menu(|ui| {
             if ui
-                .button(
-                    egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE))
-                        .size(11.5),
-                )
+                .button(egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5))
                 .clicked()
             {
                 *renaming = Some((idx, name.to_string()));
