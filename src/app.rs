@@ -146,6 +146,8 @@ pub struct AppIde {
     new_src_name: Option<String>,
     /// While `Some(s)`, a text-input for naming a new folder is shown in the tree.
     new_src_folder_name: Option<String>,
+    /// While `Some((folder, name))`, an inline file-name input is open inside that folder.
+    new_file_in_folder: Option<(String, String)>,
 }
 
 impl AppIde {
@@ -177,6 +179,7 @@ impl AppIde {
             user_src_folders: Vec::new(),
             new_src_name: None,
             new_src_folder_name: None,
+            new_file_in_folder: None,
         }
     }
 
@@ -299,6 +302,7 @@ impl eframe::App for AppIde {
                             &mut self.user_src_folders,
                             &mut self.new_src_name,
                             &mut self.new_src_folder_name,
+                            &mut self.new_file_in_folder,
                             &workspace_dir,
                             &mut save_project_needed,
                         );
@@ -896,6 +900,7 @@ fn show_project_tree(
     user_src_folders: &mut Vec<String>,
     new_src_name: &mut Option<String>,
     new_src_folder_name: &mut Option<String>,
+    new_file_in_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
 ) {
@@ -926,7 +931,7 @@ fn show_project_tree(
     .show(ui, |ui| {
         file_row(ui, 8.0, "main.rs", ProjectFileId::MainRs, selected, build_result, lsp);
 
-        // ── Build folder map: explicit folders ∪ implicit (from file paths) ──
+        // ── Build folder map: explicit folders ∪ implicit from file paths ─
         let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for folder in user_src_folders.iter() {
             folders.entry(folder.clone()).or_default();
@@ -942,6 +947,11 @@ fn show_project_tree(
 
         let mut to_delete: Option<usize> = None;
         let mut folder_to_delete: Option<String> = None;
+        // Signals: confirm/cancel for the folder-level file input
+        let mut confirm_in_folder = false;
+        let mut cancel_in_folder = false;
+        // Which folder the user just clicked "+ New file" in
+        let mut open_input_for_folder: Option<String> = None;
 
         // ── Direct files ──────────────────────────────────────────────────
         for &i in &direct {
@@ -949,8 +959,13 @@ fn show_project_tree(
             user_file_row(ui, 8.0, &name, i, selected, &mut to_delete);
         }
 
-        // ── Folder groups (with hover-delete button) ──────────────────────
+        // ── Folder groups (hover-delete + per-folder add button) ──────────
         for (folder_name, file_indices) in &folders {
+            let this_has_input = new_file_in_folder
+                .as_ref()
+                .map(|(f, _)| f == folder_name)
+                .unwrap_or(false);
+
             let ch = egui::CollapsingHeader::new(
                 egui::RichText::new(format!("{folder_name}/"))
                     .size(11.5)
@@ -959,7 +974,7 @@ fn show_project_tree(
             )
             .default_open(true)
             .show(ui, |ui| {
-                if file_indices.is_empty() {
+                if file_indices.is_empty() && !this_has_input {
                     ui.label(
                         egui::RichText::new("  (empty)")
                             .size(10.0)
@@ -971,14 +986,58 @@ fn show_project_tree(
                     let fname = full.split('/').last().unwrap_or(&full).to_string();
                     user_file_row(ui, 16.0, &fname, i, selected, &mut to_delete);
                 }
+
+                // ── Inline file input for this folder ─────────────────
+                if this_has_input {
+                    if let Some((folder_key, name)) = new_file_in_folder.as_mut() {
+                        let fid = egui::Id::new(("__folder_file_focus__", folder_key.as_str()));
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(name)
+                                    .hint_text("filename.rs")
+                                    .desired_width(ui.available_width()),
+                            );
+                            if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
+                                resp.request_focus();
+                                ui.memory_mut(|m| m.data.insert_temp(fid, false));
+                            }
+                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            if enter {
+                                confirm_in_folder = true;
+                            } else if esc || resp.lost_focus() {
+                                cancel_in_folder = true;
+                            }
+                        });
+                    }
+                } else {
+                    // ── "+ New file" button inside the folder ─────────
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(format!("{} New file", ph::PLUS))
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(100, 165, 100)),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("Add a file inside this folder")
+                            .clicked()
+                        {
+                            open_input_for_folder = Some(folder_name.clone());
+                        }
+                    });
+                }
             });
 
-            // Overlay × button on header rect when hovered
+            // Overlay × delete button on folder header when hovered
             let h = &ch.header_response;
             if h.hovered() {
                 let btn_c = egui::pos2(h.rect.right() - 10.0, h.rect.center().y);
-                let btn_rect =
-                    egui::Rect::from_center_size(btn_c, egui::vec2(14.0, 14.0));
+                let btn_rect = egui::Rect::from_center_size(btn_c, egui::vec2(14.0, 14.0));
                 let del = ui.interact(
                     btn_rect,
                     egui::Id::new(("del_folder", folder_name.as_str())),
@@ -1003,7 +1062,37 @@ fn show_project_tree(
             }
         }
 
-        // ── New file input ────────────────────────────────────────────────
+        // Apply folder-level file input results
+        if confirm_in_folder {
+            if let Some((folder, name)) = new_file_in_folder.take() {
+                ui.memory_mut(|m| m.data.insert_temp::<bool>(
+                    egui::Id::new(("__folder_file_focus__", folder.as_str())), true,
+                ));
+                let clean = name.trim().replace('\\', "/");
+                let clean = clean.trim_start_matches('/').to_string();
+                if !clean.is_empty() {
+                    let full_path = format!("{folder}/{clean}");
+                    if !user_src_files.iter().any(|(p, _)| p == &full_path) {
+                        user_src_files.push((full_path, String::new()));
+                        *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
+                        *save_needed = true;
+                    }
+                }
+            }
+        } else if cancel_in_folder {
+            if let Some((folder, _)) = new_file_in_folder.as_ref() {
+                ui.memory_mut(|m| m.data.insert_temp::<bool>(
+                    egui::Id::new(("__folder_file_focus__", folder.as_str())), true,
+                ));
+            }
+            *new_file_in_folder = None;
+        }
+        if let Some(folder) = open_input_for_folder {
+            *new_file_in_folder = Some((folder, String::new()));
+        }
+
+        // ── Root-level new file input ─────────────────────────────────────
+        const SRC_NAME_FID: &str = "__new_src_name_focus__";
         let mut confirm_file = false;
         let mut cancel_file = false;
         if let Some(name) = new_src_name {
@@ -1014,15 +1103,22 @@ fn show_project_tree(
                         .hint_text("e.g. utils.rs or drivers/spi.rs")
                         .desired_width(ui.available_width()),
                 );
-                resp.request_focus();
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let fid = egui::Id::new(SRC_NAME_FID);
+                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
+                    resp.request_focus();
+                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
+                }
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if enter {
                     confirm_file = true;
-                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                } else if esc || resp.lost_focus() {
                     cancel_file = true;
                 }
             });
         }
         if confirm_file {
+            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true));
             if let Some(name) = new_src_name.take() {
                 let clean = name.trim().replace('\\', "/");
                 let clean = clean.trim_start_matches('/').to_string();
@@ -1033,10 +1129,12 @@ fn show_project_tree(
                 }
             }
         } else if cancel_file {
+            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true));
             *new_src_name = None;
         }
 
-        // ── New folder input ──────────────────────────────────────────────
+        // ── Root-level new folder input ───────────────────────────────────
+        const SRC_FOLDER_FID: &str = "__new_src_folder_focus__";
         let mut confirm_folder = false;
         let mut cancel_folder = false;
         if let Some(name) = new_src_folder_name {
@@ -1047,17 +1145,23 @@ fn show_project_tree(
                         .hint_text("e.g. drivers")
                         .desired_width(ui.available_width()),
                 );
-                resp.request_focus();
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let fid = egui::Id::new(SRC_FOLDER_FID);
+                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
+                    resp.request_focus();
+                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
+                }
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if enter {
                     confirm_folder = true;
-                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                } else if esc || resp.lost_focus() {
                     cancel_folder = true;
                 }
             });
         }
         if confirm_folder {
+            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true));
             if let Some(name) = new_src_folder_name.take() {
-                // Strip slashes and keep only the first segment (no nesting here)
                 let clean: String = name
                     .trim()
                     .replace('\\', "/")
@@ -1066,7 +1170,6 @@ fn show_project_tree(
                     .unwrap_or("")
                     .to_string();
                 if !clean.is_empty() && !user_src_folders.contains(&clean) {
-                    // Create directory on disk immediately
                     let dest = workspace_dir.join("src").join(&clean);
                     let _ = std::fs::create_dir_all(&dest);
                     user_src_folders.push(clean);
@@ -1074,12 +1177,15 @@ fn show_project_tree(
                 }
             }
         } else if cancel_folder {
+            ui.memory_mut(|m| m.data.insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true));
             *new_src_folder_name = None;
         }
 
-        // ── Action buttons (hidden while an input is active) ──────────────
-        let no_input = new_src_name.is_none() && new_src_folder_name.is_none();
-        if no_input {
+        // ── "+ New file" / "+ New folder" buttons (hidden while any input is open) ──
+        let any_input_open = new_src_name.is_some()
+            || new_src_folder_name.is_some()
+            || new_file_in_folder.is_some();
+        if !any_input_open {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 if ui
@@ -1091,14 +1197,12 @@ fn show_project_tree(
                         )
                         .frame(false),
                     )
-                    .on_hover_text("Add a file to src/\nType e.g. utils.rs or drivers/spi.rs")
+                    .on_hover_text("Add a file to src/")
                     .clicked()
                 {
                     *new_src_name = Some(String::new());
                 }
-
                 ui.add_space(8.0);
-
                 if ui
                     .add(
                         egui::Button::new(
@@ -1134,11 +1238,9 @@ fn show_project_tree(
 
         // ── Handle folder deletion ────────────────────────────────────────
         if let Some(ref dname) = folder_to_delete {
-            // Reset selection if it pointed inside the deleted folder
             if let ProjectFileId::UserFile(_) = *selected {
                 *selected = ProjectFileId::MainRs;
             }
-            // Remove all files that were inside this folder
             let prefix = format!("{dname}/");
             let to_rm: Vec<usize> = user_src_files
                 .iter()
@@ -1151,9 +1253,11 @@ fn show_project_tree(
                 let _ = std::fs::remove_file(&dest);
                 user_src_files.remove(i);
             }
-            // Remove from explicit folder list
             user_src_folders.retain(|f| f != dname);
-            // Remove directory from disk
+            // Also close any active input for this folder
+            if new_file_in_folder.as_ref().map(|(f, _)| f == dname).unwrap_or(false) {
+                *new_file_in_folder = None;
+            }
             let dest = workspace_dir.join("src").join(dname.as_str());
             let _ = std::fs::remove_dir_all(&dest);
             *save_needed = true;
