@@ -74,7 +74,7 @@ impl Mcu {
             .find(|p| p.number == number)
     }
 
-    pub fn draw(&mut self, ui: &mut egui::Ui) {
+    pub fn draw(&mut self, ui: &mut egui::Ui) -> Option<(usize, String, PinFunction)> {
         let top_count = self.top_pins.len();
         let left_count = self.left_pins.len();
 
@@ -328,8 +328,11 @@ impl Mcu {
         }
 
         // Apply the selected function to the pin; always close the info popup.
+        // Capture what changed so the caller can react (e.g. create pin source files).
+        let mut pin_changed: Option<(usize, String, PinFunction)> = None;
         if let Some((pin_num, func)) = new_function {
             if let Some(pin) = self.find_pin_mut(pin_num) {
+                pin_changed = Some((pin.number, pin.name.clone(), func.clone()));
                 pin.selected_function = func;
             }
             self.show_info = None;
@@ -397,5 +400,7 @@ impl Mcu {
                 self.show_info = None;
             }
         }
+
+        pin_changed
     }
 }

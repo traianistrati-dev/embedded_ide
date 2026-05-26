@@ -424,6 +424,76 @@ impl AppIde {
             }
         }
     }
+
+    // ── Pin-file scaffold ─────────────────────────────────────────────────────
+    /// Called whenever a pin receives a non-Unset function.
+    /// Ensures `pins/` folder, `pins/mod.rs`, and `pins/pin{N}_{name}.rs` exist,
+    /// and keeps the `pub mod` declaration in `mod.rs` up to date.
+    fn ensure_pin_files(
+        files:   &mut Vec<(String, String)>,
+        folders: &mut Vec<String>,
+        pin_num:  usize,
+        pin_name: &str,
+        func:    &PinFunction,
+    ) {
+        let slug      = format!("pin{}_{}", pin_num, pin_name.to_lowercase());
+        let folder    = "pins".to_string();
+        let mod_path  = "pins/mod.rs".to_string();
+        let file_path = format!("pins/{slug}.rs");
+        let mod_decl  = format!("pub mod {slug};");
+
+        // 1. Ensure pins/ folder is registered
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+
+        // 2. Ensure pins/mod.rs exists (empty is fine — we append below)
+        if !files.iter().any(|(p, _)| p == &mod_path) {
+            files.push((mod_path.clone(), String::new()));
+        }
+
+        // 3. Ensure the per-pin source file exists (only created, never overwritten)
+        if !files.iter().any(|(p, _)| p == &file_path) {
+            let content = format!(
+                "// Pin {pin_num} — {pin_name}\n\
+                 // Function: {func_label}\n\
+                 \n\
+                 // TODO: implement pin {pin_num} ({pin_name}) logic here\n",
+                pin_num    = pin_num,
+                pin_name   = pin_name,
+                func_label = func.label(),
+            );
+            files.push((file_path, content));
+        }
+
+        // 4. Add `pub mod` declaration to pins/mod.rs if not already present
+        if let Some((_, mod_content)) = files.iter_mut().find(|(p, _)| p == &mod_path) {
+            if !mod_content.contains(&mod_decl) {
+                if !mod_content.is_empty() && !mod_content.ends_with('\n') {
+                    mod_content.push('\n');
+                }
+                mod_content.push_str(&mod_decl);
+                mod_content.push('\n');
+            }
+        }
+    }
+
+    /// Creates the initial `pins/` scaffold (folder + empty mod.rs).
+    /// Called once when "New Project" is confirmed so the tree is
+    /// pre-populated before any pin is configured.
+    fn init_pins_scaffold(
+        files:   &mut Vec<(String, String)>,
+        folders: &mut Vec<String>,
+    ) {
+        let folder   = "pins".to_string();
+        let mod_path = "pins/mod.rs".to_string();
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+        if !files.iter().any(|(p, _)| p == &mod_path) {
+            files.push((mod_path, String::new()));
+        }
+    }
 }
 
 impl eframe::App for AppIde {
@@ -653,6 +723,12 @@ impl eframe::App for AppIde {
                             self.new_src_folder_name = None;
                             self.new_file_in_folder = None;
                             self.confirm_new_project = false;
+                            // Pre-populate the pins/ scaffold so the tree shows
+                            // the folder immediately, before any pin is configured.
+                            Self::init_pins_scaffold(
+                                &mut self.user_src_files,
+                                &mut self.user_src_folders,
+                            );
                             save_project_needed = true;
                         }
                         ui.add_space(8.0);
@@ -1240,22 +1316,39 @@ impl eframe::App for AppIde {
             // Tab content
             match self.active_tab {
                 McuTab::Pins => {
-                    egui::ScrollArea::both().show(ui, |ui| match &mut self.mcu {
-                        Some(mcu) => mcu.draw(ui),
-                        None => {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}  {}  —  support coming soon",
-                                        ph::GEAR,
-                                        self.selected_mcu_type.label()
-                                    ))
-                                    .size(18.0)
-                                    .color(egui::Color32::GRAY),
-                                );
-                            });
+                    let pin_changed = egui::ScrollArea::both()
+                        .show(ui, |ui| match &mut self.mcu {
+                            Some(mcu) => mcu.draw(ui),
+                            None => {
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{}  {}  —  support coming soon",
+                                            ph::GEAR,
+                                            self.selected_mcu_type.label()
+                                        ))
+                                        .size(18.0)
+                                        .color(egui::Color32::GRAY),
+                                    );
+                                });
+                                None
+                            }
+                        })
+                        .inner;
+
+                    // When a pin receives a real function, auto-create
+                    // pins/<slug>.rs and register it in pins/mod.rs.
+                    if let Some((num, name, func)) = pin_changed {
+                        if func != PinFunction::Unset {
+                            Self::ensure_pin_files(
+                                &mut self.user_src_files,
+                                &mut self.user_src_folders,
+                                num,
+                                &name,
+                                &func,
+                            );
                         }
-                    });
+                    }
                 }
                 McuTab::Peripherals => show_peripherals_tab(ui, &self.mcu),
                 McuTab::Clock => {
