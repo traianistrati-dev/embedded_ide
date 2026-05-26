@@ -9,6 +9,7 @@ use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
 use egui_phosphor::regular as ph;
+use notify::Watcher as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -100,6 +101,20 @@ enum BuildPanelTab {
     Cargo,
 }
 
+// ── Persisted project state ───────────────────────────────────────────────────
+// Everything that must survive an application restart.
+// Stored via eframe's platform storage (Registry on Windows, ~/.local on Linux).
+
+const STORAGE_KEY: &str = "embedded_ide_project_v1";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PersistedState {
+    /// `(path_relative_to_src, content)` for every user-created file.
+    user_src_files:   Vec<(String, String)>,
+    /// Explicitly-created empty folders inside src/.
+    user_src_folders: Vec<String>,
+}
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AppIde {
@@ -152,6 +167,17 @@ pub struct AppIde {
     renaming_file: Option<(usize, String)>,
     /// While `Some((old_folder, new_name))`, an inline rename input is shown for that folder.
     renaming_folder: Option<(String, String)>,
+    // ── Project management ────────────────────────────────────────────────────
+    /// `true` while the "New Project" confirmation dialog is open.
+    confirm_new_project: bool,
+    /// Path of the last opened/exported project (shown in the panel heading).
+    open_project_path: Option<std::path::PathBuf>,
+    // ── Filesystem watcher ────────────────────────────────────────────────────
+    /// Receives filesystem events from the background notify thread.
+    /// Polled every frame; used to detect files created/removed by external tools.
+    fs_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
+    /// Kept alive so the watcher thread lives as long as the app.
+    _fs_watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl AppIde {
@@ -161,8 +187,35 @@ impl AppIde {
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
 
+        // ── Load persisted project state ─────────────────────────────────────
+        let persisted: PersistedState = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, STORAGE_KEY))
+            .unwrap_or_default();
+
         let mcu = create_stm32f103c8tx();
         let generated_code = mcu.fresh_main_rs();
+
+        // ── Start filesystem watcher on the build workspace src/ dir ─────────
+        // The watcher runs on a background thread and sends events through a
+        // channel.  We poll the channel each frame (non-blocking).
+        let workspace_src = std::env::temp_dir()
+            .join("embedded_ide_0_check")
+            .join("src");
+        let (fs_tx, fs_rx) = std::sync::mpsc::channel();
+        let ctx_clone = cc.egui_ctx.clone();
+        let mut watcher = notify::recommended_watcher(move |ev| {
+            let _ = fs_tx.send(ev);
+            ctx_clone.request_repaint(); // wake the UI thread on fs event
+        });
+        if let Ok(ref mut w) = watcher {
+            // Watch even if the dir doesn't exist yet — we'll re-watch after
+            // write_project creates it for the first time.
+            if workspace_src.exists() {
+                let _ = w.watch(&workspace_src, notify::RecursiveMode::Recursive);
+            }
+        }
+
         Self {
             selected_mcu_type: McuType::Stm32f103c8t6,
             generated_code,
@@ -179,13 +232,17 @@ impl AppIde {
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
-            user_src_files: Vec::new(),
-            user_src_folders: Vec::new(),
+            user_src_files:   persisted.user_src_files,
+            user_src_folders: persisted.user_src_folders,
             new_src_name: None,
             new_src_folder_name: None,
             new_file_in_folder: None,
             renaming_file: None,
             renaming_folder: None,
+            confirm_new_project: false,
+            open_project_path: None,
+            fs_rx: Some(fs_rx),
+            _fs_watcher: watcher.ok(),
         }
     }
 
@@ -195,10 +252,175 @@ impl AppIde {
             _ => None,
         }
     }
+
+    // ── Project load ──────────────────────────────────────────────────────────
+
+    /// Loads user source files from an existing Cargo project at `root`.
+    /// Only files in `root/src/` are imported; `main.rs` is always skipped
+    /// (it is regenerated from MCU pin state).
+    /// Any previous user files are replaced.
+    fn load_project_from_dir(&mut self, root: &std::path::Path) {
+        let src_dir = root.join("src");
+        if !src_dir.exists() {
+            return;
+        }
+
+        let mut files: Vec<(String, String)> = Vec::new();
+        let mut folders: Vec<String>          = Vec::new();
+
+        Self::scan_src_dir(&src_dir, &src_dir, &mut files, &mut folders);
+
+        self.user_src_files   = files;
+        self.user_src_folders = folders;
+        self.selected_file    = ProjectFileId::MainRs;
+        self.renaming_file    = None;
+        self.renaming_folder  = None;
+        self.new_src_name     = None;
+        self.new_src_folder_name = None;
+        self.new_file_in_folder  = None;
+        self.open_project_path   = Some(root.to_path_buf());
+    }
+
+    /// Recursively scans `dir` (relative to `root`) and fills `files` and `folders`.
+    /// Skips `main.rs` and any non-`.rs` files.
+    fn scan_src_dir(
+        root:    &std::path::Path,
+        dir:     &std::path::Path,
+        files:   &mut Vec<(String, String)>,
+        folders: &mut Vec<String>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let Ok(rel) = path.strip_prefix(root) else { continue };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if !folders.contains(&rel) {
+                    folders.push(rel);
+                }
+                Self::scan_src_dir(root, &path, files, folders);
+            } else if path.is_file() {
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(root) else { continue };
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if rel == "main.rs" {
+                    continue; // always generated — skip
+                }
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                files.push((rel, content));
+            }
+        }
+    }
+
+    // ── Filesystem watcher polling ────────────────────────────────────────────
+    /// Drains the notify channel and applies any relevant Create / Remove /
+    /// Rename events to `user_src_files` and `user_src_folders`.
+    ///
+    /// Rules:
+    /// - Only `.rs` files inside `workspace/src/` are tracked.
+    /// - `src/main.rs` is always excluded (it is the generated file).
+    /// - Create: add if not already present (avoids duplicates from our own writes).
+    /// - Remove: drop from the list (IDE-initiated removes are already gone by
+    ///   the time notify fires, so the search is a no-op — safe either way).
+    /// - Rename(Both): atomically update the stored path.
+    fn poll_fs_events(&mut self) {
+        use notify::EventKind::*;
+        use notify::event::{ModifyKind, RenameMode};
+
+        let workspace_src = std::env::temp_dir()
+            .join("embedded_ide_0_check")
+            .join("src");
+
+        // If the watcher hasn't started watching yet (dir didn't exist on
+        // startup), try to attach now that write_project may have created it.
+        if let (Some(w), true) = (self._fs_watcher.as_mut(), workspace_src.exists()) {
+            // `watch` is idempotent for already-watched paths.
+            let _ = w.watch(&workspace_src, notify::RecursiveMode::Recursive);
+        }
+
+        let Some(rx) = self.fs_rx.as_ref() else { return };
+
+        for event in rx.try_iter().flatten() {
+            match event.kind {
+                // ── New file created externally ──────────────────────────────
+                Create(_) => {
+                    for abs in &event.paths {
+                        if abs.extension().and_then(|e| e.to_str()) != Some("rs") {
+                            continue;
+                        }
+                        let Ok(rel) = abs.strip_prefix(&workspace_src) else { continue };
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        if rel == "main.rs" { continue; }
+                        if !self.user_src_files.iter().any(|(p, _)| p == &rel) {
+                            // Read the file content so the editor shows it correctly
+                            let content = std::fs::read_to_string(abs).unwrap_or_default();
+                            self.user_src_files.push((rel, content));
+                        }
+                    }
+                }
+                // ── File removed externally ──────────────────────────────────
+                Remove(_) => {
+                    for abs in &event.paths {
+                        let Ok(rel) = abs.strip_prefix(&workspace_src) else { continue };
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        self.user_src_files.retain(|(p, _)| p != &rel);
+                        // If a whole directory was removed, drop its folder entry
+                        let dir_rel = rel.trim_end_matches('/').to_string();
+                        self.user_src_folders.retain(|f| f != &dir_rel);
+                    }
+                }
+                // ── File renamed externally (notify sends both paths together)
+                Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
+                    let old = &event.paths[0];
+                    let new = &event.paths[1];
+                    let Ok(old_rel) = old.strip_prefix(&workspace_src) else { continue };
+                    let Ok(new_rel) = new.strip_prefix(&workspace_src) else { continue };
+                    let old_rel = old_rel.to_string_lossy().replace('\\', "/");
+                    let new_rel = new_rel.to_string_lossy().replace('\\', "/");
+                    // File rename
+                    if let Some((p, _)) = self.user_src_files.iter_mut().find(|(p, _)| p == &old_rel) {
+                        *p = new_rel.clone();
+                    }
+                    // Folder rename — update folder list + all child paths
+                    if let Some(f) = self.user_src_folders.iter_mut().find(|f| **f == old_rel) {
+                        *f = new_rel.clone();
+                    }
+                    let old_prefix = format!("{old_rel}/");
+                    let new_prefix = format!("{new_rel}/");
+                    for (path, _) in &mut self.user_src_files {
+                        if path.starts_with(&old_prefix) {
+                            *path = format!("{new_prefix}{}", &path[old_prefix.len()..]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 impl eframe::App for AppIde {
+    // ── Persistence: called by eframe on app exit (and periodically) ──────────
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            STORAGE_KEY,
+            &PersistedState {
+                user_src_files:   self.user_src_files.clone(),
+                user_src_folders: self.user_src_folders.clone(),
+            },
+        );
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // ── Poll filesystem watcher events ────────────────────────────────────
+        // Called every frame (non-blocking).  We react only to .rs file
+        // Create / Remove / Rename events so external tools (VS Code, etc.)
+        // are reflected in the project tree automatically.
+        self.poll_fs_events();
+
         // ── Update generated section when pin config changes ─────────────────
         // update_main_rs() splices only the GENERATED block (between markers),
         // leaving custom_config() and loop_code() untouched.
@@ -282,12 +504,47 @@ impl eframe::App for AppIde {
         // Set to true inside the tree when files are added/deleted, so we
         // write the whole project to the workspace directory afterwards.
         let mut save_project_needed = false;
+        // Signals set inside the panel closure, acted on outside.
+        let mut open_project_clicked = false;
+        let mut new_project_clicked  = false;
 
         egui::Panel::left("project_tree")
             .resizable(true)
             .default_size(200.0)
             .show_inside(ui, |ui| {
-                ui.heading("Project");
+                // ── Panel header row ──────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    ui.heading("Project");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn = |ui: &mut egui::Ui, icon: &str, label: &str, tip: &str| {
+                            ui.add(egui::Button::new(
+                                egui::RichText::new(format!("{icon} {label}")).size(11.0),
+                            ))
+                            .on_hover_text(tip)
+                            .clicked()
+                        };
+                        if btn(ui, ph::FOLDER_OPEN, "Open", "Open an existing project folder") {
+                            open_project_clicked = true;
+                        }
+                        ui.add_space(2.0);
+                        if btn(ui, ph::NOTE_PENCIL, "New", "Start a new empty project") {
+                            new_project_clicked = true;
+                        }
+                    });
+                });
+
+                // Show project path under the heading when one is loaded
+                if let Some(p) = &self.open_project_path {
+                    let name = p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    ui.label(
+                        egui::RichText::new(format!("  {}", name))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(140, 160, 180))
+                            .italics(),
+                    );
+                }
                 ui.separator();
 
                 match (&project_files, self.selected_mcu_type.project_config()) {
@@ -328,9 +585,67 @@ impl eframe::App for AppIde {
                 }
             });
 
+        // ── Handle toolbar button clicks ──────────────────────────────────────
+
+        // "New Project" → ask for confirmation
+        if new_project_clicked {
+            self.confirm_new_project = true;
+        }
+
+        // "Open Project" → show native folder picker, then load files
+        if open_project_clicked {
+            if let Some(folder) = rfd::FileDialog::new()
+                .set_title("Open Embedded IDE Project — pick the project root folder")
+                .pick_folder()
+            {
+                self.load_project_from_dir(&folder);
+                save_project_needed = true;
+            }
+        }
+
+        // ── "New Project" confirmation modal ──────────────────────────────────
+        if self.confirm_new_project {
+            egui::Window::new("New Project")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.label("This will clear all user files and folders.");
+                    ui.label(
+                        egui::RichText::new("The action cannot be undone.")
+                            .color(egui::Color32::from_rgb(220, 160, 60)),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(
+                            egui::RichText::new(format!("{} New Project", ph::NOTE_PENCIL))
+                                .color(egui::Color32::from_rgb(220, 80, 60)),
+                        ).clicked() {
+                            self.user_src_files.clear();
+                            self.user_src_folders.clear();
+                            self.selected_file    = ProjectFileId::MainRs;
+                            self.open_project_path = None;
+                            self.renaming_file    = None;
+                            self.renaming_folder  = None;
+                            self.new_src_name     = None;
+                            self.new_src_folder_name = None;
+                            self.new_file_in_folder  = None;
+                            self.confirm_new_project = false;
+                            save_project_needed = true;
+                        }
+                        ui.add_space(8.0);
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_new_project = false;
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+        }
+
         // Write the entire project to the workspace directory when the file
-        // tree changed (file added or deleted). This ensures Cargo.toml and
-        // all other required files exist alongside the new user file.
+        // tree changed (file added, deleted, or project opened/cleared).
+        // This ensures Cargo.toml and all other required files are in sync.
         if save_project_needed {
             if let Some(config) = self.selected_mcu_type.project_config() {
                 let workspace = std::env::temp_dir().join("embedded_ide_0_check");
