@@ -924,7 +924,7 @@ fn show_project_tree(
     });
 
     // ── src/ ──────────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new(
+    let src_ch = egui::CollapsingHeader::new(
         egui::RichText::new("src/").size(11.5).monospace().color(normal),
     )
     .default_open(true)
@@ -952,6 +952,8 @@ fn show_project_tree(
         let mut cancel_in_folder = false;
         // Which folder the user just clicked "+ New file" in
         let mut open_input_for_folder: Option<String> = None;
+        // Set by folder context menu → open new-folder name input
+        let mut ctx_open_new_folder = false;
 
         // ── Direct files ──────────────────────────────────────────────────
         for &i in &direct {
@@ -1011,55 +1013,39 @@ fn show_project_tree(
                             }
                         });
                     }
-                } else {
-                    // ── "+ New file" button inside the folder ─────────
-                    ui.horizontal(|ui| {
-                        ui.add_space(16.0);
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(format!("{} New file", ph::PLUS))
-                                        .size(10.0)
-                                        .color(egui::Color32::from_rgb(100, 165, 100)),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text("Add a file inside this folder")
-                            .clicked()
-                        {
-                            open_input_for_folder = Some(folder_name.clone());
-                        }
-                    });
                 }
             });
 
-            // Overlay × delete button on folder header when hovered
-            let h = &ch.header_response;
-            if h.hovered() {
-                let btn_c = egui::pos2(h.rect.right() - 10.0, h.rect.center().y);
-                let btn_rect = egui::Rect::from_center_size(btn_c, egui::vec2(14.0, 14.0));
-                let del = ui.interact(
-                    btn_rect,
-                    egui::Id::new(("del_folder", folder_name.as_str())),
-                    egui::Sense::click(),
-                );
-                let col = if del.hovered() {
-                    egui::Color32::from_rgb(230, 80, 60)
-                } else {
-                    egui::Color32::from_rgb(180, 80, 70)
-                };
-                ui.painter().text(
-                    btn_c,
-                    egui::Align2::CENTER_CENTER,
-                    "×",
-                    egui::FontId::proportional(13.0),
-                    col,
-                );
-                if del.clicked() {
-                    folder_to_delete = Some(folder_name.clone());
+            // Right-click context menu on the folder header
+            let fname_ctx = folder_name.clone();
+            ch.header_response.context_menu(|ui| {
+                if ui
+                    .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
+                    .clicked()
+                {
+                    open_input_for_folder = Some(fname_ctx.clone());
+                    ui.close();
                 }
-                del.on_hover_text("Delete folder and all files inside");
-            }
+                if ui
+                    .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
+                    .clicked()
+                {
+                    ctx_open_new_folder = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(
+                        egui::RichText::new(format!("{} Delete", ph::TRASH))
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(220, 80, 60)),
+                    )
+                    .clicked()
+                {
+                    folder_to_delete = Some(fname_ctx);
+                    ui.close();
+                }
+            });
         }
 
         // Apply folder-level file input results
@@ -1089,6 +1075,9 @@ fn show_project_tree(
         }
         if let Some(folder) = open_input_for_folder {
             *new_file_in_folder = Some((folder, String::new()));
+        }
+        if ctx_open_new_folder {
+            *new_src_folder_name = Some(String::new());
         }
 
         // ── Root-level new file input ─────────────────────────────────────
@@ -1181,45 +1170,6 @@ fn show_project_tree(
             *new_src_folder_name = None;
         }
 
-        // ── "+ New file" / "+ New folder" buttons (hidden while any input is open) ──
-        let any_input_open = new_src_name.is_some()
-            || new_src_folder_name.is_some()
-            || new_file_in_folder.is_some();
-        if !any_input_open {
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{} New file", ph::PLUS))
-                                .size(10.5)
-                                .color(egui::Color32::from_rgb(100, 165, 100)),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Add a file to src/")
-                    .clicked()
-                {
-                    *new_src_name = Some(String::new());
-                }
-                ui.add_space(8.0);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("{} New folder", ph::FOLDER))
-                                .size(10.5)
-                                .color(egui::Color32::from_rgb(100, 145, 200)),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Create a folder inside src/")
-                    .clicked()
-                {
-                    *new_src_folder_name = Some(String::new());
-                }
-            });
-        }
-
         // ── Handle file deletion ──────────────────────────────────────────
         if let Some(idx) = to_delete {
             if *selected == ProjectFileId::UserFile(idx) {
@@ -1263,6 +1213,32 @@ fn show_project_tree(
             *save_needed = true;
         }
     });
+
+    // Right-click context menu on the src/ folder header
+    let mut src_ctx_new_file = false;
+    let mut src_ctx_new_folder = false;
+    src_ch.header_response.context_menu(|ui| {
+        if ui
+            .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
+            .clicked()
+        {
+            src_ctx_new_file = true;
+            ui.close();
+        }
+        if ui
+            .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
+            .clicked()
+        {
+            src_ctx_new_folder = true;
+            ui.close();
+        }
+    });
+    if src_ctx_new_file {
+        *new_src_name = Some(String::new());
+    }
+    if src_ctx_new_folder {
+        *new_src_folder_name = Some(String::new());
+    }
 
     // ── Root files ────────────────────────────────────────────────────────────
     ui.add_space(2.0);
@@ -1367,23 +1343,19 @@ fn user_file_row(
         if resp.clicked() {
             *selected = id;
         }
-        // Delete button — shown only on hover or when selected
-        if resp.hovered() || is_sel {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let del = ui.add(
-                    egui::Button::new(
-                        egui::RichText::new("×")
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(190, 80, 70)),
-                    )
-                    .frame(false),
-                );
-                if del.clicked() {
-                    *to_delete = Some(idx);
-                }
-                del.on_hover_text("Delete file");
-            });
-        }
+        resp.context_menu(|ui| {
+            if ui
+                .button(
+                    egui::RichText::new(format!("{} Delete", ph::TRASH))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(220, 80, 60)),
+                )
+                .clicked()
+            {
+                *to_delete = Some(idx);
+                ui.close();
+            }
+        });
     });
 }
 
