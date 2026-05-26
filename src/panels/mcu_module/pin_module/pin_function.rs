@@ -91,6 +91,20 @@ impl PinFunction {
         }
     }
 
+    /// Returns the stm32f1xx-hal GPIO mode type name used to generate
+    /// `pub type PinType = Pin<PORT, N, MODE>;` in the per-pin source file.
+    /// Returns `None` for `Unset` (no file should be written).
+    pub fn hal_gpio_mode(&self) -> Option<&'static str> {
+        match self {
+            PinFunction::Unset          => None,
+            PinFunction::GpioInput      => Some("Input"),
+            PinFunction::GpioOutput     => Some("Output"),
+            PinFunction::AdcChannel{..} => Some("Analog"),
+            // Everything else is an alternate-function pin
+            _ => Some("Alternate"),
+        }
+    }
+
     /// Short badge shown on the pin in the diagram
     pub fn short_label(&self) -> &str {
         match self {

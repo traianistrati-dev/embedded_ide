@@ -426,55 +426,119 @@ impl AppIde {
     }
 
     // ── Pin-file scaffold ─────────────────────────────────────────────────────
-    /// Called whenever a pin receives a non-Unset function.
-    /// Ensures `pins/` folder, `pins/mod.rs`, and `pins/pin{N}_{name}.rs` exist,
-    /// and keeps the `pub mod` declaration in `mod.rs` up to date.
-    fn ensure_pin_files(
-        files:   &mut Vec<(String, String)>,
-        folders: &mut Vec<String>,
-        pin_num:  usize,
-        pin_name: &str,
-        func:    &PinFunction,
-    ) {
-        let slug      = format!("pin{}_{}", pin_num, pin_name.to_lowercase());
-        let folder    = "pins".to_string();
-        let mod_path  = "pins/mod.rs".to_string();
-        let file_path = format!("pins/{slug}.rs");
-        let mod_decl  = format!("pub mod {slug};");
 
-        // 1. Ensure pins/ folder is registered
+    /// Parses an STM32 pin name ("PA1", "PB12", …) into (port_char, pin_index).
+    /// Returns `None` if the name does not match the expected `P[A-Z][0-9]+` format.
+    fn parse_stm32_pin(pin_name: &str) -> Option<(char, u8)> {
+        let upper = pin_name.to_uppercase();
+        let mut chars = upper.chars();
+        if chars.next()? != 'P' {
+            return None;
+        }
+        let port = chars.next()?;
+        let idx: u8 = chars.as_str().parse().ok()?;
+        Some((port, idx))
+    }
+
+    /// Generates the HAL type-alias source for `pins/pin{N}_{name}.rs`.
+    /// Always called fresh when a function changes, so the alias stays in sync.
+    fn generate_pin_content(pin_num: usize, pin_name: &str, func: &PinFunction) -> String {
+        let Some(mode) = func.hal_gpio_mode() else {
+            return String::new();
+        };
+
+        let Some((port, idx)) = Self::parse_stm32_pin(pin_name) else {
+            // Non-STM32 name — emit a plain comment stub
+            return format!(
+                "// Pin {pin_num} — {pin_name}\n// Function: {label}\n",
+                label = func.label()
+            );
+        };
+
+        // Trailing comment only for functions that carry extra parameters
+        // (ADC channel numbers, timer/channel, peripheral index, etc.)
+        let comment = match func {
+            PinFunction::GpioInput | PinFunction::GpioOutput => String::new(),
+            other => format!(" // {}", other.label()),
+        };
+
+        format!(
+            "use stm32f1xx_hal::gpio::{{{mode}, Pin}};\n\
+             pub type PinType = Pin<'{port}', {idx}, {mode}>;{comment}\n",
+        )
+    }
+
+    /// Called whenever a pin receives a non-Unset function.
+    ///
+    /// * Ensures `pins/` folder and `pins/mod.rs` exist.
+    /// Full sync of the `pins/` directory against the current MCU pin state.
+    ///
+    /// Called after **any** pin function change (including deselection to Unset):
+    ///
+    /// * Removes `pins/pin*.rs` files whose pin is no longer configured.
+    /// * Creates or overwrites `pins/pin{N}_{name}.rs` for every configured pin.
+    /// * Rebuilds `pins/mod.rs` from scratch with only the active declarations.
+    /// * Ensures the `pins/` folder entry exists.
+    fn sync_pin_files(
+        files:    &mut Vec<(String, String)>,
+        folders:  &mut Vec<String>,
+        all_pins: &[(usize, String, PinFunction)],
+    ) {
+        const MOD_PATH: &str = "pins/mod.rs";
+
+        // ── Build the authoritative set of configured pins ────────────────────
+        // `(slug, pin_num, pin_name, func)` for every pin with a real function.
+        let configured: Vec<(String, usize, &str, &PinFunction)> = all_pins
+            .iter()
+            .filter(|(_, _, f)| *f != PinFunction::Unset)
+            .map(|(num, name, func)| {
+                let slug = format!("pin{}_{}", num, name.to_lowercase());
+                (slug, *num, name.as_str(), func)
+            })
+            .collect();
+
+        let active_slugs: Vec<&str> = configured.iter().map(|(s, ..)| s.as_str()).collect();
+
+        // ── 1. Ensure pins/ folder is registered ─────────────────────────────
+        let folder = "pins".to_string();
         if !folders.contains(&folder) {
             folders.push(folder);
         }
 
-        // 2. Ensure pins/mod.rs exists (empty is fine — we append below)
-        if !files.iter().any(|(p, _)| p == &mod_path) {
-            files.push((mod_path.clone(), String::new()));
+        // ── 2. Ensure pins/mod.rs exists (content rebuilt below) ─────────────
+        if !files.iter().any(|(p, _)| p == MOD_PATH) {
+            files.push((MOD_PATH.to_string(), String::new()));
         }
 
-        // 3. Ensure the per-pin source file exists (only created, never overwritten)
-        if !files.iter().any(|(p, _)| p == &file_path) {
-            let content = format!(
-                "// Pin {pin_num} — {pin_name}\n\
-                 // Function: {func_label}\n\
-                 \n\
-                 // TODO: implement pin {pin_num} ({pin_name}) logic here\n",
-                pin_num    = pin_num,
-                pin_name   = pin_name,
-                func_label = func.label(),
-            );
-            files.push((file_path, content));
-        }
+        // ── 3. Drop pin files that are no longer configured ───────────────────
+        files.retain(|(path, _)| {
+            // Only act on paths inside pins/ that look like pin files
+            let Some(fname) = path.strip_prefix("pins/") else { return true };
+            if fname == "mod.rs" { return true } // never drop mod.rs itself
+            if !fname.starts_with("pin") || !fname.ends_with(".rs") { return true }
+            let slug = &fname[..fname.len() - 3]; // strip ".rs"
+            active_slugs.contains(&slug)
+        });
 
-        // 4. Add `pub mod` declaration to pins/mod.rs if not already present
-        if let Some((_, mod_content)) = files.iter_mut().find(|(p, _)| p == &mod_path) {
-            if !mod_content.contains(&mod_decl) {
-                if !mod_content.is_empty() && !mod_content.ends_with('\n') {
-                    mod_content.push('\n');
-                }
-                mod_content.push_str(&mod_decl);
-                mod_content.push('\n');
+        // ── 4. Create / overwrite each configured pin's source file ───────────
+        for (slug, num, name, func) in &configured {
+            let file_path = format!("pins/{slug}.rs");
+            let content   = Self::generate_pin_content(*num, name, func);
+            if let Some((_, existing)) = files.iter_mut().find(|(p, _)| p == &file_path) {
+                *existing = content;
+            } else {
+                files.push((file_path, content));
             }
+        }
+
+        // ── 5. Rebuild mod.rs from scratch (only active pins) ─────────────────
+        let new_mod: String = configured
+            .iter()
+            .map(|(slug, ..)| format!("pub mod {slug};\n"))
+            .collect();
+
+        if let Some((_, mod_content)) = files.iter_mut().find(|(p, _)| p == MOD_PATH) {
+            *mod_content = new_mod;
         }
     }
 
@@ -1336,16 +1400,16 @@ impl eframe::App for AppIde {
                         })
                         .inner;
 
-                    // When a pin receives a real function, auto-create
-                    // pins/<slug>.rs and register it in pins/mod.rs.
-                    if let Some((num, name, func)) = pin_changed {
-                        if func != PinFunction::Unset {
-                            Self::ensure_pin_files(
+                    // Any pin change (configure OR deselect) triggers a full
+                    // sync: files for unconfigured pins are removed, files for
+                    // configured pins are created/updated, and mod.rs is rebuilt.
+                    if pin_changed.is_some() {
+                        if let Some(mcu) = &self.mcu {
+                            let all_pins = mcu.all_pin_functions();
+                            Self::sync_pin_files(
                                 &mut self.user_src_files,
                                 &mut self.user_src_folders,
-                                num,
-                                &name,
-                                &func,
+                                &all_pins,
                             );
                         }
                     }

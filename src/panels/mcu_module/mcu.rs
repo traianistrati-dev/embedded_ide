@@ -37,6 +37,19 @@ impl Mcu {
         }
     }
 
+    /// Returns `(number, name, selected_function)` for every non-reserved pin.
+    /// Used by the IDE to sync the `pins/` source-file directory.
+    pub fn all_pin_functions(&self) -> Vec<(usize, String, PinFunction)> {
+        self.top_pins
+            .iter()
+            .chain(self.bottom_pins.iter())
+            .chain(self.left_pins.iter())
+            .chain(self.right_pins.iter())
+            .filter(|p| !p.reserved)
+            .map(|p| (p.number, p.name.clone(), p.selected_function.clone()))
+            .collect()
+    }
+
     /// Resets all non-reserved pins to Unset and clears selection/info state.
     pub fn reset_all_pins(&mut self) {
         for pin in self
