@@ -140,8 +140,12 @@ pub struct AppIde {
     /// Extra .rs files created by the user inside src/
     /// Each entry is `(path_relative_to_src, content)`, e.g. `("utils.rs", "")`.
     user_src_files: Vec<(String, String)>,
+    /// Explicitly-created folders inside src/ (may be empty).
+    user_src_folders: Vec<String>,
     /// While `Some(s)`, a text-input for naming a new file is shown in the tree.
     new_src_name: Option<String>,
+    /// While `Some(s)`, a text-input for naming a new folder is shown in the tree.
+    new_src_folder_name: Option<String>,
 }
 
 impl AppIde {
@@ -170,7 +174,9 @@ impl AppIde {
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
             user_src_files: Vec::new(),
+            user_src_folders: Vec::new(),
             new_src_name: None,
+            new_src_folder_name: None,
         }
     }
 
@@ -264,6 +270,10 @@ impl eframe::App for AppIde {
         let display_syntax = self.selected_file.syntax();
 
         // ── Panel 1: Project Tree ─────────────────────────────────────────────
+        // Set to true inside the tree when files are added/deleted, so we
+        // write the whole project to the workspace directory afterwards.
+        let mut save_project_needed = false;
+
         egui::Panel::left("project_tree")
             .resizable(true)
             .default_size(200.0)
@@ -277,6 +287,8 @@ impl eframe::App for AppIde {
                         let build_result = build_guard.result().cloned();
                         drop(build_guard);
                         let lsp_guard = self.lsp_state.lock().unwrap();
+                        let workspace_dir =
+                            std::env::temp_dir().join("embedded_ide_0_check");
                         show_project_tree(
                             ui,
                             cfg.pkg_name,
@@ -284,7 +296,11 @@ impl eframe::App for AppIde {
                             build_result.as_ref(),
                             Some(&*lsp_guard),
                             &mut self.user_src_files,
+                            &mut self.user_src_folders,
                             &mut self.new_src_name,
+                            &mut self.new_src_folder_name,
+                            &workspace_dir,
+                            &mut save_project_needed,
                         );
                     }
                     _ => {
@@ -299,6 +315,21 @@ impl eframe::App for AppIde {
                     }
                 }
             });
+
+        // Write the entire project to the workspace directory when the file
+        // tree changed (file added or deleted). This ensures Cargo.toml and
+        // all other required files exist alongside the new user file.
+        if save_project_needed {
+            if let Some(config) = self.selected_mcu_type.project_config() {
+                let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+                let _ = project_gen::write_project(
+                    &workspace,
+                    &config,
+                    &self.generated_code,
+                    &self.user_src_files,
+                );
+            }
+        }
 
         // ── Panel 2: Code Editor ──────────────────────────────────────────────
         let editor_width = ui.available_width() * 0.5;
@@ -649,9 +680,17 @@ impl eframe::App for AppIde {
                 // ── Write user edits back ────────────────────────────────────
                 // display_code is a local clone; persist changes here.
                 if let ProjectFileId::UserFile(i) = self.selected_file {
-                    if let Some((_, content)) = self.user_src_files.get_mut(i) {
-                        if display_code != *content {
-                            *content = display_code.clone();
+                    if let Some(entry) = self.user_src_files.get_mut(i) {
+                        if display_code != entry.1 {
+                            entry.1 = display_code.clone();
+                            // Auto-save to workspace so LSP and build see the change
+                            let workspace =
+                                std::env::temp_dir().join("embedded_ide_0_check");
+                            let dest = workspace.join("src").join(&entry.0);
+                            if let Some(parent) = dest.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(&dest, entry.1.as_bytes());
                         }
                     }
                 } else if self.selected_file == ProjectFileId::MainRs
@@ -854,18 +893,20 @@ fn show_project_tree(
     build_result: Option<&build::BuildResult>,
     lsp: Option<&lsp::LspState>,
     user_src_files: &mut Vec<(String, String)>,
+    user_src_folders: &mut Vec<String>,
     new_src_name: &mut Option<String>,
+    new_src_folder_name: &mut Option<String>,
+    workspace_dir: &std::path::Path,
+    save_needed: &mut bool,
 ) {
     let normal = egui::Color32::from_rgb(200, 205, 215);
 
-    // Root folder label (non-clickable)
     ui.label(
         egui::RichText::new(format!("{pkg_name}-project/"))
             .size(12.0)
             .strong()
             .color(egui::Color32::WHITE),
     );
-
     ui.add_space(2.0);
 
     // ── .cargo/ ───────────────────────────────────────────────────────────────
@@ -885,10 +926,12 @@ fn show_project_tree(
     .show(ui, |ui| {
         file_row(ui, 8.0, "main.rs", ProjectFileId::MainRs, selected, build_result, lsp);
 
-        // ── User files: group by first path segment ──────────────────────
-        let mut direct: Vec<usize> = vec![];
+        // ── Build folder map: explicit folders ∪ implicit (from file paths) ──
         let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-
+        for folder in user_src_folders.iter() {
+            folders.entry(folder.clone()).or_default();
+        }
+        let mut direct: Vec<usize> = vec![];
         for (i, (path, _)) in user_src_files.iter().enumerate() {
             if let Some(slash) = path.find('/') {
                 folders.entry(path[..slash].to_string()).or_default().push(i);
@@ -898,16 +941,17 @@ fn show_project_tree(
         }
 
         let mut to_delete: Option<usize> = None;
+        let mut folder_to_delete: Option<String> = None;
 
-        // Direct files
+        // ── Direct files ──────────────────────────────────────────────────
         for &i in &direct {
             let name = user_src_files[i].0.clone();
             user_file_row(ui, 8.0, &name, i, selected, &mut to_delete);
         }
 
-        // Folder groups
-        for (folder_name, indices) in &folders {
-            egui::CollapsingHeader::new(
+        // ── Folder groups (with hover-delete button) ──────────────────────
+        for (folder_name, file_indices) in &folders {
+            let ch = egui::CollapsingHeader::new(
                 egui::RichText::new(format!("{folder_name}/"))
                     .size(11.5)
                     .monospace()
@@ -915,51 +959,127 @@ fn show_project_tree(
             )
             .default_open(true)
             .show(ui, |ui| {
-                for &i in indices {
-                    let full = &user_src_files[i].0;
-                    let file_name = full.split('/').last().unwrap_or(full).to_string();
-                    user_file_row(ui, 16.0, &file_name, i, selected, &mut to_delete);
+                if file_indices.is_empty() {
+                    ui.label(
+                        egui::RichText::new("  (empty)")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(95)),
+                    );
+                }
+                for &i in file_indices {
+                    let full = user_src_files[i].0.clone();
+                    let fname = full.split('/').last().unwrap_or(&full).to_string();
+                    user_file_row(ui, 16.0, &fname, i, selected, &mut to_delete);
                 }
             });
+
+            // Overlay × button on header rect when hovered
+            let h = &ch.header_response;
+            if h.hovered() {
+                let btn_c = egui::pos2(h.rect.right() - 10.0, h.rect.center().y);
+                let btn_rect =
+                    egui::Rect::from_center_size(btn_c, egui::vec2(14.0, 14.0));
+                let del = ui.interact(
+                    btn_rect,
+                    egui::Id::new(("del_folder", folder_name.as_str())),
+                    egui::Sense::click(),
+                );
+                let col = if del.hovered() {
+                    egui::Color32::from_rgb(230, 80, 60)
+                } else {
+                    egui::Color32::from_rgb(180, 80, 70)
+                };
+                ui.painter().text(
+                    btn_c,
+                    egui::Align2::CENTER_CENTER,
+                    "×",
+                    egui::FontId::proportional(13.0),
+                    col,
+                );
+                if del.clicked() {
+                    folder_to_delete = Some(folder_name.clone());
+                }
+                del.on_hover_text("Delete folder and all files inside");
+            }
         }
 
         // ── New file input ────────────────────────────────────────────────
-        let mut confirm_new = false;
-        let mut cancel_new = false;
-
+        let mut confirm_file = false;
+        let mut cancel_file = false;
         if let Some(name) = new_src_name {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                let te = egui::TextEdit::singleline(name)
-                    .hint_text("e.g. utils.rs or drivers/spi.rs")
-                    .desired_width(ui.available_width());
-                let resp = ui.add(te);
+                let resp = ui.add(
+                    egui::TextEdit::singleline(name)
+                        .hint_text("e.g. utils.rs or drivers/spi.rs")
+                        .desired_width(ui.available_width()),
+                );
                 resp.request_focus();
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    confirm_new = true;
+                    confirm_file = true;
                 } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    cancel_new = true;
+                    cancel_file = true;
                 }
             });
         }
-
-        if confirm_new {
+        if confirm_file {
             if let Some(name) = new_src_name.take() {
                 let clean = name.trim().replace('\\', "/");
                 let clean = clean.trim_start_matches('/').to_string();
-                if !clean.is_empty()
-                    && !user_src_files.iter().any(|(p, _)| p == &clean)
-                {
+                if !clean.is_empty() && !user_src_files.iter().any(|(p, _)| p == &clean) {
                     user_src_files.push((clean, String::new()));
                     *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
+                    *save_needed = true;
                 }
             }
-        } else if cancel_new {
+        } else if cancel_file {
             *new_src_name = None;
         }
 
-        // ── + New file button ─────────────────────────────────────────────
-        if new_src_name.is_none() {
+        // ── New folder input ──────────────────────────────────────────────
+        let mut confirm_folder = false;
+        let mut cancel_folder = false;
+        if let Some(name) = new_src_folder_name {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let resp = ui.add(
+                    egui::TextEdit::singleline(name)
+                        .hint_text("e.g. drivers")
+                        .desired_width(ui.available_width()),
+                );
+                resp.request_focus();
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    confirm_folder = true;
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel_folder = true;
+                }
+            });
+        }
+        if confirm_folder {
+            if let Some(name) = new_src_folder_name.take() {
+                // Strip slashes and keep only the first segment (no nesting here)
+                let clean: String = name
+                    .trim()
+                    .replace('\\', "/")
+                    .split('/')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                if !clean.is_empty() && !user_src_folders.contains(&clean) {
+                    // Create directory on disk immediately
+                    let dest = workspace_dir.join("src").join(&clean);
+                    let _ = std::fs::create_dir_all(&dest);
+                    user_src_folders.push(clean);
+                    *save_needed = true;
+                }
+            }
+        } else if cancel_folder {
+            *new_src_folder_name = None;
+        }
+
+        // ── Action buttons (hidden while an input is active) ──────────────
+        let no_input = new_src_name.is_none() && new_src_folder_name.is_none();
+        if no_input {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 if ui
@@ -976,10 +1096,27 @@ fn show_project_tree(
                 {
                     *new_src_name = Some(String::new());
                 }
+
+                ui.add_space(8.0);
+
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} New folder", ph::FOLDER))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(100, 145, 200)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Create a folder inside src/")
+                    .clicked()
+                {
+                    *new_src_folder_name = Some(String::new());
+                }
             });
         }
 
-        // ── Handle deletion ───────────────────────────────────────────────
+        // ── Handle file deletion ──────────────────────────────────────────
         if let Some(idx) = to_delete {
             if *selected == ProjectFileId::UserFile(idx) {
                 *selected = ProjectFileId::MainRs;
@@ -989,7 +1126,37 @@ fn show_project_tree(
                     *j -= 1;
                 }
             }
+            let dest = workspace_dir.join("src").join(&user_src_files[idx].0);
+            let _ = std::fs::remove_file(&dest);
             user_src_files.remove(idx);
+            *save_needed = true;
+        }
+
+        // ── Handle folder deletion ────────────────────────────────────────
+        if let Some(ref dname) = folder_to_delete {
+            // Reset selection if it pointed inside the deleted folder
+            if let ProjectFileId::UserFile(_) = *selected {
+                *selected = ProjectFileId::MainRs;
+            }
+            // Remove all files that were inside this folder
+            let prefix = format!("{dname}/");
+            let to_rm: Vec<usize> = user_src_files
+                .iter()
+                .enumerate()
+                .filter(|(_, (p, _))| p.starts_with(&prefix))
+                .map(|(i, _)| i)
+                .collect();
+            for i in to_rm.into_iter().rev() {
+                let dest = workspace_dir.join("src").join(&user_src_files[i].0);
+                let _ = std::fs::remove_file(&dest);
+                user_src_files.remove(i);
+            }
+            // Remove from explicit folder list
+            user_src_folders.retain(|f| f != dname);
+            // Remove directory from disk
+            let dest = workspace_dir.join("src").join(dname.as_str());
+            let _ = std::fs::remove_dir_all(&dest);
+            *save_needed = true;
         }
     });
 
