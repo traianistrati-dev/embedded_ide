@@ -3,6 +3,7 @@ pub mod app;
 use app::AppIde;
 
 pub mod build;
+pub mod dfu;
 pub mod lsp;
 pub mod panels;
 

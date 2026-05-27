@@ -1,4 +1,5 @@
 use crate::build::{self, BuildState};
+use crate::dfu::{self, DfuState};
 use crate::lsp::{self, LspStatus};
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::McuType;
@@ -99,6 +100,7 @@ enum BuildPanelTab {
     #[default]
     RustAnalyzer,
     Cargo,
+    Dfu,
 }
 
 // ── Persisted project state ───────────────────────────────────────────────────
@@ -145,6 +147,12 @@ pub struct AppIde {
     build_state: Arc<Mutex<BuildState>>,
     /// Index of the diagnostic currently expanded in the cargo build panel
     selected_diagnostic: Option<usize>,
+    /// Shared state for USB DFU detection and flashing
+    dfu_state: Arc<Mutex<DfuState>>,
+    /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
+    dfu_log: Arc<Mutex<Vec<String>>>,
+    /// Flash start address sent to dfu-util (editable; default = 0x08000000)
+    dfu_flash_addr: String,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -233,6 +241,9 @@ impl AppIde {
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             selected_diagnostic: None,
+            dfu_state: Arc::new(Mutex::new(DfuState::Idle)),
+            dfu_log: Arc::new(Mutex::new(Vec::new())),
+            dfu_flash_addr: "0x08000000".to_string(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -1097,6 +1108,108 @@ impl eframe::App for AppIde {
                                 .request_repaint_after(std::time::Duration::from_millis(120));
                         }
 
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        // ── USB DFU section ───────────────────────────────────
+                        let dfu_guard   = self.dfu_state.lock().unwrap();
+                        let dfu_busy    = dfu_guard.is_busy();
+                        let dfu_label   = dfu_guard.status_label().to_string();
+                        let dfu_color   = dfu_guard.status_color();
+                        let dfu_detail  = dfu_guard.detail();
+                        let device_ok   = matches!(*dfu_guard, DfuState::DeviceFound(_));
+                        drop(dfu_guard);
+
+                        // Keep UI refreshing while DFU operation is in progress
+                        if dfu_busy {
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(120));
+                        }
+
+                        // 🔍 Scan button
+                        let scan_btn = ui.add_enabled(
+                            !dfu_busy,
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Scan USB", ph::MAGNIFYING_GLASS))
+                                    .size(11.0),
+                            ),
+                        );
+                        if scan_btn.clicked() {
+                            dfu::detect_dfu(
+                                Arc::clone(&self.dfu_state),
+                                self.egui_ctx.clone(),
+                            );
+                        }
+                        scan_btn.on_hover_text(
+                            "Scan for a USB DFU device (STM32 in bootloader mode).\n\
+                             Set BOOT0 jumper = 1 then reconnect USB.",
+                        );
+
+                        ui.add_space(2.0);
+
+                        // ⚡ Flash via USB button — enabled only when device found
+                        let flash_enabled = device_ok && !dfu_busy && project_files.is_some();
+                        let flash_btn = ui.add_enabled(
+                            flash_enabled,
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Flash USB", ph::LIGHTNING))
+                                    .size(11.0)
+                                    .color(if flash_enabled {
+                                        egui::Color32::from_rgb(100, 200, 255)
+                                    } else {
+                                        egui::Color32::GRAY
+                                    }),
+                            ),
+                        );
+                        if flash_btn.clicked() {
+                            if let Some(config) = self.selected_mcu_type.project_config() {
+                                let build_dir =
+                                    std::env::temp_dir().join("embedded_ide_0_check");
+                                let code = self.generated_code.clone();
+                                // Write latest project files to disk first
+                                if project_gen::write_project(
+                                    &build_dir,
+                                    &config,
+                                    &code,
+                                    &self.user_src_files,
+                                )
+                                .is_ok()
+                                {
+                                    self.build_tab = BuildPanelTab::Dfu;
+                                    dfu::start_flash(
+                                        build_dir,
+                                        config.target.to_string(),
+                                        config.pkg_name.to_string(),
+                                        self.dfu_flash_addr.clone(),
+                                        Arc::clone(&self.dfu_state),
+                                        Arc::clone(&self.dfu_log),
+                                        self.egui_ctx.clone(),
+                                    );
+                                }
+                            }
+                        }
+                        flash_btn.on_hover_text(
+                            "Build with --release, convert to .bin, then flash via dfu-util.\n\
+                             Requires:\n\
+                             • STM32 in DFU mode (BOOT0 = 1)\n\
+                             • dfu-util in PATH\n\
+                             • WinUSB driver (install via Zadig)\n\
+                             • llvm-objcopy, arm-none-eabi-objcopy, or cargo-binutils",
+                        );
+
+                        ui.add_space(4.0);
+
+                        // DFU status label
+                        let status_widget = ui.label(
+                            egui::RichText::new(&dfu_label)
+                                .size(10.5)
+                                .color(dfu_color),
+                        );
+                        if let Some(detail) = dfu_detail {
+                            status_widget.on_hover_text(detail);
+                        }
+
                         ui.add_space(8.0);
                         // Show which file is open
                         let open_label = match self.selected_file {
@@ -1121,7 +1234,9 @@ impl eframe::App for AppIde {
                 {
                     let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
                     let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
-                    let show_panel = cargo_has || lsp_active;
+                    let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)
+                        || !self.dfu_log.lock().unwrap().is_empty();
+                    let show_panel = cargo_has || lsp_active || dfu_active;
 
                     if show_panel {
                         const HANDLE_H: f32 = 6.0;
@@ -1183,6 +1298,9 @@ impl eframe::App for AppIde {
                                     ui,
                                     &self.build_state,
                                     &self.lsp_state,
+                                    &self.dfu_state,
+                                    &self.dfu_log,
+                                    &mut self.dfu_flash_addr,
                                     &mut self.build_tab,
                                     &mut self.selected_diagnostic,
                                     &mut self.lsp_selected_diagnostic,
@@ -2355,6 +2473,9 @@ fn show_diag_panel(
     ui: &mut egui::Ui,
     build_state: &Arc<Mutex<BuildState>>,
     lsp_state: &Arc<Mutex<lsp::LspState>>,
+    dfu_state: &Arc<Mutex<DfuState>>,
+    dfu_log: &Arc<Mutex<Vec<String>>>,
+    dfu_flash_addr: &mut String,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
@@ -2437,6 +2558,44 @@ fn show_diag_panel(
                 *tab = BuildPanelTab::RustAnalyzer;
             }
         }
+
+        ui.separator();
+
+        // DFU tab button
+        {
+            let dfu = dfu_state.lock().unwrap();
+            let (badge, col) = match &*dfu {
+                DfuState::Building | DfuState::Detecting => {
+                    (" …".to_owned(), egui::Color32::from_rgb(220, 180, 60))
+                }
+                DfuState::Flashing => (
+                    " …".to_owned(),
+                    egui::Color32::from_rgb(100, 180, 255),
+                ),
+                DfuState::Success => (
+                    format!(" {}", ph::CHECK_CIRCLE),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                DfuState::Error(_) => (
+                    format!(" {}", ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                _ => (String::new(), egui::Color32::DARK_GRAY),
+            };
+            let label = format!("{} DFU Flash{badge}", ph::LIGHTNING);
+            let active = *tab == BuildPanelTab::Dfu;
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Dfu;
+            }
+        }
     });
 
     ui.separator();
@@ -2449,7 +2608,209 @@ fn show_diag_panel(
         BuildPanelTab::RustAnalyzer => {
             show_ra_tab(ui, lsp_state, lsp_sel, selected_file);
         }
+        BuildPanelTab::Dfu => {
+            show_dfu_tab(ui, dfu_state, dfu_log, dfu_flash_addr);
+        }
     }
+}
+
+// ── DFU Flash tab ─────────────────────────────────────────────────────────────
+
+fn show_dfu_tab(
+    ui: &mut egui::Ui,
+    dfu_state: &Arc<Mutex<DfuState>>,
+    dfu_log: &Arc<Mutex<Vec<String>>>,
+    dfu_flash_addr: &mut String,
+) {
+    let state = dfu_state.lock().unwrap().clone();
+    let log = dfu_log.lock().unwrap().clone();
+
+    // ── Flash address + Clear row ─────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        // Flash address configuration
+        ui.label(
+            egui::RichText::new("Flash addr:")
+                .size(10.5)
+                .color(egui::Color32::GRAY),
+        );
+        ui.add(
+            egui::TextEdit::singleline(dfu_flash_addr)
+                .desired_width(82.0)
+                .font(egui::TextStyle::Monospace),
+        )
+        .on_hover_text(
+            "Start address passed to dfu-util.\n\
+             0x08000000 — standard (no bootloader)\n\
+             0x08002000 — with 8 KB bootloader offset",
+        );
+
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("Std").size(10.0),
+            ))
+            .on_hover_text("0x08000000 — standard flash start (no bootloader)")
+            .clicked()
+        {
+            *dfu_flash_addr = "0x08000000".to_string();
+        }
+
+        if ui
+            .add(egui::Button::new(
+                egui::RichText::new("+BL").size(10.0),
+            ))
+            .on_hover_text("0x08002000 — 8 KB bootloader offset")
+            .clicked()
+        {
+            *dfu_flash_addr = "0x08002000".to_string();
+        }
+
+        ui.separator();
+
+        // Phase progress indicators
+        let build_done = log.iter().any(|l| l.contains("✔ Build OK"));
+        let objcopy_done = log.iter().any(|l| l.contains("✔ firmware.bin ready"));
+
+        let phase_widget = |ui: &mut egui::Ui,
+                            icon: &str,
+                            label: &str,
+                            color: egui::Color32| {
+            ui.label(egui::RichText::new(icon).size(11.5).color(color));
+            ui.label(egui::RichText::new(label).size(11.0).color(color));
+        };
+
+        // Build phase
+        let (b_icon, b_col) = match &state {
+            DfuState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
+            _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+            DfuState::Error(_) if !build_done && !log.is_empty() => {
+                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+            }
+            _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+        };
+        phase_widget(ui, b_icon, "Build", b_col);
+        ui.label(egui::RichText::new("→").size(11.0).color(egui::Color32::from_gray(70)));
+
+        // Objcopy phase
+        let (o_icon, o_col) = match &state {
+            _ if objcopy_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+            DfuState::Flashing | DfuState::Success => {
+                (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
+            }
+            DfuState::Error(_) if build_done && !objcopy_done => {
+                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+            }
+            DfuState::Building if build_done => {
+                (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
+            }
+            _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+        };
+        phase_widget(ui, o_icon, "Objcopy", o_col);
+        ui.label(egui::RichText::new("→").size(11.0).color(egui::Color32::from_gray(70)));
+
+        // Flash phase
+        let (f_icon, f_col) = match &state {
+            DfuState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255)),
+            DfuState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+            DfuState::Error(_) if objcopy_done => {
+                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+            }
+            _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+        };
+        phase_widget(ui, f_icon, "Flash", f_col);
+
+        // Clear button aligned to the right
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{} Clear", ph::X))
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                ))
+                .clicked()
+            {
+                dfu_log.lock().unwrap().clear();
+                *dfu_state.lock().unwrap() = DfuState::Idle;
+            }
+        });
+    });
+
+    ui.separator();
+
+    // ── Error banner ──────────────────────────────────────────────────────────
+    if let DfuState::Error(msg) = &state {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::X_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70)),
+            );
+            ui.label(
+                egui::RichText::new(msg.lines().next().unwrap_or("Error"))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+
+    // ── Success banner ────────────────────────────────────────────────────────
+    if matches!(state, DfuState::Success) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::CHECK_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100)),
+            );
+            ui.label(
+                egui::RichText::new("Device programmed successfully!")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+
+    // ── Scrollable log ────────────────────────────────────────────────────────
+    egui::ScrollArea::vertical()
+        .id_salt("dfu_log_scroll")
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            if log.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "No output yet.\n\
+                         Click 'Flash USB' in the toolbar to start flashing.",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::GRAY),
+                );
+                return;
+            }
+
+            for line in &log {
+                // Colour-code lines by content
+                let color = if line.starts_with("✔") {
+                    egui::Color32::from_rgb(80, 200, 100)
+                } else if line.starts_with("▶") {
+                    egui::Color32::from_rgb(100, 180, 255)
+                } else if line.contains("error") && !line.contains("0 error") {
+                    egui::Color32::from_rgb(220, 100, 80)
+                } else if line.contains("warning") && !line.contains("0 warning") {
+                    egui::Color32::from_rgb(210, 170, 40)
+                } else {
+                    egui::Color32::from_rgb(175, 180, 192)
+                };
+                ui.label(
+                    egui::RichText::new(line.as_str())
+                        .size(10.5)
+                        .monospace()
+                        .color(color),
+                );
+            }
+        });
 }
 
 // ── Cargo Check tab ───────────────────────────────────────────────────────────
