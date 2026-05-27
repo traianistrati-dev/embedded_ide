@@ -5,6 +5,7 @@ use app::AppIde;
 pub mod build;
 pub mod dfu;
 pub mod lsp;
+pub mod openocd;
 pub mod panels;
 
 fn main() -> eframe::Result<()> {

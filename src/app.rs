@@ -1,5 +1,6 @@
 use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
+use crate::openocd::{self, OpenOcdState};
 use crate::lsp::{self, LspStatus};
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::McuType;
@@ -157,6 +158,10 @@ pub struct AppIde {
     dfu_sel_programmer: usize,
     /// Flash start address sent to dfu-util (editable; default = 0x08000000)
     dfu_flash_addr: String,
+    /// Shared state for OpenOCD SWD flash operations
+    openocd_state: Arc<Mutex<OpenOcdState>>,
+    /// Target config file passed to OpenOCD (e.g. "target/stm32f1x.cfg")
+    openocd_target_cfg: String,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -238,6 +243,8 @@ impl AppIde {
         let dfu_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let openocd_state: Arc<Mutex<OpenOcdState>> =
+            Arc::new(Mutex::new(OpenOcdState::Idle));
 
         // Scan immediately on startup (non-blocking — runs in background thread)
         dfu::detect_dfu(
@@ -266,6 +273,8 @@ impl AppIde {
             dfu_programmers,
             dfu_sel_programmer: 0,
             dfu_flash_addr: "0x08000000".to_string(),
+            openocd_state,
+            openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -1134,7 +1143,7 @@ impl eframe::App for AppIde {
                         ui.separator();
                         ui.add_space(4.0);
 
-                        // ── USB DFU section ───────────────────────────────────
+                        // ── USB DFU + SWD section ─────────────────────────────
                         let dfu_guard   = self.dfu_state.lock().unwrap();
                         let dfu_busy    = dfu_guard.is_busy();
                         let dfu_label   = dfu_guard.status_label().to_string();
@@ -1143,8 +1152,23 @@ impl eframe::App for AppIde {
                         let device_ok   = matches!(*dfu_guard, DfuState::DeviceFound(_));
                         drop(dfu_guard);
 
-                        // Keep UI refreshing while DFU operation is in progress
-                        if dfu_busy {
+                        let ocd_busy = self.openocd_state.lock().unwrap().is_busy();
+                        let any_busy = dfu_busy || ocd_busy;
+
+                        // Determine if the selected programmer supports SWD flashing
+                        let (is_swd_capable, sel_interface_cfg) = {
+                            let progs = self.dfu_programmers.lock().unwrap();
+                            let kind = progs
+                                .get(self.dfu_sel_programmer)
+                                .map(|p| p.kind)
+                                .unwrap_or("");
+                            let swd = matches!(kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
+                            let cfg = openocd::interface_cfg_for_kind(kind).to_string();
+                            (swd, cfg)
+                        };
+
+                        // Keep UI refreshing while any flash operation is running
+                        if any_busy {
                             ui.ctx()
                                 .request_repaint_after(std::time::Duration::from_millis(120));
                         }
@@ -1174,8 +1198,8 @@ impl eframe::App for AppIde {
 
                         ui.add_space(2.0);
 
-                        // ⚡ Flash via USB button — enabled only when device found
-                        let flash_enabled = device_ok && !dfu_busy && project_files.is_some();
+                        // ⚡ Flash via USB (DFU) — enabled only when DFU device detected
+                        let flash_enabled = device_ok && !any_busy && project_files.is_some();
                         let flash_btn = ui.add_enabled(
                             flash_enabled,
                             egui::Button::new(
@@ -1224,15 +1248,76 @@ impl eframe::App for AppIde {
                              • llvm-objcopy, arm-none-eabi-objcopy, or cargo-binutils",
                         );
 
+                        ui.add_space(2.0);
+
+                        // 🔗 Flash via SWD (OpenOCD) — enabled when SWD programmer is selected
+                        let flash_swd_enabled =
+                            is_swd_capable && !any_busy && project_files.is_some();
+                        let flash_swd_btn = ui.add_enabled(
+                            flash_swd_enabled,
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Flash SWD", ph::LIGHTNING))
+                                    .size(11.0)
+                                    .color(if flash_swd_enabled {
+                                        egui::Color32::from_rgb(255, 165, 50)
+                                    } else {
+                                        egui::Color32::GRAY
+                                    }),
+                            ),
+                        );
+                        if flash_swd_btn.clicked() {
+                            if let Some(config) = self.selected_mcu_type.project_config() {
+                                let build_dir =
+                                    std::env::temp_dir().join("embedded_ide_0_check");
+                                let code = self.generated_code.clone();
+                                if project_gen::write_project(
+                                    &build_dir,
+                                    &config,
+                                    &code,
+                                    &self.user_src_files,
+                                )
+                                .is_ok()
+                                {
+                                    self.build_tab = BuildPanelTab::Dfu;
+                                    openocd::start_flash(
+                                        build_dir,
+                                        config.target.to_string(),
+                                        config.pkg_name.to_string(),
+                                        sel_interface_cfg.clone(),
+                                        self.openocd_target_cfg.clone(),
+                                        Arc::clone(&self.openocd_state),
+                                        Arc::clone(&self.dfu_log),
+                                        self.egui_ctx.clone(),
+                                    );
+                                }
+                            }
+                        }
+                        flash_swd_btn.on_hover_text(
+                            "Build with --release, then program via SWD using OpenOCD.\n\
+                             Requires:\n\
+                             • OpenOCD in PATH  (winget install openocd)\n\
+                             • ST-Link/J-Link/CMSIS-DAP driver installed\n\
+                             • Target .cfg selected in the DFU tab (e.g. target/stm32f1x.cfg)\n\
+                             • SWD wiring: SWDIO + SWCLK + GND",
+                        );
+
                         ui.add_space(4.0);
 
-                        // DFU status label
+                        // Status label — shows OpenOCD status when active, otherwise DFU status
+                        let (show_label, show_color, show_detail) = {
+                            let ocd = self.openocd_state.lock().unwrap();
+                            if !matches!(*ocd, OpenOcdState::Idle) {
+                                (ocd.status_label().to_string(), ocd.status_color(), None)
+                            } else {
+                                (dfu_label.clone(), dfu_color, dfu_detail)
+                            }
+                        };
                         let status_widget = ui.label(
-                            egui::RichText::new(&dfu_label)
+                            egui::RichText::new(&show_label)
                                 .size(10.5)
-                                .color(dfu_color),
+                                .color(show_color),
                         );
-                        if let Some(detail) = dfu_detail {
+                        if let Some(detail) = show_detail {
                             status_widget.on_hover_text(detail);
                         }
 
@@ -1261,6 +1346,7 @@ impl eframe::App for AppIde {
                     let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
                     let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
                     let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)
+                        || !matches!(*self.openocd_state.lock().unwrap(), OpenOcdState::Idle)
                         || !self.dfu_log.lock().unwrap().is_empty();
                     let show_panel = cargo_has || lsp_active || dfu_active;
 
@@ -1329,6 +1415,8 @@ impl eframe::App for AppIde {
                                     &self.dfu_programmers,
                                     &mut self.dfu_sel_programmer,
                                     &mut self.dfu_flash_addr,
+                                    &self.openocd_state,
+                                    &mut self.openocd_target_cfg,
                                     &mut self.build_tab,
                                     &mut self.selected_diagnostic,
                                     &mut self.lsp_selected_diagnostic,
@@ -2506,6 +2594,8 @@ fn show_diag_panel(
     dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
     dfu_sel_programmer: &mut usize,
     dfu_flash_addr: &mut String,
+    openocd_state: &Arc<Mutex<OpenOcdState>>,
+    openocd_target_cfg: &mut String,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
@@ -2591,28 +2681,32 @@ fn show_diag_panel(
 
         ui.separator();
 
-        // DFU tab button
+        // DFU / SWD tab button — badge reflects whichever operation is active
         {
             let dfu = dfu_state.lock().unwrap();
-            let (badge, col) = match &*dfu {
-                DfuState::Building | DfuState::Detecting => {
+            let ocd = openocd_state.lock().unwrap();
+            let (badge, col) = if dfu.is_busy() || ocd.is_busy() {
+                if matches!(*dfu, DfuState::Flashing) || matches!(*ocd, OpenOcdState::Flashing) {
+                    (" …".to_owned(), egui::Color32::from_rgb(100, 180, 255))
+                } else {
                     (" …".to_owned(), egui::Color32::from_rgb(220, 180, 60))
                 }
-                DfuState::Flashing => (
-                    " …".to_owned(),
-                    egui::Color32::from_rgb(100, 180, 255),
-                ),
-                DfuState::Success => (
+            } else if matches!(*dfu, DfuState::Success) || matches!(*ocd, OpenOcdState::Success) {
+                (
                     format!(" {}", ph::CHECK_CIRCLE),
                     egui::Color32::from_rgb(80, 200, 100),
-                ),
-                DfuState::Error(_) => (
+                )
+            } else if matches!(*dfu, DfuState::Error(_)) || matches!(*ocd, OpenOcdState::Error(_)) {
+                (
                     format!(" {}", ph::X_CIRCLE),
                     egui::Color32::from_rgb(220, 80, 70),
-                ),
-                _ => (String::new(), egui::Color32::DARK_GRAY),
+                )
+            } else {
+                (String::new(), egui::Color32::DARK_GRAY)
             };
-            let label = format!("{} DFU Flash{badge}", ph::LIGHTNING);
+            drop(ocd);
+            drop(dfu);
+            let label = format!("{} Flash{badge}", ph::LIGHTNING);
             let active = *tab == BuildPanelTab::Dfu;
             let btn = ui.add(
                 egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
@@ -2639,7 +2733,16 @@ fn show_diag_panel(
             show_ra_tab(ui, lsp_state, lsp_sel, selected_file);
         }
         BuildPanelTab::Dfu => {
-            show_dfu_tab(ui, dfu_state, dfu_log, dfu_programmers, dfu_sel_programmer, dfu_flash_addr);
+            show_dfu_tab(
+                ui,
+                dfu_state,
+                dfu_log,
+                dfu_programmers,
+                dfu_sel_programmer,
+                dfu_flash_addr,
+                openocd_state,
+                openocd_target_cfg,
+            );
         }
     }
 }
@@ -2653,10 +2756,18 @@ fn show_dfu_tab(
     dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
     dfu_sel_programmer: &mut usize,
     dfu_flash_addr: &mut String,
+    openocd_state: &Arc<Mutex<OpenOcdState>>,
+    openocd_target_cfg: &mut String,
 ) {
-    let state = dfu_state.lock().unwrap().clone();
-    let log   = dfu_log.lock().unwrap().clone();
-    let progs = dfu_programmers.lock().unwrap().clone();
+    let state     = dfu_state.lock().unwrap().clone();
+    let ocd_state = openocd_state.lock().unwrap().clone();
+    let log       = dfu_log.lock().unwrap().clone();
+    let progs     = dfu_programmers.lock().unwrap().clone();
+
+    // Determine selected programmer kind for adaptive config UI
+    let sel_kind      = progs.get(*dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
+    let is_swd        = matches!(sel_kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
+    let interface_cfg = openocd::interface_cfg_for_kind(sel_kind);
 
     // ── Programmer selector ComboBox ──────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -2738,51 +2849,11 @@ fn show_dfu_tab(
 
     ui.separator();
 
-    // ── Flash address + phase row ─────────────────────────────────────────────
+    // ── Config row — adaptive: SWD (OpenOCD) or DFU ───────────────────────────
     ui.horizontal(|ui| {
-        // Flash address configuration
-        ui.label(
-            egui::RichText::new("Flash addr:")
-                .size(10.5)
-                .color(egui::Color32::GRAY),
-        );
-        ui.add(
-            egui::TextEdit::singleline(dfu_flash_addr)
-                .desired_width(82.0)
-                .font(egui::TextStyle::Monospace),
-        )
-        .on_hover_text(
-            "Start address passed to dfu-util.\n\
-             0x08000000 — standard (no bootloader)\n\
-             0x08002000 — with 8 KB bootloader offset",
-        );
-
-        if ui
-            .add(egui::Button::new(
-                egui::RichText::new("Std").size(10.0),
-            ))
-            .on_hover_text("0x08000000 — standard flash start (no bootloader)")
-            .clicked()
-        {
-            *dfu_flash_addr = "0x08000000".to_string();
-        }
-
-        if ui
-            .add(egui::Button::new(
-                egui::RichText::new("+BL").size(10.0),
-            ))
-            .on_hover_text("0x08002000 — 8 KB bootloader offset")
-            .clicked()
-        {
-            *dfu_flash_addr = "0x08002000".to_string();
-        }
-
-        ui.separator();
-
-        // Phase progress indicators
         let build_done = log.iter().any(|l| l.contains("✔ Build OK"));
-        let objcopy_done = log.iter().any(|l| l.contains("✔ firmware.bin ready"));
 
+        // Helper: render a phase indicator icon + label
         let phase_widget = |ui: &mut egui::Ui,
                             icon: &str,
                             label: &str,
@@ -2791,47 +2862,173 @@ fn show_dfu_tab(
             ui.label(egui::RichText::new(label).size(11.0).color(color));
         };
 
-        // Build phase
-        let (b_icon, b_col) = match &state {
-            DfuState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
-            _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
-            DfuState::Error(_) if !build_done && !log.is_empty() => {
-                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-            }
-            _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
-        };
-        phase_widget(ui, b_icon, "Build", b_col);
-        ui.label(egui::RichText::new("→").size(11.0).color(egui::Color32::from_gray(70)));
+        if is_swd {
+            // ── SWD / OpenOCD config ──────────────────────────────────────────
+            ui.label(
+                egui::RichText::new("Interface:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.label(
+                egui::RichText::new(interface_cfg)
+                    .size(10.5)
+                    .monospace()
+                    .color(egui::Color32::from_rgb(120, 160, 200)),
+            )
+            .on_hover_text("OpenOCD interface config — auto-selected from programmer type");
 
-        // Objcopy phase
-        let (o_icon, o_col) = match &state {
-            _ if objcopy_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
-            DfuState::Flashing | DfuState::Success => {
-                (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
-            }
-            DfuState::Error(_) if build_done && !objcopy_done => {
-                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-            }
-            DfuState::Building if build_done => {
-                (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
-            }
-            _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
-        };
-        phase_widget(ui, o_icon, "Objcopy", o_col);
-        ui.label(egui::RichText::new("→").size(11.0).color(egui::Color32::from_gray(70)));
+            ui.separator();
 
-        // Flash phase
-        let (f_icon, f_col) = match &state {
-            DfuState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255)),
-            DfuState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
-            DfuState::Error(_) if objcopy_done => {
-                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-            }
-            _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
-        };
-        phase_widget(ui, f_icon, "Flash", f_col);
+            ui.label(
+                egui::RichText::new("Target:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(openocd_target_cfg)
+                    .desired_width(140.0)
+                    .font(egui::TextStyle::Monospace),
+            )
+            .on_hover_text(
+                "OpenOCD target config file.\n\
+                 Examples: target/stm32f1x.cfg, target/stm32f4x.cfg\n\
+                 Full list in your OpenOCD install under scripts/target/",
+            );
 
-        // Clear button aligned to the right
+            // Quick-select presets for common STM32 families
+            for (label, cfg, tip) in [
+                ("F1", "target/stm32f1x.cfg", "STM32F1 (F103, F100, F105, …)"),
+                ("F4", "target/stm32f4x.cfg", "STM32F4 (F407, F411, F401, …)"),
+                ("H7", "target/stm32h7x.cfg", "STM32H7 (H743, H750, …)"),
+                ("L4", "target/stm32l4x.cfg", "STM32L4 (L432, L476, L496, …)"),
+            ] {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(label).size(10.0)))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    *openocd_target_cfg = cfg.to_string();
+                }
+            }
+
+            ui.separator();
+
+            // SWD phases: Build → Flash (no objcopy — OpenOCD programs ELF directly)
+            let (b_icon, b_col) = match &ocd_state {
+                OpenOcdState::Building => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
+                }
+                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                OpenOcdState::Error(_) if !build_done && !log.is_empty() => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, b_icon, "Build", b_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (f_icon, f_col) = match &ocd_state {
+                OpenOcdState::Flashing => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255))
+                }
+                OpenOcdState::Success => {
+                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
+                }
+                OpenOcdState::Error(_) if build_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, f_icon, "Flash SWD", f_col);
+        } else {
+            // ── DFU config ────────────────────────────────────────────────────
+            ui.label(
+                egui::RichText::new("Flash addr:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(dfu_flash_addr)
+                    .desired_width(82.0)
+                    .font(egui::TextStyle::Monospace),
+            )
+            .on_hover_text(
+                "Start address passed to dfu-util.\n\
+                 0x08000000 — standard (no bootloader)\n\
+                 0x08002000 — with 8 KB bootloader offset",
+            );
+
+            if ui
+                .add(egui::Button::new(egui::RichText::new("Std").size(10.0)))
+                .on_hover_text("0x08000000 — standard flash start (no bootloader)")
+                .clicked()
+            {
+                *dfu_flash_addr = "0x08000000".to_string();
+            }
+            if ui
+                .add(egui::Button::new(egui::RichText::new("+BL").size(10.0)))
+                .on_hover_text("0x08002000 — 8 KB bootloader offset")
+                .clicked()
+            {
+                *dfu_flash_addr = "0x08002000".to_string();
+            }
+
+            ui.separator();
+
+            // DFU phases: Build → Objcopy → Flash
+            let objcopy_done = log.iter().any(|l| l.contains("✔ firmware.bin ready"));
+
+            let (b_icon, b_col) = match &state {
+                DfuState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
+                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Error(_) if !build_done && !log.is_empty() => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, b_icon, "Build", b_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (o_icon, o_col) = match &state {
+                _ if objcopy_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Flashing | DfuState::Success => {
+                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
+                }
+                DfuState::Error(_) if build_done && !objcopy_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                DfuState::Building if build_done => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, o_icon, "Objcopy", o_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (f_icon, f_col) = match &state {
+                DfuState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255)),
+                DfuState::Success  => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Error(_) if objcopy_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, f_icon, "Flash", f_col);
+        }
+
+        // Clear button — right-aligned, always visible, resets both states + log
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::new(
@@ -2842,14 +3039,15 @@ fn show_dfu_tab(
                 .clicked()
             {
                 dfu_log.lock().unwrap().clear();
-                *dfu_state.lock().unwrap() = DfuState::Idle;
+                *dfu_state.lock().unwrap()     = DfuState::Idle;
+                *openocd_state.lock().unwrap() = OpenOcdState::Idle;
             }
         });
     });
 
     ui.separator();
 
-    // ── Error banner ──────────────────────────────────────────────────────────
+    // ── DFU Error / Success banners ───────────────────────────────────────────
     if let DfuState::Error(msg) = &state {
         ui.horizontal(|ui| {
             ui.label(
@@ -2858,16 +3056,17 @@ fn show_dfu_tab(
                     .color(egui::Color32::from_rgb(220, 80, 70)),
             );
             ui.label(
-                egui::RichText::new(msg.lines().next().unwrap_or("Error"))
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(220, 80, 70))
-                    .strong(),
+                egui::RichText::new(format!(
+                    "DFU: {}",
+                    msg.lines().next().unwrap_or("Error")
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(220, 80, 70))
+                .strong(),
             );
         });
         ui.separator();
     }
-
-    // ── Success banner ────────────────────────────────────────────────────────
     if matches!(state, DfuState::Success) {
         ui.horizontal(|ui| {
             ui.label(
@@ -2876,7 +3075,7 @@ fn show_dfu_tab(
                     .color(egui::Color32::from_rgb(80, 200, 100)),
             );
             ui.label(
-                egui::RichText::new("Device programmed successfully!")
+                egui::RichText::new("Device programmed via DFU successfully!")
                     .size(11.0)
                     .color(egui::Color32::from_rgb(80, 200, 100))
                     .strong(),
@@ -2885,7 +3084,44 @@ fn show_dfu_tab(
         ui.separator();
     }
 
-    // ── Scrollable log ────────────────────────────────────────────────────────
+    // ── OpenOCD Error / Success banners ───────────────────────────────────────
+    if let OpenOcdState::Error(msg) = &ocd_state {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::X_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70)),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "SWD: {}",
+                    msg.lines().next().unwrap_or("Error")
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(220, 80, 70))
+                .strong(),
+            );
+        });
+        ui.separator();
+    }
+    if matches!(ocd_state, OpenOcdState::Success) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::CHECK_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100)),
+            );
+            ui.label(
+                egui::RichText::new("Device programmed via SWD successfully!")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+
+    // ── Scrollable log (shared between DFU and OpenOCD operations) ────────────
     egui::ScrollArea::vertical()
         .id_salt("dfu_log_scroll")
         .stick_to_bottom(true)
@@ -2895,7 +3131,8 @@ fn show_dfu_tab(
                 ui.label(
                     egui::RichText::new(
                         "No output yet.\n\
-                         Click 'Flash USB' in the toolbar to start flashing.",
+                         • Flash USB  — DFU mode (STM32 with BOOT0 = 1)\n\
+                         • Flash SWD  — ST-Link / J-Link via OpenOCD",
                     )
                     .size(11.0)
                     .color(egui::Color32::GRAY),
@@ -2904,7 +3141,7 @@ fn show_dfu_tab(
             }
 
             for line in &log {
-                // Colour-code lines by content
+                // Colour-code lines by content prefix / keywords
                 let color = if line.starts_with("✔") {
                     egui::Color32::from_rgb(80, 200, 100)
                 } else if line.starts_with("▶") {

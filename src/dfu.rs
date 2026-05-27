@@ -320,11 +320,13 @@ pub fn start_flash(
         push_log(&dfu_log, &ctx, "✔ Build OK");
 
         // ── Phase 2: ELF → BIN ────────────────────────────────────────────────
+        // The Cargo.toml template names the binary "{pkg_name}-project"
+        let bin_name = format!("{pkg_name}-project");
         let elf = project_dir
             .join("target")
             .join(&target)
             .join("release")
-            .join(&pkg_name);
+            .join(&bin_name);
         let bin = project_dir.join("firmware.bin");
 
         push_log(&dfu_log, &ctx, "▶ Converting ELF → BIN …");
