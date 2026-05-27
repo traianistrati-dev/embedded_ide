@@ -53,6 +53,8 @@ pub struct Mcu {
     selected_pin: Option<usize>,
     /// Function whose ⓘ info window is open (None = closed)
     show_info: Option<PinFunction>,
+    /// Vertical scroll offset (pixels) for the function-list panel inside the chip.
+    fn_scroll_offset: f32,
 }
 
 impl Mcu {
@@ -73,6 +75,7 @@ impl Mcu {
             right_pins,
             selected_pin: None,
             show_info: None,
+            fn_scroll_offset: 0.0,
         }
     }
 
@@ -296,13 +299,17 @@ impl Mcu {
             }
         }
 
-        // Toggle selected_pin (click again to deselect)
+        // Toggle selected_pin (click again to deselect); reset scroll on change.
         if let Some(n) = clicked_pin {
+            let prev = self.selected_pin;
             self.selected_pin = if self.selected_pin == Some(n) {
                 None
             } else {
                 Some(n)
             };
+            if prev != self.selected_pin {
+                self.fn_scroll_offset = 0.0;
+            }
         }
 
         // ── Inner chip panel ─────────────────────────────────────────────────
@@ -367,21 +374,83 @@ impl Mcu {
                 egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 120)),
             );
 
-            // Function buttons
+            // ── Function button list (scrollable) ──────────────────────────
             let info_btn_w = 22.0;
-            let gap = 4.0;
-            let btn_w = chip_rect.width() - 24.0 - info_btn_w - gap;
-            let btn_h = 28.0;
-            let btn_x = chip_rect.left() + 12.0;
-            let mut btn_y = sep_y + 12.0;
+            let gap       = 4.0;
+            let btn_h     = 28.0;
+            let item_h    = btn_h + 6.0;
+            let btn_x     = chip_rect.left() + 12.0;
+
+            // Scrollable area bounds inside the chip
+            let content_top    = sep_y + 12.0;
+            let content_bottom = chip_rect.bottom() - 8.0;
+            let available_h    = (content_bottom - content_top).max(0.0);
+            let total_h        = funcs.len() as f32 * item_h;
+            let max_scroll     = (total_h - available_h).max(0.0);
+
+            // Clamp scroll offset (in case the window was resized)
+            self.fn_scroll_offset = self.fn_scroll_offset.clamp(0.0, max_scroll);
+
+            // Reserve 7 px on the right for the optional scrollbar track
+            let sb_w   = 4.0;
+            let sb_gap = 3.0;
+            let btn_w  = chip_rect.width() - 24.0 - info_btn_w - gap - sb_w - sb_gap;
+
+            // Scrollable clip region (excludes the scrollbar strip)
+            let list_rect = egui::Rect::from_min_max(
+                egui::pos2(btn_x - 4.0, content_top),
+                egui::pos2(chip_rect.right() - sb_w - sb_gap - 1.0, content_bottom),
+            );
+
+            // Handle mouse-wheel scrolling when the pointer is inside the list
+            let pointer_in_list = ui.input(|i| {
+                i.pointer.hover_pos()
+                    .map(|p| list_rect.contains(p))
+                    .unwrap_or(false)
+            });
+            if pointer_in_list && max_scroll > 0.0 {
+                let delta = ui.input(|i| i.smooth_scroll_delta.y);
+                if delta != 0.0 {
+                    self.fn_scroll_offset =
+                        (self.fn_scroll_offset - delta).clamp(0.0, max_scroll);
+                }
+            }
+
+            // Scrollbar thumb (drawn with unclipped painter so it's always visible)
+            if max_scroll > 0.0 {
+                let sb_x        = chip_rect.right() - sb_w - 2.0;
+                let track_h     = available_h;
+                let thumb_h     = ((available_h / total_h) * track_h).max(16.0);
+                let thumb_top   = content_top
+                    + (self.fn_scroll_offset / max_scroll) * (track_h - thumb_h);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(sb_x, thumb_top),
+                        egui::vec2(sb_w, thumb_h),
+                    ),
+                    sb_w / 2.0,
+                    egui::Color32::from_rgba_premultiplied(180, 180, 210, 140),
+                );
+            }
+
+            // Clipped painter — buttons never draw outside content_top..content_bottom
+            let list_painter = painter.with_clip_rect(list_rect);
+
+            let mut btn_y = content_top - self.fn_scroll_offset;
 
             for (i, func) in funcs.iter().enumerate() {
-                let btn_rect =
-                    egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, btn_h));
+                let btn_rect = egui::Rect::from_min_size(
+                    egui::pos2(btn_x, btn_y),
+                    egui::vec2(btn_w, btn_h),
+                );
                 let info_rect = egui::Rect::from_min_size(
                     egui::pos2(btn_x + btn_w + gap, btn_y),
                     egui::vec2(info_btn_w, btn_h),
                 );
+
+                // Skip interaction (but not drawing) for fully off-screen items
+                let visible = btn_rect.bottom() > content_top
+                    && btn_rect.top() < content_bottom;
 
                 let is_sel = func == &selected_func;
                 let bg = if is_sel {
@@ -390,10 +459,10 @@ impl Mcu {
                     egui::Color32::from_rgb(65, 65, 80)
                 };
 
-                painter.rect_filled(btn_rect, 5.0, bg);
+                list_painter.rect_filled(btn_rect, 5.0, bg);
 
-                // Label: short label on the left, full label on the right
-                painter.text(
+                // Label: short label — full label
+                list_painter.text(
                     btn_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     format!("{}  —  {}", func.short_label(), func.label()),
@@ -408,62 +477,63 @@ impl Mcu {
                 } else {
                     egui::Color32::from_rgb(55, 55, 75)
                 };
-                painter.rect_filled(info_rect, 5.0, info_bg);
-                // Draw circle outline
+                list_painter.rect_filled(info_rect, 5.0, info_bg);
                 let ic = info_rect.center();
                 let ir = 7.5_f32;
-                painter.circle_stroke(ic, ir, egui::Stroke::new(1.5, egui::Color32::WHITE));
-                // Draw the "i" glyph: top dot + vertical stem
-                painter.circle_filled(egui::pos2(ic.x, ic.y - 2.5), 1.3, egui::Color32::WHITE);
-                painter.line_segment(
+                list_painter.circle_stroke(ic, ir, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                list_painter.circle_filled(
+                    egui::pos2(ic.x, ic.y - 2.5),
+                    1.3,
+                    egui::Color32::WHITE,
+                );
+                list_painter.line_segment(
                     [egui::pos2(ic.x, ic.y - 0.5), egui::pos2(ic.x, ic.y + 4.0)],
                     egui::Stroke::new(1.8, egui::Color32::WHITE),
                 );
 
-                // Hover / click — main button
-                let btn_response = ui.interact(
-                    btn_rect,
-                    ui.id().with(("fn_btn", num, i)),
-                    egui::Sense::click(),
-                );
-                if btn_response.hovered() {
-                    painter.rect_stroke(
+                // Hover / click — only for visible buttons
+                if visible {
+                    let btn_response = ui.interact(
                         btn_rect,
-                        5.0,
-                        egui::Stroke::new(1.5, egui::Color32::WHITE),
-                        egui::StrokeKind::Middle,
+                        ui.id().with(("fn_btn", num, i)),
+                        egui::Sense::click(),
                     );
-                }
-                if btn_response.clicked() {
-                    // Click on the already-selected function → deselect (Unset);
-                    // click on a different function → select it.
-                    let next = if func == &selected_func {
-                        PinFunction::Unset
-                    } else {
-                        func.clone()
-                    };
-                    new_function = Some((num, next));
-                }
+                    if btn_response.hovered() {
+                        list_painter.rect_stroke(
+                            btn_rect,
+                            5.0,
+                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                    if btn_response.clicked() {
+                        let next = if func == &selected_func {
+                            PinFunction::Unset
+                        } else {
+                            func.clone()
+                        };
+                        new_function = Some((num, next));
+                    }
 
-                // Hover / click — info button
-                let info_response = ui.interact(
-                    info_rect,
-                    ui.id().with(("info_btn", num, i)),
-                    egui::Sense::click(),
-                );
-                if info_response.hovered() {
-                    painter.rect_stroke(
+                    let info_response = ui.interact(
                         info_rect,
-                        5.0,
-                        egui::Stroke::new(1.5, egui::Color32::WHITE),
-                        egui::StrokeKind::Middle,
+                        ui.id().with(("info_btn", num, i)),
+                        egui::Sense::click(),
                     );
-                }
-                if info_response.clicked() {
-                    toggle_info = Some(func.clone());
+                    if info_response.hovered() {
+                        list_painter.rect_stroke(
+                            info_rect,
+                            5.0,
+                            egui::Stroke::new(1.5, egui::Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                    if info_response.clicked() {
+                        toggle_info = Some(func.clone());
+                    }
                 }
 
-                btn_y += btn_h + 6.0;
+                btn_y += item_h;
             }
         } else {
             // No pin selected — show the chip name
