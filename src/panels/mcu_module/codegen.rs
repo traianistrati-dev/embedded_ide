@@ -105,7 +105,6 @@ fn invariant_header(mcu_name: &str) -> String {
          // MCU: {mcu_name} | HAL: stm32f1xx-hal\n\n\
          #![no_std]\n\
          #![no_main]\n\n\
-         mod pins;\n\
          use panic_halt as _;\n\
          use cortex_m_rt::entry;\n\n"
     )

@@ -103,58 +103,48 @@ pub fn start_flash(
     ctx.request_repaint();
 
     thread::spawn(move || {
-        // ── Phase 1: cargo build --release ────────────────────────────────────
+        // ── Phase 1: cargo build --release (with auto-clean retry) ───────────
         push_log(
             &log,
             &ctx,
             &format!("▶ cargo build --release --target {target} …"),
         );
 
-        let mut cargo_cmd = Command::new("cargo");
-        cargo_cmd
-            .current_dir(&project_dir)
-            .args(["build", "--release", "--target", &target])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        if !run_cargo_build(&project_dir, &target, &log, &ctx) {
+            // If the failure is a stale device.x cache, auto-clean and retry once.
+            let is_device_x = log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("cannot find linker script device.x"));
 
-        // Suppress console window on Windows
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cargo_cmd.creation_flags(0x0800_0000);
-        }
-
-        let mut child = match cargo_cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                set(
-                    &state,
+            if is_device_x {
+                push_log(
+                    &log,
                     &ctx,
-                    OpenOcdState::Error(format!("Cannot run cargo: {e}")),
+                    "⚠ Stale linker-script cache (device.x missing) — \
+                     running `cargo clean` and retrying…",
                 );
-                return;
-            }
-        };
-
-        // Stream cargo stderr line by line
-        if let Some(stderr) = child.stderr.take() {
-            for line in BufReader::new(stderr).lines() {
-                if let Ok(line) = line {
-                    push_log(&log, &ctx, &line);
+                cargo_clean(&project_dir);
+                push_log(
+                    &log,
+                    &ctx,
+                    &format!("▶ cargo build --release --target {target} … (retry)"),
+                );
+                if !run_cargo_build(&project_dir, &target, &log, &ctx) {
+                    set(
+                        &state,
+                        &ctx,
+                        OpenOcdState::Error(
+                            "cargo build --release failed after `cargo clean`.\n\
+                             Fix compilation errors before flashing.\n\
+                             See the log for details."
+                                .into(),
+                        ),
+                    );
+                    return;
                 }
-            }
-        }
-
-        match child.wait() {
-            Err(e) => {
-                set(
-                    &state,
-                    &ctx,
-                    OpenOcdState::Error(format!("Cannot run cargo: {e}")),
-                );
-                return;
-            }
-            Ok(s) if !s.success() => {
+            } else {
                 set(
                     &state,
                     &ctx,
@@ -167,7 +157,6 @@ pub fn start_flash(
                 );
                 return;
             }
-            _ => {}
         }
 
         push_log(&log, &ctx, "✔ Build OK");
@@ -298,4 +287,58 @@ fn push_log(log: &Arc<Mutex<Vec<String>>>, ctx: &eframe::egui::Context, line: &s
 fn set(state: &Arc<Mutex<OpenOcdState>>, ctx: &eframe::egui::Context, next: OpenOcdState) {
     *state.lock().unwrap() = next;
     ctx.request_repaint();
+}
+
+/// Runs `cargo build --release --target <target>` in `project_dir`, streaming
+/// each stderr line into `log`.  Returns `true` on success.
+fn run_cargo_build(
+    project_dir: &std::path::Path,
+    target: &str,
+    log: &Arc<Mutex<Vec<String>>>,
+    ctx: &eframe::egui::Context,
+) -> bool {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(project_dir)
+        .args(["build", "--release", "--target", target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            push_log(log, ctx, &format!("Cannot run cargo: {e}"));
+            return false;
+        }
+    };
+
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).lines().flatten() {
+            push_log(log, ctx, &line);
+        }
+    }
+
+    matches!(child.wait(), Ok(s) if s.success())
+}
+
+/// Runs `cargo clean` in `project_dir` (blocking, output suppressed).
+fn cargo_clean(project_dir: &std::path::Path) {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(project_dir)
+        .args(["clean"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+
+    let _ = cmd.output();
 }

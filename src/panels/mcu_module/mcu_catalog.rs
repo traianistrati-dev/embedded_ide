@@ -98,7 +98,7 @@ impl McuType {
                 flash_size:     "64K",
                 ram_origin:     "0x20000000",
                 ram_size:       "20K",
-                hal_dep:        r#"stm32f1xx-hal = { version = "0.10", features = ["stm32f103", "medium"] }"#,
+                hal_dep:        r#"stm32f1xx-hal = { version = "0.10", features = ["stm32f103", "medium", "rt"] }"#,
                 probe_chip:     "STM32F103C8",
                 memory_comment: "STM32F103C8T6  —  64 KiB Flash / 20 KiB RAM",
                 toolchain:      ToolchainKind::RustEmbedded,

@@ -118,10 +118,12 @@ struct PersistedState {
     /// Explicitly-created empty folders inside src/.
     user_src_folders: Vec<String>,
     /// Display name of the last opened/exported project folder.
-    /// Stored as a plain String (not PathBuf) to avoid any platform
-    /// path-separator issues with eframe's JSON storage on Windows.
     #[serde(default)]
     project_name: Option<String>,
+    /// Full filesystem path of the last opened project root (UTF-8 string).
+    /// On startup the IDE reopens this folder automatically if it still exists.
+    #[serde(default)]
+    project_dir: Option<String>,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -197,6 +199,9 @@ pub struct AppIde {
     confirm_new_project: bool,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
+    /// Full path to the last opened project root folder.
+    /// Persisted so the IDE can reopen it automatically on next startup.
+    project_dir: Option<std::path::PathBuf>,
     // ── Filesystem watcher ────────────────────────────────────────────────────
     /// Receives filesystem events from the background notify thread.
     /// Polled every frame; used to detect files created/removed by external tools.
@@ -220,6 +225,13 @@ impl AppIde {
 
         let mcu = create_stm32f103c8tx();
         let generated_code = mcu.fresh_main_rs();
+
+        // Pre-compute the saved project dir so we can use it both in the
+        // Self initialiser and in the post-construction load call below.
+        let saved_project_dir: Option<std::path::PathBuf> = persisted
+            .project_dir
+            .as_deref()
+            .map(std::path::PathBuf::from);
 
         // ── Start filesystem watcher on the build workspace src/ dir ─────────
         // The watcher runs on a background thread and sends events through a
@@ -259,7 +271,7 @@ impl AppIde {
         // Start persistent USB hotplug monitor: re-scans every 2-4 s automatically
         dfu::start_usb_monitor(Arc::clone(&dfu_state), cc.egui_ctx.clone());
 
-        Self {
+        let mut app = Self {
             selected_mcu_type: McuType::Stm32f103c8t6,
             generated_code,
             mcu: Some(mcu),
@@ -292,9 +304,22 @@ impl AppIde {
             renaming_folder: None,
             confirm_new_project: false,
             project_name: persisted.project_name,
+            project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
+        };
+
+        // ── Restore previously opened project on startup ──────────────────────
+        // If the last project directory still exists on disk, reload it:
+        // user source files, pin configuration, and generated code are all
+        // recovered exactly as they were when the app was last closed.
+        if let Some(dir) = &saved_project_dir {
+            if dir.exists() {
+                app.load_project_from_dir(dir);
+            }
         }
+
+        app
     }
 
     fn init_mcu(mcu_type: &McuType) -> Option<Mcu> {
@@ -330,6 +355,7 @@ impl AppIde {
         self.new_src_folder_name = None;
         self.new_file_in_folder = None;
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
+        self.project_dir = Some(root.to_path_buf());
 
         // ── Restore pin state from src/main.rs ───────────────────────────────
         // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
@@ -641,6 +667,11 @@ impl eframe::App for AppIde {
                 user_src_files: self.user_src_files.clone(),
                 user_src_folders: self.user_src_folders.clone(),
                 project_name: self.project_name.clone(),
+                project_dir: self
+                    .project_dir
+                    .as_ref()
+                    .and_then(|p| p.to_str())
+                    .map(String::from),
             },
         );
     }
