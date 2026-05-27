@@ -84,6 +84,30 @@ impl Mcu {
             .collect()
     }
 
+    /// Restores pin assignments parsed from `src/main.rs` by
+    /// `codegen::parse_main_rs()`.
+    ///
+    /// - Resets all pins to `Unset` first (clean slate).
+    /// - Sets each named pin to the given `PinFunction`.
+    /// - Pins not found in this MCU layout (wrong name) are silently skipped.
+    /// - Reserved pins are never overwritten.
+    /// - Does NOT trigger auto-partner assignment — the saved state already
+    ///   contains every pin individually.
+    pub fn apply_saved_pins(&mut self, pins: &[(String, PinFunction)]) {
+        self.reset_all_pins();
+        for (name, func) in pins {
+            let num = self
+                .iter_all_pins()
+                .find(|p| p.name == *name && !p.reserved)
+                .map(|p| p.number);
+            if let Some(num) = num {
+                if let Some(pin) = self.find_pin_mut(num) {
+                    pin.selected_function = func.clone();
+                }
+            }
+        }
+    }
+
     /// Resets all non-reserved pins to Unset and clears selection/info state.
     pub fn reset_all_pins(&mut self) {
         for pin in self

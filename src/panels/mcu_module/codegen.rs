@@ -558,6 +558,78 @@ fn make_default_gen_section(mcu_name: &str) -> String {
     )
 }
 
+// ── Pin state parser ──────────────────────────────────────────────────────────
+
+/// Parses pin assignments from an existing `src/main.rs`.
+///
+/// Scans the GEN_BEGIN … GEN_END block for lines of the form:
+/// ```text
+///     let p{lc}{num} = [&mut ]{pv}.p{lc}{num}.{method}(…); // {label}
+/// ```
+/// Returns `(pin_name, PinFunction)` pairs (e.g. `("PC13", GpioOutput)`)
+/// for every recognisable pin.  Unknown or comment-only lines are skipped.
+pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
+    let Some(begin_pos) = source.find(GEN_BEGIN) else {
+        return vec![];
+    };
+    let Some(end_pos) = source.find(GEN_END) else {
+        return vec![];
+    };
+    if begin_pos >= end_pos {
+        return vec![];
+    }
+
+    let gen_block = &source[begin_pos..end_pos];
+    let mut result = Vec::new();
+
+    for line in gen_block.lines() {
+        let trimmed = line.trim();
+
+        // Pin declaration lines start with "let p" after trimming.
+        // Comment-only lines (USB, SWD) start with "//".
+        if !trimmed.starts_with("let p") {
+            continue;
+        }
+
+        // ── Extract variable name ─────────────────────────────────────────────
+        // trimmed = "let pc13 = &mut gpioc.pc13.into_push_pull_output(…); // …"
+        let after_let = &trimmed["let ".len()..]; // "pc13 = …"
+        let Some(eq_pos) = after_let.find(" =") else {
+            continue;
+        };
+        let var = after_let[..eq_pos].trim(); // "pc13"
+
+        // var must be p + ascii-lowercase-letter + one-or-more digits
+        if var.len() < 3 || !var.starts_with('p') {
+            continue;
+        }
+        let port_lc = match var.chars().nth(1) {
+            Some(c) if c.is_ascii_lowercase() => c,
+            _ => continue,
+        };
+        let pin_num_str = &var[2..];
+        if pin_num_str.is_empty() || !pin_num_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        // ── Build canonical pin name: "pc13" → "PC13" ────────────────────────
+        let pin_name = format!("P{}{}", port_lc.to_ascii_uppercase(), pin_num_str);
+
+        // ── Extract trailing comment label: "// GPIO Output" → "GPIO Output" ─
+        let Some(comment_pos) = trimmed.rfind("// ") else {
+            continue;
+        };
+        let label = trimmed[comment_pos + 3..].trim();
+
+        // ── Map label → PinFunction ───────────────────────────────────────────
+        if let Some(func) = PinFunction::from_label(label) {
+            result.push((pin_name, func));
+        }
+    }
+
+    result
+}
+
 // ── Pin helpers (unchanged) ───────────────────────────────────────────────────
 
 struct PinMeta {

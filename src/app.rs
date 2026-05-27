@@ -330,6 +330,28 @@ impl AppIde {
         self.new_src_folder_name = None;
         self.new_file_in_folder = None;
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
+
+        // ── Restore pin state from src/main.rs ───────────────────────────────
+        // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
+        // assignment back to the MCU diagram.  If no markers are found (e.g.
+        // an ESP32-C3 project or a hand-written main.rs) this is a silent no-op.
+        let main_rs_path = src_dir.join("main.rs");
+        if let Ok(source) = std::fs::read_to_string(&main_rs_path) {
+            use crate::panels::mcu_module::codegen;
+            let saved = codegen::parse_main_rs(&source);
+            if !saved.is_empty() {
+                if let Some(mcu) = &mut self.mcu {
+                    mcu.apply_saved_pins(&saved);
+                    // Rebuild generated_code from the restored pin state while
+                    // keeping the user's loop body from the existing file.
+                    self.generated_code = mcu.update_main_rs(&source);
+                }
+            } else {
+                // No parseable pins (e.g. ESP32-C3 / blank project) —
+                // display the file as-is so the user sees their code.
+                self.generated_code = source;
+            }
+        }
     }
 
     /// Recursively scans `dir` (relative to `root`) and fills `files` and `folders`.

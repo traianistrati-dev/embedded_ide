@@ -91,6 +91,101 @@ impl PinFunction {
         }
     }
 
+    /// Reverse of `label()` — parses a label string back into a `PinFunction`.
+    ///
+    /// Used by `codegen::parse_main_rs()` to restore pin state from an
+    /// existing `src/main.rs` when opening a project.
+    /// Returns `None` for unrecognised or unsupported labels (e.g. "Not configured").
+    pub fn from_label(s: &str) -> Option<PinFunction> {
+        // ── Fixed / parameter-free variants ──────────────────────────────────
+        match s {
+            "GPIO Input"              => return Some(PinFunction::GpioInput),
+            "GPIO Output"             => return Some(PinFunction::GpioOutput),
+            "USB  D−"                 => return Some(PinFunction::UsbDm),
+            "USB  D+"                 => return Some(PinFunction::UsbDp),
+            "CAN  RX"                 => return Some(PinFunction::CanRx),
+            "CAN  TX"                 => return Some(PinFunction::CanTx),
+            "SWD  IO  (JTMS)"         => return Some(PinFunction::SwdIo),
+            "SWD  CLK  (JTCK)"        => return Some(PinFunction::SwdClk),
+            "MCO  (Master Clock Out)" => return Some(PinFunction::Mco),
+            _                         => {}
+        }
+
+        // ── USART{n}  {role} ─────────────────────────────────────────────────
+        if let Some(rest) = s.strip_prefix("USART") {
+            if let Some((num_str, role)) = rest.split_once("  ") {
+                if let Ok(n) = num_str.parse::<u8>() {
+                    return match role {
+                        "TX"  => Some(PinFunction::UsartTx(n)),
+                        "RX"  => Some(PinFunction::UsartRx(n)),
+                        "CTS" => Some(PinFunction::UsartCts(n)),
+                        "RTS" => Some(PinFunction::UsartRts(n)),
+                        "CK"  => Some(PinFunction::UsartCk(n)),
+                        _     => None,
+                    };
+                }
+            }
+        }
+
+        // ── SPI{n}  {role} ───────────────────────────────────────────────────
+        if let Some(rest) = s.strip_prefix("SPI") {
+            if let Some((num_str, role)) = rest.split_once("  ") {
+                if let Ok(n) = num_str.parse::<u8>() {
+                    return match role {
+                        "NSS"  => Some(PinFunction::SpiNss(n)),
+                        "SCK"  => Some(PinFunction::SpiSck(n)),
+                        "MISO" => Some(PinFunction::SpiMiso(n)),
+                        "MOSI" => Some(PinFunction::SpiMosi(n)),
+                        _      => None,
+                    };
+                }
+            }
+        }
+
+        // ── I2C{n}  {role} ───────────────────────────────────────────────────
+        if let Some(rest) = s.strip_prefix("I2C") {
+            if let Some((num_str, role)) = rest.split_once("  ") {
+                if let Ok(n) = num_str.parse::<u8>() {
+                    return match role {
+                        "SCL" => Some(PinFunction::I2cScl(n)),
+                        "SDA" => Some(PinFunction::I2cSda(n)),
+                        _     => None,
+                    };
+                }
+            }
+        }
+
+        // ── ADC{adc}  IN{channel} ────────────────────────────────────────────
+        // label() → format!("ADC{adc}  IN{channel}")
+        if let Some(rest) = s.strip_prefix("ADC") {
+            // rest = "1  IN3"  →  split on "  IN"
+            if let Some((adc_str, ch_str)) = rest.split_once("  IN") {
+                if let (Ok(adc), Ok(channel)) =
+                    (adc_str.parse::<u8>(), ch_str.parse::<u8>())
+                {
+                    return Some(PinFunction::AdcChannel { adc, channel });
+                }
+            }
+        }
+
+        // ── TIM{timer}  CH{channel}  (PWM) ───────────────────────────────────
+        // label() → format!("TIM{timer}  CH{channel}  (PWM)")
+        if let Some(rest) = s.strip_prefix("TIM") {
+            // rest = "2  CH1  (PWM)"
+            if let Some((timer_str, ch_rest)) = rest.split_once("  CH") {
+                // ch_rest = "1  (PWM)" — take everything up to the next "  "
+                let ch_num_str = ch_rest.split("  ").next().unwrap_or("");
+                if let (Ok(timer), Ok(channel)) =
+                    (timer_str.parse::<u8>(), ch_num_str.parse::<u8>())
+                {
+                    return Some(PinFunction::TimerPwm { timer, channel });
+                }
+            }
+        }
+
+        None
+    }
+
     /// Returns the stm32f1xx-hal GPIO mode type name used to generate
     /// `pub type PinType = Pin<PORT, N, MODE>;` in the per-pin source file.
     /// Returns `None` for `Unset` (no file should be written).
