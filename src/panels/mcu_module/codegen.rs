@@ -39,8 +39,8 @@ impl Mcu {
                 )
             }
             ToolchainKind::EspRust => {
-                // ESP32-C3: no GEN block — return the fixed esp-hal template
-                super::project_gen::esp32c3_fresh_main_rs()
+                let all = self.all_pins();
+                super::codegen_esp::fresh_esp32c3_main_rs(&all)
             }
             ToolchainKind::SdccC => {
                 // STM8 — not yet implemented
@@ -61,8 +61,12 @@ impl Mcu {
                 let new_section = make_generated_section(&self.name, &all);
                 splice_section(existing, &new_section, &self.name)
             }
-            // No GEN markers → nothing to splice; preserve the file as-is.
-            ToolchainKind::EspRust | ToolchainKind::SdccC => existing.to_owned(),
+            ToolchainKind::EspRust => {
+                let all = self.all_pins();
+                super::codegen_esp::update_esp32c3_main_rs(existing, &all)
+            }
+            // SdccC — not yet implemented; return file unchanged.
+            ToolchainKind::SdccC => existing.to_owned(),
         }
     }
 
