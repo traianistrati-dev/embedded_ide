@@ -5,6 +5,7 @@ use crate::lsp::{self, LspStatus};
 use crate::openocd::{self, OpenOcdState};
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::{McuType, ToolchainKind};
+use crate::panels::mcu_module::mock_esp32c3::create_esp32c3;
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
@@ -325,7 +326,8 @@ impl AppIde {
     fn init_mcu(mcu_type: &McuType) -> Option<Mcu> {
         match mcu_type {
             McuType::Stm32f103c8t6 => Some(create_stm32f103c8tx()),
-            _ => None,
+            McuType::Esp32c3       => Some(create_esp32c3()),
+            _                      => None,
         }
     }
 
@@ -1727,10 +1729,7 @@ impl eframe::App for AppIde {
                         .mcu
                         .as_ref()
                         .map(|m| m.fresh_main_rs())
-                        .unwrap_or_else(|| match self.selected_mcu_type.toolchain() {
-                            ToolchainKind::EspRust => project_gen::esp32c3_fresh_main_rs(),
-                            _ => String::new(),
-                        });
+                        .unwrap_or_default(); // STM8 / unimplemented chips
                     self.active_tab = McuTab::Pins;
                     self.selected_file = ProjectFileId::MainRs;
                     // Reset any file selection that is RustEmbedded-only

@@ -67,7 +67,7 @@ impl McuType {
 
     /// Returns `true` if this chip has a fully implemented graphical pin diagram.
     pub fn is_supported(&self) -> bool {
-        matches!(self, McuType::Stm32f103c8t6)
+        matches!(self, McuType::Stm32f103c8t6 | McuType::Esp32c3)
     }
 
     /// CPU architecture family shown next to the selector.

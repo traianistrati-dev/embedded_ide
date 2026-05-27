@@ -161,12 +161,13 @@ fn make_gen_section(pins: &[&Pin]) -> String {
             body.push_str(&format!("    // ── ADC{adc_n} ──\n"));
             body.push_str(&format!("    let mut adc{adc_n}_config = AdcConfig::new();\n"));
             for p in pin_list {
-                if let PinFunction::AdcChannel { channel, .. } = p.selected_function {
+                if let PinFunction::AdcChannel { .. } = p.selected_function {
                     body.push_str(&format!(
                         "    let mut {var}_adc = adc{adc_n}_config\
-                         .enable_pin(peripherals.{gpio}, Attenuation::Db11); // ADC{adc_n} IN{channel}\n",
-                        var  = pin_var(&p.name),
-                        gpio = p.name,
+                         .enable_pin(peripherals.{gpio}, Attenuation::Db11); // {label}\n",
+                        var   = pin_var(&p.name),
+                        gpio  = p.name,
+                        label = p.selected_function.label(),
                     ));
                 }
             }
@@ -192,10 +193,10 @@ fn make_gen_section(pins: &[&Pin]) -> String {
             body.push('\n');
             body.push_str(&format!("    // ── UART{n} ──\n"));
             let rx_part = uart_rx.get(&n)
-                .map(|p| format!("\n        .with_rx(peripherals.{})", p.name))
+                .map(|p| format!("\n        .with_rx(peripherals.{}) // {}", p.name, p.selected_function.label()))
                 .unwrap_or_default();
             let tx_part = uart_tx.get(&n)
-                .map(|p| format!("\n        .with_tx(peripherals.{})", p.name))
+                .map(|p| format!("\n        .with_tx(peripherals.{}) // {}", p.name, p.selected_function.label()))
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _uart{n} = Uart::new(peripherals.UART{n}, UartConfig::default()){rx_part}{tx_part};\n"
@@ -225,16 +226,16 @@ fn make_gen_section(pins: &[&Pin]) -> String {
             body.push('\n');
             body.push_str(&format!("    // ── SPI{n} ──\n"));
             let sck_part  = spi_sck.get(&n)
-                .map(|p| format!("\n        .with_sck(peripherals.{})",  p.name))
+                .map(|p| format!("\n        .with_sck(peripherals.{}) // {}",  p.name, p.selected_function.label()))
                 .unwrap_or_default();
             let mosi_part = spi_mosi.get(&n)
-                .map(|p| format!("\n        .with_mosi(peripherals.{})", p.name))
+                .map(|p| format!("\n        .with_mosi(peripherals.{}) // {}", p.name, p.selected_function.label()))
                 .unwrap_or_default();
             let miso_part = spi_miso.get(&n)
-                .map(|p| format!("\n        .with_miso(peripherals.{})", p.name))
+                .map(|p| format!("\n        .with_miso(peripherals.{}) // {}", p.name, p.selected_function.label()))
                 .unwrap_or_default();
             let nss_part  = spi_nss.get(&n)
-                .map(|p| format!("\n        .with_cs(peripherals.{})",   p.name))
+                .map(|p| format!("\n        .with_cs(peripherals.{}) // {}",   p.name, p.selected_function.label()))
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _spi{n} = Spi::new(peripherals.SPI{n}, SpiConfig::default())\
@@ -259,10 +260,10 @@ fn make_gen_section(pins: &[&Pin]) -> String {
             body.push('\n');
             body.push_str(&format!("    // ── I2C{n} ──\n"));
             let scl_part = i2c_scl.get(&n)
-                .map(|p| format!("\n        .with_scl(peripherals.{})", p.name))
+                .map(|p| format!("\n        .with_scl(peripherals.{}) // {}", p.name, p.selected_function.label()))
                 .unwrap_or_default();
             let sda_part = i2c_sda.get(&n)
-                .map(|p| format!("\n        .with_sda(peripherals.{})", p.name))
+                .map(|p| format!("\n        .with_sda(peripherals.{}) // {}", p.name, p.selected_function.label()))
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _i2c{n} = I2c::new(peripherals.I2C{n}, I2cConfig::default())\
