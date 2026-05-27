@@ -58,10 +58,16 @@ impl Pin {
     pub fn get_background_color(&self) -> eframe::egui::Color32 {
         if self.reserved {
             return match self.name.as_str() {
-                "VDD" | "VDDA" => eframe::egui::Color32::from_rgb(200, 50, 50),
-                "VBAT"         => eframe::egui::Color32::from_rgb(220, 100, 100),
-                "VSS" | "VSSA" => eframe::egui::Color32::from_rgb(30, 30, 30),
-                _              => eframe::egui::Color32::LIGHT_GRAY,
+                // STM32 power / ground names
+                "VDD" | "VDDA"                    => eframe::egui::Color32::from_rgb(200, 50, 50),
+                "VBAT"                             => eframe::egui::Color32::from_rgb(220, 100, 100),
+                "VSS" | "VSSA"                     => eframe::egui::Color32::from_rgb(30, 30, 30),
+                // ESP32-C3 power / ground names
+                "VDD3P3" | "VDD3P3_CPU"
+                | "VDD3P3_RTC" | "VDD_SPI"        => eframe::egui::Color32::from_rgb(200, 50, 50),
+                "GND"                              => eframe::egui::Color32::from_rgb(30, 30, 30),
+                // Misc reserved (NRST, BOOT0, CHIP_PU, LNA_IN, …)
+                _                                  => eframe::egui::Color32::LIGHT_GRAY,
             };
         }
         self.selected_function.color()
@@ -70,8 +76,8 @@ impl Pin {
     pub fn get_text_color(&self) -> eframe::egui::Color32 {
         if self.reserved {
             return match self.name.as_str() {
-                "VSS" | "VSSA" => eframe::egui::Color32::WHITE,
-                _              => eframe::egui::Color32::BLACK,
+                "VSS" | "VSSA" | "GND" => eframe::egui::Color32::WHITE,
+                _                       => eframe::egui::Color32::BLACK,
             };
         }
         eframe::egui::Color32::BLACK
