@@ -627,13 +627,14 @@ impl AppIde {
             active_slugs.contains(&slug)
         });
 
-        // ── 4. Create / overwrite each configured pin's source file ───────────
+        // ── 4. Create pin files that don't yet exist ─────────────────────────
+        // Only write when the file is brand-new.  If it already exists the user
+        // may have added custom code below the generated type alias — never
+        // overwrite it.  (Removing and re-adding a pin generates a fresh file.)
         for (slug, num, name, func) in &configured {
             let file_path = format!("pins/{slug}.rs");
-            let content = Self::generate_pin_content(*num, name, func);
-            if let Some((_, existing)) = files.iter_mut().find(|(p, _)| p == &file_path) {
-                *existing = content;
-            } else {
+            if !files.iter().any(|(p, _)| p == &file_path) {
+                let content = Self::generate_pin_content(*num, name, func);
                 files.push((file_path, content));
             }
         }
