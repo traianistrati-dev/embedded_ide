@@ -373,8 +373,13 @@ impl AppIde {
                     self.generated_code = mcu.update_main_rs(&source);
                 }
             } else {
-                // No parseable pins (e.g. ESP32-C3 / blank project) —
-                // display the file as-is so the user sees their code.
+                // No parseable pins (blank STM32 project, ESP32-C3, or
+                // hand-written main.rs).  Always reset the MCU diagram so
+                // pins configured in the previously-open project do not
+                // bleed into this one.
+                if let Some(mcu) = &mut self.mcu {
+                    mcu.reset_all_pins();
+                }
                 self.generated_code = source;
             }
         }
@@ -934,6 +939,13 @@ impl eframe::App for AppIde {
                 .get(i)
                 .map(|(_, c)| c.clone())
                 .unwrap_or_default()
+        } else if self.selected_file == ProjectFileId::MainRs {
+            // Always read from self.generated_code — not from the project_files
+            // snapshot built at the start of this frame.  The snapshot is stale
+            // whenever load_project_from_dir() runs in the same frame (Open
+            // Project), which would otherwise show the previous project's code
+            // and then immediately overwrite generated_code via the write-back.
+            self.generated_code.clone()
         } else {
             match &project_files {
                 Some(files) => self.selected_file.content(files).to_owned(),
