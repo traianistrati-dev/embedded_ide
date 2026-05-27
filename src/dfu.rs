@@ -126,76 +126,85 @@ pub fn start_usb_monitor(state: Arc<Mutex<DfuState>>, ctx: eframe::egui::Context
 
 /// Spawn a background thread that:
 ///   1. Runs `dfu-util -l` and updates `state`
-///   2. Lists ALL connected USB devices and appends them to `dfu_log`
-///      (so the DFU tab shows ST-Link, J-Link, etc., even if not DFU capable)
+///   2. Enumerates relevant USB programmer devices → populates `programmers`
+///   3. Writes a human-readable summary to `dfu_log`
 pub fn detect_dfu(
     state: Arc<Mutex<DfuState>>,
     dfu_log: Arc<Mutex<Vec<String>>>,
+    programmers: Arc<Mutex<Vec<ProgrammerInfo>>>,
     ctx: eframe::egui::Context,
 ) {
     if state.lock().unwrap().is_busy() {
-        return; // already doing something
+        return;
     }
     *state.lock().unwrap() = DfuState::Detecting;
     {
         let mut log = dfu_log.lock().unwrap();
         log.clear();
-        log.push("▶ Scanning for DFU devices (dfu-util -l) …".to_string());
+        log.push("▶ Scanning USB …".to_string());
     }
     ctx.request_repaint();
 
     thread::spawn(move || {
-        // ── DFU detection ─────────────────────────────────────────────────────
-        let next = run_detect();
+        // ── 1. DFU bootloader detection via dfu-util -l ───────────────────────
+        let dfu_result = run_detect();
 
+        // ── 2. Enumerate relevant USB programmer devices ───────────────────────
+        let mut found = list_programmer_devices();
+
+        // Make sure a DFU device is listed even if the OS doesn't show it
+        // (some DFU drivers hide the device in WMI / lsusb).
+        if let DfuState::DeviceFound(ref desc) = dfu_result {
+            let already = found.iter().any(|p| p.kind == "DFU Bootloader");
+            if !already {
+                found.insert(0, ProgrammerInfo {
+                    name:    desc.clone(),
+                    vid_pid: "0483:df11".to_string(),
+                    kind:    "DFU Bootloader",
+                });
+            }
+        }
+        *programmers.lock().unwrap() = found.clone();
+
+        // ── 3. Build log text ─────────────────────────────────────────────────
         {
             let mut log = dfu_log.lock().unwrap();
-            match &next {
+            log.clear();
+
+            // DFU-specific result
+            match &dfu_result {
                 DfuState::DeviceFound(desc) => {
-                    log.push(format!("✔ {desc}"));
+                    log.push(format!("✔ DFU bootloader: {desc}"));
                 }
                 DfuState::NoDevice => {
-                    log.push("  No DFU bootloader device found.".to_string());
-                    log.push(String::new());
-                    log.push(
-                        "  ⓘ  DFU mode = STM32 MCU in bootloader (NOT ST-Link):".to_string(),
-                    );
-                    log.push("     1. Set BOOT0 jumper = 1".to_string());
-                    log.push("     2. Reconnect USB or press RESET".to_string());
-                    log.push("     3. Device appears as VID 0483 : PID DF11".to_string());
+                    log.push("  No DFU bootloader found.".to_string());
+                    log.push("  To enter DFU mode on STM32:".to_string());
+                    log.push("    1. Set BOOT0 = 1, press RESET".to_string());
+                    log.push("    2. Device appears as VID 0483:DF11".to_string());
                 }
                 DfuState::Error(e) => {
-                    log.push(format!("✗ {}", e.lines().next().unwrap_or(e)));
-                    log.push(String::new());
-                    log.push("  Install dfu-util:".to_string());
-                    log.push("    winget install dfu-util".to_string());
-                    log.push(
-                        "  Then install WinUSB driver via Zadig for 'STM32 BOOTLOADER'."
-                            .to_string(),
-                    );
+                    log.push(format!("✗ dfu-util: {}", e.lines().next().unwrap_or(e)));
+                    log.push("  Install: winget install dfu-util".to_string());
+                    log.push("  WinUSB driver: install via Zadig for 'STM32 BOOTLOADER'".to_string());
                 }
                 _ => {}
             }
-        }
-        ctx.request_repaint();
 
-        // ── List ALL connected USB devices for context ─────────────────────────
-        let usb_devs = list_connected_usb();
-        {
-            let mut log = dfu_log.lock().unwrap();
             log.push(String::new());
-            if usb_devs.is_empty() {
-                log.push("── No USB devices found ──────────────────────────".to_string());
+
+            // Programmer list
+            if found.is_empty() {
+                log.push("── No known programmer / serial adapter detected ─────".to_string());
             } else {
-                log.push("── Connected USB devices ─────────────────────────".to_string());
-                for dev in &usb_devs {
-                    log.push(format!("  {dev}"));
+                log.push("── Detected programmers / adapters ──────────────────".to_string());
+                for p in &found {
+                    log.push(format!("  [{}]  {}  [{}]", p.kind, p.name, p.vid_pid));
                 }
             }
         }
         ctx.request_repaint();
 
-        *state.lock().unwrap() = next;
+        *state.lock().unwrap() = dfu_result;
         ctx.request_repaint();
     });
 }
@@ -472,28 +481,148 @@ fn try_cmd(program: &str, args: &[&str], cwd: Option<&Path>) -> bool {
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
-// ── USB device enumeration ────────────────────────────────────────────────────
+// ── Programmer device catalogue ───────────────────────────────────────────────
 
-/// Returns a human-readable list of all connected USB devices.
-/// Used to explain to the user why a DFU device was not found
-/// (e.g., ST-Link v2 is connected but is NOT a DFU bootloader device).
+/// A detected USB device relevant to embedded MCU programming.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgrammerInfo {
+    /// Device name as reported by the OS (e.g. "STMicroelectronics ST-LINK/V2")
+    pub name: String,
+    /// Lowercase "vid:pid" (e.g. "0483:3748")
+    pub vid_pid: String,
+    /// Programmer family (e.g. "ST-Link", "J-Link", "DFU Bootloader")
+    pub kind: &'static str,
+}
+
+impl ProgrammerInfo {
+    /// One-line label for the ComboBox.
+    pub fn combo_label(&self) -> String {
+        format!("[{}]  {}  [{}]", self.kind, self.name, self.vid_pid)
+    }
+
+    /// Contextual guidance shown below the ComboBox.
+    pub fn guidance(&self) -> &'static str {
+        match self.kind {
+            "DFU Bootloader" =>
+                "DFU bootloader detected — click Flash USB to program.",
+            "ST-Link" =>
+                "ST-Link connected. DFU flashing needs the MCU in bootloader mode \
+                 (BOOT0=1 + reset). For SWD: use OpenOCD.",
+            "J-Link" =>
+                "J-Link detected. Use J-Flash or OpenOCD for SWD/JTAG flashing.",
+            "CMSIS-DAP" =>
+                "CMSIS-DAP / DAPLink detected. Use pyOCD or OpenOCD for SWD flashing.",
+            "USB-Serial" =>
+                "USB-Serial adapter. STM32 UART boot: STM32CubeProgrammer. \
+                 ESP32: esptool.py. Arduino: avrdude.",
+            "ESP32" =>
+                "ESP32 in USB-CDC mode. Flash with: esptool.py.",
+            _ => "",
+        }
+    }
+}
+
+/// Known VID:PID → (display name, programmer kind).
+/// Sorted roughly by prevalence; exact match checked before VID-only fallback.
+const KNOWN_PROGRAMMERS: &[(&str, &str, &str)] = &[
+    // ── DFU Bootloaders ───────────────────────────────────────────────────────
+    ("0483:df11", "STM32 DFU Bootloader",     "DFU Bootloader"),
+    ("303a:0002", "ESP32-S2 DFU Bootloader",  "DFU Bootloader"),
+    ("1915:521f", "nRF52840 Dongle (DFU)",    "DFU Bootloader"),
+    ("03eb:6124", "Atmel DFU Bootloader",     "DFU Bootloader"),
+    ("239a:0035", "Adafruit Bootloader (DFU)","DFU Bootloader"),
+    // ── ST-Link ───────────────────────────────────────────────────────────────
+    ("0483:3744", "ST-Link v1",               "ST-Link"),
+    ("0483:3748", "ST-Link v2",               "ST-Link"),
+    ("0483:3749", "ST-Link v2-1",             "ST-Link"),
+    ("0483:374a", "ST-Link v2-1 (MSD)",       "ST-Link"),
+    ("0483:374b", "ST-Link v3E",              "ST-Link"),
+    ("0483:374d", "ST-Link v3 (VCP)",         "ST-Link"),
+    ("0483:374e", "ST-Link v3E (OB)",         "ST-Link"),
+    ("0483:374f", "ST-Link v3S",              "ST-Link"),
+    // ── CMSIS-DAP / DAPLink ───────────────────────────────────────────────────
+    ("0d28:0204", "DAPLink / CMSIS-DAP",      "CMSIS-DAP"),
+    ("2e8a:000c", "Picoprobe (RP2040)",        "CMSIS-DAP"),
+    ("2e8a:0003", "Raspberry Pi Debug Probe", "CMSIS-DAP"),
+    ("1fc9:0143", "NXP LPC-Link2",            "CMSIS-DAP"),
+    ("1d50:6018", "Black Magic Probe",        "CMSIS-DAP"),
+    ("1a86:8010", "WCH-Link (RISC-V)",        "CMSIS-DAP"),
+    ("03eb:2111", "Atmel EDBG",               "CMSIS-DAP"),
+    ("03eb:2140", "Atmel ICE",                "CMSIS-DAP"),
+    ("03eb:2177", "Atmel EDBG (SAME)",        "CMSIS-DAP"),
+    ("04d8:900a", "MPLAB ICD",                "CMSIS-DAP"),
+    ("04d8:9012", "PICkit 3",                 "CMSIS-DAP"),
+    ("04d8:8f0c", "MPLAB SNAP",               "CMSIS-DAP"),
+    ("1915:9010", "nRF9160 DK / CMSIS-DAP",  "CMSIS-DAP"),
+    // ── FTDI ──────────────────────────────────────────────────────────────────
+    ("0403:6001", "FTDI FT232RL",             "USB-Serial"),
+    ("0403:6010", "FTDI FT2232H",             "USB-Serial"),
+    ("0403:6011", "FTDI FT4232H",             "USB-Serial"),
+    ("0403:6014", "FTDI FT232H",              "USB-Serial"),
+    ("0403:6015", "FTDI FT231X",              "USB-Serial"),
+    // ── WCH CH340 / CH341 (Arduino, ESP8266, ESP32) ───────────────────────────
+    ("1a86:7523", "CH340 USB-Serial",         "USB-Serial"),
+    ("1a86:5523", "CH341A USB-Serial",        "USB-Serial"),
+    ("1a86:55d4", "CH342/344 USB-Serial",     "USB-Serial"),
+    ("1a86:7522", "CH340K USB-Serial",        "USB-Serial"),
+    // ── Silicon Labs CP210x (ESP32, various) ──────────────────────────────────
+    ("10c4:ea60", "CP2102 USB-Serial",        "USB-Serial"),
+    ("10c4:ea61", "CP2103 USB-Serial",        "USB-Serial"),
+    ("10c4:ea70", "CP2105 USB-Serial",        "USB-Serial"),
+    ("10c4:ea71", "CP2108 USB-Serial",        "USB-Serial"),
+    // ── Prolific PL2303 ───────────────────────────────────────────────────────
+    ("067b:2303", "PL2303 USB-Serial",        "USB-Serial"),
+    ("067b:23a3", "PL2303HXN USB-Serial",     "USB-Serial"),
+    // ── ESP32 direct USB (S2 / S3 / C3 in CDC mode) ──────────────────────────
+    ("303a:1001", "ESP32-S2 (USB-CDC)",       "ESP32"),
+    ("303a:4001", "ESP32-S3 (USB-CDC)",       "ESP32"),
+    ("303a:1002", "ESP32-C3 (USB-CDC)",       "ESP32"),
+];
+
+/// Look up VID:PID in the programmer catalogue.
+/// Returns `Some((display_name, kind))` only for recognised embedded programmers.
+fn find_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
+    // 1. Exact VID:PID match
+    for &(vp, name, kind) in KNOWN_PROGRAMMERS {
+        if vid_pid.eq_ignore_ascii_case(vp) {
+            return Some((name, kind));
+        }
+    }
+    // 2. VID-only fallback for families with many PIDs
+    let vid = vid_pid.split(':').next().unwrap_or("").to_lowercase();
+    match vid.as_str() {
+        "1366" => Some(("SEGGER J-Link", "J-Link")),
+        "2341" => Some(("Arduino", "CMSIS-DAP")), // Arduino LLC
+        "2a03" => Some(("Arduino (clone)", "CMSIS-DAP")),
+        _ => None,
+    }
+}
+
+// ── USB device enumeration (platform-specific) ────────────────────────────────
+
+/// Enumerate connected USB devices and return only those relevant for MCU programming.
 #[cfg(target_os = "windows")]
-fn list_connected_usb() -> Vec<String> { list_usb_windows() }
+pub fn list_programmer_devices() -> Vec<ProgrammerInfo> {
+    list_programmers_windows()
+}
 
 #[cfg(target_os = "linux")]
-fn list_connected_usb() -> Vec<String> { list_usb_linux() }
+pub fn list_programmer_devices() -> Vec<ProgrammerInfo> {
+    list_programmers_linux()
+}
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn list_connected_usb() -> Vec<String> { vec![] }
+pub fn list_programmer_devices() -> Vec<ProgrammerInfo> {
+    vec![]
+}
 
-/// Windows: enumerate USB devices via PowerShell + WMI.
-/// Uses CREATE_NO_WINDOW so no console flashes in a GUI app.
+/// Windows: enumerate via PowerShell + WMI, filter by KNOWN_PROGRAMMERS.
 #[cfg(target_os = "windows")]
-fn list_usb_windows() -> Vec<String> {
+fn list_programmers_windows() -> Vec<ProgrammerInfo> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    // PowerShell script: list VID-bearing USB devices, output "Name|vid:pid" per line.
+    // Output one "OsName|vid:pid" line per USB device.
     let ps = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Get-WmiObject Win32_PnPEntity |
@@ -513,69 +642,63 @@ Get-WmiObject Win32_PnPEntity |
         .creation_flags(CREATE_NO_WINDOW)
         .output();
 
-    let Ok(out) = out else {
-        return vec![];
-    };
+    let Ok(out) = out else { return vec![] };
 
-    let mut devices: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    let mut devices: Vec<ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let (name, vp) = line.split_once('|')?;
-            let name = name.trim();
-            let vp = vp.trim();
-            if name.is_empty() {
-                return None;
-            }
-            let tag = classify_usb(vp);
-            Some(format!("{tag}{name}  [{vp}]"))
+            if line.is_empty() { return None; }
+            let (os_name, vp) = line.split_once('|')?;
+            let os_name = os_name.trim();
+            let vp      = vp.trim();
+            if os_name.is_empty() { return None; }
+            let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
+            // Prefer the OS name when it's more descriptive than the catalogue name
+            let name = if os_name.len() > catalogue_name.len() {
+                os_name.to_string()
+            } else {
+                catalogue_name.to_string()
+            };
+            Some(ProgrammerInfo { name, vid_pid: vp.to_string(), kind })
         })
         .collect();
 
-    devices.sort();
-    devices.dedup();
+    devices.sort_by(|a, b| a.kind.cmp(b.kind).then(a.name.cmp(&b.name)));
+    devices.dedup_by(|a, b| a.vid_pid == b.vid_pid);
     devices
 }
 
-/// Linux: enumerate USB devices via `lsusb`.
+/// Linux: enumerate via `lsusb`, filter by KNOWN_PROGRAMMERS.
 #[cfg(target_os = "linux")]
-fn list_usb_linux() -> Vec<String> {
+fn list_programmers_linux() -> Vec<ProgrammerInfo> {
     let out = Command::new("lsusb")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output();
-    let Ok(out) = out else {
-        return vec![];
-    };
-    let mut devices: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    let Ok(out) = out else { return vec![] };
+
+    let mut devices: Vec<ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             // "Bus 001 Device 003: ID 0483:3748 STMicroelectronics ST-LINK/V2"
             let id_pos = line.find("ID ")?;
-            let rest = &line[id_pos + 3..];
-            let sp = rest.find(' ')?;
-            let vp = &rest[..sp];
-            let name = rest[sp..].trim();
-            let tag = classify_usb(vp);
-            Some(format!("{tag}{name}  [{vp}]"))
+            let rest   = &line[id_pos + 3..];
+            let sp     = rest.find(' ')?;
+            let vp     = rest[..sp].trim();
+            let os_name = rest[sp..].trim();
+            let (catalogue_name, kind) = find_programmer(vp)?;
+            let name = if os_name.len() > catalogue_name.len() {
+                os_name.to_string()
+            } else {
+                catalogue_name.to_string()
+            };
+            Some(ProgrammerInfo { name, vid_pid: vp.to_string(), kind })
         })
         .collect();
-    devices.sort();
-    devices
-}
 
-/// Tag a device with its programmer type if recognised.
-fn classify_usb(vid_pid: &str) -> &'static str {
-    let vp = vid_pid.to_lowercase();
-    if vp == "0483:df11"          { return "[DFU ⚡]  "; }
-    if vp.starts_with("0483:374") { return "[ST-Link] "; }
-    if vp.starts_with("1366:")    { return "[J-Link]  "; }
-    if vp.starts_with("0d28:")    { return "[DAP]     "; }
-    if vp.starts_with("03eb:")    { return "[Atmel]   "; }
-    ""
+    devices.sort_by(|a, b| a.kind.cmp(b.kind).then(a.name.cmp(&b.name)));
+    devices
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

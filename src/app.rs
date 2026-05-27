@@ -151,6 +151,10 @@ pub struct AppIde {
     dfu_state: Arc<Mutex<DfuState>>,
     /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
     dfu_log: Arc<Mutex<Vec<String>>>,
+    /// Filtered list of detected USB programmers (ST-Link, J-Link, DFU, serial, …)
+    dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
+    /// Index of the programmer currently selected in the ComboBox
+    dfu_sel_programmer: usize,
     /// Flash start address sent to dfu-util (editable; default = 0x08000000)
     dfu_flash_addr: String,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
@@ -232,9 +236,16 @@ impl AppIde {
         // ── USB DFU state — created before Self so we can start monitoring ──
         let dfu_state: Arc<Mutex<DfuState>> = Arc::new(Mutex::new(DfuState::Idle));
         let dfu_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         // Scan immediately on startup (non-blocking — runs in background thread)
-        dfu::detect_dfu(Arc::clone(&dfu_state), Arc::clone(&dfu_log), cc.egui_ctx.clone());
+        dfu::detect_dfu(
+            Arc::clone(&dfu_state),
+            Arc::clone(&dfu_log),
+            Arc::clone(&dfu_programmers),
+            cc.egui_ctx.clone(),
+        );
         // Start persistent USB hotplug monitor: re-scans every 2-4 s automatically
         dfu::start_usb_monitor(Arc::clone(&dfu_state), cc.egui_ctx.clone());
 
@@ -252,6 +263,8 @@ impl AppIde {
             selected_diagnostic: None,
             dfu_state,
             dfu_log,
+            dfu_programmers,
+            dfu_sel_programmer: 0,
             dfu_flash_addr: "0x08000000".to_string(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
@@ -1146,9 +1159,11 @@ impl eframe::App for AppIde {
                         );
                         if scan_btn.clicked() {
                             self.build_tab = BuildPanelTab::Dfu; // show results in DFU tab
+                            self.dfu_sel_programmer = 0;
                             dfu::detect_dfu(
                                 Arc::clone(&self.dfu_state),
                                 Arc::clone(&self.dfu_log),
+                                Arc::clone(&self.dfu_programmers),
                                 self.egui_ctx.clone(),
                             );
                         }
@@ -1311,6 +1326,8 @@ impl eframe::App for AppIde {
                                     &self.lsp_state,
                                     &self.dfu_state,
                                     &self.dfu_log,
+                                    &self.dfu_programmers,
+                                    &mut self.dfu_sel_programmer,
                                     &mut self.dfu_flash_addr,
                                     &mut self.build_tab,
                                     &mut self.selected_diagnostic,
@@ -2486,6 +2503,8 @@ fn show_diag_panel(
     lsp_state: &Arc<Mutex<lsp::LspState>>,
     dfu_state: &Arc<Mutex<DfuState>>,
     dfu_log: &Arc<Mutex<Vec<String>>>,
+    dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
+    dfu_sel_programmer: &mut usize,
     dfu_flash_addr: &mut String,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
@@ -2620,7 +2639,7 @@ fn show_diag_panel(
             show_ra_tab(ui, lsp_state, lsp_sel, selected_file);
         }
         BuildPanelTab::Dfu => {
-            show_dfu_tab(ui, dfu_state, dfu_log, dfu_flash_addr);
+            show_dfu_tab(ui, dfu_state, dfu_log, dfu_programmers, dfu_sel_programmer, dfu_flash_addr);
         }
     }
 }
@@ -2631,12 +2650,95 @@ fn show_dfu_tab(
     ui: &mut egui::Ui,
     dfu_state: &Arc<Mutex<DfuState>>,
     dfu_log: &Arc<Mutex<Vec<String>>>,
+    dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
+    dfu_sel_programmer: &mut usize,
     dfu_flash_addr: &mut String,
 ) {
     let state = dfu_state.lock().unwrap().clone();
-    let log = dfu_log.lock().unwrap().clone();
+    let log   = dfu_log.lock().unwrap().clone();
+    let progs = dfu_programmers.lock().unwrap().clone();
 
-    // ── Flash address + Clear row ─────────────────────────────────────────────
+    // ── Programmer selector ComboBox ──────────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Programmer:")
+                .size(10.5)
+                .color(egui::Color32::GRAY),
+        );
+
+        let combo_label = if progs.is_empty() {
+            "— none detected —".to_string()
+        } else {
+            progs
+                .get(*dfu_sel_programmer)
+                .map(|p| p.combo_label())
+                .unwrap_or_else(|| "— select —".to_string())
+        };
+
+        egui::ComboBox::from_id_salt("dfu_programmer_selector")
+            .selected_text(egui::RichText::new(&combo_label).size(10.5).monospace())
+            .width(ui.available_width() - 2.0)
+            .show_ui(ui, |ui| {
+                if progs.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No programmer detected. Click 'Scan USB'.")
+                            .size(10.5)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+                for (i, p) in progs.iter().enumerate() {
+                    let kind_color = match p.kind {
+                        "DFU Bootloader" => egui::Color32::from_rgb(100, 200, 255),
+                        "ST-Link"        => egui::Color32::from_rgb(100, 220, 120),
+                        "J-Link"         => egui::Color32::from_rgb(220, 180, 60),
+                        "CMSIS-DAP"      => egui::Color32::from_rgb(180, 140, 220),
+                        "USB-Serial"     => egui::Color32::from_rgb(200, 160, 100),
+                        "ESP32"          => egui::Color32::from_rgb(220, 120, 60),
+                        _                => egui::Color32::GRAY,
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("[{}]", p.kind))
+                                .size(10.0)
+                                .monospace()
+                                .color(kind_color),
+                        );
+                        ui.selectable_value(
+                            dfu_sel_programmer,
+                            i,
+                            egui::RichText::new(format!("{}  [{}]", p.name, p.vid_pid))
+                                .size(10.5)
+                                .monospace(),
+                        );
+                    });
+                }
+            });
+    });
+
+    // Guidance text for selected programmer
+    if let Some(p) = progs.get(*dfu_sel_programmer) {
+        let guidance = p.guidance();
+        if !guidance.is_empty() {
+            let color = match p.kind {
+                "DFU Bootloader" => egui::Color32::from_rgb(80, 200, 100),
+                "ST-Link" | "J-Link" | "CMSIS-DAP" =>
+                    egui::Color32::from_rgb(180, 180, 100),
+                _ => egui::Color32::from_rgb(160, 160, 170),
+            };
+            for line in guidance.lines() {
+                ui.label(
+                    egui::RichText::new(line)
+                        .size(10.0)
+                        .color(color)
+                        .italics(),
+                );
+            }
+        }
+    }
+
+    ui.separator();
+
+    // ── Flash address + phase row ─────────────────────────────────────────────
     ui.horizontal(|ui| {
         // Flash address configuration
         ui.label(
