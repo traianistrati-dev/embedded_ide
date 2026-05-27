@@ -88,16 +88,113 @@ impl DfuState {
 
 // ── Detection ─────────────────────────────────────────────────────────────────
 
-/// Spawn a background thread that runs `dfu-util -l` and updates `state`.
-pub fn detect_dfu(state: Arc<Mutex<DfuState>>, ctx: eframe::egui::Context) {
+/// Spawn a long-lived background thread that periodically polls `dfu-util -l`
+/// so the UI always reflects the current USB state without manual button clicks.
+///
+/// Poll interval:
+/// - 2 s when no device is present (fast enough to catch plug-in events)
+/// - 4 s when a device is already found (no point checking as often)
+/// - skips the poll while any operation is in progress (`is_busy()`)
+///
+/// The first poll is delayed 3 s so it doesn't race with the explicit
+/// `detect_dfu()` call made at startup.
+pub fn start_usb_monitor(state: Arc<Mutex<DfuState>>, ctx: eframe::egui::Context) {
+    thread::spawn(move || {
+        // Let the startup detect_dfu() finish before we start competing.
+        thread::sleep(std::time::Duration::from_secs(3));
+
+        loop {
+            // Skip while building / flashing / detecting
+            let busy = state.lock().unwrap().is_busy();
+            if !busy {
+                let next = run_detect();
+                let mut guard = state.lock().unwrap();
+                // Only repaint when something actually changed
+                if !guard.is_busy() && *guard != next {
+                    *guard = next;
+                    drop(guard);
+                    ctx.request_repaint();
+                }
+            }
+
+            // Slow down polling when we already know a device is present
+            let device_present = matches!(*state.lock().unwrap(), DfuState::DeviceFound(_));
+            thread::sleep(std::time::Duration::from_secs(if device_present { 4 } else { 2 }));
+        }
+    });
+}
+
+/// Spawn a background thread that:
+///   1. Runs `dfu-util -l` and updates `state`
+///   2. Lists ALL connected USB devices and appends them to `dfu_log`
+///      (so the DFU tab shows ST-Link, J-Link, etc., even if not DFU capable)
+pub fn detect_dfu(
+    state: Arc<Mutex<DfuState>>,
+    dfu_log: Arc<Mutex<Vec<String>>>,
+    ctx: eframe::egui::Context,
+) {
     if state.lock().unwrap().is_busy() {
         return; // already doing something
     }
     *state.lock().unwrap() = DfuState::Detecting;
+    {
+        let mut log = dfu_log.lock().unwrap();
+        log.clear();
+        log.push("▶ Scanning for DFU devices (dfu-util -l) …".to_string());
+    }
     ctx.request_repaint();
 
     thread::spawn(move || {
+        // ── DFU detection ─────────────────────────────────────────────────────
         let next = run_detect();
+
+        {
+            let mut log = dfu_log.lock().unwrap();
+            match &next {
+                DfuState::DeviceFound(desc) => {
+                    log.push(format!("✔ {desc}"));
+                }
+                DfuState::NoDevice => {
+                    log.push("  No DFU bootloader device found.".to_string());
+                    log.push(String::new());
+                    log.push(
+                        "  ⓘ  DFU mode = STM32 MCU in bootloader (NOT ST-Link):".to_string(),
+                    );
+                    log.push("     1. Set BOOT0 jumper = 1".to_string());
+                    log.push("     2. Reconnect USB or press RESET".to_string());
+                    log.push("     3. Device appears as VID 0483 : PID DF11".to_string());
+                }
+                DfuState::Error(e) => {
+                    log.push(format!("✗ {}", e.lines().next().unwrap_or(e)));
+                    log.push(String::new());
+                    log.push("  Install dfu-util:".to_string());
+                    log.push("    winget install dfu-util".to_string());
+                    log.push(
+                        "  Then install WinUSB driver via Zadig for 'STM32 BOOTLOADER'."
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        ctx.request_repaint();
+
+        // ── List ALL connected USB devices for context ─────────────────────────
+        let usb_devs = list_connected_usb();
+        {
+            let mut log = dfu_log.lock().unwrap();
+            log.push(String::new());
+            if usb_devs.is_empty() {
+                log.push("── No USB devices found ──────────────────────────".to_string());
+            } else {
+                log.push("── Connected USB devices ─────────────────────────".to_string());
+                for dev in &usb_devs {
+                    log.push(format!("  {dev}"));
+                }
+            }
+        }
+        ctx.request_repaint();
+
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -374,6 +471,114 @@ fn try_cmd(program: &str, args: &[&str], cwd: Option<&Path>) -> bool {
     }
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
+
+// ── USB device enumeration ────────────────────────────────────────────────────
+
+/// Returns a human-readable list of all connected USB devices.
+/// Used to explain to the user why a DFU device was not found
+/// (e.g., ST-Link v2 is connected but is NOT a DFU bootloader device).
+#[cfg(target_os = "windows")]
+fn list_connected_usb() -> Vec<String> { list_usb_windows() }
+
+#[cfg(target_os = "linux")]
+fn list_connected_usb() -> Vec<String> { list_usb_linux() }
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn list_connected_usb() -> Vec<String> { vec![] }
+
+/// Windows: enumerate USB devices via PowerShell + WMI.
+/// Uses CREATE_NO_WINDOW so no console flashes in a GUI app.
+#[cfg(target_os = "windows")]
+fn list_usb_windows() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // PowerShell script: list VID-bearing USB devices, output "Name|vid:pid" per line.
+    let ps = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Get-WmiObject Win32_PnPEntity |
+  Where-Object { $_.DeviceID -like 'USB\VID*' } |
+  ForEach-Object {
+    if ($_.DeviceID -match 'VID_([0-9A-Fa-f]{4}).*PID_([0-9A-Fa-f]{4})') {
+      $vp = $Matches[1].ToLower() + ':' + $Matches[2].ToLower()
+      if ($_.Name) { "$($_.Name)|$vp" }
+    }
+  }
+"#;
+
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let Ok(out) = out else {
+        return vec![];
+    };
+
+    let mut devices: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (name, vp) = line.split_once('|')?;
+            let name = name.trim();
+            let vp = vp.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let tag = classify_usb(vp);
+            Some(format!("{tag}{name}  [{vp}]"))
+        })
+        .collect();
+
+    devices.sort();
+    devices.dedup();
+    devices
+}
+
+/// Linux: enumerate USB devices via `lsusb`.
+#[cfg(target_os = "linux")]
+fn list_usb_linux() -> Vec<String> {
+    let out = Command::new("lsusb")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return vec![];
+    };
+    let mut devices: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            // "Bus 001 Device 003: ID 0483:3748 STMicroelectronics ST-LINK/V2"
+            let id_pos = line.find("ID ")?;
+            let rest = &line[id_pos + 3..];
+            let sp = rest.find(' ')?;
+            let vp = &rest[..sp];
+            let name = rest[sp..].trim();
+            let tag = classify_usb(vp);
+            Some(format!("{tag}{name}  [{vp}]"))
+        })
+        .collect();
+    devices.sort();
+    devices
+}
+
+/// Tag a device with its programmer type if recognised.
+fn classify_usb(vid_pid: &str) -> &'static str {
+    let vp = vid_pid.to_lowercase();
+    if vp == "0483:df11"          { return "[DFU ⚡]  "; }
+    if vp.starts_with("0483:374") { return "[ST-Link] "; }
+    if vp.starts_with("1366:")    { return "[J-Link]  "; }
+    if vp.starts_with("0d28:")    { return "[DAP]     "; }
+    if vp.starts_with("03eb:")    { return "[Atmel]   "; }
+    ""
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Append a line to the live DFU log and request a repaint.
 fn push_log(log: &Arc<Mutex<Vec<String>>>, ctx: &eframe::egui::Context, line: &str) {

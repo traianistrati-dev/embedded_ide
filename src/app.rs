@@ -229,6 +229,15 @@ impl AppIde {
             }
         }
 
+        // ── USB DFU state — created before Self so we can start monitoring ──
+        let dfu_state: Arc<Mutex<DfuState>> = Arc::new(Mutex::new(DfuState::Idle));
+        let dfu_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Scan immediately on startup (non-blocking — runs in background thread)
+        dfu::detect_dfu(Arc::clone(&dfu_state), Arc::clone(&dfu_log), cc.egui_ctx.clone());
+        // Start persistent USB hotplug monitor: re-scans every 2-4 s automatically
+        dfu::start_usb_monitor(Arc::clone(&dfu_state), cc.egui_ctx.clone());
+
         Self {
             selected_mcu_type: McuType::Stm32f103c8t6,
             generated_code,
@@ -241,8 +250,8 @@ impl AppIde {
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             selected_diagnostic: None,
-            dfu_state: Arc::new(Mutex::new(DfuState::Idle)),
-            dfu_log: Arc::new(Mutex::new(Vec::new())),
+            dfu_state,
+            dfu_log,
             dfu_flash_addr: "0x08000000".to_string(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
@@ -1136,8 +1145,10 @@ impl eframe::App for AppIde {
                             ),
                         );
                         if scan_btn.clicked() {
+                            self.build_tab = BuildPanelTab::Dfu; // show results in DFU tab
                             dfu::detect_dfu(
                                 Arc::clone(&self.dfu_state),
+                                Arc::clone(&self.dfu_log),
                                 self.egui_ctx.clone(),
                             );
                         }
