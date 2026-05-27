@@ -120,22 +120,13 @@ pub fn esp32c3_fresh_main_rs() -> String {
 
 use esp_hal::prelude::*;
 
-fn custom_config() {
-    // Add your custom peripheral configuration here.
-    // Preserved when you change pin assignments.
-}
-
-fn loop_code() -> ! {
-    loop {
-        // Add your main loop logic here.
-    }
-}
-
 #[esp_hal::main]
 fn main() -> ! {
     let _peripherals = esp_hal::init(esp_hal::Config::default());
-    custom_config();
-    loop_code();
+
+    loop {
+        // Your main loop code here.
+    }
 }
 "#
     .to_string()

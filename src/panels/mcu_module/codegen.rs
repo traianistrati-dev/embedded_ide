@@ -5,39 +5,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // ── Section markers ───────────────────────────────────────────────────────────
 //
-// Everything between these two comment lines is auto-generated and will be
-// replaced whenever the pin configuration changes.  The user-editable
-// functions (custom_config, loop_code) live *outside* the markers and are
-// therefore preserved across pin changes.
+// The GEN_BEGIN … GEN_END block is auto-generated and replaced whenever the
+// pin configuration changes.  It includes the HAL use items, any peripheral
+// helper functions, the #[entry] attribute, and the opening of fn main().
+// The block is intentionally left open — USER_TAIL closes main() with the
+// user-editable loop body, which is preserved across every regen.
 
 pub const GEN_BEGIN: &str = "// <<< GENERATED BEGIN — do not edit between these markers >>>";
 pub const GEN_END: &str = "// <<< GENERATED END >>>";
 
-// ── User-section template ─────────────────────────────────────────────────────
+// ── User tail — closes fn main() ─────────────────────────────────────────────
 //
-// Written once on first generation; preserved forever after.
+// Written once on first generation; the loop body is user-editable and is
+// preserved across every pin-configuration change.
 
-const USER_SECTION: &str = r#"fn custom_config() {
-    // Add your custom peripheral configuration here.
-    // This function is called after generated_pins_config().
-    // Preserved when you change pin assignments.
-}
-
-fn loop_code() -> !{
-    // Add your main loop logic here.
-    // Preserved when you change pin assignments.
-    loop {
-
-    }
-}
-
-#[entry]
-fn main() -> !{
-    generated_pins_config();
-    custom_config();
-    loop_code();
-}
-"#;
+const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
 
 // ── Public API on Mcu ─────────────────────────────────────────────────────────
 
@@ -48,9 +30,9 @@ impl Mcu {
         let all = self.all_pins();
         let gen_ = make_generated_section(&self.name, &all);
         format!(
-            "{header}{gen_}\n{user}",
+            "{header}{gen_}\n{tail}",
             header = invariant_header(&self.name),
-            user = USER_SECTION,
+            tail = USER_TAIL,
         )
     }
 
@@ -89,16 +71,28 @@ fn splice_section(existing: &str, new_section: &str, mcu_name: &str) -> String {
         // blank line.  This makes splice idempotent: running it N times always
         // produces the same result instead of accumulating newlines.
         let after = existing[end..].trim_start_matches('\n');
-        // new_section already ends with  "// <<< GENERATED END >>>\n"
-        // + one more "\n" gives the single blank line before custom_config.
+
+        // Detect old format (had fn custom_config / fn loop_code after GEN_END).
+        // Rebuild from scratch so the user tail is the new flat loop{} style.
+        if after.contains("fn custom_config()") || after.contains("fn loop_code()") {
+            return format!(
+                "{}{}\n{}",
+                invariant_header(mcu_name),
+                new_section,
+                USER_TAIL,
+            );
+        }
+
+        // new_section already ends with "// <<< GENERATED END >>>\n"
+        // + one more "\n" gives a single blank line before the user tail.
         format!("{}{}\n{}", &existing[..begin], new_section, after)
     } else {
-        // Markers not found (old format) — rebuild from scratch.
+        // Markers not found — rebuild from scratch.
         format!(
             "{}{}\n{}",
             invariant_header(mcu_name),
             new_section,
-            USER_SECTION
+            USER_TAIL,
         )
     }
 }
@@ -227,8 +221,9 @@ fn make_generated_section(mcu_name: &str, all_pins: &[&Pin]) -> String {
                 expr.trim_start_matches("//").trim()
             )
         } else {
+            let prefix = if needs_mut_ref(&pin.selected_function) { "&mut " } else { "" };
             format!(
-                "    let {var} = {pv}.{var}.{expr}; // {comment}",
+                "    let {var} = {prefix}{pv}.{var}.{expr}; // {comment}",
                 var = meta.var,
                 pv = meta.port_var,
             )
@@ -359,7 +354,7 @@ where
         fn_defs.push_str("}\n\n");
     }
 
-    // ── Peripheral init calls (inside generated_pins_config) ─────────────────
+    // ── Peripheral init calls (inside fn main) ───────────────────────────────
     let mut fn_calls = String::new();
     let mut any_call = false;
 
@@ -523,7 +518,8 @@ where
          {use_block}\n\
          }};\n\n\
          {fn_defs_block}\
-         fn generated_pins_config() {{\n\
+         #[entry]\n\
+         fn main() -> ! {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
@@ -536,7 +532,6 @@ where
          {port_splits}\n\n\
          {pin_section}\
          {fn_calls}\
-         }}\n\
          {GEN_END}\n"
     )
 }
@@ -548,7 +543,8 @@ fn make_default_gen_section(mcu_name: &str) -> String {
         "{GEN_BEGIN}\n\
          // MCU: {mcu_name}\n\
          use stm32f1xx_hal::{{pac, prelude::*}};\n\n\
-         fn generated_pins_config() {{\n\
+         #[entry]\n\
+         fn main() -> ! {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
@@ -558,7 +554,6 @@ fn make_default_gen_section(mcu_name: &str) -> String {
                  .pclk1(36.MHz())\n\
                  .freeze(&mut flash.acr);\n\n\
              // Select pins in the MCU Configurator to generate code here.\n\
-         }}\n\
          {GEN_END}\n"
     )
 }
@@ -629,4 +624,25 @@ fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
 
 fn is_comment_expr(expr: &str) -> bool {
     expr.trim_start().starts_with("//")
+}
+
+/// Returns `true` for pins that are driven (output / alternate-output).
+/// These get a `&mut` prefix so the binding is immediately usable as a
+/// mutable reference without a later `&mut var` at each call site.
+fn needs_mut_ref(func: &PinFunction) -> bool {
+    matches!(
+        func,
+        PinFunction::GpioOutput
+            | PinFunction::TimerPwm { .. }
+            | PinFunction::UsartTx(_)
+            | PinFunction::UsartCk(_)
+            | PinFunction::UsartRts(_)
+            | PinFunction::SpiSck(_)
+            | PinFunction::SpiMosi(_)
+            | PinFunction::SpiNss(_)
+            | PinFunction::I2cScl(_)
+            | PinFunction::I2cSda(_)
+            | PinFunction::Mco
+            | PinFunction::CanTx
+    )
 }

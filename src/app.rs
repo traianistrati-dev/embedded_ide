@@ -1,8 +1,8 @@
 use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
 use crate::espflash::{self, EspFlashState};
-use crate::openocd::{self, OpenOcdState};
 use crate::lsp::{self, LspStatus};
+use crate::openocd::{self, OpenOcdState};
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::{McuType, ToolchainKind};
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
@@ -246,10 +246,8 @@ impl AppIde {
         let dfu_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>> =
             Arc::new(Mutex::new(Vec::new()));
-        let openocd_state: Arc<Mutex<OpenOcdState>> =
-            Arc::new(Mutex::new(OpenOcdState::Idle));
-        let espflash_state: Arc<Mutex<EspFlashState>> =
-            Arc::new(Mutex::new(EspFlashState::Idle));
+        let openocd_state: Arc<Mutex<OpenOcdState>> = Arc::new(Mutex::new(OpenOcdState::Idle));
+        let espflash_state: Arc<Mutex<EspFlashState>> = Arc::new(Mutex::new(EspFlashState::Idle));
 
         // Scan immediately on startup (non-blocking — runs in background thread)
         dfu::detect_dfu(
@@ -528,8 +526,8 @@ impl AppIde {
     /// * Rebuilds `pins/mod.rs` from scratch with only the active declarations.
     /// * Ensures the `pins/` folder entry exists.
     fn sync_pin_files(
-        files:    &mut Vec<(String, String)>,
-        folders:  &mut Vec<String>,
+        files: &mut Vec<(String, String)>,
+        folders: &mut Vec<String>,
         all_pins: &[(usize, String, PinFunction)],
     ) {
         const MOD_PATH: &str = "pins/mod.rs";
@@ -561,9 +559,15 @@ impl AppIde {
         // ── 3. Drop pin files that are no longer configured ───────────────────
         files.retain(|(path, _)| {
             // Only act on paths inside pins/ that look like pin files
-            let Some(fname) = path.strip_prefix("pins/") else { return true };
-            if fname == "mod.rs" { return true } // never drop mod.rs itself
-            if !fname.starts_with("pin") || !fname.ends_with(".rs") { return true }
+            let Some(fname) = path.strip_prefix("pins/") else {
+                return true;
+            };
+            if fname == "mod.rs" {
+                return true;
+            } // never drop mod.rs itself
+            if !fname.starts_with("pin") || !fname.ends_with(".rs") {
+                return true;
+            }
             let slug = &fname[..fname.len() - 3]; // strip ".rs"
             active_slugs.contains(&slug)
         });
@@ -571,7 +575,7 @@ impl AppIde {
         // ── 4. Create / overwrite each configured pin's source file ───────────
         for (slug, num, name, func) in &configured {
             let file_path = format!("pins/{slug}.rs");
-            let content   = Self::generate_pin_content(*num, name, func);
+            let content = Self::generate_pin_content(*num, name, func);
             if let Some((_, existing)) = files.iter_mut().find(|(p, _)| p == &file_path) {
                 *existing = content;
             } else {
@@ -593,11 +597,8 @@ impl AppIde {
     /// Creates the initial `pins/` scaffold (folder + empty mod.rs).
     /// Called once when "New Project" is confirmed so the tree is
     /// pre-populated before any pin is configured.
-    fn init_pins_scaffold(
-        files:   &mut Vec<(String, String)>,
-        folders: &mut Vec<String>,
-    ) {
-        let folder   = "pins".to_string();
+    fn init_pins_scaffold(files: &mut Vec<(String, String)>, folders: &mut Vec<String>) {
+        let folder = "pins".to_string();
         let mod_path = "pins/mod.rs".to_string();
         if !folders.contains(&folder) {
             folders.push(folder);
@@ -737,6 +738,7 @@ impl eframe::App for AppIde {
                     });
                 });
 
+                ui.separator();
                 // Show project name under the heading when one is loaded
                 if let Some(name) = &self.project_name {
                     ui.label(
@@ -746,7 +748,6 @@ impl eframe::App for AppIde {
                             .italics(),
                     );
                 }
-                ui.separator();
 
                 match (&project_files, self.selected_mcu_type.project_config()) {
                     (Some(_), Some(cfg)) => {
@@ -809,7 +810,7 @@ impl eframe::App for AppIde {
             egui::Window::new("New Project")
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .anchor(egui::Align2::LEFT_TOP, [20.0, 10.0])
                 .show(ui.ctx(), |ui| {
                     ui.add_space(4.0);
                     ui.label("This will clear all user files and folders.");
@@ -1151,12 +1152,12 @@ impl eframe::App for AppIde {
                         ui.add_space(4.0);
 
                         // ── USB DFU + SWD section ─────────────────────────────
-                        let dfu_guard   = self.dfu_state.lock().unwrap();
-                        let dfu_busy    = dfu_guard.is_busy();
-                        let dfu_label   = dfu_guard.status_label().to_string();
-                        let dfu_color   = dfu_guard.status_color();
-                        let dfu_detail  = dfu_guard.detail();
-                        let device_ok   = matches!(*dfu_guard, DfuState::DeviceFound(_));
+                        let dfu_guard = self.dfu_state.lock().unwrap();
+                        let dfu_busy = dfu_guard.is_busy();
+                        let dfu_label = dfu_guard.status_label().to_string();
+                        let dfu_color = dfu_guard.status_color();
+                        let dfu_detail = dfu_guard.detail();
+                        let device_ok = matches!(*dfu_guard, DfuState::DeviceFound(_));
                         drop(dfu_guard);
 
                         let ocd_busy = self.openocd_state.lock().unwrap().is_busy();
@@ -1215,7 +1216,8 @@ impl eframe::App for AppIde {
                         match chip_toolchain {
                             ToolchainKind::RustEmbedded => {
                                 // ⚡ Flash via USB (DFU)
-                                let flash_enabled = device_ok && !any_busy && project_files.is_some();
+                                let flash_enabled =
+                                    device_ok && !any_busy && project_files.is_some();
                                 let flash_btn = ui.add_enabled(
                                     flash_enabled,
                                     egui::Button::new(
@@ -1323,13 +1325,18 @@ impl eframe::App for AppIde {
                                 let flash_esp_btn = ui.add_enabled(
                                     flash_esp_enabled,
                                     egui::Button::new(
-                                        egui::RichText::new(format!("{} Flash ESP32", ph::LIGHTNING))
-                                            .size(11.0)
-                                            .color(if flash_esp_enabled {
+                                        egui::RichText::new(format!(
+                                            "{} Flash ESP32",
+                                            ph::LIGHTNING
+                                        ))
+                                        .size(11.0)
+                                        .color(
+                                            if flash_esp_enabled {
                                                 egui::Color32::from_rgb(220, 140, 60)
                                             } else {
                                                 egui::Color32::GRAY
-                                            }),
+                                            },
+                                        ),
                                     ),
                                 );
                                 if flash_esp_btn.clicked() {
@@ -1655,11 +1662,9 @@ impl eframe::App for AppIde {
                         .mcu
                         .as_ref()
                         .map(|m| m.fresh_main_rs())
-                        .unwrap_or_else(|| {
-                            match self.selected_mcu_type.toolchain() {
-                                ToolchainKind::EspRust => project_gen::esp32c3_fresh_main_rs(),
-                                _ => String::new(),
-                            }
+                        .unwrap_or_else(|| match self.selected_mcu_type.toolchain() {
+                            ToolchainKind::EspRust => project_gen::esp32c3_fresh_main_rs(),
+                            _ => String::new(),
                         });
                     self.active_tab = McuTab::Pins;
                     self.selected_file = ProjectFileId::MainRs;
@@ -1788,7 +1793,7 @@ fn show_project_tree(
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
 ) {
-    let normal = egui::Color32::from_rgb(100, 105, 115);
+    let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
 
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
@@ -1804,7 +1809,7 @@ fn show_project_tree(
         egui::RichText::new(".cargo/")
             .size(11.5)
             .monospace()
-            .color(normal),
+            .color(default_tree_folder_color),
     )
     .default_open(true)
     .show(ui, |ui| {
@@ -1824,7 +1829,7 @@ fn show_project_tree(
         egui::RichText::new("src/")
             .size(11.5)
             .monospace()
-            .color(normal),
+            .color(default_tree_folder_color),
     )
     .default_open(true)
     .show(ui, |ui| {
@@ -1931,7 +1936,7 @@ fn show_project_tree(
                     egui::RichText::new(format!("{folder_name}/"))
                         .size(11.5)
                         .monospace()
-                        .color(normal),
+                        .color(default_tree_folder_color),
                 )
                 .default_open(true)
                 .show(ui, |ui| {
@@ -2874,15 +2879,15 @@ fn show_dfu_tab(
     espflash_state: &Arc<Mutex<EspFlashState>>,
     toolchain: &ToolchainKind,
 ) {
-    let state     = dfu_state.lock().unwrap().clone();
+    let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
     let esp_state = espflash_state.lock().unwrap().clone();
-    let log       = dfu_log.lock().unwrap().clone();
-    let progs     = dfu_programmers.lock().unwrap().clone();
+    let log = dfu_log.lock().unwrap().clone();
+    let progs = dfu_programmers.lock().unwrap().clone();
 
     // Determine selected programmer kind for adaptive config UI
-    let sel_kind      = progs.get(*dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
-    let is_swd        = matches!(sel_kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
+    let sel_kind = progs.get(*dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
+    let is_swd = matches!(sel_kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
     let interface_cfg = openocd::interface_cfg_for_kind(sel_kind);
 
     // ── Programmer selector ComboBox ──────────────────────────────────────────
@@ -2916,12 +2921,12 @@ fn show_dfu_tab(
                 for (i, p) in progs.iter().enumerate() {
                     let kind_color = match p.kind {
                         "DFU Bootloader" => egui::Color32::from_rgb(100, 200, 255),
-                        "ST-Link"        => egui::Color32::from_rgb(100, 220, 120),
-                        "J-Link"         => egui::Color32::from_rgb(220, 180, 60),
-                        "CMSIS-DAP"      => egui::Color32::from_rgb(180, 140, 220),
-                        "USB-Serial"     => egui::Color32::from_rgb(200, 160, 100),
-                        "ESP32"          => egui::Color32::from_rgb(220, 120, 60),
-                        _                => egui::Color32::GRAY,
+                        "ST-Link" => egui::Color32::from_rgb(100, 220, 120),
+                        "J-Link" => egui::Color32::from_rgb(220, 180, 60),
+                        "CMSIS-DAP" => egui::Color32::from_rgb(180, 140, 220),
+                        "USB-Serial" => egui::Color32::from_rgb(200, 160, 100),
+                        "ESP32" => egui::Color32::from_rgb(220, 120, 60),
+                        _ => egui::Color32::GRAY,
                     };
                     ui.horizontal(|ui| {
                         ui.label(
@@ -2948,17 +2953,11 @@ fn show_dfu_tab(
         if !guidance.is_empty() {
             let color = match p.kind {
                 "DFU Bootloader" => egui::Color32::from_rgb(80, 200, 100),
-                "ST-Link" | "J-Link" | "CMSIS-DAP" =>
-                    egui::Color32::from_rgb(180, 180, 100),
+                "ST-Link" | "J-Link" | "CMSIS-DAP" => egui::Color32::from_rgb(180, 180, 100),
                 _ => egui::Color32::from_rgb(160, 160, 170),
             };
             for line in guidance.lines() {
-                ui.label(
-                    egui::RichText::new(line)
-                        .size(10.0)
-                        .color(color)
-                        .italics(),
-                );
+                ui.label(egui::RichText::new(line).size(10.0).color(color).italics());
             }
         }
     }
@@ -2970,10 +2969,7 @@ fn show_dfu_tab(
         let build_done = log.iter().any(|l| l.contains("✔ Build OK"));
 
         // Helper: render a phase indicator icon + label
-        let phase_widget = |ui: &mut egui::Ui,
-                            icon: &str,
-                            label: &str,
-                            color: egui::Color32| {
+        let phase_widget = |ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32| {
             ui.label(egui::RichText::new(icon).size(11.5).color(color));
             ui.label(egui::RichText::new(label).size(11.0).color(color));
         };
@@ -3009,9 +3005,7 @@ fn show_dfu_tab(
                 EspFlashState::Flashing => {
                     (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 140, 60))
                 }
-                EspFlashState::Success => {
-                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
-                }
+                EspFlashState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
                 EspFlashState::Error(_) if build_done => {
                     (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
                 }
@@ -3071,9 +3065,7 @@ fn show_dfu_tab(
 
             // SWD phases: Build → Flash (no objcopy — OpenOCD programs ELF directly)
             let (b_icon, b_col) = match &ocd_state {
-                OpenOcdState::Building => {
-                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
-                }
+                OpenOcdState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
                 _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
                 OpenOcdState::Error(_) if !build_done && !log.is_empty() => {
                     (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
@@ -3091,9 +3083,7 @@ fn show_dfu_tab(
                 OpenOcdState::Flashing => {
                     (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255))
                 }
-                OpenOcdState::Success => {
-                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
-                }
+                OpenOcdState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
                 OpenOcdState::Error(_) if build_done => {
                     (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
                 }
@@ -3175,7 +3165,7 @@ fn show_dfu_tab(
 
             let (f_icon, f_col) = match &state {
                 DfuState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255)),
-                DfuState::Success  => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
                 DfuState::Error(_) if objcopy_done => {
                     (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
                 }
@@ -3195,9 +3185,9 @@ fn show_dfu_tab(
                 .clicked()
             {
                 dfu_log.lock().unwrap().clear();
-                *dfu_state.lock().unwrap()       = DfuState::Idle;
-                *openocd_state.lock().unwrap()   = OpenOcdState::Idle;
-                *espflash_state.lock().unwrap()  = EspFlashState::Idle;
+                *dfu_state.lock().unwrap() = DfuState::Idle;
+                *openocd_state.lock().unwrap() = OpenOcdState::Idle;
+                *espflash_state.lock().unwrap() = EspFlashState::Idle;
             }
         });
     });
@@ -3213,13 +3203,10 @@ fn show_dfu_tab(
                     .color(egui::Color32::from_rgb(220, 80, 70)),
             );
             ui.label(
-                egui::RichText::new(format!(
-                    "DFU: {}",
-                    msg.lines().next().unwrap_or("Error")
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(220, 80, 70))
-                .strong(),
+                egui::RichText::new(format!("DFU: {}", msg.lines().next().unwrap_or("Error")))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70))
+                    .strong(),
             );
         });
         ui.separator();
@@ -3250,13 +3237,10 @@ fn show_dfu_tab(
                     .color(egui::Color32::from_rgb(220, 80, 70)),
             );
             ui.label(
-                egui::RichText::new(format!(
-                    "SWD: {}",
-                    msg.lines().next().unwrap_or("Error")
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(220, 80, 70))
-                .strong(),
+                egui::RichText::new(format!("SWD: {}", msg.lines().next().unwrap_or("Error")))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70))
+                    .strong(),
             );
         });
         ui.separator();
@@ -3287,13 +3271,10 @@ fn show_dfu_tab(
                     .color(egui::Color32::from_rgb(220, 80, 70)),
             );
             ui.label(
-                egui::RichText::new(format!(
-                    "ESP: {}",
-                    msg.lines().next().unwrap_or("Error")
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(220, 80, 70))
-                .strong(),
+                egui::RichText::new(format!("ESP: {}", msg.lines().next().unwrap_or("Error")))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70))
+                    .strong(),
             );
         });
         ui.separator();
