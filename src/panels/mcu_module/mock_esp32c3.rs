@@ -1,4 +1,5 @@
 use super::mcu::Mcu;
+use super::mcu_catalog::ToolchainKind;
 use super::pin_module::pin::Pin;
 use super::pin_module::pin_function::PinFunction;
 
@@ -209,6 +210,7 @@ pub fn create_esp32c3() -> Mcu {
 
     Mcu::new(
         "ESP32-C3".to_owned(),
+        ToolchainKind::EspRust,
         top_pins,
         bottom_pins,
         left_pins,

@@ -1,3 +1,4 @@
+use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
 use eframe::egui;
@@ -42,6 +43,8 @@ const PIN_SPACING: f32 = 3.0;
 
 pub struct Mcu {
     pub name: String,
+    /// Toolchain family — governs which code template is generated.
+    pub toolchain: ToolchainKind,
     pub top_pins: Vec<Pin>,
     pub bottom_pins: Vec<Pin>,
     pub left_pins: Vec<Pin>,
@@ -55,6 +58,7 @@ pub struct Mcu {
 impl Mcu {
     pub fn new(
         name: String,
+        toolchain: ToolchainKind,
         top_pins: Vec<Pin>,
         bottom_pins: Vec<Pin>,
         left_pins: Vec<Pin>,
@@ -62,6 +66,7 @@ impl Mcu {
     ) -> Self {
         Self {
             name,
+            toolchain,
             top_pins,
             bottom_pins,
             left_pins,

@@ -1,4 +1,5 @@
 use super::mcu::Mcu;
+use super::mcu_catalog::ToolchainKind;
 use super::pin_module::pin::Pin;
 use super::pin_module::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,25 +26,44 @@ const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }
 
 impl Mcu {
     /// Build a brand-new `src/main.rs` (called when the MCU type is first
-    /// selected or reset).  Contains the generated section + user stubs.
+    /// selected or reset).  Dispatches on `self.toolchain`.
     pub fn fresh_main_rs(&self) -> String {
-        let all = self.all_pins();
-        let gen_ = make_generated_section(&self.name, &all);
-        format!(
-            "{header}{gen_}\n{tail}",
-            header = invariant_header(&self.name),
-            tail = USER_TAIL,
-        )
+        match self.toolchain {
+            ToolchainKind::RustEmbedded => {
+                let all = self.all_pins();
+                let gen_ = make_generated_section(&self.name, &all);
+                format!(
+                    "{header}{gen_}\n{tail}",
+                    header = invariant_header(&self.name),
+                    tail = USER_TAIL,
+                )
+            }
+            ToolchainKind::EspRust => {
+                // ESP32-C3: no GEN block — return the fixed esp-hal template
+                super::project_gen::esp32c3_fresh_main_rs()
+            }
+            ToolchainKind::SdccC => {
+                // STM8 — not yet implemented
+                String::new()
+            }
+        }
     }
 
     /// Update `existing` in-place: replace only the generated section
     /// (between the markers), preserving the user-editable parts.
     ///
-    /// If the markers are missing (old format), builds a fresh file instead.
+    /// For toolchains without a GEN block (EspRust, SdccC) the existing
+    /// file is returned unchanged — pin state is not reflected in code yet.
     pub fn update_main_rs(&self, existing: &str) -> String {
-        let all = self.all_pins();
-        let new_section = make_generated_section(&self.name, &all);
-        splice_section(existing, &new_section, &self.name)
+        match self.toolchain {
+            ToolchainKind::RustEmbedded => {
+                let all = self.all_pins();
+                let new_section = make_generated_section(&self.name, &all);
+                splice_section(existing, &new_section, &self.name)
+            }
+            // No GEN markers → nothing to splice; preserve the file as-is.
+            ToolchainKind::EspRust | ToolchainKind::SdccC => existing.to_owned(),
+        }
     }
 
     /// Kept for any remaining call sites — delegates to `fresh_main_rs`.
