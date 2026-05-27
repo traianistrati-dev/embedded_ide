@@ -4,6 +4,7 @@ use app::AppIde;
 
 pub mod build;
 pub mod dfu;
+pub mod espflash;
 pub mod lsp;
 pub mod openocd;
 pub mod panels;

@@ -1,9 +1,10 @@
 use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
+use crate::espflash::{self, EspFlashState};
 use crate::openocd::{self, OpenOcdState};
 use crate::lsp::{self, LspStatus};
 use crate::panels::mcu_module::mcu::Mcu;
-use crate::panels::mcu_module::mcu_catalog::McuType;
+use crate::panels::mcu_module::mcu_catalog::{McuType, ToolchainKind};
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
@@ -162,6 +163,8 @@ pub struct AppIde {
     openocd_state: Arc<Mutex<OpenOcdState>>,
     /// Target config file passed to OpenOCD (e.g. "target/stm32f1x.cfg")
     openocd_target_cfg: String,
+    /// Shared state for ESP32 espflash operations
+    espflash_state: Arc<Mutex<EspFlashState>>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -245,6 +248,8 @@ impl AppIde {
             Arc::new(Mutex::new(Vec::new()));
         let openocd_state: Arc<Mutex<OpenOcdState>> =
             Arc::new(Mutex::new(OpenOcdState::Idle));
+        let espflash_state: Arc<Mutex<EspFlashState>> =
+            Arc::new(Mutex::new(EspFlashState::Idle));
 
         // Scan immediately on startup (non-blocking — runs in background thread)
         dfu::detect_dfu(
@@ -275,6 +280,7 @@ impl AppIde {
             dfu_flash_addr: "0x08000000".to_string(),
             openocd_state,
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
+            espflash_state,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -752,6 +758,7 @@ impl eframe::App for AppIde {
                         show_project_tree(
                             ui,
                             cfg.pkg_name,
+                            &cfg.toolchain,
                             &mut self.selected_file,
                             build_result.as_ref(),
                             Some(&*lsp_guard),
@@ -1153,7 +1160,11 @@ impl eframe::App for AppIde {
                         drop(dfu_guard);
 
                         let ocd_busy = self.openocd_state.lock().unwrap().is_busy();
-                        let any_busy = dfu_busy || ocd_busy;
+                        let esp_busy = self.espflash_state.lock().unwrap().is_busy();
+                        let any_busy = dfu_busy || ocd_busy || esp_busy;
+
+                        // Determine toolchain of the selected chip
+                        let chip_toolchain = self.selected_mcu_type.toolchain();
 
                         // Determine if the selected programmer supports SWD flashing
                         let (is_swd_capable, sel_interface_cfg) = {
@@ -1173,7 +1184,7 @@ impl eframe::App for AppIde {
                                 .request_repaint_after(std::time::Duration::from_millis(120));
                         }
 
-                        // 🔍 Scan button
+                        // 🔍 Scan button — always visible (detects DFU, ST-Link, and serial)
                         let scan_btn = ui.add_enabled(
                             !dfu_busy,
                             egui::Button::new(
@@ -1182,7 +1193,7 @@ impl eframe::App for AppIde {
                             ),
                         );
                         if scan_btn.clicked() {
-                            self.build_tab = BuildPanelTab::Dfu; // show results in DFU tab
+                            self.build_tab = BuildPanelTab::Dfu;
                             self.dfu_sel_programmer = 0;
                             dfu::detect_dfu(
                                 Arc::clone(&self.dfu_state),
@@ -1192,122 +1203,187 @@ impl eframe::App for AppIde {
                             );
                         }
                         scan_btn.on_hover_text(
-                            "Scan for a USB DFU device (STM32 in bootloader mode).\n\
-                             Set BOOT0 jumper = 1 then reconnect USB.",
+                            "Scan for connected USB programmers:\n\
+                             • DFU bootloader (STM32 with BOOT0 = 1)\n\
+                             • ST-Link / J-Link / CMSIS-DAP\n\
+                             • USB-Serial (ESP32-C3, …)",
                         );
 
                         ui.add_space(2.0);
 
-                        // ⚡ Flash via USB (DFU) — enabled only when DFU device detected
-                        let flash_enabled = device_ok && !any_busy && project_files.is_some();
-                        let flash_btn = ui.add_enabled(
-                            flash_enabled,
-                            egui::Button::new(
-                                egui::RichText::new(format!("{} Flash USB", ph::LIGHTNING))
-                                    .size(11.0)
-                                    .color(if flash_enabled {
-                                        egui::Color32::from_rgb(100, 200, 255)
-                                    } else {
-                                        egui::Color32::GRAY
-                                    }),
-                            ),
-                        );
-                        if flash_btn.clicked() {
-                            if let Some(config) = self.selected_mcu_type.project_config() {
-                                let build_dir =
-                                    std::env::temp_dir().join("embedded_ide_0_check");
-                                let code = self.generated_code.clone();
-                                // Write latest project files to disk first
-                                if project_gen::write_project(
-                                    &build_dir,
-                                    &config,
-                                    &code,
-                                    &self.user_src_files,
-                                )
-                                .is_ok()
-                                {
-                                    self.build_tab = BuildPanelTab::Dfu;
-                                    dfu::start_flash(
-                                        build_dir,
-                                        config.target.to_string(),
-                                        config.pkg_name.to_string(),
-                                        self.dfu_flash_addr.clone(),
-                                        Arc::clone(&self.dfu_state),
-                                        Arc::clone(&self.dfu_log),
-                                        self.egui_ctx.clone(),
-                                    );
+                        // ── Toolchain-specific flash buttons ──────────────────
+                        match chip_toolchain {
+                            ToolchainKind::RustEmbedded => {
+                                // ⚡ Flash via USB (DFU)
+                                let flash_enabled = device_ok && !any_busy && project_files.is_some();
+                                let flash_btn = ui.add_enabled(
+                                    flash_enabled,
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} Flash USB", ph::LIGHTNING))
+                                            .size(11.0)
+                                            .color(if flash_enabled {
+                                                egui::Color32::from_rgb(100, 200, 255)
+                                            } else {
+                                                egui::Color32::GRAY
+                                            }),
+                                    ),
+                                );
+                                if flash_btn.clicked() {
+                                    if let Some(config) = self.selected_mcu_type.project_config() {
+                                        let build_dir =
+                                            std::env::temp_dir().join("embedded_ide_0_check");
+                                        let code = self.generated_code.clone();
+                                        if project_gen::write_project(
+                                            &build_dir,
+                                            &config,
+                                            &code,
+                                            &self.user_src_files,
+                                        )
+                                        .is_ok()
+                                        {
+                                            self.build_tab = BuildPanelTab::Dfu;
+                                            dfu::start_flash(
+                                                build_dir,
+                                                config.target.to_string(),
+                                                config.pkg_name.to_string(),
+                                                self.dfu_flash_addr.clone(),
+                                                Arc::clone(&self.dfu_state),
+                                                Arc::clone(&self.dfu_log),
+                                                self.egui_ctx.clone(),
+                                            );
+                                        }
+                                    }
                                 }
+                                flash_btn.on_hover_text(
+                                    "Build with --release, convert to .bin, flash via dfu-util.\n\
+                                     Requires:\n\
+                                     • STM32 in DFU mode (BOOT0 = 1)\n\
+                                     • dfu-util in PATH\n\
+                                     • WinUSB driver (install via Zadig)\n\
+                                     • llvm-objcopy or arm-none-eabi-objcopy",
+                                );
+
+                                ui.add_space(2.0);
+
+                                // 🔗 Flash via SWD (OpenOCD)
+                                let flash_swd_enabled =
+                                    is_swd_capable && !any_busy && project_files.is_some();
+                                let flash_swd_btn = ui.add_enabled(
+                                    flash_swd_enabled,
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} Flash SWD", ph::LIGHTNING))
+                                            .size(11.0)
+                                            .color(if flash_swd_enabled {
+                                                egui::Color32::from_rgb(255, 165, 50)
+                                            } else {
+                                                egui::Color32::GRAY
+                                            }),
+                                    ),
+                                );
+                                if flash_swd_btn.clicked() {
+                                    if let Some(config) = self.selected_mcu_type.project_config() {
+                                        let build_dir =
+                                            std::env::temp_dir().join("embedded_ide_0_check");
+                                        let code = self.generated_code.clone();
+                                        if project_gen::write_project(
+                                            &build_dir,
+                                            &config,
+                                            &code,
+                                            &self.user_src_files,
+                                        )
+                                        .is_ok()
+                                        {
+                                            self.build_tab = BuildPanelTab::Dfu;
+                                            openocd::start_flash(
+                                                build_dir,
+                                                config.target.to_string(),
+                                                config.pkg_name.to_string(),
+                                                sel_interface_cfg.clone(),
+                                                self.openocd_target_cfg.clone(),
+                                                Arc::clone(&self.openocd_state),
+                                                Arc::clone(&self.dfu_log),
+                                                self.egui_ctx.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                                flash_swd_btn.on_hover_text(
+                                    "Build with --release, then program via SWD using OpenOCD.\n\
+                                     Requires:\n\
+                                     • OpenOCD in PATH  (winget install openocd)\n\
+                                     • ST-Link/J-Link/CMSIS-DAP driver installed\n\
+                                     • Target .cfg selected in the Flash tab\n\
+                                     • SWD wiring: SWDIO + SWCLK + GND",
+                                );
+                            }
+
+                            ToolchainKind::EspRust => {
+                                // 🔶 Flash ESP32
+                                let flash_esp_enabled = !any_busy && project_files.is_some();
+                                let flash_esp_btn = ui.add_enabled(
+                                    flash_esp_enabled,
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} Flash ESP32", ph::LIGHTNING))
+                                            .size(11.0)
+                                            .color(if flash_esp_enabled {
+                                                egui::Color32::from_rgb(220, 140, 60)
+                                            } else {
+                                                egui::Color32::GRAY
+                                            }),
+                                    ),
+                                );
+                                if flash_esp_btn.clicked() {
+                                    if let Some(config) = self.selected_mcu_type.project_config() {
+                                        let build_dir =
+                                            std::env::temp_dir().join("embedded_ide_0_check");
+                                        let code = self.generated_code.clone();
+                                        if project_gen::write_project(
+                                            &build_dir,
+                                            &config,
+                                            &code,
+                                            &self.user_src_files,
+                                        )
+                                        .is_ok()
+                                        {
+                                            self.build_tab = BuildPanelTab::Dfu;
+                                            espflash::start_flash(
+                                                build_dir,
+                                                config.target.to_string(),
+                                                config.probe_chip.to_string(),
+                                                Arc::clone(&self.espflash_state),
+                                                Arc::clone(&self.dfu_log),
+                                                self.egui_ctx.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                                flash_esp_btn.on_hover_text(
+                                    "Build with --release, then flash via espflash.\n\
+                                     Requires:\n\
+                                     • espflash in PATH  (cargo install espflash)\n\
+                                     • ESP32-C3 connected via USB\n\
+                                     • ESP32-C3 in download mode:\n\
+                                         hold BOOT → press RESET → release BOOT\n\
+                                     • Target installed:\n\
+                                         rustup target add riscv32imc-unknown-none-elf",
+                                );
+                            }
+
+                            ToolchainKind::SdccC => {
+                                // STM8 — on hold, no flash button
                             }
                         }
-                        flash_btn.on_hover_text(
-                            "Build with --release, convert to .bin, then flash via dfu-util.\n\
-                             Requires:\n\
-                             • STM32 in DFU mode (BOOT0 = 1)\n\
-                             • dfu-util in PATH\n\
-                             • WinUSB driver (install via Zadig)\n\
-                             • llvm-objcopy, arm-none-eabi-objcopy, or cargo-binutils",
-                        );
-
-                        ui.add_space(2.0);
-
-                        // 🔗 Flash via SWD (OpenOCD) — enabled when SWD programmer is selected
-                        let flash_swd_enabled =
-                            is_swd_capable && !any_busy && project_files.is_some();
-                        let flash_swd_btn = ui.add_enabled(
-                            flash_swd_enabled,
-                            egui::Button::new(
-                                egui::RichText::new(format!("{} Flash SWD", ph::LIGHTNING))
-                                    .size(11.0)
-                                    .color(if flash_swd_enabled {
-                                        egui::Color32::from_rgb(255, 165, 50)
-                                    } else {
-                                        egui::Color32::GRAY
-                                    }),
-                            ),
-                        );
-                        if flash_swd_btn.clicked() {
-                            if let Some(config) = self.selected_mcu_type.project_config() {
-                                let build_dir =
-                                    std::env::temp_dir().join("embedded_ide_0_check");
-                                let code = self.generated_code.clone();
-                                if project_gen::write_project(
-                                    &build_dir,
-                                    &config,
-                                    &code,
-                                    &self.user_src_files,
-                                )
-                                .is_ok()
-                                {
-                                    self.build_tab = BuildPanelTab::Dfu;
-                                    openocd::start_flash(
-                                        build_dir,
-                                        config.target.to_string(),
-                                        config.pkg_name.to_string(),
-                                        sel_interface_cfg.clone(),
-                                        self.openocd_target_cfg.clone(),
-                                        Arc::clone(&self.openocd_state),
-                                        Arc::clone(&self.dfu_log),
-                                        self.egui_ctx.clone(),
-                                    );
-                                }
-                            }
-                        }
-                        flash_swd_btn.on_hover_text(
-                            "Build with --release, then program via SWD using OpenOCD.\n\
-                             Requires:\n\
-                             • OpenOCD in PATH  (winget install openocd)\n\
-                             • ST-Link/J-Link/CMSIS-DAP driver installed\n\
-                             • Target .cfg selected in the DFU tab (e.g. target/stm32f1x.cfg)\n\
-                             • SWD wiring: SWDIO + SWCLK + GND",
-                        );
 
                         ui.add_space(4.0);
 
-                        // Status label — shows OpenOCD status when active, otherwise DFU status
+                        // Status label — shows the most active state
                         let (show_label, show_color, show_detail) = {
                             let ocd = self.openocd_state.lock().unwrap();
+                            let esp = self.espflash_state.lock().unwrap();
                             if !matches!(*ocd, OpenOcdState::Idle) {
                                 (ocd.status_label().to_string(), ocd.status_color(), None)
+                            } else if !matches!(*esp, EspFlashState::Idle) {
+                                (esp.status_label().to_string(), esp.status_color(), None)
                             } else {
                                 (dfu_label.clone(), dfu_color, dfu_detail)
                             }
@@ -1347,6 +1423,7 @@ impl eframe::App for AppIde {
                     let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
                     let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)
                         || !matches!(*self.openocd_state.lock().unwrap(), OpenOcdState::Idle)
+                        || !matches!(*self.espflash_state.lock().unwrap(), EspFlashState::Idle)
                         || !self.dfu_log.lock().unwrap().is_empty();
                     let show_panel = cargo_has || lsp_active || dfu_active;
 
@@ -1417,6 +1494,8 @@ impl eframe::App for AppIde {
                                     &mut self.dfu_flash_addr,
                                     &self.openocd_state,
                                     &mut self.openocd_target_cfg,
+                                    &self.espflash_state,
+                                    &self.selected_mcu_type.toolchain(),
                                     &mut self.build_tab,
                                     &mut self.selected_diagnostic,
                                     &mut self.lsp_selected_diagnostic,
@@ -1569,17 +1648,29 @@ impl eframe::App for AppIde {
 
                 if prev_type != self.selected_mcu_type {
                     self.mcu = Self::init_mcu(&self.selected_mcu_type);
-                    // Build a fresh file with new stubs — user had no edits yet
-                    // for this MCU type, and pin layout is completely different.
+                    // Build a fresh main.rs — pin layout changes completely.
+                    // For MCUs without a pin diagram (ESP32-C3), use the
+                    // toolchain-specific default template instead.
                     self.generated_code = self
                         .mcu
                         .as_ref()
                         .map(|m| m.fresh_main_rs())
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| {
+                            match self.selected_mcu_type.toolchain() {
+                                ToolchainKind::EspRust => project_gen::esp32c3_fresh_main_rs(),
+                                _ => String::new(),
+                            }
+                        });
                     self.active_tab = McuTab::Pins;
                     self.selected_file = ProjectFileId::MainRs;
-                    // Stop old RA session; it will auto-restart on the next frame
-                    // for supported chips (generation counter prevents stale updates).
+                    // Reset any file selection that is RustEmbedded-only
+                    if matches!(
+                        self.selected_file,
+                        ProjectFileId::MemoryX | ProjectFileId::BuildRs
+                    ) {
+                        self.selected_file = ProjectFileId::MainRs;
+                    }
+                    // Stop old RA session; it will auto-restart on the next frame.
                     self.lsp_state.lock().unwrap().reset();
                     self.lsp_selected_diagnostic = None;
                 }
@@ -1683,6 +1774,7 @@ impl eframe::App for AppIde {
 fn show_project_tree(
     ui: &mut egui::Ui,
     pkg_name: &str,
+    toolchain: &ToolchainKind,
     selected: &mut ProjectFileId,
     build_result: Option<&build::BuildResult>,
     lsp: Option<&lsp::LspState>,
@@ -2239,15 +2331,18 @@ fn show_project_tree(
         build_result,
         lsp,
     );
-    file_row(
-        ui,
-        4.0,
-        "build.rs",
-        ProjectFileId::BuildRs,
-        selected,
-        build_result,
-        lsp,
-    );
+    // build.rs and memory.x only exist for RustEmbedded toolchain
+    if *toolchain == ToolchainKind::RustEmbedded {
+        file_row(
+            ui,
+            4.0,
+            "build.rs",
+            ProjectFileId::BuildRs,
+            selected,
+            build_result,
+            lsp,
+        );
+    }
     file_row(
         ui,
         4.0,
@@ -2257,15 +2352,17 @@ fn show_project_tree(
         build_result,
         lsp,
     );
-    file_row(
-        ui,
-        4.0,
-        "memory.x",
-        ProjectFileId::MemoryX,
-        selected,
-        build_result,
-        lsp,
-    );
+    if *toolchain == ToolchainKind::RustEmbedded {
+        file_row(
+            ui,
+            4.0,
+            "memory.x",
+            ProjectFileId::MemoryX,
+            selected,
+            build_result,
+            lsp,
+        );
+    }
 }
 
 // ── Single file row for fixed project files (with diagnostic indicators) ──────
@@ -2596,6 +2693,8 @@ fn show_diag_panel(
     dfu_flash_addr: &mut String,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
+    espflash_state: &Arc<Mutex<EspFlashState>>,
+    toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
@@ -2681,22 +2780,33 @@ fn show_diag_panel(
 
         ui.separator();
 
-        // DFU / SWD tab button — badge reflects whichever operation is active
+        // Flash tab button — badge reflects whichever flash operation is active
         {
             let dfu = dfu_state.lock().unwrap();
             let ocd = openocd_state.lock().unwrap();
-            let (badge, col) = if dfu.is_busy() || ocd.is_busy() {
-                if matches!(*dfu, DfuState::Flashing) || matches!(*ocd, OpenOcdState::Flashing) {
+            let esp = espflash_state.lock().unwrap();
+            let any_busy = dfu.is_busy() || ocd.is_busy() || esp.is_busy();
+            let any_success = matches!(*dfu, DfuState::Success)
+                || matches!(*ocd, OpenOcdState::Success)
+                || matches!(*esp, EspFlashState::Success);
+            let any_error = matches!(*dfu, DfuState::Error(_))
+                || matches!(*ocd, OpenOcdState::Error(_))
+                || matches!(*esp, EspFlashState::Error(_));
+            let (badge, col) = if any_busy {
+                if matches!(*dfu, DfuState::Flashing)
+                    || matches!(*ocd, OpenOcdState::Flashing)
+                    || matches!(*esp, EspFlashState::Flashing)
+                {
                     (" …".to_owned(), egui::Color32::from_rgb(100, 180, 255))
                 } else {
                     (" …".to_owned(), egui::Color32::from_rgb(220, 180, 60))
                 }
-            } else if matches!(*dfu, DfuState::Success) || matches!(*ocd, OpenOcdState::Success) {
+            } else if any_success {
                 (
                     format!(" {}", ph::CHECK_CIRCLE),
                     egui::Color32::from_rgb(80, 200, 100),
                 )
-            } else if matches!(*dfu, DfuState::Error(_)) || matches!(*ocd, OpenOcdState::Error(_)) {
+            } else if any_error {
                 (
                     format!(" {}", ph::X_CIRCLE),
                     egui::Color32::from_rgb(220, 80, 70),
@@ -2704,6 +2814,7 @@ fn show_diag_panel(
             } else {
                 (String::new(), egui::Color32::DARK_GRAY)
             };
+            drop(esp);
             drop(ocd);
             drop(dfu);
             let label = format!("{} Flash{badge}", ph::LIGHTNING);
@@ -2742,6 +2853,8 @@ fn show_diag_panel(
                 dfu_flash_addr,
                 openocd_state,
                 openocd_target_cfg,
+                espflash_state,
+                toolchain,
             );
         }
     }
@@ -2758,9 +2871,12 @@ fn show_dfu_tab(
     dfu_flash_addr: &mut String,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
+    espflash_state: &Arc<Mutex<EspFlashState>>,
+    toolchain: &ToolchainKind,
 ) {
     let state     = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
+    let esp_state = espflash_state.lock().unwrap().clone();
     let log       = dfu_log.lock().unwrap().clone();
     let progs     = dfu_programmers.lock().unwrap().clone();
 
@@ -2849,7 +2965,7 @@ fn show_dfu_tab(
 
     ui.separator();
 
-    // ── Config row — adaptive: SWD (OpenOCD) or DFU ───────────────────────────
+    // ── Config row — adaptive: ESP32 / SWD (OpenOCD) / DFU ───────────────────
     ui.horizontal(|ui| {
         let build_done = log.iter().any(|l| l.contains("✔ Build OK"));
 
@@ -2862,7 +2978,47 @@ fn show_dfu_tab(
             ui.label(egui::RichText::new(label).size(11.0).color(color));
         };
 
-        if is_swd {
+        if *toolchain == ToolchainKind::EspRust {
+            // ── EspRust config ────────────────────────────────────────────────
+            ui.label(
+                egui::RichText::new("Tool: espflash")
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(220, 140, 60)),
+            );
+            ui.separator();
+
+            // Phases: Build → Flash ESP
+            let (b_icon, b_col) = match &esp_state {
+                EspFlashState::Building => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
+                }
+                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                EspFlashState::Error(_) if !build_done && !log.is_empty() => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, b_icon, "Build", b_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (f_icon, f_col) = match &esp_state {
+                EspFlashState::Flashing => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 140, 60))
+                }
+                EspFlashState::Success => {
+                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
+                }
+                EspFlashState::Error(_) if build_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, f_icon, "Flash ESP32", f_col);
+        } else if is_swd {
             // ── SWD / OpenOCD config ──────────────────────────────────────────
             ui.label(
                 egui::RichText::new("Interface:")
@@ -3039,8 +3195,9 @@ fn show_dfu_tab(
                 .clicked()
             {
                 dfu_log.lock().unwrap().clear();
-                *dfu_state.lock().unwrap()     = DfuState::Idle;
-                *openocd_state.lock().unwrap() = OpenOcdState::Idle;
+                *dfu_state.lock().unwrap()       = DfuState::Idle;
+                *openocd_state.lock().unwrap()   = OpenOcdState::Idle;
+                *espflash_state.lock().unwrap()  = EspFlashState::Idle;
             }
         });
     });
@@ -3121,6 +3278,43 @@ fn show_dfu_tab(
         ui.separator();
     }
 
+    // ── ESP32 flash Error / Success banners ───────────────────────────────────
+    if let EspFlashState::Error(msg) = &esp_state {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::X_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70)),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "ESP: {}",
+                    msg.lines().next().unwrap_or("Error")
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(220, 80, 70))
+                .strong(),
+            );
+        });
+        ui.separator();
+    }
+    if matches!(esp_state, EspFlashState::Success) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::CHECK_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100)),
+            );
+            ui.label(
+                egui::RichText::new("ESP32 programmed successfully!")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+
     // ── Scrollable log (shared between DFU and OpenOCD operations) ────────────
     egui::ScrollArea::vertical()
         .id_salt("dfu_log_scroll")
@@ -3131,8 +3325,9 @@ fn show_dfu_tab(
                 ui.label(
                     egui::RichText::new(
                         "No output yet.\n\
-                         • Flash USB  — DFU mode (STM32 with BOOT0 = 1)\n\
-                         • Flash SWD  — ST-Link / J-Link via OpenOCD",
+                         • Flash USB    — DFU mode (STM32 with BOOT0 = 1)\n\
+                         • Flash SWD    — ST-Link / J-Link via OpenOCD\n\
+                         • Flash ESP32  — espflash (ESP32-C3 via USB-Serial)",
                     )
                     .size(11.0)
                     .color(egui::Color32::GRAY),
