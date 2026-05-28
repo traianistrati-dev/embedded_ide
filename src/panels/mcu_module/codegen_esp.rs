@@ -15,7 +15,7 @@
 //!
 //! #[main]
 //! fn main() -> ! {
-//!     let peripherals = esp_hal::init(esp_hal::Config::default());
+//!     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
 //!
 //!     // ── GPIO ──
 //!     let mut gpio2 = Output::new(peripherals.GPIO2, Level::Low); // GPIO Output
@@ -88,45 +88,61 @@ fn make_gen_section(pins: &[&Pin]) -> String {
     }
 
     // ── Feature flags ────────────────────────────────────────────────────────
-    let has_output = configured.iter().any(|p| p.selected_function == PinFunction::GpioOutput);
-    let has_input  = configured.iter().any(|p| p.selected_function == PinFunction::GpioInput);
-    let has_adc    = configured.iter().any(|p| matches!(p.selected_function, PinFunction::AdcChannel { .. }));
-    let has_uart   = configured.iter().any(|p| matches!(
-        p.selected_function,
-        PinFunction::UsartTx(_) | PinFunction::UsartRx(_)
-    ));
-    let has_spi    = configured.iter().any(|p| matches!(
-        p.selected_function,
-        PinFunction::SpiSck(_) | PinFunction::SpiMosi(_)
-            | PinFunction::SpiMiso(_) | PinFunction::SpiNss(_)
-    ));
-    let has_i2c    = configured.iter().any(|p| matches!(
-        p.selected_function,
-        PinFunction::I2cScl(_) | PinFunction::I2cSda(_)
-    ));
-    let has_twai   = configured.iter().any(|p| matches!(
-        p.selected_function,
-        PinFunction::CanTx | PinFunction::CanRx
-    ));
-    let has_usb    = configured.iter().any(|p| matches!(
-        p.selected_function,
-        PinFunction::UsbDm | PinFunction::UsbDp
-    ));
+    let has_output = configured
+        .iter()
+        .any(|p| p.selected_function == PinFunction::GpioOutput);
+    let has_input = configured
+        .iter()
+        .any(|p| p.selected_function == PinFunction::GpioInput);
+    let has_adc = configured
+        .iter()
+        .any(|p| matches!(p.selected_function, PinFunction::AdcChannel { .. }));
+    let has_uart = configured.iter().any(|p| {
+        matches!(
+            p.selected_function,
+            PinFunction::UsartTx(_) | PinFunction::UsartRx(_)
+        )
+    });
+    let has_spi = configured.iter().any(|p| {
+        matches!(
+            p.selected_function,
+            PinFunction::SpiSck(_)
+                | PinFunction::SpiMosi(_)
+                | PinFunction::SpiMiso(_)
+                | PinFunction::SpiNss(_)
+        )
+    });
+    let has_i2c = configured.iter().any(|p| {
+        matches!(
+            p.selected_function,
+            PinFunction::I2cScl(_) | PinFunction::I2cSda(_)
+        )
+    });
+    let has_twai = configured
+        .iter()
+        .any(|p| matches!(p.selected_function, PinFunction::CanTx | PinFunction::CanRx));
+    let has_usb = configured
+        .iter()
+        .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp));
 
     // ── use block ─────────────────────────────────────────────────────────────
     let use_block = build_use_block(has_output, has_input, has_adc, has_uart, has_spi, has_i2c);
 
     // ── fn main() body ────────────────────────────────────────────────────────
     let mut body = String::new();
-    body.push_str("    let peripherals = esp_hal::init(esp_hal::Config::default());\n");
+    body.push_str("    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));\n");
 
     // ── GPIO Output / Input ───────────────────────────────────────────────────
-    let outputs: Vec<&Pin> = configured.iter()
+    let outputs: Vec<&Pin> = configured
+        .iter()
         .filter(|p| p.selected_function == PinFunction::GpioOutput)
-        .copied().collect();
-    let inputs: Vec<&Pin> = configured.iter()
+        .copied()
+        .collect();
+    let inputs: Vec<&Pin> = configured
+        .iter()
         .filter(|p| p.selected_function == PinFunction::GpioInput)
-        .copied().collect();
+        .copied()
+        .collect();
 
     if !outputs.is_empty() || !inputs.is_empty() {
         body.push('\n');
@@ -134,14 +150,14 @@ fn make_gen_section(pins: &[&Pin]) -> String {
         for p in &outputs {
             body.push_str(&format!(
                 "    let mut {var} = Output::new(peripherals.{gpio}, Level::Low); // GPIO Output\n",
-                var  = pin_var(&p.name),
+                var = pin_var(&p.name),
                 gpio = p.name,
             ));
         }
         for p in &inputs {
             body.push_str(&format!(
                 "    let {var} = Input::new(peripherals.{gpio}, Pull::None); // GPIO Input\n",
-                var  = pin_var(&p.name),
+                var = pin_var(&p.name),
                 gpio = p.name,
             ));
         }
@@ -150,7 +166,8 @@ fn make_gen_section(pins: &[&Pin]) -> String {
     // ── ADC — grouped by ADC instance ────────────────────────────────────────
     if has_adc {
         let mut adc_pins: BTreeMap<u8, Vec<&Pin>> = BTreeMap::new();
-        for p in configured.iter()
+        for p in configured
+            .iter()
             .filter(|p| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
         {
             if let PinFunction::AdcChannel { adc, .. } = p.selected_function {
@@ -161,14 +178,16 @@ fn make_gen_section(pins: &[&Pin]) -> String {
         for (adc_n, pin_list) in &adc_pins {
             body.push('\n');
             body.push_str(&format!("    // ── ADC{adc_n} ──\n"));
-            body.push_str(&format!("    let mut adc{adc_n}_config = AdcConfig::new();\n"));
+            body.push_str(&format!(
+                "    let mut adc{adc_n}_config = AdcConfig::new();\n"
+            ));
             for p in pin_list {
                 if let PinFunction::AdcChannel { .. } = p.selected_function {
                     body.push_str(&format!(
                         "    let mut {var}_adc = adc{adc_n}_config\
                          .enable_pin(peripherals.{gpio}, Attenuation::Db11); // {label}\n",
-                        var   = pin_var(&p.name),
-                        gpio  = p.name,
+                        var = pin_var(&p.name),
+                        gpio = p.name,
                         label = p.selected_function.label(),
                     ));
                 }
@@ -185,8 +204,12 @@ fn make_gen_section(pins: &[&Pin]) -> String {
         let mut uart_rx: BTreeMap<u8, &Pin> = BTreeMap::new();
         for p in configured.iter() {
             match p.selected_function {
-                PinFunction::UsartTx(n) => { uart_tx.insert(n, p); }
-                PinFunction::UsartRx(n) => { uart_rx.insert(n, p); }
+                PinFunction::UsartTx(n) => {
+                    uart_tx.insert(n, p);
+                }
+                PinFunction::UsartRx(n) => {
+                    uart_rx.insert(n, p);
+                }
                 _ => {}
             }
         }
@@ -194,11 +217,25 @@ fn make_gen_section(pins: &[&Pin]) -> String {
         for n in instances {
             body.push('\n');
             body.push_str(&format!("    // ── UART{n} ──\n"));
-            let rx_part = uart_rx.get(&n)
-                .map(|p| format!("\n        .with_rx(peripherals.{}) // {}", p.name, p.selected_function.label()))
+            let rx_part = uart_rx
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_rx(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
-            let tx_part = uart_tx.get(&n)
-                .map(|p| format!("\n        .with_tx(peripherals.{}) // {}", p.name, p.selected_function.label()))
+            let tx_part = uart_tx
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_tx(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _uart{n} = Uart::new(peripherals.UART{n}, UartConfig::default()){rx_part}{tx_part};\n"
@@ -208,36 +245,76 @@ fn make_gen_section(pins: &[&Pin]) -> String {
 
     // ── SPI — grouped by peripheral instance ─────────────────────────────────
     if has_spi {
-        let mut spi_sck:  BTreeMap<u8, &Pin> = BTreeMap::new();
+        let mut spi_sck: BTreeMap<u8, &Pin> = BTreeMap::new();
         let mut spi_mosi: BTreeMap<u8, &Pin> = BTreeMap::new();
         let mut spi_miso: BTreeMap<u8, &Pin> = BTreeMap::new();
-        let mut spi_nss:  BTreeMap<u8, &Pin> = BTreeMap::new();
+        let mut spi_nss: BTreeMap<u8, &Pin> = BTreeMap::new();
         for p in configured.iter() {
             match p.selected_function {
-                PinFunction::SpiSck(n)  => { spi_sck.insert(n, p); }
-                PinFunction::SpiMosi(n) => { spi_mosi.insert(n, p); }
-                PinFunction::SpiMiso(n) => { spi_miso.insert(n, p); }
-                PinFunction::SpiNss(n)  => { spi_nss.insert(n, p); }
+                PinFunction::SpiSck(n) => {
+                    spi_sck.insert(n, p);
+                }
+                PinFunction::SpiMosi(n) => {
+                    spi_mosi.insert(n, p);
+                }
+                PinFunction::SpiMiso(n) => {
+                    spi_miso.insert(n, p);
+                }
+                PinFunction::SpiNss(n) => {
+                    spi_nss.insert(n, p);
+                }
                 _ => {}
             }
         }
-        let instances: BTreeSet<u8> = spi_sck.keys()
-            .chain(spi_mosi.keys()).chain(spi_miso.keys()).chain(spi_nss.keys())
-            .copied().collect();
+        let instances: BTreeSet<u8> = spi_sck
+            .keys()
+            .chain(spi_mosi.keys())
+            .chain(spi_miso.keys())
+            .chain(spi_nss.keys())
+            .copied()
+            .collect();
         for n in instances {
             body.push('\n');
             body.push_str(&format!("    // ── SPI{n} ──\n"));
-            let sck_part  = spi_sck.get(&n)
-                .map(|p| format!("\n        .with_sck(peripherals.{}) // {}",  p.name, p.selected_function.label()))
+            let sck_part = spi_sck
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_sck(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
-            let mosi_part = spi_mosi.get(&n)
-                .map(|p| format!("\n        .with_mosi(peripherals.{}) // {}", p.name, p.selected_function.label()))
+            let mosi_part = spi_mosi
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_mosi(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
-            let miso_part = spi_miso.get(&n)
-                .map(|p| format!("\n        .with_miso(peripherals.{}) // {}", p.name, p.selected_function.label()))
+            let miso_part = spi_miso
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_miso(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
-            let nss_part  = spi_nss.get(&n)
-                .map(|p| format!("\n        .with_cs(peripherals.{}) // {}",   p.name, p.selected_function.label()))
+            let nss_part = spi_nss
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_cs(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _spi{n} = Spi::new(peripherals.SPI{n}, SpiConfig::default())\
@@ -252,8 +329,12 @@ fn make_gen_section(pins: &[&Pin]) -> String {
         let mut i2c_sda: BTreeMap<u8, &Pin> = BTreeMap::new();
         for p in configured.iter() {
             match p.selected_function {
-                PinFunction::I2cScl(n) => { i2c_scl.insert(n, p); }
-                PinFunction::I2cSda(n) => { i2c_sda.insert(n, p); }
+                PinFunction::I2cScl(n) => {
+                    i2c_scl.insert(n, p);
+                }
+                PinFunction::I2cSda(n) => {
+                    i2c_sda.insert(n, p);
+                }
                 _ => {}
             }
         }
@@ -261,11 +342,25 @@ fn make_gen_section(pins: &[&Pin]) -> String {
         for n in instances {
             body.push('\n');
             body.push_str(&format!("    // ── I2C{n} ──\n"));
-            let scl_part = i2c_scl.get(&n)
-                .map(|p| format!("\n        .with_scl(peripherals.{}) // {}", p.name, p.selected_function.label()))
+            let scl_part = i2c_scl
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_scl(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
-            let sda_part = i2c_sda.get(&n)
-                .map(|p| format!("\n        .with_sda(peripherals.{}) // {}", p.name, p.selected_function.label()))
+            let sda_part = i2c_sda
+                .get(&n)
+                .map(|p| {
+                    format!(
+                        "\n        .with_sda(peripherals.{}) // {}",
+                        p.name,
+                        p.selected_function.label()
+                    )
+                })
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _i2c{n} = I2c::new(peripherals.I2C{n}, I2cConfig::default())\
@@ -276,8 +371,12 @@ fn make_gen_section(pins: &[&Pin]) -> String {
 
     // ── TWAI (CAN-compatible) — comment only ─────────────────────────────────
     if has_twai {
-        let twai_tx = configured.iter().find(|p| p.selected_function == PinFunction::CanTx);
-        let twai_rx = configured.iter().find(|p| p.selected_function == PinFunction::CanRx);
+        let twai_tx = configured
+            .iter()
+            .find(|p| p.selected_function == PinFunction::CanTx);
+        let twai_rx = configured
+            .iter()
+            .find(|p| p.selected_function == PinFunction::CanRx);
         body.push('\n');
         body.push_str("    // ── TWAI (CAN) — add esp-hal twai feature to Cargo.toml ──\n");
         if let Some(tx) = twai_tx {
@@ -291,9 +390,7 @@ fn make_gen_section(pins: &[&Pin]) -> String {
     // ── USB — comment only (hardware-fixed on GPIO18/GPIO19) ─────────────────
     if has_usb {
         body.push('\n');
-        body.push_str(
-            "    // ── USB — configured automatically by the USB peripheral ──\n"
-        );
+        body.push_str("    // ── USB — configured automatically by the USB peripheral ──\n");
     }
 
     // Blank line before GEN_END
@@ -318,7 +415,7 @@ fn make_default_gen_section() -> String {
          use esp_hal::prelude::*;\n\n\
          #[esp_hal::main]\n\
          fn main() -> ! {{\n\
-             let _peripherals = esp_hal::init(esp_hal::Config::default());\n\n\
+             let _peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));\n\n\
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n"
     )
@@ -328,11 +425,11 @@ fn make_default_gen_section() -> String {
 
 fn build_use_block(
     has_output: bool,
-    has_input:  bool,
-    has_adc:    bool,
-    has_uart:   bool,
-    has_spi:    bool,
-    has_i2c:    bool,
+    has_input: bool,
+    has_adc: bool,
+    has_uart: bool,
+    has_spi: bool,
+    has_i2c: bool,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 

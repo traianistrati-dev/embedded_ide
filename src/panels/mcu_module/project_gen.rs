@@ -192,8 +192,7 @@ use esp_hal::prelude::*;
 
 #[esp_hal::main]
 fn main() -> ! {
-    let _peripherals = esp_hal::init(esp_hal::Config::default());
-
+    let _peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
     loop {
         // Your main loop code here.
     }
