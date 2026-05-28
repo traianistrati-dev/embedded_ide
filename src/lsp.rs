@@ -68,6 +68,19 @@ pub struct LspDiagnostic {
     pub code:     Option<String>,
 }
 
+/// A single item returned by a `textDocument/completion` response.
+#[derive(Clone, Debug, Default)]
+pub struct CompletionItem {
+    pub label:       String,
+    /// LSP CompletionItemKind (1=Text, 2=Method, 3=Function, 5=Field, 6=Variable, …)
+    pub kind:        u8,
+    /// Short type / signature string shown in the hover tooltip
+    pub detail:      String,
+    /// Text actually inserted when the item is accepted
+    /// (falls back to `label` when the server doesn't send `insertText`)
+    pub insert_text: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LspStatus {
     #[default]
@@ -113,6 +126,12 @@ pub struct LspState {
     pub last_sent_code: String,
     /// Workspace root URI (e.g. `file:///tmp/embedded_ide_0_check`).
     pub root_uri:    String,
+    /// Most recent completion items from rust-analyzer.
+    pub completion_items:  Vec<CompletionItem>,
+    /// The request id of the pending completion request, if any.
+    completion_req_id:     Option<u64>,
+    /// Counter for outgoing requests (starts at 1; incremented before each send → first = 2).
+    next_req_id:           u64,
 }
 
 impl Default for LspState {
@@ -125,7 +144,10 @@ impl Default for LspState {
             doc_version:   0,
             did_open_sent: false,
             last_sent_code: String::new(),
-            root_uri:      String::new(),
+            root_uri:          String::new(),
+            completion_items:  Vec::new(),
+            completion_req_id: None,
+            next_req_id:       1,
         }
     }
 }
@@ -156,6 +178,36 @@ impl LspState {
                     "text":       text,
                 }
             }
+        }).to_string());
+    }
+
+    /// Request completions at the given cursor position.
+    ///
+    /// `trigger_char = None`  → manual invocation (Ctrl+Space, triggerKind=1)
+    /// `trigger_char = Some(c)` → auto-trigger (typed `.`, triggerKind=2)
+    pub fn request_completion(&mut self, line: u32, character: u32, trigger_char: Option<char>) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.completion_req_id = Some(id);
+        self.completion_items.clear();
+        let uri = format!("{}/src/main.rs", self.root_uri);
+        let trigger_kind: u32 = if trigger_char.is_some() { 2 } else { 1 };
+        let mut params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+            "context": { "triggerKind": trigger_kind }
+        });
+        if let Some(c) = trigger_char {
+            params["context"]["triggerCharacter"] = serde_json::json!(c.to_string());
+        }
+        self.send_raw(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id":      id,
+            "method":  "textDocument/completion",
+            "params":  params
         }).to_string());
     }
 
@@ -222,6 +274,8 @@ impl LspState {
         self.last_sent_code = String::new();
         self.doc_version   = 0;
         self.root_uri      = String::new();
+        self.completion_items.clear();
+        self.completion_req_id = None;
     }
 }
 
@@ -339,6 +393,15 @@ fn launch(
                     "publishDiagnostics": {
                         "relatedInformation": false,
                         "versionSupport":     false,
+                    },
+                    "completion": {
+                        "completionItem": {
+                            "snippetSupport": false,
+                        },
+                        "completionItemKind": {
+                            "valueSet": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
+                        },
+                        "contextSupport": true,
                     },
                 },
                 "window": { "workDoneProgress": true },
@@ -483,6 +546,35 @@ fn handle_incoming(
             }
         }
 
+        // ── Completion response ───────────────────────────────────────────────
+        // Any response (method == "") whose id is not 1 (initialize) and that
+        // carries a "result" field is treated as a completion response.
+        "" if msg.get("result").is_some()
+           && msg.get("id").is_some()
+           && msg["id"].as_u64().map_or(false, |n| n != 1) =>
+        {
+            if let Some(req_id) = msg["id"].as_u64() {
+                let mut s = state.lock().unwrap();
+                if s.generation == my_gen && s.completion_req_id == Some(req_id) {
+                    s.completion_req_id = None;
+                    let result = &msg["result"];
+                    // CompletionList { items: [...] }  OR  [...] directly
+                    let items_arr = result["items"]
+                        .as_array()
+                        .or_else(|| result.as_array());
+                    s.completion_items = items_arr
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(parse_completion_item)
+                                .take(60)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    ctx.request_repaint();
+                }
+            }
+        }
+
         // Ignore window/logMessage, telemetry, etc.
         _ => {}
     }
@@ -529,4 +621,15 @@ fn uri_to_rel(uri: &str, root_uri: &str) -> String {
     uri.strip_prefix(&prefix)
         .unwrap_or(uri)
         .to_owned()
+}
+
+fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
+    let label = v["label"].as_str()?.to_owned();
+    let kind = v["kind"].as_u64().unwrap_or(6) as u8;
+    let detail = v["detail"].as_str().unwrap_or("").to_owned();
+    let insert_text = v["insertText"]
+        .as_str()
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| label.clone());
+    Some(CompletionItem { label, kind, detail, insert_text })
 }

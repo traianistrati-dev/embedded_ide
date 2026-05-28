@@ -175,6 +175,13 @@ pub struct AppIde {
     /// Code-completion engine — stores the trie, current prefix and popup state.
     /// Must live in the App (not a local) so state is preserved across frames.
     completer: Completer,
+    /// True when the LSP completion popup is visible.
+    completion_open:        bool,
+    /// Index of the currently highlighted row in the completion popup.
+    completion_sel:         usize,
+    /// Character-offset in the editor text where completion was triggered.
+    /// Used to close the popup if the cursor moves far away.
+    completion_trigger_idx: usize,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -307,6 +314,9 @@ impl AppIde {
             completer: Completer::new_with_syntax(&Syntax::rust())
                 .with_auto_indent()
                 .with_user_words(),
+            completion_open:        false,
+            completion_sel:         0,
+            completion_trigger_idx: 0,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -1703,6 +1713,42 @@ impl eframe::App for AppIde {
                     ProjectFileId::GitIgnore => "code_editor:gitignore".into(),
                 };
 
+                // ── LSP completion: pre-editor key consumption ───────────────
+                // Consume navigation / accept keys BEFORE show_with_completer
+                // so the built-in Completer never sees them when our popup is open.
+                let mut lsp_accepted: Option<String> = None;
+                if self.completion_open {
+                    let has_items = {
+                        let s = self.lsp_state.lock().unwrap();
+                        !s.completion_items.is_empty()
+                    };
+                    if has_items {
+                        ui.input_mut(|inp| {
+                            if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                                self.completion_open = false;
+                            } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                                self.completion_sel = self.completion_sel.saturating_add(1);
+                            } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                                self.completion_sel = self.completion_sel.saturating_sub(1);
+                            } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                                   || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            {
+                                let items = self.lsp_state.lock().unwrap().completion_items.clone();
+                                let sel = self.completion_sel.min(items.len().saturating_sub(1));
+                                if let Some(item) = items.get(sel) {
+                                    lsp_accepted = Some(item.insert_text.clone());
+                                }
+                                self.completion_open = false;
+                            }
+                        });
+                    }
+                }
+                // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
+                // to the TextEdit as a literal character.
+                let ctrl_space_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL, egui::Key::Space)
+                });
+
                 let editor_resp = CodeEditor::default()
                     .id_source(editor_id)
                     .with_rows(50)
@@ -1735,6 +1781,165 @@ impl eframe::App for AppIde {
                     && display_code != self.generated_code
                 {
                     self.generated_code = display_code.clone();
+                }
+
+                // ── LSP completion: post-editor apply + trigger + popup ───────
+                let cursor_char_idx = editor_resp.state.cursor
+                    .char_range()
+                    .map(|r| r.primary.index);
+
+                // Apply accepted completion: replace [word_start..cursor] with insert_text
+                if let Some(insert_text) = lsp_accepted {
+                    if let Some(cur_idx) = cursor_char_idx {
+                        let word_start = lsp_word_start(&display_code, cur_idx);
+                        let chars: Vec<char> = display_code.chars().collect();
+                        let before: String = chars[..word_start].iter().collect();
+                        let after:  String = chars[cur_idx..].iter().collect();
+                        display_code = format!("{}{}{}", before, insert_text, after);
+                        // Persist the change so the write-back below picks it up
+                        // (the write-back already happened above; redo it for this file)
+                        if let ProjectFileId::UserFile(i) = self.selected_file {
+                            if let Some(entry) = self.user_src_files.get_mut(i) {
+                                entry.1 = display_code.clone();
+                                let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+                                let dest = workspace.join("src").join(&entry.0);
+                                let _ = std::fs::write(&dest, entry.1.as_bytes());
+                            }
+                        } else if self.selected_file == ProjectFileId::MainRs {
+                            self.generated_code = display_code.clone();
+                        }
+                    }
+                }
+
+                // Trigger detection
+                {
+                    let lsp_ready = matches!(
+                        self.lsp_state.lock().unwrap().status,
+                        lsp::LspStatus::Ready
+                    );
+                    if lsp_ready {
+                        // Manual Ctrl+Space
+                        if ctrl_space_pressed {
+                            if let Some(idx) = cursor_char_idx {
+                                let (line, col) = lsp_cursor_pos(&display_code, idx);
+                                self.lsp_state.lock().unwrap()
+                                    .request_completion(line, col, None);
+                                self.completion_trigger_idx = idx;
+                                self.completion_sel          = 0;
+                                self.completion_open         = true;
+                            }
+                        }
+
+                        // Auto-trigger on `.`
+                        let dot_trigger = editor_resp.response.changed()
+                            && cursor_char_idx.map(|idx| {
+                                let chars: Vec<char> = display_code.chars().collect();
+                                idx > 0 && chars.get(idx - 1) == Some(&'.')
+                            }).unwrap_or(false);
+                        if dot_trigger && !ctrl_space_pressed {
+                            if let Some(idx) = cursor_char_idx {
+                                let (line, col) = lsp_cursor_pos(&display_code, idx);
+                                self.lsp_state.lock().unwrap()
+                                    .request_completion(line, col, Some('.'));
+                                self.completion_trigger_idx = idx;
+                                self.completion_sel          = 0;
+                                self.completion_open         = true;
+                            }
+                        }
+                    }
+
+                    // Close popup if cursor moved far from trigger point
+                    if self.completion_open {
+                        if let Some(idx) = cursor_char_idx {
+                            let delta = (idx as isize)
+                                .saturating_sub(self.completion_trigger_idx as isize)
+                                .unsigned_abs();
+                            if delta > 30 {
+                                self.completion_open = false;
+                            }
+                        }
+                    }
+                }
+
+                // ── LSP completion popup ───────────────────────────────────────
+                if self.completion_open {
+                    let items = self.lsp_state.lock().unwrap().completion_items.clone();
+                    if !items.is_empty() {
+                        // Clamp selection to valid range
+                        self.completion_sel = self.completion_sel.min(items.len() - 1);
+                        let sel = self.completion_sel;
+
+                        // Calculate screen position from cursor glyph rect
+                        let popup_pos = if let Some(char_range) =
+                            editor_resp.state.cursor.char_range()
+                        {
+                            let cursor_idx = char_range.primary.index;
+                            let text_char_count =
+                                editor_resp.galley.job.text.chars().count();
+                            let clamped = cursor_idx.min(
+                                text_char_count.saturating_sub(1)
+                            );
+                            let cursor_local = editor_resp.galley
+                                .pos_from_cursor(egui::text::CCursor::new(clamped));
+                            let offset = egui::vec2(0.0, cursor_local.height() + 2.0);
+                            editor_resp.response.rect.left_top()
+                                + cursor_local.min.to_vec2()
+                                + offset
+                        } else {
+                            editor_resp.response.rect.left_top()
+                        };
+
+                        egui::Area::new(egui::Id::new("lsp_completion_popup"))
+                            .fixed_pos(popup_pos)
+                            .order(egui::Order::Foreground)
+                            .interactable(false)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(&ui.ctx().style()).show(ui, |ui| {
+                                    ui.set_width(340.0);
+                                    ui.style_mut().wrap_mode =
+                                        Some(egui::TextWrapMode::Extend);
+
+                                    for (i, item) in items.iter().enumerate().take(15) {
+                                        let selected = i == sel;
+                                        let icon = lsp_kind_icon(item.kind);
+                                        let text = format!("{} {}", icon, item.label);
+                                        let fg = if selected {
+                                            egui::Color32::WHITE
+                                        } else {
+                                            egui::Color32::from_rgb(200, 210, 230)
+                                        };
+                                        let fill = if selected {
+                                            egui::Color32::from_rgb(40, 90, 160)
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        };
+                                        let rich = egui::RichText::new(&text)
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(fg);
+                                        let btn = ui.add(
+                                            egui::Button::new(rich)
+                                                .sense(egui::Sense::empty())
+                                                .fill(fill)
+                                                .frame(selected)
+                                                .min_size(egui::vec2(320.0, 0.0)),
+                                        );
+                                        if selected {
+                                            btn.scroll_to_me(None);
+                                        }
+                                        if !item.detail.is_empty() {
+                                            btn.on_hover_text(
+                                                egui::RichText::new(&item.detail)
+                                                    .monospace()
+                                                    .size(11.0),
+                                            );
+                                        }
+                                    }
+                                });
+                            });
+                    } else {
+                        // Items not yet arrived or empty — keep waiting (don't close)
+                    }
                 }
 
                 // ── RA error lane (right-edge overlay on editor rect) ─────────
@@ -4044,6 +4249,57 @@ fn show_ra_tab(
 }
 
 // ── Required Tools tab ────────────────────────────────────────────────────────
+
+// ── LSP completion helpers ────────────────────────────────────────────────────
+
+/// Convert a character offset into a (line, UTF-16-column) pair for LSP.
+fn lsp_cursor_pos(text: &str, char_idx: usize) -> (u32, u32) {
+    let mut line: u32 = 0;
+    let mut col: u32  = 0;
+    for (i, c) in text.chars().enumerate() {
+        if i >= char_idx {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col   = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Return the char-index of the first character of the identifier that ends at `end_idx`.
+fn lsp_word_start(text: &str, end_idx: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let end = end_idx.min(chars.len());
+    let mut i = end;
+    while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        i -= 1;
+    }
+    i
+}
+
+/// Map an LSP CompletionItemKind number to a short (3-char) icon string.
+fn lsp_kind_icon(kind: u8) -> &'static str {
+    match kind {
+        2 | 3 => "fn ",   // Method / Function
+        4      => "ctr",  // Constructor
+        5      => "fld",  // Field
+        6      => "var",  // Variable
+        7      => "cls",  // Class
+        8      => "int",  // Interface
+        9      => "mod",  // Module
+        13     => "enm",  // Enum
+        14     => "kwd",  // Keyword
+        20     => "enm",  // EnumMember
+        21     => "con",  // Constant
+        22     => "str",  // Struct
+        25     => "typ",  // TypeParameter
+        _      => "   ",
+    }
+}
 
 fn show_tools_tab(
     ui: &mut egui::Ui,
