@@ -359,6 +359,30 @@ impl AppIde {
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
         self.project_dir = Some(root.to_path_buf());
 
+        // ── Detect MCU type from Cargo.toml ──────────────────────────────────
+        // Read the dependency block to determine which chip this project targets.
+        // Switching the MCU type BEFORE restoring pin state ensures the correct
+        // pin diagram is active when parse_main_rs() is applied.
+        let cargo_toml = root.join("Cargo.toml");
+        if let Ok(cargo) = std::fs::read_to_string(&cargo_toml) {
+            let detected = if cargo.contains("stm32f1xx-hal") {
+                Some(McuType::Stm32f103c8t6)
+            } else if cargo.contains("esp-hal") {
+                Some(McuType::Esp32c3)
+            } else {
+                None
+            };
+            if let Some(mcu_type) = detected {
+                if mcu_type != self.selected_mcu_type {
+                    self.selected_mcu_type = mcu_type.clone();
+                    self.mcu = Self::init_mcu(&mcu_type);
+                    // Reset LSP — it was attached to the previous chip's workspace.
+                    self.lsp_state.lock().unwrap().reset();
+                    self.lsp_selected_diagnostic = None;
+                }
+            }
+        }
+
         // ── Restore pin state from src/main.rs ───────────────────────────────
         // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
         // assignment back to the MCU diagram.  If no markers are found (e.g.
@@ -892,6 +916,7 @@ impl eframe::App for AppIde {
                             self.user_src_folders.clear();
                             self.selected_file = ProjectFileId::MainRs;
                             self.project_name = None;
+                            self.project_dir  = None; // unlock the MCU selector
                             self.renaming_file = None;
                             self.renaming_folder = None;
                             self.new_src_name = None;
@@ -1697,52 +1722,73 @@ impl eframe::App for AppIde {
                 });
             });
 
-            // Chip selector
+            // Chip selector.
+            // Editable only while no project is open (new-project flow).
+            // Once a project is loaded from disk the selector locks: only the
+            // chip name and architecture family are shown as plain labels.
             ui.horizontal(|ui| {
                 ui.label("Chip:");
-                let prev_type = self.selected_mcu_type.clone();
 
-                egui::ComboBox::from_id_salt("mcu_type_selector")
-                    .selected_text(self.selected_mcu_type.label())
-                    .show_ui(ui, |ui| {
-                        for mcu_type in McuType::all() {
-                            let label = if mcu_type.is_supported() {
-                                mcu_type.label().to_string()
-                            } else {
-                                format!("{} — coming soon", mcu_type.label())
-                            };
-                            ui.selectable_value(&mut self.selected_mcu_type, mcu_type, label);
+                if self.project_dir.is_none() {
+                    // ── No project on disk → ComboBox is active ───────────────
+                    let prev_type = self.selected_mcu_type.clone();
+
+                    egui::ComboBox::from_id_salt("mcu_type_selector")
+                        .selected_text(self.selected_mcu_type.label())
+                        .show_ui(ui, |ui| {
+                            for mcu_type in McuType::all() {
+                                let label = if mcu_type.is_supported() {
+                                    mcu_type.label().to_string()
+                                } else {
+                                    format!("{} — coming soon", mcu_type.label())
+                                };
+                                ui.selectable_value(
+                                    &mut self.selected_mcu_type,
+                                    mcu_type,
+                                    label,
+                                );
+                            }
+                        });
+
+                    ui.label(
+                        egui::RichText::new(self.selected_mcu_type.family())
+                            .color(egui::Color32::GRAY)
+                            .size(11.0),
+                    );
+
+                    if prev_type != self.selected_mcu_type {
+                        self.mcu = Self::init_mcu(&self.selected_mcu_type);
+                        self.generated_code = self
+                            .mcu
+                            .as_ref()
+                            .map(|m| m.fresh_main_rs())
+                            .unwrap_or_default();
+                        self.active_tab = McuTab::Pins;
+                        self.selected_file = ProjectFileId::MainRs;
+                        if matches!(
+                            self.selected_file,
+                            ProjectFileId::MemoryX | ProjectFileId::BuildRs
+                        ) {
+                            self.selected_file = ProjectFileId::MainRs;
                         }
-                    });
-
-                ui.label(
-                    egui::RichText::new(self.selected_mcu_type.family())
+                        self.lsp_state.lock().unwrap().reset();
+                        self.lsp_selected_diagnostic = None;
+                    }
+                } else {
+                    // ── Project open → read-only chip display ─────────────────
+                    ui.label(
+                        egui::RichText::new(self.selected_mcu_type.label())
+                            .strong()
+                            .color(egui::Color32::LIGHT_BLUE),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "·  {}",
+                            self.selected_mcu_type.family()
+                        ))
                         .color(egui::Color32::GRAY)
                         .size(11.0),
-                );
-
-                if prev_type != self.selected_mcu_type {
-                    self.mcu = Self::init_mcu(&self.selected_mcu_type);
-                    // Build a fresh main.rs — pin layout changes completely.
-                    // For MCUs without a pin diagram (ESP32-C3), use the
-                    // toolchain-specific default template instead.
-                    self.generated_code = self
-                        .mcu
-                        .as_ref()
-                        .map(|m| m.fresh_main_rs())
-                        .unwrap_or_default(); // STM8 / unimplemented chips
-                    self.active_tab = McuTab::Pins;
-                    self.selected_file = ProjectFileId::MainRs;
-                    // Reset any file selection that is RustEmbedded-only
-                    if matches!(
-                        self.selected_file,
-                        ProjectFileId::MemoryX | ProjectFileId::BuildRs
-                    ) {
-                        self.selected_file = ProjectFileId::MainRs;
-                    }
-                    // Stop old RA session; it will auto-restart on the next frame.
-                    self.lsp_state.lock().unwrap().reset();
-                    self.lsp_selected_diagnostic = None;
+                    );
                 }
             });
 
