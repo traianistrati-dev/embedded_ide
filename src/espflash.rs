@@ -2,7 +2,7 @@
 //!
 //! Workflow:
 //!   1. `cargo build --release`  → ELF binary  (stderr streamed live)
-//!   2. `espflash flash --chip <chip> --release`
+//!   2. `espflash flash --chip <chip> <elf_path>`
 //!      (stdout + stderr streamed live)
 //!
 //! Install espflash: `cargo install espflash`
@@ -66,7 +66,8 @@ impl EspFlashState {
 
 /// Spawn a background thread that:
 ///   1. Runs `cargo build --release` in `project_dir` (stderr streamed live)
-///   2. Runs `espflash flash --chip <chip> --release`
+///   2. Runs `espflash flash --chip <chip> <elf_path>`
+///      where `<elf_path>` = `target/<target>/release/<chip>-project`
 ///      (stdout + stderr streamed live concurrently)
 ///
 /// `state` is updated at every phase so the UI can show progress.
@@ -159,16 +160,29 @@ pub fn start_flash(
         // ── Phase 2: espflash flash ────────────────────────────────────────────
         set(&state, &ctx, EspFlashState::Flashing);
 
+        // Build the path to the ELF produced by cargo build --release.
+        // Cargo names the binary after the [[bin]] name in Cargo.toml, which
+        // our generator sets to "<chip>-project" (e.g. "esp32c3-project").
+        let elf_path = project_dir
+            .join("target")
+            .join(&target)
+            .join("release")
+            .join(format!("{chip}-project"));
+
         push_log(
             &log,
             &ctx,
-            &format!("▶ espflash flash --chip {chip} --release …"),
+            &format!("▶ espflash flash --chip {chip} {} …", elf_path.display()),
         );
 
         let mut esp_cmd = Command::new("espflash");
         esp_cmd
             .current_dir(&project_dir)
-            .args(["flash", "--chip", &chip, "--release"])
+            // --ignore-app-descriptor: esp-hal bare-metal binaries do not carry
+            // an ESP-IDF application descriptor; espflash 4.x requires this flag
+            // to skip the descriptor check for non-esp-idf applications.
+            .args(["flash", "--chip", &chip, "--ignore-app-descriptor"])
+            .arg(&elf_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

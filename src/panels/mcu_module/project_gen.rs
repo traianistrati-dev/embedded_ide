@@ -23,7 +23,10 @@
 //! ├── .gitignore
 //! └── Cargo.toml
 //! ```
-//! (no memory.x or build.rs — esp-hal provides its own linker script)
+//! No `memory.x` or `build.rs` — esp-hal 0.23 generates both `memory.x` and
+//! `linkall.x` in its own OUT_DIR via its build script.  Only `-Tlinkall.x` is
+//! needed in rustflags; adding a second `-Tmemory.x` redefines IROM/DROM/etc.
+//! and causes a linker error ("region already defined").
 
 use super::mcu_catalog::{McuProjectConfig, ToolchainKind};
 use std::{fs, io, path::Path};
@@ -33,12 +36,12 @@ use std::{fs, io, path::Path};
 /// All generated file contents for one project snapshot.
 /// Cheap to build (pure string formatting); regenerated every UI frame.
 pub struct ProjectFiles {
-    pub main_rs:      String,
-    pub cargo_toml:   String,
+    pub main_rs: String,
+    pub cargo_toml: String,
     pub cargo_config: String,
-    pub memory_x:     String,  // empty for EspRust
-    pub build_rs:     String,  // empty for EspRust
-    pub gitignore:    String,
+    pub memory_x: String, // empty for EspRust
+    pub build_rs: String, // empty for EspRust
+    pub gitignore: String,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -47,28 +50,32 @@ pub struct ProjectFiles {
 pub fn build_project_files(config: &McuProjectConfig, main_rs: &str) -> ProjectFiles {
     match config.toolchain {
         ToolchainKind::RustEmbedded => ProjectFiles {
-            main_rs:      main_rs.to_owned(),
-            cargo_toml:   cargo_toml_embedded(config),
+            main_rs: main_rs.to_owned(),
+            cargo_toml: cargo_toml_embedded(config),
             cargo_config: cargo_config_embedded(config),
-            memory_x:     memory_x(config),
-            build_rs:     build_rs_embedded(),
-            gitignore:    "/target\n".to_owned(),
+            memory_x: memory_x(config),
+            build_rs: build_rs_embedded(),
+            gitignore: "/target\n".to_owned(),
         },
         ToolchainKind::EspRust => ProjectFiles {
-            main_rs:      main_rs.to_owned(),
-            cargo_toml:   cargo_toml_esp(config),
+            main_rs: main_rs.to_owned(),
+            cargo_toml: cargo_toml_esp(config),
             cargo_config: cargo_config_esp(config),
-            memory_x:     String::new(),
-            build_rs:     String::new(),
-            gitignore:    "/target\n".to_owned(),
+            // esp-hal 0.23 generates memory.x + linkall.x in its own OUT_DIR
+            // via its build script.  linkall.x uses `INCLUDE memory.x` so the
+            // chip memory map is already available — we must NOT supply our own
+            // or the linker sees IROM/DROM/etc. defined twice.
+            memory_x: String::new(),
+            build_rs: String::new(),
+            gitignore: "/target\n".to_owned(),
         },
         ToolchainKind::SdccC => ProjectFiles {
-            main_rs:      main_rs.to_owned(),
-            cargo_toml:   String::new(),
+            main_rs: main_rs.to_owned(),
+            cargo_toml: String::new(),
             cargo_config: String::new(),
-            memory_x:     String::new(),
-            build_rs:     String::new(),
-            gitignore:    String::new(),
+            memory_x: String::new(),
+            build_rs: String::new(),
+            gitignore: String::new(),
         },
     }
 }
@@ -101,14 +108,35 @@ pub fn write_project(
         .collect();
     remove_stale_rs(&dest.join("src"), &dest.join("src"), &expected_in_src);
 
-    // Files common to all toolchains
-    fs::write(dest.join("Cargo.toml"),                         &files.cargo_toml)?;
-    fs::write(dest.join(".cargo").join("config.toml"),         &files.cargo_config)?;
-    fs::write(dest.join("src").join("main.rs"),                &files.main_rs)?;
-    fs::write(dest.join(".gitignore"),                         &files.gitignore)?;
+    // ── Remove stale Cargo.lock ───────────────────────────────────────────────
+    // If the workspace was previously used for a different chip (e.g. STM32),
+    // Cargo.lock pins the old dependency versions.  Even though Cargo.toml is
+    // rewritten correctly, cargo honours the lock-file and may resolve esp-hal
+    // to a version that predates the `#[esp_hal::main]` proc macro.
+    // Deleting the lock-file forces a fresh dependency resolution each time the
+    // project is written.  Cargo's on-disk package cache means this does NOT
+    // re-download crates — only re-solves the version graph.
+    let _ = fs::remove_file(dest.join("Cargo.lock"));
 
-    // RustEmbedded-specific files
-    if config.toolchain == ToolchainKind::RustEmbedded {
+    // Files common to all toolchains
+    fs::write(dest.join("Cargo.toml"), &files.cargo_toml)?;
+    fs::write(dest.join(".cargo").join("config.toml"), &files.cargo_config)?;
+    fs::write(dest.join("src").join("main.rs"), &files.main_rs)?;
+    fs::write(dest.join(".gitignore"), &files.gitignore)?;
+
+    // memory.x + build.rs — only for RustEmbedded (STM32/ARM).
+    //
+    // For EspRust: esp-hal 0.23 generates its own complete memory.x (with
+    // IROM, DROM, IRAM, DRAM, RTC_FAST) in its build-script OUT_DIR.
+    // linkall.x starts with `INCLUDE "memory.x"` and searches the linker
+    // -L paths in order.  If a project-level memory.x is present (from a
+    // previous build or toolchain switch), it shadows esp-hal's file, causing
+    // either "IROM already defined" (if -Tmemory.x is also present) or
+    // missing regions (if the stale file is incomplete).
+    // → Always delete stale copies first, then only write for RustEmbedded.
+    let _ = fs::remove_file(dest.join("memory.x"));
+    let _ = fs::remove_file(dest.join("build.rs"));
+    if !files.memory_x.is_empty() {
         fs::write(dest.join("memory.x"), &files.memory_x)?;
         fs::write(dest.join("build.rs"), &files.build_rs)?;
     }
@@ -129,12 +157,10 @@ pub fn write_project(
 /// `root` is **not** listed in `keep`.  Errors on individual files are silently
 /// ignored — a failed removal produces no stale content (the file stays) and
 /// does not abort the project write.
-fn remove_stale_rs(
-    root: &Path,
-    dir: &Path,
-    keep: &std::collections::HashSet<String>,
-) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+fn remove_stale_rs(root: &Path, dir: &Path, keep: &std::collections::HashSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -159,6 +185,9 @@ pub fn esp32c3_fresh_main_rs() -> String {
 #![no_std]
 #![no_main]
 
+pub mod pins;
+
+use esp_backtrace as _;
 use esp_hal::prelude::*;
 
 #[esp_hal::main]
@@ -207,7 +236,7 @@ fn cargo_toml_embedded(c: &McuProjectConfig) -> String {
          panic     = \"abort\"\n\
          opt-level = 1\n",
         name = c.pkg_name,
-        hal  = c.hal_dep,
+        hal = c.hal_dep,
         chip = c.probe_chip,
     )
 }
@@ -224,7 +253,7 @@ fn cargo_config_embedded(c: &McuProjectConfig) -> String {
              \"-C\", \"link-arg=-Tlink.x\",\n\
          ]\n",
         target = c.target,
-        chip   = c.probe_chip,
+        chip = c.probe_chip,
     )
 }
 
@@ -239,13 +268,14 @@ fn memory_x(c: &McuProjectConfig) -> String {
         comment = c.memory_comment,
         flash_o = c.flash_origin,
         flash_s = c.flash_size,
-        ram_o   = c.ram_origin,
-        ram_s   = c.ram_size,
+        ram_o = c.ram_origin,
+        ram_s = c.ram_size,
     )
 }
 
 /// `build.rs` placed in the project root.
-/// Copies `memory.x` to `OUT_DIR` so `cortex-m-rt`'s `link.x` can find it.
+/// Copies `memory.x` to `OUT_DIR` so the linker script (`link.x` for ARM,
+/// `linkall.x` for ESP32) can find it via the `rustc-link-search` path.
 fn build_rs_embedded() -> String {
     let mut s = String::new();
     s.push_str("use std::env;\n");
@@ -280,9 +310,9 @@ fn cargo_toml_esp(c: &McuProjectConfig) -> String {
          bench = false\n\
          \n\
          [dependencies]\n\
-         esp-hal       = {{ version = \"0.22\", features = [\"{chip}\"] }}\n\
-         esp-backtrace = {{ version = \"0.14\", features = [\"{chip}\", \"exception-handler\", \"panic-handler\", \"println\"] }}\n\
-         esp-println   = {{ version = \"0.12\", features = [\"{chip}\", \"log\"] }}\n\
+         esp-hal       = {{ version = \"0.23\", features = [\"{chip}\"] }}\n\
+         esp-backtrace = {{ version = \"0.15\", features = [\"{chip}\", \"exception-handler\", \"panic-handler\", \"println\"] }}\n\
+         esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
          log           = \"0.4\"\n\
          \n\
          # Flash with: espflash flash --chip {chip} --release\n\
@@ -299,14 +329,25 @@ fn cargo_toml_esp(c: &McuProjectConfig) -> String {
          panic     = \"abort\"\n\
          opt-level = 1\n",
         name = c.pkg_name,
-        chip = c.probe_chip,  // "esp32c3"
+        chip = c.probe_chip, // "esp32c3"
     )
 }
 
 fn cargo_config_esp(c: &McuProjectConfig) -> String {
     format!(
         "[target.{target}]\n\
-         runner = \"espflash flash --monitor\"\n\
+         # --ignore-app-descriptor: esp-hal bare-metal binaries do not carry an\n\
+         # ESP-IDF app descriptor; espflash 4.x requires this flag to skip the\n\
+         # descriptor check. Add --monitor to open the serial console after flash.\n\
+         runner = \"espflash flash --monitor --ignore-app-descriptor\"\n\
+         # esp-hal 0.23 places linkall.x + memory.x in its OUT_DIR via its\n\
+         # build script.  linkall.x uses `INCLUDE memory.x` internally, so\n\
+         # the chip memory map (IROM, DROM, IRAM, DRAM, RTC_SLOW) is already\n\
+         # present.  Only -Tlinkall.x is needed here; supplying a second\n\
+         # -Tmemory.x would redefine those regions and cause a linker error.\n\
+         rustflags = [\n\
+             \"-C\", \"link-arg=-Tlinkall.x\",\n\
+         ]\n\
          \n\
          [build]\n\
          target = \"{target}\"\n\

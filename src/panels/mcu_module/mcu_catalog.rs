@@ -14,25 +14,25 @@ pub enum ToolchainKind {
 /// All data needed to generate a buildable Cargo project for a specific chip.
 pub struct McuProjectConfig {
     /// Cargo package name, e.g. "stm32f103c8t6"
-    pub pkg_name:        &'static str,
+    pub pkg_name: &'static str,
     /// Rust target triple, e.g. "thumbv7m-none-eabi"
-    pub target:          &'static str,
+    pub target: &'static str,
     /// Linker flash origin — empty for EspRust (linker script provided by HAL)
-    pub flash_origin:    &'static str,
+    pub flash_origin: &'static str,
     /// Flash size for memory.x — empty for EspRust
-    pub flash_size:      &'static str,
+    pub flash_size: &'static str,
     /// Linker RAM origin — empty for EspRust
-    pub ram_origin:      &'static str,
+    pub ram_origin: &'static str,
     /// RAM size for memory.x — empty for EspRust
-    pub ram_size:        &'static str,
+    pub ram_size: &'static str,
     /// Primary HAL dependency line (placed in Cargo.toml [dependencies])
-    pub hal_dep:         &'static str,
+    pub hal_dep: &'static str,
     /// Chip identifier: probe-rs chip for RustEmbedded; espflash chip for EspRust
-    pub probe_chip:      &'static str,
+    pub probe_chip: &'static str,
     /// Human-readable comment for memory.x — empty for EspRust
-    pub memory_comment:  &'static str,
+    pub memory_comment: &'static str,
     /// Determines the generated file set, flash tool, and code template
-    pub toolchain:       ToolchainKind,
+    pub toolchain: ToolchainKind,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,8 +60,8 @@ impl McuType {
     pub fn label(&self) -> &str {
         match self {
             McuType::Stm32f103c8t6 => "STM32F103C8T6",
-            McuType::Stm8s103f3p6  => "STM8S103F3P6",
-            McuType::Esp32c3       => "ESP32-C3",
+            McuType::Stm8s103f3p6 => "STM8S103F3P6",
+            McuType::Esp32c3 => "ESP32-C3",
         }
     }
 
@@ -74,8 +74,8 @@ impl McuType {
     pub fn family(&self) -> &str {
         match self {
             McuType::Stm32f103c8t6 => "ARM Cortex-M3",
-            McuType::Stm8s103f3p6  => "STM8 8-bit",
-            McuType::Esp32c3       => "RISC-V 32-bit",
+            McuType::Stm8s103f3p6 => "STM8 8-bit",
+            McuType::Esp32c3 => "RISC-V 32-bit",
         }
     }
 
@@ -83,8 +83,8 @@ impl McuType {
     pub fn toolchain(&self) -> ToolchainKind {
         match self {
             McuType::Stm32f103c8t6 => ToolchainKind::RustEmbedded,
-            McuType::Esp32c3       => ToolchainKind::EspRust,
-            McuType::Stm8s103f3p6  => ToolchainKind::SdccC,
+            McuType::Esp32c3 => ToolchainKind::EspRust,
+            McuType::Stm8s103f3p6 => ToolchainKind::SdccC,
         }
     }
 
@@ -92,30 +92,30 @@ impl McuType {
     pub fn project_config(&self) -> Option<McuProjectConfig> {
         match self {
             McuType::Stm32f103c8t6 => Some(McuProjectConfig {
-                pkg_name:       "stm32f103c8t6",
-                target:         "thumbv7m-none-eabi",
-                flash_origin:   "0x08000000",
-                flash_size:     "64K",
-                ram_origin:     "0x20000000",
-                ram_size:       "20K",
-                hal_dep:        r#"stm32f1xx-hal = { version = "0.10", features = ["stm32f103", "medium", "rt"] }"#,
-                probe_chip:     "STM32F103C8",
+                pkg_name: "stm32f103c8t6",
+                target: "thumbv7m-none-eabi",
+                flash_origin: "0x08000000",
+                flash_size: "64K",
+                ram_origin: "0x20000000",
+                ram_size: "20K",
+                hal_dep: r#"stm32f1xx-hal = { version = "0.10", features = ["stm32f103", "medium", "rt"] }"#,
+                probe_chip: "STM32F103C8",
                 memory_comment: "STM32F103C8T6  —  64 KiB Flash / 20 KiB RAM",
-                toolchain:      ToolchainKind::RustEmbedded,
+                toolchain: ToolchainKind::RustEmbedded,
             }),
 
             McuType::Esp32c3 => Some(McuProjectConfig {
-                pkg_name:       "esp32c3",
-                target:         "riscv32imc-unknown-none-elf",
+                pkg_name: "esp32c3",
+                target: "riscv32imc-unknown-none-elf",
                 // memory.x is not used — esp-hal provides its own linker script
-                flash_origin:   "",
-                flash_size:     "",
-                ram_origin:     "",
-                ram_size:       "",
-                hal_dep:        r#"esp-hal = { version = "0.22", features = ["esp32c3"] }"#,
-                probe_chip:     "esp32c3",   // chip name for espflash
+                flash_origin: "",
+                flash_size: "",
+                ram_origin: "",
+                ram_size: "",
+                hal_dep: r#"esp-hal = { version = "0.23", features = ["esp32c3"] }"#,
+                probe_chip: "esp32c3", // chip name for espflash
                 memory_comment: "",
-                toolchain:      ToolchainKind::EspRust,
+                toolchain: ToolchainKind::EspRust,
             }),
 
             // STM8 — on hold
