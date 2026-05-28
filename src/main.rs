@@ -8,6 +8,7 @@ pub mod espflash;
 pub mod lsp;
 pub mod openocd;
 pub mod panels;
+pub mod required_tools;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

@@ -3,6 +3,7 @@ use crate::dfu::{self, DfuState};
 use crate::espflash::{self, EspFlashState};
 use crate::lsp::{self, LspStatus};
 use crate::openocd::{self, OpenOcdState};
+use crate::required_tools;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::{McuType, ToolchainKind};
 use crate::panels::mcu_module::mock_esp32c3::create_esp32c3;
@@ -104,6 +105,7 @@ enum BuildPanelTab {
     RustAnalyzer,
     Cargo,
     Dfu,
+    RequiredTools,
 }
 
 // ── Persisted project state ───────────────────────────────────────────────────
@@ -168,6 +170,8 @@ pub struct AppIde {
     openocd_target_cfg: String,
     /// Shared state for ESP32 espflash operations
     espflash_state: Arc<Mutex<EspFlashState>>,
+    /// Shared state for the Required Tools tab (check + install operations)
+    tools_state: Arc<Mutex<required_tools::ToolsState>>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -198,6 +202,9 @@ pub struct AppIde {
     // ── Project management ────────────────────────────────────────────────────
     /// `true` while the "New Project" confirmation dialog is open.
     confirm_new_project: bool,
+    /// Chip type staged inside the "New Project" popup.
+    /// `None` = "Empty" (no chip change on confirm).
+    pending_mcu_type: Option<McuType>,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -292,6 +299,7 @@ impl AppIde {
             openocd_state,
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
             espflash_state,
+            tools_state: required_tools::make_tools_state(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -304,6 +312,7 @@ impl AppIde {
             renaming_file: None,
             renaming_folder: None,
             confirm_new_project: false,
+            pending_mcu_type: None,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -874,9 +883,10 @@ impl eframe::App for AppIde {
 
         // ── Handle toolbar button clicks ──────────────────────────────────────
 
-        // "New Project" → ask for confirmation
+        // "New Project" → ask for confirmation; default chip selection = Empty
         if new_project_clicked {
             self.confirm_new_project = true;
+            self.pending_mcu_type = None;
         }
 
         // "Open Project" → show native folder picker, then load files
@@ -904,6 +914,47 @@ impl eframe::App for AppIde {
                             .color(egui::Color32::from_rgb(220, 160, 60)),
                     );
                     ui.add_space(8.0);
+
+                    // ── Chip selector ─────────────────────────────────────────
+                    ui.horizontal(|ui| {
+                        ui.label("Chip:");
+                        let selected_text = match &self.pending_mcu_type {
+                            None    => "— Empty —".to_string(),
+                            Some(t) => t.label().to_string(),
+                        };
+                        egui::ComboBox::from_id_salt("new_project_chip_selector")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                // "Empty" — first entry, no chip selected
+                                ui.selectable_value(
+                                    &mut self.pending_mcu_type,
+                                    None,
+                                    "— Empty —",
+                                );
+                                for mcu_type in McuType::all() {
+                                    let label = if mcu_type.is_supported() {
+                                        mcu_type.label().to_string()
+                                    } else {
+                                        format!("{} — coming soon", mcu_type.label())
+                                    };
+                                    ui.selectable_value(
+                                        &mut self.pending_mcu_type,
+                                        Some(mcu_type),
+                                        label,
+                                    );
+                                }
+                            });
+                        // Architecture family hint
+                        if let Some(t) = &self.pending_mcu_type {
+                            ui.label(
+                                egui::RichText::new(t.family())
+                                    .color(egui::Color32::GRAY)
+                                    .size(11.0),
+                            );
+                        }
+                    });
+
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui
                             .button(
@@ -912,11 +963,27 @@ impl eframe::App for AppIde {
                             )
                             .clicked()
                         {
+                            // ── Apply chip change (if any) ────────────────────
+                            if let Some(new_chip) = self.pending_mcu_type.take() {
+                                if new_chip != self.selected_mcu_type {
+                                    self.selected_mcu_type = new_chip;
+                                    self.mcu = Self::init_mcu(&self.selected_mcu_type);
+                                    self.generated_code = self
+                                        .mcu
+                                        .as_ref()
+                                        .map(|m| m.fresh_main_rs())
+                                        .unwrap_or_default();
+                                    self.active_tab = McuTab::Pins;
+                                    self.lsp_state.lock().unwrap().reset();
+                                    self.lsp_selected_diagnostic = None;
+                                }
+                            }
+                            // ── Reset project files ───────────────────────────
                             self.user_src_files.clear();
                             self.user_src_folders.clear();
                             self.selected_file = ProjectFileId::MainRs;
                             self.project_name = None;
-                            self.project_dir  = None; // unlock the MCU selector
+                            self.project_dir  = None;
                             self.renaming_file = None;
                             self.renaming_folder = None;
                             self.new_src_name = None;
@@ -934,6 +1001,7 @@ impl eframe::App for AppIde {
                         ui.add_space(8.0);
                         if ui.button("Cancel").clicked() {
                             self.confirm_new_project = false;
+                            self.pending_mcu_type = None;
                         }
                     });
                     ui.add_space(4.0);
@@ -1585,6 +1653,7 @@ impl eframe::App for AppIde {
                                 // ── Content ────────────────────────────────
                                 show_diag_panel(
                                     ui,
+                                    &self.egui_ctx,
                                     &self.build_state,
                                     &self.lsp_state,
                                     &self.dfu_state,
@@ -1595,6 +1664,7 @@ impl eframe::App for AppIde {
                                     &self.openocd_state,
                                     &mut self.openocd_target_cfg,
                                     &self.espflash_state,
+                                    &self.tools_state,
                                     &self.selected_mcu_type.toolchain(),
                                     &mut self.build_tab,
                                     &mut self.selected_diagnostic,
@@ -1722,74 +1792,20 @@ impl eframe::App for AppIde {
                 });
             });
 
-            // Chip selector.
-            // Editable only while no project is open (new-project flow).
-            // Once a project is loaded from disk the selector locks: only the
-            // chip name and architecture family are shown as plain labels.
+            // Chip label — always read-only.
+            // Selection is done exclusively via the "New Project" popup.
             ui.horizontal(|ui| {
                 ui.label("Chip:");
-
-                if self.project_dir.is_none() {
-                    // ── No project on disk → ComboBox is active ───────────────
-                    let prev_type = self.selected_mcu_type.clone();
-
-                    egui::ComboBox::from_id_salt("mcu_type_selector")
-                        .selected_text(self.selected_mcu_type.label())
-                        .show_ui(ui, |ui| {
-                            for mcu_type in McuType::all() {
-                                let label = if mcu_type.is_supported() {
-                                    mcu_type.label().to_string()
-                                } else {
-                                    format!("{} — coming soon", mcu_type.label())
-                                };
-                                ui.selectable_value(
-                                    &mut self.selected_mcu_type,
-                                    mcu_type,
-                                    label,
-                                );
-                            }
-                        });
-
-                    ui.label(
-                        egui::RichText::new(self.selected_mcu_type.family())
-                            .color(egui::Color32::GRAY)
-                            .size(11.0),
-                    );
-
-                    if prev_type != self.selected_mcu_type {
-                        self.mcu = Self::init_mcu(&self.selected_mcu_type);
-                        self.generated_code = self
-                            .mcu
-                            .as_ref()
-                            .map(|m| m.fresh_main_rs())
-                            .unwrap_or_default();
-                        self.active_tab = McuTab::Pins;
-                        self.selected_file = ProjectFileId::MainRs;
-                        if matches!(
-                            self.selected_file,
-                            ProjectFileId::MemoryX | ProjectFileId::BuildRs
-                        ) {
-                            self.selected_file = ProjectFileId::MainRs;
-                        }
-                        self.lsp_state.lock().unwrap().reset();
-                        self.lsp_selected_diagnostic = None;
-                    }
-                } else {
-                    // ── Project open → read-only chip display ─────────────────
-                    ui.label(
-                        egui::RichText::new(self.selected_mcu_type.label())
-                            .strong()
-                            .color(egui::Color32::LIGHT_BLUE),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "·  {}",
-                            self.selected_mcu_type.family()
-                        ))
+                ui.label(
+                    egui::RichText::new(self.selected_mcu_type.label())
+                        .strong()
+                        .color(egui::Color32::LIGHT_BLUE),
+                );
+                ui.label(
+                    egui::RichText::new(format!("·  {}", self.selected_mcu_type.family()))
                         .color(egui::Color32::GRAY)
                         .size(11.0),
-                    );
-                }
+                );
             });
 
             ui.separator();
@@ -2800,6 +2816,7 @@ fn periph_section(ui: &mut egui::Ui, title: &str, pins: &[&Pin], color: egui::Co
 
 fn show_diag_panel(
     ui: &mut egui::Ui,
+    ctx: &egui::Context,
     build_state: &Arc<Mutex<BuildState>>,
     lsp_state: &Arc<Mutex<lsp::LspState>>,
     dfu_state: &Arc<Mutex<DfuState>>,
@@ -2810,6 +2827,7 @@ fn show_diag_panel(
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
+    tools_state: &Arc<Mutex<required_tools::ToolsState>>,
     toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
@@ -2947,6 +2965,39 @@ fn show_diag_panel(
                 *tab = BuildPanelTab::Dfu;
             }
         }
+
+        ui.separator();
+
+        // Required Tools tab button
+        {
+            let ts = tools_state.lock().unwrap();
+            let missing = ts.missing_installable_count();
+            let any_busy = ts.any_busy();
+            drop(ts);
+            let (badge, col) = if any_busy {
+                (" …".to_owned(), egui::Color32::from_rgb(180, 180, 80))
+            } else if missing > 0 {
+                (
+                    format!(" {} {}", missing, ph::WARNING),
+                    egui::Color32::from_rgb(230, 160, 50),
+                )
+            } else {
+                (String::new(), egui::Color32::DARK_GRAY)
+            };
+            let label = format!("{} Tools{badge}", ph::WRENCH);
+            let active = *tab == BuildPanelTab::RequiredTools;
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::RequiredTools;
+            }
+        }
     });
 
     ui.separator();
@@ -2972,6 +3023,9 @@ fn show_diag_panel(
                 espflash_state,
                 toolchain,
             );
+        }
+        BuildPanelTab::RequiredTools => {
+            show_tools_tab(ui, tools_state, ctx);
         }
     }
 }
@@ -3975,4 +4029,241 @@ fn show_ra_tab(
                 });
         }
     }
+}
+
+// ── Required Tools tab ────────────────────────────────────────────────────────
+
+fn show_tools_tab(
+    ui: &mut egui::Ui,
+    tools_state: &Arc<Mutex<required_tools::ToolsState>>,
+    ctx: &egui::Context,
+) {
+    use required_tools::ToolStatus;
+
+    // Snapshot all state before rendering (avoids holding the lock during draw)
+    let (rows, any_busy, missing_count, log) = {
+        let s = tools_state.lock().unwrap();
+        (
+            s.snapshot(),
+            s.any_busy(),
+            s.missing_installable_count(),
+            s.log.clone(),
+        )
+    };
+
+    // ── Toolbar ───────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !any_busy,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Check All", ph::MAGNIFYING_GLASS)).size(11.0),
+                ),
+            )
+            .on_hover_text("Check every tool / target in the list")
+            .clicked()
+        {
+            required_tools::start_check_all(Arc::clone(tools_state), ctx.clone());
+        }
+
+        let install_label = if missing_count > 0 {
+            format!("Install Missing ({})", missing_count)
+        } else {
+            "Install Missing".to_string()
+        };
+        if ui
+            .add_enabled(
+                !any_busy && missing_count > 0,
+                egui::Button::new(egui::RichText::new(install_label).size(11.0)),
+            )
+            .on_hover_text("Auto-install every missing tool that supports it")
+            .clicked()
+        {
+            required_tools::start_install_missing(Arc::clone(tools_state), ctx.clone());
+        }
+    });
+
+    ui.add_space(2.0);
+    ui.separator();
+
+    // ── Tools grid ────────────────────────────────────────────────────────────
+    let available_h = ui.available_height();
+    // Reserve ~30 % of the panel for the log area (min 60 px, max 110 px)
+    let log_h = (available_h * 0.30).clamp(60.0, 110.0);
+    let grid_h = (available_h - log_h - 20.0).max(40.0);
+
+    egui::ScrollArea::vertical()
+        .id_salt("tools_grid_scroll")
+        .max_height(grid_h)
+        .show(ui, |ui| {
+            egui::Grid::new("tools_grid")
+                .num_columns(5)
+                .striped(true)
+                .min_col_width(50.0)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    // Header row
+                    let hdr = |text: &str| {
+                        egui::RichText::new(text)
+                            .strong()
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(150, 160, 180))
+                    };
+                    ui.label(hdr("Tool"));
+                    ui.label(hdr("For"));
+                    ui.label(hdr("Status"));
+                    ui.label(hdr("Version"));
+                    ui.label(hdr("Action"));
+                    ui.end_row();
+
+                    for (idx, row) in rows.iter().enumerate() {
+                        // ── Tool name + description tooltip ────────────────
+                        ui.label(
+                            egui::RichText::new(row.name)
+                                .monospace()
+                                .size(10.5),
+                        )
+                        .on_hover_text(row.description);
+
+                        // ── Toolchain column ──────────────────────────────
+                        let tc_label = match &row.toolchain {
+                            None => "All",
+                            Some(ToolchainKind::RustEmbedded) => "STM32",
+                            Some(ToolchainKind::EspRust) => "ESP32-C3",
+                            Some(ToolchainKind::SdccC) => "SDCC",
+                        };
+                        ui.label(
+                            egui::RichText::new(tc_label)
+                                .size(10.5)
+                                .color(egui::Color32::GRAY),
+                        );
+
+                        // ── Status badge ───────────────────────────────────
+                        ui.label(
+                            egui::RichText::new(row.status.label())
+                                .size(10.5)
+                                .color(row.status.color()),
+                        );
+
+                        // ── Version string ─────────────────────────────────
+                        let ver = match &row.status {
+                            ToolStatus::Ok(v) => v.as_str(),
+                            _ => "—",
+                        };
+                        ui.label(
+                            egui::RichText::new(ver)
+                                .monospace()
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(140, 150, 170)),
+                        );
+
+                        // ── Action buttons ─────────────────────────────────
+                        let busy = row.status.is_busy();
+                        ui.horizontal(|ui| {
+                            // Check button — always shown, disabled while busy
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new(
+                                        egui::RichText::new(ph::MAGNIFYING_GLASS).size(11.0),
+                                    )
+                                    .small(),
+                                )
+                                .on_hover_text("Re-check this tool")
+                                .clicked()
+                            {
+                                required_tools::start_check(
+                                    idx,
+                                    Arc::clone(tools_state),
+                                    ctx.clone(),
+                                );
+                            }
+
+                            // Install button — only when missing/failed AND auto-installable
+                            if row.can_auto_install
+                                && matches!(
+                                    row.status,
+                                    ToolStatus::Missing | ToolStatus::Failed(_)
+                                )
+                            {
+                                if ui
+                                    .add_enabled(
+                                        !busy,
+                                        egui::Button::new(
+                                            egui::RichText::new("Install").size(10.5),
+                                        )
+                                        .small(),
+                                    )
+                                    .on_hover_text("Auto-install this tool")
+                                    .clicked()
+                                {
+                                    required_tools::start_install(
+                                        idx,
+                                        Arc::clone(tools_state),
+                                        ctx.clone(),
+                                    );
+                                }
+                            }
+
+                            // Manual URL link — for tools without auto-install
+                            if !row.can_auto_install
+                                && matches!(
+                                    row.status,
+                                    ToolStatus::Missing
+                                        | ToolStatus::Unknown
+                                        | ToolStatus::Failed(_)
+                                )
+                            {
+                                ui.hyperlink_to(
+                                    egui::RichText::new("Get…")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(100, 160, 220)),
+                                    row.manual_url,
+                                )
+                                .on_hover_text(row.manual_url);
+                            }
+                        });
+
+                        ui.end_row();
+                    }
+                });
+        });
+
+    // ── Log area ──────────────────────────────────────────────────────────────
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .id_salt("tools_log_scroll")
+        .stick_to_bottom(true)
+        .max_height(log_h)
+        .show(ui, |ui| {
+            if log.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "Click \"Check All\" to verify your toolchain setup.\n\
+                         Use \"Install\" buttons to auto-install missing components.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+                );
+                return;
+            }
+            for line in &log {
+                let color = if line.starts_with("  ✔") || line.starts_with("✔") {
+                    egui::Color32::from_rgb(80, 200, 100)
+                } else if line.starts_with("  ✘") {
+                    egui::Color32::from_rgb(220, 80, 70)
+                } else if line.starts_with("▶") {
+                    egui::Color32::from_rgb(100, 180, 255)
+                } else {
+                    egui::Color32::from_rgb(175, 180, 192)
+                };
+                ui.label(
+                    egui::RichText::new(line.as_str())
+                        .monospace()
+                        .size(10.0)
+                        .color(color),
+                );
+            }
+        });
 }
