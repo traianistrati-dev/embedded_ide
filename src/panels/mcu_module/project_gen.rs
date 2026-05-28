@@ -86,6 +86,21 @@ pub fn write_project(
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
 
+    // ── Remove stale .rs files from src/ ─────────────────────────────────────
+    // When the user switches between chip types (e.g. STM32 → ESP32-C3), the
+    // workspace directory still contains .rs files written during the previous
+    // build (e.g. src/lib.rs with `use stm32f1xx_hal`).  Those stale files are
+    // not part of the new project, but `cargo check` picks them up and fails.
+    //
+    // Build the authoritative set of paths that SHOULD exist inside src/:
+    // main.rs (always generated) + every user source file.
+    let expected_in_src: std::collections::HashSet<String> = user_src_files
+        .iter()
+        .map(|(p, _)| p.clone())
+        .chain(std::iter::once("main.rs".to_string()))
+        .collect();
+    remove_stale_rs(&dest.join("src"), &dest.join("src"), &expected_in_src);
+
     // Files common to all toolchains
     fs::write(dest.join("Cargo.toml"),                         &files.cargo_toml)?;
     fs::write(dest.join(".cargo").join("config.toml"),         &files.cargo_config)?;
@@ -108,6 +123,32 @@ pub fn write_project(
     }
 
     Ok(())
+}
+
+/// Walks `dir` recursively and removes every `.rs` file whose path relative to
+/// `root` is **not** listed in `keep`.  Errors on individual files are silently
+/// ignored — a failed removal produces no stale content (the file stays) and
+/// does not abort the project write.
+fn remove_stale_rs(
+    root: &Path,
+    dir: &Path,
+    keep: &std::collections::HashSet<String>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_stale_rs(root, &path, keep);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            if let Ok(rel) = path.strip_prefix(root) {
+                // Normalise to forward slashes so the lookup matches on Windows
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                if !keep.contains(&rel_str) {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
 }
 
 /// Default `src/main.rs` for an ESP32-C3 project (no pin layout configured yet).
