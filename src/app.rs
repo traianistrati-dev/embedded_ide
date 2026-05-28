@@ -12,7 +12,7 @@ use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use eframe::egui;
-use egui_code_editor::{CodeEditor, ColorTheme, Syntax};
+use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
 use egui_phosphor::regular as ph;
 use notify::Watcher as _;
 use std::collections::BTreeMap;
@@ -172,6 +172,9 @@ pub struct AppIde {
     espflash_state: Arc<Mutex<EspFlashState>>,
     /// Shared state for the Required Tools tab (check + install operations)
     tools_state: Arc<Mutex<required_tools::ToolsState>>,
+    /// Code-completion engine — stores the trie, current prefix and popup state.
+    /// Must live in the App (not a local) so state is preserved across frames.
+    completer: Completer,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -300,6 +303,10 @@ impl AppIde {
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
             espflash_state,
             tools_state: required_tools::make_tools_state(),
+            // Completer: seeded with Rust keywords/types + learns words from code
+            completer: Completer::new_with_syntax(&Syntax::rust())
+                .with_auto_indent()
+                .with_user_words(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -1702,7 +1709,12 @@ impl eframe::App for AppIde {
                     .with_fontsize(13.0)
                     .with_theme(ColorTheme::GRUVBOX)
                     .with_numlines(true)
-                    .show(ui, &mut display_code, &display_syntax);
+                    .show_with_completer(
+                        ui,
+                        &mut display_code,
+                        &display_syntax,
+                        &mut self.completer,
+                    );
 
                 // ── Write user edits back ────────────────────────────────────
                 // display_code is a local clone; persist changes here.
