@@ -445,12 +445,10 @@ fn launch(
                     "fullFunctionSignatures": { "enable": true },
                 },
 
-                // Use the host target for type-checking / completion analysis.
-                // The configured target (riscv32imc-unknown-none-elf) is used
-                // for cargo-check diagnostics; for IDE analysis the host is more
-                // reliable because all std/proc-macro artefacts are available.
+                // Let RA read the target from .cargo/config.toml.
+                // For ESP32-C3 this is riscv32imc-unknown-none-elf, which ensures
+                // that cfg(target_arch = "riscv32") items in esp-hal are visible.
                 "cargo": {
-                    "target": null,
                     "noDefaultFeatures": false,
                 },
             },
@@ -693,18 +691,29 @@ fn parse_diag(v: &serde_json::Value) -> Option<LspDiagnostic> {
 // ── URI helpers ───────────────────────────────────────────────────────────────
 
 pub fn path_to_uri(path: &Path) -> String {
-    // Canonicalize to resolve symlinks and normalise separators.
+    // On Windows, Path::canonicalize() returns extended-length paths prefixed
+    // with \\?\ (e.g. \\?\C:\Users\...).  Replacing every backslash with a
+    // forward slash would produce //?/C:/... — an invalid file URI that causes
+    // rust-analyzer to return error -32603 "url is not a file" for every request.
+    //
+    // Fix: strip the \\?\ prefix before building the URI.
+    // If canonicalize fails (directory doesn't exist yet), the fallback path
+    // is already an absolute path without the \\?\ prefix.
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let s = canonical.to_string_lossy();
+
     #[cfg(windows)]
     {
-        // Windows: C:\foo\bar → file:///C:/foo/bar
-        let s = s.replace('\\', "/");
-        format!("file:///{s}")
+        // Strip the Windows extended-length path prefix \\?\ if present,
+        // then normalise backslashes to forward slashes.
+        // Result: file:///C:/Users/foo/bar
+        let stripped   = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        let normalised = stripped.replace('\\', "/");
+        format!("file:///{normalised}")
     }
     #[cfg(not(windows))]
     {
-        // Unix: /foo/bar → file:///foo/bar  (file:// + /foo/bar)
+        // Unix: /foo/bar  →  file:///foo/bar
         format!("file://{s}")
     }
 }
