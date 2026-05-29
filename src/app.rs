@@ -2208,6 +2208,160 @@ impl eframe::App for AppIde {
                         }
                     }
                 }
+
+                // ── Inline diagnostic underlines + hover tooltips ──────────────
+                // Draws wavy underlines directly on the text at the error/warning
+                // spans reported by rust-analyzer, and shows a tooltip on hover.
+                //
+                // Coordinate system:
+                //   galley.pos_from_cursor(CCursor(n))  →  Rect in galley-local space
+                //   response.rect.left_top()            →  screen position of local (0,0)
+                //   screen_pos = left_top + local.to_vec2()
+                //
+                // Scroll is handled automatically: pos_from_cursor returns positions
+                // relative to the galley start; if those are outside the editor's
+                // clip rect (scrolled out of view) the painter ignores them.
+                if self.selected_file == ProjectFileId::MainRs {
+                    let diags: Vec<lsp::LspDiagnostic> = {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        lsp.diagnostics
+                            .get("src/main.rs")
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+
+                    if !diags.is_empty() {
+                        // Painter clipped to the editor rect so underlines never
+                        // bleed into the line-number gutter or the scroll bar.
+                        let editor_rect = editor_resp.response.rect;
+                        let painter     = ui.painter().with_clip_rect(editor_rect);
+                        let origin      = editor_rect.left_top();
+                        let total_chars = display_code.chars().count();
+
+                        for (di, diag) in diags.iter().enumerate() {
+                            // ── Convert LSP (line, col) → galley char index ───────
+                            let start_ci = lsp_pos_to_char_idx(
+                                &display_code, diag.line, diag.col,
+                            ).min(total_chars);
+                            let end_ci_raw = lsp_pos_to_char_idx(
+                                &display_code, diag.end_line, diag.end_col,
+                            ).min(total_chars);
+                            // Guarantee a minimum visible span of 1 char.
+                            let end_ci = if end_ci_raw <= start_ci {
+                                (start_ci + 1).min(total_chars)
+                            } else {
+                                end_ci_raw
+                            };
+
+                            // ── Galley positions (galley-local Rect) ──────────────
+                            let loc_s = editor_resp.galley
+                                .pos_from_cursor(egui::text::CCursor::new(start_ci));
+                            let loc_e = editor_resp.galley
+                                .pos_from_cursor(egui::text::CCursor::new(end_ci));
+
+                            // Screen-space coordinates
+                            let sx = origin.x + loc_s.min.x;
+                            let sy_top = origin.y + loc_s.min.y;
+                            let sy_bot = origin.y + loc_s.max.y; // bottom of text line
+                            let line_h = loc_s.height();
+
+                            // For multi-line spans draw only the first line;
+                            // end_x is either the real end (same line) or the
+                            // right edge of the start line.
+                            let same_line =
+                                (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
+                            let ex = if same_line {
+                                origin.x + loc_e.min.x
+                            } else {
+                                // Extend underline to EOL
+                                origin.x + editor_resp.galley.rect.width() - 8.0
+                            };
+
+                            // Skip if horizontally degenerate
+                            if ex <= sx + 0.5 {
+                                continue;
+                            }
+
+                            // ── Colors per severity ───────────────────────────────
+                            let (ul_color, bg_color) = match diag.severity {
+                                lsp::DiagSeverity::Error => (
+                                    egui::Color32::from_rgb(220, 65, 55),
+                                    egui::Color32::from_rgba_unmultiplied(210, 55, 45, 20),
+                                ),
+                                lsp::DiagSeverity::Warning => (
+                                    egui::Color32::from_rgb(210, 165, 35),
+                                    egui::Color32::from_rgba_unmultiplied(200, 160, 30, 14),
+                                ),
+                                lsp::DiagSeverity::Info => (
+                                    egui::Color32::from_rgb(80, 140, 215),
+                                    egui::Color32::TRANSPARENT,
+                                ),
+                                lsp::DiagSeverity::Hint => (
+                                    egui::Color32::from_rgb(100, 170, 120),
+                                    egui::Color32::TRANSPARENT,
+                                ),
+                            };
+
+                            // ── Background highlight ──────────────────────────────
+                            if bg_color != egui::Color32::TRANSPARENT {
+                                painter.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(sx,  sy_top),
+                                        egui::pos2(ex,  sy_bot),
+                                    ),
+                                    0.0,
+                                    bg_color,
+                                );
+                            }
+
+                            // ── Wavy underline ────────────────────────────────────
+                            draw_wavy_underline(&painter, sx, ex, sy_bot, ul_color);
+
+                            // ── Hover tooltip ─────────────────────────────────────
+                            // Use ui.interact() — does not allocate layout space.
+                            let hover_rect = egui::Rect::from_min_max(
+                                egui::pos2(sx, sy_top),
+                                egui::pos2(ex, sy_bot + 3.0),
+                            );
+                            let hover = ui.interact(
+                                hover_rect,
+                                egui::Id::new("inline_diag").with(di),
+                                egui::Sense::hover(),
+                            );
+                            if hover.hovered() {
+                                let icon = match diag.severity {
+                                    lsp::DiagSeverity::Error   => "⛔",
+                                    lsp::DiagSeverity::Warning => "⚠",
+                                    lsp::DiagSeverity::Info    => "ℹ",
+                                    lsp::DiagSeverity::Hint    => "·",
+                                };
+                                let msg   = format!("{icon}  {}", diag.message);
+                                let code  = diag.code.clone();
+                                #[allow(deprecated)]
+                                egui::show_tooltip_at_pointer(
+                                    ui.ctx(),
+                                    ui.layer_id(),   // parent LayerId (required in 0.34)
+                                    egui::Id::new("inline_diag_tip").with(di),
+                                    |ui: &mut egui::Ui| {
+                                        ui.set_max_width(380.0);
+                                        ui.label(
+                                            egui::RichText::new(&msg).size(12.0),
+                                        );
+                                        if let Some(c) = &code {
+                                            ui.label(
+                                                egui::RichText::new(format!("[{c}]"))
+                                                    .size(10.5)
+                                                    .color(egui::Color32::from_rgb(
+                                                        140, 150, 170,
+                                                    )),
+                                            );
+                                        }
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
             });
 
         // ── Panel 3: MCU Configurator ─────────────────────────────────────────
@@ -4680,6 +4834,64 @@ fn lsp_word_start(text: &str, end_idx: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+// ── Inline diagnostics helpers ────────────────────────────────────────────────
+
+/// Convert an LSP position (1-based line, 1-based column in UTF-16 units)
+/// to a char index suitable for `galley.pos_from_cursor(CCursor::new(idx))`.
+///
+/// LSP columns are UTF-16 code-unit offsets from line start.  For ASCII and
+/// BMP characters (including Romanian diacritics) each char is 1 unit.
+fn lsp_pos_to_char_idx(text: &str, line_1: u32, col_1: u32) -> usize {
+    let want_line = line_1.saturating_sub(1) as usize;
+    let want_utf16_col = col_1.saturating_sub(1) as usize;
+    let mut cur_line     = 0usize;
+    let mut utf16_col    = 0usize;
+    let mut char_idx     = 0usize;
+    for c in text.chars() {
+        if cur_line == want_line && utf16_col >= want_utf16_col {
+            return char_idx;
+        }
+        if c == '\n' {
+            if cur_line == want_line {
+                // Column is past end of line — clamp to the newline position.
+                return char_idx;
+            }
+            cur_line += 1;
+            utf16_col = 0;
+        } else {
+            utf16_col += c.len_utf16();
+        }
+        char_idx += 1;
+    }
+    char_idx
+}
+
+/// Draw a wavy (zigzag) underline between `x_start` and `x_end` at height `y`.
+///
+/// Each segment alternates up/down by `AMP` pixels with a horizontal step of
+/// `STEP` pixels, producing the classic "squiggly" error underline appearance.
+fn draw_wavy_underline(
+    painter: &egui::Painter,
+    x_start: f32,
+    x_end:   f32,
+    y:       f32,
+    color:   egui::Color32,
+) {
+    const STEP: f32 = 3.0;
+    const AMP:  f32 = 1.5;
+    if x_end <= x_start { return; }
+    let stroke = egui::Stroke::new(1.2, color);
+    let mut x  = x_start;
+    let mut up = true;
+    while x < x_end {
+        let x2 = (x + STEP).min(x_end);
+        let (y1, y2) = if up { (y, y + AMP) } else { (y + AMP, y) };
+        painter.line_segment([egui::pos2(x, y1), egui::pos2(x2, y2)], stroke);
+        x  = x2;
+        up = !up;
+    }
 }
 
 /// Map an LSP CompletionItemKind number to a short (3-char) icon string.

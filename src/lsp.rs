@@ -429,13 +429,12 @@ fn launch(
                 // background analysis, not from an active build invocation.
                 "checkOnSave":  false,
 
-                // Disable proc-macro expansion.  esp-hal proc macros need to be
-                // compiled for the host (Windows x64) which often fails for
-                // embedded crates that pull in target-specific code.  Keeping
-                // this disabled lets RA analyse the crate graph and public API
-                // (module names, types, functions) purely from source, which is
-                // what we need for `::` and `.` completions.
-                "procMacro": { "enable": false },
+                // Enable proc-macro expansion.
+                // esp-hal proc macros (e.g. #[esp_hal::main]) are standard Rust
+                // proc macros compiled for the HOST, not the embedded target.
+                // With proc macros enabled RA can expand #[esp_hal::main] and
+                // avoids the false "proc-macro expansion is disabled" diagnostic.
+                "procMacro": { "enable": true },
 
                 "diagnostics":  { "enable": true },
 
