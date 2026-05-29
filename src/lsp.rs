@@ -429,14 +429,35 @@ fn launch(
                 // background analysis, not from an active build invocation.
                 "checkOnSave":  false,
 
-                // Enable proc-macro expansion.
-                // esp-hal proc macros (e.g. #[esp_hal::main]) are standard Rust
-                // proc macros compiled for the HOST, not the embedded target.
-                // With proc macros enabled RA can expand #[esp_hal::main] and
-                // avoids the false "proc-macro expansion is disabled" diagnostic.
-                "procMacro": { "enable": true },
+                // Proc-macro expansion is disabled.
+                //
+                // WHY: RA looks for the proc-macro DLL (e.g. esp_hal_procmacros-
+                // <hash>.dll) in target/debug/deps/.  The DLL only exists after a
+                // successful `cargo build`.  Our workspace deletes Cargo.lock on
+                // every project write, which changes the resolution hash, so the
+                // DLL RA cached from a previous session is no longer present.
+                // Enabling proc-macros therefore causes:
+                //   "Cannot create expander for <dll>: path not found (os error 3)"
+                // on every RA startup until the user manually runs a build.
+                //
+                // With proc-macros disabled, RA still analyses the full crate
+                // graph, provides :: completions, type inference, diagnostics, and
+                // go-to-definition — it just can't *expand* attribute macros like
+                // #[esp_hal::main].  The function body and all other code are fully
+                // analysed, so the IDE experience is not materially affected.
+                //
+                // To prevent RA from reporting a false "unresolved-proc-macro"
+                // warning on #[esp_hal::main] we suppress that diagnostic below.
+                "procMacro": { "enable": false },
 
-                "diagnostics":  { "enable": true },
+                "diagnostics": {
+                    "enable": true,
+                    // Suppress the "proc-macro expansion is disabled" pseudo-error
+                    // that RA emits for every attribute macro when expansion is off.
+                    // All real compiler errors (type mismatches, borrow errors, …)
+                    // are still reported through cargo-check diagnostics.
+                    "disabled": ["unresolved-proc-macro"],
+                },
 
                 // Ask RA to include full documentation text in completion
                 // responses rather than returning only a label.
