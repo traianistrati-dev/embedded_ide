@@ -1832,8 +1832,14 @@ impl eframe::App for AppIde {
                 }
 
                 // Trigger detection
+                // Completions are only meaningful for files that RA has open.
+                // Currently RA only tracks src/main.rs; skip for other files.
+                let lsp_file_tracked = matches!(
+                    self.selected_file,
+                    ProjectFileId::MainRs
+                );
                 {
-                    let lsp_ready = matches!(
+                    let lsp_ready = lsp_file_tracked && matches!(
                         self.lsp_state.lock().unwrap().status,
                         lsp::LspStatus::Ready
                     );
@@ -1842,15 +1848,21 @@ impl eframe::App for AppIde {
                         if ctrl_space_pressed {
                             if let Some(idx) = cursor_char_idx {
                                 let (line, col) = lsp_cursor_pos(&display_code, idx);
-                                self.lsp_state.lock().unwrap()
-                                    .request_completion(line, col, None);
+                                // Sync the latest editor text to RA BEFORE the
+                                // completion request — the frame's did_change (sent
+                                // at the top of update()) used last frame's code.
+                                {
+                                    let mut lsp = self.lsp_state.lock().unwrap();
+                                    lsp.did_change(&display_code);
+                                    lsp.request_completion(line, col, None);
+                                }
                                 self.completion_trigger_idx = idx;
                                 self.completion_sel          = 0;
                                 self.completion_open         = true;
                             }
                         }
 
-                        // Auto-trigger on `.`
+                        // Auto-trigger on `.`  (method / field access)
                         let dot_trigger = editor_resp.response.changed()
                             && cursor_char_idx.map(|idx| {
                                 let chars: Vec<char> = display_code.chars().collect();
@@ -1859,8 +1871,39 @@ impl eframe::App for AppIde {
                         if dot_trigger && !ctrl_space_pressed {
                             if let Some(idx) = cursor_char_idx {
                                 let (line, col) = lsp_cursor_pos(&display_code, idx);
-                                self.lsp_state.lock().unwrap()
-                                    .request_completion(line, col, Some('.'));
+                                {
+                                    let mut lsp = self.lsp_state.lock().unwrap();
+                                    lsp.did_change(&display_code);
+                                    lsp.request_completion(line, col, Some('.'));
+                                }
+                                self.completion_trigger_idx = idx;
+                                self.completion_sel          = 0;
+                                self.completion_open         = true;
+                            }
+                        }
+
+                        // Auto-trigger on `::` (Rust path separator — module / type paths)
+                        // Fires when the user types the SECOND colon of `::`.
+                        // Sending triggerCharacter=':' tells rust-analyzer this is a
+                        // path-completion context so it returns module members, not
+                        // arbitrary identifier completions.
+                        let colon_trigger = !dot_trigger
+                            && !ctrl_space_pressed
+                            && editor_resp.response.changed()
+                            && cursor_char_idx.map(|idx| {
+                                let chars: Vec<char> = display_code.chars().collect();
+                                idx >= 2
+                                    && chars.get(idx - 1) == Some(&':')
+                                    && chars.get(idx - 2) == Some(&':')
+                            }).unwrap_or(false);
+                        if colon_trigger {
+                            if let Some(idx) = cursor_char_idx {
+                                let (line, col) = lsp_cursor_pos(&display_code, idx);
+                                {
+                                    let mut lsp = self.lsp_state.lock().unwrap();
+                                    lsp.did_change(&display_code);
+                                    lsp.request_completion(line, col, Some(':'));
+                                }
                                 self.completion_trigger_idx = idx;
                                 self.completion_sel          = 0;
                                 self.completion_open         = true;
@@ -2014,10 +2057,15 @@ impl eframe::App for AppIde {
                                                 // Detail (type signature) — right-aligned,
                                                 // smaller and dimmer, truncated if needed.
                                                 if !item.detail.is_empty() {
-                                                    let det = if item.detail.len() > 38 {
-                                                        format!("{}…", &item.detail[..35])
-                                                    } else {
-                                                        item.detail.clone()
+                                                    let det = {
+                                                        let chars: Vec<char> =
+                                                            item.detail.chars().collect();
+                                                        if chars.len() > 38 {
+                                                            format!("{}…",
+                                                                chars[..35].iter().collect::<String>())
+                                                        } else {
+                                                            item.detail.clone()
+                                                        }
                                                     };
                                                     painter.text(
                                                         rect.right_center()
@@ -2061,7 +2109,61 @@ impl eframe::App for AppIde {
                                 }); // Area
                         }
                     }
-                    // If all_items is empty: items not yet arrived — keep waiting.
+                    // all_items is empty: either RA hasn't responded yet, or
+                    // it responded with no completions / an error.
+                    else if lsp_file_tracked {
+                        let (resp_received, timed_out) = {
+                            let lsp = self.lsp_state.lock().unwrap();
+                            let received = lsp.completion_response_received;
+                            let timeout  = lsp.completion_request_sent_at
+                                .map(|t| t.elapsed().as_secs() > 6)
+                                .unwrap_or(false);
+                            (received, timeout)
+                        };
+
+                        if resp_received || timed_out {
+                            // RA answered (empty) or request is stale — close popup.
+                            self.completion_open = false;
+                        } else {
+                            // Still waiting — show a small spinner popup.
+                            let popup_pos = cursor_char_idx.and_then(|_| {
+                                editor_resp.state.cursor.char_range().map(|cr| {
+                                    let clamped = cr.primary.index.min(
+                                        editor_resp.galley.job.text.chars().count()
+                                            .saturating_sub(1),
+                                    );
+                                    let local = editor_resp.galley
+                                        .pos_from_cursor(egui::text::CCursor::new(clamped));
+                                    editor_resp.response.rect.left_top()
+                                        + local.min.to_vec2()
+                                        + egui::vec2(0.0, local.height() + 2.0)
+                                })
+                            });
+                            if let Some(pos) = popup_pos {
+                                egui::Area::new(egui::Id::new("lsp_completion_loading"))
+                                    .fixed_pos(pos)
+                                    .order(egui::Order::Foreground)
+                                    .show(ui.ctx(), |ui| {
+                                        egui::Frame::popup(&ui.ctx().global_style())
+                                            .show(ui, |ui| {
+                                            ui.add_space(2.0);
+                                            ui.horizontal(|ui| {
+                                                ui.spinner();
+                                                ui.label(
+                                                    egui::RichText::new("  rust-analyzer…")
+                                                        .size(11.5)
+                                                        .color(
+                                                            egui::Color32::from_rgb(160, 175, 200),
+                                                        ),
+                                                );
+                                            });
+                                            ui.add_space(2.0);
+                                        });
+                                    });
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                    }
                 }
 
                 // ── RA error lane (right-edge overlay on editor rect) ─────────
@@ -4525,6 +4627,11 @@ fn show_ra_tab(
 // ── LSP completion helpers ────────────────────────────────────────────────────
 
 /// Convert a character offset into a (line, UTF-16-column) pair for LSP.
+///
+/// LSP `Position.character` is a count of UTF-16 code units from the start
+/// of the line, NOT a count of Unicode chars.  For the BMP (U+0000–U+FFFF,
+/// which includes all ASCII + Romanian diacritics) each char = 1 unit, so the
+/// result is the same.  Emoji and other non-BMP chars are 2 units each.
 fn lsp_cursor_pos(text: &str, char_idx: usize) -> (u32, u32) {
     let mut line: u32 = 0;
     let mut col: u32  = 0;
@@ -4536,7 +4643,7 @@ fn lsp_cursor_pos(text: &str, char_idx: usize) -> (u32, u32) {
             line += 1;
             col   = 0;
         } else {
-            col += 1;
+            col += c.len_utf16() as u32;
         }
     }
     (line, col)

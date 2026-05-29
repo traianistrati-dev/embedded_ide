@@ -8,6 +8,10 @@ use super::pin_module::pin_function::PinFunction;
 // The ESP32-C3 routes almost every peripheral through a configurable IO Matrix,
 // so the same set of functions is available on most GPIO pins.
 //
+// IMPORTANT: Pin::new() / Pin::new_with_analog() already add GpioInput and
+// GpioOutput to available_functions automatically.  Therefore matrix_fns() must
+// NOT include them — they would appear twice in the popup otherwise.
+//
 // Hardware-fixed exceptions / datasheet (Rev 2.4) notes:
 //   • GPIO18 = USB D-   (USB Serial/JTAG; avoid for general use on SuperMini)
 //   • GPIO19 = USB D+   (USB Serial/JTAG; avoid for general use on SuperMini)
@@ -29,7 +33,7 @@ use super::pin_module::pin_function::PinFunction;
 //   Built-in USB-JTAG is available on GPIO18/GPIO19 (USB D-/D+).
 //
 // LEDC (LED PWM Controller):
-//   • 6 independent channels, up to 14-bit resolution
+//   • 6 independent channels (CH0–CH5), up to 14-bit resolution
 //   • Any GPIO can be assigned to any LEDC channel via the GPIO Matrix
 //
 // Crystal oscillators:
@@ -74,49 +78,82 @@ use super::pin_module::pin_function::PinFunction;
 //   Pin 32 : VDDA         Power   Analog supply 3.3 V (second pad)
 //   Pin 33 : GND          Power   Exposed thermal pad (EP); solder to GND plane
 
-/// Full set of matrix-IO peripherals available on a general-purpose GPIO.
-/// Peripherals are ordered by priority / likelihood of use.
+// ── Peripheral function lists ─────────────────────────────────────────────────
+
+/// Matrix-routed peripherals available on every general-purpose GPIO.
+///
+/// Does NOT include GpioInput / GpioOutput — those are added automatically by
+/// Pin::new() / Pin::new_with_analog() and must not appear here a second time.
 fn matrix_fns() -> Vec<PinFunction> {
     vec![
-        // ── GPIO ─────────────────────────────────────────────────────────────
-        PinFunction::GpioOutput,
-        PinFunction::GpioInput,
-
-        // ── LEDC (LED PWM Controller) — 6 channels assignable to any GPIO ──
+        // ── LEDC (LED PWM Controller) — 6 independent channels ────────────────
         PinFunction::TimerPwm { timer: 0, channel: 0 },
         PinFunction::TimerPwm { timer: 0, channel: 1 },
         PinFunction::TimerPwm { timer: 0, channel: 2 },
         PinFunction::TimerPwm { timer: 0, channel: 3 },
         PinFunction::TimerPwm { timer: 0, channel: 4 },
         PinFunction::TimerPwm { timer: 0, channel: 5 },
-
-        // ── UART0 — default pins are GPIO20/GPIO21 but any GPIO can be used
+        // ── UART0 — default pins GPIO20/GPIO21, but re-routable ──────────────
         PinFunction::UsartTx(0),
         PinFunction::UsartRx(0),
-        // ── UART1 — always matrix-routed, no fixed pins
+        // ── UART1 — always matrix-routed, no fixed pins ───────────────────────
         PinFunction::UsartTx(1),
         PinFunction::UsartRx(1),
-
-        // ── SPI2 (FSPI) — matrix-routed; SPI0/1 reserved for internal flash
+        // ── SPI2 (GPSPI2 / FSPI) — the only user SPI; SPI0/1 are flash-only ──
         PinFunction::SpiSck(2),
         PinFunction::SpiMosi(2),
         PinFunction::SpiMiso(2),
         PinFunction::SpiNss(2),
-
-        // ── I2C0 — single I2C controller, fully matrix-routed
+        // ── I2C0 — single I2C controller, fully matrix-routed ─────────────────
         PinFunction::I2cScl(0),
         PinFunction::I2cSda(0),
-
-        // ── TWAI (CAN-compatible, ISO 11898-1) — matrix-routed
+        // ── TWAI (CAN-compatible, ISO 11898-1) — matrix-routed ────────────────
         PinFunction::CanTx,
         PinFunction::CanRx,
     ]
 }
 
-/// Returns (adc_num, adc_channel, extra_peripheral_functions) for ADC1 pins.
-/// GPIO0–GPIO4 only — they map to ADC1 channels 0–4.
-fn adc1_fns(channel: u8) -> (u8, u8, Vec<PinFunction>) {
-    (1, channel, matrix_fns())
+/// Matrix functions for UART0-default pins (GPIO20 = RX, GPIO21 = TX).
+/// UART0 RX/TX are promoted to the top; duplicates filtered from the rest.
+fn uart0_rx_pin_fns() -> Vec<PinFunction> {
+    let mut fns = vec![
+        PinFunction::UsartRx(0), // primary: UART0 RX via IO MUX
+        PinFunction::UsartTx(0), // also available via matrix
+    ];
+    fns.extend(
+        matrix_fns()
+            .into_iter()
+            .filter(|f| !matches!(f, PinFunction::UsartTx(0) | PinFunction::UsartRx(0))),
+    );
+    fns
+}
+
+fn uart0_tx_pin_fns() -> Vec<PinFunction> {
+    let mut fns = vec![
+        PinFunction::UsartTx(0), // primary: UART0 TX via IO MUX
+        PinFunction::UsartRx(0), // also available via matrix
+    ];
+    fns.extend(
+        matrix_fns()
+            .into_iter()
+            .filter(|f| !matches!(f, PinFunction::UsartTx(0) | PinFunction::UsartRx(0))),
+    );
+    fns
+}
+
+/// Matrix functions for USB pins (GPIO18/GPIO19).
+/// USB D-/D+ promoted to top; all matrix peripherals still listed as alternatives
+/// (usable only if USB is permanently disabled via eFuse).
+fn usb_dm_pin_fns() -> Vec<PinFunction> {
+    let mut fns = vec![PinFunction::UsbDm];
+    fns.extend(matrix_fns());
+    fns
+}
+
+fn usb_dp_pin_fns() -> Vec<PinFunction> {
+    let mut fns = vec![PinFunction::UsbDp];
+    fns.extend(matrix_fns());
+    fns
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,84 +178,44 @@ fn adc1_fns(channel: u8) -> (u8, u8, Vec<PinFunction>) {
 /// GPIO12–GPIO17 are connected to the internal SPI flash on WROOM/MINI modules.
 pub fn create_esp32c3() -> Mcu {
     // ── TOP pins — visual left → right (chip pins 1 → 8) ────────────────────
-    let top_pins = vec![
+    let left_pins = vec![
         // Pin 1: LNA_IN — RF antenna feed (reserved, not user-accessible)
         Pin::new_reserved(1, "LNA_IN"),
-
         // Pin 2: VDD3P3 — RF/analog 3.3 V supply (first pad)
         Pin::new_reserved(2, "VDD3P3"),
-
         // Pin 3: VDD3P3 — RF/analog 3.3 V supply (second pad)
         Pin::new_reserved(3, "VDD3P3"),
-
-        // Pin 4: GPIO0 — ADC1 CH0  (IO MUX primary name: XTAL_32K_P)
-        //   Also serves as the optional 32 kHz RTC crystal input (P side).
-        {
-            let (adc, ch, fns) = adc1_fns(0);
-            Pin::new_with_analog(4, "GPIO0", adc, ch).with_functions(fns)
-        },
-
-        // Pin 5: GPIO1 — ADC1 CH1  (IO MUX primary name: XTAL_32K_N)
-        //   Also serves as the optional 32 kHz RTC crystal input (N side).
-        {
-            let (adc, ch, fns) = adc1_fns(1);
-            Pin::new_with_analog(5, "GPIO1", adc, ch).with_functions(fns)
-        },
-
+        // Pin 4: GPIO0 — ADC1 CH0  (IO MUX: XTAL_32K_P)
+        // Constructor adds: GpioInput, GpioOutput, AdcChannel{1,0}
+        // with_functions adds: LEDC, UART0/1, SPI2, I2C0, TWAI (no duplicates)
+        Pin::new_with_analog(4, "GPIO0", 1, 0).with_functions(matrix_fns()),
+        // Pin 5: GPIO1 — ADC1 CH1  (IO MUX: XTAL_32K_N)
+        Pin::new_with_analog(5, "GPIO1", 1, 1).with_functions(matrix_fns()),
         // Pin 6: GPIO2 — ADC1 CH2  ⚠ strapping pin (HIGH = SPI boot)
-        //   Must be HIGH (floating or pulled-up) for normal operation.
-        {
-            let (adc, ch, fns) = adc1_fns(2);
-            Pin::new_with_analog(6, "GPIO2", adc, ch).with_functions(fns)
-        },
-
-        // Pin 7: CHIP_EN — chip enable / reset (active-HIGH)
-        //   Pull HIGH via 10 kΩ for normal operation; pull LOW to reset the chip.
-        //   Datasheet type: Analog (input to an internal analog comparator /
-        //   brownout-detect circuit). Official pin name in Table 2-1: "CHIP_EN".
+        Pin::new_with_analog(6, "GPIO2", 1, 2).with_functions(matrix_fns()),
+        // Pin 7: CHIP_EN — chip enable / reset (active-HIGH analog input)
         Pin::new_reserved(7, "CHIP_EN"),
-
         // Pin 8: GPIO3 — ADC1 CH3
-        {
-            let (adc, ch, fns) = adc1_fns(3);
-            Pin::new_with_analog(8, "GPIO3", adc, ch).with_functions(fns)
-        },
+        Pin::new_with_analog(8, "GPIO3", 1, 3).with_functions(matrix_fns()),
     ];
 
     // ── RIGHT pins — visual top → bottom (chip pins 9 → 16) ─────────────────
-    let right_pins = vec![
-        // Pin 9: GPIO4 — ADC1 CH4  (IO MUX primary name: MTMS — JTAG TMS)
-        //   External JTAG TMS signal is available on this pin via IO MUX F2.
-        {
-            let (adc, ch, fns) = adc1_fns(4);
-            Pin::new_with_analog(9, "GPIO4", adc, ch).with_functions(fns)
-        },
-
-        // Pin 10: GPIO5 — ADC2 CH0  ⚠ ADC2, NOT ADC1! (IO MUX: MTDI — JTAG TDI)
-        //   ADC2 is a separate 12-bit SAR unit with only this one channel.
-        //   ADC2 is not factory-calibrated; accuracy may be lower than ADC1.
+    let bottom_pins = vec![
+        // Pin 9: GPIO4 — ADC1 CH4  (IO MUX: MTMS — JTAG TMS)
+        Pin::new_with_analog(9, "GPIO4", 1, 4).with_functions(matrix_fns()),
+        // Pin 10: GPIO5 — ADC2 CH0  ⚠ ADC2, NOT ADC1!  (IO MUX: MTDI — JTAG TDI)
+        // ADC2 is a separate unit (not factory-calibrated).
         Pin::new_with_analog(10, "GPIO5", 2, 0).with_functions(matrix_fns()),
-
-        // Pin 11: VDD3P3_RTC — RTC / ultra-low-power domain 3.3 V supply
-        //   Requires 1 µF + 100 nF decoupling capacitors.
+        // Pin 11: VDD3P3_RTC — RTC domain 3.3 V supply
         Pin::new_reserved(11, "VDD3P3_RTC"),
-
-        // Pin 12: GPIO6 — general purpose  (IO MUX primary name: MTCK — JTAG TCK)
+        // Pin 12: GPIO6 — general purpose  (IO MUX: MTCK — JTAG TCK)
         Pin::new(12, "GPIO6").with_functions(matrix_fns()),
-
-        // Pin 13: GPIO7 — general purpose  (IO MUX primary name: MTDO — JTAG TDO)
-        //   TDO is output-only when used as external JTAG via IO MUX.
+        // Pin 13: GPIO7 — general purpose  (IO MUX: MTDO — JTAG TDO, output-only)
         Pin::new(13, "GPIO7").with_functions(matrix_fns()),
-
         // Pin 14: GPIO8 — general purpose  ⚠ strapping pin (ROM print / boot mode)
-        //   Sampled at reset; LOW suppresses ROM bootloader output on UART0.
-        //   Built-in LED on many SuperMini / DevKit boards is wired to GPIO8.
         Pin::new(14, "GPIO8").with_functions(matrix_fns()),
-
-        // Pin 15: GPIO9 — general purpose  ⚠ strapping pin (weak pull-up)
-        //   HIGH = SPI boot (normal), LOW = download mode (programming).
+        // Pin 15: GPIO9 — general purpose  ⚠ strapping pin (HIGH = SPI boot)
         Pin::new(15, "GPIO9").with_functions(matrix_fns()),
-
         // Pin 16: GPIO10 — general purpose
         Pin::new(16, "GPIO10").with_functions(matrix_fns()),
     ];
@@ -227,43 +224,23 @@ pub fn create_esp32c3() -> Mcu {
     //
     // Physical bottom row runs right-to-left (pins 17→24), so reversing gives
     // the left-to-right visual order used in the pin diagram: 24→17.
-    let bottom_pins = vec![
-        // Pin 24: GPIO17 — SPI flash SPIQ (MISO) on WROOM/MINI modules
-        //   IO MUX primary name: SPIQ.
-        //   ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
+    let right_pins = vec![
+        // Pin 24: GPIO17 — IO MUX: SPIQ (SPI flash MISO on WROOM/MINI)
+        // ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
         Pin::new(24, "GPIO17").with_functions(matrix_fns()),
-
-        // Pin 23: GPIO16 — SPI flash SPID (MOSI) on WROOM/MINI modules
-        //   IO MUX primary name: SPID.
-        //   ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
+        // Pin 23: GPIO16 — IO MUX: SPID (SPI flash MOSI on WROOM/MINI)
         Pin::new(23, "GPIO16").with_functions(matrix_fns()),
-
-        // Pin 22: GPIO15 — SPI flash SPICLK on WROOM/MINI modules
-        //   IO MUX primary name: SPICLK.
-        //   ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
+        // Pin 22: GPIO15 — IO MUX: SPICLK (SPI flash CLK on WROOM/MINI)
         Pin::new(22, "GPIO15").with_functions(matrix_fns()),
-
-        // Pin 21: GPIO14 — SPI flash SPICS0 on WROOM/MINI modules
-        //   IO MUX primary name: SPICS0.
-        //   ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
+        // Pin 21: GPIO14 — IO MUX: SPICS0 (SPI flash CS on WROOM/MINI)
         Pin::new(21, "GPIO14").with_functions(matrix_fns()),
-
-        // Pin 20: GPIO13 — SPI flash SPIWP on WROOM/MINI modules
-        //   IO MUX primary name: SPIWP.
-        //   ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
+        // Pin 20: GPIO13 — IO MUX: SPIWP (SPI flash WP on WROOM/MINI)
         Pin::new(20, "GPIO13").with_functions(matrix_fns()),
-
-        // Pin 19: GPIO12 — SPI flash SPIHD on WROOM/MINI modules
-        //   IO MUX primary name: SPIHD.
-        //   ⚠ Do NOT use on WROOM/MINI — connected to internal flash.
+        // Pin 19: GPIO12 — IO MUX: SPIHD (SPI flash HOLD on WROOM/MINI)
         Pin::new(19, "GPIO12").with_functions(matrix_fns()),
-
-        // Pin 18: VDD_SPI — SPI flash power supply (3.3 V or 1.8 V, set via eFuse)
-        //   Tied to VDD3P3_CPU on WROOM/MINI modules (3.3 V flash).
+        // Pin 18: VDD_SPI — SPI flash power supply (3.3 V or 1.8 V, set by eFuse)
         Pin::new_reserved(18, "VDD_SPI"),
-
         // Pin 17: VDD3P3_CPU — digital core 3.3 V supply
-        //   Requires 10 µF + 100 nF decoupling capacitors.
         Pin::new_reserved(17, "VDD3P3_CPU"),
     ];
 
@@ -271,76 +248,27 @@ pub fn create_esp32c3() -> Mcu {
     //
     // Physical left column runs bottom-to-top (pins 25→32), so reversing gives
     // the top-to-bottom visual order used in the pin diagram: 32→25.
-    //
-    // QFN-32 left-side pinout (datasheet Rev 2.4, Table 2-1):
-    //   32      : VDDA    — analog supply 3.3 V (second pad)
-    //   31      : VDDA    — analog supply 3.3 V (first pad)
-    //   30      : XTAL_P  — 40 MHz main crystal P (analog, reserved)
-    //   29      : XTAL_N  — 40 MHz main crystal N (analog, reserved)
-    //   28      : UOTXD   — GPIO21 / UART0 TX default
-    //   27      : UORXD   — GPIO20 / UART0 RX default
-    //   26      : GPIO19  — USB Serial/JTAG D+
-    //   25      : GPIO18  — USB Serial/JTAG D-
-    //   EP(33)  : GND     — exposed thermal pad; must be soldered to PCB ground plane
-    let left_pins = vec![
+    let top_pins = vec![
         // Pin 32: VDDA — analog supply 3.3 V (second pad)
         Pin::new_reserved(32, "VDDA"),
-
         // Pin 31: VDDA — analog supply 3.3 V (first pad)
         Pin::new_reserved(31, "VDDA"),
-
         // Pin 30: XTAL_P — 40 MHz main crystal oscillator P (analog, reserved)
         Pin::new_reserved(30, "XTAL_P"),
-
         // Pin 29: XTAL_N — 40 MHz main crystal oscillator N (analog, reserved)
         Pin::new_reserved(29, "XTAL_N"),
-
-        // Pin 28: GPIO21 — UART0 TX (default); matrix-routed to any peripheral
-        //   IO MUX primary name: UOTXD.
-        Pin::new(28, "GPIO21").with_functions({
-            let mut fns = vec![
-                PinFunction::UsartTx(0), // default UART0 TX
-                PinFunction::UsartRx(0),
-            ];
-            // Append remaining matrix functions (skip duplicate UART0 entries)
-            fns.extend(matrix_fns().into_iter().filter(|f| {
-                !matches!(f, PinFunction::UsartTx(0) | PinFunction::UsartRx(0))
-            }));
-            fns
-        }),
-
-        // Pin 27: GPIO20 — UART0 RX (default); matrix-routed to any peripheral
-        //   IO MUX primary name: UORXD.
-        Pin::new(27, "GPIO20").with_functions({
-            let mut fns = vec![
-                PinFunction::UsartRx(0), // default UART0 RX
-                PinFunction::UsartTx(0),
-            ];
-            fns.extend(matrix_fns().into_iter().filter(|f| {
-                !matches!(f, PinFunction::UsartTx(0) | PinFunction::UsartRx(0))
-            }));
-            fns
-        }),
-
-        // Pin 26: GPIO19 — USB Serial/JTAG D+
-        //   Primary function: USB D+. Can be repurposed as GPIO/matrix peripheral
-        //   if USB is permanently disabled via eFuse.
-        //   ⚠ Avoid for general GPIO use if USB connectivity is needed.
-        Pin::new(26, "GPIO19").with_functions({
-            let mut fns = vec![PinFunction::UsbDp];
-            fns.extend(matrix_fns());
-            fns
-        }),
-
-        // Pin 25: GPIO18 — USB Serial/JTAG D-
-        //   Primary function: USB D-. Can be repurposed as GPIO/matrix peripheral
-        //   if USB is permanently disabled via eFuse.
-        //   ⚠ Avoid for general GPIO use if USB connectivity is needed.
-        Pin::new(25, "GPIO18").with_functions({
-            let mut fns = vec![PinFunction::UsbDm];
-            fns.extend(matrix_fns());
-            fns
-        }),
+        // Pin 28: GPIO21 — IO MUX: UOTXD (UART0 TX default)
+        // Constructor adds: GpioInput, GpioOutput
+        // uart0_tx_pin_fns() adds: UsartTx(0) first, then all other matrix fns
+        Pin::new(28, "GPIO21").with_functions(uart0_tx_pin_fns()),
+        // Pin 27: GPIO20 — IO MUX: UORXD (UART0 RX default)
+        Pin::new(27, "GPIO20").with_functions(uart0_rx_pin_fns()),
+        // Pin 26: GPIO19 — IO MUX: USB D+
+        // ⚠ Avoid for general GPIO use if USB connectivity is needed.
+        Pin::new(26, "GPIO19").with_functions(usb_dp_pin_fns()),
+        // Pin 25: GPIO18 — IO MUX: USB D-
+        // ⚠ Avoid for general GPIO use if USB connectivity is needed.
+        Pin::new(25, "GPIO18").with_functions(usb_dm_pin_fns()),
     ];
 
     Mcu::new(

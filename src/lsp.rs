@@ -131,10 +131,16 @@ pub struct LspState {
     pub root_uri:    String,
     /// Most recent completion items from rust-analyzer.
     pub completion_items:  Vec<CompletionItem>,
+    /// Set to `true` when a completion response (success OR error) arrives.
+    /// Reset to `false` when a new request is sent.
+    /// The App uses this to close the spinner when RA returns nothing.
+    pub completion_response_received: bool,
     /// The request id of the pending completion request, if any.
     completion_req_id:     Option<u64>,
     /// Counter for outgoing requests (starts at 1; incremented before each send → first = 2).
     next_req_id:           u64,
+    /// When the last completion request was sent (for spinner timeout).
+    pub completion_request_sent_at: Option<std::time::Instant>,
 }
 
 impl Default for LspState {
@@ -149,8 +155,10 @@ impl Default for LspState {
             last_sent_code: String::new(),
             root_uri:          String::new(),
             completion_items:  Vec::new(),
+            completion_response_received: false,
             completion_req_id: None,
             next_req_id:       1,
+            completion_request_sent_at: None,
         }
     }
 }
@@ -196,6 +204,11 @@ impl LspState {
         let id = self.next_req_id;
         self.completion_req_id = Some(id);
         self.completion_items.clear();
+        self.completion_response_received = false;
+        self.completion_request_sent_at = Some(std::time::Instant::now());
+        lsp_log(&format!(
+            "COMPLETION_REQ id={id} line={line} char={character} trigger={trigger_char:?}"
+        ));
         let uri = format!("{}/src/main.rs", self.root_uri);
         let trigger_kind: u32 = if trigger_char.is_some() { 2 } else { 1 };
         let mut params = serde_json::json!({
@@ -399,7 +412,9 @@ fn launch(
                     },
                     "completion": {
                         "completionItem": {
-                            "snippetSupport": false,
+                            "snippetSupport":      false,
+                            "documentationFormat": ["plaintext", "markdown"],
+                            "labelDetailsSupport": true,
                         },
                         "completionItemKind": {
                             "valueSet": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
@@ -410,9 +425,34 @@ fn launch(
                 "window": { "workDoneProgress": true },
             },
             "initializationOptions": {
-                "checkOnSave":  { "enable": false },
-                "procMacro":    { "enable": false },
-                "diagnostics":  { "enable": true  },
+                // Disable cargo check on save — we only want diagnostics from the
+                // background analysis, not from an active build invocation.
+                "checkOnSave":  false,
+
+                // Disable proc-macro expansion.  esp-hal proc macros need to be
+                // compiled for the host (Windows x64) which often fails for
+                // embedded crates that pull in target-specific code.  Keeping
+                // this disabled lets RA analyse the crate graph and public API
+                // (module names, types, functions) purely from source, which is
+                // what we need for `::` and `.` completions.
+                "procMacro": { "enable": false },
+
+                "diagnostics":  { "enable": true },
+
+                // Ask RA to include full documentation text in completion
+                // responses rather than returning only a label.
+                "completion": {
+                    "fullFunctionSignatures": { "enable": true },
+                },
+
+                // Use the host target for type-checking / completion analysis.
+                // The configured target (riscv32imc-unknown-none-elf) is used
+                // for cargo-check diagnostics; for IDE analysis the host is more
+                // reliable because all std/proc-macro artefacts are available.
+                "cargo": {
+                    "target": null,
+                    "noDefaultFeatures": false,
+                },
             },
         }
     }).to_string());
@@ -473,6 +513,20 @@ fn read_lsp<R: BufRead>(reader: &mut R) -> Option<serde_json::Value> {
 
 // ── Message handler ───────────────────────────────────────────────────────────
 
+/// Append a line to the LSP debug log in the system temp dir.
+/// File: <TEMP>/embedded_ide_lsp.log
+/// Only active in debug builds; no-op in release.
+#[cfg(debug_assertions)]
+fn lsp_log(line: &str) {
+    use std::io::Write;
+    let path = std::env::temp_dir().join("embedded_ide_lsp.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{}", line);
+    }
+}
+#[cfg(not(debug_assertions))]
+fn lsp_log(_: &str) {}
+
 fn handle_incoming(
     msg:      serde_json::Value,
     state:    &Arc<Mutex<LspState>>,
@@ -487,6 +541,23 @@ fn handle_incoming(
     }
 
     let method = msg["method"].as_str().unwrap_or("");
+
+    // Log all response messages (no "method") for debugging.
+    #[cfg(debug_assertions)]
+    if method.is_empty() {
+        let id  = &msg["id"];
+        let has_result = msg.get("result").is_some();
+        let has_error  = msg.get("error").is_some();
+        let preview = if has_result {
+            let r = msg["result"].to_string();
+            format!("result={}", &r[..r.len().min(200)])
+        } else if has_error {
+            format!("error={}", msg["error"].to_string())
+        } else {
+            "?".to_owned()
+        };
+        lsp_log(&format!("RESPONSE id={id} {preview}"));
+    }
 
     match method {
         // ── Initialize response ───────────────────────────────────────────────
@@ -549,7 +620,7 @@ fn handle_incoming(
             }
         }
 
-        // ── Completion response ───────────────────────────────────────────────
+        // ── Completion response (success) ─────────────────────────────────────
         // Any response (method == "") whose id is not 1 (initialize) and that
         // carries a "result" field is treated as a completion response.
         "" if msg.get("result").is_some()
@@ -560,8 +631,10 @@ fn handle_incoming(
                 let mut s = state.lock().unwrap();
                 if s.generation == my_gen && s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
+                    s.completion_response_received = true;
                     let result = &msg["result"];
                     // CompletionList { items: [...] }  OR  [...] directly
+                    // `result` may also be JSON null — treat as empty list.
                     let items_arr = result["items"]
                         .as_array()
                         .or_else(|| result.as_array());
@@ -573,6 +646,25 @@ fn handle_incoming(
                                 .collect()
                         })
                         .unwrap_or_default();
+                    ctx.request_repaint();
+                }
+            }
+        }
+
+        // ── Completion response (error / cancel) ──────────────────────────────
+        // RA returns {"id": N, "error": {...}} when it cannot fulfil a request
+        // (e.g. the file won't compile, or the request was cancelled).
+        // We must handle this or the spinner runs forever.
+        "" if msg.get("error").is_some()
+           && msg.get("id").is_some()
+           && msg["id"].as_u64().map_or(false, |n| n != 1) =>
+        {
+            if let Some(req_id) = msg["id"].as_u64() {
+                let mut s = state.lock().unwrap();
+                if s.generation == my_gen && s.completion_req_id == Some(req_id) {
+                    s.completion_req_id = None;
+                    s.completion_response_received = true;
+                    // completion_items stays empty — App will close the popup.
                     ctx.request_repaint();
                 }
             }
@@ -629,7 +721,28 @@ fn uri_to_rel(uri: &str, root_uri: &str) -> String {
 fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
     let label = v["label"].as_str()?.to_owned();
     let kind = v["kind"].as_u64().unwrap_or(6) as u8;
-    let detail = v["detail"].as_str().unwrap_or("").to_owned();
+
+    // `detail` is the primary type annotation (e.g. "-> bool", "fn(...)").
+    // rust-analyzer may put this in `detail` directly, or in
+    // `labelDetails.detail` / `labelDetails.description`.
+    let detail = {
+        let from_detail = v["detail"].as_str().unwrap_or("").to_owned();
+        if !from_detail.is_empty() {
+            from_detail
+        } else {
+            // labelDetails.detail is typically the short type suffix (e.g. "(…) -> T")
+            // labelDetails.description is typically the full qualified path
+            let ld_detail = v["labelDetails"]["detail"].as_str().unwrap_or("");
+            let ld_desc   = v["labelDetails"]["description"].as_str().unwrap_or("");
+            match (ld_detail.is_empty(), ld_desc.is_empty()) {
+                (false, false) => format!("{ld_detail}  {ld_desc}"),
+                (false, true)  => ld_detail.to_owned(),
+                (true,  false) => ld_desc.to_owned(),
+                (true,  true)  => String::new(),
+            }
+        }
+    };
+
     let insert_text = v["insertText"]
         .as_str()
         .map(|s| s.to_owned())
