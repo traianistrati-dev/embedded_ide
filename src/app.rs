@@ -180,8 +180,16 @@ pub struct AppIde {
     /// Index of the currently highlighted row in the completion popup.
     completion_sel:         usize,
     /// Character-offset in the editor text where completion was triggered.
-    /// Used to close the popup if the cursor moves far away.
+    /// Used to compute the live prefix for filtering and to close the popup
+    /// when the cursor moves away.
     completion_trigger_idx: usize,
+    /// Insert text deferred from a mouse-click on a completion item.
+    /// Applied at the start of the next frame (before the editor renders).
+    completion_pending_insert: Option<String>,
+    /// Filtered completion list from the last rendered frame.
+    /// Key handlers (Tab / Enter / Arrow) use this so they always operate
+    /// on the same slice the user sees, not the full unfiltered LSP list.
+    completion_filtered_items: Vec<lsp::CompletionItem>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -314,9 +322,11 @@ impl AppIde {
             completer: Completer::new_with_syntax(&Syntax::rust())
                 .with_auto_indent()
                 .with_user_words(),
-            completion_open:        false,
-            completion_sel:         0,
-            completion_trigger_idx: 0,
+            completion_open:           false,
+            completion_sel:            0,
+            completion_trigger_idx:    0,
+            completion_pending_insert: None,
+            completion_filtered_items: Vec::new(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -1716,26 +1726,36 @@ impl eframe::App for AppIde {
                 // ── LSP completion: pre-editor key consumption ───────────────
                 // Consume navigation / accept keys BEFORE show_with_completer
                 // so the built-in Completer never sees them when our popup is open.
-                let mut lsp_accepted: Option<String> = None;
+                //
+                // Mouse clicks on popup items set `completion_pending_insert` last
+                // frame; apply them here so the same accept path is used for both
+                // keyboard and mouse.
+                let mut lsp_accepted: Option<String> =
+                    self.completion_pending_insert.take();
+                if lsp_accepted.is_some() {
+                    self.completion_open = false;
+                }
+
                 if self.completion_open {
-                    let has_items = {
-                        let s = self.lsp_state.lock().unwrap();
-                        !s.completion_items.is_empty()
-                    };
+                    let has_items = !self.completion_filtered_items.is_empty();
                     if has_items {
+                        let count = self.completion_filtered_items.len();
                         ui.input_mut(|inp| {
                             if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
                                 self.completion_open = false;
                             } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                                self.completion_sel = self.completion_sel.saturating_add(1);
+                                // Clamp against the FILTERED count so selection never
+                                // goes out of the visible list.
+                                self.completion_sel =
+                                    (self.completion_sel + 1).min(count.saturating_sub(1));
                             } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                                 self.completion_sel = self.completion_sel.saturating_sub(1);
                             } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
                                    || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                             {
-                                let items = self.lsp_state.lock().unwrap().completion_items.clone();
-                                let sel = self.completion_sel.min(items.len().saturating_sub(1));
-                                if let Some(item) = items.get(sel) {
+                                // Use the filtered list — guaranteed same items as shown.
+                                let sel = self.completion_sel.min(count.saturating_sub(1));
+                                if let Some(item) = self.completion_filtered_items.get(sel) {
                                     lsp_accepted = Some(item.insert_text.clone());
                                 }
                                 self.completion_open = false;
@@ -1848,13 +1868,16 @@ impl eframe::App for AppIde {
                         }
                     }
 
-                    // Close popup if cursor moved far from trigger point
+                    // Close popup if cursor moved back past the trigger point,
+                    // or too far ahead (user navigated away from the trigger word).
                     if self.completion_open {
                         if let Some(idx) = cursor_char_idx {
-                            let delta = (idx as isize)
-                                .saturating_sub(self.completion_trigger_idx as isize)
-                                .unsigned_abs();
-                            if delta > 30 {
+                            let cursor  = idx as isize;
+                            let trigger = self.completion_trigger_idx as isize;
+                            let delta   = cursor - trigger;
+                            // delta < 0  → user deleted back past trigger point
+                            // delta > 80 → user moved far forward (switched context)
+                            if delta < 0 || delta > 80 {
                                 self.completion_open = false;
                             }
                         }
@@ -1863,83 +1886,182 @@ impl eframe::App for AppIde {
 
                 // ── LSP completion popup ───────────────────────────────────────
                 if self.completion_open {
-                    let items = self.lsp_state.lock().unwrap().completion_items.clone();
-                    if !items.is_empty() {
-                        // Clamp selection to valid range
-                        self.completion_sel = self.completion_sel.min(items.len() - 1);
-                        let sel = self.completion_sel;
+                    let all_items = self.lsp_state.lock().unwrap().completion_items.clone();
 
-                        // Calculate screen position from cursor glyph rect
-                        let popup_pos = if let Some(char_range) =
-                            editor_resp.state.cursor.char_range()
-                        {
-                            let cursor_idx = char_range.primary.index;
-                            let text_char_count =
-                                editor_resp.galley.job.text.chars().count();
-                            let clamped = cursor_idx.min(
-                                text_char_count.saturating_sub(1)
-                            );
-                            let cursor_local = editor_resp.galley
-                                .pos_from_cursor(egui::text::CCursor::new(clamped));
-                            let offset = egui::vec2(0.0, cursor_local.height() + 2.0);
-                            editor_resp.response.rect.left_top()
-                                + cursor_local.min.to_vec2()
-                                + offset
+                    if !all_items.is_empty() {
+                        // ── Live prefix filtering ────────────────────────────────
+                        // Compute what the user has typed since the trigger point.
+                        let prefix = cursor_char_idx
+                            .map(|cur| lsp_completion_prefix(
+                                &display_code,
+                                self.completion_trigger_idx,
+                                cur,
+                            ))
+                            .unwrap_or_default();
+
+                        let filtered: Vec<lsp::CompletionItem> = if prefix.is_empty() {
+                            all_items
                         } else {
-                            editor_resp.response.rect.left_top()
+                            let pl = prefix.to_lowercase();
+                            all_items
+                                .into_iter()
+                                .filter(|it| it.label.to_lowercase().starts_with(&pl))
+                                .collect()
                         };
 
-                        egui::Area::new(egui::Id::new("lsp_completion_popup"))
-                            .fixed_pos(popup_pos)
-                            .order(egui::Order::Foreground)
-                            .interactable(false)
-                            .show(ui.ctx(), |ui| {
-                                egui::Frame::popup(&ui.ctx().style()).show(ui, |ui| {
-                                    ui.set_width(340.0);
-                                    ui.style_mut().wrap_mode =
-                                        Some(egui::TextWrapMode::Extend);
+                        // Persist filtered list so next frame's key handlers see
+                        // exactly the same items the user sees right now.
+                        self.completion_filtered_items = filtered.clone();
 
-                                    for (i, item) in items.iter().enumerate().take(15) {
-                                        let selected = i == sel;
-                                        let icon = lsp_kind_icon(item.kind);
-                                        let text = format!("{} {}", icon, item.label);
-                                        let fg = if selected {
-                                            egui::Color32::WHITE
-                                        } else {
-                                            egui::Color32::from_rgb(200, 210, 230)
-                                        };
-                                        let fill = if selected {
-                                            egui::Color32::from_rgb(40, 90, 160)
-                                        } else {
-                                            egui::Color32::TRANSPARENT
-                                        };
-                                        let rich = egui::RichText::new(&text)
-                                            .monospace()
-                                            .size(12.0)
-                                            .color(fg);
-                                        let btn = ui.add(
-                                            egui::Button::new(rich)
-                                                .sense(egui::Sense::empty())
-                                                .fill(fill)
-                                                .frame(selected)
-                                                .min_size(egui::vec2(320.0, 0.0)),
-                                        );
-                                        if selected {
-                                            btn.scroll_to_me(None);
-                                        }
-                                        if !item.detail.is_empty() {
-                                            btn.on_hover_text(
-                                                egui::RichText::new(&item.detail)
-                                                    .monospace()
-                                                    .size(11.0),
-                                            );
-                                        }
-                                    }
-                                });
-                            });
-                    } else {
-                        // Items not yet arrived or empty — keep waiting (don't close)
+                        if filtered.is_empty() {
+                            // Nothing matches the current prefix — hide the popup.
+                            self.completion_open = false;
+                        } else {
+                            // Clamp selection into the visible filtered range.
+                            self.completion_sel =
+                                self.completion_sel.min(filtered.len() - 1);
+                            let sel = self.completion_sel;
+
+                            // ── Popup screen position ────────────────────────────
+                            let popup_pos = if let Some(char_range) =
+                                editor_resp.state.cursor.char_range()
+                            {
+                                let cursor_idx = char_range.primary.index;
+                                let text_char_count =
+                                    editor_resp.galley.job.text.chars().count();
+                                let clamped = cursor_idx
+                                    .min(text_char_count.saturating_sub(1));
+                                let cursor_local = editor_resp.galley
+                                    .pos_from_cursor(egui::text::CCursor::new(clamped));
+                                let offset =
+                                    egui::vec2(0.0, cursor_local.height() + 2.0);
+                                editor_resp.response.rect.left_top()
+                                    + cursor_local.min.to_vec2()
+                                    + offset
+                            } else {
+                                editor_resp.response.rect.left_top()
+                            };
+
+                            // ── Render popup ─────────────────────────────────────
+                            // `interactable` defaults to true → mouse clicks work.
+                            egui::Area::new(egui::Id::new("lsp_completion_popup"))
+                                .fixed_pos(popup_pos)
+                                .order(egui::Order::Foreground)
+                                .show(ui.ctx(), |ui| {
+                                    egui::Frame::popup(&ui.ctx().global_style())
+                                        .show(ui, |ui| {
+                                        ui.style_mut().wrap_mode =
+                                            Some(egui::TextWrapMode::Extend);
+                                        ui.set_min_width(440.0);
+                                        ui.set_max_width(440.0);
+
+                                        egui::ScrollArea::vertical()
+                                            .max_height(300.0)
+                                            .auto_shrink([false, true])
+                                            .show(ui, |ui| {
+                                            for (i, item) in filtered.iter().enumerate() {
+                                                let selected = i == sel;
+
+                                                let fg = if selected {
+                                                    egui::Color32::WHITE
+                                                } else {
+                                                    egui::Color32::from_rgb(200, 210, 230)
+                                                };
+                                                let sel_bg =
+                                                    egui::Color32::from_rgb(40, 90, 160);
+                                                let hover_bg =
+                                                    egui::Color32::from_rgb(50, 60, 80);
+                                                let detail_fg = if selected {
+                                                    egui::Color32::from_rgb(160, 195, 255)
+                                                } else {
+                                                    egui::Color32::from_rgb(110, 130, 155)
+                                                };
+
+                                                // Allocate the full row width for hit-testing.
+                                                let row_h = 19.0;
+                                                let avail_w = ui.available_width();
+                                                let (rect, row_resp) =
+                                                    ui.allocate_exact_size(
+                                                        egui::vec2(avail_w, row_h),
+                                                        egui::Sense::click(),
+                                                    );
+
+                                                // Background (selected / hovered).
+                                                if selected {
+                                                    ui.painter().rect_filled(
+                                                        rect, 2.0, sel_bg,
+                                                    );
+                                                } else if row_resp.hovered() {
+                                                    ui.painter().rect_filled(
+                                                        rect, 2.0, hover_bg,
+                                                    );
+                                                }
+
+                                                let painter = ui.painter();
+                                                let icon    = lsp_kind_icon(item.kind);
+                                                let label   = format!("{} {}", icon, item.label);
+
+                                                // Icon + label — left-aligned.
+                                                painter.text(
+                                                    rect.left_center()
+                                                        + egui::vec2(4.0, 0.0),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    &label,
+                                                    egui::FontId::monospace(12.0),
+                                                    fg,
+                                                );
+
+                                                // Detail (type signature) — right-aligned,
+                                                // smaller and dimmer, truncated if needed.
+                                                if !item.detail.is_empty() {
+                                                    let det = if item.detail.len() > 38 {
+                                                        format!("{}…", &item.detail[..35])
+                                                    } else {
+                                                        item.detail.clone()
+                                                    };
+                                                    painter.text(
+                                                        rect.right_center()
+                                                            - egui::vec2(4.0, 0.0),
+                                                        egui::Align2::RIGHT_CENTER,
+                                                        det,
+                                                        egui::FontId::monospace(10.5),
+                                                        detail_fg,
+                                                    );
+                                                }
+
+                                                // Mouse click → deferred insert.
+                                                if row_resp.clicked() {
+                                                    self.completion_pending_insert =
+                                                        Some(item.insert_text.clone());
+                                                    self.completion_open = false;
+                                                }
+
+                                                // Scroll selected item into view.
+                                                if selected {
+                                                    row_resp.scroll_to_me(None);
+                                                }
+
+                                                // Hover tooltip: documentation first,
+                                                // then full detail as fallback.
+                                                if !item.documentation.is_empty() {
+                                                    row_resp.on_hover_text(
+                                                        egui::RichText::new(&item.documentation)
+                                                            .size(11.5),
+                                                    );
+                                                } else if !item.detail.is_empty() {
+                                                    row_resp.on_hover_text(
+                                                        egui::RichText::new(&item.detail)
+                                                            .monospace()
+                                                            .size(11.0),
+                                                    );
+                                                }
+                                            }
+                                        }); // ScrollArea
+                                    }); // Frame
+                                }); // Area
+                        }
                     }
+                    // If all_items is empty: items not yet arrived — keep waiting.
                 }
 
                 // ── RA error lane (right-edge overlay on editor rect) ─────────
@@ -3222,7 +3344,7 @@ fn show_diag_panel(
     // ── Tab content ───────────────────────────────────────────────────────────
     match tab {
         BuildPanelTab::Cargo => {
-            show_cargo_tab(ui, build_state, cargo_sel, selected_file);
+            show_cargo_tab(ui, ctx, build_state, cargo_sel, selected_file);
         }
         BuildPanelTab::RustAnalyzer => {
             show_ra_tab(ui, lsp_state, lsp_sel, selected_file);
@@ -3574,6 +3696,59 @@ fn show_dfu_tab(
         });
     });
 
+    // ── ESP32 diagnostic row (read-only chip identification) ─────────────────
+    // Shown only for EspRust; sits between the config row and the log area.
+    if *toolchain == ToolchainKind::EspRust {
+        ui.horizontal(|ui| {
+            let busy = esp_state.is_busy();
+            let reading = matches!(esp_state, EspFlashState::ReadingInfo);
+
+            let btn_color = if reading {
+                egui::Color32::from_rgb(100, 180, 255)
+            } else if busy {
+                egui::Color32::GRAY
+            } else {
+                egui::Color32::from_rgb(100, 180, 255)
+            };
+
+            let btn_label = if reading {
+                format!("{} Reading…", ph::CIRCLE_NOTCH)
+            } else {
+                format!("{} Read Chip Info", ph::INFO)
+            };
+
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(
+                        egui::RichText::new(&btn_label).size(10.5).color(btn_color),
+                    ),
+                )
+                .on_hover_text(
+                    "Run `espflash board-info` — connects to the chip and reads:\n\
+                     chip type, silicon revision, flash size, MAC address.\n\
+                     \n\
+                     Nothing is written to flash — safe to run at any time.\n\
+                     Use this to verify the USB cable / COM port works before flashing.",
+                )
+                .clicked()
+            {
+                espflash::read_board_info(
+                    Arc::clone(espflash_state),
+                    Arc::clone(dfu_log),
+                    ui.ctx().clone(),
+                );
+            }
+
+            ui.label(
+                egui::RichText::new("← verify connectivity without flashing")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(100))
+                    .italics(),
+            );
+        });
+    }
+
     ui.separator();
 
     // ── DFU Error / Success banners ───────────────────────────────────────────
@@ -3725,11 +3900,13 @@ fn show_dfu_tab(
 
 fn show_cargo_tab(
     ui: &mut egui::Ui,
+    ctx: &egui::Context,
     build_state: &Arc<Mutex<BuildState>>,
     selected_diagnostic: &mut Option<usize>,
     selected_file: &mut ProjectFileId,
 ) {
     let state = build_state.lock().unwrap().clone();
+    let workspace = std::env::temp_dir().join("embedded_ide_0_check");
 
     // ── Status bar ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -3740,11 +3917,16 @@ fn show_cargo_tab(
                 "Building…".to_owned(),
                 egui::Color32::from_rgb(180, 180, 180),
             ),
-            BuildState::Failed(msg) => (
-                ph::X_CIRCLE,
-                format!("Build failed: {}", msg.lines().next().unwrap_or(msg)),
-                egui::Color32::from_rgb(230, 90, 80),
-            ),
+            BuildState::Failed(msg) => {
+                let first = msg.lines().next().unwrap_or(msg);
+                // Suppress the [DISK_FULL] prefix from the one-liner badge
+                let first = first.strip_prefix("[DISK_FULL] ").unwrap_or(first);
+                (
+                    ph::X_CIRCLE,
+                    format!("Build failed: {}", first),
+                    egui::Color32::from_rgb(230, 90, 80),
+                )
+            }
             BuildState::Done(r) if r.error_count() > 0 => (
                 ph::X_CIRCLE,
                 format!(
@@ -3782,8 +3964,9 @@ fn show_cargo_tab(
         ui.label(egui::RichText::new(icon).size(13.0).color(color));
         ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
 
-        // Clear button
+        // Right-side buttons: Clean target/ | Clear
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Clear result button
             if ui
                 .add(egui::Button::new(
                     egui::RichText::new(format!("{} Clear", ph::X))
@@ -3795,6 +3978,31 @@ fn show_cargo_tab(
                 *build_state.lock().unwrap() = BuildState::Idle;
                 *selected_diagnostic = None;
             }
+
+            ui.add_space(4.0);
+
+            // "Clean target/" — deletes cached LLVM/cargo build artefacts to
+            // recover disk space.  Shown always; especially helpful after a
+            // disk-full build failure.
+            let is_building = matches!(state, BuildState::Building);
+            if ui
+                .add_enabled(
+                    !is_building,
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Clean target/", ph::TRASH))
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(200, 160, 80)),
+                    ),
+                )
+                .on_hover_text(
+                    "Run `cargo clean` — deletes the target/ directory to free disk space.\n\
+                     Crates cached in ~/.cargo are NOT removed; only rebuilt files are re-compiled.",
+                )
+                .clicked()
+            {
+                build::start_clean(workspace.clone(), Arc::clone(build_state), ctx.clone());
+                *selected_diagnostic = None;
+            }
         });
     });
 
@@ -3802,12 +4010,76 @@ fn show_cargo_tab(
         // For Building/Failed we've shown what we can
         if let BuildState::Failed(msg) = &state {
             ui.separator();
+
+            // ── Special disk-full banner ──────────────────────────────────────
+            let is_disk_full = msg.starts_with("[DISK_FULL]");
+            if is_disk_full {
+                // Orange warning box with an inline "Clean target/" button
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(60, 45, 10))
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} Disk full", ph::WARNING))
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(250, 190, 60))
+                                    .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    " — the build target/ directory ran out of space.",
+                                )
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(230, 210, 140)),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "ESP32 / RISC-V builds produce several GB of LLVM artefacts \
+                                 on the first run.  Click the button to delete the target/ \
+                                 folder and free that space — crates cached in ~/.cargo are \
+                                 NOT removed so the next build only re-compiles changed files.",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(200, 190, 150)),
+                        );
+                        ui.add_space(6.0);
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{} Clean target/  (free space)",
+                                    ph::TRASH
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 210, 80)),
+                            ))
+                            .clicked()
+                        {
+                            build::start_clean(
+                                workspace.clone(),
+                                Arc::clone(build_state),
+                                ctx.clone(),
+                            );
+                            *selected_diagnostic = None;
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+
+            // Full error text in a scroll area
             egui::ScrollArea::vertical()
                 .id_salt("build_failed_scroll")
                 .show(ui, |ui| {
+                    // Strip the [DISK_FULL] marker before display
+                    let display_msg = msg
+                        .strip_prefix("[DISK_FULL] ")
+                        .unwrap_or(msg.as_str());
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(msg)
+                            egui::RichText::new(display_msg)
                                 .size(11.0)
                                 .monospace()
                                 .color(egui::Color32::from_rgb(230, 90, 80)),
@@ -4268,6 +4540,28 @@ fn lsp_cursor_pos(text: &str, char_idx: usize) -> (u32, u32) {
         }
     }
     (line, col)
+}
+
+/// Extract the prefix typed between `trigger_idx` and `cursor_idx`.
+///
+/// Used for live filtering of the completion popup: after the user triggers
+/// completion (via `.` or Ctrl+Space) any additional characters they type
+/// narrow the visible list.  Returns an empty string when the cursor hasn't
+/// moved past the trigger point yet.
+fn lsp_completion_prefix(text: &str, trigger_idx: usize, cursor_idx: usize) -> String {
+    if cursor_idx <= trigger_idx {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let start = trigger_idx.min(chars.len());
+    let end   = cursor_idx.min(chars.len());
+    // Only take identifier characters (letters, digits, _).  A dot or space
+    // means the user has moved to a new expression — we'll rely on the delta
+    // check in the trigger section to close the popup in that case.
+    chars[start..end]
+        .iter()
+        .take_while(|&&c| c.is_alphanumeric() || c == '_')
+        .collect()
 }
 
 /// Return the char-index of the first character of the identifier that ends at `end_idx`.

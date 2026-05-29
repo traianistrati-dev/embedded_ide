@@ -74,11 +74,14 @@ pub struct CompletionItem {
     pub label:       String,
     /// LSP CompletionItemKind (1=Text, 2=Method, 3=Function, 5=Field, 6=Variable, …)
     pub kind:        u8,
-    /// Short type / signature string shown in the hover tooltip
+    /// Short type / signature string shown inline next to the label
     pub detail:      String,
     /// Text actually inserted when the item is accepted
     /// (falls back to `label` when the server doesn't send `insertText`)
     pub insert_text: String,
+    /// Plain-text documentation (stripped from LSP `documentation` markdown).
+    /// Shown as a tooltip when the item is hovered.
+    pub documentation: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -631,5 +634,44 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
         .as_str()
         .map(|s| s.to_owned())
         .unwrap_or_else(|| label.clone());
-    Some(CompletionItem { label, kind, detail, insert_text })
+
+    // `documentation` can be a plain string or { kind: "markdown", value: "..." }.
+    // Strip leading `\`\`\`rust … \`\`\`` fences that rust-analyzer wraps code in.
+    let documentation = {
+        let doc = &v["documentation"];
+        let raw = if let Some(s) = doc.as_str() {
+            s.to_owned()
+        } else if let Some(s) = doc["value"].as_str() {
+            s.to_owned()
+        } else {
+            String::new()
+        };
+        // Strip markdown code fences (```rust … ```) so text reads cleanly.
+        strip_md_fences(&raw)
+    };
+
+    Some(CompletionItem { label, kind, detail, insert_text, documentation })
+}
+
+/// Remove ` ```lang … ``` ` fences from a markdown string so it reads as
+/// plain text in a tooltip.
+fn strip_md_fences(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_fence = false;
+    for line in s.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue; // skip the fence line itself
+        }
+        if !in_fence {
+            if !out.is_empty() { out.push('\n'); }
+            out.push_str(line);
+        } else {
+            // Inside a code fence: keep the code but strip leading indent.
+            if !out.is_empty() { out.push('\n'); }
+            out.push_str(trimmed);
+        }
+    }
+    out.trim().to_owned()
 }

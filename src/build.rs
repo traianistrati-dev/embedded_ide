@@ -135,6 +135,30 @@ pub fn start_build(
     });
 }
 
+/// Delete `target/` build artifacts (`cargo clean`) to recover disk space.
+///
+/// Sets the state to `Building` while cleaning (shows the spinner) then resets
+/// it to `Idle` when done so the user can trigger a fresh build.
+pub fn start_clean(
+    workspace_dir: PathBuf,
+    state: Arc<Mutex<BuildState>>,
+    ctx: eframe::egui::Context,
+) {
+    *state.lock().unwrap() = BuildState::Building;
+    ctx.request_repaint();
+
+    thread::spawn(move || {
+        let _ = Command::new("cargo")
+            .current_dir(&workspace_dir)
+            .args(["clean"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        *state.lock().unwrap() = BuildState::Idle;
+        ctx.request_repaint();
+    });
+}
+
 // ── Internal ──────────────────────────────────────────────────────────────────
 
 /// Ensure the rustup target is installed, then run `cargo check`.
@@ -155,7 +179,10 @@ fn run_check(dir: &Path, target: &str) -> BuildState {
         .current_dir(dir)
         .args(["check", "--message-format=json", "--color=never"])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null()) // JSON stdout is authoritative; stderr is redundant
+        // Capture stderr so we can detect disk-full and other fatal OS errors.
+        // Without this, cargo crashes silently (no build-finished JSON) and the
+        // IDE either reports a false success or a confusing bare "build failed".
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -169,6 +196,16 @@ fn run_check(dir: &Path, target: &str) -> BuildState {
     };
 
     let stdout = child.stdout.take().expect("stdout should be piped");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+
+    // Drain stderr on a separate thread to avoid deadlock when its pipe buffer fills.
+    let stderr_thread = thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
+        buf
+    });
+
     let mut result = BuildResult::default();
     let mut saw_build_finished = false;
 
@@ -190,8 +227,25 @@ fn run_check(dir: &Path, target: &str) -> BuildState {
     }
 
     let _ = child.wait();
+    let stderr_text = stderr_thread.join().unwrap_or_default();
 
     if !saw_build_finished {
+        // cargo exited without emitting build-finished — check why.
+        let is_disk_full = stderr_text.contains("not enough space")
+            || stderr_text.contains("There is not enough space")
+            || stderr_text.contains("os error 112")  // Windows  ERROR_DISK_FULL
+            || stderr_text.contains("os error 28");   // POSIX    ENOSPC
+        if is_disk_full {
+            return BuildState::Failed(
+                "[DISK_FULL] The build target/ directory has run out of disk space.\n\n\
+                 ESP32 / RISC-V builds generate several GB of LLVM artefacts the first time.\n\
+                 → Click  \"Clean target/\"  to delete cached build artefacts and free space,\n\
+                   then press Build again (crates stay cached in ~/.cargo; only rebuilt files\n\
+                   are re-compiled).\n\n\
+                 Path: <TEMP>\\embedded_ide_0_check\\target\\"
+                    .to_string(),
+            );
+        }
         // Infer from diagnostic content if cargo exited without build-finished
         result.success = result.error_count() == 0;
     }
