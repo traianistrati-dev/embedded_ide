@@ -805,17 +805,24 @@ impl eframe::App for AppIde {
                     }
                 }
                 LspStatus::Indexing => {
-                    // Handshake complete — open the main file so RA starts analysing.
+                    // Handshake complete — open main.rs so RA starts analysing.
                     let mut lsp = self.lsp_state.lock().unwrap();
-                    if !lsp.did_open_sent {
-                        let code = self.generated_code.clone();
-                        lsp.did_open(&code);
+                    if !lsp.is_file_open("src/main.rs") {
+                        lsp.did_open("src/main.rs", &self.generated_code.clone());
                     }
                 }
                 LspStatus::Ready => {
-                    // Sync any code change incrementally.
-                    let code = self.generated_code.clone();
-                    self.lsp_state.lock().unwrap().did_change(&code);
+                    // Sync the active file incrementally.
+                    // For multi-file support, also open any user .rs files that
+                    // haven't been opened yet in this session.
+                    let mut lsp = self.lsp_state.lock().unwrap();
+                    // Always keep main.rs in sync
+                    lsp.did_change("src/main.rs", &self.generated_code.clone());
+                    // Sync every user .rs file (auto-opens on first call)
+                    for (rel, content) in &self.user_src_files {
+                        let full_rel = format!("src/{rel}");
+                        lsp.did_change(&full_rel, content);
+                    }
                 }
                 _ => {}
             }
@@ -1841,18 +1848,24 @@ impl eframe::App for AppIde {
                 }
 
                 // Trigger detection
-                // Completions are only meaningful for files that RA has open.
-                // Currently RA only tracks src/main.rs; skip for other files.
+                // LSP completions are available for any .rs file open in RA.
                 let lsp_file_tracked = matches!(
                     self.selected_file,
-                    ProjectFileId::MainRs
+                    ProjectFileId::MainRs | ProjectFileId::UserFile(_)
                 );
+                // Compute the relative path for the currently edited file.
+                // Used for all LSP requests (did_change, request_completion, etc.)
+                let current_rel_path: Option<String> =
+                    selected_file_rel_path(&self.selected_file, &self.user_src_files);
                 {
-                    let lsp_ready = lsp_file_tracked && matches!(
-                        self.lsp_state.lock().unwrap().status,
-                        lsp::LspStatus::Ready
-                    );
+                    let lsp_ready = lsp_file_tracked
+                        && current_rel_path.is_some()
+                        && matches!(
+                            self.lsp_state.lock().unwrap().status,
+                            lsp::LspStatus::Ready
+                        );
                     if lsp_ready {
+                        let rel = current_rel_path.as_deref().unwrap_or("src/main.rs");
                         // Manual Ctrl+Space
                         if ctrl_space_pressed {
                             if let Some(idx) = cursor_char_idx {
@@ -1862,8 +1875,8 @@ impl eframe::App for AppIde {
                                 // at the top of update()) used last frame's code.
                                 {
                                     let mut lsp = self.lsp_state.lock().unwrap();
-                                    lsp.did_change(&display_code);
-                                    lsp.request_completion(line, col, None);
+                                    lsp.did_change(rel, &display_code);
+                                    lsp.request_completion(rel, line, col, None);
                                 }
                                 self.completion_trigger_idx = idx;
                                 self.completion_sel          = 0;
@@ -1882,8 +1895,8 @@ impl eframe::App for AppIde {
                                 let (line, col) = lsp_cursor_pos(&display_code, idx);
                                 {
                                     let mut lsp = self.lsp_state.lock().unwrap();
-                                    lsp.did_change(&display_code);
-                                    lsp.request_completion(line, col, Some('.'));
+                                    lsp.did_change(rel, &display_code);
+                                    lsp.request_completion(rel, line, col, Some('.'));
                                 }
                                 self.completion_trigger_idx = idx;
                                 self.completion_sel          = 0;
@@ -1891,11 +1904,7 @@ impl eframe::App for AppIde {
                             }
                         }
 
-                        // Auto-trigger on `::` (Rust path separator — module / type paths)
-                        // Fires when the user types the SECOND colon of `::`.
-                        // Sending triggerCharacter=':' tells rust-analyzer this is a
-                        // path-completion context so it returns module members, not
-                        // arbitrary identifier completions.
+                        // Auto-trigger on `::` (Rust path separator)
                         let colon_trigger = !dot_trigger
                             && !ctrl_space_pressed
                             && editor_resp.response.changed()
@@ -1910,8 +1919,8 @@ impl eframe::App for AppIde {
                                 let (line, col) = lsp_cursor_pos(&display_code, idx);
                                 {
                                     let mut lsp = self.lsp_state.lock().unwrap();
-                                    lsp.did_change(&display_code);
-                                    lsp.request_completion(line, col, Some(':'));
+                                    lsp.did_change(rel, &display_code);
+                                    lsp.request_completion(rel, line, col, Some(':'));
                                 }
                                 self.completion_trigger_idx = idx;
                                 self.completion_sel          = 0;
@@ -2184,61 +2193,22 @@ impl eframe::App for AppIde {
                 //
                 // LANE ALIGNMENT:
                 //   Use actual galley Y position (pos_from_cursor) for each diagnostic,
-                //   not a proportional estimate from the line count.  The editor renders
-                //   at least `with_rows(50)` rows even if the file is shorter, so a
-                //   line-count based proportion would be wrong.
-                if self.selected_file == ProjectFileId::MainRs {
-                    let diags: Vec<lsp::LspDiagnostic> = {
-                        let lsp = self.lsp_state.lock().unwrap();
-                        diags_for_main_rs(&lsp.diagnostics)
-                    };
+                //   not a proportional estimate from the line count.
+                if lsp_file_tracked {
+                    let diags: Vec<lsp::LspDiagnostic> = current_rel_path
+                        .as_deref()
+                        .map(|rel| {
+                            let lsp = self.lsp_state.lock().unwrap();
+                            diags_for_file(&lsp.diagnostics, rel)
+                        })
+                        .unwrap_or_default();
 
                     if !diags.is_empty() {
                         let gp          = editor_resp.galley_pos; // galley origin on screen
                         let clip        = editor_resp.text_clip_rect;
                         let painter     = ui.painter().with_clip_rect(clip);
                         let total_chars = display_code.chars().count();
-                        let galley_h    = editor_resp.galley.rect.height().max(1.0);
 
-                        // ── Right-edge lane ───────────────────────────────────────
-                        // A 6-px strip at the right edge of the visible text area.
-                        // The Y position of each tick is derived from the actual
-                        // rendered position of the first character of the diagnostic
-                        // line — not from a proportional estimate — so it aligns
-                        // exactly with the text on screen.
-                        {
-                            let lane = egui::Rect::from_min_max(
-                                egui::pos2(clip.right() - 6.0, clip.top()),
-                                egui::pos2(clip.right(),        clip.bottom()),
-                            );
-                            painter.rect_filled(lane, 0.0, egui::Color32::from_black_alpha(50));
-
-                            for d in &diags {
-                                // Find the first character of this diagnostic's line
-                                // and get its galley-local Y position.
-                                let ci = lsp_pos_to_char_idx(
-                                    &display_code, d.line, 1,
-                                ).min(total_chars);
-                                let local_y = editor_resp.galley
-                                    .pos_from_cursor(egui::text::CCursor::new(ci))
-                                    .min.y;
-                                // Map local Y (within galley height) to lane Y
-                                let t  = local_y / galley_h;
-                                let y  = clip.top() + t * clip.height();
-                                let c  = match d.severity {
-                                    lsp::DiagSeverity::Error   => egui::Color32::from_rgb(220, 60, 50),
-                                    lsp::DiagSeverity::Warning => egui::Color32::from_rgb(200, 160, 30),
-                                    _                          => egui::Color32::from_rgb(80, 130, 200),
-                                };
-                                painter.rect_filled(
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(lane.left(), y - 2.5),
-                                        egui::pos2(lane.right(), y + 2.5),
-                                    ),
-                                    1.0, c,
-                                );
-                            }
-                        }
 
                         // ── Per-diagnostic: underline + inline message + tooltip ──
                         for (di, diag) in diags.iter().enumerate() {
@@ -5058,35 +5028,64 @@ fn lsp_word_start(text: &str, end_idx: usize) -> usize {
     i
 }
 
-// ── Diagnostic helpers ────────────────────────────────────────────────────────
+// ── LSP / file helpers ────────────────────────────────────────────────────────
 
-/// Return the diagnostics for `src/main.rs` regardless of how the key is stored.
+/// Return the LSP relative path for the currently selected file.
+///
+/// - `MainRs`       → `"src/main.rs"`
+/// - `UserFile(i)`  → `"src/{user_src_files[i].0}"`  (e.g. `"src/pins.rs"`)
+/// - Other files (Cargo.toml, memory.x, …) → `None` (not tracked by RA)
+fn selected_file_rel_path(
+    selected:   &ProjectFileId,
+    user_files: &[(String, String)],
+) -> Option<String> {
+    match selected {
+        ProjectFileId::MainRs => Some("src/main.rs".to_owned()),
+        ProjectFileId::UserFile(i) => {
+            user_files.get(*i).map(|(p, _)| format!("src/{p}"))
+        }
+        _ => None,
+    }
+}
+
+/// Return the diagnostics for `rel_path` regardless of how the key is stored.
 ///
 /// On Windows, rust-analyzer may send file URIs with a lowercase drive letter
 /// (`file:///c:/…`) while `path_to_uri` produces uppercase (`file:///C:/…`).
 /// `uri_to_rel` does a case-sensitive prefix strip, so on a mismatch the full
-/// URI becomes the key instead of the short relative path.  This helper tries
-/// several key formats so inline diagnostics work even when the key is "wrong".
+/// URI is used as the key.  This helper tries several key formats so inline
+/// diagnostics work even when the key is "wrong".
+fn diags_for_file(
+    map:      &std::collections::HashMap<String, Vec<lsp::LspDiagnostic>>,
+    rel_path: &str,
+) -> Vec<lsp::LspDiagnostic> {
+    // 1. Exact match (ideal case)
+    if let Some(v) = map.get(rel_path) {
+        return v.clone();
+    }
+    // 2. Case-insensitive suffix match for Windows drive-letter mismatches.
+    //    The key may be a full URI like "file:///c:/.../{rel_path}".
+    let rel_lc = rel_path.to_lowercase();
+    let suffix_slash  = format!("/{rel_lc}");
+    let suffix_bslash = format!("\\{}", rel_lc.replace('/', "\\"));
+    for (k, v) in map {
+        let k_lc = k.to_lowercase();
+        if k_lc.ends_with(&suffix_slash)
+            || k_lc.ends_with(&suffix_bslash)
+            || k_lc == rel_lc
+        {
+            return v.clone();
+        }
+    }
+    Vec::new()
+}
+
+/// Convenience wrapper kept for call-sites that specifically look up main.rs.
+#[allow(dead_code)]
 fn diags_for_main_rs(
     map: &std::collections::HashMap<String, Vec<lsp::LspDiagnostic>>,
 ) -> Vec<lsp::LspDiagnostic> {
-    // 1. Ideal key produced by uri_to_rel when case matches
-    if let Some(v) = map.get("src/main.rs") {
-        return v.clone();
-    }
-    // 2. Key is just the filename (no directory prefix)
-    if let Some(v) = map.get("main.rs") {
-        return v.clone();
-    }
-    // 3. Fallback: any key whose last path segment is "main.rs"
-    //    (handles full URI keys from case-mismatch on Windows)
-    map.iter()
-        .find(|(k, _)| {
-            k.ends_with("main.rs")
-                && (k.ends_with("/main.rs") || k.ends_with("\\main.rs"))
-        })
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default()
+    diags_for_file(map, "src/main.rs")
 }
 
 // ── Inline diagnostics helpers ────────────────────────────────────────────────

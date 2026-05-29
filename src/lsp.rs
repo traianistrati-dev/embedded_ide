@@ -111,6 +111,16 @@ impl LspStatus {
     }
 }
 
+// ── Per-file open state ───────────────────────────────────────────────────────
+
+/// Tracks the LSP state for one open file.
+struct OpenFileState {
+    /// LSP document version (incremented on every `textDocument/didChange`).
+    doc_version:    u64,
+    /// The text last sent to RA so no-op frames are skipped.
+    last_sent_code: String,
+}
+
 // ── LspState ──────────────────────────────────────────────────────────────────
 
 pub struct LspState {
@@ -121,19 +131,13 @@ pub struct LspState {
     pub generation:  u64,
     /// Channel to the write thread; `None` while stopped.
     sender:          Option<mpsc::Sender<String>>,
-    /// Tracks document version for `textDocument/didChange`.
-    doc_version:     u64,
-    /// Whether we have sent `textDocument/didOpen` yet this session.
-    pub did_open_sent: bool,
-    /// The last code text we sent so we skip no-op frames.
-    pub last_sent_code: String,
+    /// Per-file open state.  Key = relative path, e.g. `"src/main.rs"`.
+    open_files:      HashMap<String, OpenFileState>,
     /// Workspace root URI (e.g. `file:///tmp/embedded_ide_0_check`).
     pub root_uri:    String,
     /// Most recent completion items from rust-analyzer.
     pub completion_items:  Vec<CompletionItem>,
     /// Set to `true` when a completion response (success OR error) arrives.
-    /// Reset to `false` when a new request is sent.
-    /// The App uses this to close the spinner when RA returns nothing.
     pub completion_response_received: bool,
     /// The request id of the pending completion request, if any.
     completion_req_id:     Option<u64>,
@@ -150,9 +154,7 @@ impl Default for LspState {
             diagnostics:   HashMap::new(),
             generation:    0,
             sender:        None,
-            doc_version:   0,
-            did_open_sent: false,
-            last_sent_code: String::new(),
+            open_files:    HashMap::new(),
             root_uri:          String::new(),
             completion_items:  Vec::new(),
             completion_response_received: false,
@@ -172,12 +174,21 @@ impl LspState {
         }
     }
 
-    /// Send `textDocument/didOpen` and record the text.
-    pub fn did_open(&mut self, text: &str) {
-        self.did_open_sent = true;
-        self.doc_version   = 1;
-        self.last_sent_code = text.to_owned();
-        let uri = format!("{}/src/main.rs", self.root_uri);
+    /// Returns `true` if `textDocument/didOpen` has been sent for `rel_path`.
+    pub fn is_file_open(&self, rel_path: &str) -> bool {
+        self.open_files.contains_key(rel_path)
+    }
+
+    /// Send `textDocument/didOpen` for `rel_path` and record the text.
+    ///
+    /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
+    pub fn did_open(&mut self, rel_path: &str, text: &str) {
+        if self.sender.is_none() { return; }
+        self.open_files.insert(rel_path.to_owned(), OpenFileState {
+            doc_version:    1,
+            last_sent_code: text.to_owned(),
+        });
+        let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(serde_json::json!({
             "jsonrpc": "2.0",
             "method":  "textDocument/didOpen",
@@ -192,14 +203,46 @@ impl LspState {
         }).to_string());
     }
 
-    /// Request completions at the given cursor position.
+    /// Send `textDocument/didChange` for `rel_path` when the text has changed.
+    /// Auto-opens the file via `didOpen` if it hasn't been opened yet.
     ///
-    /// `trigger_char = None`  → manual invocation (Ctrl+Space, triggerKind=1)
-    /// `trigger_char = Some(c)` → auto-trigger (typed `.`, triggerKind=2)
-    pub fn request_completion(&mut self, line: u32, character: u32, trigger_char: Option<char>) {
-        if self.sender.is_none() {
+    /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
+    pub fn did_change(&mut self, rel_path: &str, text: &str) {
+        if self.sender.is_none() { return; }
+        // Auto-open the file on first access.
+        if !self.open_files.contains_key(rel_path) {
+            self.did_open(rel_path, text);
             return;
         }
+        let file = self.open_files.get_mut(rel_path).unwrap();
+        if text == file.last_sent_code { return; }
+        file.last_sent_code = text.to_owned();
+        file.doc_version   += 1;
+        let version = file.doc_version;
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method":  "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": uri, "version": version },
+                "contentChanges": [{ "text": text }],
+            }
+        }).to_string());
+    }
+
+    /// Request completions at the given cursor position in `rel_path`.
+    ///
+    /// `trigger_char = None`  → manual invocation (Ctrl+Space, triggerKind=1)
+    /// `trigger_char = Some(c)` → auto-trigger (typed `.` or `:`, triggerKind=2)
+    /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
+    pub fn request_completion(
+        &mut self,
+        rel_path:     &str,
+        line:         u32,
+        character:    u32,
+        trigger_char: Option<char>,
+    ) {
+        if self.sender.is_none() { return; }
         self.next_req_id += 1;
         let id = self.next_req_id;
         self.completion_req_id = Some(id);
@@ -207,9 +250,10 @@ impl LspState {
         self.completion_response_received = false;
         self.completion_request_sent_at = Some(std::time::Instant::now());
         lsp_log(&format!(
-            "COMPLETION_REQ id={id} line={line} char={character} trigger={trigger_char:?}"
+            "COMPLETION_REQ id={id} file={rel_path} line={line} char={character} \
+             trigger={trigger_char:?}"
         ));
-        let uri = format!("{}/src/main.rs", self.root_uri);
+        let uri = format!("{}/{}", self.root_uri, rel_path);
         let trigger_kind: u32 = if trigger_char.is_some() { 2 } else { 1 };
         let mut params = serde_json::json!({
             "textDocument": { "uri": uri },
@@ -224,25 +268,6 @@ impl LspState {
             "id":      id,
             "method":  "textDocument/completion",
             "params":  params
-        }).to_string());
-    }
-
-    /// Send `textDocument/didChange` only when the text actually changed.
-    pub fn did_change(&mut self, text: &str) {
-        if text == self.last_sent_code {
-            return;
-        }
-        self.last_sent_code = text.to_owned();
-        self.doc_version += 1;
-        let version = self.doc_version;
-        let uri = format!("{}/src/main.rs", self.root_uri);
-        self.send_raw(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method":  "textDocument/didChange",
-            "params": {
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": text }],
-            }
         }).to_string());
     }
 
@@ -286,9 +311,7 @@ impl LspState {
         self.status        = LspStatus::Stopped;
         self.diagnostics   .clear();
         self.sender        = None;   // write thread's Receiver will close → it exits
-        self.did_open_sent = false;
-        self.last_sent_code = String::new();
-        self.doc_version   = 0;
+        self.open_files    .clear();
         self.root_uri      = String::new();
         self.completion_items.clear();
         self.completion_req_id = None;
@@ -316,9 +339,7 @@ pub fn start(
         s.status        = LspStatus::Starting;
         s.diagnostics   .clear();
         s.root_uri      = root_uri.clone();
-        s.doc_version   = 0;
-        s.did_open_sent = false;
-        s.last_sent_code = String::new();
+        s.open_files    .clear();
         // Drop any old sender — signals the old write thread to exit.
         s.sender = None;
     }
