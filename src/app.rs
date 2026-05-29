@@ -2175,24 +2175,18 @@ impl eframe::App for AppIde {
                     }
                 }
 
-                // ── Diagnostic overlays (lane + inline underlines) ────────────
+                // ── Diagnostic overlays ───────────────────────────────────────
                 //
                 // COORDINATE SYSTEM (egui 0.34):
-                //   editor_resp.galley_pos  — screen Pos2 where galley's (0,0) is drawn
-                //   galley.rect             — LOCAL rect, always top=0 / left=0
-                //   galley.pos_from_cursor  — returns LOCAL Rect
-                //   screen = galley_pos + local.to_vec2()
+                //   galley_pos              — screen Pos2 where galley's (0,0) is drawn
+                //   galley.pos_from_cursor  — returns LOCAL Rect  (add galley_pos to get screen)
+                //   text_clip_rect          — exact screen clip used when painting the text
                 //
-                //   editor_resp.text_clip_rect — exact screen rect used to clip the text;
-                //   use this as the painter clip so our overlay matches egui's clipping.
-                //
-                // DIAGNOSTICS KEY:
-                //   On Windows, rust-analyzer may send URIs with a lowercase drive
-                //   letter (file:///c:/…) while our path_to_uri produces uppercase
-                //   (file:///C:/…).  uri_to_rel uses case-sensitive prefix stripping,
-                //   so on a mismatch the full URI becomes the HashMap key instead of
-                //   the short relative path.  We therefore look up diagnostics with
-                //   a robust helper that tries multiple key formats.
+                // LANE ALIGNMENT:
+                //   Use actual galley Y position (pos_from_cursor) for each diagnostic,
+                //   not a proportional estimate from the line count.  The editor renders
+                //   at least `with_rows(50)` rows even if the file is shorter, so a
+                //   line-count based proportion would be wrong.
                 if self.selected_file == ProjectFileId::MainRs {
                     let diags: Vec<lsp::LspDiagnostic> = {
                         let lsp = self.lsp_state.lock().unwrap();
@@ -2200,97 +2194,109 @@ impl eframe::App for AppIde {
                     };
 
                     if !diags.is_empty() {
-                        // galley_pos is the screen position of galley local (0,0).
-                        let gp          = editor_resp.galley_pos;
-                        // Clip painter exactly to the text area (excludes line-number
-                        // gutter and any decorations outside the text column).
+                        let gp          = editor_resp.galley_pos; // galley origin on screen
                         let clip        = editor_resp.text_clip_rect;
                         let painter     = ui.painter().with_clip_rect(clip);
                         let total_chars = display_code.chars().count();
+                        let galley_h    = editor_resp.galley.rect.height().max(1.0);
 
-                        // ── Right-edge lane — proportional error/warning ticks ────
+                        // ── Right-edge lane ───────────────────────────────────────
+                        // A 6-px strip at the right edge of the visible text area.
+                        // The Y position of each tick is derived from the actual
+                        // rendered position of the first character of the diagnostic
+                        // line — not from a proportional estimate — so it aligns
+                        // exactly with the text on screen.
                         {
-                            let total = display_code.lines().count().max(1) as f32;
-                            // Lane: 6 px strip at the right edge of the text clip rect.
                             let lane = egui::Rect::from_min_max(
                                 egui::pos2(clip.right() - 6.0, clip.top()),
                                 egui::pos2(clip.right(),        clip.bottom()),
                             );
                             painter.rect_filled(lane, 0.0, egui::Color32::from_black_alpha(50));
+
                             for d in &diags {
-                                let t = (d.line.saturating_sub(1) as f32) / total;
-                                let y = clip.top() + t * clip.height();
-                                let c = match d.severity {
-                                    lsp::DiagSeverity::Error   => egui::Color32::from_rgb(210, 60, 50),
-                                    lsp::DiagSeverity::Warning => egui::Color32::from_rgb(190, 155, 30),
+                                // Find the first character of this diagnostic's line
+                                // and get its galley-local Y position.
+                                let ci = lsp_pos_to_char_idx(
+                                    &display_code, d.line, 1,
+                                ).min(total_chars);
+                                let local_y = editor_resp.galley
+                                    .pos_from_cursor(egui::text::CCursor::new(ci))
+                                    .min.y;
+                                // Map local Y (within galley height) to lane Y
+                                let t  = local_y / galley_h;
+                                let y  = clip.top() + t * clip.height();
+                                let c  = match d.severity {
+                                    lsp::DiagSeverity::Error   => egui::Color32::from_rgb(220, 60, 50),
+                                    lsp::DiagSeverity::Warning => egui::Color32::from_rgb(200, 160, 30),
                                     _                          => egui::Color32::from_rgb(80, 130, 200),
                                 };
                                 painter.rect_filled(
                                     egui::Rect::from_min_max(
-                                        egui::pos2(lane.left(), y - 2.0),
-                                        egui::pos2(lane.right(), y + 2.0),
+                                        egui::pos2(lane.left(), y - 2.5),
+                                        egui::pos2(lane.right(), y + 2.5),
                                     ),
-                                    0.0, c,
+                                    1.0, c,
                                 );
                             }
                         }
 
-                        // ── Inline underlines + hover tooltips ────────────────────
+                        // ── Per-diagnostic: underline + inline message + tooltip ──
                         for (di, diag) in diags.iter().enumerate() {
-                            // Convert LSP 1-based (line, col) → char index
                             let start_ci = lsp_pos_to_char_idx(
                                 &display_code, diag.line, diag.col,
                             ).min(total_chars);
                             let end_ci_raw = lsp_pos_to_char_idx(
                                 &display_code, diag.end_line, diag.end_col,
                             ).min(total_chars);
-                            // Ensure at least 1-char span so a single-char error is visible
                             let end_ci = if end_ci_raw <= start_ci {
                                 (start_ci + 1).min(total_chars)
                             } else {
                                 end_ci_raw
                             };
 
-                            // Galley-local positions for start and end characters
+                            // Galley-local positions
                             let loc_s = editor_resp.galley
                                 .pos_from_cursor(egui::text::CCursor::new(start_ci));
                             let loc_e = editor_resp.galley
                                 .pos_from_cursor(egui::text::CCursor::new(end_ci));
 
-                            // Convert local → screen using galley_pos
+                            // Screen coordinates
                             let sx     = gp.x + loc_s.min.x;
                             let sy_top = gp.y + loc_s.min.y;
                             let sy_bot = gp.y + loc_s.max.y;
                             let line_h = loc_s.height().max(1.0);
+                            let sy_mid = (sy_top + sy_bot) * 0.5;
 
-                            // Multi-line span: underline only the first line
+                            // Same-line check for multi-line spans
                             let same_line = (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
                             let ex = if same_line {
                                 gp.x + loc_e.min.x
                             } else {
-                                // Extend to the right edge of the text area
                                 gp.x + editor_resp.galley.rect.width()
                             };
-
                             if ex <= sx + 1.0 { continue; }
 
                             // Severity colours
-                            let (ul_color, bg_color) = match diag.severity {
+                            let (ul_color, bg_color, msg_color) = match diag.severity {
                                 lsp::DiagSeverity::Error => (
                                     egui::Color32::from_rgb(220, 65, 55),
                                     egui::Color32::from_rgba_unmultiplied(210, 55, 45, 22),
+                                    egui::Color32::from_rgb(200, 80, 70),
                                 ),
                                 lsp::DiagSeverity::Warning => (
                                     egui::Color32::from_rgb(210, 165, 35),
                                     egui::Color32::from_rgba_unmultiplied(200, 160, 30, 14),
+                                    egui::Color32::from_rgb(190, 150, 40),
                                 ),
                                 lsp::DiagSeverity::Info => (
                                     egui::Color32::from_rgb(80, 140, 215),
                                     egui::Color32::TRANSPARENT,
+                                    egui::Color32::from_rgb(100, 150, 210),
                                 ),
                                 lsp::DiagSeverity::Hint => (
-                                    egui::Color32::from_rgb(100, 170, 120),
+                                    egui::Color32::from_rgb(100, 160, 110),
                                     egui::Color32::TRANSPARENT,
+                                    egui::Color32::from_rgb(110, 150, 110),
                                 ),
                             };
 
@@ -2308,7 +2314,38 @@ impl eframe::App for AppIde {
                             // Wavy underline
                             draw_wavy_underline(&painter, sx, ex, sy_bot, ul_color);
 
-                            // Hover tooltip
+                            // ── Inline message at end of line ─────────────────────
+                            // Find the EOL position so the message appears after the code.
+                            let eol_ci = lsp_line_end_char_idx(&display_code, diag.line)
+                                .min(total_chars);
+                            let loc_eol = editor_resp.galley
+                                .pos_from_cursor(egui::text::CCursor::new(eol_ci));
+                            // Only draw when the error line is on the same screen row
+                            // as its EOL (avoids stray messages for very long lines).
+                            let same_row_eol =
+                                (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
+                            if same_row_eol {
+                                let msg_x = gp.x + loc_eol.min.x + 16.0; // 16px gap
+                                // Truncate to keep the inline hint compact
+                                let short_msg: String = diag.message
+                                    .chars()
+                                    .take(72)
+                                    .collect();
+                                let short_msg = if diag.message.chars().count() > 72 {
+                                    format!("{short_msg}…")
+                                } else {
+                                    short_msg
+                                };
+                                painter.text(
+                                    egui::pos2(msg_x, sy_mid),
+                                    egui::Align2::LEFT_CENTER,
+                                    &short_msg,
+                                    egui::FontId::monospace(10.5),
+                                    msg_color,
+                                );
+                            }
+
+                            // ── Hover tooltip (full message) ──────────────────────
                             let hover_rect = egui::Rect::from_min_max(
                                 egui::pos2(sx, sy_top),
                                 egui::pos2(ex, sy_bot + 3.0),
@@ -2333,7 +2370,7 @@ impl eframe::App for AppIde {
                                     ui.layer_id(),
                                     egui::Id::new("inline_diag_tip").with(di),
                                     |ui: &mut egui::Ui| {
-                                        ui.set_max_width(380.0);
+                                        ui.set_max_width(420.0);
                                         ui.label(egui::RichText::new(&msg).size(12.0));
                                         if let Some(c) = &code {
                                             ui.label(
@@ -5053,6 +5090,28 @@ fn diags_for_main_rs(
 }
 
 // ── Inline diagnostics helpers ────────────────────────────────────────────────
+
+/// Return the char index of the last non-newline character on `line_1` (1-based).
+/// Used to position inline error messages at the end of the error line.
+fn lsp_line_end_char_idx(text: &str, line_1: u32) -> usize {
+    let want_line = line_1.saturating_sub(1) as usize;
+    let mut cur_line = 0usize;
+    let mut char_idx = 0usize;
+    let mut line_end = 0usize;
+    for c in text.chars() {
+        if c == '\n' {
+            if cur_line == want_line {
+                return line_end;
+            }
+            cur_line += 1;
+            line_end = char_idx + 1; // start of next line
+        } else {
+            line_end = char_idx + 1; // last non-newline on this line (so far)
+        }
+        char_idx += 1;
+    }
+    char_idx
+}
 
 /// Convert an LSP position (1-based line, 1-based column in UTF-16 units)
 /// to a char index suitable for `galley.pos_from_cursor(CCursor::new(idx))`.
