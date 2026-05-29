@@ -83,6 +83,8 @@ pub fn start_flash(
     project_dir: PathBuf,
     target:      String,
     chip:        String,
+    // Serial port override (e.g. "COM3").  Pass an empty string for auto-detect.
+    port:        String,
     state:       Arc<Mutex<EspFlashState>>,
     log:         Arc<Mutex<Vec<String>>>,
     ctx:         eframe::egui::Context,
@@ -181,28 +183,36 @@ pub fn start_flash(
         //                              app descriptor; espflash 4.x rejects them
         //                              without this flag.
         //   --after hard-reset       : explicitly reset the chip via the RTS line
-        //                              after flashing.  Without this, boards that
-        //                              lack a full DTR/RTS auto-reset circuit
-        //                              (e.g. ESP32-C3 SuperMini with CH340C) may
-        //                              not reboot into the new firmware on their own.
+        //                              after flashing so boards with a DTR/RTS
+        //                              auto-reset circuit reboot automatically.
+        //   --port <port>            : optional; empty string = auto-detect.
+        let port_display = if port.is_empty() {
+            "auto".to_owned()
+        } else {
+            port.clone()
+        };
         push_log(
             &log,
             &ctx,
             &format!(
-                "▶ espflash flash --chip {chip} --ignore-app-descriptor --after hard-reset {} …",
+                "▶ espflash flash --chip {chip} --port {port_display} \
+                 --ignore-app-descriptor --after hard-reset {} …",
                 elf_path.display()
             ),
         );
+        if port.is_empty() {
+            push_log(&log, &ctx, "  (no port specified — espflash will auto-detect)");
+        }
 
         let mut esp_cmd = Command::new("espflash");
         esp_cmd
             .current_dir(&project_dir)
-            .args([
-                "flash",
-                "--chip",                &chip,
-                "--ignore-app-descriptor",
-                "--after",              "hard-reset",
-            ])
+            .args(["flash", "--chip", &chip]);
+        if !port.is_empty() {
+            esp_cmd.args(["--port", &port]);
+        }
+        esp_cmd
+            .args(["--ignore-app-descriptor", "--after", "hard-reset"])
             .arg(&elf_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

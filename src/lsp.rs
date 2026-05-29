@@ -740,11 +740,34 @@ pub fn path_to_uri(path: &Path) -> String {
 
 /// Strip `root_uri + "/"` from an absolute URI to get the relative path.
 /// `"file:///tmp/proj/src/main.rs"` → `"src/main.rs"`
+///
+/// On Windows, rust-analyzer may normalise the drive letter to lowercase
+/// (`file:///c:/…`) while `path_to_uri` produces uppercase (`file:///C:/…`).
+/// The comparison is therefore case-insensitive on Windows so that the key
+/// stored in `LspState.diagnostics` is always the short relative path
+/// (`src/main.rs`) rather than the full URI.
 fn uri_to_rel(uri: &str, root_uri: &str) -> String {
     let prefix = format!("{root_uri}/");
-    uri.strip_prefix(&prefix)
-        .unwrap_or(uri)
-        .to_owned()
+
+    // Case-sensitive match first (non-Windows, or matching case on Windows)
+    if let Some(rel) = uri.strip_prefix(&prefix) {
+        return rel.to_owned();
+    }
+
+    // Case-insensitive fallback for Windows drive-letter mismatches
+    #[cfg(windows)]
+    {
+        let uri_lc = uri.to_lowercase();
+        let pfx_lc = prefix.to_lowercase();
+        if uri_lc.starts_with(&pfx_lc) {
+            // Preserve the original (potentially mixed-case) suffix
+            return uri[prefix.len()..].to_owned();
+        }
+    }
+
+    // Nothing matched — return the full URI as-is; the diags_for_main_rs
+    // helper in app.rs will still find it by suffix matching.
+    uri.to_owned()
 }
 
 fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {

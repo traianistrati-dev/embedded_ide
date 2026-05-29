@@ -170,6 +170,9 @@ pub struct AppIde {
     openocd_target_cfg: String,
     /// Shared state for ESP32 espflash operations
     espflash_state: Arc<Mutex<EspFlashState>>,
+    /// Optional serial port override for espflash (e.g. "COM3", "/dev/ttyUSB0").
+    /// Empty = auto-detect (espflash scans available ports automatically).
+    espflash_port: String,
     /// Shared state for the Required Tools tab (check + install operations)
     tools_state: Arc<Mutex<required_tools::ToolsState>>,
     /// Code-completion engine — stores the trie, current prefix and popup state.
@@ -320,6 +323,7 @@ impl AppIde {
             openocd_state,
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
             espflash_state,
+            espflash_port: String::new(),
             tools_state: required_tools::make_tools_state(),
             // Completer: seeded with Rust keywords/types + learns words from code
             completer: Completer::new_with_syntax(&Syntax::rust())
@@ -1548,6 +1552,7 @@ impl eframe::App for AppIde {
                                                 build_dir,
                                                 config.target.to_string(),
                                                 config.probe_chip.to_string(),
+                                                self.espflash_port.clone(),
                                                 Arc::clone(&self.espflash_state),
                                                 Arc::clone(&self.dfu_log),
                                                 self.egui_ctx.clone(),
@@ -1694,6 +1699,7 @@ impl eframe::App for AppIde {
                                     &self.openocd_state,
                                     &mut self.openocd_target_cfg,
                                     &self.espflash_state,
+                                    &mut self.espflash_port,
                                     &self.tools_state,
                                     &self.selected_mcu_type.toolchain(),
                                     &mut self.build_tab,
@@ -2169,127 +2175,110 @@ impl eframe::App for AppIde {
                     }
                 }
 
-                // ── RA error lane (right-edge overlay on editor rect) ─────────
-                // Proportional tick marks showing where errors/warnings are in
-                // the file — useful even when the lines are scrolled out of view.
+                // ── Diagnostic overlays (lane + inline underlines) ────────────
+                //
+                // COORDINATE SYSTEM (egui 0.34):
+                //   editor_resp.galley_pos  — screen Pos2 where galley's (0,0) is drawn
+                //   galley.rect             — LOCAL rect, always top=0 / left=0
+                //   galley.pos_from_cursor  — returns LOCAL Rect
+                //   screen = galley_pos + local.to_vec2()
+                //
+                //   editor_resp.text_clip_rect — exact screen rect used to clip the text;
+                //   use this as the painter clip so our overlay matches egui's clipping.
+                //
+                // DIAGNOSTICS KEY:
+                //   On Windows, rust-analyzer may send URIs with a lowercase drive
+                //   letter (file:///c:/…) while our path_to_uri produces uppercase
+                //   (file:///C:/…).  uri_to_rel uses case-sensitive prefix stripping,
+                //   so on a mismatch the full URI becomes the HashMap key instead of
+                //   the short relative path.  We therefore look up diagnostics with
+                //   a robust helper that tries multiple key formats.
                 if self.selected_file == ProjectFileId::MainRs {
-                    let lsp = self.lsp_state.lock().unwrap();
-                    if let Some(diags) = lsp.diagnostics.get("src/main.rs") {
-                        if !diags.is_empty() {
+                    let diags: Vec<lsp::LspDiagnostic> = {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        diags_for_main_rs(&lsp.diagnostics)
+                    };
+
+                    if !diags.is_empty() {
+                        // galley_pos is the screen position of galley local (0,0).
+                        let gp          = editor_resp.galley_pos;
+                        // Clip painter exactly to the text area (excludes line-number
+                        // gutter and any decorations outside the text column).
+                        let clip        = editor_resp.text_clip_rect;
+                        let painter     = ui.painter().with_clip_rect(clip);
+                        let total_chars = display_code.chars().count();
+
+                        // ── Right-edge lane — proportional error/warning ticks ────
+                        {
                             let total = display_code.lines().count().max(1) as f32;
-                            let rect = editor_resp.galley.rect;
+                            // Lane: 6 px strip at the right edge of the text clip rect.
                             let lane = egui::Rect::from_min_max(
-                                egui::pos2(rect.right() - 6.0, rect.top()),
-                                egui::pos2(rect.right(), rect.bottom()),
+                                egui::pos2(clip.right() - 6.0, clip.top()),
+                                egui::pos2(clip.right(),        clip.bottom()),
                             );
-                            ui.painter().rect_filled(
-                                lane,
-                                0.0,
-                                egui::Color32::from_black_alpha(50),
-                            );
-                            for d in diags {
+                            painter.rect_filled(lane, 0.0, egui::Color32::from_black_alpha(50));
+                            for d in &diags {
                                 let t = (d.line.saturating_sub(1) as f32) / total;
-                                let y = rect.top() + t * rect.height();
-                                let color = match d.severity {
-                                    lsp::DiagSeverity::Error => {
-                                        egui::Color32::from_rgb(210, 60, 50)
-                                    }
-                                    lsp::DiagSeverity::Warning => {
-                                        egui::Color32::from_rgb(190, 155, 30)
-                                    }
-                                    _ => egui::Color32::from_rgb(80, 130, 200),
+                                let y = clip.top() + t * clip.height();
+                                let c = match d.severity {
+                                    lsp::DiagSeverity::Error   => egui::Color32::from_rgb(210, 60, 50),
+                                    lsp::DiagSeverity::Warning => egui::Color32::from_rgb(190, 155, 30),
+                                    _                          => egui::Color32::from_rgb(80, 130, 200),
                                 };
-                                ui.painter().rect_filled(
+                                painter.rect_filled(
                                     egui::Rect::from_min_max(
                                         egui::pos2(lane.left(), y - 2.0),
                                         egui::pos2(lane.right(), y + 2.0),
                                     ),
-                                    0.0,
-                                    color,
+                                    0.0, c,
                                 );
                             }
                         }
-                    }
-                }
 
-                // ── Inline diagnostic underlines + hover tooltips ──────────────
-                // Draws wavy underlines directly on the text at the error/warning
-                // spans reported by rust-analyzer, and shows a tooltip on hover.
-                //
-                // Coordinate system:
-                //   galley.pos_from_cursor(CCursor(n))  →  Rect in galley-local space
-                //   response.rect.left_top()            →  screen position of local (0,0)
-                //   screen_pos = left_top + local.to_vec2()
-                //
-                // Scroll is handled automatically: pos_from_cursor returns positions
-                // relative to the galley start; if those are outside the editor's
-                // clip rect (scrolled out of view) the painter ignores them.
-                if self.selected_file == ProjectFileId::MainRs {
-                    let diags: Vec<lsp::LspDiagnostic> = {
-                        let lsp = self.lsp_state.lock().unwrap();
-                        lsp.diagnostics
-                            .get("src/main.rs")
-                            .cloned()
-                            .unwrap_or_default()
-                    };
-
-                    if !diags.is_empty() {
-                        // Painter clipped to the editor rect so underlines never
-                        // bleed into the line-number gutter or the scroll bar.
-                        let editor_rect = editor_resp.response.rect;
-                        let painter     = ui.painter().with_clip_rect(editor_rect);
-                        let origin      = editor_rect.left_top();
-                        let total_chars = display_code.chars().count();
-
+                        // ── Inline underlines + hover tooltips ────────────────────
                         for (di, diag) in diags.iter().enumerate() {
-                            // ── Convert LSP (line, col) → galley char index ───────
+                            // Convert LSP 1-based (line, col) → char index
                             let start_ci = lsp_pos_to_char_idx(
                                 &display_code, diag.line, diag.col,
                             ).min(total_chars);
                             let end_ci_raw = lsp_pos_to_char_idx(
                                 &display_code, diag.end_line, diag.end_col,
                             ).min(total_chars);
-                            // Guarantee a minimum visible span of 1 char.
+                            // Ensure at least 1-char span so a single-char error is visible
                             let end_ci = if end_ci_raw <= start_ci {
                                 (start_ci + 1).min(total_chars)
                             } else {
                                 end_ci_raw
                             };
 
-                            // ── Galley positions (galley-local Rect) ──────────────
+                            // Galley-local positions for start and end characters
                             let loc_s = editor_resp.galley
                                 .pos_from_cursor(egui::text::CCursor::new(start_ci));
                             let loc_e = editor_resp.galley
                                 .pos_from_cursor(egui::text::CCursor::new(end_ci));
 
-                            // Screen-space coordinates
-                            let sx = origin.x + loc_s.min.x;
-                            let sy_top = origin.y + loc_s.min.y;
-                            let sy_bot = origin.y + loc_s.max.y; // bottom of text line
-                            let line_h = loc_s.height();
+                            // Convert local → screen using galley_pos
+                            let sx     = gp.x + loc_s.min.x;
+                            let sy_top = gp.y + loc_s.min.y;
+                            let sy_bot = gp.y + loc_s.max.y;
+                            let line_h = loc_s.height().max(1.0);
 
-                            // For multi-line spans draw only the first line;
-                            // end_x is either the real end (same line) or the
-                            // right edge of the start line.
-                            let same_line =
-                                (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
+                            // Multi-line span: underline only the first line
+                            let same_line = (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
                             let ex = if same_line {
-                                origin.x + loc_e.min.x
+                                gp.x + loc_e.min.x
                             } else {
-                                // Extend underline to EOL
-                                origin.x + editor_resp.galley.rect.width() - 8.0
+                                // Extend to the right edge of the text area
+                                gp.x + editor_resp.galley.rect.width()
                             };
 
-                            // Skip if horizontally degenerate
-                            if ex <= sx + 0.5 {
-                                continue;
-                            }
+                            if ex <= sx + 1.0 { continue; }
 
-                            // ── Colors per severity ───────────────────────────────
+                            // Severity colours
                             let (ul_color, bg_color) = match diag.severity {
                                 lsp::DiagSeverity::Error => (
                                     egui::Color32::from_rgb(220, 65, 55),
-                                    egui::Color32::from_rgba_unmultiplied(210, 55, 45, 20),
+                                    egui::Color32::from_rgba_unmultiplied(210, 55, 45, 22),
                                 ),
                                 lsp::DiagSeverity::Warning => (
                                     egui::Color32::from_rgb(210, 165, 35),
@@ -2305,23 +2294,21 @@ impl eframe::App for AppIde {
                                 ),
                             };
 
-                            // ── Background highlight ──────────────────────────────
-                            if bg_color != egui::Color32::TRANSPARENT {
+                            // Background tint
+                            if bg_color.a() > 0 {
                                 painter.rect_filled(
                                     egui::Rect::from_min_max(
-                                        egui::pos2(sx,  sy_top),
-                                        egui::pos2(ex,  sy_bot),
+                                        egui::pos2(sx, sy_top),
+                                        egui::pos2(ex, sy_bot),
                                     ),
-                                    0.0,
-                                    bg_color,
+                                    0.0, bg_color,
                                 );
                             }
 
-                            // ── Wavy underline ────────────────────────────────────
+                            // Wavy underline
                             draw_wavy_underline(&painter, sx, ex, sy_bot, ul_color);
 
-                            // ── Hover tooltip ─────────────────────────────────────
-                            // Use ui.interact() — does not allocate layout space.
+                            // Hover tooltip
                             let hover_rect = egui::Rect::from_min_max(
                                 egui::pos2(sx, sy_top),
                                 egui::pos2(ex, sy_bot + 3.0),
@@ -2338,25 +2325,21 @@ impl eframe::App for AppIde {
                                     lsp::DiagSeverity::Info    => "ℹ",
                                     lsp::DiagSeverity::Hint    => "·",
                                 };
-                                let msg   = format!("{icon}  {}", diag.message);
-                                let code  = diag.code.clone();
+                                let msg  = format!("{icon}  {}", diag.message);
+                                let code = diag.code.clone();
                                 #[allow(deprecated)]
                                 egui::show_tooltip_at_pointer(
                                     ui.ctx(),
-                                    ui.layer_id(),   // parent LayerId (required in 0.34)
+                                    ui.layer_id(),
                                     egui::Id::new("inline_diag_tip").with(di),
                                     |ui: &mut egui::Ui| {
                                         ui.set_max_width(380.0);
-                                        ui.label(
-                                            egui::RichText::new(&msg).size(12.0),
-                                        );
+                                        ui.label(egui::RichText::new(&msg).size(12.0));
                                         if let Some(c) = &code {
                                             ui.label(
                                                 egui::RichText::new(format!("[{c}]"))
                                                     .size(10.5)
-                                                    .color(egui::Color32::from_rgb(
-                                                        140, 150, 170,
-                                                    )),
+                                                    .color(egui::Color32::from_rgb(140,150,170)),
                                             );
                                         }
                                     },
@@ -3425,6 +3408,7 @@ fn show_diag_panel(
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
+    espflash_port: &mut String,
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
     toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
@@ -3619,6 +3603,7 @@ fn show_diag_panel(
                 openocd_state,
                 openocd_target_cfg,
                 espflash_state,
+                espflash_port,
                 toolchain,
             );
         }
@@ -3640,6 +3625,7 @@ fn show_dfu_tab(
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
+    espflash_port: &mut String,
     toolchain: &ToolchainKind,
 ) {
     let state = dfu_state.lock().unwrap().clone();
@@ -3955,6 +3941,49 @@ fn show_dfu_tab(
         });
     });
 
+    // ── ESP32 port selector ───────────────────────────────────────────────────
+    // Shown only for EspRust.  Lets the user type a COM port (e.g. "COM3") so
+    // espflash targets the correct device when multiple serial ports are present.
+    // Leave empty to let espflash auto-detect.
+    if *toolchain == ToolchainKind::EspRust {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Port:")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(160)),
+            );
+            let resp = ui.add(
+                egui::TextEdit::singleline(espflash_port)
+                    .hint_text("auto (e.g. COM3)")
+                    .desired_width(120.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            resp.on_hover_text(
+                "Serial port for espflash.\n\
+                 Leave empty to auto-detect.\n\
+                 Windows example: COM3\n\
+                 Linux example:   /dev/ttyUSB0\n\
+                 macOS example:   /dev/cu.usbserial-0001",
+            );
+            if !espflash_port.is_empty() {
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Clear — use auto-detect")
+                    .clicked()
+                {
+                    espflash_port.clear();
+                }
+            }
+            ui.label(
+                egui::RichText::new("← leave empty for auto-detect")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(100))
+                    .italics(),
+            );
+        });
+        ui.add_space(2.0);
+    }
+
     // ── ESP32 diagnostic row (read-only chip identification) ─────────────────
     // Shown only for EspRust; sits between the config row and the log area.
     if *toolchain == ToolchainKind::EspRust {
@@ -4133,17 +4162,30 @@ fn show_dfu_tab(
             }
 
             for line in &log {
-                // Colour-code lines by content prefix / keywords
+                // Colour-code lines by content prefix.
+                //
+                // IMPORTANT: cargo prints "   Compiling proc-macro-error-attr2"
+                // and "   Compiling proc-macro-error2" which contain the word
+                // "error" inside the crate name — NOT an actual build error.
+                // Real cargo errors always start with "error" at column 0
+                // (e.g. "error[E0308]: …" or "error: …").
+                // Warnings start with "warning" at column 0.
+                // Using starts_with() avoids false positives from crate names.
+                let trimmed = line.trim_start();
                 let color = if line.starts_with("✔") {
-                    egui::Color32::from_rgb(80, 200, 100)
+                    egui::Color32::from_rgb(80, 200, 100)   // green  — success
                 } else if line.starts_with("▶") {
-                    egui::Color32::from_rgb(100, 180, 255)
-                } else if line.contains("error") && !line.contains("0 error") {
-                    egui::Color32::from_rgb(220, 100, 80)
-                } else if line.contains("warning") && !line.contains("0 warning") {
-                    egui::Color32::from_rgb(210, 170, 40)
+                    egui::Color32::from_rgb(100, 180, 255)  // blue   — command header
+                } else if trimmed.starts_with("error[") || trimmed.starts_with("error:") {
+                    egui::Color32::from_rgb(220, 100, 80)   // red    — real compile error
+                } else if trimmed.starts_with("warning[") || trimmed.starts_with("warning:") {
+                    egui::Color32::from_rgb(210, 170, 40)   // yellow — compile warning
+                } else if trimmed.starts_with("Compiling ")
+                       || trimmed.starts_with("Finished ")
+                       || trimmed.starts_with("Running ") {
+                    egui::Color32::from_rgb(130, 170, 130)  // muted green — progress
                 } else {
-                    egui::Color32::from_rgb(175, 180, 192)
+                    egui::Color32::from_rgb(175, 180, 192)  // grey   — normal output
                 };
                 ui.label(
                     egui::RichText::new(line.as_str())
@@ -4977,6 +5019,37 @@ fn lsp_word_start(text: &str, end_idx: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+// ── Diagnostic helpers ────────────────────────────────────────────────────────
+
+/// Return the diagnostics for `src/main.rs` regardless of how the key is stored.
+///
+/// On Windows, rust-analyzer may send file URIs with a lowercase drive letter
+/// (`file:///c:/…`) while `path_to_uri` produces uppercase (`file:///C:/…`).
+/// `uri_to_rel` does a case-sensitive prefix strip, so on a mismatch the full
+/// URI becomes the key instead of the short relative path.  This helper tries
+/// several key formats so inline diagnostics work even when the key is "wrong".
+fn diags_for_main_rs(
+    map: &std::collections::HashMap<String, Vec<lsp::LspDiagnostic>>,
+) -> Vec<lsp::LspDiagnostic> {
+    // 1. Ideal key produced by uri_to_rel when case matches
+    if let Some(v) = map.get("src/main.rs") {
+        return v.clone();
+    }
+    // 2. Key is just the filename (no directory prefix)
+    if let Some(v) = map.get("main.rs") {
+        return v.clone();
+    }
+    // 3. Fallback: any key whose last path segment is "main.rs"
+    //    (handles full URI keys from case-mismatch on Windows)
+    map.iter()
+        .find(|(k, _)| {
+            k.ends_with("main.rs")
+                && (k.ends_with("/main.rs") || k.ends_with("\\main.rs"))
+        })
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
 }
 
 // ── Inline diagnostics helpers ────────────────────────────────────────────────
