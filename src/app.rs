@@ -1779,6 +1779,102 @@ impl eframe::App for AppIde {
                         });
                     }
                 }
+                // ── rust-analyzer inline status bar ───────────────────────────
+                // Shown just above the code editor so the user always knows
+                // whether RA is still indexing or actively checking the file.
+                {
+                    let (ra_status, errs, warns) = {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        let rel = selected_file_rel_path(
+                            &self.selected_file, &self.user_src_files,
+                        ).unwrap_or_default();
+                        let errs  = lsp.diagnostics.get(&rel)
+                            .map(|v| v.iter().filter(|d| d.severity.is_error()).count())
+                            .unwrap_or(0);
+                        let warns = lsp.diagnostics.get(&rel)
+                            .map(|v| v.iter().filter(|d| d.severity.is_warning()).count())
+                            .unwrap_or(0);
+                        (lsp.status.clone(), errs, warns)
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.add_space(2.0);
+                        match &ra_status {
+                            LspStatus::Stopped => {
+                                ui.label(
+                                    egui::RichText::new(format!("{} RA off", ph::PLUGS))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_gray(90)),
+                                );
+                            }
+                            LspStatus::Starting | LspStatus::Indexing => {
+                                // Request repaint so the spinner keeps animating
+                                ui.ctx().request_repaint();
+                                ui.spinner();
+                                ui.label(
+                                    egui::RichText::new(
+                                        if matches!(ra_status, LspStatus::Starting) {
+                                            " rust-analyzer: pornire…"
+                                        } else {
+                                            " rust-analyzer: indexare crate-uri…"
+                                        },
+                                    )
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(200, 190, 80)),
+                                );
+                            }
+                            LspStatus::Ready => {
+                                let (icon, color) = if errs > 0 {
+                                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                                } else if warns > 0 {
+                                    (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                                } else {
+                                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!("{icon} RA"))
+                                        .size(10.5)
+                                        .color(color),
+                                );
+                                if errs > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!("  {errs} erori"))
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(220, 80, 70)),
+                                    );
+                                }
+                                if warns > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!("  {warns} avertismente"))
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(210, 170, 40)),
+                                    );
+                                }
+                                if errs == 0 && warns == 0 {
+                                    ui.label(
+                                        egui::RichText::new("  fără erori")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_gray(120))
+                                            .italics(),
+                                    );
+                                }
+                            }
+                            LspStatus::Failed(msg) => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        format!("{} RA eșuat: {}", ph::X_CIRCLE,
+                                            msg.lines().next().unwrap_or("eroare"))
+                                    )
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(220, 80, 70)),
+                                )
+                                .on_hover_text(msg.as_str());
+                            }
+                        }
+                    });
+                    ui.add_space(1.0);
+                }
+
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
                 let ctrl_space_pressed = ui.input_mut(|i| {
