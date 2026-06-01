@@ -3,7 +3,6 @@ use crate::dfu::{self, DfuState};
 use crate::espflash::{self, EspFlashState};
 use crate::lsp::{self, LspStatus};
 use crate::openocd::{self, OpenOcdState};
-use crate::required_tools;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::{McuType, ToolchainKind};
 use crate::panels::mcu_module::mock_esp32c3::create_esp32c3;
@@ -11,6 +10,7 @@ use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pin_module::pin::Pin;
 use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
+use crate::required_tools;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
 use egui_phosphor::regular as ph;
@@ -179,9 +179,9 @@ pub struct AppIde {
     /// Must live in the App (not a local) so state is preserved across frames.
     completer: Completer,
     /// True when the LSP completion popup is visible.
-    completion_open:        bool,
+    completion_open: bool,
     /// Index of the currently highlighted row in the completion popup.
-    completion_sel:         usize,
+    completion_sel: usize,
     /// Character-offset in the editor text where completion was triggered.
     /// Used to compute the live prefix for filtering and to close the popup
     /// when the cursor moves away.
@@ -329,9 +329,9 @@ impl AppIde {
             completer: Completer::new_with_syntax(&Syntax::rust())
                 .with_auto_indent()
                 .with_user_words(),
-            completion_open:           false,
-            completion_sel:            0,
-            completion_trigger_idx:    0,
+            completion_open: false,
+            completion_sel: 0,
+            completion_trigger_idx: 0,
             completion_pending_insert: None,
             completion_filtered_items: Vec::new(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
@@ -369,8 +369,8 @@ impl AppIde {
     fn init_mcu(mcu_type: &McuType) -> Option<Mcu> {
         match mcu_type {
             McuType::Stm32f103c8t6 => Some(create_stm32f103c8tx()),
-            McuType::Esp32c3       => Some(create_esp32c3()),
-            _                      => None,
+            McuType::Esp32c3 => Some(create_esp32c3()),
+            _ => None,
         }
     }
 
@@ -960,18 +960,14 @@ impl eframe::App for AppIde {
                     ui.horizontal(|ui| {
                         ui.label("Chip:");
                         let selected_text = match &self.pending_mcu_type {
-                            None    => "— Empty —".to_string(),
+                            None => "— Empty —".to_string(),
                             Some(t) => t.label().to_string(),
                         };
                         egui::ComboBox::from_id_salt("new_project_chip_selector")
                             .selected_text(selected_text)
                             .show_ui(ui, |ui| {
                                 // "Empty" — first entry, no chip selected
-                                ui.selectable_value(
-                                    &mut self.pending_mcu_type,
-                                    None,
-                                    "— Empty —",
-                                );
+                                ui.selectable_value(&mut self.pending_mcu_type, None, "— Empty —");
                                 for mcu_type in McuType::all() {
                                     let label = if mcu_type.is_supported() {
                                         mcu_type.label().to_string()
@@ -1024,7 +1020,7 @@ impl eframe::App for AppIde {
                             self.user_src_folders.clear();
                             self.selected_file = ProjectFileId::MainRs;
                             self.project_name = None;
-                            self.project_dir  = None;
+                            self.project_dir = None;
                             self.renaming_file = None;
                             self.renaming_folder = None;
                             self.new_src_name = None;
@@ -1746,8 +1742,7 @@ impl eframe::App for AppIde {
                 // Mouse clicks on popup items set `completion_pending_insert` last
                 // frame; apply them here so the same accept path is used for both
                 // keyboard and mouse.
-                let mut lsp_accepted: Option<String> =
-                    self.completion_pending_insert.take();
+                let mut lsp_accepted: Option<String> = self.completion_pending_insert.take();
                 if lsp_accepted.is_some() {
                     self.completion_open = false;
                 }
@@ -1767,7 +1762,7 @@ impl eframe::App for AppIde {
                             } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
                                 self.completion_sel = self.completion_sel.saturating_sub(1);
                             } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
-                                   || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                             {
                                 // Use the filtered list — guaranteed same items as shown.
                                 let sel = self.completion_sel.min(count.saturating_sub(1));
@@ -1783,33 +1778,39 @@ impl eframe::App for AppIde {
                 // Shown just above the code editor so the user always knows
                 // whether RA is still indexing or actively checking the file.
                 {
-                    let (ra_status, errs, warns) = {
+                    let (ra_status, checking, errs, warns) = {
                         let lsp = self.lsp_state.lock().unwrap();
-                        let rel = selected_file_rel_path(
-                            &self.selected_file, &self.user_src_files,
-                        ).unwrap_or_default();
-                        let errs  = lsp.diagnostics.get(&rel)
+                        let rel = selected_file_rel_path(&self.selected_file, &self.user_src_files)
+                            .unwrap_or_default();
+                        let errs = lsp
+                            .diagnostics
+                            .get(&rel)
                             .map(|v| v.iter().filter(|d| d.severity.is_error()).count())
                             .unwrap_or(0);
-                        let warns = lsp.diagnostics.get(&rel)
+                        let warns = lsp
+                            .diagnostics
+                            .get(&rel)
                             .map(|v| v.iter().filter(|d| d.severity.is_warning()).count())
                             .unwrap_or(0);
-                        (lsp.status.clone(), errs, warns)
+                        (lsp.status.clone(), lsp.checking, errs, warns)
                     };
+
+                    // Keep repainting while RA is busy so the spinner animates.
+                    if checking || matches!(ra_status, LspStatus::Starting | LspStatus::Indexing) {
+                        ui.ctx().request_repaint();
+                    }
 
                     ui.horizontal(|ui| {
                         ui.add_space(2.0);
                         match &ra_status {
                             LspStatus::Stopped => {
                                 ui.label(
-                                    egui::RichText::new(format!("{} RA off", ph::PLUGS))
+                                    egui::RichText::new(format!("{} RA oprit", ph::PLUGS))
                                         .size(10.5)
                                         .color(egui::Color32::from_gray(90)),
                                 );
                             }
                             LspStatus::Starting | LspStatus::Indexing => {
-                                // Request repaint so the spinner keeps animating
-                                ui.ctx().request_repaint();
                                 ui.spinner();
                                 ui.label(
                                     egui::RichText::new(
@@ -1824,6 +1825,21 @@ impl eframe::App for AppIde {
                                 );
                             }
                             LspStatus::Ready => {
+                                if checking {
+                                    // cargo check rulează în fundal
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new(" verificare cargo…")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(100, 160, 220)),
+                                    );
+                                    // separator vizual
+                                    ui.label(
+                                        egui::RichText::new("  |")
+                                            .size(10.5)
+                                            .color(egui::Color32::from_gray(70)),
+                                    );
+                                }
                                 let (icon, color) = if errs > 0 {
                                     (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
                                 } else if warns > 0 {
@@ -1840,31 +1856,33 @@ impl eframe::App for AppIde {
                                     ui.label(
                                         egui::RichText::new(format!("  {errs} erori"))
                                             .size(10.5)
-                                            .color(egui::Color32::from_rgb(220, 80, 70)),
+                                            .color(egui::Color32::from_rgb(220, 80, 70))
+                                            .strong(),
                                     );
                                 }
                                 if warns > 0 {
                                     ui.label(
-                                        egui::RichText::new(format!("  {warns} avertismente"))
+                                        egui::RichText::new(format!("  {warns} atenționări"))
                                             .size(10.5)
                                             .color(egui::Color32::from_rgb(210, 170, 40)),
                                     );
                                 }
-                                if errs == 0 && warns == 0 {
+                                if errs == 0 && warns == 0 && !checking {
                                     ui.label(
                                         egui::RichText::new("  fără erori")
                                             .size(10.5)
-                                            .color(egui::Color32::from_gray(120))
+                                            .color(egui::Color32::from_gray(130))
                                             .italics(),
                                     );
                                 }
                             }
                             LspStatus::Failed(msg) => {
                                 ui.label(
-                                    egui::RichText::new(
-                                        format!("{} RA eșuat: {}", ph::X_CIRCLE,
-                                            msg.lines().next().unwrap_or("eroare"))
-                                    )
+                                    egui::RichText::new(format!(
+                                        "{} RA eșuat: {}",
+                                        ph::X_CIRCLE,
+                                        msg.lines().next().unwrap_or("eroare")
+                                    ))
                                     .size(10.5)
                                     .color(egui::Color32::from_rgb(220, 80, 70)),
                                 )
@@ -1877,9 +1895,8 @@ impl eframe::App for AppIde {
 
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
-                let ctrl_space_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::CTRL, egui::Key::Space)
-                });
+                let ctrl_space_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
 
                 let editor_resp = CodeEditor::default()
                     .id_source(editor_id)
@@ -1916,7 +1933,9 @@ impl eframe::App for AppIde {
                 }
 
                 // ── LSP completion: post-editor apply + trigger + popup ───────
-                let cursor_char_idx = editor_resp.state.cursor
+                let cursor_char_idx = editor_resp
+                    .state
+                    .cursor
                     .char_range()
                     .map(|r| r.primary.index);
 
@@ -1926,7 +1945,7 @@ impl eframe::App for AppIde {
                         let word_start = lsp_word_start(&display_code, cur_idx);
                         let chars: Vec<char> = display_code.chars().collect();
                         let before: String = chars[..word_start].iter().collect();
-                        let after:  String = chars[cur_idx..].iter().collect();
+                        let after: String = chars[cur_idx..].iter().collect();
                         display_code = format!("{}{}{}", before, insert_text, after);
                         // Persist the change so the write-back below picks it up
                         // (the write-back already happened above; redo it for this file)
@@ -1956,10 +1975,7 @@ impl eframe::App for AppIde {
                 {
                     let lsp_ready = lsp_file_tracked
                         && current_rel_path.is_some()
-                        && matches!(
-                            self.lsp_state.lock().unwrap().status,
-                            lsp::LspStatus::Ready
-                        );
+                        && matches!(self.lsp_state.lock().unwrap().status, lsp::LspStatus::Ready);
                     if lsp_ready {
                         let rel = current_rel_path.as_deref().unwrap_or("src/main.rs");
                         // Manual Ctrl+Space
@@ -1975,17 +1991,19 @@ impl eframe::App for AppIde {
                                     lsp.request_completion(rel, line, col, None);
                                 }
                                 self.completion_trigger_idx = idx;
-                                self.completion_sel          = 0;
-                                self.completion_open         = true;
+                                self.completion_sel = 0;
+                                self.completion_open = true;
                             }
                         }
 
                         // Auto-trigger on `.`  (method / field access)
                         let dot_trigger = editor_resp.response.changed()
-                            && cursor_char_idx.map(|idx| {
-                                let chars: Vec<char> = display_code.chars().collect();
-                                idx > 0 && chars.get(idx - 1) == Some(&'.')
-                            }).unwrap_or(false);
+                            && cursor_char_idx
+                                .map(|idx| {
+                                    let chars: Vec<char> = display_code.chars().collect();
+                                    idx > 0 && chars.get(idx - 1) == Some(&'.')
+                                })
+                                .unwrap_or(false);
                         if dot_trigger && !ctrl_space_pressed {
                             if let Some(idx) = cursor_char_idx {
                                 let (line, col) = lsp_cursor_pos(&display_code, idx);
@@ -1995,8 +2013,8 @@ impl eframe::App for AppIde {
                                     lsp.request_completion(rel, line, col, Some('.'));
                                 }
                                 self.completion_trigger_idx = idx;
-                                self.completion_sel          = 0;
-                                self.completion_open         = true;
+                                self.completion_sel = 0;
+                                self.completion_open = true;
                             }
                         }
 
@@ -2004,12 +2022,14 @@ impl eframe::App for AppIde {
                         let colon_trigger = !dot_trigger
                             && !ctrl_space_pressed
                             && editor_resp.response.changed()
-                            && cursor_char_idx.map(|idx| {
-                                let chars: Vec<char> = display_code.chars().collect();
-                                idx >= 2
-                                    && chars.get(idx - 1) == Some(&':')
-                                    && chars.get(idx - 2) == Some(&':')
-                            }).unwrap_or(false);
+                            && cursor_char_idx
+                                .map(|idx| {
+                                    let chars: Vec<char> = display_code.chars().collect();
+                                    idx >= 2
+                                        && chars.get(idx - 1) == Some(&':')
+                                        && chars.get(idx - 2) == Some(&':')
+                                })
+                                .unwrap_or(false);
                         if colon_trigger {
                             if let Some(idx) = cursor_char_idx {
                                 let (line, col) = lsp_cursor_pos(&display_code, idx);
@@ -2019,8 +2039,8 @@ impl eframe::App for AppIde {
                                     lsp.request_completion(rel, line, col, Some(':'));
                                 }
                                 self.completion_trigger_idx = idx;
-                                self.completion_sel          = 0;
-                                self.completion_open         = true;
+                                self.completion_sel = 0;
+                                self.completion_open = true;
                             }
                         }
                     }
@@ -2029,9 +2049,9 @@ impl eframe::App for AppIde {
                     // or too far ahead (user navigated away from the trigger word).
                     if self.completion_open {
                         if let Some(idx) = cursor_char_idx {
-                            let cursor  = idx as isize;
+                            let cursor = idx as isize;
                             let trigger = self.completion_trigger_idx as isize;
-                            let delta   = cursor - trigger;
+                            let delta = cursor - trigger;
                             // delta < 0  → user deleted back past trigger point
                             // delta > 80 → user moved far forward (switched context)
                             if delta < 0 || delta > 80 {
@@ -2049,11 +2069,13 @@ impl eframe::App for AppIde {
                         // ── Live prefix filtering ────────────────────────────────
                         // Compute what the user has typed since the trigger point.
                         let prefix = cursor_char_idx
-                            .map(|cur| lsp_completion_prefix(
-                                &display_code,
-                                self.completion_trigger_idx,
-                                cur,
-                            ))
+                            .map(|cur| {
+                                lsp_completion_prefix(
+                                    &display_code,
+                                    self.completion_trigger_idx,
+                                    cur,
+                                )
+                            })
                             .unwrap_or_default();
 
                         let filtered: Vec<lsp::CompletionItem> = if prefix.is_empty() {
@@ -2075,8 +2097,7 @@ impl eframe::App for AppIde {
                             self.completion_open = false;
                         } else {
                             // Clamp selection into the visible filtered range.
-                            self.completion_sel =
-                                self.completion_sel.min(filtered.len() - 1);
+                            self.completion_sel = self.completion_sel.min(filtered.len() - 1);
                             let sel = self.completion_sel;
 
                             // ── Popup screen position ────────────────────────────
@@ -2084,14 +2105,12 @@ impl eframe::App for AppIde {
                                 editor_resp.state.cursor.char_range()
                             {
                                 let cursor_idx = char_range.primary.index;
-                                let text_char_count =
-                                    editor_resp.galley.job.text.chars().count();
-                                let clamped = cursor_idx
-                                    .min(text_char_count.saturating_sub(1));
-                                let cursor_local = editor_resp.galley
+                                let text_char_count = editor_resp.galley.job.text.chars().count();
+                                let clamped = cursor_idx.min(text_char_count.saturating_sub(1));
+                                let cursor_local = editor_resp
+                                    .galley
                                     .pos_from_cursor(egui::text::CCursor::new(clamped));
-                                let offset =
-                                    egui::vec2(0.0, cursor_local.height() + 2.0);
+                                let offset = egui::vec2(0.0, cursor_local.height() + 2.0);
                                 editor_resp.response.rect.left_top()
                                     + cursor_local.min.to_vec2()
                                     + offset
@@ -2105,10 +2124,8 @@ impl eframe::App for AppIde {
                                 .fixed_pos(popup_pos)
                                 .order(egui::Order::Foreground)
                                 .show(ui.ctx(), |ui| {
-                                    egui::Frame::popup(&ui.ctx().global_style())
-                                        .show(ui, |ui| {
-                                        ui.style_mut().wrap_mode =
-                                            Some(egui::TextWrapMode::Extend);
+                                    egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
+                                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                                         ui.set_min_width(440.0);
                                         ui.set_max_width(440.0);
 
@@ -2116,109 +2133,110 @@ impl eframe::App for AppIde {
                                             .max_height(300.0)
                                             .auto_shrink([false, true])
                                             .show(ui, |ui| {
-                                            for (i, item) in filtered.iter().enumerate() {
-                                                let selected = i == sel;
+                                                for (i, item) in filtered.iter().enumerate() {
+                                                    let selected = i == sel;
 
-                                                let fg = if selected {
-                                                    egui::Color32::WHITE
-                                                } else {
-                                                    egui::Color32::from_rgb(200, 210, 230)
-                                                };
-                                                let sel_bg =
-                                                    egui::Color32::from_rgb(40, 90, 160);
-                                                let hover_bg =
-                                                    egui::Color32::from_rgb(50, 60, 80);
-                                                let detail_fg = if selected {
-                                                    egui::Color32::from_rgb(160, 195, 255)
-                                                } else {
-                                                    egui::Color32::from_rgb(110, 130, 155)
-                                                };
+                                                    let fg = if selected {
+                                                        egui::Color32::WHITE
+                                                    } else {
+                                                        egui::Color32::from_rgb(200, 210, 230)
+                                                    };
+                                                    let sel_bg =
+                                                        egui::Color32::from_rgb(40, 90, 160);
+                                                    let hover_bg =
+                                                        egui::Color32::from_rgb(50, 60, 80);
+                                                    let detail_fg = if selected {
+                                                        egui::Color32::from_rgb(160, 195, 255)
+                                                    } else {
+                                                        egui::Color32::from_rgb(110, 130, 155)
+                                                    };
 
-                                                // Allocate the full row width for hit-testing.
-                                                let row_h = 19.0;
-                                                let avail_w = ui.available_width();
-                                                let (rect, row_resp) =
-                                                    ui.allocate_exact_size(
+                                                    // Allocate the full row width for hit-testing.
+                                                    let row_h = 19.0;
+                                                    let avail_w = ui.available_width();
+                                                    let (rect, row_resp) = ui.allocate_exact_size(
                                                         egui::vec2(avail_w, row_h),
                                                         egui::Sense::click(),
                                                     );
 
-                                                // Background (selected / hovered).
-                                                if selected {
-                                                    ui.painter().rect_filled(
-                                                        rect, 2.0, sel_bg,
-                                                    );
-                                                } else if row_resp.hovered() {
-                                                    ui.painter().rect_filled(
-                                                        rect, 2.0, hover_bg,
-                                                    );
-                                                }
+                                                    // Background (selected / hovered).
+                                                    if selected {
+                                                        ui.painter().rect_filled(rect, 2.0, sel_bg);
+                                                    } else if row_resp.hovered() {
+                                                        ui.painter()
+                                                            .rect_filled(rect, 2.0, hover_bg);
+                                                    }
 
-                                                let painter = ui.painter();
-                                                let icon    = lsp_kind_icon(item.kind);
-                                                let label   = format!("{} {}", icon, item.label);
+                                                    let painter = ui.painter();
+                                                    let icon = lsp_kind_icon(item.kind);
+                                                    let label = format!("{} {}", icon, item.label);
 
-                                                // Icon + label — left-aligned.
-                                                painter.text(
-                                                    rect.left_center()
-                                                        + egui::vec2(4.0, 0.0),
-                                                    egui::Align2::LEFT_CENTER,
-                                                    &label,
-                                                    egui::FontId::monospace(12.0),
-                                                    fg,
-                                                );
-
-                                                // Detail (type signature) — right-aligned,
-                                                // smaller and dimmer, truncated if needed.
-                                                if !item.detail.is_empty() {
-                                                    let det = {
-                                                        let chars: Vec<char> =
-                                                            item.detail.chars().collect();
-                                                        if chars.len() > 38 {
-                                                            format!("{}…",
-                                                                chars[..35].iter().collect::<String>())
-                                                        } else {
-                                                            item.detail.clone()
-                                                        }
-                                                    };
+                                                    // Icon + label — left-aligned.
                                                     painter.text(
-                                                        rect.right_center()
-                                                            - egui::vec2(4.0, 0.0),
-                                                        egui::Align2::RIGHT_CENTER,
-                                                        det,
-                                                        egui::FontId::monospace(10.5),
-                                                        detail_fg,
+                                                        rect.left_center() + egui::vec2(4.0, 0.0),
+                                                        egui::Align2::LEFT_CENTER,
+                                                        &label,
+                                                        egui::FontId::monospace(12.0),
+                                                        fg,
                                                     );
-                                                }
 
-                                                // Mouse click → deferred insert.
-                                                if row_resp.clicked() {
-                                                    self.completion_pending_insert =
-                                                        Some(item.insert_text.clone());
-                                                    self.completion_open = false;
-                                                }
+                                                    // Detail (type signature) — right-aligned,
+                                                    // smaller and dimmer, truncated if needed.
+                                                    if !item.detail.is_empty() {
+                                                        let det = {
+                                                            let chars: Vec<char> =
+                                                                item.detail.chars().collect();
+                                                            if chars.len() > 38 {
+                                                                format!(
+                                                                    "{}…",
+                                                                    chars[..35]
+                                                                        .iter()
+                                                                        .collect::<String>()
+                                                                )
+                                                            } else {
+                                                                item.detail.clone()
+                                                            }
+                                                        };
+                                                        painter.text(
+                                                            rect.right_center()
+                                                                - egui::vec2(4.0, 0.0),
+                                                            egui::Align2::RIGHT_CENTER,
+                                                            det,
+                                                            egui::FontId::monospace(10.5),
+                                                            detail_fg,
+                                                        );
+                                                    }
 
-                                                // Scroll selected item into view.
-                                                if selected {
-                                                    row_resp.scroll_to_me(None);
-                                                }
+                                                    // Mouse click → deferred insert.
+                                                    if row_resp.clicked() {
+                                                        self.completion_pending_insert =
+                                                            Some(item.insert_text.clone());
+                                                        self.completion_open = false;
+                                                    }
 
-                                                // Hover tooltip: documentation first,
-                                                // then full detail as fallback.
-                                                if !item.documentation.is_empty() {
-                                                    row_resp.on_hover_text(
-                                                        egui::RichText::new(&item.documentation)
+                                                    // Scroll selected item into view.
+                                                    if selected {
+                                                        row_resp.scroll_to_me(None);
+                                                    }
+
+                                                    // Hover tooltip: documentation first,
+                                                    // then full detail as fallback.
+                                                    if !item.documentation.is_empty() {
+                                                        row_resp.on_hover_text(
+                                                            egui::RichText::new(
+                                                                &item.documentation,
+                                                            )
                                                             .size(11.5),
-                                                    );
-                                                } else if !item.detail.is_empty() {
-                                                    row_resp.on_hover_text(
-                                                        egui::RichText::new(&item.detail)
-                                                            .monospace()
-                                                            .size(11.0),
-                                                    );
+                                                        );
+                                                    } else if !item.detail.is_empty() {
+                                                        row_resp.on_hover_text(
+                                                            egui::RichText::new(&item.detail)
+                                                                .monospace()
+                                                                .size(11.0),
+                                                        );
+                                                    }
                                                 }
-                                            }
-                                        }); // ScrollArea
+                                            }); // ScrollArea
                                     }); // Frame
                                 }); // Area
                         }
@@ -2229,7 +2247,8 @@ impl eframe::App for AppIde {
                         let (resp_received, timed_out) = {
                             let lsp = self.lsp_state.lock().unwrap();
                             let received = lsp.completion_response_received;
-                            let timeout  = lsp.completion_request_sent_at
+                            let timeout = lsp
+                                .completion_request_sent_at
                                 .map(|t| t.elapsed().as_secs() > 6)
                                 .unwrap_or(false);
                             (received, timeout)
@@ -2243,10 +2262,16 @@ impl eframe::App for AppIde {
                             let popup_pos = cursor_char_idx.and_then(|_| {
                                 editor_resp.state.cursor.char_range().map(|cr| {
                                     let clamped = cr.primary.index.min(
-                                        editor_resp.galley.job.text.chars().count()
+                                        editor_resp
+                                            .galley
+                                            .job
+                                            .text
+                                            .chars()
+                                            .count()
                                             .saturating_sub(1),
                                     );
-                                    let local = editor_resp.galley
+                                    let local = editor_resp
+                                        .galley
                                         .pos_from_cursor(egui::text::CCursor::new(clamped));
                                     editor_resp.response.rect.left_top()
                                         + local.min.to_vec2()
@@ -2258,21 +2283,23 @@ impl eframe::App for AppIde {
                                     .fixed_pos(pos)
                                     .order(egui::Order::Foreground)
                                     .show(ui.ctx(), |ui| {
-                                        egui::Frame::popup(&ui.ctx().global_style())
-                                            .show(ui, |ui| {
-                                            ui.add_space(2.0);
-                                            ui.horizontal(|ui| {
-                                                ui.spinner();
-                                                ui.label(
-                                                    egui::RichText::new("  rust-analyzer…")
-                                                        .size(11.5)
-                                                        .color(
-                                                            egui::Color32::from_rgb(160, 175, 200),
-                                                        ),
-                                                );
-                                            });
-                                            ui.add_space(2.0);
-                                        });
+                                        egui::Frame::popup(&ui.ctx().global_style()).show(
+                                            ui,
+                                            |ui| {
+                                                ui.add_space(2.0);
+                                                ui.horizontal(|ui| {
+                                                    ui.spinner();
+                                                    ui.label(
+                                                        egui::RichText::new("  rust-analyzer…")
+                                                            .size(11.5)
+                                                            .color(egui::Color32::from_rgb(
+                                                                160, 175, 200,
+                                                            )),
+                                                    );
+                                                });
+                                                ui.add_space(2.0);
+                                            },
+                                        );
                                     });
                                 ui.ctx().request_repaint();
                             }
@@ -2300,20 +2327,18 @@ impl eframe::App for AppIde {
                         .unwrap_or_default();
 
                     if !diags.is_empty() {
-                        let gp          = editor_resp.galley_pos; // galley origin on screen
-                        let clip        = editor_resp.text_clip_rect;
-                        let painter     = ui.painter().with_clip_rect(clip);
+                        let gp = editor_resp.galley_pos; // galley origin on screen
+                        let clip = editor_resp.text_clip_rect;
+                        let painter = ui.painter().with_clip_rect(clip);
                         let total_chars = display_code.chars().count();
-
 
                         // ── Per-diagnostic: underline + inline message + tooltip ──
                         for (di, diag) in diags.iter().enumerate() {
-                            let start_ci = lsp_pos_to_char_idx(
-                                &display_code, diag.line, diag.col,
-                            ).min(total_chars);
-                            let end_ci_raw = lsp_pos_to_char_idx(
-                                &display_code, diag.end_line, diag.end_col,
-                            ).min(total_chars);
+                            let start_ci = lsp_pos_to_char_idx(&display_code, diag.line, diag.col)
+                                .min(total_chars);
+                            let end_ci_raw =
+                                lsp_pos_to_char_idx(&display_code, diag.end_line, diag.end_col)
+                                    .min(total_chars);
                             let end_ci = if end_ci_raw <= start_ci {
                                 (start_ci + 1).min(total_chars)
                             } else {
@@ -2321,13 +2346,15 @@ impl eframe::App for AppIde {
                             };
 
                             // Galley-local positions
-                            let loc_s = editor_resp.galley
+                            let loc_s = editor_resp
+                                .galley
                                 .pos_from_cursor(egui::text::CCursor::new(start_ci));
-                            let loc_e = editor_resp.galley
+                            let loc_e = editor_resp
+                                .galley
                                 .pos_from_cursor(egui::text::CCursor::new(end_ci));
 
                             // Screen coordinates
-                            let sx     = gp.x + loc_s.min.x;
+                            let sx = gp.x + loc_s.min.x;
                             let sy_top = gp.y + loc_s.min.y;
                             let sy_bot = gp.y + loc_s.max.y;
                             let line_h = loc_s.height().max(1.0);
@@ -2340,7 +2367,9 @@ impl eframe::App for AppIde {
                             } else {
                                 gp.x + editor_resp.galley.rect.width()
                             };
-                            if ex <= sx + 1.0 { continue; }
+                            if ex <= sx + 1.0 {
+                                continue;
+                            }
 
                             // Severity colours
                             let (ul_color, bg_color, msg_color) = match diag.severity {
@@ -2373,7 +2402,8 @@ impl eframe::App for AppIde {
                                         egui::pos2(sx, sy_top),
                                         egui::pos2(ex, sy_bot),
                                     ),
-                                    0.0, bg_color,
+                                    0.0,
+                                    bg_color,
                                 );
                             }
 
@@ -2382,21 +2412,18 @@ impl eframe::App for AppIde {
 
                             // ── Inline message at end of line ─────────────────────
                             // Find the EOL position so the message appears after the code.
-                            let eol_ci = lsp_line_end_char_idx(&display_code, diag.line)
-                                .min(total_chars);
-                            let loc_eol = editor_resp.galley
+                            let eol_ci =
+                                lsp_line_end_char_idx(&display_code, diag.line).min(total_chars);
+                            let loc_eol = editor_resp
+                                .galley
                                 .pos_from_cursor(egui::text::CCursor::new(eol_ci));
                             // Only draw when the error line is on the same screen row
                             // as its EOL (avoids stray messages for very long lines).
-                            let same_row_eol =
-                                (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
+                            let same_row_eol = (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
                             if same_row_eol {
                                 let msg_x = gp.x + loc_eol.min.x + 16.0; // 16px gap
                                 // Truncate to keep the inline hint compact
-                                let short_msg: String = diag.message
-                                    .chars()
-                                    .take(72)
-                                    .collect();
+                                let short_msg: String = diag.message.chars().take(72).collect();
                                 let short_msg = if diag.message.chars().count() > 72 {
                                     format!("{short_msg}…")
                                 } else {
@@ -2423,12 +2450,12 @@ impl eframe::App for AppIde {
                             );
                             if hover.hovered() {
                                 let icon = match diag.severity {
-                                    lsp::DiagSeverity::Error   => "⛔",
+                                    lsp::DiagSeverity::Error => "⛔",
                                     lsp::DiagSeverity::Warning => "⚠",
-                                    lsp::DiagSeverity::Info    => "ℹ",
-                                    lsp::DiagSeverity::Hint    => "·",
+                                    lsp::DiagSeverity::Info => "ℹ",
+                                    lsp::DiagSeverity::Hint => "·",
                                 };
-                                let msg  = format!("{icon}  {}", diag.message);
+                                let msg = format!("{icon}  {}", diag.message);
                                 let code = diag.code.clone();
                                 #[allow(deprecated)]
                                 egui::show_tooltip_at_pointer(
@@ -2442,7 +2469,7 @@ impl eframe::App for AppIde {
                                             ui.label(
                                                 egui::RichText::new(format!("[{c}]"))
                                                     .size(10.5)
-                                                    .color(egui::Color32::from_rgb(140,150,170)),
+                                                    .color(egui::Color32::from_rgb(140, 150, 170)),
                                             );
                                         }
                                     },
@@ -3148,7 +3175,9 @@ fn show_project_tree(
         lsp,
     );
     // build.rs and memory.x only exist for RustEmbedded toolchain
-    if *toolchain == ToolchainKind::RustEmbedded {
+    if *toolchain == ToolchainKind::RustEmbedded
+    /*|| *toolchain == ToolchainKind::EspRust*/
+    {
         file_row(
             ui,
             4.0,
@@ -4111,9 +4140,7 @@ fn show_dfu_tab(
             if ui
                 .add_enabled(
                     !busy,
-                    egui::Button::new(
-                        egui::RichText::new(&btn_label).size(10.5).color(btn_color),
-                    ),
+                    egui::Button::new(egui::RichText::new(&btn_label).size(10.5).color(btn_color)),
                 )
                 .on_hover_text(
                     "Run `espflash board-info` — connects to the chip and reads:\n\
@@ -4143,39 +4170,40 @@ fn show_dfu_tab(
     ui.separator();
 
     // ── DFU Error / Success banners ───────────────────────────────────────────
-    if let DfuState::Error(msg) = &state {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(ph::X_CIRCLE)
-                    .size(13.0)
-                    .color(egui::Color32::from_rgb(220, 80, 70)),
-            );
-            ui.label(
-                egui::RichText::new(format!("DFU: {}", msg.lines().next().unwrap_or("Error")))
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(220, 80, 70))
-                    .strong(),
-            );
-        });
-        ui.separator();
-    }
-    if matches!(state, DfuState::Success) {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(ph::CHECK_CIRCLE)
-                    .size(13.0)
-                    .color(egui::Color32::from_rgb(80, 200, 100)),
-            );
-            ui.label(
-                egui::RichText::new("Device programmed via DFU successfully!")
-                    .size(11.0)
-                    .color(egui::Color32::from_rgb(80, 200, 100))
-                    .strong(),
-            );
-        });
-        ui.separator();
-    }
-
+    /*
+        if let DfuState::Error(msg) = &state {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(ph::X_CIRCLE)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(220, 80, 70)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("DFU: {}", msg.lines().next().unwrap_or("Error")))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(220, 80, 70))
+                        .strong(),
+                );
+            });
+            ui.separator();
+        }
+        if matches!(state, DfuState::Success) {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(ph::CHECK_CIRCLE)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(80, 200, 100)),
+                );
+                ui.label(
+                    egui::RichText::new("Device programmed via DFU successfully!")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(80, 200, 100))
+                        .strong(),
+                );
+            });
+            ui.separator();
+        }
+    */
     // ── OpenOCD Error / Success banners ───────────────────────────────────────
     if let OpenOcdState::Error(msg) = &ocd_state {
         ui.horizontal(|ui| {
@@ -4276,19 +4304,20 @@ fn show_dfu_tab(
                 // Using starts_with() avoids false positives from crate names.
                 let trimmed = line.trim_start();
                 let color = if line.starts_with("✔") {
-                    egui::Color32::from_rgb(80, 200, 100)   // green  — success
+                    egui::Color32::from_rgb(80, 200, 100) // green  — success
                 } else if line.starts_with("▶") {
-                    egui::Color32::from_rgb(100, 180, 255)  // blue   — command header
+                    egui::Color32::from_rgb(100, 180, 255) // blue   — command header
                 } else if trimmed.starts_with("error[") || trimmed.starts_with("error:") {
-                    egui::Color32::from_rgb(220, 100, 80)   // red    — real compile error
+                    egui::Color32::from_rgb(220, 100, 80) // red    — real compile error
                 } else if trimmed.starts_with("warning[") || trimmed.starts_with("warning:") {
-                    egui::Color32::from_rgb(210, 170, 40)   // yellow — compile warning
+                    egui::Color32::from_rgb(210, 170, 40) // yellow — compile warning
                 } else if trimmed.starts_with("Compiling ")
-                       || trimmed.starts_with("Finished ")
-                       || trimmed.starts_with("Running ") {
-                    egui::Color32::from_rgb(130, 170, 130)  // muted green — progress
+                    || trimmed.starts_with("Finished ")
+                    || trimmed.starts_with("Running ")
+                {
+                    egui::Color32::from_rgb(130, 170, 130) // muted green — progress
                 } else {
-                    egui::Color32::from_rgb(175, 180, 192)  // grey   — normal output
+                    egui::Color32::from_rgb(175, 180, 192) // grey   — normal output
                 };
                 ui.label(
                     egui::RichText::new(line.as_str())
@@ -4478,9 +4507,7 @@ fn show_cargo_tab(
                 .id_salt("build_failed_scroll")
                 .show(ui, |ui| {
                     // Strip the [DISK_FULL] marker before display
-                    let display_msg = msg
-                        .strip_prefix("[DISK_FULL] ")
-                        .unwrap_or(msg.as_str());
+                    let display_msg = msg.strip_prefix("[DISK_FULL] ").unwrap_or(msg.as_str());
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(display_msg)
@@ -4958,88 +4985,88 @@ fn apply_dark_theme(ctx: &egui::Context) {
     let sep = Color32::from_rgb(0x3a, 0x3f, 0x4b);
     let fg0 = Color32::from_rgb(0xab, 0xb2, 0xbf);
     let fg1 = Color32::from_rgb(0xd0, 0xd7, 0xe0);
-    let acc    = Color32::from_rgb(0x52, 0x8b, 0xff);
+    let acc = Color32::from_rgb(0x52, 0x8b, 0xff);
     let acc_bg = Color32::from_rgba_unmultiplied(0x52, 0x8b, 0xff, 50);
-    let cr4    = egui::CornerRadius::same(4); // CornerRadius uses u8
+    let cr4 = egui::CornerRadius::same(4); // CornerRadius uses u8
 
     // ── Backgrounds ──────────────────────────────────────────────────────────
-    vis.window_fill      = bg1;
-    vis.panel_fill       = bg1;
-    vis.faint_bg_color   = bg0;
+    vis.window_fill = bg1;
+    vis.panel_fill = bg1;
+    vis.faint_bg_color = bg0;
     vis.extreme_bg_color = bg0;
-    vis.code_bg_color    = Color32::from_rgb(0x1a, 0x1d, 0x23);
+    vis.code_bg_color = Color32::from_rgb(0x1a, 0x1d, 0x23);
 
     // ── Window chrome ────────────────────────────────────────────────────────
-    vis.window_stroke         = egui::Stroke::new(1.0, sep);
-    vis.window_corner_radius  = egui::CornerRadius::same(6);
-    vis.menu_corner_radius    = egui::CornerRadius::same(5);
+    vis.window_stroke = egui::Stroke::new(1.0, sep);
+    vis.window_corner_radius = egui::CornerRadius::same(6);
+    vis.menu_corner_radius = egui::CornerRadius::same(5);
     vis.window_shadow = egui::Shadow {
         offset: [0, 4],
-        blur:   14,
+        blur: 14,
         spread: 0,
-        color:  Color32::from_black_alpha(130),
+        color: Color32::from_black_alpha(130),
     };
     vis.popup_shadow = egui::Shadow {
         offset: [0, 2],
-        blur:   8,
+        blur: 8,
         spread: 0,
-        color:  Color32::from_black_alpha(100),
+        color: Color32::from_black_alpha(100),
     };
 
     // ── Widgets: noninteractive ───────────────────────────────────────────────
-    vis.widgets.noninteractive.bg_fill      = bg1;
+    vis.widgets.noninteractive.bg_fill = bg1;
     vis.widgets.noninteractive.weak_bg_fill = bg1;
-    vis.widgets.noninteractive.bg_stroke    = egui::Stroke::new(1.0, sep);
-    vis.widgets.noninteractive.fg_stroke    = egui::Stroke::new(1.0, fg0);
+    vis.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, sep);
+    vis.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, fg0);
     vis.widgets.noninteractive.corner_radius = cr4;
 
     // ── Widgets: inactive ────────────────────────────────────────────────────
-    vis.widgets.inactive.bg_fill      = bg2;
+    vis.widgets.inactive.bg_fill = bg2;
     vis.widgets.inactive.weak_bg_fill = bg2;
-    vis.widgets.inactive.bg_stroke    = egui::Stroke::new(1.0, sep);
-    vis.widgets.inactive.fg_stroke    = egui::Stroke::new(1.5, fg0);
+    vis.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, sep);
+    vis.widgets.inactive.fg_stroke = egui::Stroke::new(1.5, fg0);
     vis.widgets.inactive.corner_radius = cr4;
 
     // ── Widgets: hovered ─────────────────────────────────────────────────────
-    vis.widgets.hovered.bg_fill      = bg3;
+    vis.widgets.hovered.bg_fill = bg3;
     vis.widgets.hovered.weak_bg_fill = bg3;
-    vis.widgets.hovered.bg_stroke    = egui::Stroke::new(1.0, Color32::from_rgb(0x60, 0x6a, 0x80));
-    vis.widgets.hovered.fg_stroke    = egui::Stroke::new(1.5, fg1);
+    vis.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x60, 0x6a, 0x80));
+    vis.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, fg1);
     vis.widgets.hovered.corner_radius = cr4;
 
     // ── Widgets: active (pressed) ────────────────────────────────────────────
-    vis.widgets.active.bg_fill      = bg4;
+    vis.widgets.active.bg_fill = bg4;
     vis.widgets.active.weak_bg_fill = bg4;
-    vis.widgets.active.bg_stroke    = egui::Stroke::new(1.0, acc);
-    vis.widgets.active.fg_stroke    = egui::Stroke::new(2.0, fg1);
+    vis.widgets.active.bg_stroke = egui::Stroke::new(1.0, acc);
+    vis.widgets.active.fg_stroke = egui::Stroke::new(2.0, fg1);
     vis.widgets.active.corner_radius = cr4;
 
     // ── Widgets: open (combo-box open state) ─────────────────────────────────
-    vis.widgets.open.bg_fill      = bg4;
+    vis.widgets.open.bg_fill = bg4;
     vis.widgets.open.weak_bg_fill = bg4;
-    vis.widgets.open.bg_stroke    = egui::Stroke::new(1.0, acc);
-    vis.widgets.open.fg_stroke    = egui::Stroke::new(1.5, fg1);
+    vis.widgets.open.bg_stroke = egui::Stroke::new(1.0, acc);
+    vis.widgets.open.fg_stroke = egui::Stroke::new(1.5, fg1);
     vis.widgets.open.corner_radius = cr4;
 
     // ── Text / selection ─────────────────────────────────────────────────────
     vis.override_text_color = Some(fg0);
-    vis.selection.bg_fill   = acc_bg;
-    vis.selection.stroke    = egui::Stroke::new(1.0, acc);
+    vis.selection.bg_fill = acc_bg;
+    vis.selection.stroke = egui::Stroke::new(1.0, acc);
 
     // ── Misc ─────────────────────────────────────────────────────────────────
-    vis.hyperlink_color  = Color32::from_rgb(0x61, 0xaf, 0xef);
-    vis.warn_fg_color    = Color32::from_rgb(0xe5, 0xc0, 0x7b);
-    vis.error_fg_color   = Color32::from_rgb(0xe0, 0x6c, 0x75);
+    vis.hyperlink_color = Color32::from_rgb(0x61, 0xaf, 0xef);
+    vis.warn_fg_color = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    vis.error_fg_color = Color32::from_rgb(0xe0, 0x6c, 0x75);
 
     ctx.set_visuals(vis);
 
     // ── Global style tweaks ──────────────────────────────────────────────────
     let mut style = (*ctx.style()).clone();
 
-    style.spacing.item_spacing   = egui::vec2(6.0, 4.0);
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
-    style.spacing.window_margin  = egui::Margin::same(8);
-    style.spacing.indent         = 14.0;
+    style.spacing.window_margin = egui::Margin::same(8);
+    style.spacing.indent = 14.0;
 
     use egui::TextStyle;
     style.text_styles.insert(
@@ -5076,14 +5103,14 @@ fn apply_dark_theme(ctx: &egui::Context) {
 /// result is the same.  Emoji and other non-BMP chars are 2 units each.
 fn lsp_cursor_pos(text: &str, char_idx: usize) -> (u32, u32) {
     let mut line: u32 = 0;
-    let mut col: u32  = 0;
+    let mut col: u32 = 0;
     for (i, c) in text.chars().enumerate() {
         if i >= char_idx {
             break;
         }
         if c == '\n' {
             line += 1;
-            col   = 0;
+            col = 0;
         } else {
             col += c.len_utf16() as u32;
         }
@@ -5103,7 +5130,7 @@ fn lsp_completion_prefix(text: &str, trigger_idx: usize, cursor_idx: usize) -> S
     }
     let chars: Vec<char> = text.chars().collect();
     let start = trigger_idx.min(chars.len());
-    let end   = cursor_idx.min(chars.len());
+    let end = cursor_idx.min(chars.len());
     // Only take identifier characters (letters, digits, _).  A dot or space
     // means the user has moved to a new expression — we'll rely on the delta
     // check in the trigger section to close the popup in that case.
@@ -5132,14 +5159,12 @@ fn lsp_word_start(text: &str, end_idx: usize) -> usize {
 /// - `UserFile(i)`  → `"src/{user_src_files[i].0}"`  (e.g. `"src/pins.rs"`)
 /// - Other files (Cargo.toml, memory.x, …) → `None` (not tracked by RA)
 fn selected_file_rel_path(
-    selected:   &ProjectFileId,
+    selected: &ProjectFileId,
     user_files: &[(String, String)],
 ) -> Option<String> {
     match selected {
         ProjectFileId::MainRs => Some("src/main.rs".to_owned()),
-        ProjectFileId::UserFile(i) => {
-            user_files.get(*i).map(|(p, _)| format!("src/{p}"))
-        }
+        ProjectFileId::UserFile(i) => user_files.get(*i).map(|(p, _)| format!("src/{p}")),
         _ => None,
     }
 }
@@ -5152,7 +5177,7 @@ fn selected_file_rel_path(
 /// URI is used as the key.  This helper tries several key formats so inline
 /// diagnostics work even when the key is "wrong".
 fn diags_for_file(
-    map:      &std::collections::HashMap<String, Vec<lsp::LspDiagnostic>>,
+    map: &std::collections::HashMap<String, Vec<lsp::LspDiagnostic>>,
     rel_path: &str,
 ) -> Vec<lsp::LspDiagnostic> {
     // 1. Exact match (ideal case)
@@ -5162,14 +5187,11 @@ fn diags_for_file(
     // 2. Case-insensitive suffix match for Windows drive-letter mismatches.
     //    The key may be a full URI like "file:///c:/.../{rel_path}".
     let rel_lc = rel_path.to_lowercase();
-    let suffix_slash  = format!("/{rel_lc}");
+    let suffix_slash = format!("/{rel_lc}");
     let suffix_bslash = format!("\\{}", rel_lc.replace('/', "\\"));
     for (k, v) in map {
         let k_lc = k.to_lowercase();
-        if k_lc.ends_with(&suffix_slash)
-            || k_lc.ends_with(&suffix_bslash)
-            || k_lc == rel_lc
-        {
+        if k_lc.ends_with(&suffix_slash) || k_lc.ends_with(&suffix_bslash) || k_lc == rel_lc {
             return v.clone();
         }
     }
@@ -5216,9 +5238,9 @@ fn lsp_line_end_char_idx(text: &str, line_1: u32) -> usize {
 fn lsp_pos_to_char_idx(text: &str, line_1: u32, col_1: u32) -> usize {
     let want_line = line_1.saturating_sub(1) as usize;
     let want_utf16_col = col_1.saturating_sub(1) as usize;
-    let mut cur_line     = 0usize;
-    let mut utf16_col    = 0usize;
-    let mut char_idx     = 0usize;
+    let mut cur_line = 0usize;
+    let mut utf16_col = 0usize;
+    let mut char_idx = 0usize;
     for c in text.chars() {
         if cur_line == want_line && utf16_col >= want_utf16_col {
             return char_idx;
@@ -5245,21 +5267,23 @@ fn lsp_pos_to_char_idx(text: &str, line_1: u32, col_1: u32) -> usize {
 fn draw_wavy_underline(
     painter: &egui::Painter,
     x_start: f32,
-    x_end:   f32,
-    y:       f32,
-    color:   egui::Color32,
+    x_end: f32,
+    y: f32,
+    color: egui::Color32,
 ) {
     const STEP: f32 = 3.0;
-    const AMP:  f32 = 1.5;
-    if x_end <= x_start { return; }
+    const AMP: f32 = 1.5;
+    if x_end <= x_start {
+        return;
+    }
     let stroke = egui::Stroke::new(1.2, color);
-    let mut x  = x_start;
+    let mut x = x_start;
     let mut up = true;
     while x < x_end {
         let x2 = (x + STEP).min(x_end);
         let (y1, y2) = if up { (y, y + AMP) } else { (y + AMP, y) };
         painter.line_segment([egui::pos2(x, y1), egui::pos2(x2, y2)], stroke);
-        x  = x2;
+        x = x2;
         up = !up;
     }
 }
@@ -5267,20 +5291,20 @@ fn draw_wavy_underline(
 /// Map an LSP CompletionItemKind number to a short (3-char) icon string.
 fn lsp_kind_icon(kind: u8) -> &'static str {
     match kind {
-        2 | 3 => "fn ",   // Method / Function
-        4      => "ctr",  // Constructor
-        5      => "fld",  // Field
-        6      => "var",  // Variable
-        7      => "cls",  // Class
-        8      => "int",  // Interface
-        9      => "mod",  // Module
-        13     => "enm",  // Enum
-        14     => "kwd",  // Keyword
-        20     => "enm",  // EnumMember
-        21     => "con",  // Constant
-        22     => "str",  // Struct
-        25     => "typ",  // TypeParameter
-        _      => "   ",
+        2 | 3 => "fn ", // Method / Function
+        4 => "ctr",     // Constructor
+        5 => "fld",     // Field
+        6 => "var",     // Variable
+        7 => "cls",     // Class
+        8 => "int",     // Interface
+        9 => "mod",     // Module
+        13 => "enm",    // Enum
+        14 => "kwd",    // Keyword
+        20 => "enm",    // EnumMember
+        21 => "con",    // Constant
+        22 => "str",    // Struct
+        25 => "typ",    // TypeParameter
+        _ => "   ",
     }
 }
 
@@ -5369,12 +5393,8 @@ fn show_tools_tab(
 
                     for (idx, row) in rows.iter().enumerate() {
                         // ── Tool name + description tooltip ────────────────
-                        ui.label(
-                            egui::RichText::new(row.name)
-                                .monospace()
-                                .size(10.5),
-                        )
-                        .on_hover_text(row.description);
+                        ui.label(egui::RichText::new(row.name).monospace().size(10.5))
+                            .on_hover_text(row.description);
 
                         // ── Toolchain column ──────────────────────────────
                         let tc_label = match &row.toolchain {
@@ -5432,10 +5452,7 @@ fn show_tools_tab(
 
                             // Install button — only when missing/failed AND auto-installable
                             if row.can_auto_install
-                                && matches!(
-                                    row.status,
-                                    ToolStatus::Missing | ToolStatus::Failed(_)
-                                )
+                                && matches!(row.status, ToolStatus::Missing | ToolStatus::Failed(_))
                             {
                                 if ui
                                     .add_enabled(

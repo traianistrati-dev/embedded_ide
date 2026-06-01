@@ -135,6 +135,9 @@ pub struct LspState {
     open_files:      HashMap<String, OpenFileState>,
     /// Workspace root URI (e.g. `file:///tmp/embedded_ide_0_check`).
     pub root_uri:    String,
+    /// True while RA is running a background `cargo check` pass.
+    /// Set to `true` on `$/progress begin` for check tokens; cleared on `end`.
+    pub checking: bool,
     /// Most recent completion items from rust-analyzer.
     pub completion_items:  Vec<CompletionItem>,
     /// Set to `true` when a completion response (success OR error) arrives.
@@ -156,6 +159,7 @@ impl Default for LspState {
             sender:        None,
             open_files:    HashMap::new(),
             root_uri:          String::new(),
+            checking:          false,
             completion_items:  Vec::new(),
             completion_response_received: false,
             completion_req_id: None,
@@ -313,6 +317,7 @@ impl LspState {
         self.sender        = None;   // write thread's Receiver will close → it exits
         self.open_files    .clear();
         self.root_uri      = String::new();
+        self.checking      = false;
         self.completion_items.clear();
         self.completion_req_id = None;
     }
@@ -446,9 +451,18 @@ fn launch(
                 "window": { "workDoneProgress": true },
             },
             "initializationOptions": {
-                // Disable cargo check on save — we only want diagnostics from the
-                // background analysis, not from an active build invocation.
-                "checkOnSave":  false,
+                // Enable cargo check so ALL compilation errors are reported —
+                // not just those from RA's in-memory analysis.  Without this,
+                // errors like undefined variables, missing semicolons, and wrong
+                // function names in embedded code are not detected because RA's
+                // analysis can't fully resolve esp-hal types until crates are
+                // indexed.  cargo check catches everything the compiler sees.
+                //
+                // RA debounces the check (default ~1 s after last edit) so it
+                // does not run on every keystroke.  The "checking…" progress
+                // notification is tracked in handle_incoming() to update the
+                // status indicator in the editor header.
+                "checkOnSave":  true,
 
                 // Proc-macro expansion is disabled.
                 //
@@ -643,18 +657,35 @@ fn handle_incoming(
             ctx.request_repaint();
         }
 
-        // ── Window progress (indexing feedback) ───────────────────────────────
+        // ── Window progress ────────────────────────────────────────────────────
+        // RA sends $/progress for two kinds of work:
+        //   1. Indexing  — token contains "rust" or "index";  "end" → Ready
+        //   2. cargo check — token contains "cargo" or "check";
+        //                    "begin" → checking=true, "end" → checking=false
         "$/progress" => {
             let kind  = msg["params"]["value"]["kind"].as_str().unwrap_or("");
-            let token = msg["params"]["token"].as_str().unwrap_or("");
-            // Many progress tokens signal ongoing indexing; "end" means done.
-            if kind == "end"
-                && (token.contains("rust") || token.contains("index"))
-            {
-                let mut s = state.lock().unwrap();
-                if s.generation == my_gen && s.status == LspStatus::Indexing {
-                    s.status = LspStatus::Ready;
-                    ctx.request_repaint();
+            let token_raw = msg["params"]["token"].as_str().unwrap_or("");
+            // RA may use numeric tokens — convert to string for matching
+            let token_num = msg["params"]["token"].as_u64()
+                .map(|n| n.to_string());
+            let token = token_num.as_deref().unwrap_or(token_raw);
+
+            let is_indexing = token.contains("rust") || token.contains("index");
+            let is_check    = token.contains("cargo") || token.contains("check")
+                           || token.contains("flycheck");
+
+            let mut s = state.lock().unwrap();
+            if s.generation != my_gen { return; }
+
+            if is_indexing && kind == "end" && s.status == LspStatus::Indexing {
+                s.status = LspStatus::Ready;
+                ctx.request_repaint();
+            }
+            if is_check {
+                match kind {
+                    "begin" => { s.checking = true;  ctx.request_repaint(); }
+                    "end"   => { s.checking = false; ctx.request_repaint(); }
+                    _ => {}
                 }
             }
         }

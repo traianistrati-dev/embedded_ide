@@ -46,12 +46,12 @@ impl EspFlashState {
     /// Short status label for the toolbar badge.
     pub fn status_label(&self) -> &str {
         match self {
-            EspFlashState::Idle        => "—",
-            EspFlashState::Building    => "Building…",
-            EspFlashState::Flashing    => "Flashing (ESP)…",
+            EspFlashState::Idle => "—",
+            EspFlashState::Building => "Building…",
+            EspFlashState::Flashing => "Flashing (ESP)…",
             EspFlashState::ReadingInfo => "Reading chip…",
-            EspFlashState::Success     => "ESP Flash OK ✔",
-            EspFlashState::Error(_)    => "ESP Error",
+            EspFlashState::Success => "ESP Flash OK ✔",
+            EspFlashState::Error(_) => "ESP Error",
         }
     }
 
@@ -59,12 +59,11 @@ impl EspFlashState {
     pub fn status_color(&self) -> eframe::egui::Color32 {
         use eframe::egui::Color32;
         match self {
-            EspFlashState::Success     => Color32::from_rgb(80, 220, 100),
-            EspFlashState::Error(_)    => Color32::from_rgb(230, 80, 60),
+            EspFlashState::Success => Color32::from_rgb(80, 220, 100),
+            EspFlashState::Error(_) => Color32::from_rgb(230, 80, 60),
             EspFlashState::ReadingInfo => Color32::from_rgb(100, 180, 255),
-            EspFlashState::Building
-            | EspFlashState::Flashing  => Color32::from_rgb(220, 180, 60),
-            _                          => Color32::GRAY,
+            EspFlashState::Building | EspFlashState::Flashing => Color32::from_rgb(220, 180, 60),
+            _ => Color32::GRAY,
         }
     }
 }
@@ -81,13 +80,13 @@ impl EspFlashState {
 /// `log` receives each output line as it arrives.
 pub fn start_flash(
     project_dir: PathBuf,
-    target:      String,
-    chip:        String,
+    target: String,
+    chip: String,
     // Serial port override (e.g. "COM3").  Pass an empty string for auto-detect.
-    port:        String,
-    state:       Arc<Mutex<EspFlashState>>,
-    log:         Arc<Mutex<Vec<String>>>,
-    ctx:         eframe::egui::Context,
+    port: String,
+    state: Arc<Mutex<EspFlashState>>,
+    log: Arc<Mutex<Vec<String>>>,
+    ctx: eframe::egui::Context,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -101,12 +100,14 @@ pub fn start_flash(
         push_log(
             &log,
             &ctx,
+            //&format!("▶ cargo build --release"),
             &format!("▶ cargo build --release --target {target} …"),
         );
 
         let mut cargo_cmd = Command::new("cargo");
         cargo_cmd
             .current_dir(&project_dir)
+            //.args(["build", "--release"])
             .args(["build", "--release", "--target", &target])
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -195,13 +196,18 @@ pub fn start_flash(
             &log,
             &ctx,
             &format!(
-                "▶ espflash flash --chip {chip} --port {port_display} \
-                 --ignore-app-descriptor --after hard-reset {} …",
+                // "▶ espflash flash --chip {chip} --port {port_display} \
+                // --ignore-app-descriptor --after hard-reset {} …",
+                "▶ espflash flash --chip {chip}  --ignore-app-descriptor {}-",
                 elf_path.display()
             ),
         );
         if port.is_empty() {
-            push_log(&log, &ctx, "  (no port specified — espflash will auto-detect)");
+            push_log(
+                &log,
+                &ctx,
+                "  (no port specified — espflash will auto-detect)",
+            );
         }
 
         let mut esp_cmd = Command::new("espflash");
@@ -298,10 +304,16 @@ pub fn start_flash(
             ),
             _ => {
                 push_log(&log, &ctx, "✔ ESP32 flash complete!");
-                push_log(&log, &ctx,
-                    "  If the board does not start automatically → press the RST button.");
-                push_log(&log, &ctx,
-                    "  (Some SuperMini / DevKit boards ignore the USB auto-reset signal.)");
+                push_log(
+                    &log,
+                    &ctx,
+                    "  If the board does not start automatically → press the RST button.",
+                );
+                push_log(
+                    &log,
+                    &ctx,
+                    "  (Some SuperMini / DevKit boards ignore the USB auto-reset signal.)",
+                );
                 set(&state, &ctx, EspFlashState::Success);
             }
         }
@@ -317,8 +329,8 @@ pub fn start_flash(
 /// without risking a partial flash.
 pub fn read_board_info(
     state: Arc<Mutex<EspFlashState>>,
-    log:   Arc<Mutex<Vec<String>>>,
-    ctx:   eframe::egui::Context,
+    log: Arc<Mutex<Vec<String>>>,
+    ctx: eframe::egui::Context,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -418,11 +430,7 @@ fn push_log(log: &Arc<Mutex<Vec<String>>>, ctx: &eframe::egui::Context, line: &s
     ctx.request_repaint();
 }
 
-fn set(
-    state: &Arc<Mutex<EspFlashState>>,
-    ctx:   &eframe::egui::Context,
-    next:  EspFlashState,
-) {
+fn set(state: &Arc<Mutex<EspFlashState>>, ctx: &eframe::egui::Context, next: EspFlashState) {
     *state.lock().unwrap() = next;
     ctx.request_repaint();
 }

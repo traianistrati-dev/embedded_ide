@@ -136,6 +136,9 @@ pub fn write_project(
     // → Always delete stale copies first, then only write for RustEmbedded.
     let _ = fs::remove_file(dest.join("memory.x"));
     let _ = fs::remove_file(dest.join("build.rs"));
+
+    // fs::write(dest.join("build.rs"), &files.build_rs)?;
+
     if !files.memory_x.is_empty() {
         fs::write(dest.join("memory.x"), &files.memory_x)?;
         fs::write(dest.join("build.rs"), &files.build_rs)?;
@@ -150,6 +153,7 @@ pub fn write_project(
         fs::write(full, content)?;
     }
 
+    println!("project_gen write_project()");
     Ok(())
 }
 
@@ -187,12 +191,12 @@ pub fn esp32c3_fresh_main_rs() -> String {
 
 pub mod pins;
 
-use esp_backtrace as _;
-use esp_hal::prelude::*;
+
+esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_hal::main]
 fn main() -> ! {
-    let _peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
+    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
     loop {
         // Your main loop code here.
     }
@@ -301,7 +305,7 @@ fn cargo_toml_esp(c: &McuProjectConfig) -> String {
         "[package]\n\
          name    = \"{name}-project\"\n\
          version = \"0.1.0\"\n\
-         edition = \"2021\"\n\
+         edition = \"2024\"\n\
          \n\
          [[bin]]\n\
          name  = \"{name}-project\"\n\
@@ -309,24 +313,22 @@ fn cargo_toml_esp(c: &McuProjectConfig) -> String {
          bench = false\n\
          \n\
          [dependencies]\n\
-         esp-hal       = {{ version = \"0.23\", features = [\"{chip}\"] }}\n\
-         esp-backtrace = {{ version = \"0.15\", features = [\"{chip}\", \"exception-handler\", \"panic-handler\", \"println\"] }}\n\
+         esp-hal       = {{ version = \"~1.1.0\", features = [\"{chip}\"] }}\n\
          esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
-         log           = \"0.4\"\n\
+         esp-bootloader-esp-idf = {{ version = \"0.5.0\", features = [\"{chip}\"] }}\n\
+         critical-section = \"1.2.0\"\n\
          \n\
          # Flash with: espflash flash --chip {chip} --release\n\
          # Install:    cargo install espflash\n\
          \n\
          [profile.release]\n\
-         panic         = \"abort\"\n\
          codegen-units = 1\n\
-         debug         = true\n\
-         lto           = \"thin\"\n\
+         debug         = 2\n\
+         lto           = \"fat\"\n\
          opt-level     = \"s\"\n\
          \n\
          [profile.dev]\n\
-         panic     = \"abort\"\n\
-         opt-level = 1\n",
+         opt-level     = \"s\"\n",
         name = c.pkg_name,
         chip = c.probe_chip, // "esp32c3"
     )
@@ -338,14 +340,16 @@ fn cargo_config_esp(c: &McuProjectConfig) -> String {
          # --ignore-app-descriptor: esp-hal bare-metal binaries do not carry an\n\
          # ESP-IDF app descriptor; espflash 4.x requires this flag to skip the\n\
          # descriptor check. Add --monitor to open the serial console after flash.\n\
-         runner = \"espflash flash --monitor --ignore-app-descriptor\"\n\
+         #runner = \"espflash flash --monitor --ignore-app-descriptor\"\n\
+         runner = \"espflash flash --monitor --chip {chip}\"\n\
          # esp-hal 0.23 places linkall.x + memory.x in its OUT_DIR via its\n\
          # build script.  linkall.x uses `INCLUDE memory.x` internally, so\n\
          # the chip memory map (IROM, DROM, IRAM, DRAM, RTC_SLOW) is already\n\
          # present.  Only -Tlinkall.x is needed here; supplying a second\n\
          # -Tmemory.x would redefine those regions and cause a linker error.\n\
          rustflags = [\n\
-             \"-C\", \"link-arg=-Tlinkall.x\",\n\
+            \"-C\", \"link-arg=-Tlinkall.x\",\n\
+            # \"-C\", \"force-frame-pointers\",\n\
          ]\n\
          \n\
          [build]\n\
@@ -357,5 +361,6 @@ fn cargo_config_esp(c: &McuProjectConfig) -> String {
          [unstable]\n\
          build-std = [\"core\"]\n",
         target = c.target,
+        chip = c.probe_chip,
     )
 }
