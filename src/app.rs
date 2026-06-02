@@ -495,9 +495,6 @@ impl AppIde {
                 }
                 Self::scan_src_dir(root, &path, files, folders);
             } else if path.is_file() {
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                    continue;
-                }
                 let Ok(rel) = path.strip_prefix(root) else {
                     continue;
                 };
@@ -546,9 +543,6 @@ impl AppIde {
                 // ── New file created externally ──────────────────────────────
                 Create(_) => {
                     for abs in &event.paths {
-                        if abs.extension().and_then(|e| e.to_str()) != Some("rs") {
-                            continue;
-                        }
                         let Ok(rel) = abs.strip_prefix(&workspace_src) else {
                             continue;
                         };

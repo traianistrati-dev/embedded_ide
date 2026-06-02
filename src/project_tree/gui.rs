@@ -35,40 +35,56 @@ fn build_tree(user_src_files: &[(String, String)], user_src_folders: &[String]) 
     root
 }
 
-/// Helper: insert a folder path into the tree.
+/// Helper: insert a folder path into the tree (recursive).
 fn insert_folder_path(root: &mut BTreeMap<String, TreeNode>, path: &str) {
-    let parts: Vec<&str> = path.split('/').collect();
-    let mut current = root;
-    for part in parts {
-        let node = current
-            .entry(part.to_string())
-            .or_insert_with(|| TreeNode::Folder(BTreeMap::new()));
-        if let TreeNode::Folder(children) = node {
-            current = children;
-        } else {
-            break; // Parent is a file, can't go deeper
-        }
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    insert_folder_path_recursive(root, &parts);
+}
+
+fn insert_folder_path_recursive(current: &mut BTreeMap<String, TreeNode>, parts: &[&str]) {
+    if parts.is_empty() {
+        return;
+    }
+    let part = parts[0];
+    let rest = &parts[1..];
+    let node = current
+        .entry(part.to_string())
+        .or_insert_with(|| TreeNode::Folder(BTreeMap::new()));
+    if let TreeNode::Folder(children) = node {
+        insert_folder_path_recursive(children, rest);
     }
 }
 
-/// Helper: insert a file path into the tree.
+/// Helper: insert a file path into the tree (recursive).
 fn insert_file_path(root: &mut BTreeMap<String, TreeNode>, parts: &[&str], file_idx: usize) {
     if parts.is_empty() {
         return;
     }
-    let mut current = root;
-    for part in &parts[..parts.len() - 1] {
+    insert_file_path_recursive(root, parts, file_idx);
+}
+
+fn insert_file_path_recursive(
+    current: &mut BTreeMap<String, TreeNode>,
+    parts: &[&str],
+    file_idx: usize,
+) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1 {
+        // Last part is the filename
+        current.insert(parts[0].to_string(), TreeNode::File(file_idx));
+    } else {
+        // Navigate deeper
+        let part = parts[0];
+        let rest = &parts[1..];
         let node = current
             .entry(part.to_string())
             .or_insert_with(|| TreeNode::Folder(BTreeMap::new()));
         if let TreeNode::Folder(children) = node {
-            current = children;
-        } else {
-            return; // Parent is a file, can't go deeper
+            insert_file_path_recursive(children, rest, file_idx);
         }
     }
-    let file_name = parts[parts.len() - 1].to_string();
-    current.insert(file_name, TreeNode::File(file_idx));
 }
 
 /// Display the project tree panel (left side of the IDE).
