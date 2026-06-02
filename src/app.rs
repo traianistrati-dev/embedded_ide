@@ -13,6 +13,7 @@ use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use crate::project_tree::gui::show_project_tree as show_project_tree_panel;
+use crate::project_tree::ProjectTreeState;
 use crate::required_tools;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
@@ -214,11 +215,8 @@ pub struct AppIde {
     /// user's drag position is remembered across show/hide cycles.
     diag_panel_height: f32,
     // ── User source files ─────────────────────────────────────────────────────
-    /// Extra .rs files created by the user inside src/
-    /// Each entry is `(path_relative_to_src, content)`, e.g. `("utils.rs", "")`.
-    user_src_files: Vec<(String, String)>,
-    /// Explicitly-created folders inside src/ (may be empty).
-    user_src_folders: Vec<String>,
+    /// Project tree state (files and folders in src/)
+    project_tree: ProjectTreeState,
     /// While `Some(s)`, a text-input for naming a new file is shown in the tree.
     new_src_name: Option<String>,
     /// While `Some(s)`, a text-input for naming a new folder is shown in the tree.
@@ -352,8 +350,10 @@ impl AppIde {
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
-            user_src_files: persisted.user_src_files,
-            user_src_folders: persisted.user_src_folders,
+            project_tree: ProjectTreeState {
+                user_src_files: persisted.user_src_files,
+                user_src_folders: persisted.user_src_folders,
+            },
             new_src_name: None,
             new_src_folder_name: None,
             new_file_parent_folder: None,
@@ -397,18 +397,9 @@ impl AppIde {
     /// (it is regenerated from MCU pin state).
     /// Any previous user files are replaced.
     fn load_project_from_dir(&mut self, root: &std::path::Path) {
-        let src_dir = root.join("src");
-        if !src_dir.exists() {
-            return;
-        }
+        // Load files and folders via ProjectTreeState
+        self.project_tree = ProjectTreeState::load_from_dir(root);
 
-        let mut files: Vec<(String, String)> = Vec::new();
-        let mut folders: Vec<String> = Vec::new();
-
-        Self::scan_src_dir(&src_dir, &src_dir, &mut files, &mut folders);
-
-        self.user_src_files = files;
-        self.user_src_folders = folders;
         self.selected_file = ProjectFileId::MainRs;
         self.renaming_file = None;
         self.renaming_folder = None;
@@ -448,7 +439,7 @@ impl AppIde {
         // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
         // assignment back to the MCU diagram.  If no markers are found (e.g.
         // an ESP32-C3 project or a hand-written main.rs) this is a silent no-op.
-        let main_rs_path = src_dir.join("main.rs");
+        let main_rs_path = root.join("src").join("main.rs");
         if let Ok(source) = std::fs::read_to_string(&main_rs_path) {
             use crate::panels::mcu_module::codegen;
             let saved = codegen::parse_main_rs(&source);
@@ -472,56 +463,20 @@ impl AppIde {
         }
     }
 
-    /// Recursively scans `dir` (relative to `root`) and fills `files` and `folders`.
-    /// Skips `main.rs` and any non-`.rs` files.
-    fn scan_src_dir(
-        root: &std::path::Path,
-        dir: &std::path::Path,
-        files: &mut Vec<(String, String)>,
-        folders: &mut Vec<String>,
-    ) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let Ok(rel) = path.strip_prefix(root) else {
-                    continue;
-                };
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                if !folders.contains(&rel) {
-                    folders.push(rel);
-                }
-                Self::scan_src_dir(root, &path, files, folders);
-            } else if path.is_file() {
-                let Ok(rel) = path.strip_prefix(root) else {
-                    continue;
-                };
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                if rel == "main.rs" {
-                    continue; // always generated — skip
-                }
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
-                files.push((rel, content));
-            }
-        }
-    }
-
     // ── Filesystem watcher polling ────────────────────────────────────────────
     /// Drains the notify channel and applies any relevant Create / Remove /
-    /// Rename events to `user_src_files` and `user_src_folders`.
+    /// Rename events to `project_tree`.
     ///
     /// Rules:
-    /// - Only `.rs` files inside `workspace/src/` are tracked.
+    /// - Only files inside `workspace/src/` are tracked.
     /// - `src/main.rs` is always excluded (it is the generated file).
     /// - Create: add if not already present (avoids duplicates from our own writes).
-    /// - Remove: drop from the list (IDE-initiated removes are already gone by
-    ///   the time notify fires, so the search is a no-op — safe either way).
-    /// - Rename(Both): atomically update the stored path.
+    /// - Remove: drop from the list (IDE-initiated removes are already gone).
+    /// - Rename: atomically update the stored path.
     fn poll_fs_events(&mut self) {
         use notify::EventKind::*;
         use notify::event::{ModifyKind, RenameMode};
+        use crate::project_tree::logic::FsEventKind;
 
         let workspace_src = std::env::temp_dir()
             .join("embedded_ide_0_check")
@@ -538,9 +493,10 @@ impl AppIde {
             return;
         };
 
+        let mut events = Vec::new();
+
         for event in rx.try_iter().flatten() {
             match event.kind {
-                // ── New file created externally ──────────────────────────────
                 Create(_) => {
                     for abs in &event.paths {
                         let Ok(rel) = abs.strip_prefix(&workspace_src) else {
@@ -550,27 +506,23 @@ impl AppIde {
                         if rel == "main.rs" {
                             continue;
                         }
-                        if !self.user_src_files.iter().any(|(p, _)| p == &rel) {
+                        // Only add if not already tracked (avoids duplicates from our own writes)
+                        if !self.project_tree.user_src_files.iter().any(|(p, _)| p == &rel) {
                             // Read the file content so the editor shows it correctly
                             let content = std::fs::read_to_string(abs).unwrap_or_default();
-                            self.user_src_files.push((rel, content));
+                            self.project_tree.user_src_files.push((rel, content));
                         }
                     }
                 }
-                // ── File removed externally ──────────────────────────────────
                 Remove(_) => {
                     for abs in &event.paths {
                         let Ok(rel) = abs.strip_prefix(&workspace_src) else {
                             continue;
                         };
                         let rel = rel.to_string_lossy().replace('\\', "/");
-                        self.user_src_files.retain(|(p, _)| p != &rel);
-                        // If a whole directory was removed, drop its folder entry
-                        let dir_rel = rel.trim_end_matches('/').to_string();
-                        self.user_src_folders.retain(|f| f != &dir_rel);
+                        events.push((rel, FsEventKind::Remove));
                     }
                 }
-                // ── File renamed externally (notify sends both paths together)
                 Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
                     let old = &event.paths[0];
                     let new = &event.paths[1];
@@ -582,199 +534,21 @@ impl AppIde {
                     };
                     let old_rel = old_rel.to_string_lossy().replace('\\', "/");
                     let new_rel = new_rel.to_string_lossy().replace('\\', "/");
-                    // File rename
-                    if let Some((p, _)) =
-                        self.user_src_files.iter_mut().find(|(p, _)| p == &old_rel)
-                    {
-                        *p = new_rel.clone();
-                    }
-                    // Folder rename — update folder list + all child paths
-                    if let Some(f) = self.user_src_folders.iter_mut().find(|f| **f == old_rel) {
-                        *f = new_rel.clone();
-                    }
-                    let old_prefix = format!("{old_rel}/");
-                    let new_prefix = format!("{new_rel}/");
-                    for (path, _) in &mut self.user_src_files {
-                        if path.starts_with(&old_prefix) {
-                            *path = format!("{new_prefix}{}", &path[old_prefix.len()..]);
-                        }
-                    }
+                    events.push((
+                        old_rel.clone(),
+                        FsEventKind::Rename {
+                            old_rel: old_rel.clone(),
+                            new_rel,
+                        },
+                    ));
                 }
                 _ => {}
             }
         }
-    }
 
-    // ── Pin-file scaffold ─────────────────────────────────────────────────────
-
-    /// Parses an STM32 pin name ("PA1", "PB12", …) into (port_char, pin_index).
-    /// Returns `None` if the name does not match the expected `P[A-Z][0-9]+` format.
-    fn parse_stm32_pin(pin_name: &str) -> Option<(char, u8)> {
-        let upper = pin_name.to_uppercase();
-        let mut chars = upper.chars();
-        if chars.next()? != 'P' {
-            return None;
-        }
-        let port = chars.next()?;
-        let idx: u8 = chars.as_str().parse().ok()?;
-        Some((port, idx))
-    }
-
-    /// Generates the HAL type-alias source for `pins/pin{N}_{name}.rs`.
-    /// Always called fresh when a function changes, so the alias stays in sync.
-    fn generate_pin_content(pin_num: usize, pin_name: &str, func: &PinFunction) -> String {
-        let Some(mode) = func.hal_gpio_mode() else {
-            return String::new();
-        };
-
-        let Some((port, idx)) = Self::parse_stm32_pin(pin_name) else {
-            // Non-STM32 name — emit a plain comment stub
-            return format!(
-                "// Pin {pin_num} — {pin_name}\n// Function: {label}\n",
-                label = func.label()
-            );
-        };
-
-        // Trailing comment only for functions that carry extra parameters
-        // (ADC channel numbers, timer/channel, peripheral index, etc.)
-        let comment = match func {
-            PinFunction::GpioInput | PinFunction::GpioOutput => String::new(),
-            other => format!(" // {}", other.label()),
-        };
-
-        format!(
-            "use stm32f1xx_hal::gpio::{{{mode}, Pin}};\n\
-             pub type PinType = Pin<'{port}', {idx}, {mode}>;{comment}\n",
-        )
-    }
-
-    /// Called whenever a pin receives a non-Unset function.
-    ///
-    /// * Ensures `pins/` folder and `pins/mod.rs` exist.
-    /// Full sync of the `pins/` directory against the current MCU pin state.
-    ///
-    /// Called after **any** pin function change (including deselection to Unset):
-    ///
-    /// * Removes `pins/pin*.rs` files whose pin is no longer configured.
-    /// * Creates or overwrites `pins/pin{N}_{name}.rs` for every configured pin.
-    /// * Rebuilds `pins/mod.rs` from scratch with only the active declarations.
-    /// * Ensures the `pins/` folder entry exists.
-    fn sync_pin_files(
-        files: &mut Vec<(String, String)>,
-        folders: &mut Vec<String>,
-        all_pins: &[(usize, String, PinFunction)],
-    ) {
-        const MOD_PATH: &str = "pins/mod.rs";
-
-        // ── Build the authoritative set of configured pins ────────────────────
-        // `(slug, pin_num, pin_name, func)` for every pin with a real function.
-        let configured: Vec<(String, usize, &str, &PinFunction)> = all_pins
-            .iter()
-            .filter(|(_, _, f)| *f != PinFunction::Unset)
-            .map(|(num, name, func)| {
-                let slug = format!("pin{}_{}", num, name.to_lowercase());
-                (slug, *num, name.as_str(), func)
-            })
-            .collect();
-
-        let active_slugs: Vec<&str> = configured.iter().map(|(s, ..)| s.as_str()).collect();
-
-        // ── 1. Ensure pins/ folder is registered ─────────────────────────────
-        let folder = "pins".to_string();
-        if !folders.contains(&folder) {
-            folders.push(folder);
-        }
-
-        // ── 2. Ensure pins/mod.rs exists (content rebuilt below) ─────────────
-        if !files.iter().any(|(p, _)| p == MOD_PATH) {
-            files.push((MOD_PATH.to_string(), String::new()));
-        }
-
-        // ── 3. Drop pin files that are no longer configured ───────────────────
-        files.retain(|(path, _)| {
-            // Only act on paths inside pins/ that look like pin files
-            let Some(fname) = path.strip_prefix("pins/") else {
-                return true;
-            };
-            if fname == "mod.rs" {
-                return true;
-            } // never drop mod.rs itself
-            if !fname.starts_with("pin") || !fname.ends_with(".rs") {
-                return true;
-            }
-            let slug = &fname[..fname.len() - 3]; // strip ".rs"
-            active_slugs.contains(&slug)
-        });
-
-        // ── 4. Create pin files that don't yet exist ─────────────────────────
-        // Only write when the file is brand-new.  If it already exists the user
-        // may have added custom code below the generated type alias — never
-        // overwrite it.  (Removing and re-adding a pin generates a fresh file.)
-        for (slug, num, name, func) in &configured {
-            let file_path = format!("pins/{slug}.rs");
-            if !files.iter().any(|(p, _)| p == &file_path) {
-                let content = Self::generate_pin_content(*num, name, func);
-                files.push((file_path, content));
-            }
-        }
-
-        // ── 5. Rebuild mod.rs (preserve custom code outside GENERATED section) ──
-        let generated_section: String = configured
-            .iter()
-            .map(|(slug, ..)| format!("pub mod {slug};\n"))
-            .collect();
-
-        let generated_with_markers = format!(
-            "// <<< GENERATED >>>\n{}\n// <<< GENERATED END >>>\n",
-            generated_section.trim()
-        );
-
-        if let Some((_, mod_content)) = files.iter_mut().find(|(p, _)| p == MOD_PATH) {
-            // Preserve custom code outside GENERATED markers
-            let existing = mod_content.as_str();
-            if let (Some(begin_pos), Some(end_pos)) = (
-                existing.find("// <<< GENERATED >>>"),
-                existing.find("// <<< GENERATED END >>>"),
-            ) {
-                // Keep code before GENERATED section + new GENERATED section + code after GENERATED section
-                let before = &existing[..begin_pos].trim_end();
-                let after = &existing[end_pos + "// <<< GENERATED END >>>".len()..].trim_start();
-                if before.is_empty() && after.is_empty() {
-                    *mod_content = generated_with_markers;
-                } else if before.is_empty() {
-                    *mod_content = format!("{}\n\n{}", generated_with_markers.trim(), after);
-                } else if after.is_empty() {
-                    *mod_content = format!("{}\n\n{}", before, generated_with_markers.trim());
-                } else {
-                    *mod_content = format!(
-                        "{}\n\n{}\n\n{}",
-                        before,
-                        generated_with_markers.trim(),
-                        after
-                    );
-                }
-            } else {
-                // No markers found, just add the generated section at the top
-                if existing.trim().is_empty() {
-                    *mod_content = generated_with_markers;
-                } else {
-                    *mod_content = format!("{}\n\n{}", generated_with_markers.trim(), existing);
-                }
-            }
-        }
-    }
-
-    /// Creates the initial `pins/` scaffold (folder + empty mod.rs).
-    /// Called once when "New Project" is confirmed so the tree is
-    /// pre-populated before any pin is configured.
-    fn init_pins_scaffold(files: &mut Vec<(String, String)>, folders: &mut Vec<String>) {
-        let folder = "pins".to_string();
-        let mod_path = "pins/mod.rs".to_string();
-        if !folders.contains(&folder) {
-            folders.push(folder);
-        }
-        if !files.iter().any(|(p, _)| p == &mod_path) {
-            files.push((mod_path, String::new()));
+        // Delegate Remove and Rename events to ProjectTreeState
+        if !events.is_empty() {
+            self.project_tree.handle_fs_events(events);
         }
     }
 
@@ -810,7 +584,7 @@ impl AppIde {
                             &build_dir,
                             &config,
                             &self.generated_code,
-                            &self.user_src_files,
+                            &self.project_tree.user_src_files,
                         )
                         .is_ok()
                         {
@@ -832,7 +606,7 @@ impl AppIde {
             LspStatus::Ready => {
                 let mut lsp = self.lsp_state.lock().unwrap();
                 lsp.did_change("src/main.rs", &self.generated_code.clone());
-                for (rel, content) in &self.user_src_files {
+                for (rel, content) in &self.project_tree.user_src_files {
                     let full_rel = format!("src/{rel}");
                     lsp.did_change(&full_rel, content);
                 }
@@ -849,8 +623,8 @@ impl eframe::App for AppIde {
             storage,
             STORAGE_KEY,
             &PersistedState {
-                user_src_files: self.user_src_files.clone(),
-                user_src_folders: self.user_src_folders.clone(),
+                user_src_files: self.project_tree.user_src_files.clone(),
+                user_src_folders: self.project_tree.user_src_folders.clone(),
                 project_name: self.project_name.clone(),
                 project_dir: self
                     .project_dir
@@ -939,8 +713,8 @@ impl eframe::App for AppIde {
                             &mut self.selected_file,
                             build_result.as_ref(),
                             Some(&*lsp_guard),
-                            &mut self.user_src_files,
-                            &mut self.user_src_folders,
+                            &mut self.project_tree.user_src_files,
+                            &mut self.project_tree.user_src_folders,
                             &mut self.new_src_name,
                             &mut self.new_src_folder_name,
                             &mut self.new_file_parent_folder,
@@ -1059,8 +833,8 @@ impl eframe::App for AppIde {
                                 }
                             }
                             // ── Reset project files ───────────────────────────
-                            self.user_src_files.clear();
-                            self.user_src_folders.clear();
+                            self.project_tree.user_src_files.clear();
+                            self.project_tree.user_src_folders.clear();
                             self.selected_file = ProjectFileId::MainRs;
                             self.project_name = None;
                             self.project_dir = None;
@@ -1074,10 +848,7 @@ impl eframe::App for AppIde {
                             self.confirm_new_project = false;
                             // Pre-populate the pins/ scaffold so the tree shows
                             // the folder immediately, before any pin is configured.
-                            Self::init_pins_scaffold(
-                                &mut self.user_src_files,
-                                &mut self.user_src_folders,
-                            );
+                            self.project_tree.init_pins_scaffold();
                             save_project_needed = true;
                         }
                         ui.add_space(8.0);
@@ -1129,7 +900,7 @@ impl eframe::App for AppIde {
                                 format!("{parent_folder}/{clean}")
                             };
                             if !clean.is_empty()
-                                && !self.user_src_files.iter().any(|(p, _)| p == &full_path)
+                                && !self.project_tree.user_src_files.iter().any(|(p, _)| p == &full_path)
                             {
                                 // Use the actual project directory if available, otherwise use temp workspace
                                 let base_dir = if let Some(project_dir) = &self.project_dir {
@@ -1146,10 +917,10 @@ impl eframe::App for AppIde {
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 let _ = std::fs::write(&file_path, "// New file\n");
-                                self.user_src_files
+                                self.project_tree.user_src_files
                                     .push((full_path, "// New file\n".to_string()));
                                 self.selected_file =
-                                    ProjectFileId::UserFile(self.user_src_files.len() - 1);
+                                    ProjectFileId::UserFile(self.project_tree.user_src_files.len() - 1);
                                 save_project_needed = true;
                             }
                             should_close = true;
@@ -1206,8 +977,8 @@ impl eframe::App for AppIde {
                             } else {
                                 format!("{parent_folder}/{clean}")
                             };
-                            if !clean.is_empty() && !self.user_src_folders.contains(&full_path) {
-                                self.user_src_folders.push(full_path.clone());
+                            if !clean.is_empty() && !self.project_tree.user_src_folders.contains(&full_path) {
+                                self.project_tree.user_src_folders.push(full_path.clone());
                                 // Use the actual project directory if available, otherwise use temp workspace
                                 let base_dir = if let Some(project_dir) = &self.project_dir {
                                     project_dir.join("src")
@@ -1246,7 +1017,7 @@ impl eframe::App for AppIde {
                     &workspace,
                     &config,
                     &self.generated_code,
-                    &self.user_src_files,
+                    &self.project_tree.user_src_files,
                 );
             }
         }
@@ -1259,7 +1030,7 @@ impl eframe::App for AppIde {
         // click handler, but display_code still held the OLD file's content.
         // The write-back then wrongly stored the old content into the new file.
         let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
-            self.user_src_files
+            self.project_tree.user_src_files
                 .get(i)
                 .map(|(_, c)| c.clone())
                 .unwrap_or_default()
@@ -1351,7 +1122,7 @@ impl eframe::App for AppIde {
                                         &dest,
                                         &config,
                                         &code,
-                                        &self.user_src_files,
+                                        &self.project_tree.user_src_files,
                                     ) {
                                         Ok(()) => {
                                             let name = dest
@@ -1504,7 +1275,7 @@ impl eframe::App for AppIde {
                                     &build_dir,
                                     &config,
                                     &code,
-                                    &self.user_src_files,
+                                    &self.project_tree.user_src_files,
                                 ) {
                                     Ok(()) => {
                                         self.selected_diagnostic = None;
@@ -1628,7 +1399,7 @@ impl eframe::App for AppIde {
                                             &build_dir,
                                             &config,
                                             &code,
-                                            &self.user_src_files,
+                                            &self.project_tree.user_src_files,
                                         )
                                         .is_ok()
                                         {
@@ -1680,7 +1451,7 @@ impl eframe::App for AppIde {
                                             &build_dir,
                                             &config,
                                             &code,
-                                            &self.user_src_files,
+                                            &self.project_tree.user_src_files,
                                         )
                                         .is_ok()
                                         {
@@ -1737,7 +1508,7 @@ impl eframe::App for AppIde {
                                             &build_dir,
                                             &config,
                                             &code,
-                                            &self.user_src_files,
+                                            &self.project_tree.user_src_files,
                                         )
                                         .is_ok()
                                         {
@@ -1798,7 +1569,7 @@ impl eframe::App for AppIde {
                         // Show which file is open
                         let open_label = match self.selected_file {
                             ProjectFileId::UserFile(i) => self
-                                .user_src_files
+                                .project_tree.user_src_files
                                 .get(i)
                                 .map(|(name, _)| format!("src/{name}"))
                                 .unwrap_or_else(|| "src/???".to_string()),
@@ -1912,7 +1683,7 @@ impl eframe::App for AppIde {
                 let editor_id: String = match &self.selected_file {
                     ProjectFileId::UserFile(i) => {
                         let path = self
-                            .user_src_files
+                            .project_tree.user_src_files
                             .get(*i)
                             .map(|(p, _)| p.as_str())
                             .unwrap_or("?");
@@ -1970,7 +1741,7 @@ impl eframe::App for AppIde {
                     ui,
                     &self.lsp_state,
                     &self.selected_file,
-                    &self.user_src_files,
+                    &self.project_tree.user_src_files,
                 );
 
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
@@ -1994,7 +1765,7 @@ impl eframe::App for AppIde {
                 // ── Write user edits back ────────────────────────────────────
                 // display_code is a local clone; persist changes here.
                 if let ProjectFileId::UserFile(i) = self.selected_file {
-                    if let Some(entry) = self.user_src_files.get_mut(i) {
+                    if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                         if display_code != entry.1 {
                             entry.1 = display_code.clone();
                             // Auto-save to workspace so LSP and build see the change
@@ -2030,7 +1801,7 @@ impl eframe::App for AppIde {
                         // Persist the change so the write-back below picks it up
                         // (the write-back already happened above; redo it for this file)
                         if let ProjectFileId::UserFile(i) = self.selected_file {
-                            if let Some(entry) = self.user_src_files.get_mut(i) {
+                            if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                                 entry.1 = display_code.clone();
                                 let workspace = std::env::temp_dir().join("embedded_ide_0_check");
                                 let dest = workspace.join("src").join(&entry.0);
@@ -2051,7 +1822,7 @@ impl eframe::App for AppIde {
                 // Compute the relative path for the currently edited file.
                 // Used for all LSP requests (did_change, request_completion, etc.)
                 let current_rel_path: Option<String> =
-                    selected_file_rel_path(&self.selected_file, &self.user_src_files);
+                    selected_file_rel_path(&self.selected_file, &self.project_tree.user_src_files);
                 {
                     let lsp_ready = lsp_file_tracked
                         && current_rel_path.is_some()
@@ -2502,11 +2273,7 @@ impl eframe::App for AppIde {
                     if pin_changed.is_some() {
                         if let Some(mcu) = &self.mcu {
                             let all_pins = mcu.all_pin_functions();
-                            Self::sync_pin_files(
-                                &mut self.user_src_files,
-                                &mut self.user_src_folders,
-                                &all_pins,
-                            );
+                            self.project_tree.sync_pin_files(&all_pins);
                         }
                     }
                 }
