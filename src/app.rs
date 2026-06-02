@@ -718,14 +718,49 @@ impl AppIde {
             }
         }
 
-        // ── 5. Rebuild mod.rs from scratch (only active pins) ─────────────────
-        let new_mod: String = configured
+        // ── 5. Rebuild mod.rs (preserve custom code outside GENERATED section) ──
+        let generated_section: String = configured
             .iter()
             .map(|(slug, ..)| format!("pub mod {slug};\n"))
             .collect();
 
+        let generated_with_markers = format!(
+            "// <<< GENERATED >>>\n{}\n// <<< GENERATED END >>>\n",
+            generated_section.trim()
+        );
+
         if let Some((_, mod_content)) = files.iter_mut().find(|(p, _)| p == MOD_PATH) {
-            *mod_content = new_mod;
+            // Preserve custom code outside GENERATED markers
+            let existing = mod_content.as_str();
+            if let (Some(begin_pos), Some(end_pos)) = (
+                existing.find("// <<< GENERATED >>>"),
+                existing.find("// <<< GENERATED END >>>"),
+            ) {
+                // Keep code before GENERATED section + new GENERATED section + code after GENERATED section
+                let before = &existing[..begin_pos].trim_end();
+                let after = &existing[end_pos + "// <<< GENERATED END >>>".len()..].trim_start();
+                if before.is_empty() && after.is_empty() {
+                    *mod_content = generated_with_markers;
+                } else if before.is_empty() {
+                    *mod_content = format!("{}\n\n{}", generated_with_markers.trim(), after);
+                } else if after.is_empty() {
+                    *mod_content = format!("{}\n\n{}", before, generated_with_markers.trim());
+                } else {
+                    *mod_content = format!(
+                        "{}\n\n{}\n\n{}",
+                        before,
+                        generated_with_markers.trim(),
+                        after
+                    );
+                }
+            } else {
+                // No markers found, just add the generated section at the top
+                if existing.trim().is_empty() {
+                    *mod_content = generated_with_markers;
+                } else {
+                    *mod_content = format!("{}\n\n{}", generated_with_markers.trim(), existing);
+                }
+            }
         }
     }
 
@@ -1068,7 +1103,11 @@ impl eframe::App for AppIde {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
                     ui.add_space(4.0);
-                    let display_folder = if parent_folder.is_empty() { "src" } else { &parent_folder };
+                    let display_folder = if parent_folder.is_empty() {
+                        "src"
+                    } else {
+                        &parent_folder
+                    };
                     ui.label(format!("Create file in: {display_folder}/"));
                     ui.label("Enter filename:");
                     let response = ui.text_edit_singleline(new_name);
@@ -1140,7 +1179,11 @@ impl eframe::App for AppIde {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
                     ui.add_space(4.0);
-                    let display_folder = if parent_folder.is_empty() { "src" } else { &parent_folder };
+                    let display_folder = if parent_folder.is_empty() {
+                        "src"
+                    } else {
+                        &parent_folder
+                    };
                     ui.label(format!("Create folder in: {display_folder}/"));
                     ui.label("Enter folder name:");
                     let response = ui.text_edit_singleline(new_name);
