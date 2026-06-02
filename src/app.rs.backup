@@ -25,9 +25,6 @@ use std::sync::{Arc, Mutex};
 mod tabs;
 use tabs::{show_peripherals_tab, show_cargo_tab, show_ra_tab, show_dfu_tab, show_tools_tab};
 
-mod helpers;
-use helpers::{apply_dark_theme, file_row, user_file_row};
-
 // ── Project file selector ─────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
@@ -740,58 +737,6 @@ impl AppIde {
             files.push((mod_path, String::new()));
         }
     }
-
-    // ── Frame initialization (frame state, LSP, MCU synchronization) ───────────
-    fn init_frame(&mut self, _ui: &mut egui::Ui) {
-        // ── Poll filesystem watcher events ────────────────────────────────────
-        self.poll_fs_events();
-
-        // ── Update generated section when pin config changes ─────────────────
-        if let Some(mcu) = &self.mcu {
-            let updated = mcu.update_main_rs(&self.generated_code);
-            if updated != self.generated_code {
-                self.generated_code = updated;
-            }
-        }
-
-        // Tick flash counters down
-        if self.copy_flash > 0 {
-            self.copy_flash -= 1;
-        }
-        if self.export_flash > 0 {
-            self.export_flash -= 1;
-        }
-
-        // ── LSP lifecycle ─────────────────────────────────────────────────────
-        let lsp_status = self.lsp_state.lock().unwrap().status.clone();
-        match lsp_status {
-            LspStatus::Stopped => {
-                if self.selected_mcu_type.project_config().is_some() {
-                    let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                    if let Some(config) = self.selected_mcu_type.project_config() {
-                        if project_gen::write_project(&build_dir, &config, &self.generated_code, &self.user_src_files).is_ok() {
-                            lsp::start(&build_dir, Arc::clone(&self.lsp_state), self.egui_ctx.clone());
-                        }
-                    }
-                }
-            }
-            LspStatus::Indexing => {
-                let mut lsp = self.lsp_state.lock().unwrap();
-                if !lsp.is_file_open("src/main.rs") {
-                    lsp.did_open("src/main.rs", &self.generated_code.clone());
-                }
-            }
-            LspStatus::Ready => {
-                let mut lsp = self.lsp_state.lock().unwrap();
-                lsp.did_change("src/main.rs", &self.generated_code.clone());
-                for (rel, content) in &self.user_src_files {
-                    let full_rel = format!("src/{rel}");
-                    lsp.did_change(&full_rel, content);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 impl eframe::App for AppIde {
@@ -814,10 +759,84 @@ impl eframe::App for AppIde {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Initialize frame state (polling, LSP, MCU updates)
-        self.init_frame(ui);
+        // ── Poll filesystem watcher events ────────────────────────────────────
+        // Called every frame (non-blocking).  We react only to .rs file
+        // Create / Remove / Rename events so external tools (VS Code, etc.)
+        // are reflected in the project tree automatically.
+        self.poll_fs_events();
 
-        // Build project files snapshot (used by both tree and editor panels)
+        // ── Update generated section when pin config changes ─────────────────
+        // update_main_rs() splices only the GENERATED block (between markers),
+        // leaving custom_config() and loop_code() untouched.
+        // Comparing the result avoids touching the string when nothing changed.
+        if let Some(mcu) = &self.mcu {
+            let updated = mcu.update_main_rs(&self.generated_code);
+            if updated != self.generated_code {
+                self.generated_code = updated;
+            }
+        }
+
+        // Tick flash counters down
+        if self.copy_flash > 0 {
+            self.copy_flash -= 1;
+        }
+        if self.export_flash > 0 {
+            self.export_flash -= 1;
+        }
+
+        // ── LSP lifecycle ─────────────────────────────────────────────────────
+        // Drive rust-analyzer: start it once, send didOpen/didChange as needed.
+        {
+            let lsp_status = self.lsp_state.lock().unwrap().status.clone();
+            match lsp_status {
+                LspStatus::Stopped => {
+                    // Auto-start when we have a supported chip (project on disk needed).
+                    if self.selected_mcu_type.project_config().is_some() {
+                        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+                        if let Some(config) = self.selected_mcu_type.project_config() {
+                            if project_gen::write_project(
+                                &build_dir,
+                                &config,
+                                &self.generated_code,
+                                &self.user_src_files,
+                            )
+                            .is_ok()
+                            {
+                                lsp::start(
+                                    &build_dir,
+                                    Arc::clone(&self.lsp_state),
+                                    self.egui_ctx.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                LspStatus::Indexing => {
+                    // Handshake complete — open main.rs so RA starts analysing.
+                    let mut lsp = self.lsp_state.lock().unwrap();
+                    if !lsp.is_file_open("src/main.rs") {
+                        lsp.did_open("src/main.rs", &self.generated_code.clone());
+                    }
+                }
+                LspStatus::Ready => {
+                    // Sync the active file incrementally.
+                    // For multi-file support, also open any user .rs files that
+                    // haven't been opened yet in this session.
+                    let mut lsp = self.lsp_state.lock().unwrap();
+                    // Always keep main.rs in sync
+                    lsp.did_change("src/main.rs", &self.generated_code.clone());
+                    // Sync every user .rs file (auto-opens on first call)
+                    for (rel, content) in &self.user_src_files {
+                        let full_rel = format!("src/{rel}");
+                        lsp.did_change(&full_rel, content);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Build project files snapshot ─────────────────────────────────────
+        // Cheap (pure string fmt); used by both tree panel and code editor.
         let project_files: Option<ProjectFiles> = self
             .selected_mcu_type
             .project_config()
@@ -2335,12 +2354,270 @@ impl eframe::App for AppIde {
 
 // ── Single file row for fixed project files (with diagnostic indicators) ──────
 
+fn file_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    name: &str,
+    id: ProjectFileId,
+    selected: &mut ProjectFileId,
+    build_result: Option<&build::BuildResult>,
+    lsp: Option<&lsp::LspState>,
+) {
+    let dim = egui::Color32::from_rgb(140, 150, 165);
+    let hi = egui::Color32::from_rgb(100, 180, 255);
+    let normal = egui::Color32::from_rgb(200, 205, 215);
+
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let is_sel = *selected == id;
+        let color = if is_sel { hi } else { normal };
+        let icon_color = if is_sel {
+            egui::Color32::from_rgb(180, 210, 255)
+        } else {
+            egui::Color32::from_rgb(160, 170, 190)
+        };
+        ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
+        let resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(name)
+                    .size(11.5)
+                    .monospace()
+                    .color(color),
+            )
+            .sense(egui::Sense::click()),
+        );
+        if resp.clicked() {
+            *selected = id;
+        }
+        if resp.hovered() && !is_sel {
+            let r = resp.rect;
+            ui.painter().line_segment(
+                [r.left_bottom(), r.right_bottom()],
+                egui::Stroke::new(1.0, dim),
+            );
+        }
+        if let Some(cargo_path) = id.cargo_path() {
+            let cargo_err = build_result.map_or(false, |r| r.has_errors_in(cargo_path));
+            let cargo_warn = build_result.map_or(false, |r| r.has_warnings_in(cargo_path));
+            let lsp_err = lsp.map_or(false, |l| l.error_count_for(cargo_path) > 0);
+            let lsp_warn = lsp.map_or(false, |l| l.warning_count_for(cargo_path) > 0);
+            let has_err = cargo_err || lsp_err;
+            let has_warn = cargo_warn || lsp_warn;
+            let (dot, dot_color) = if has_err {
+                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+            } else if has_warn {
+                (ph::WARNING, egui::Color32::from_rgb(220, 180, 50))
+            } else {
+                ("", egui::Color32::TRANSPARENT)
+            };
+            if !dot.is_empty() {
+                ui.label(egui::RichText::new(dot).size(10.0).color(dot_color));
+            }
+        }
+    });
+}
 
 // ── Single file row for user-created source files (with delete button) ────────
 
+fn user_file_row(
+    ui: &mut egui::Ui,
+    indent: f32,
+    name: &str,
+    idx: usize,
+    selected: &mut ProjectFileId,
+    to_delete: &mut Option<usize>,
+    renaming: &mut Option<(usize, String)>,
+    do_rename: &mut Option<usize>,
+    cancel_rename: &mut bool,
+) {
+    let hi = egui::Color32::from_rgb(100, 180, 255);
+    let normal = egui::Color32::from_rgb(200, 205, 215);
+    let id = ProjectFileId::UserFile(idx);
+    let is_renaming = renaming.as_ref().map(|(i, _)| *i == idx).unwrap_or(false);
+
+    // ── Inline rename mode ────────────────────────────────────────────────
+    if is_renaming {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            ui.label(
+                egui::RichText::new(ph::FILE)
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(180, 210, 255)),
+            );
+            if let Some((_, new_name)) = renaming.as_mut() {
+                let fid = egui::Id::new(("__rename_file__", idx));
+                let resp = ui
+                    .add(egui::TextEdit::singleline(new_name).desired_width(ui.available_width()));
+                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
+                    resp.request_focus();
+                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
+                }
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if enter {
+                    *do_rename = Some(idx);
+                } else if esc || resp.lost_focus() {
+                    *cancel_rename = true;
+                }
+            }
+        });
+        return;
+    }
+
+    // ── Normal display mode ───────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let is_sel = *selected == id;
+        let color = if is_sel { hi } else { normal };
+        let icon_color = if is_sel {
+            egui::Color32::from_rgb(180, 210, 255)
+        } else {
+            egui::Color32::from_rgb(160, 170, 190)
+        };
+        ui.label(egui::RichText::new(ph::FILE).size(11.5).color(icon_color));
+        let resp = ui.add(
+            egui::Label::new(
+                egui::RichText::new(name)
+                    .size(11.5)
+                    .monospace()
+                    .color(color),
+            )
+            .sense(egui::Sense::click()),
+        );
+        if resp.clicked() {
+            *selected = id;
+        }
+        resp.context_menu(|ui| {
+            if ui
+                .button(egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5))
+                .clicked()
+            {
+                *renaming = Some((idx, name.to_string()));
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("{} Delete", ph::TRASH))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(220, 80, 60)),
+                )
+                .clicked()
+            {
+                *to_delete = Some(idx);
+                ui.close();
+            }
+        });
+    });
+}
 
 // ── Peripherals tab ───────────────────────────────────────────────────────────
 
+fn show_peripherals_tab(ui: &mut egui::Ui, mcu: &Option<Mcu>) {
+    let Some(mcu) = mcu else {
+        ui.centered_and_justified(|ui| {
+            ui.label(egui::RichText::new("No chip selected.").color(egui::Color32::GRAY));
+        });
+        return;
+    };
+
+    let configured: Vec<_> = mcu
+        .top_pins
+        .iter()
+        .chain(mcu.bottom_pins.iter())
+        .chain(mcu.left_pins.iter())
+        .chain(mcu.right_pins.iter())
+        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+        .collect();
+
+    if configured.is_empty() {
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("No pins configured yet.")
+                    .size(14.0)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Switch to the Pins tab and assign functions to pins.")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(120, 120, 130)),
+            );
+        });
+        return;
+    }
+
+    let mut gpio_in = vec![];
+    let mut gpio_out = vec![];
+    let mut adc = vec![];
+    let mut timers = vec![];
+    let mut usart = vec![];
+    let mut spi = vec![];
+    let mut i2c = vec![];
+    let mut usb = vec![];
+    let mut can = vec![];
+    let mut swd = vec![];
+    let mut other = vec![];
+
+    for pin in &configured {
+        match &pin.selected_function {
+            PinFunction::GpioInput => gpio_in.push(*pin),
+            PinFunction::GpioOutput => gpio_out.push(*pin),
+            PinFunction::AdcChannel { .. } => adc.push(*pin),
+            PinFunction::TimerPwm { .. } => timers.push(*pin),
+            PinFunction::UsartTx(_)
+            | PinFunction::UsartRx(_)
+            | PinFunction::UsartCts(_)
+            | PinFunction::UsartRts(_)
+            | PinFunction::UsartCk(_) => usart.push(*pin),
+            PinFunction::SpiNss(_)
+            | PinFunction::SpiSck(_)
+            | PinFunction::SpiMiso(_)
+            | PinFunction::SpiMosi(_) => spi.push(*pin),
+            PinFunction::I2cScl(_) | PinFunction::I2cSda(_) => i2c.push(*pin),
+            PinFunction::UsbDm | PinFunction::UsbDp => usb.push(*pin),
+            PinFunction::CanRx | PinFunction::CanTx => can.push(*pin),
+            PinFunction::SwdIo | PinFunction::SwdClk => swd.push(*pin),
+            _ => other.push(*pin),
+        }
+    }
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.add_space(4.0);
+        periph_section(
+            ui,
+            "GPIO Input",
+            &gpio_in,
+            egui::Color32::from_rgb(70, 160, 70),
+        );
+        periph_section(
+            ui,
+            "GPIO Output",
+            &gpio_out,
+            egui::Color32::from_rgb(200, 120, 50),
+        );
+        periph_section(ui, "ADC", &adc, egui::Color32::from_rgb(150, 70, 200));
+        periph_section(
+            ui,
+            "Timers / PWM",
+            &timers,
+            egui::Color32::from_rgb(190, 170, 30),
+        );
+        periph_section(ui, "USART", &usart, egui::Color32::from_rgb(50, 110, 200));
+        periph_section(ui, "SPI", &spi, egui::Color32::from_rgb(30, 170, 170));
+        periph_section(ui, "I2C", &i2c, egui::Color32::from_rgb(60, 180, 100));
+        periph_section(ui, "USB", &usb, egui::Color32::from_rgb(190, 50, 160));
+        periph_section(ui, "CAN", &can, egui::Color32::from_rgb(200, 130, 20));
+        periph_section(
+            ui,
+            "SWD / Debug",
+            &swd,
+            egui::Color32::from_rgb(190, 50, 50),
+        );
+        periph_section(ui, "Other", &other, egui::Color32::GRAY);
+    });
+}
 
 fn periph_section(ui: &mut egui::Ui, title: &str, pins: &[&Pin], color: egui::Color32) {
     if pins.is_empty() {
@@ -2612,12 +2889,1209 @@ fn show_diag_panel(
 
 // ── DFU Flash tab ─────────────────────────────────────────────────────────────
 
+fn show_dfu_tab(
+    ui: &mut egui::Ui,
+    dfu_state: &Arc<Mutex<DfuState>>,
+    dfu_log: &Arc<Mutex<Vec<String>>>,
+    dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
+    dfu_sel_programmer: &mut usize,
+    dfu_flash_addr: &mut String,
+    openocd_state: &Arc<Mutex<OpenOcdState>>,
+    openocd_target_cfg: &mut String,
+    espflash_state: &Arc<Mutex<EspFlashState>>,
+    espflash_port: &mut String,
+    toolchain: &ToolchainKind,
+) {
+    let state = dfu_state.lock().unwrap().clone();
+    let ocd_state = openocd_state.lock().unwrap().clone();
+    let esp_state = espflash_state.lock().unwrap().clone();
+    let log = dfu_log.lock().unwrap().clone();
+    let progs = dfu_programmers.lock().unwrap().clone();
+
+    // Determine selected programmer kind for adaptive config UI
+    let sel_kind = progs.get(*dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
+    let is_swd = matches!(sel_kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
+    let interface_cfg = openocd::interface_cfg_for_kind(sel_kind);
+
+    // ── Programmer selector ComboBox ──────────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Programmer:")
+                .size(10.5)
+                .color(egui::Color32::GRAY),
+        );
+
+        let combo_label = if progs.is_empty() {
+            "— none detected —".to_string()
+        } else {
+            progs
+                .get(*dfu_sel_programmer)
+                .map(|p| p.combo_label())
+                .unwrap_or_else(|| "— select —".to_string())
+        };
+
+        egui::ComboBox::from_id_salt("dfu_programmer_selector")
+            .selected_text(egui::RichText::new(&combo_label).size(10.5).monospace())
+            .width(ui.available_width() - 2.0)
+            .show_ui(ui, |ui| {
+                if progs.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No programmer detected. Click 'Scan USB'.")
+                            .size(10.5)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+                for (i, p) in progs.iter().enumerate() {
+                    let kind_color = match p.kind {
+                        "DFU Bootloader" => egui::Color32::from_rgb(100, 200, 255),
+                        "ST-Link" => egui::Color32::from_rgb(100, 220, 120),
+                        "J-Link" => egui::Color32::from_rgb(220, 180, 60),
+                        "CMSIS-DAP" => egui::Color32::from_rgb(180, 140, 220),
+                        "USB-Serial" => egui::Color32::from_rgb(200, 160, 100),
+                        "ESP32" => egui::Color32::from_rgb(220, 120, 60),
+                        _ => egui::Color32::GRAY,
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("[{}]", p.kind))
+                                .size(10.0)
+                                .monospace()
+                                .color(kind_color),
+                        );
+                        ui.selectable_value(
+                            dfu_sel_programmer,
+                            i,
+                            egui::RichText::new(format!("{}  [{}]", p.name, p.vid_pid))
+                                .size(10.5)
+                                .monospace(),
+                        );
+                    });
+                }
+            });
+    });
+
+    // Guidance text for selected programmer
+    if let Some(p) = progs.get(*dfu_sel_programmer) {
+        let guidance = p.guidance();
+        if !guidance.is_empty() {
+            let color = match p.kind {
+                "DFU Bootloader" => egui::Color32::from_rgb(80, 200, 100),
+                "ST-Link" | "J-Link" | "CMSIS-DAP" => egui::Color32::from_rgb(180, 180, 100),
+                _ => egui::Color32::from_rgb(160, 160, 170),
+            };
+            for line in guidance.lines() {
+                ui.label(egui::RichText::new(line).size(10.0).color(color).italics());
+            }
+        }
+    }
+
+    ui.separator();
+
+    // ── Config row — adaptive: ESP32 / SWD (OpenOCD) / DFU ───────────────────
+    ui.horizontal(|ui| {
+        let build_done = log.iter().any(|l| l.contains("✔ Build OK"));
+
+        // Helper: render a phase indicator icon + label
+        let phase_widget = |ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32| {
+            ui.label(egui::RichText::new(icon).size(11.5).color(color));
+            ui.label(egui::RichText::new(label).size(11.0).color(color));
+        };
+
+        if *toolchain == ToolchainKind::EspRust {
+            // ── EspRust config ────────────────────────────────────────────────
+            ui.label(
+                egui::RichText::new("Tool: espflash")
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(220, 140, 60)),
+            );
+            ui.separator();
+
+            // Phases: Build → Flash ESP
+            let (b_icon, b_col) = match &esp_state {
+                EspFlashState::Building => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
+                }
+                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                EspFlashState::Error(_) if !build_done && !log.is_empty() => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, b_icon, "Build", b_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (f_icon, f_col) = match &esp_state {
+                EspFlashState::Flashing => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 140, 60))
+                }
+                EspFlashState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                EspFlashState::Error(_) if build_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, f_icon, "Flash ESP32", f_col);
+        } else if is_swd {
+            // ── SWD / OpenOCD config ──────────────────────────────────────────
+            ui.label(
+                egui::RichText::new("Interface:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.label(
+                egui::RichText::new(interface_cfg)
+                    .size(10.5)
+                    .monospace()
+                    .color(egui::Color32::from_rgb(120, 160, 200)),
+            )
+            .on_hover_text("OpenOCD interface config — auto-selected from programmer type");
+
+            ui.separator();
+
+            ui.label(
+                egui::RichText::new("Target:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(openocd_target_cfg)
+                    .desired_width(140.0)
+                    .font(egui::TextStyle::Monospace),
+            )
+            .on_hover_text(
+                "OpenOCD target config file.\n\
+                 Examples: target/stm32f1x.cfg, target/stm32f4x.cfg\n\
+                 Full list in your OpenOCD install under scripts/target/",
+            );
+
+            // Quick-select presets for common STM32 families
+            for (label, cfg, tip) in [
+                ("F1", "target/stm32f1x.cfg", "STM32F1 (F103, F100, F105, …)"),
+                ("F4", "target/stm32f4x.cfg", "STM32F4 (F407, F411, F401, …)"),
+                ("H7", "target/stm32h7x.cfg", "STM32H7 (H743, H750, …)"),
+                ("L4", "target/stm32l4x.cfg", "STM32L4 (L432, L476, L496, …)"),
+            ] {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(label).size(10.0)))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    *openocd_target_cfg = cfg.to_string();
+                }
+            }
+
+            ui.separator();
+
+            // SWD phases: Build → Flash (no objcopy — OpenOCD programs ELF directly)
+            let (b_icon, b_col) = match &ocd_state {
+                OpenOcdState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
+                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                OpenOcdState::Error(_) if !build_done && !log.is_empty() => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, b_icon, "Build", b_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (f_icon, f_col) = match &ocd_state {
+                OpenOcdState::Flashing => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255))
+                }
+                OpenOcdState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                OpenOcdState::Error(_) if build_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, f_icon, "Flash SWD", f_col);
+        } else {
+            // ── DFU config ────────────────────────────────────────────────────
+            ui.label(
+                egui::RichText::new("Flash addr:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(dfu_flash_addr)
+                    .desired_width(82.0)
+                    .font(egui::TextStyle::Monospace),
+            )
+            .on_hover_text(
+                "Start address passed to dfu-util.\n\
+                 0x08000000 — standard (no bootloader)\n\
+                 0x08002000 — with 8 KB bootloader offset",
+            );
+
+            if ui
+                .add(egui::Button::new(egui::RichText::new("Std").size(10.0)))
+                .on_hover_text("0x08000000 — standard flash start (no bootloader)")
+                .clicked()
+            {
+                *dfu_flash_addr = "0x08000000".to_string();
+            }
+            if ui
+                .add(egui::Button::new(egui::RichText::new("+BL").size(10.0)))
+                .on_hover_text("0x08002000 — 8 KB bootloader offset")
+                .clicked()
+            {
+                *dfu_flash_addr = "0x08002000".to_string();
+            }
+
+            ui.separator();
+
+            // DFU phases: Build → Objcopy → Flash
+            let objcopy_done = log.iter().any(|l| l.contains("✔ firmware.bin ready"));
+
+            let (b_icon, b_col) = match &state {
+                DfuState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
+                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Error(_) if !build_done && !log.is_empty() => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, b_icon, "Build", b_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (o_icon, o_col) = match &state {
+                _ if objcopy_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Flashing | DfuState::Success => {
+                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
+                }
+                DfuState::Error(_) if build_done && !objcopy_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                DfuState::Building if build_done => {
+                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, o_icon, "Objcopy", o_col);
+            ui.label(
+                egui::RichText::new("→")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(70)),
+            );
+
+            let (f_icon, f_col) = match &state {
+                DfuState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(100, 180, 255)),
+                DfuState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+                DfuState::Error(_) if objcopy_done => {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                }
+                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+            };
+            phase_widget(ui, f_icon, "Flash", f_col);
+        }
+
+        // Clear button — right-aligned, always visible, resets both states + log
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{} Clear", ph::X))
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                ))
+                .clicked()
+            {
+                dfu_log.lock().unwrap().clear();
+                *dfu_state.lock().unwrap() = DfuState::Idle;
+                *openocd_state.lock().unwrap() = OpenOcdState::Idle;
+                *espflash_state.lock().unwrap() = EspFlashState::Idle;
+            }
+        });
+    });
+
+    // ── ESP32 port selector ───────────────────────────────────────────────────
+    // Shown only for EspRust.  Lets the user type a COM port (e.g. "COM3") so
+    // espflash targets the correct device when multiple serial ports are present.
+    // Leave empty to let espflash auto-detect.
+    if *toolchain == ToolchainKind::EspRust {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Port:")
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(160)),
+            );
+            let resp = ui.add(
+                egui::TextEdit::singleline(espflash_port)
+                    .hint_text("auto (e.g. COM3)")
+                    .desired_width(120.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            resp.on_hover_text(
+                "Serial port for espflash.\n\
+                 Leave empty to auto-detect.\n\
+                 Windows example: COM3\n\
+                 Linux example:   /dev/ttyUSB0\n\
+                 macOS example:   /dev/cu.usbserial-0001",
+            );
+            if !espflash_port.is_empty() {
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Clear — use auto-detect")
+                    .clicked()
+                {
+                    espflash_port.clear();
+                }
+            }
+            ui.label(
+                egui::RichText::new("← leave empty for auto-detect")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(100))
+                    .italics(),
+            );
+        });
+        ui.add_space(2.0);
+    }
+
+    // ── ESP32 diagnostic row (read-only chip identification) ─────────────────
+    // Shown only for EspRust; sits between the config row and the log area.
+    if *toolchain == ToolchainKind::EspRust {
+        ui.horizontal(|ui| {
+            let busy = esp_state.is_busy();
+            let reading = matches!(esp_state, EspFlashState::ReadingInfo);
+
+            let btn_color = if reading {
+                egui::Color32::from_rgb(100, 180, 255)
+            } else if busy {
+                egui::Color32::GRAY
+            } else {
+                egui::Color32::from_rgb(100, 180, 255)
+            };
+
+            let btn_label = if reading {
+                format!("{} Reading…", ph::CIRCLE_NOTCH)
+            } else {
+                format!("{} Read Chip Info", ph::INFO)
+            };
+
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new(egui::RichText::new(&btn_label).size(10.5).color(btn_color)),
+                )
+                .on_hover_text(
+                    "Run `espflash board-info` — connects to the chip and reads:\n\
+                     chip type, silicon revision, flash size, MAC address.\n\
+                     \n\
+                     Nothing is written to flash — safe to run at any time.\n\
+                     Use this to verify the USB cable / COM port works before flashing.",
+                )
+                .clicked()
+            {
+                espflash::read_board_info(
+                    Arc::clone(espflash_state),
+                    Arc::clone(dfu_log),
+                    ui.ctx().clone(),
+                );
+            }
+
+            ui.label(
+                egui::RichText::new("← verify connectivity without flashing")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(100))
+                    .italics(),
+            );
+        });
+    }
+
+    ui.separator();
+
+    // ── DFU Error / Success banners ───────────────────────────────────────────
+    /*
+        if let DfuState::Error(msg) = &state {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(ph::X_CIRCLE)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(220, 80, 70)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("DFU: {}", msg.lines().next().unwrap_or("Error")))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(220, 80, 70))
+                        .strong(),
+                );
+            });
+            ui.separator();
+        }
+        if matches!(state, DfuState::Success) {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(ph::CHECK_CIRCLE)
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(80, 200, 100)),
+                );
+                ui.label(
+                    egui::RichText::new("Device programmed via DFU successfully!")
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(80, 200, 100))
+                        .strong(),
+                );
+            });
+            ui.separator();
+        }
+    */
+    // ── OpenOCD Error / Success banners ───────────────────────────────────────
+    if let OpenOcdState::Error(msg) = &ocd_state {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::X_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70)),
+            );
+            ui.label(
+                egui::RichText::new(format!("SWD: {}", msg.lines().next().unwrap_or("Error")))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+    if matches!(ocd_state, OpenOcdState::Success) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::CHECK_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100)),
+            );
+            ui.label(
+                egui::RichText::new("Device programmed via SWD successfully!")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+
+    // ── ESP32 flash Error / Success banners ───────────────────────────────────
+    if let EspFlashState::Error(msg) = &esp_state {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::X_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70)),
+            );
+            ui.label(
+                egui::RichText::new(format!("ESP: {}", msg.lines().next().unwrap_or("Error")))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 80, 70))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+    if matches!(esp_state, EspFlashState::Success) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(ph::CHECK_CIRCLE)
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100)),
+            );
+            ui.label(
+                egui::RichText::new("ESP32 programmed successfully!")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(80, 200, 100))
+                    .strong(),
+            );
+        });
+        ui.separator();
+    }
+
+    // ── Scrollable log (shared between DFU and OpenOCD operations) ────────────
+    egui::ScrollArea::vertical()
+        .id_salt("dfu_log_scroll")
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            if log.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "No output yet.\n\
+                         • Flash USB    — DFU mode (STM32 with BOOT0 = 1)\n\
+                         • Flash SWD    — ST-Link / J-Link via OpenOCD\n\
+                         • Flash ESP32  — espflash (ESP32-C3 via USB-Serial)",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::GRAY),
+                );
+                return;
+            }
+
+            for line in &log {
+                // Colour-code lines by content prefix.
+                //
+                // IMPORTANT: cargo prints "   Compiling proc-macro-error-attr2"
+                // and "   Compiling proc-macro-error2" which contain the word
+                // "error" inside the crate name — NOT an actual build error.
+                // Real cargo errors always start with "error" at column 0
+                // (e.g. "error[E0308]: …" or "error: …").
+                // Warnings start with "warning" at column 0.
+                // Using starts_with() avoids false positives from crate names.
+                let trimmed = line.trim_start();
+                let color = if line.starts_with("✔") {
+                    egui::Color32::from_rgb(80, 200, 100) // green  — success
+                } else if line.starts_with("▶") {
+                    egui::Color32::from_rgb(100, 180, 255) // blue   — command header
+                } else if trimmed.starts_with("error[") || trimmed.starts_with("error:") {
+                    egui::Color32::from_rgb(220, 100, 80) // red    — real compile error
+                } else if trimmed.starts_with("warning[") || trimmed.starts_with("warning:") {
+                    egui::Color32::from_rgb(210, 170, 40) // yellow — compile warning
+                } else if trimmed.starts_with("Compiling ")
+                    || trimmed.starts_with("Finished ")
+                    || trimmed.starts_with("Running ")
+                {
+                    egui::Color32::from_rgb(130, 170, 130) // muted green — progress
+                } else {
+                    egui::Color32::from_rgb(175, 180, 192) // grey   — normal output
+                };
+                ui.label(
+                    egui::RichText::new(line.as_str())
+                        .size(10.5)
+                        .monospace()
+                        .color(color),
+                );
+            }
+        });
+}
 
 // ── Cargo Check tab ───────────────────────────────────────────────────────────
 
+fn show_cargo_tab(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    build_state: &Arc<Mutex<BuildState>>,
+    selected_diagnostic: &mut Option<usize>,
+    selected_file: &mut ProjectFileId,
+) {
+    let state = build_state.lock().unwrap().clone();
+    let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+
+    // ── Status bar ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        let (icon, text, color) = match &state {
+            BuildState::Idle => return,
+            BuildState::Building => (
+                ph::HAMMER,
+                "Building…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 180),
+            ),
+            BuildState::Failed(msg) => {
+                let first = msg.lines().next().unwrap_or(msg);
+                // Suppress the [DISK_FULL] prefix from the one-liner badge
+                let first = first.strip_prefix("[DISK_FULL] ").unwrap_or(first);
+                (
+                    ph::X_CIRCLE,
+                    format!("Build failed: {}", first),
+                    egui::Color32::from_rgb(230, 90, 80),
+                )
+            }
+            BuildState::Done(r) if r.error_count() > 0 => (
+                ph::X_CIRCLE,
+                format!(
+                    "{} error{}{}",
+                    r.error_count(),
+                    if r.error_count() == 1 { "" } else { "s" },
+                    if r.warning_count() > 0 {
+                        format!(
+                            ",  {} warning{}",
+                            r.warning_count(),
+                            if r.warning_count() == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+            BuildState::Done(r) if r.warning_count() > 0 => (
+                ph::WARNING,
+                format!(
+                    "{} warning{}",
+                    r.warning_count(),
+                    if r.warning_count() == 1 { "" } else { "s" }
+                ),
+                egui::Color32::from_rgb(230, 190, 50),
+            ),
+            BuildState::Done(_) => (
+                ph::CHECK_CIRCLE,
+                "Build succeeded — no errors".to_owned(),
+                egui::Color32::from_rgb(80, 200, 100),
+            ),
+        };
+
+        ui.label(egui::RichText::new(icon).size(13.0).color(color));
+        ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
+
+        // Right-side buttons: Clean target/ | Clear
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Clear result button
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{} Clear", ph::X))
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                ))
+                .clicked()
+            {
+                *build_state.lock().unwrap() = BuildState::Idle;
+                *selected_diagnostic = None;
+            }
+
+            ui.add_space(4.0);
+
+            // "Clean target/" — deletes cached LLVM/cargo build artefacts to
+            // recover disk space.  Shown always; especially helpful after a
+            // disk-full build failure.
+            let is_building = matches!(state, BuildState::Building);
+            if ui
+                .add_enabled(
+                    !is_building,
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Clean target/", ph::TRASH))
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(200, 160, 80)),
+                    ),
+                )
+                .on_hover_text(
+                    "Run `cargo clean` — deletes the target/ directory to free disk space.\n\
+                     Crates cached in ~/.cargo are NOT removed; only rebuilt files are re-compiled.",
+                )
+                .clicked()
+            {
+                build::start_clean(workspace.clone(), Arc::clone(build_state), ctx.clone());
+                *selected_diagnostic = None;
+            }
+        });
+    });
+
+    let BuildState::Done(result) = &state else {
+        // For Building/Failed we've shown what we can
+        if let BuildState::Failed(msg) = &state {
+            ui.separator();
+
+            // ── Special disk-full banner ──────────────────────────────────────
+            let is_disk_full = msg.starts_with("[DISK_FULL]");
+            if is_disk_full {
+                // Orange warning box with an inline "Clean target/" button
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(60, 45, 10))
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} Disk full", ph::WARNING))
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(250, 190, 60))
+                                    .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    " — the build target/ directory ran out of space.",
+                                )
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(230, 210, 140)),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "ESP32 / RISC-V builds produce several GB of LLVM artefacts \
+                                 on the first run.  Click the button to delete the target/ \
+                                 folder and free that space — crates cached in ~/.cargo are \
+                                 NOT removed so the next build only re-compiles changed files.",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(200, 190, 150)),
+                        );
+                        ui.add_space(6.0);
+                        if ui
+                            .add(egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{} Clean target/  (free space)",
+                                    ph::TRASH
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(255, 210, 80)),
+                            ))
+                            .clicked()
+                        {
+                            build::start_clean(
+                                workspace.clone(),
+                                Arc::clone(build_state),
+                                ctx.clone(),
+                            );
+                            *selected_diagnostic = None;
+                        }
+                    });
+                ui.add_space(4.0);
+            }
+
+            // Full error text in a scroll area
+            egui::ScrollArea::vertical()
+                .id_salt("build_failed_scroll")
+                .show(ui, |ui| {
+                    // Strip the [DISK_FULL] marker before display
+                    let display_msg = msg.strip_prefix("[DISK_FULL] ").unwrap_or(msg.as_str());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(display_msg)
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(230, 90, 80)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+        return;
+    };
+
+    if result.diagnostics.is_empty() {
+        return;
+    }
+
+    ui.separator();
+
+    // ── Compact diagnostic list ───────────────────────────────────────────────
+    let sel = *selected_diagnostic;
+
+    // If something is selected, split the panel: list on top, detail below
+    let list_height = if sel.is_some() {
+        ui.available_height() * 0.45
+    } else {
+        ui.available_height()
+    };
+
+    egui::ScrollArea::vertical()
+        .id_salt("build_diag_list")
+        .max_height(list_height)
+        .show(ui, |ui| {
+            for (i, diag) in result.diagnostics.iter().enumerate() {
+                let is_sel = sel == Some(i);
+
+                let (level_icon, level_color) = if diag.is_error() {
+                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                } else {
+                    (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                };
+
+                let location = match (diag.file.as_deref(), diag.line) {
+                    (Some(f), Some(l)) => format!("{f}:{l}"),
+                    (Some(f), None) => f.to_owned(),
+                    _ => String::new(),
+                };
+
+                let row_bg = if is_sel {
+                    egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 18.0),
+                    egui::Sense::click(),
+                );
+
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, row_bg);
+
+                    // painter.text() returns the Rect of the rendered text,
+                    // letting us advance x without needing &mut Fonts.
+                    let cy = rect.center().y;
+                    let mut x = rect.left() + 4.0;
+
+                    // Level icon
+                    let r = painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        level_icon,
+                        egui::FontId::proportional(11.0),
+                        level_color,
+                    );
+                    x = r.right() + 4.0;
+
+                    // File:line location
+                    if !location.is_empty() {
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            &location,
+                            egui::FontId::monospace(10.5),
+                            egui::Color32::from_rgb(120, 160, 200),
+                        );
+                        x = r.right() + 6.0;
+                    }
+
+                    // Error code [E0308]
+                    if let Some(code) = &diag.code {
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            format!("[{code}]"),
+                            egui::FontId::monospace(10.0),
+                            egui::Color32::from_rgb(150, 130, 80),
+                        );
+                        x = r.right() + 6.0;
+                    }
+
+                    // Message text
+                    let msg_color = if is_sel {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(210, 210, 220)
+                    };
+                    painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &diag.message,
+                        egui::FontId::proportional(11.0),
+                        msg_color,
+                    );
+                }
+
+                if resp.clicked() {
+                    *selected_diagnostic = if is_sel { None } else { Some(i) };
+
+                    // Navigate to the file if possible
+                    if let Some(file) = &diag.file {
+                        let target = match file.as_str() {
+                            "src/main.rs" => Some(ProjectFileId::MainRs),
+                            "build.rs" => Some(ProjectFileId::BuildRs),
+                            "Cargo.toml" => Some(ProjectFileId::CargoToml),
+                            _ => None,
+                        };
+                        if let Some(id) = target {
+                            *selected_file = id;
+                        }
+                    }
+                }
+            }
+        });
+
+    // ── Detail view for selected diagnostic ───────────────────────────────────
+    if let Some(idx) = sel {
+        if let Some(diag) = result.diagnostics.get(idx) {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("build_diag_detail")
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&diag.rendered)
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(220, 215, 200)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+    }
+}
 
 // ── rust-analyzer tab ─────────────────────────────────────────────────────────
 
+fn show_ra_tab(
+    ui: &mut egui::Ui,
+    lsp_state: &Arc<Mutex<lsp::LspState>>,
+    selected: &mut Option<usize>,
+    selected_file: &mut ProjectFileId,
+) {
+    // Extract everything we need while holding the lock, then drop it
+    // before we start drawing so there's no risk of a deadlock.
+    let (status, total_err, total_warn, all_diags, failed_msg) = {
+        let lsp = lsp_state.lock().unwrap();
+        let failed_msg = if let lsp::LspStatus::Failed(ref m) = lsp.status {
+            Some(m.clone())
+        } else {
+            None
+        };
+        // Flatten all diagnostics into (rel_path, LspDiagnostic) pairs
+        let mut flat: Vec<(String, lsp::LspDiagnostic)> = lsp
+            .diagnostics
+            .iter()
+            .flat_map(|(path, diags)| diags.iter().map(move |d| (path.clone(), d.clone())))
+            .collect();
+        // Errors first, then warnings
+        flat.sort_by_key(|(_, d)| (d.severity != lsp::DiagSeverity::Error, d.line));
+        (
+            lsp.status.clone(),
+            lsp.total_errors(),
+            lsp.total_warnings(),
+            flat,
+            failed_msg,
+        )
+    };
+
+    // ── Status bar ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        let (icon, text, color) = match &status {
+            lsp::LspStatus::Stopped => (
+                ph::PLUGS,
+                "rust-analyzer not running".to_owned(),
+                egui::Color32::DARK_GRAY,
+            ),
+            lsp::LspStatus::Starting => (
+                ph::CIRCLE_NOTCH,
+                "rust-analyzer starting…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 80),
+            ),
+            lsp::LspStatus::Indexing => (
+                ph::CIRCLE_NOTCH,
+                "Indexing project…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 80),
+            ),
+            lsp::LspStatus::Ready if total_err > 0 => (
+                ph::X_CIRCLE,
+                format!(
+                    "{} error{}{}",
+                    total_err,
+                    if total_err == 1 { "" } else { "s" },
+                    if total_warn > 0 {
+                        format!(
+                            ",  {} warning{}",
+                            total_warn,
+                            if total_warn == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+            lsp::LspStatus::Ready if total_warn > 0 => (
+                ph::WARNING,
+                format!(
+                    "{} warning{}",
+                    total_warn,
+                    if total_warn == 1 { "" } else { "s" }
+                ),
+                egui::Color32::from_rgb(230, 190, 50),
+            ),
+            lsp::LspStatus::Ready => (
+                ph::CHECK_CIRCLE,
+                "No issues — rust-analyzer ready".to_owned(),
+                egui::Color32::from_rgb(80, 200, 100),
+            ),
+            lsp::LspStatus::Failed(_) => (
+                ph::X_CIRCLE,
+                "rust-analyzer failed to start".to_owned(),
+                egui::Color32::from_rgb(230, 90, 80),
+            ),
+        };
+
+        ui.label(egui::RichText::new(icon).size(13.0).color(color));
+        ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
+    });
+
+    // Spinner repaint
+    if matches!(status, lsp::LspStatus::Starting | lsp::LspStatus::Indexing) {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    // Failed detail
+    if let Some(msg) = failed_msg {
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("ra_failed_scroll")
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&msg)
+                            .size(11.0)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(230, 90, 80)),
+                    )
+                    .wrap(),
+                );
+            });
+        return;
+    }
+
+    if all_diags.is_empty() {
+        return;
+    }
+
+    ui.separator();
+
+    // ── Diagnostic list ───────────────────────────────────────────────────────
+    let sel = *selected;
+    let list_height = if sel.is_some() {
+        ui.available_height() * 0.45
+    } else {
+        ui.available_height()
+    };
+
+    egui::ScrollArea::vertical()
+        .id_salt("ra_diag_list")
+        .max_height(list_height)
+        .show(ui, |ui| {
+            for (i, (path, diag)) in all_diags.iter().enumerate() {
+                let is_sel = sel == Some(i);
+
+                let (level_icon, level_color) = match diag.severity {
+                    lsp::DiagSeverity::Error => {
+                        (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                    }
+                    lsp::DiagSeverity::Warning => {
+                        (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                    }
+                    lsp::DiagSeverity::Info | lsp::DiagSeverity::Hint => {
+                        (ph::INFO, egui::Color32::from_rgb(80, 140, 210))
+                    }
+                };
+
+                let location = format!("{}:{}", path, diag.line);
+
+                let row_bg = if is_sel {
+                    egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 18.0),
+                    egui::Sense::click(),
+                );
+
+                if ui.is_rect_visible(rect) {
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 2.0, row_bg);
+
+                    let cy = rect.center().y;
+                    let mut x = rect.left() + 4.0;
+
+                    // Severity icon
+                    let r = painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        level_icon,
+                        egui::FontId::proportional(11.0),
+                        level_color,
+                    );
+                    x = r.right() + 4.0;
+
+                    // file:line
+                    let r = painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &location,
+                        egui::FontId::monospace(10.5),
+                        egui::Color32::from_rgb(120, 160, 200),
+                    );
+                    x = r.right() + 6.0;
+
+                    // Error code [E0308]
+                    if let Some(code) = &diag.code {
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            format!("[{code}]"),
+                            egui::FontId::monospace(10.0),
+                            egui::Color32::from_rgb(150, 130, 80),
+                        );
+                        x = r.right() + 6.0;
+                    }
+
+                    // Message
+                    let msg_color = if is_sel {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(210, 210, 220)
+                    };
+                    painter.text(
+                        egui::pos2(x, cy),
+                        egui::Align2::LEFT_CENTER,
+                        &diag.message,
+                        egui::FontId::proportional(11.0),
+                        msg_color,
+                    );
+                }
+
+                if resp.clicked() {
+                    *selected = if is_sel { None } else { Some(i) };
+
+                    // Navigate to file
+                    let target = match path.as_str() {
+                        "src/main.rs" => Some(ProjectFileId::MainRs),
+                        "build.rs" => Some(ProjectFileId::BuildRs),
+                        "Cargo.toml" => Some(ProjectFileId::CargoToml),
+                        _ => None,
+                    };
+                    if let Some(id) = target {
+                        *selected_file = id;
+                    }
+                }
+            }
+        });
+
+    // ── Detail view ───────────────────────────────────────────────────────────
+    if let Some(idx) = sel {
+        if let Some((_, diag)) = all_diags.get(idx) {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("ra_diag_detail")
+                .show(ui, |ui| {
+                    // Header: severity + code + location
+                    ui.horizontal(|ui| {
+                        let (sev_icon, sev_col) = match diag.severity {
+                            lsp::DiagSeverity::Error => {
+                                (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                            }
+                            lsp::DiagSeverity::Warning => {
+                                (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                            }
+                            _ => (ph::INFO, egui::Color32::from_rgb(80, 140, 210)),
+                        };
+                        ui.label(egui::RichText::new(sev_icon).size(13.0).color(sev_col));
+                        if let Some(code) = &diag.code {
+                            ui.label(
+                                egui::RichText::new(format!("[{code}]"))
+                                    .size(11.0)
+                                    .monospace()
+                                    .color(egui::Color32::from_rgb(180, 155, 80)),
+                            );
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("line {}  col {}", diag.line, diag.col))
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    });
+
+                    // Full message body
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&diag.message)
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(220, 215, 200)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+    }
+}
 
 // ── Required Tools tab ────────────────────────────────────────────────────────
 
@@ -2635,6 +4109,131 @@ fn show_diag_panel(
 ///   fg1  #d0d7e0  — strong / heading text
 ///   acc  #528bff  — selection / focus accent
 ///   sep  #3a3f4b  — borders / separators
+fn apply_dark_theme(ctx: &egui::Context) {
+    use egui::Color32;
+
+    // Pin theme to Dark so an OS appearance change can't flip it to light.
+    ctx.set_theme(egui::Theme::Dark);
+
+    // ── Start from egui's built-in dark base ─────────────────────────────────
+    let mut vis = egui::Visuals::dark();
+
+    // ── Palette ──────────────────────────────────────────────────────────────
+    let bg0 = Color32::from_rgb(0x1e, 0x21, 0x27);
+    let bg1 = Color32::from_rgb(0x21, 0x25, 0x2b);
+    let bg2 = Color32::from_rgb(0x28, 0x2c, 0x34);
+    let bg3 = Color32::from_rgb(0x2c, 0x31, 0x3a);
+    let bg4 = Color32::from_rgb(0x3e, 0x44, 0x51);
+    let sep = Color32::from_rgb(0x3a, 0x3f, 0x4b);
+    let fg0 = Color32::from_rgb(0xab, 0xb2, 0xbf);
+    let fg1 = Color32::from_rgb(0xd0, 0xd7, 0xe0);
+    let acc = Color32::from_rgb(0x52, 0x8b, 0xff);
+    let acc_bg = Color32::from_rgba_unmultiplied(0x52, 0x8b, 0xff, 50);
+    let cr4 = egui::CornerRadius::same(4); // CornerRadius uses u8
+
+    // ── Backgrounds ──────────────────────────────────────────────────────────
+    vis.window_fill = bg1;
+    vis.panel_fill = bg1;
+    vis.faint_bg_color = bg0;
+    vis.extreme_bg_color = bg0;
+    vis.code_bg_color = Color32::from_rgb(0x1a, 0x1d, 0x23);
+
+    // ── Window chrome ────────────────────────────────────────────────────────
+    vis.window_stroke = egui::Stroke::new(1.0, sep);
+    vis.window_corner_radius = egui::CornerRadius::same(6);
+    vis.menu_corner_radius = egui::CornerRadius::same(5);
+    vis.window_shadow = egui::Shadow {
+        offset: [0, 4],
+        blur: 14,
+        spread: 0,
+        color: Color32::from_black_alpha(130),
+    };
+    vis.popup_shadow = egui::Shadow {
+        offset: [0, 2],
+        blur: 8,
+        spread: 0,
+        color: Color32::from_black_alpha(100),
+    };
+
+    // ── Widgets: noninteractive ───────────────────────────────────────────────
+    vis.widgets.noninteractive.bg_fill = bg1;
+    vis.widgets.noninteractive.weak_bg_fill = bg1;
+    vis.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, sep);
+    vis.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, fg0);
+    vis.widgets.noninteractive.corner_radius = cr4;
+
+    // ── Widgets: inactive ────────────────────────────────────────────────────
+    vis.widgets.inactive.bg_fill = bg2;
+    vis.widgets.inactive.weak_bg_fill = bg2;
+    vis.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, sep);
+    vis.widgets.inactive.fg_stroke = egui::Stroke::new(1.5, fg0);
+    vis.widgets.inactive.corner_radius = cr4;
+
+    // ── Widgets: hovered ─────────────────────────────────────────────────────
+    vis.widgets.hovered.bg_fill = bg3;
+    vis.widgets.hovered.weak_bg_fill = bg3;
+    vis.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x60, 0x6a, 0x80));
+    vis.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, fg1);
+    vis.widgets.hovered.corner_radius = cr4;
+
+    // ── Widgets: active (pressed) ────────────────────────────────────────────
+    vis.widgets.active.bg_fill = bg4;
+    vis.widgets.active.weak_bg_fill = bg4;
+    vis.widgets.active.bg_stroke = egui::Stroke::new(1.0, acc);
+    vis.widgets.active.fg_stroke = egui::Stroke::new(2.0, fg1);
+    vis.widgets.active.corner_radius = cr4;
+
+    // ── Widgets: open (combo-box open state) ─────────────────────────────────
+    vis.widgets.open.bg_fill = bg4;
+    vis.widgets.open.weak_bg_fill = bg4;
+    vis.widgets.open.bg_stroke = egui::Stroke::new(1.0, acc);
+    vis.widgets.open.fg_stroke = egui::Stroke::new(1.5, fg1);
+    vis.widgets.open.corner_radius = cr4;
+
+    // ── Text / selection ─────────────────────────────────────────────────────
+    vis.override_text_color = Some(fg0);
+    vis.selection.bg_fill = acc_bg;
+    vis.selection.stroke = egui::Stroke::new(1.0, acc);
+
+    // ── Misc ─────────────────────────────────────────────────────────────────
+    vis.hyperlink_color = Color32::from_rgb(0x61, 0xaf, 0xef);
+    vis.warn_fg_color = Color32::from_rgb(0xe5, 0xc0, 0x7b);
+    vis.error_fg_color = Color32::from_rgb(0xe0, 0x6c, 0x75);
+
+    ctx.set_visuals(vis);
+
+    // ── Global style tweaks ──────────────────────────────────────────────────
+    let mut style = (*ctx.style()).clone();
+
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(8.0, 3.0);
+    style.spacing.window_margin = egui::Margin::same(8);
+    style.spacing.indent = 14.0;
+
+    use egui::TextStyle;
+    style.text_styles.insert(
+        TextStyle::Heading,
+        egui::FontId::new(14.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Body,
+        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Button,
+        egui::FontId::new(12.5, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Small,
+        egui::FontId::new(11.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        egui::FontId::new(13.0, egui::FontFamily::Monospace),
+    );
+
+    ctx.set_style(style);
+}
 
 // ── LSP completion helpers ────────────────────────────────────────────────────
 
@@ -2851,3 +4450,230 @@ fn lsp_kind_icon(kind: u8) -> &'static str {
     }
 }
 
+fn show_tools_tab(
+    ui: &mut egui::Ui,
+    tools_state: &Arc<Mutex<required_tools::ToolsState>>,
+    ctx: &egui::Context,
+) {
+    use required_tools::ToolStatus;
+
+    // Snapshot all state before rendering (avoids holding the lock during draw)
+    let (rows, any_busy, missing_count, log) = {
+        let s = tools_state.lock().unwrap();
+        (
+            s.snapshot(),
+            s.any_busy(),
+            s.missing_installable_count(),
+            s.log.clone(),
+        )
+    };
+
+    // ── Toolbar ───────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                !any_busy,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Check All", ph::MAGNIFYING_GLASS)).size(11.0),
+                ),
+            )
+            .on_hover_text("Check every tool / target in the list")
+            .clicked()
+        {
+            required_tools::start_check_all(Arc::clone(tools_state), ctx.clone());
+        }
+
+        let install_label = if missing_count > 0 {
+            format!("Install Missing ({})", missing_count)
+        } else {
+            "Install Missing".to_string()
+        };
+        if ui
+            .add_enabled(
+                !any_busy && missing_count > 0,
+                egui::Button::new(egui::RichText::new(install_label).size(11.0)),
+            )
+            .on_hover_text("Auto-install every missing tool that supports it")
+            .clicked()
+        {
+            required_tools::start_install_missing(Arc::clone(tools_state), ctx.clone());
+        }
+    });
+
+    ui.add_space(2.0);
+    ui.separator();
+
+    // ── Tools grid ────────────────────────────────────────────────────────────
+    let available_h = ui.available_height();
+    // Reserve ~30 % of the panel for the log area (min 60 px, max 110 px)
+    let log_h = (available_h * 0.30).clamp(60.0, 110.0);
+    let grid_h = (available_h - log_h - 20.0).max(40.0);
+
+    egui::ScrollArea::vertical()
+        .id_salt("tools_grid_scroll")
+        .max_height(grid_h)
+        .show(ui, |ui| {
+            egui::Grid::new("tools_grid")
+                .num_columns(5)
+                .striped(true)
+                .min_col_width(50.0)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    // Header row
+                    let hdr = |text: &str| {
+                        egui::RichText::new(text)
+                            .strong()
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(150, 160, 180))
+                    };
+                    ui.label(hdr("Tool"));
+                    ui.label(hdr("For"));
+                    ui.label(hdr("Status"));
+                    ui.label(hdr("Version"));
+                    ui.label(hdr("Action"));
+                    ui.end_row();
+
+                    for (idx, row) in rows.iter().enumerate() {
+                        // ── Tool name + description tooltip ────────────────
+                        ui.label(egui::RichText::new(row.name).monospace().size(10.5))
+                            .on_hover_text(row.description);
+
+                        // ── Toolchain column ──────────────────────────────
+                        let tc_label = match &row.toolchain {
+                            None => "All",
+                            Some(ToolchainKind::RustEmbedded) => "STM32",
+                            Some(ToolchainKind::EspRust) => "ESP32-C3",
+                            Some(ToolchainKind::SdccC) => "SDCC",
+                        };
+                        ui.label(
+                            egui::RichText::new(tc_label)
+                                .size(10.5)
+                                .color(egui::Color32::GRAY),
+                        );
+
+                        // ── Status badge ───────────────────────────────────
+                        ui.label(
+                            egui::RichText::new(row.status.label())
+                                .size(10.5)
+                                .color(row.status.color()),
+                        );
+
+                        // ── Version string ─────────────────────────────────
+                        let ver = match &row.status {
+                            ToolStatus::Ok(v) => v.as_str(),
+                            _ => "—",
+                        };
+                        ui.label(
+                            egui::RichText::new(ver)
+                                .monospace()
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(140, 150, 170)),
+                        );
+
+                        // ── Action buttons ─────────────────────────────────
+                        let busy = row.status.is_busy();
+                        ui.horizontal(|ui| {
+                            // Check button — always shown, disabled while busy
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new(
+                                        egui::RichText::new(ph::MAGNIFYING_GLASS).size(11.0),
+                                    )
+                                    .small(),
+                                )
+                                .on_hover_text("Re-check this tool")
+                                .clicked()
+                            {
+                                required_tools::start_check(
+                                    idx,
+                                    Arc::clone(tools_state),
+                                    ctx.clone(),
+                                );
+                            }
+
+                            // Install button — only when missing/failed AND auto-installable
+                            if row.can_auto_install
+                                && matches!(row.status, ToolStatus::Missing | ToolStatus::Failed(_))
+                            {
+                                if ui
+                                    .add_enabled(
+                                        !busy,
+                                        egui::Button::new(
+                                            egui::RichText::new("Install").size(10.5),
+                                        )
+                                        .small(),
+                                    )
+                                    .on_hover_text("Auto-install this tool")
+                                    .clicked()
+                                {
+                                    required_tools::start_install(
+                                        idx,
+                                        Arc::clone(tools_state),
+                                        ctx.clone(),
+                                    );
+                                }
+                            }
+
+                            // Manual URL link — for tools without auto-install
+                            if !row.can_auto_install
+                                && matches!(
+                                    row.status,
+                                    ToolStatus::Missing
+                                        | ToolStatus::Unknown
+                                        | ToolStatus::Failed(_)
+                                )
+                            {
+                                ui.hyperlink_to(
+                                    egui::RichText::new("Get…")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(100, 160, 220)),
+                                    row.manual_url,
+                                )
+                                .on_hover_text(row.manual_url);
+                            }
+                        });
+
+                        ui.end_row();
+                    }
+                });
+        });
+
+    // ── Log area ──────────────────────────────────────────────────────────────
+    ui.separator();
+
+    egui::ScrollArea::vertical()
+        .id_salt("tools_log_scroll")
+        .stick_to_bottom(true)
+        .max_height(log_h)
+        .show(ui, |ui| {
+            if log.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "Click \"Check All\" to verify your toolchain setup.\n\
+                         Use \"Install\" buttons to auto-install missing components.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+                );
+                return;
+            }
+            for line in &log {
+                let color = if line.starts_with("  ✔") || line.starts_with("✔") {
+                    egui::Color32::from_rgb(80, 200, 100)
+                } else if line.starts_with("  ✘") {
+                    egui::Color32::from_rgb(220, 80, 70)
+                } else if line.starts_with("▶") {
+                    egui::Color32::from_rgb(100, 180, 255)
+                } else {
+                    egui::Color32::from_rgb(175, 180, 192)
+                };
+                ui.label(
+                    egui::RichText::new(line.as_str())
+                        .monospace()
+                        .size(10.0)
+                        .color(color),
+                );
+            }
+        });
+}
