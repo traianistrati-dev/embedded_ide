@@ -1,5 +1,7 @@
 use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
+use crate::editor::gui::show_diagnostics_overlay;
+use crate::editor::gui::show_ra_status_bar;
 use crate::espflash::{self, EspFlashState};
 use crate::lsp::{self, LspStatus};
 use crate::openocd::{self, OpenOcdState};
@@ -10,20 +12,17 @@ use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
-use crate::required_tools;
-use crate::editor::gui::show_ra_status_bar;
-use crate::editor::gui::show_diagnostics_overlay;
 use crate::project_tree::gui::show_project_tree as show_project_tree_panel;
+use crate::required_tools;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
 use egui_phosphor::regular as ph;
 use notify::Watcher as _;
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 // ── Module structure ──────────────────────────────────────────────────────────
 mod tabs;
-use tabs::{show_peripherals_tab, show_cargo_tab, show_ra_tab, show_dfu_tab, show_tools_tab};
+use tabs::{show_cargo_tab, show_dfu_tab, show_peripherals_tab, show_ra_tab, show_tools_tab};
 
 mod helpers;
 use helpers::{apply_dark_theme, file_row, user_file_row};
@@ -224,6 +223,11 @@ pub struct AppIde {
     new_src_name: Option<String>,
     /// While `Some(s)`, a text-input for naming a new folder is shown in the tree.
     new_src_folder_name: Option<String>,
+    /// Parent folder path when creating a new file (e.g., "src" or "src/utils").
+    /// If empty, creates in src/ root. For project-level files, would use "".
+    new_file_parent_folder: Option<String>,
+    /// Parent folder path when creating a new folder (e.g., "src" or "src/utils").
+    new_folder_parent_folder: Option<String>,
     /// While `Some((folder, name))`, an inline file-name input is open inside that folder.
     new_file_in_folder: Option<(String, String)>,
     /// While `Some((idx, new_name))`, an inline rename input is shown for that user file.
@@ -352,6 +356,8 @@ impl AppIde {
             user_src_folders: persisted.user_src_folders,
             new_src_name: None,
             new_src_folder_name: None,
+            new_file_parent_folder: None,
+            new_folder_parent_folder: None,
             new_file_in_folder: None,
             renaming_file: None,
             renaming_folder: None,
@@ -408,6 +414,8 @@ impl AppIde {
         self.renaming_folder = None;
         self.new_src_name = None;
         self.new_src_folder_name = None;
+        self.new_file_parent_folder = None;
+        self.new_folder_parent_folder = None;
         self.new_file_in_folder = None;
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
         self.project_dir = Some(root.to_path_buf());
@@ -769,8 +777,19 @@ impl AppIde {
                 if self.selected_mcu_type.project_config().is_some() {
                     let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                     if let Some(config) = self.selected_mcu_type.project_config() {
-                        if project_gen::write_project(&build_dir, &config, &self.generated_code, &self.user_src_files).is_ok() {
-                            lsp::start(&build_dir, Arc::clone(&self.lsp_state), self.egui_ctx.clone());
+                        if project_gen::write_project(
+                            &build_dir,
+                            &config,
+                            &self.generated_code,
+                            &self.user_src_files,
+                        )
+                        .is_ok()
+                        {
+                            lsp::start(
+                                &build_dir,
+                                Arc::clone(&self.lsp_state),
+                                self.egui_ctx.clone(),
+                            );
                         }
                     }
                 }
@@ -890,6 +909,8 @@ impl eframe::App for AppIde {
                             &mut self.user_src_folders,
                             &mut self.new_src_name,
                             &mut self.new_src_folder_name,
+                            &mut self.new_file_parent_folder,
+                            &mut self.new_folder_parent_folder,
                             &mut self.new_file_in_folder,
                             &mut self.renaming_file,
                             &mut self.renaming_folder,
@@ -1013,6 +1034,8 @@ impl eframe::App for AppIde {
                             self.renaming_folder = None;
                             self.new_src_name = None;
                             self.new_src_folder_name = None;
+                            self.new_file_parent_folder = None;
+                            self.new_folder_parent_folder = None;
                             self.new_file_in_folder = None;
                             self.confirm_new_project = false;
                             // Pre-populate the pins/ scaffold so the tree shows
@@ -1031,6 +1054,126 @@ impl eframe::App for AppIde {
                     });
                     ui.add_space(4.0);
                 });
+        }
+
+        // ── "New File" dialog ─────────────────────────────────────────────────
+        if let Some(ref mut new_name) = self.new_src_name {
+            let mut should_close = false;
+            let parent_folder = self
+                .new_file_parent_folder
+                .clone()
+                .unwrap_or_else(|| "src".to_string());
+            egui::Window::new("New File")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.label(format!("Create file in: {parent_folder}/"));
+                    ui.label("Enter filename:");
+                    let response = ui.text_edit_singleline(new_name);
+                    if ui.memory(|m| {
+                        m.data
+                            .get_temp::<bool>(egui::Id::new("__new_file__"))
+                            .unwrap_or(true)
+                    }) {
+                        response.request_focus();
+                        ui.memory_mut(|m| m.data.insert_temp(egui::Id::new("__new_file__"), false));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            let clean = new_name.trim().to_string();
+                            let full_path = if parent_folder == "src" {
+                                clean.clone()
+                            } else {
+                                format!("{parent_folder}/{clean}")
+                            };
+                            if !clean.is_empty()
+                                && !self.user_src_files.iter().any(|(p, _)| p == &full_path)
+                            {
+                                let workspace_dir =
+                                    std::env::temp_dir().join("embedded_ide_0_check");
+                                let file_path = workspace_dir.join(&parent_folder).join(&clean);
+                                if let Some(parent) = file_path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                let _ = std::fs::write(&file_path, "// New file\n");
+                                self.user_src_files
+                                    .push((full_path, "// New file\n".to_string()));
+                                self.selected_file =
+                                    ProjectFileId::UserFile(self.user_src_files.len() - 1);
+                                save_project_needed = true;
+                            }
+                            should_close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+            if should_close {
+                self.new_src_name = None;
+                self.new_file_parent_folder = None;
+            }
+        }
+
+        // ── "New Folder" dialog ───────────────────────────────────────────────
+        if let Some(ref mut new_name) = self.new_src_folder_name {
+            let mut should_close = false;
+            let parent_folder = self
+                .new_folder_parent_folder
+                .clone()
+                .unwrap_or_else(|| "src".to_string());
+            egui::Window::new("New Folder")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.label(format!("Create folder in: {parent_folder}/"));
+                    ui.label("Enter folder name:");
+                    let response = ui.text_edit_singleline(new_name);
+                    if ui.memory(|m| {
+                        m.data
+                            .get_temp::<bool>(egui::Id::new("__new_folder__"))
+                            .unwrap_or(true)
+                    }) {
+                        response.request_focus();
+                        ui.memory_mut(|m| {
+                            m.data.insert_temp(egui::Id::new("__new_folder__"), false)
+                        });
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Create").clicked() {
+                            let clean = new_name.trim().to_string();
+                            let full_path = if parent_folder == "src" {
+                                clean.clone()
+                            } else {
+                                format!("{parent_folder}/{clean}")
+                            };
+                            if !clean.is_empty() && !self.user_src_folders.contains(&full_path) {
+                                self.user_src_folders.push(full_path.clone());
+                                let workspace_dir =
+                                    std::env::temp_dir().join("embedded_ide_0_check");
+                                let folder_path = workspace_dir.join(&parent_folder).join(&clean);
+                                let _ = std::fs::create_dir_all(&folder_path);
+                                save_project_needed = true;
+                            }
+                            should_close = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+            if should_close {
+                self.new_src_folder_name = None;
+                self.new_folder_parent_folder = None;
+            }
         }
 
         // Write the entire project to the workspace directory when the file
@@ -1763,7 +1906,12 @@ impl eframe::App for AppIde {
                     }
                 }
                 // ── rust-analyzer inline status bar ───────────────────────────
-                show_ra_status_bar(ui, &self.lsp_state, &self.selected_file, &self.user_src_files);
+                show_ra_status_bar(
+                    ui,
+                    &self.lsp_state,
+                    &self.selected_file,
+                    &self.user_src_files,
+                );
 
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
@@ -2332,15 +2480,11 @@ impl eframe::App for AppIde {
     }
 }
 
-
 // ── Single file row for fixed project files (with diagnostic indicators) ──────
-
 
 // ── Single file row for user-created source files (with delete button) ────────
 
-
 // ── Peripherals tab ───────────────────────────────────────────────────────────
-
 
 fn periph_section(ui: &mut egui::Ui, title: &str, pins: &[&Pin], color: egui::Color32) {
     if pins.is_empty() {
@@ -2612,12 +2756,9 @@ fn show_diag_panel(
 
 // ── DFU Flash tab ─────────────────────────────────────────────────────────────
 
-
 // ── Cargo Check tab ───────────────────────────────────────────────────────────
 
-
 // ── rust-analyzer tab ─────────────────────────────────────────────────────────
-
 
 // ── Required Tools tab ────────────────────────────────────────────────────────
 
@@ -2850,4 +2991,3 @@ fn lsp_kind_icon(kind: u8) -> &'static str {
         _ => "   ",
     }
 }
-

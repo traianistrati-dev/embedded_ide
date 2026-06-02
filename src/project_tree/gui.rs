@@ -7,6 +7,70 @@ use crate::app::ProjectFileId;
 use crate::{build, lsp};
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 
+/// Tree node representing a file or folder.
+#[derive(Clone, Debug)]
+enum TreeNode {
+    File(usize),  // index into user_src_files
+    Folder(BTreeMap<String, TreeNode>),
+}
+
+/// Build a hierarchical tree from user_src_files and user_src_folders.
+fn build_tree(user_src_files: &[(String, String)], user_src_folders: &[String]) -> BTreeMap<String, TreeNode> {
+    let mut root: BTreeMap<String, TreeNode> = BTreeMap::new();
+
+    // First, ensure all folders exist in the tree
+    for folder in user_src_folders {
+        insert_folder_path(&mut root, folder);
+    }
+
+    // Then, insert all files
+    for (i, (path, _)) in user_src_files.iter().enumerate() {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.is_empty() {
+            continue;
+        }
+        insert_file_path(&mut root, &parts, i);
+    }
+
+    root
+}
+
+/// Helper: insert a folder path into the tree.
+fn insert_folder_path(root: &mut BTreeMap<String, TreeNode>, path: &str) {
+    let parts: Vec<&str> = path.split('/').collect();
+    let mut current = root;
+    for part in parts {
+        let node = current
+            .entry(part.to_string())
+            .or_insert_with(|| TreeNode::Folder(BTreeMap::new()));
+        if let TreeNode::Folder(children) = node {
+            current = children;
+        } else {
+            break; // Parent is a file, can't go deeper
+        }
+    }
+}
+
+/// Helper: insert a file path into the tree.
+fn insert_file_path(root: &mut BTreeMap<String, TreeNode>, parts: &[&str], file_idx: usize) {
+    if parts.is_empty() {
+        return;
+    }
+    let mut current = root;
+    for part in &parts[..parts.len() - 1] {
+        let node = current
+            .entry(part.to_string())
+            .or_insert_with(|| TreeNode::Folder(BTreeMap::new()));
+        if let TreeNode::Folder(children) = node {
+            current = children;
+        } else {
+            return; // Parent is a file, can't go deeper
+        }
+    }
+    let file_name = parts[parts.len() - 1].to_string();
+    current.insert(file_name, TreeNode::File(file_idx));
+}
+
 /// Display the project tree panel (left side of the IDE).
 pub fn show_project_tree(
     ui: &mut egui::Ui,
@@ -19,6 +83,8 @@ pub fn show_project_tree(
     user_src_folders: &mut Vec<String>,
     new_src_name: &mut Option<String>,
     new_src_folder_name: &mut Option<String>,
+    new_file_parent_folder: &mut Option<String>,
+    new_folder_parent_folder: &mut Option<String>,
     new_file_in_folder: &mut Option<(String, String)>,
     renaming_file: &mut Option<(usize, String)>,
     renaming_folder: &mut Option<(String, String)>,
@@ -74,152 +140,37 @@ pub fn show_project_tree(
             lsp_state,
         );
 
-        let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for folder in user_src_folders.iter() {
-            folders.entry(folder.clone()).or_default();
-        }
-        let mut direct: Vec<usize> = vec![];
-        for (i, (path, _)) in user_src_files.iter().enumerate() {
-            if let Some(slash) = path.find('/') {
-                folders
-                    .entry(path[..slash].to_string())
-                    .or_default()
-                    .push(i);
-            } else {
-                direct.push(i);
-            }
-        }
+        // Build hierarchical tree from files and folders
+        let tree = build_tree(user_src_files, user_src_folders);
 
+        // Track deletions and renames to apply after rendering
         let mut to_delete: Option<usize> = None;
         let mut do_rename_file: Option<usize> = None;
         let mut cancel_rename_file = false;
 
-        for &i in &direct {
-            let name = user_src_files[i].0.clone();
-            user_file_row(
-                ui,
-                8.0,
-                &name,
-                i,
-                selected,
-                &mut to_delete,
-                renaming_file,
-                &mut do_rename_file,
-                &mut cancel_rename_file,
-            );
-        }
+        // Recursively render the tree
+        render_tree_node(
+            ui,
+            &tree,
+            user_src_files,
+            user_src_folders,
+            selected,
+            8.0,
+            renaming_file,
+            &mut do_rename_file,
+            &mut cancel_rename_file,
+            &mut to_delete,
+            renaming_folder,
+            workspace_dir,
+            save_needed,
+            new_src_name,
+            new_src_folder_name,
+            new_file_parent_folder,
+            new_folder_parent_folder,
+            "src",  // parent path at root is "src"
+        );
 
-        for (folder_name, file_indices) in &folders {
-            let is_renaming_this = renaming_folder
-                .as_ref()
-                .map(|(f, _)| f == folder_name)
-                .unwrap_or(false);
-
-            if is_renaming_this {
-                let should_cancel = if let Some((_, new_name)) = renaming_folder.as_mut() {
-                    let fid = egui::Id::new(("__rename_folder__", folder_name.as_str()));
-                    let mut cancel = false;
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(ph::FOLDER)
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(200, 165, 70)),
-                        );
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(new_name)
-                                .desired_width(ui.available_width()),
-                        );
-                        if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
-                            resp.request_focus();
-                            ui.memory_mut(|m| m.data.insert_temp(fid, false));
-                        }
-                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                        cancel = enter || esc || resp.lost_focus();
-                    });
-                    cancel
-                } else {
-                    false
-                };
-                if should_cancel {
-                    *renaming_folder = None;
-                }
-            } else {
-                let ch = egui::CollapsingHeader::new(
-                    egui::RichText::new(format!("{folder_name}/"))
-                        .size(11.5)
-                        .monospace()
-                        .color(default_tree_folder_color),
-                )
-                .default_open(true)
-                .show(ui, |ui| {
-                    if file_indices.is_empty() {
-                        ui.label(
-                            egui::RichText::new("  (empty)")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(95)),
-                        );
-                    }
-                    for &i in file_indices {
-                        let full = user_src_files[i].0.clone();
-                        let fname = full.split('/').last().unwrap_or(&full).to_string();
-                        user_file_row(
-                            ui,
-                            16.0,
-                            &fname,
-                            i,
-                            selected,
-                            &mut to_delete,
-                            renaming_file,
-                            &mut do_rename_file,
-                            &mut cancel_rename_file,
-                        );
-                    }
-                });
-
-                ch.header_response.context_menu(|ui| {
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5),
-                        )
-                        .clicked()
-                    {
-                        *renaming_folder = Some((folder_name.clone(), folder_name.clone()));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} Delete", ph::TRASH))
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(220, 80, 60)),
-                        )
-                        .clicked()
-                    {
-                        // Delete folder
-                        let prefix = format!("{folder_name}/");
-                        let to_rm: Vec<usize> = user_src_files
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, (p, _))| p.starts_with(&prefix))
-                            .map(|(i, _)| i)
-                            .collect();
-                        for i in to_rm.into_iter().rev() {
-                            let dest = workspace_dir.join("src").join(&user_src_files[i].0);
-                            let _ = std::fs::remove_file(&dest);
-                            user_src_files.remove(i);
-                        }
-                        user_src_folders.retain(|f| f != folder_name);
-                        let dest = workspace_dir.join("src").join(folder_name.as_str());
-                        let _ = std::fs::remove_dir_all(&dest);
-                        *save_needed = true;
-                        ui.close();
-                    }
-                });
-            }
-        }
-
+        // Apply file deletion
         if let Some(idx) = to_delete {
             if *selected == ProjectFileId::UserFile(idx) {
                 *selected = ProjectFileId::MainRs;
@@ -230,6 +181,7 @@ pub fn show_project_tree(
             *save_needed = true;
         }
 
+        // Apply file rename
         if let Some(confirm_idx) = do_rename_file {
             if let Some((_, new_name)) = renaming_file.take() {
                 let old_path = user_src_files[confirm_idx].0.clone();
@@ -261,6 +213,7 @@ pub fn show_project_tree(
             .clicked()
         {
             *new_src_name = Some(String::new());
+            *new_file_parent_folder = Some("src".to_string());
             ui.close();
         }
         if ui
@@ -268,6 +221,7 @@ pub fn show_project_tree(
             .clicked()
         {
             *new_src_folder_name = Some(String::new());
+            *new_folder_parent_folder = Some("src".to_string());
             ui.close();
         }
     });
@@ -312,6 +266,197 @@ pub fn show_project_tree(
             build_result,
             lsp_state,
         );
+    }
+}
+
+/// Recursively render tree nodes (files and folders).
+#[allow(clippy::too_many_arguments)]
+fn render_tree_node(
+    ui: &mut egui::Ui,
+    tree: &BTreeMap<String, TreeNode>,
+    user_src_files: &[(String, String)],
+    user_src_folders: &mut Vec<String>,
+    selected: &mut ProjectFileId,
+    indent: f32,
+    renaming_file: &mut Option<(usize, String)>,
+    do_rename_file: &mut Option<usize>,
+    cancel_rename_file: &mut bool,
+    to_delete: &mut Option<usize>,
+    renaming_folder: &mut Option<(String, String)>,
+    workspace_dir: &std::path::Path,
+    save_needed: &mut bool,
+    new_src_name: &mut Option<String>,
+    new_src_folder_name: &mut Option<String>,
+    new_file_parent_folder: &mut Option<String>,
+    new_folder_parent_folder: &mut Option<String>,
+    parent_path: &str,
+) {
+    let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
+
+    for (name, node) in tree {
+        match node {
+            TreeNode::File(idx) => {
+                let full_path = &user_src_files[*idx].0;
+                let file_name = full_path.split('/').last().unwrap_or(full_path).to_string();
+                user_file_row(
+                    ui,
+                    indent,
+                    &file_name,
+                    *idx,
+                    selected,
+                    to_delete,
+                    renaming_file,
+                    do_rename_file,
+                    cancel_rename_file,
+                );
+            }
+            TreeNode::Folder(children) => {
+                let is_renaming = renaming_folder
+                    .as_ref()
+                    .map(|(f, _)| f == name)
+                    .unwrap_or(false);
+
+                if is_renaming {
+                    let should_cancel = if let Some((_, new_name)) = renaming_folder.as_mut() {
+                        let fid = egui::Id::new(("__rename_folder__", name.as_str()));
+                        let mut cancel = false;
+                        ui.horizontal(|ui| {
+                            ui.add_space(indent);
+                            ui.label(
+                                egui::RichText::new(ph::FOLDER)
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(200, 165, 70)),
+                            );
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(new_name)
+                                    .desired_width(ui.available_width()),
+                            );
+                            if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
+                                resp.request_focus();
+                                ui.memory_mut(|m| m.data.insert_temp(fid, false));
+                            }
+                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            cancel = enter || esc || resp.lost_focus();
+                        });
+                        cancel
+                    } else {
+                        false
+                    };
+                    if should_cancel {
+                        *renaming_folder = None;
+                    }
+                } else {
+                    let ch = egui::CollapsingHeader::new(
+                        egui::RichText::new(format!("{name}/"))
+                            .size(11.5)
+                            .monospace()
+                            .color(default_tree_folder_color),
+                    )
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if children.is_empty() {
+                            ui.label(
+                                egui::RichText::new("  (empty)")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_gray(95)),
+                            );
+                        }
+                        let folder_path = if parent_path == "src" {
+                            name.clone()
+                        } else {
+                            format!("{parent_path}/{name}")
+                        };
+                        render_tree_node(
+                            ui,
+                            children,
+                            user_src_files,
+                            user_src_folders,
+                            selected,
+                            indent + 8.0,
+                            renaming_file,
+                            do_rename_file,
+                            cancel_rename_file,
+                            to_delete,
+                            renaming_folder,
+                            workspace_dir,
+                            save_needed,
+                            new_src_name,
+                            new_src_folder_name,
+                            new_file_parent_folder,
+                            new_folder_parent_folder,
+                            &folder_path,
+                        );
+                    });
+
+                    let folder_path = if parent_path == "src" {
+                        name.clone()
+                    } else {
+                        format!("{parent_path}/{name}")
+                    };
+                    ch.header_response.context_menu(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5),
+                            )
+                            .clicked()
+                        {
+                            *new_src_name = Some(String::new());
+                            *new_file_parent_folder = Some(folder_path.clone());
+                            ui.close();
+                        }
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5),
+                            )
+                            .clicked()
+                        {
+                            *new_src_folder_name = Some(String::new());
+                            *new_folder_parent_folder = Some(folder_path.clone());
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5),
+                            )
+                            .clicked()
+                        {
+                            *renaming_folder = Some((name.clone(), name.clone()));
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} Delete", ph::TRASH))
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(220, 80, 60)),
+                            )
+                            .clicked()
+                        {
+                            // Delete folder and all contents
+                            let prefix = format!("{folder_path}/");
+                            let to_rm: Vec<usize> = user_src_files
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, (p, _))| p.starts_with(&prefix))
+                                .map(|(i, _)| i)
+                                .collect();
+                            for i in to_rm.into_iter().rev() {
+                                let dest = workspace_dir.join(&user_src_files[i].0);
+                                let _ = std::fs::remove_file(&dest);
+                            }
+                            // Remove from tracking (these will be auto-removed by polling)
+                            user_src_folders.retain(|f| f != &folder_path);
+                            let dest = workspace_dir.join(&folder_path);
+                            let _ = std::fs::remove_dir_all(&dest);
+                            *save_needed = true;
+                            ui.close();
+                        }
+                    });
+                }
+            }
+        }
     }
 }
 
