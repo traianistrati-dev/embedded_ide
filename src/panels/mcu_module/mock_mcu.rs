@@ -1,7 +1,7 @@
 use super::mcu::Mcu;
 use super::mcu_catalog::ToolchainKind;
-use super::pin_module::pin::Pin;
-use super::pin_module::pin_function::PinFunction;
+use super::pins::logic::pin::Pin;
+use super::pins::logic::pin_function::PinFunction;
 
 /// Builds the STM32F103C8Tx MCU with all 48 pins correctly mapped.
 /// Peripheral functions sourced from the official STM32F103C8T6 datasheet (DS5319).

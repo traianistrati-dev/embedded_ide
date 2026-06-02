@@ -28,8 +28,8 @@
 //! ```
 
 use super::codegen::{GEN_BEGIN, GEN_END};
-use super::pin_module::pin::Pin;
-use super::pin_module::pin_function::PinFunction;
+use super::pins::logic::pin::Pin;
+use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── User tail — closes fn main() ─────────────────────────────────────────────

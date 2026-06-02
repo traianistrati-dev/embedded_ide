@@ -7,10 +7,13 @@ use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::mcu_catalog::{McuType, ToolchainKind};
 use crate::panels::mcu_module::mock_esp32c3::create_esp32c3;
 use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
-use crate::panels::mcu_module::pin_module::pin::Pin;
-use crate::panels::mcu_module::pin_module::pin_function::PinFunction;
+use crate::panels::mcu_module::pins::logic::pin::Pin;
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
 use crate::required_tools;
+use crate::editor::gui::show_ra_status_bar;
+use crate::editor::gui::show_diagnostics_overlay;
+use crate::project_tree::gui::show_project_tree as show_project_tree_panel;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
 use egui_phosphor::regular as ph;
@@ -21,7 +24,7 @@ use std::sync::{Arc, Mutex};
 // ── Project file selector ─────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
-enum ProjectFileId {
+pub enum ProjectFileId {
     #[default]
     MainRs,
     CargoToml,
@@ -66,7 +69,7 @@ impl ProjectFileId {
 
     /// Path as reported by `rustc` in JSON diagnostics (relative to project root).
     /// Returns `None` for files that rustc never reports errors for.
-    fn cargo_path(self) -> Option<&'static str> {
+    pub fn cargo_path(self) -> Option<&'static str> {
         match self {
             Self::MainRs => Some("src/main.rs"),
             Self::BuildRs => Some("build.rs"),
@@ -891,7 +894,7 @@ impl eframe::App for AppIde {
                         drop(build_guard);
                         let lsp_guard = self.lsp_state.lock().unwrap();
                         let workspace_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                        show_project_tree(
+                        show_project_tree_panel(
                             ui,
                             cfg.pkg_name,
                             &cfg.toolchain,
@@ -1775,123 +1778,7 @@ impl eframe::App for AppIde {
                     }
                 }
                 // ── rust-analyzer inline status bar ───────────────────────────
-                // Shown just above the code editor so the user always knows
-                // whether RA is still indexing or actively checking the file.
-                {
-                    let (ra_status, checking, errs, warns) = {
-                        let lsp = self.lsp_state.lock().unwrap();
-                        let rel = selected_file_rel_path(&self.selected_file, &self.user_src_files)
-                            .unwrap_or_default();
-                        let errs = lsp
-                            .diagnostics
-                            .get(&rel)
-                            .map(|v| v.iter().filter(|d| d.severity.is_error()).count())
-                            .unwrap_or(0);
-                        let warns = lsp
-                            .diagnostics
-                            .get(&rel)
-                            .map(|v| v.iter().filter(|d| d.severity.is_warning()).count())
-                            .unwrap_or(0);
-                        (lsp.status.clone(), lsp.checking, errs, warns)
-                    };
-
-                    // Keep repainting while RA is busy so the spinner animates.
-                    if checking || matches!(ra_status, LspStatus::Starting | LspStatus::Indexing) {
-                        ui.ctx().request_repaint();
-                    }
-
-                    ui.horizontal(|ui| {
-                        ui.add_space(2.0);
-                        match &ra_status {
-                            LspStatus::Stopped => {
-                                ui.label(
-                                    egui::RichText::new(format!("{} RA oprit", ph::PLUGS))
-                                        .size(10.5)
-                                        .color(egui::Color32::from_gray(90)),
-                                );
-                            }
-                            LspStatus::Starting | LspStatus::Indexing => {
-                                ui.spinner();
-                                ui.label(
-                                    egui::RichText::new(
-                                        if matches!(ra_status, LspStatus::Starting) {
-                                            " rust-analyzer: pornire…"
-                                        } else {
-                                            " rust-analyzer: indexare crate-uri…"
-                                        },
-                                    )
-                                    .size(10.5)
-                                    .color(egui::Color32::from_rgb(200, 190, 80)),
-                                );
-                            }
-                            LspStatus::Ready => {
-                                if checking {
-                                    // cargo check rulează în fundal
-                                    ui.spinner();
-                                    ui.label(
-                                        egui::RichText::new(" verificare cargo…")
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(100, 160, 220)),
-                                    );
-                                    // separator vizual
-                                    ui.label(
-                                        egui::RichText::new("  |")
-                                            .size(10.5)
-                                            .color(egui::Color32::from_gray(70)),
-                                    );
-                                }
-                                let (icon, color) = if errs > 0 {
-                                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-                                } else if warns > 0 {
-                                    (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
-                                } else {
-                                    (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100))
-                                };
-                                ui.label(
-                                    egui::RichText::new(format!("{icon} RA"))
-                                        .size(10.5)
-                                        .color(color),
-                                );
-                                if errs > 0 {
-                                    ui.label(
-                                        egui::RichText::new(format!("  {errs} erori"))
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(220, 80, 70))
-                                            .strong(),
-                                    );
-                                }
-                                if warns > 0 {
-                                    ui.label(
-                                        egui::RichText::new(format!("  {warns} atenționări"))
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(210, 170, 40)),
-                                    );
-                                }
-                                if errs == 0 && warns == 0 && !checking {
-                                    ui.label(
-                                        egui::RichText::new("  fără erori")
-                                            .size(10.5)
-                                            .color(egui::Color32::from_gray(130))
-                                            .italics(),
-                                    );
-                                }
-                            }
-                            LspStatus::Failed(msg) => {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} RA eșuat: {}",
-                                        ph::X_CIRCLE,
-                                        msg.lines().next().unwrap_or("eroare")
-                                    ))
-                                    .size(10.5)
-                                    .color(egui::Color32::from_rgb(220, 80, 70)),
-                                )
-                                .on_hover_text(msg.as_str());
-                            }
-                        }
-                    });
-                    ui.add_space(1.0);
-                }
+                show_ra_status_bar(ui, &self.lsp_state, &self.selected_file, &self.user_src_files);
 
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
@@ -2308,15 +2195,6 @@ impl eframe::App for AppIde {
                 }
 
                 // ── Diagnostic overlays ───────────────────────────────────────
-                //
-                // COORDINATE SYSTEM (egui 0.34):
-                //   galley_pos              — screen Pos2 where galley's (0,0) is drawn
-                //   galley.pos_from_cursor  — returns LOCAL Rect  (add galley_pos to get screen)
-                //   text_clip_rect          — exact screen clip used when painting the text
-                //
-                // LANE ALIGNMENT:
-                //   Use actual galley Y position (pos_from_cursor) for each diagnostic,
-                //   not a proportional estimate from the line count.
                 if lsp_file_tracked {
                     let diags: Vec<lsp::LspDiagnostic> = current_rel_path
                         .as_deref()
@@ -2326,157 +2204,14 @@ impl eframe::App for AppIde {
                         })
                         .unwrap_or_default();
 
-                    if !diags.is_empty() {
-                        let gp = editor_resp.galley_pos; // galley origin on screen
-                        let clip = editor_resp.text_clip_rect;
-                        let painter = ui.painter().with_clip_rect(clip);
-                        let total_chars = display_code.chars().count();
-
-                        // ── Per-diagnostic: underline + inline message + tooltip ──
-                        for (di, diag) in diags.iter().enumerate() {
-                            let start_ci = lsp_pos_to_char_idx(&display_code, diag.line, diag.col)
-                                .min(total_chars);
-                            let end_ci_raw =
-                                lsp_pos_to_char_idx(&display_code, diag.end_line, diag.end_col)
-                                    .min(total_chars);
-                            let end_ci = if end_ci_raw <= start_ci {
-                                (start_ci + 1).min(total_chars)
-                            } else {
-                                end_ci_raw
-                            };
-
-                            // Galley-local positions
-                            let loc_s = editor_resp
-                                .galley
-                                .pos_from_cursor(egui::text::CCursor::new(start_ci));
-                            let loc_e = editor_resp
-                                .galley
-                                .pos_from_cursor(egui::text::CCursor::new(end_ci));
-
-                            // Screen coordinates
-                            let sx = gp.x + loc_s.min.x;
-                            let sy_top = gp.y + loc_s.min.y;
-                            let sy_bot = gp.y + loc_s.max.y;
-                            let line_h = loc_s.height().max(1.0);
-                            let sy_mid = (sy_top + sy_bot) * 0.5;
-
-                            // Same-line check for multi-line spans
-                            let same_line = (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
-                            let ex = if same_line {
-                                gp.x + loc_e.min.x
-                            } else {
-                                gp.x + editor_resp.galley.rect.width()
-                            };
-                            if ex <= sx + 1.0 {
-                                continue;
-                            }
-
-                            // Severity colours
-                            let (ul_color, bg_color, msg_color) = match diag.severity {
-                                lsp::DiagSeverity::Error => (
-                                    egui::Color32::from_rgb(220, 65, 55),
-                                    egui::Color32::from_rgba_unmultiplied(210, 55, 45, 22),
-                                    egui::Color32::from_rgb(200, 80, 70),
-                                ),
-                                lsp::DiagSeverity::Warning => (
-                                    egui::Color32::from_rgb(210, 165, 35),
-                                    egui::Color32::from_rgba_unmultiplied(200, 160, 30, 14),
-                                    egui::Color32::from_rgb(190, 150, 40),
-                                ),
-                                lsp::DiagSeverity::Info => (
-                                    egui::Color32::from_rgb(80, 140, 215),
-                                    egui::Color32::TRANSPARENT,
-                                    egui::Color32::from_rgb(100, 150, 210),
-                                ),
-                                lsp::DiagSeverity::Hint => (
-                                    egui::Color32::from_rgb(100, 160, 110),
-                                    egui::Color32::TRANSPARENT,
-                                    egui::Color32::from_rgb(110, 150, 110),
-                                ),
-                            };
-
-                            // Background tint
-                            if bg_color.a() > 0 {
-                                painter.rect_filled(
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(sx, sy_top),
-                                        egui::pos2(ex, sy_bot),
-                                    ),
-                                    0.0,
-                                    bg_color,
-                                );
-                            }
-
-                            // Wavy underline
-                            draw_wavy_underline(&painter, sx, ex, sy_bot, ul_color);
-
-                            // ── Inline message at end of line ─────────────────────
-                            // Find the EOL position so the message appears after the code.
-                            let eol_ci =
-                                lsp_line_end_char_idx(&display_code, diag.line).min(total_chars);
-                            let loc_eol = editor_resp
-                                .galley
-                                .pos_from_cursor(egui::text::CCursor::new(eol_ci));
-                            // Only draw when the error line is on the same screen row
-                            // as its EOL (avoids stray messages for very long lines).
-                            let same_row_eol = (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
-                            if same_row_eol {
-                                let msg_x = gp.x + loc_eol.min.x + 16.0; // 16px gap
-                                // Truncate to keep the inline hint compact
-                                let short_msg: String = diag.message.chars().take(72).collect();
-                                let short_msg = if diag.message.chars().count() > 72 {
-                                    format!("{short_msg}…")
-                                } else {
-                                    short_msg
-                                };
-                                painter.text(
-                                    egui::pos2(msg_x, sy_mid),
-                                    egui::Align2::LEFT_CENTER,
-                                    &short_msg,
-                                    egui::FontId::monospace(10.5),
-                                    msg_color,
-                                );
-                            }
-
-                            // ── Hover tooltip (full message) ──────────────────────
-                            let hover_rect = egui::Rect::from_min_max(
-                                egui::pos2(sx, sy_top),
-                                egui::pos2(ex, sy_bot + 3.0),
-                            );
-                            let hover = ui.interact(
-                                hover_rect,
-                                egui::Id::new("inline_diag").with(di),
-                                egui::Sense::hover(),
-                            );
-                            if hover.hovered() {
-                                let icon = match diag.severity {
-                                    lsp::DiagSeverity::Error => "⛔",
-                                    lsp::DiagSeverity::Warning => "⚠",
-                                    lsp::DiagSeverity::Info => "ℹ",
-                                    lsp::DiagSeverity::Hint => "·",
-                                };
-                                let msg = format!("{icon}  {}", diag.message);
-                                let code = diag.code.clone();
-                                #[allow(deprecated)]
-                                egui::show_tooltip_at_pointer(
-                                    ui.ctx(),
-                                    ui.layer_id(),
-                                    egui::Id::new("inline_diag_tip").with(di),
-                                    |ui: &mut egui::Ui| {
-                                        ui.set_max_width(420.0);
-                                        ui.label(egui::RichText::new(&msg).size(12.0));
-                                        if let Some(c) = &code {
-                                            ui.label(
-                                                egui::RichText::new(format!("[{c}]"))
-                                                    .size(10.5)
-                                                    .color(egui::Color32::from_rgb(140, 150, 170)),
-                                            );
-                                        }
-                                    },
-                                );
-                            }
-                        }
-                    }
+                    show_diagnostics_overlay(
+                        ui,
+                        editor_resp.galley_pos,
+                        editor_resp.text_clip_rect,
+                        &editor_resp.galley,
+                        &diags,
+                        &display_code,
+                    );
                 }
             });
 
@@ -2612,603 +2347,6 @@ impl eframe::App for AppIde {
     }
 }
 
-// ── Project tree ──────────────────────────────────────────────────────────────
-
-fn show_project_tree(
-    ui: &mut egui::Ui,
-    pkg_name: &str,
-    toolchain: &ToolchainKind,
-    selected: &mut ProjectFileId,
-    build_result: Option<&build::BuildResult>,
-    lsp: Option<&lsp::LspState>,
-    user_src_files: &mut Vec<(String, String)>,
-    user_src_folders: &mut Vec<String>,
-    new_src_name: &mut Option<String>,
-    new_src_folder_name: &mut Option<String>,
-    new_file_in_folder: &mut Option<(String, String)>,
-    renaming_file: &mut Option<(usize, String)>,
-    renaming_folder: &mut Option<(String, String)>,
-    workspace_dir: &std::path::Path,
-    save_needed: &mut bool,
-) {
-    let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
-
-    ui.label(
-        egui::RichText::new(format!("package: {pkg_name}"))
-            .size(12.0)
-            .strong()
-            // .background_color(egui::Color32::LIGHT_GRAY)
-            .color(egui::Color32::DARK_RED),
-    );
-    ui.add_space(2.0);
-
-    // ── .cargo/ ───────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new(
-        egui::RichText::new(".cargo/")
-            .size(11.5)
-            .monospace()
-            .color(default_tree_folder_color),
-    )
-    .default_open(true)
-    .show(ui, |ui| {
-        file_row(
-            ui,
-            8.0,
-            "config.toml",
-            ProjectFileId::CargoConfig,
-            selected,
-            build_result,
-            lsp,
-        );
-    });
-
-    // ── src/ ──────────────────────────────────────────────────────────────────
-    let src_ch = egui::CollapsingHeader::new(
-        egui::RichText::new("src/")
-            .size(11.5)
-            .monospace()
-            .color(default_tree_folder_color),
-    )
-    .default_open(true)
-    .show(ui, |ui| {
-        file_row(
-            ui,
-            8.0,
-            "main.rs",
-            ProjectFileId::MainRs,
-            selected,
-            build_result,
-            lsp,
-        );
-
-        // ── Build folder map: explicit folders ∪ implicit from file paths ─
-        let mut folders: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for folder in user_src_folders.iter() {
-            folders.entry(folder.clone()).or_default();
-        }
-        let mut direct: Vec<usize> = vec![];
-        for (i, (path, _)) in user_src_files.iter().enumerate() {
-            if let Some(slash) = path.find('/') {
-                folders
-                    .entry(path[..slash].to_string())
-                    .or_default()
-                    .push(i);
-            } else {
-                direct.push(i);
-            }
-        }
-
-        let mut to_delete: Option<usize> = None;
-        let mut folder_to_delete: Option<String> = None;
-        // Signals: confirm/cancel for the folder-level file input
-        let mut confirm_in_folder = false;
-        let mut cancel_in_folder = false;
-        // Which folder the user just clicked "+ New file" in
-        let mut open_input_for_folder: Option<String> = None;
-        // Set by folder context menu → open new-folder name input
-        let mut ctx_open_new_folder = false;
-        // Rename signals
-        let mut do_rename_file: Option<usize> = None;
-        let mut cancel_rename_file = false;
-        let mut do_rename_folder = false;
-        let mut cancel_rename_folder = false;
-
-        // ── Direct files ──────────────────────────────────────────────────
-        for &i in &direct {
-            let name = user_src_files[i].0.clone();
-            user_file_row(
-                ui,
-                8.0,
-                &name,
-                i,
-                selected,
-                &mut to_delete,
-                renaming_file,
-                &mut do_rename_file,
-                &mut cancel_rename_file,
-            );
-        }
-
-        // ── Folder groups ─────────────────────────────────────────────────
-        for (folder_name, file_indices) in &folders {
-            let is_renaming_this = renaming_folder
-                .as_ref()
-                .map(|(f, _)| f == folder_name)
-                .unwrap_or(false);
-
-            if is_renaming_this {
-                // ── Inline folder rename input ─────────────────────────
-                if let Some((_, new_name)) = renaming_folder.as_mut() {
-                    let fid = egui::Id::new(("__rename_folder__", folder_name.as_str()));
-                    ui.horizontal(|ui| {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(ph::FOLDER)
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(200, 165, 70)),
-                        );
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(new_name)
-                                .desired_width(ui.available_width()),
-                        );
-                        if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
-                            resp.request_focus();
-                            ui.memory_mut(|m| m.data.insert_temp(fid, false));
-                        }
-                        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                        if enter {
-                            do_rename_folder = true;
-                        } else if esc || resp.lost_focus() {
-                            cancel_rename_folder = true;
-                        }
-                    });
-                }
-            } else {
-                let this_has_input = new_file_in_folder
-                    .as_ref()
-                    .map(|(f, _)| f == folder_name)
-                    .unwrap_or(false);
-
-                let ch = egui::CollapsingHeader::new(
-                    egui::RichText::new(format!("{folder_name}/"))
-                        .size(11.5)
-                        .monospace()
-                        .color(default_tree_folder_color),
-                )
-                .default_open(true)
-                .show(ui, |ui| {
-                    if file_indices.is_empty() && !this_has_input {
-                        ui.label(
-                            egui::RichText::new("  (empty)")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(95)),
-                        );
-                    }
-                    for &i in file_indices {
-                        let full = user_src_files[i].0.clone();
-                        let fname = full.split('/').last().unwrap_or(&full).to_string();
-                        user_file_row(
-                            ui,
-                            16.0,
-                            &fname,
-                            i,
-                            selected,
-                            &mut to_delete,
-                            renaming_file,
-                            &mut do_rename_file,
-                            &mut cancel_rename_file,
-                        );
-                    }
-
-                    // ── Inline file input for this folder ─────────────
-                    if this_has_input {
-                        if let Some((folder_key, name)) = new_file_in_folder.as_mut() {
-                            let fid = egui::Id::new(("__folder_file_focus__", folder_key.as_str()));
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(name)
-                                        .hint_text("filename.rs")
-                                        .desired_width(ui.available_width()),
-                                );
-                                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
-                                    resp.request_focus();
-                                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
-                                }
-                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                if enter {
-                                    confirm_in_folder = true;
-                                } else if esc || resp.lost_focus() {
-                                    cancel_in_folder = true;
-                                }
-                            });
-                        }
-                    }
-                });
-
-                // Right-click context menu on the folder header
-                let fname_ctx = folder_name.clone();
-                ch.header_response.context_menu(|ui| {
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5),
-                        )
-                        .clicked()
-                    {
-                        open_input_for_folder = Some(fname_ctx.clone());
-                        ui.close();
-                    }
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS))
-                                .size(11.5),
-                        )
-                        .clicked()
-                    {
-                        ctx_open_new_folder = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5),
-                        )
-                        .clicked()
-                    {
-                        *renaming_folder = Some((fname_ctx.clone(), fname_ctx.clone()));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} Delete", ph::TRASH))
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(220, 80, 60)),
-                        )
-                        .clicked()
-                    {
-                        folder_to_delete = Some(fname_ctx);
-                        ui.close();
-                    }
-                });
-            }
-        }
-
-        // Apply folder-level file input results
-        if confirm_in_folder {
-            if let Some((folder, name)) = new_file_in_folder.take() {
-                ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(
-                        egui::Id::new(("__folder_file_focus__", folder.as_str())),
-                        true,
-                    )
-                });
-                let clean = name.trim().replace('\\', "/");
-                let clean = clean.trim_start_matches('/').to_string();
-                if !clean.is_empty() {
-                    let full_path = format!("{folder}/{clean}");
-                    if !user_src_files.iter().any(|(p, _)| p == &full_path) {
-                        user_src_files.push((full_path, String::new()));
-                        *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
-                        *save_needed = true;
-                    }
-                }
-            }
-        } else if cancel_in_folder {
-            if let Some((folder, _)) = new_file_in_folder.as_ref() {
-                ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(
-                        egui::Id::new(("__folder_file_focus__", folder.as_str())),
-                        true,
-                    )
-                });
-            }
-            *new_file_in_folder = None;
-        }
-        if let Some(folder) = open_input_for_folder {
-            *new_file_in_folder = Some((folder, String::new()));
-        }
-        if ctx_open_new_folder {
-            *new_src_folder_name = Some(String::new());
-        }
-
-        // ── Root-level new file input ─────────────────────────────────────
-        const SRC_NAME_FID: &str = "__new_src_name_focus__";
-        let mut confirm_file = false;
-        let mut cancel_file = false;
-        if let Some(name) = new_src_name {
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                let resp = ui.add(
-                    egui::TextEdit::singleline(name)
-                        .hint_text("e.g. utils.rs or drivers/spi.rs")
-                        .desired_width(ui.available_width()),
-                );
-                let fid = egui::Id::new(SRC_NAME_FID);
-                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
-                    resp.request_focus();
-                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
-                }
-                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                if enter {
-                    confirm_file = true;
-                } else if esc || resp.lost_focus() {
-                    cancel_file = true;
-                }
-            });
-        }
-        if confirm_file {
-            ui.memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true)
-            });
-            if let Some(name) = new_src_name.take() {
-                let clean = name.trim().replace('\\', "/");
-                let clean = clean.trim_start_matches('/').to_string();
-                if !clean.is_empty() && !user_src_files.iter().any(|(p, _)| p == &clean) {
-                    user_src_files.push((clean, String::new()));
-                    *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
-                    *save_needed = true;
-                }
-            }
-        } else if cancel_file {
-            ui.memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(egui::Id::new(SRC_NAME_FID), true)
-            });
-            *new_src_name = None;
-        }
-
-        // ── Root-level new folder input ───────────────────────────────────
-        const SRC_FOLDER_FID: &str = "__new_src_folder_focus__";
-        let mut confirm_folder = false;
-        let mut cancel_folder = false;
-        if let Some(name) = new_src_folder_name {
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                let resp = ui.add(
-                    egui::TextEdit::singleline(name)
-                        .hint_text("e.g. drivers")
-                        .desired_width(ui.available_width()),
-                );
-                let fid = egui::Id::new(SRC_FOLDER_FID);
-                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
-                    resp.request_focus();
-                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
-                }
-                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                if enter {
-                    confirm_folder = true;
-                } else if esc || resp.lost_focus() {
-                    cancel_folder = true;
-                }
-            });
-        }
-        if confirm_folder {
-            ui.memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true)
-            });
-            if let Some(name) = new_src_folder_name.take() {
-                let clean: String = name
-                    .trim()
-                    .replace('\\', "/")
-                    .split('/')
-                    .find(|s| !s.is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                if !clean.is_empty() && !user_src_folders.contains(&clean) {
-                    let dest = workspace_dir.join("src").join(&clean);
-                    let _ = std::fs::create_dir_all(&dest);
-                    user_src_folders.push(clean);
-                    *save_needed = true;
-                }
-            }
-        } else if cancel_folder {
-            ui.memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(egui::Id::new(SRC_FOLDER_FID), true)
-            });
-            *new_src_folder_name = None;
-        }
-
-        // ── Handle file deletion ──────────────────────────────────────────
-        if let Some(idx) = to_delete {
-            if *selected == ProjectFileId::UserFile(idx) {
-                *selected = ProjectFileId::MainRs;
-            }
-            if let ProjectFileId::UserFile(j) = selected {
-                if *j > idx {
-                    *j -= 1;
-                }
-            }
-            let dest = workspace_dir.join("src").join(&user_src_files[idx].0);
-            let _ = std::fs::remove_file(&dest);
-            user_src_files.remove(idx);
-            *save_needed = true;
-        }
-
-        // ── Handle folder deletion ────────────────────────────────────────
-        if let Some(ref dname) = folder_to_delete {
-            if let ProjectFileId::UserFile(_) = *selected {
-                *selected = ProjectFileId::MainRs;
-            }
-            let prefix = format!("{dname}/");
-            let to_rm: Vec<usize> = user_src_files
-                .iter()
-                .enumerate()
-                .filter(|(_, (p, _))| p.starts_with(&prefix))
-                .map(|(i, _)| i)
-                .collect();
-            for i in to_rm.into_iter().rev() {
-                let dest = workspace_dir.join("src").join(&user_src_files[i].0);
-                let _ = std::fs::remove_file(&dest);
-                user_src_files.remove(i);
-            }
-            user_src_folders.retain(|f| f != dname);
-            // Also close any active input for this folder
-            if new_file_in_folder
-                .as_ref()
-                .map(|(f, _)| f == dname)
-                .unwrap_or(false)
-            {
-                *new_file_in_folder = None;
-            }
-            let dest = workspace_dir.join("src").join(dname.as_str());
-            let _ = std::fs::remove_dir_all(&dest);
-            *save_needed = true;
-        }
-
-        // ── Apply file rename ─────────────────────────────────────────────
-        if let Some(confirm_idx) = do_rename_file {
-            if let Some((_, new_name)) = renaming_file.take() {
-                ui.memory_mut(|m| {
-                    m.data
-                        .insert_temp::<bool>(egui::Id::new(("__rename_file__", confirm_idx)), true)
-                });
-                let old_path = user_src_files[confirm_idx].0.clone();
-                let clean = new_name.trim().to_string();
-                if !clean.is_empty() {
-                    let new_path = if let Some(slash) = old_path.rfind('/') {
-                        format!("{}/{clean}", &old_path[..slash])
-                    } else {
-                        clean
-                    };
-                    if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path) {
-                        let old_dest = workspace_dir.join("src").join(&old_path);
-                        let new_dest = workspace_dir.join("src").join(&new_path);
-                        let _ = std::fs::rename(&old_dest, &new_dest);
-                        user_src_files[confirm_idx].0 = new_path;
-                        *save_needed = true;
-                    }
-                }
-            }
-        } else if cancel_rename_file {
-            if let Some((idx, _)) = renaming_file.as_ref() {
-                ui.memory_mut(|m| {
-                    m.data
-                        .insert_temp::<bool>(egui::Id::new(("__rename_file__", *idx)), true)
-                });
-            }
-            *renaming_file = None;
-        }
-
-        // ── Apply folder rename ───────────────────────────────────────────
-        if do_rename_folder {
-            if let Some((old_name, new_name)) = renaming_folder.take() {
-                ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(
-                        egui::Id::new(("__rename_folder__", old_name.as_str())),
-                        true,
-                    )
-                });
-                let clean = new_name.trim().to_string();
-                if !clean.is_empty() && clean != old_name && !user_src_folders.contains(&clean) {
-                    let old_dest = workspace_dir.join("src").join(&old_name);
-                    let new_dest = workspace_dir.join("src").join(&clean);
-                    let _ = std::fs::rename(&old_dest, &new_dest);
-                    if let Some(f) = user_src_folders.iter_mut().find(|f| **f == old_name) {
-                        *f = clean.clone();
-                    }
-                    let prefix = format!("{old_name}/");
-                    let new_prefix = format!("{clean}/");
-                    for (path, _) in user_src_files.iter_mut() {
-                        if path.starts_with(&prefix) {
-                            *path = format!("{new_prefix}{}", &path[prefix.len()..]);
-                        }
-                    }
-                    *save_needed = true;
-                }
-            }
-        } else if cancel_rename_folder {
-            if let Some((old_name, _)) = renaming_folder.as_ref() {
-                ui.memory_mut(|m| {
-                    m.data.insert_temp::<bool>(
-                        egui::Id::new(("__rename_folder__", old_name.as_str())),
-                        true,
-                    )
-                });
-            }
-            *renaming_folder = None;
-        }
-    });
-
-    // Right-click context menu on the src/ folder header
-    let mut src_ctx_new_file = false;
-    let mut src_ctx_new_folder = false;
-    src_ch.header_response.context_menu(|ui| {
-        if ui
-            .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
-            .clicked()
-        {
-            src_ctx_new_file = true;
-            ui.close();
-        }
-        if ui
-            .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
-            .clicked()
-        {
-            src_ctx_new_folder = true;
-            ui.close();
-        }
-    });
-    if src_ctx_new_file {
-        *new_src_name = Some(String::new());
-    }
-    if src_ctx_new_folder {
-        *new_src_folder_name = Some(String::new());
-    }
-
-    // ── Root files ────────────────────────────────────────────────────────────
-    ui.add_space(2.0);
-    file_row(
-        ui,
-        4.0,
-        ".gitignore",
-        ProjectFileId::GitIgnore,
-        selected,
-        build_result,
-        lsp,
-    );
-    // build.rs and memory.x only exist for RustEmbedded toolchain
-    if *toolchain == ToolchainKind::RustEmbedded
-    /*|| *toolchain == ToolchainKind::EspRust*/
-    {
-        file_row(
-            ui,
-            4.0,
-            "build.rs",
-            ProjectFileId::BuildRs,
-            selected,
-            build_result,
-            lsp,
-        );
-    }
-    file_row(
-        ui,
-        4.0,
-        "Cargo.toml",
-        ProjectFileId::CargoToml,
-        selected,
-        build_result,
-        lsp,
-    );
-    if *toolchain == ToolchainKind::RustEmbedded {
-        file_row(
-            ui,
-            4.0,
-            "memory.x",
-            ProjectFileId::MemoryX,
-            selected,
-            build_result,
-            lsp,
-        );
-    }
-}
 
 // ── Single file row for fixed project files (with diagnostic indicators) ──────
 
@@ -5158,7 +4296,7 @@ fn lsp_word_start(text: &str, end_idx: usize) -> usize {
 /// - `MainRs`       → `"src/main.rs"`
 /// - `UserFile(i)`  → `"src/{user_src_files[i].0}"`  (e.g. `"src/pins.rs"`)
 /// - Other files (Cargo.toml, memory.x, …) → `None` (not tracked by RA)
-fn selected_file_rel_path(
+pub fn selected_file_rel_path(
     selected: &ProjectFileId,
     user_files: &[(String, String)],
 ) -> Option<String> {
@@ -5176,7 +4314,7 @@ fn selected_file_rel_path(
 /// `uri_to_rel` does a case-sensitive prefix strip, so on a mismatch the full
 /// URI is used as the key.  This helper tries several key formats so inline
 /// diagnostics work even when the key is "wrong".
-fn diags_for_file(
+pub fn diags_for_file(
     map: &std::collections::HashMap<String, Vec<lsp::LspDiagnostic>>,
     rel_path: &str,
 ) -> Vec<lsp::LspDiagnostic> {
@@ -5210,7 +4348,7 @@ fn diags_for_main_rs(
 
 /// Return the char index of the last non-newline character on `line_1` (1-based).
 /// Used to position inline error messages at the end of the error line.
-fn lsp_line_end_char_idx(text: &str, line_1: u32) -> usize {
+pub fn lsp_line_end_char_idx(text: &str, line_1: u32) -> usize {
     let want_line = line_1.saturating_sub(1) as usize;
     let mut cur_line = 0usize;
     let mut char_idx = 0usize;
@@ -5235,7 +4373,7 @@ fn lsp_line_end_char_idx(text: &str, line_1: u32) -> usize {
 ///
 /// LSP columns are UTF-16 code-unit offsets from line start.  For ASCII and
 /// BMP characters (including Romanian diacritics) each char is 1 unit.
-fn lsp_pos_to_char_idx(text: &str, line_1: u32, col_1: u32) -> usize {
+pub fn lsp_pos_to_char_idx(text: &str, line_1: u32, col_1: u32) -> usize {
     let want_line = line_1.saturating_sub(1) as usize;
     let want_utf16_col = col_1.saturating_sub(1) as usize;
     let mut cur_line = 0usize;
@@ -5264,7 +4402,7 @@ fn lsp_pos_to_char_idx(text: &str, line_1: u32, col_1: u32) -> usize {
 ///
 /// Each segment alternates up/down by `AMP` pixels with a horizontal step of
 /// `STEP` pixels, producing the classic "squiggly" error underline appearance.
-fn draw_wavy_underline(
+pub fn draw_wavy_underline(
     painter: &egui::Painter,
     x_start: f32,
     x_end: f32,
