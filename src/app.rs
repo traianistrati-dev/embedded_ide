@@ -897,7 +897,12 @@ impl eframe::App for AppIde {
                         let build_result = build_guard.result().cloned();
                         drop(build_guard);
                         let lsp_guard = self.lsp_state.lock().unwrap();
-                        let workspace_dir = std::env::temp_dir().join("embedded_ide_0_check");
+                        // Use actual project directory if available, otherwise use temp workspace
+                        let workspace_dir = if let Some(project_dir) = &self.project_dir {
+                            project_dir.clone()
+                        } else {
+                            std::env::temp_dir().join("embedded_ide_0_check")
+                        };
                         show_project_tree_panel(
                             ui,
                             cfg.pkg_name,
@@ -1062,14 +1067,15 @@ impl eframe::App for AppIde {
             let parent_folder = self
                 .new_file_parent_folder
                 .clone()
-                .unwrap_or_else(|| "src".to_string());
+                .unwrap_or_else(|| String::new());
             egui::Window::new("New File")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
                     ui.add_space(4.0);
-                    ui.label(format!("Create file in: {parent_folder}/"));
+                    let display_folder = if parent_folder.is_empty() { "src" } else { &parent_folder };
+                    ui.label(format!("Create file in: {display_folder}/"));
                     ui.label("Enter filename:");
                     let response = ui.text_edit_singleline(new_name);
                     if ui.memory(|m| {
@@ -1084,7 +1090,7 @@ impl eframe::App for AppIde {
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             let clean = new_name.trim().to_string();
-                            let full_path = if parent_folder == "src" {
+                            let full_path = if parent_folder.is_empty() {
                                 clean.clone()
                             } else {
                                 format!("{parent_folder}/{clean}")
@@ -1092,9 +1098,17 @@ impl eframe::App for AppIde {
                             if !clean.is_empty()
                                 && !self.user_src_files.iter().any(|(p, _)| p == &full_path)
                             {
-                                let workspace_dir =
-                                    std::env::temp_dir().join("embedded_ide_0_check");
-                                let file_path = workspace_dir.join(&parent_folder).join(&clean);
+                                // Use the actual project directory if available, otherwise use temp workspace
+                                let base_dir = if let Some(project_dir) = &self.project_dir {
+                                    project_dir.join("src")
+                                } else {
+                                    std::env::temp_dir().join("embedded_ide_0_check")
+                                };
+                                let file_path = if parent_folder.is_empty() {
+                                    base_dir.join(&clean)
+                                } else {
+                                    base_dir.join(&parent_folder).join(&clean)
+                                };
                                 if let Some(parent) = file_path.parent() {
                                     let _ = std::fs::create_dir_all(parent);
                                 }
@@ -1125,14 +1139,15 @@ impl eframe::App for AppIde {
             let parent_folder = self
                 .new_folder_parent_folder
                 .clone()
-                .unwrap_or_else(|| "src".to_string());
+                .unwrap_or_else(|| String::new());
             egui::Window::new("New Folder")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
                     ui.add_space(4.0);
-                    ui.label(format!("Create folder in: {parent_folder}/"));
+                    let display_folder = if parent_folder.is_empty() { "src" } else { &parent_folder };
+                    ui.label(format!("Create folder in: {display_folder}/"));
                     ui.label("Enter folder name:");
                     let response = ui.text_edit_singleline(new_name);
                     if ui.memory(|m| {
@@ -1149,16 +1164,24 @@ impl eframe::App for AppIde {
                     ui.horizontal(|ui| {
                         if ui.button("Create").clicked() {
                             let clean = new_name.trim().to_string();
-                            let full_path = if parent_folder == "src" {
+                            let full_path = if parent_folder.is_empty() {
                                 clean.clone()
                             } else {
                                 format!("{parent_folder}/{clean}")
                             };
                             if !clean.is_empty() && !self.user_src_folders.contains(&full_path) {
                                 self.user_src_folders.push(full_path.clone());
-                                let workspace_dir =
-                                    std::env::temp_dir().join("embedded_ide_0_check");
-                                let folder_path = workspace_dir.join(&parent_folder).join(&clean);
+                                // Use the actual project directory if available, otherwise use temp workspace
+                                let base_dir = if let Some(project_dir) = &self.project_dir {
+                                    project_dir.join("src")
+                                } else {
+                                    std::env::temp_dir().join("embedded_ide_0_check")
+                                };
+                                let folder_path = if parent_folder.is_empty() {
+                                    base_dir.join(&clean)
+                                } else {
+                                    base_dir.join(&parent_folder).join(&clean)
+                                };
                                 let _ = std::fs::create_dir_all(&folder_path);
                                 save_project_needed = true;
                             }

@@ -167,7 +167,7 @@ pub fn show_project_tree(
             new_src_folder_name,
             new_file_parent_folder,
             new_folder_parent_folder,
-            "src",  // parent path at root is "src"
+            "",  // parent path at root is empty (relative to src/)
         );
 
         // Apply file deletion
@@ -213,7 +213,7 @@ pub fn show_project_tree(
             .clicked()
         {
             *new_src_name = Some(String::new());
-            *new_file_parent_folder = Some("src".to_string());
+            *new_file_parent_folder = Some(String::new());  // empty = root of src/
             ui.close();
         }
         if ui
@@ -221,7 +221,7 @@ pub fn show_project_tree(
             .clicked()
         {
             *new_src_folder_name = Some(String::new());
-            *new_folder_parent_folder = Some("src".to_string());
+            *new_folder_parent_folder = Some(String::new());  // empty = root of src/
             ui.close();
         }
     });
@@ -362,7 +362,7 @@ fn render_tree_node(
                                     .color(egui::Color32::from_gray(95)),
                             );
                         }
-                        let folder_path = if parent_path == "src" {
+                        let folder_path = if parent_path.is_empty() {
                             name.clone()
                         } else {
                             format!("{parent_path}/{name}")
@@ -389,7 +389,7 @@ fn render_tree_node(
                         );
                     });
 
-                    let folder_path = if parent_path == "src" {
+                    let folder_path = if parent_path.is_empty() {
                         name.clone()
                     } else {
                         format!("{parent_path}/{name}")
