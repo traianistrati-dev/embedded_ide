@@ -1,5 +1,7 @@
 //! Project tree viewer — the left panel showing workspace files and MCU selection.
 
 pub mod gui;
+pub mod logic;
 
 pub use gui::show_project_tree;
+pub use logic::ProjectTreeState;
