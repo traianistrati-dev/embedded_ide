@@ -78,3 +78,298 @@ impl Mcu {
             .collect()
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    // ── Helper functions ──────────────────────────────────────────────────────
+
+    fn assert_contains_substring(haystack: &str, needle: &str) {
+        assert!(
+            haystack.contains(needle),
+            "Expected substring not found: '{}'\n\nIn:\n{}",
+            needle,
+            haystack
+        );
+    }
+
+    fn assert_not_contains_substring(haystack: &str, needle: &str) {
+        assert!(
+            !haystack.contains(needle),
+            "Unexpected substring found: '{}'\n\nIn:\n{}",
+            needle,
+            haystack
+        );
+    }
+
+    fn count_gen_sections(code: &str) -> usize {
+        code.matches(GEN_BEGIN).count()
+    }
+
+    // ── Parse Main RS Tests (PUBLIC API) ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_main_rs_stm32_gpio_output() {
+        let input = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nlet pa0 = &mut gpioa.pa0.into_push_pull_output(&mut gpioa.crl); // GPIO Output\n// <<< GENERATED END >>>";
+        let parsed = parse_main_rs(input);
+
+        assert!(parsed.iter().any(|(name, _)| name == "PA0"));
+        assert!(parsed.iter().any(|(_, func)| *func == PinFunction::GpioOutput));
+    }
+
+    #[test]
+    fn test_parse_main_rs_stm32_gpio_input() {
+        let input = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nlet pc13 = &mut gpioc.pc13.into_floating_input(&mut gpioc.crh); // GPIO Input\n// <<< GENERATED END >>>";
+        let parsed = parse_main_rs(input);
+
+        assert!(parsed.iter().any(|(name, _)| name == "PC13"));
+        assert!(parsed.iter().any(|(_, func)| *func == PinFunction::GpioInput));
+    }
+
+    #[test]
+    fn test_parse_main_rs_multiple_pins() {
+        let input = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nlet pa0 = &mut gpioa.pa0.into_push_pull_output(&mut gpioa.crl); // GPIO Output\nlet pc13 = &mut gpioc.pc13.into_floating_input(&mut gpioc.crh); // GPIO Input\n// <<< GENERATED END >>>";
+        let parsed = parse_main_rs(input);
+
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_main_rs_no_markers() {
+        let input = "let pa0 = &mut gpioa.pa0.into_push_pull_output(&mut gpioa.crl); // GPIO Output";
+        let parsed = parse_main_rs(input);
+
+        assert!(parsed.is_empty(), "Should not parse without markers");
+    }
+
+    #[test]
+    fn test_parse_main_rs_empty_gen_section() {
+        let input = "// <<< GENERATED BEGIN — do not edit between these markers >>>\n// <<< GENERATED END >>>";
+        let parsed = parse_main_rs(input);
+
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_parse_main_rs_adc_channel() {
+        let input = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nlet pa1 = &mut gpioa.pa1.into_analog(&mut gpioa.crl); // ADC1  IN1\n// <<< GENERATED END >>>";
+        let parsed = parse_main_rs(input);
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "PA1");
+    }
+
+    #[test]
+    fn test_parse_main_rs_skips_port_split_lines() {
+        let input = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nlet mut gpioa = dp.GPIOA.split();\nlet pa0 = &mut gpioa.pa0.into_push_pull_output(&mut gpioa.crl); // GPIO Output\n// <<< GENERATED END >>>";
+        let parsed = parse_main_rs(input);
+
+        // Should only have one pin (PA0), not the port split
+        assert_eq!(parsed.len(), 1);
+    }
+
+    // ── Marker Constants Tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_gen_begin_marker_constant_exists() {
+        assert!(!GEN_BEGIN.is_empty());
+        assert!(GEN_BEGIN.contains("GENERATED BEGIN"));
+        assert!(GEN_BEGIN.contains("do not edit"));
+    }
+
+    #[test]
+    fn test_gen_end_marker_constant_exists() {
+        assert!(!GEN_END.is_empty());
+        assert!(GEN_END.contains("GENERATED END"));
+    }
+
+    #[test]
+    fn test_user_tail_constant_exists() {
+        assert!(!USER_TAIL.is_empty());
+        assert!(USER_TAIL.contains("loop"));
+    }
+
+    // ── Marker Count Tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_count_gen_sections_single() {
+        let code = "// <<< GENERATED BEGIN — do not edit between these markers >>>\ncode\n// <<< GENERATED END >>>";
+        assert_eq!(count_gen_sections(code), 1);
+    }
+
+    #[test]
+    fn test_count_gen_sections_multiple() {
+        let code = "// <<< GENERATED BEGIN — do not edit between these markers >>>\ncode1\n// <<< GENERATED END >>>\n// <<< GENERATED BEGIN — do not edit between these markers >>>\ncode2\n// <<< GENERATED END >>>";
+        assert_eq!(count_gen_sections(code), 2);
+    }
+
+    #[test]
+    fn test_count_gen_sections_none() {
+        let code = "// No markers here";
+        assert_eq!(count_gen_sections(code), 0);
+    }
+
+    // ── Fresh Code Generation Tests (via Mcu::fresh_main_rs) ─────────────────
+
+    #[test]
+    fn test_fresh_main_rs_stm32_no_pins_has_markers() {
+        use super::super::mock_mcu;
+
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let code = mcu.fresh_main_rs();
+
+        assert_contains_substring(&code, GEN_BEGIN);
+        assert_contains_substring(&code, GEN_END);
+        assert_eq!(count_gen_sections(&code), 1);
+    }
+
+    #[test]
+    fn test_fresh_main_rs_stm32_has_required_headers() {
+        use super::super::mock_mcu;
+
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let code = mcu.fresh_main_rs();
+
+        assert_contains_substring(&code, "#![no_std]");
+        assert_contains_substring(&code, "#![no_main]");
+        assert_contains_substring(&code, "use cortex_m_rt::entry;");
+        assert_contains_substring(&code, "#[entry]");
+        assert_contains_substring(&code, "fn main() -> !");
+    }
+
+    #[test]
+    fn test_fresh_main_rs_stm32_ends_with_user_tail() {
+        use super::super::mock_mcu;
+
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let code = mcu.fresh_main_rs();
+
+        assert_contains_substring(&code, USER_TAIL);
+        let trimmed_code = code.trim_end();
+        let trimmed_tail = USER_TAIL.trim_end();
+        assert!(trimmed_code.ends_with(trimmed_tail), "Code should end with USER_TAIL");
+    }
+
+    #[test]
+    fn test_fresh_main_rs_stm32_contains_preamble_before_gen() {
+        use super::super::mock_mcu;
+
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let code = mcu.fresh_main_rs();
+
+        let gen_start = code.find(GEN_BEGIN).expect("GEN_BEGIN not found");
+        let preamble = &code[..gen_start];
+
+        // Should have some content before gen section
+        assert!(preamble.len() > 0);
+        assert!(preamble.contains("#!") || preamble.contains("use"));
+    }
+
+    // ── Update Code Generation Tests (via Mcu::update_main_rs) ───────────────
+
+    #[test]
+    fn test_update_main_rs_preserves_user_code() {
+        use super::super::mock_mcu;
+
+        let before = "// preamble\n// <<< GENERATED BEGIN — do not edit between these markers >>>\nOLD_GEN\n// <<< GENERATED END >>>\nloop { eprintln!(\"Custom\"); }";
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let after = mcu.update_main_rs(before);
+
+        assert_contains_substring(&after, "eprintln!(\"Custom\")");
+        assert_not_contains_substring(&after, "OLD_GEN");
+    }
+
+    #[test]
+    fn test_update_main_rs_produces_valid_markers() {
+        use super::super::mock_mcu;
+
+        let before = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nOLD\n// <<< GENERATED END >>>\nloop";
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let after = mcu.update_main_rs(before);
+
+        assert_eq!(count_gen_sections(&after), 1);
+        assert_contains_substring(&after, GEN_BEGIN);
+        assert_contains_substring(&after, GEN_END);
+    }
+
+    #[test]
+    fn test_update_main_rs_idempotent() {
+        use super::super::mock_mcu;
+
+        let original = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nOLD\n// <<< GENERATED END >>>\nloop";
+        let mcu = mock_mcu::create_stm32f103c8tx();
+
+        let first = mcu.update_main_rs(original);
+        let second = mcu.update_main_rs(&first);
+
+        assert_eq!(first, second, "update_main_rs should be idempotent");
+    }
+
+    #[test]
+    fn test_update_main_rs_multiple_iterations() {
+        use super::super::mock_mcu;
+
+        let original = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nOLD\n// <<< GENERATED END >>>\nloop";
+        let mcu = mock_mcu::create_stm32f103c8tx();
+
+        let first = mcu.update_main_rs(original);
+        let second = mcu.update_main_rs(&first);
+
+        // Second update should be identical to first (idempotent)
+        assert_eq!(first, second, "Second update should be identical to first");
+
+        // Count markers to ensure they didn't multiply
+        assert_eq!(first.matches(GEN_BEGIN).count(), 1, "Should have exactly 1 GEN_BEGIN");
+        assert_eq!(second.matches(GEN_BEGIN).count(), 1, "Should have exactly 1 GEN_BEGIN");
+    }
+
+    #[test]
+    fn test_update_main_rs_handles_multiline_user_code() {
+        use super::super::mock_mcu;
+
+        let before = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nOLD\n// <<< GENERATED END >>>\nloop {\n    eprintln!(\"Line 1\");\n    eprintln!(\"Line 2\");\n}";
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let after = mcu.update_main_rs(before);
+
+        assert_contains_substring(&after, "eprintln!(\"Line 1\")");
+        assert_contains_substring(&after, "eprintln!(\"Line 2\")");
+    }
+
+    // ── Round-Trip Tests (Parse → Generate → Parse) ──────────────────────────
+
+    #[test]
+    fn test_round_trip_generated_then_parsed() {
+        use super::super::mock_mcu;
+
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let code = mcu.fresh_main_rs();
+
+        // Parse what we generated
+        let parsed = parse_main_rs(&code);
+
+        // Since we didn't configure pins, should be empty
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_update_preserves_gen_section_integrity() {
+        use super::super::mock_mcu;
+
+        let before = "// <<< GENERATED BEGIN — do not edit between these markers >>>\nOLD\n// <<< GENERATED END >>>\nloop";
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let after = mcu.update_main_rs(before);
+
+        // After update, should still have exactly one marker pair
+        let begin_count = after.matches(GEN_BEGIN).count();
+        let end_count = after.matches(GEN_END).count();
+
+        assert_eq!(begin_count, 1);
+        assert_eq!(end_count, 1);
+    }
+}

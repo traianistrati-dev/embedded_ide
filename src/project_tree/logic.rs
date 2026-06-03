@@ -158,11 +158,16 @@ impl ProjectTreeState {
             active_slugs.contains(&slug)
         });
 
-        // 4. Create pin files that don't yet exist
+        // 4. Create or update pin files
         for (slug, num, name, func) in &configured {
             let file_path = format!("pins/{slug}.rs");
-            if !self.user_src_files.iter().any(|(p, _)| p == &file_path) {
-                let content = generate_pin_content(*num, name, func);
+            let content = generate_pin_content(*num, name, func);
+
+            if let Some((_, file_content)) = self.user_src_files.iter_mut().find(|(p, _)| p == &file_path) {
+                // Update existing file
+                *file_content = content;
+            } else {
+                // Create new file
                 self.user_src_files.push((file_path, content));
             }
         }
@@ -709,5 +714,66 @@ mod tests {
         let count_after = state.user_src_folders.len() + state.user_src_files.len();
 
         assert_eq!(count_before, count_after, "Scaffold should be idempotent");
+    }
+
+    #[test]
+    fn test_sync_updates_pintype_on_function_change() {
+        let mut state = ProjectTreeState::new();
+
+        // Start with PA0 as GPIO Output
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
+        state.sync_pin_files(&pins);
+
+        let entry = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .unwrap();
+        assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"));
+
+        // Change to ADC (Analog)
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::AdcChannel { adc: 1, channel: 0 })];
+        state.sync_pin_files(&pins);
+
+        let entry = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .unwrap();
+        // After function change, the file should be regenerated with new type
+        assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Analog>;"));
+        assert!(!entry.1.contains("Output"), "Old Output type should be removed");
+    }
+
+    #[test]
+    fn test_sync_updates_pin_comment_on_function_change() {
+        let mut state = ProjectTreeState::new();
+
+        // Start with GPIO Output (no comment)
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
+        state.sync_pin_files(&pins);
+
+        let entry = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .unwrap();
+        assert!(!entry.1.contains("//"), "GPIO pins should have no comment");
+
+        // Change to ADC with function label
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::AdcChannel { adc: 1, channel: 0 })];
+        state.sync_pin_files(&pins);
+
+        let entry = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .unwrap();
+        // ADC should have a comment with the function label
+        assert!(
+            entry.1.contains("// ADC1  IN0"),
+            "ADC pin should have function label comment: {}",
+            entry.1
+        );
     }
 }

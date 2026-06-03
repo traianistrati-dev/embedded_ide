@@ -32,19 +32,38 @@ fn test_rust_code_smart_pointers() {
     let ssss = "123ABC".to_owned();
 
     let mut smart_pointer: *const String = &ssss;
-
     smart_pointer = &"xxxxxx".to_string();
+    // update_smart_pointer(&mut smart_pointer);
+    // update_smart_pointer2(smart_pointer);
 
-    update_smart_pointer(&mut smart_pointer);
-    update_smart_pointer2(smart_pointer);
+    let ssss_ref: &String = &ssss;
+    let ssss_ref: *const String = &ssss;
+    // let ssss_ref: &str = &*ssss;
+
+    update_string_by_smart_pointer(ssss_ref);
+
+    {
+        let ssss_ref: *mut String = (&ssss as *const String).clone().cast_mut();
+        unsafe {
+            println!("ssss_ref = {:p}", ssss_ref);
+            {
+                (*ssss_ref) = "vvvvv".to_owned();
+            }
+            println!("ssss_ref = {:p}", ssss_ref);
+        }
+    }
+
+    println!("ssss = {:?}", ssss);
+
     if true {
         //TODO:
     } else {
         std::panic!(
-            "smart_pointer {:?}, {:p}, {:?}",
+            "smart_pointer {:?}, {:p}, {:?}, ssss={:?}",
             smart_pointer.clone(),
             smart_pointer.clone(),
-            unsafe { &*smart_pointer }
+            unsafe { &*smart_pointer },
+            ssss
         );
     }
 
@@ -70,7 +89,7 @@ fn test_rust_code_smart_pointers() {
         }
     }
     /////
-    fn update_smart_pointer2(text: *const String) {
+    fn update_string_by_smart_pointer(text: *const String) {
         let smart_pointer = text.cast_mut();
         unsafe {
             println!(
@@ -80,8 +99,8 @@ fn test_rust_code_smart_pointers() {
             );
 
             {
-                // (*smart_pointer).push_str("ooooo");
                 (*smart_pointer) = "ooooo".to_owned();
+                (*smart_pointer).push_str("-00000");
             }
 
             println!(
