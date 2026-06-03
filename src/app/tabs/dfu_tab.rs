@@ -60,6 +60,15 @@ pub fn show_dfu_tab(
                     );
                 }
                 for (i, p) in progs.iter().enumerate() {
+                    // Determine if this programmer is compatible with the selected toolchain
+                    let is_stm_programmer = matches!(p.kind, "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP");
+                    let is_esp_programmer = matches!(p.kind, "USB-Serial" | "ESP32");
+                    let is_compatible = match toolchain {
+                        ToolchainKind::RustEmbedded => is_stm_programmer,
+                        ToolchainKind::EspRust => is_esp_programmer,
+                        ToolchainKind::SdccC => false,
+                    };
+
                     let kind_color = match p.kind {
                         "DFU Bootloader" => egui::Color32::from_rgb(100, 200, 255),
                         "ST-Link" => egui::Color32::from_rgb(100, 220, 120),
@@ -69,20 +78,34 @@ pub fn show_dfu_tab(
                         "ESP32" => egui::Color32::from_rgb(220, 120, 60),
                         _ => egui::Color32::GRAY,
                     };
+
+                    // Disable color for incompatible programmers
+                    let display_color = if is_compatible {
+                        kind_color
+                    } else {
+                        egui::Color32::from_gray(80)
+                    };
+
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(format!("[{}]", p.kind))
                                 .size(10.0)
                                 .monospace()
-                                .color(kind_color),
+                                .color(display_color),
                         );
-                        ui.selectable_value(
-                            dfu_sel_programmer,
-                            i,
-                            egui::RichText::new(format!("{}  [{}]", p.name, p.vid_pid))
-                                .size(10.5)
-                                .monospace(),
-                        );
+                        ui.add_enabled(
+                            is_compatible,
+                            egui::SelectableLabel::new(
+                                *dfu_sel_programmer == i,
+                                egui::RichText::new(format!("{}  [{}]", p.name, p.vid_pid))
+                                    .size(10.5)
+                                    .monospace(),
+                            ),
+                        ).clicked().then(|| {
+                            if is_compatible {
+                                *dfu_sel_programmer = i;
+                            }
+                        });
                     });
                 }
             });

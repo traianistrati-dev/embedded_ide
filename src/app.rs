@@ -1,7 +1,6 @@
 use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
 use crate::editor::gui::show_diagnostics_overlay;
-use crate::editor::gui::show_ra_status_bar;
 use crate::espflash::{self, EspFlashState};
 use crate::lsp::{self, LspStatus};
 use crate::openocd::{self, OpenOcdState};
@@ -12,8 +11,8 @@ use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
-use crate::project_tree::gui::show_project_tree as show_project_tree_panel;
 use crate::project_tree::ProjectTreeState;
+use crate::project_tree::gui::show_project_tree as show_project_tree_panel;
 use crate::required_tools;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
@@ -474,9 +473,9 @@ impl AppIde {
     /// - Remove: drop from the list (IDE-initiated removes are already gone).
     /// - Rename: atomically update the stored path.
     fn poll_fs_events(&mut self) {
+        use crate::project_tree::logic::FsEventKind;
         use notify::EventKind::*;
         use notify::event::{ModifyKind, RenameMode};
-        use crate::project_tree::logic::FsEventKind;
 
         let workspace_src = std::env::temp_dir()
             .join("embedded_ide_0_check")
@@ -507,7 +506,12 @@ impl AppIde {
                             continue;
                         }
                         // Only add if not already tracked (avoids duplicates from our own writes)
-                        if !self.project_tree.user_src_files.iter().any(|(p, _)| p == &rel) {
+                        if !self
+                            .project_tree
+                            .user_src_files
+                            .iter()
+                            .any(|(p, _)| p == &rel)
+                        {
                             // Read the file content so the editor shows it correctly
                             let content = std::fs::read_to_string(abs).unwrap_or_default();
                             self.project_tree.user_src_files.push((rel, content));
@@ -639,6 +643,9 @@ impl eframe::App for AppIde {
         // Initialize frame state (polling, LSP, MCU updates)
         self.init_frame(ui);
 
+        // Detect Ctrl+S for Save/Export project
+        let ctrl_s_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S));
+
         // Build project files snapshot (used by both tree and editor panels)
         let project_files: Option<ProjectFiles> = self
             .selected_mcu_type
@@ -652,6 +659,7 @@ impl eframe::App for AppIde {
         // Signals set inside the panel closure, acted on outside.
         let mut open_project_clicked = false;
         let mut new_project_clicked = false;
+        let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
 
         egui::Panel::left("project_tree")
             .resizable(true)
@@ -668,6 +676,20 @@ impl eframe::App for AppIde {
                             .on_hover_text(tip)
                             .clicked()
                         };
+
+                        // Save button
+                        let can_save = project_files.is_some();
+                        let save_label = if can_save { "Save" } else { "Save (N/A)" };
+                        if btn(
+                            ui,
+                            ph::EXPORT,
+                            save_label,
+                            "Export/Save project to disk (Ctrl+S)",
+                        ) {
+                            save_project_clicked = true;
+                        }
+                        ui.add_space(2.0);
+
                         if btn(
                             ui,
                             ph::FOLDER_OPEN,
@@ -755,6 +777,39 @@ impl eframe::App for AppIde {
             {
                 self.load_project_from_dir(&folder);
                 save_project_needed = true;
+            }
+        }
+
+        // "Save Project" → export to folder
+        if save_project_clicked {
+            if let Some(config) = self.selected_mcu_type.project_config() {
+                if let Some(dest) = rfd::FileDialog::new()
+                    .set_title("Choose folder to save the project")
+                    .pick_folder()
+                {
+                    let code = self.generated_code.clone();
+                    match project_gen::write_project(
+                        &dest,
+                        &config,
+                        &code,
+                        &self.project_tree.user_src_files,
+                    ) {
+                        Ok(()) => {
+                            let name = dest
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("saved")
+                                .to_string();
+                            self.export_msg = format!("✔  {name}");
+                            self.export_flash = 180;
+                            self.project_name = Some(name);
+                        }
+                        Err(e) => {
+                            self.export_msg = format!("✗  {e}");
+                            self.export_flash = 180;
+                        }
+                    }
+                }
             }
         }
 
@@ -900,7 +955,11 @@ impl eframe::App for AppIde {
                                 format!("{parent_folder}/{clean}")
                             };
                             if !clean.is_empty()
-                                && !self.project_tree.user_src_files.iter().any(|(p, _)| p == &full_path)
+                                && !self
+                                    .project_tree
+                                    .user_src_files
+                                    .iter()
+                                    .any(|(p, _)| p == &full_path)
                             {
                                 // Use the actual project directory if available, otherwise use temp workspace
                                 let base_dir = if let Some(project_dir) = &self.project_dir {
@@ -917,10 +976,12 @@ impl eframe::App for AppIde {
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 let _ = std::fs::write(&file_path, "// New file\n");
-                                self.project_tree.user_src_files
+                                self.project_tree
+                                    .user_src_files
                                     .push((full_path, "// New file\n".to_string()));
-                                self.selected_file =
-                                    ProjectFileId::UserFile(self.project_tree.user_src_files.len() - 1);
+                                self.selected_file = ProjectFileId::UserFile(
+                                    self.project_tree.user_src_files.len() - 1,
+                                );
                                 save_project_needed = true;
                             }
                             should_close = true;
@@ -977,7 +1038,9 @@ impl eframe::App for AppIde {
                             } else {
                                 format!("{parent_folder}/{clean}")
                             };
-                            if !clean.is_empty() && !self.project_tree.user_src_folders.contains(&full_path) {
+                            if !clean.is_empty()
+                                && !self.project_tree.user_src_folders.contains(&full_path)
+                            {
                                 self.project_tree.user_src_folders.push(full_path.clone());
                                 // Use the actual project directory if available, otherwise use temp workspace
                                 let base_dir = if let Some(project_dir) = &self.project_dir {
@@ -1030,7 +1093,8 @@ impl eframe::App for AppIde {
         // click handler, but display_code still held the OLD file's content.
         // The write-back then wrongly stored the old content into the new file.
         let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
-            self.project_tree.user_src_files
+            self.project_tree
+                .user_src_files
                 .get(i)
                 .map(|(_, c)| c.clone())
                 .unwrap_or_default()
@@ -1077,138 +1141,6 @@ impl eframe::App for AppIde {
                                 ));
                             });
                             self.copy_flash = 60;
-                        }
-
-                        ui.add_space(4.0);
-
-                        // Export Project button
-                        let can_export = project_files.is_some();
-                        let export_idle = format!("{} Export Project", ph::EXPORT);
-                        let export_na = format!("{} Export (N/A)", ph::EXPORT);
-                        let export_label: &str = if self.export_flash > 0 {
-                            &self.export_msg
-                        } else if can_export {
-                            &export_idle
-                        } else {
-                            &export_na
-                        };
-
-                        let export_color =
-                            if self.export_flash > 0 && self.export_msg.starts_with('✔') {
-                                egui::Color32::from_rgb(100, 220, 100)
-                            } else if self.export_flash > 0 {
-                                egui::Color32::from_rgb(230, 100, 80)
-                            } else {
-                                egui::Color32::WHITE
-                            };
-
-                        let export_btn = ui.add_enabled(
-                            can_export && self.export_flash == 0,
-                            egui::Button::new(
-                                egui::RichText::new(export_label)
-                                    .size(11.0)
-                                    .color(export_color),
-                            ),
-                        );
-
-                        if export_btn.clicked() {
-                            if let Some(config) = self.selected_mcu_type.project_config() {
-                                if let Some(dest) = rfd::FileDialog::new()
-                                    .set_title("Choose folder for the exported project")
-                                    .pick_folder()
-                                {
-                                    let code = self.generated_code.clone();
-                                    match project_gen::write_project(
-                                        &dest,
-                                        &config,
-                                        &code,
-                                        &self.project_tree.user_src_files,
-                                    ) {
-                                        Ok(()) => {
-                                            let name = dest
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or("exported")
-                                                .to_string();
-                                            self.export_msg = format!("✔  {name}");
-                                            self.export_flash = 180;
-                                            // Track the exported folder name so it is visible
-                                            // in the panel heading and persisted across restarts
-                                            // even for projects that were never opened via
-                                            // "Open Project".
-                                            self.project_name = Some(name);
-                                        }
-                                        Err(e) => {
-                                            self.export_msg = format!("✗  {e}");
-                                            self.export_flash = 180;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        export_btn.on_hover_text(
-                            "Exports a complete Cargo project:\n\
-                             Cargo.toml · .cargo/config.toml · memory.x · build.rs · src/main.rs",
-                        );
-
-                        ui.add_space(4.0);
-
-                        // ── rust-analyzer status badge ────────────────────────
-                        {
-                            let lsp = self.lsp_state.lock().unwrap();
-                            let (icon, color, tip) = match &lsp.status {
-                                LspStatus::Stopped => (
-                                    ph::PLUGS,
-                                    egui::Color32::DARK_GRAY,
-                                    "rust-analyzer: not running",
-                                ),
-                                LspStatus::Starting => (
-                                    ph::CIRCLE_NOTCH,
-                                    egui::Color32::from_rgb(180, 180, 80),
-                                    "rust-analyzer: starting…",
-                                ),
-                                LspStatus::Indexing => (
-                                    ph::CIRCLE_NOTCH,
-                                    egui::Color32::from_rgb(180, 180, 80),
-                                    "rust-analyzer: indexing…",
-                                ),
-                                LspStatus::Ready if lsp.total_errors() > 0 => (
-                                    ph::X_CIRCLE,
-                                    egui::Color32::from_rgb(220, 80, 70),
-                                    "rust-analyzer: errors",
-                                ),
-                                LspStatus::Ready if lsp.total_warnings() > 0 => (
-                                    ph::WARNING,
-                                    egui::Color32::from_rgb(210, 170, 40),
-                                    "rust-analyzer: warnings",
-                                ),
-                                LspStatus::Ready => (
-                                    ph::CHECK_CIRCLE,
-                                    egui::Color32::from_rgb(80, 200, 100),
-                                    "rust-analyzer: no errors",
-                                ),
-                                LspStatus::Failed(_) => (
-                                    ph::X_CIRCLE,
-                                    egui::Color32::from_rgb(220, 80, 70),
-                                    "rust-analyzer: failed",
-                                ),
-                            };
-                            // Spin the icon while indexing
-                            let is_spinning =
-                                matches!(lsp.status, LspStatus::Starting | LspStatus::Indexing);
-                            let badge = format!("RA {icon}");
-                            ui.add(
-                                egui::Button::new(
-                                    egui::RichText::new(&badge).size(11.0).color(color),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text(tip);
-                            if is_spinning {
-                                ui.ctx()
-                                    .request_repaint_after(std::time::Duration::from_millis(200));
-                            }
                         }
 
                         ui.add_space(4.0);
@@ -1376,6 +1308,7 @@ impl eframe::App for AppIde {
                         match chip_toolchain {
                             ToolchainKind::RustEmbedded => {
                                 // ⚡ Flash via USB (DFU)
+                                /*
                                 let flash_enabled =
                                     device_ok && !any_busy && project_files.is_some();
                                 let flash_btn = ui.add_enabled(
@@ -1426,6 +1359,7 @@ impl eframe::App for AppIde {
                                 );
 
                                 ui.add_space(2.0);
+                                */
 
                                 // 🔗 Flash via SWD (OpenOCD)
                                 let flash_swd_enabled =
@@ -1569,7 +1503,8 @@ impl eframe::App for AppIde {
                         // Show which file is open
                         let open_label = match self.selected_file {
                             ProjectFileId::UserFile(i) => self
-                                .project_tree.user_src_files
+                                .project_tree
+                                .user_src_files
                                 .get(i)
                                 .map(|(name, _)| format!("src/{name}"))
                                 .unwrap_or_else(|| "src/???".to_string()),
@@ -1683,7 +1618,8 @@ impl eframe::App for AppIde {
                 let editor_id: String = match &self.selected_file {
                     ProjectFileId::UserFile(i) => {
                         let path = self
-                            .project_tree.user_src_files
+                            .project_tree
+                            .user_src_files
                             .get(*i)
                             .map(|(p, _)| p.as_str())
                             .unwrap_or("?");
@@ -1736,14 +1672,6 @@ impl eframe::App for AppIde {
                         });
                     }
                 }
-                // ── rust-analyzer inline status bar ───────────────────────────
-                show_ra_status_bar(
-                    ui,
-                    &self.lsp_state,
-                    &self.selected_file,
-                    &self.project_tree.user_src_files,
-                );
-
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
                 let ctrl_space_pressed =

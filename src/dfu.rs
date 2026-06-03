@@ -50,14 +50,14 @@ impl DfuState {
     /// Short status label for the toolbar.
     pub fn status_label(&self) -> &str {
         match self {
-            DfuState::Idle           => "—",
-            DfuState::Detecting      => "Scanning…",
+            DfuState::Idle => "—",
+            DfuState::Detecting => "Scanning…",
             DfuState::DeviceFound(_) => "DFU device found",
-            DfuState::NoDevice       => "No DFU device",
-            DfuState::Building       => "Building…",
-            DfuState::Flashing       => "Flashing…",
-            DfuState::Success        => "Flash OK ✔",
-            DfuState::Error(_)       => "Error",
+            DfuState::NoDevice => "No DFU device",
+            DfuState::Building => "Building…",
+            DfuState::Flashing => "Flashing…",
+            DfuState::Success => "Flash OK ✔",
+            DfuState::Error(_) => "Error",
         }
     }
 
@@ -66,13 +66,13 @@ impl DfuState {
         use eframe::egui::Color32;
         match self {
             DfuState::DeviceFound(_) => Color32::from_rgb(80, 220, 100),
-            DfuState::Success        => Color32::from_rgb(80, 220, 100),
-            DfuState::NoDevice       => Color32::from_rgb(180, 180, 180),
-            DfuState::Error(_)       => Color32::from_rgb(230, 80, 60),
-            DfuState::Building
-            | DfuState::Flashing
-            | DfuState::Detecting    => Color32::from_rgb(220, 180, 60),
-            _                        => Color32::GRAY,
+            DfuState::Success => Color32::from_rgb(80, 220, 100),
+            DfuState::NoDevice => Color32::from_rgb(180, 180, 180),
+            DfuState::Error(_) => Color32::from_rgb(230, 80, 60),
+            DfuState::Building | DfuState::Flashing | DfuState::Detecting => {
+                Color32::from_rgb(220, 180, 60)
+            }
+            _ => Color32::GRAY,
         }
     }
 
@@ -80,8 +80,8 @@ impl DfuState {
     pub fn detail(&self) -> Option<String> {
         match self {
             DfuState::DeviceFound(desc) => Some(desc.clone()),
-            DfuState::Error(msg)        => Some(msg.clone()),
-            _                           => None,
+            DfuState::Error(msg) => Some(msg.clone()),
+            _ => None,
         }
     }
 }
@@ -119,7 +119,11 @@ pub fn start_usb_monitor(state: Arc<Mutex<DfuState>>, ctx: eframe::egui::Context
 
             // Slow down polling when we already know a device is present
             let device_present = matches!(*state.lock().unwrap(), DfuState::DeviceFound(_));
-            thread::sleep(std::time::Duration::from_secs(if device_present { 4 } else { 2 }));
+            thread::sleep(std::time::Duration::from_secs(if device_present {
+                4
+            } else {
+                2
+            }));
         }
     });
 }
@@ -157,11 +161,14 @@ pub fn detect_dfu(
         if let DfuState::DeviceFound(ref desc) = dfu_result {
             let already = found.iter().any(|p| p.kind == "DFU Bootloader");
             if !already {
-                found.insert(0, ProgrammerInfo {
-                    name:    desc.clone(),
-                    vid_pid: "0483:df11".to_string(),
-                    kind:    "DFU Bootloader",
-                });
+                found.insert(
+                    0,
+                    ProgrammerInfo {
+                        name: desc.clone(),
+                        vid_pid: "0483:df11".to_string(),
+                        kind: "DFU Bootloader",
+                    },
+                );
             }
         }
         *programmers.lock().unwrap() = found.clone();
@@ -185,7 +192,9 @@ pub fn detect_dfu(
                 DfuState::Error(e) => {
                     log.push(format!("✗ dfu-util: {}", e.lines().next().unwrap_or(e)));
                     log.push("  Install: winget install dfu-util".to_string());
-                    log.push("  WinUSB driver: install via Zadig for 'STM32 BOOTLOADER'".to_string());
+                    log.push(
+                        "  WinUSB driver: install via Zadig for 'STM32 BOOTLOADER'".to_string(),
+                    );
                 }
                 _ => {}
             }
@@ -223,7 +232,7 @@ fn run_detect() -> DfuState {
                  Install dfu-util:\n\
                  • Windows: winget install dfu-util\n\
                  • Also install WinUSB driver via Zadig for the STM32 BOOTLOADER device."
-            ))
+            ));
         }
     };
 
@@ -407,7 +416,11 @@ pub fn start_flash(
         }
 
         match child.wait() {
-            Err(e) => set(&state, &ctx, DfuState::Error(format!("Cannot run dfu-util: {e}"))),
+            Err(e) => set(
+                &state,
+                &ctx,
+                DfuState::Error(format!("Cannot run dfu-util: {e}")),
+            ),
             Ok(s) if !s.success() => set(
                 &state,
                 &ctx,
@@ -455,7 +468,12 @@ fn objcopy(
 
     // 2. arm-none-eabi-objcopy (ARM GNU toolchain)
     push_log(log, ctx, "  Trying arm-none-eabi-objcopy …");
-    if try_cmd("arm-none-eabi-objcopy", &["-O", "binary", elf_s, bin_s], None) && bin.exists() {
+    if try_cmd(
+        "arm-none-eabi-objcopy",
+        &["-O", "binary", elf_s, bin_s],
+        None,
+    ) && bin.exists()
+    {
         push_log(log, ctx, "  ✔ arm-none-eabi-objcopy succeeded");
         return Ok(());
     }
@@ -472,13 +490,11 @@ fn objcopy(
         return Ok(());
     }
 
-    Err(
-        "Could not convert ELF → BIN. Install one of:\n\
+    Err("Could not convert ELF → BIN. Install one of:\n\
          • llvm-objcopy  — rustup component add llvm-tools-preview\n\
          • arm-none-eabi-objcopy  — ARM GNU Toolchain\n\
          • cargo-binutils  — cargo install cargo-binutils"
-            .into(),
-    )
+        .into())
 }
 
 /// Run a command silently; returns true if exit code is 0.
@@ -513,20 +529,18 @@ impl ProgrammerInfo {
     /// Contextual guidance shown below the ComboBox.
     pub fn guidance(&self) -> &'static str {
         match self.kind {
-            "DFU Bootloader" =>
-                "DFU bootloader detected — click Flash USB to program.",
-            "ST-Link" =>
+            "DFU Bootloader" => "DFU bootloader detected — click Flash USB to program.",
+            "ST-Link" => {
                 "ST-Link connected. DFU flashing needs the MCU in bootloader mode \
-                 (BOOT0=1 + reset). For SWD: use OpenOCD.",
-            "J-Link" =>
-                "J-Link detected. Use J-Flash or OpenOCD for SWD/JTAG flashing.",
-            "CMSIS-DAP" =>
-                "CMSIS-DAP / DAPLink detected. Use pyOCD or OpenOCD for SWD flashing.",
-            "USB-Serial" =>
+                 (BOOT0=1 + reset). For SWD: use OpenOCD."
+            }
+            "J-Link" => "J-Link detected. Use J-Flash or OpenOCD for SWD/JTAG flashing.",
+            "CMSIS-DAP" => "CMSIS-DAP / DAPLink detected. Use pyOCD or OpenOCD for SWD flashing.",
+            "USB-Serial" => {
                 "USB-Serial adapter. STM32 UART boot: STM32CubeProgrammer. \
-                 ESP32: esptool.py. Arduino: avrdude.",
-            "ESP32" =>
-                "ESP32 in USB-CDC mode. Flash with: esptool.py.",
+                 ESP32: esptool.py. Arduino: avrdude."
+            }
+            "ESP32" => "ESP32 in USB-CDC mode. Flash with: esptool.py.",
             _ => "",
         }
     }
@@ -536,57 +550,57 @@ impl ProgrammerInfo {
 /// Sorted roughly by prevalence; exact match checked before VID-only fallback.
 const KNOWN_PROGRAMMERS: &[(&str, &str, &str)] = &[
     // ── DFU Bootloaders ───────────────────────────────────────────────────────
-    ("0483:df11", "STM32 DFU Bootloader",     "DFU Bootloader"),
-    ("303a:0002", "ESP32-S2 DFU Bootloader",  "DFU Bootloader"),
-    ("1915:521f", "nRF52840 Dongle (DFU)",    "DFU Bootloader"),
-    ("03eb:6124", "Atmel DFU Bootloader",     "DFU Bootloader"),
-    ("239a:0035", "Adafruit Bootloader (DFU)","DFU Bootloader"),
+    ("0483:df11", "STM32 DFU Bootloader", "DFU Bootloader"),
+    ("303a:0002", "ESP32-S2 DFU Bootloader", "DFU Bootloader"),
+    ("1915:521f", "nRF52840 Dongle (DFU)", "DFU Bootloader"),
+    ("03eb:6124", "Atmel DFU Bootloader", "DFU Bootloader"),
+    ("239a:0035", "Adafruit Bootloader (DFU)", "DFU Bootloader"),
     // ── ST-Link ───────────────────────────────────────────────────────────────
-    ("0483:3744", "ST-Link v1",               "ST-Link"),
-    ("0483:3748", "ST-Link v2",               "ST-Link"),
-    ("0483:3749", "ST-Link v2-1",             "ST-Link"),
-    ("0483:374a", "ST-Link v2-1 (MSD)",       "ST-Link"),
-    ("0483:374b", "ST-Link v3E",              "ST-Link"),
-    ("0483:374d", "ST-Link v3 (VCP)",         "ST-Link"),
-    ("0483:374e", "ST-Link v3E (OB)",         "ST-Link"),
-    ("0483:374f", "ST-Link v3S",              "ST-Link"),
+    ("0483:3744", "ST-Link v1", "ST-Link"),
+    ("0483:3748", "ST-Link v2", "ST-Link"),
+    ("0483:3749", "ST-Link v2-1", "ST-Link"),
+    ("0483:374a", "ST-Link v2-1 (MSD)", "ST-Link"),
+    ("0483:374b", "ST-Link v3E", "ST-Link"),
+    ("0483:374d", "ST-Link v3 (VCP)", "ST-Link"),
+    ("0483:374e", "ST-Link v3E (OB)", "ST-Link"),
+    ("0483:374f", "ST-Link v3S", "ST-Link"),
     // ── CMSIS-DAP / DAPLink ───────────────────────────────────────────────────
-    ("0d28:0204", "DAPLink / CMSIS-DAP",      "CMSIS-DAP"),
-    ("2e8a:000c", "Picoprobe (RP2040)",        "CMSIS-DAP"),
+    ("0d28:0204", "DAPLink / CMSIS-DAP", "CMSIS-DAP"),
+    ("2e8a:000c", "Picoprobe (RP2040)", "CMSIS-DAP"),
     ("2e8a:0003", "Raspberry Pi Debug Probe", "CMSIS-DAP"),
-    ("1fc9:0143", "NXP LPC-Link2",            "CMSIS-DAP"),
-    ("1d50:6018", "Black Magic Probe",        "CMSIS-DAP"),
-    ("1a86:8010", "WCH-Link (RISC-V)",        "CMSIS-DAP"),
-    ("03eb:2111", "Atmel EDBG",               "CMSIS-DAP"),
-    ("03eb:2140", "Atmel ICE",                "CMSIS-DAP"),
-    ("03eb:2177", "Atmel EDBG (SAME)",        "CMSIS-DAP"),
-    ("04d8:900a", "MPLAB ICD",                "CMSIS-DAP"),
-    ("04d8:9012", "PICkit 3",                 "CMSIS-DAP"),
-    ("04d8:8f0c", "MPLAB SNAP",               "CMSIS-DAP"),
-    ("1915:9010", "nRF9160 DK / CMSIS-DAP",  "CMSIS-DAP"),
+    ("1fc9:0143", "NXP LPC-Link2", "CMSIS-DAP"),
+    ("1d50:6018", "Black Magic Probe", "CMSIS-DAP"),
+    ("1a86:8010", "WCH-Link (RISC-V)", "CMSIS-DAP"),
+    ("03eb:2111", "Atmel EDBG", "CMSIS-DAP"),
+    ("03eb:2140", "Atmel ICE", "CMSIS-DAP"),
+    ("03eb:2177", "Atmel EDBG (SAME)", "CMSIS-DAP"),
+    ("04d8:900a", "MPLAB ICD", "CMSIS-DAP"),
+    ("04d8:9012", "PICkit 3", "CMSIS-DAP"),
+    ("04d8:8f0c", "MPLAB SNAP", "CMSIS-DAP"),
+    ("1915:9010", "nRF9160 DK / CMSIS-DAP", "CMSIS-DAP"),
     // ── FTDI ──────────────────────────────────────────────────────────────────
-    ("0403:6001", "FTDI FT232RL",             "USB-Serial"),
-    ("0403:6010", "FTDI FT2232H",             "USB-Serial"),
-    ("0403:6011", "FTDI FT4232H",             "USB-Serial"),
-    ("0403:6014", "FTDI FT232H",              "USB-Serial"),
-    ("0403:6015", "FTDI FT231X",              "USB-Serial"),
+    ("0403:6001", "FTDI FT232RL", "USB-Serial"),
+    ("0403:6010", "FTDI FT2232H", "USB-Serial"),
+    ("0403:6011", "FTDI FT4232H", "USB-Serial"),
+    ("0403:6014", "FTDI FT232H", "USB-Serial"),
+    ("0403:6015", "FTDI FT231X", "USB-Serial"),
     // ── WCH CH340 / CH341 (Arduino, ESP8266, ESP32) ───────────────────────────
-    ("1a86:7523", "CH340 USB-Serial",         "USB-Serial"),
-    ("1a86:5523", "CH341A USB-Serial",        "USB-Serial"),
-    ("1a86:55d4", "CH342/344 USB-Serial",     "USB-Serial"),
-    ("1a86:7522", "CH340K USB-Serial",        "USB-Serial"),
+    ("1a86:7523", "CH340 USB-Serial", "USB-Serial"),
+    ("1a86:5523", "CH341A USB-Serial", "USB-Serial"),
+    ("1a86:55d4", "CH342/344 USB-Serial", "USB-Serial"),
+    ("1a86:7522", "CH340K USB-Serial", "USB-Serial"),
     // ── Silicon Labs CP210x (ESP32, various) ──────────────────────────────────
-    ("10c4:ea60", "CP2102 USB-Serial",        "USB-Serial"),
-    ("10c4:ea61", "CP2103 USB-Serial",        "USB-Serial"),
-    ("10c4:ea70", "CP2105 USB-Serial",        "USB-Serial"),
-    ("10c4:ea71", "CP2108 USB-Serial",        "USB-Serial"),
+    ("10c4:ea60", "CP2102 USB-Serial", "USB-Serial"),
+    ("10c4:ea61", "CP2103 USB-Serial", "USB-Serial"),
+    ("10c4:ea70", "CP2105 USB-Serial", "USB-Serial"),
+    ("10c4:ea71", "CP2108 USB-Serial", "USB-Serial"),
     // ── Prolific PL2303 ───────────────────────────────────────────────────────
-    ("067b:2303", "PL2303 USB-Serial",        "USB-Serial"),
-    ("067b:23a3", "PL2303HXN USB-Serial",     "USB-Serial"),
+    ("067b:2303", "PL2303 USB-Serial", "USB-Serial"),
+    ("067b:23a3", "PL2303HXN USB-Serial", "USB-Serial"),
     // ── ESP32 direct USB (S2 / S3 / C3 in CDC mode) ──────────────────────────
-    ("303a:1001", "ESP32-S2 (USB-CDC)",       "ESP32"),
-    ("303a:4001", "ESP32-S3 (USB-CDC)",       "ESP32"),
-    ("303a:1002", "ESP32-C3 (USB-CDC)",       "ESP32"),
+    ("303a:1001", "ESP32-S2 (USB-CDC)", "ESP32"),
+    ("303a:4001", "ESP32-S3 (USB-CDC)", "ESP32"),
+    ("303a:1002", "ESP32-C3 (USB-CDC)", "ESP32"),
 ];
 
 /// Look up VID:PID in the programmer catalogue.
@@ -658,11 +672,15 @@ Get-WmiObject Win32_PnPEntity |
         .lines()
         .filter_map(|line| {
             let line = line.trim();
-            if line.is_empty() { return None; }
+            if line.is_empty() {
+                return None;
+            }
             let (os_name, vp) = line.split_once('|')?;
             let os_name = os_name.trim();
-            let vp      = vp.trim();
-            if os_name.is_empty() { return None; }
+            let vp = vp.trim();
+            if os_name.is_empty() {
+                return None;
+            }
             let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
             // Prefer the OS name when it's more descriptive than the catalogue name
             let name = if os_name.len() > catalogue_name.len() {
@@ -670,7 +688,11 @@ Get-WmiObject Win32_PnPEntity |
             } else {
                 catalogue_name.to_string()
             };
-            Some(ProgrammerInfo { name, vid_pid: vp.to_string(), kind })
+            Some(ProgrammerInfo {
+                name,
+                vid_pid: vp.to_string(),
+                kind,
+            })
         })
         .collect();
 
@@ -693,9 +715,9 @@ fn list_programmers_linux() -> Vec<ProgrammerInfo> {
         .filter_map(|line| {
             // "Bus 001 Device 003: ID 0483:3748 STMicroelectronics ST-LINK/V2"
             let id_pos = line.find("ID ")?;
-            let rest   = &line[id_pos + 3..];
-            let sp     = rest.find(' ')?;
-            let vp     = rest[..sp].trim();
+            let rest = &line[id_pos + 3..];
+            let sp = rest.find(' ')?;
+            let vp = rest[..sp].trim();
             let os_name = rest[sp..].trim();
             let (catalogue_name, kind) = find_programmer(vp)?;
             let name = if os_name.len() > catalogue_name.len() {
@@ -703,7 +725,11 @@ fn list_programmers_linux() -> Vec<ProgrammerInfo> {
             } else {
                 catalogue_name.to_string()
             };
-            Some(ProgrammerInfo { name, vid_pid: vp.to_string(), kind })
+            Some(ProgrammerInfo {
+                name,
+                vid_pid: vp.to_string(),
+                kind,
+            })
         })
         .collect();
 
