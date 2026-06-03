@@ -1,16 +1,17 @@
 use eframe::egui;
 pub mod app;
 use app::AppIde;
+use egui::debug_text::print;
 
 pub mod build;
 pub mod dfu;
+pub mod editor;
 pub mod espflash;
 pub mod lsp;
 pub mod openocd;
 pub mod panels;
-pub mod required_tools;
-pub mod editor;
 pub mod project_tree;
+pub mod required_tools;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -27,7 +28,70 @@ fn main() -> eframe::Result<()> {
 /////////
 //NOT related to this project; Project TEST mutable references, ownership, borrowing, lifetimes, panics and smart pointers
 #[test]
-fn test_rust_code_smart_pointers() {}
+fn test_rust_code_smart_pointers() {
+    let ssss = "123ABC".to_owned();
+
+    let mut smart_pointer: *const String = &ssss;
+
+    smart_pointer = &"xxxxxx".to_string();
+
+    update_smart_pointer(&mut smart_pointer);
+    update_smart_pointer2(smart_pointer);
+    if true {
+        //TODO:
+    } else {
+        std::panic!(
+            "smart_pointer {:?}, {:p}, {:?}",
+            smart_pointer.clone(),
+            smart_pointer.clone(),
+            unsafe { &*smart_pointer }
+        );
+    }
+
+    fn update_smart_pointer(smart_pointer: &mut *const String) {
+        unsafe {
+            println!(
+                "update_smart_pointer {:?}, *{:?}",
+                smart_pointer,
+                // (&***smart_pointer as &str)
+                // (&**smart_pointer as &String)
+                (**smart_pointer)
+            );
+        }
+
+        *smart_pointer = Box::leak(Box::new("kkkkk".to_string()));
+
+        unsafe {
+            println!(
+                "update_smart_pointer {:?}, *{:?}",
+                smart_pointer,
+                (**smart_pointer)
+            );
+        }
+    }
+    /////
+    fn update_smart_pointer2(text: *const String) {
+        let smart_pointer = text.cast_mut();
+        unsafe {
+            println!(
+                "update_smart_pointer2 {:?}, *{:?}",
+                smart_pointer,
+                (*smart_pointer)
+            );
+
+            {
+                // (*smart_pointer).push_str("ooooo");
+                (*smart_pointer) = "ooooo".to_owned();
+            }
+
+            println!(
+                "update_smart_pointer2 {:?}, *{:?}",
+                smart_pointer,
+                (*smart_pointer)
+            );
+        };
+    }
+}
 
 #[test]
 fn test_rust_code_ownership() {}

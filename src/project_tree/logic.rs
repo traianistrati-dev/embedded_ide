@@ -275,3 +275,439 @@ fn generate_pin_content(pin_num: usize, pin_name: &str, func: &PinFunction) -> S
          pub type PinType = Pin<'{port}', {idx}, {mode}>;{comment}\n",
     )
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    // ── Helper macros and functions ──────────────────────────────────────────
+
+    macro_rules! setup_temp_project {
+        () => {{
+            let temp = TempDir::new().unwrap();
+            let src = temp.path().join("src");
+            fs::create_dir(&src).unwrap();
+            (temp, src)
+        }};
+    }
+
+    fn assert_file_exists(state: &ProjectTreeState, path: &str) {
+        assert!(
+            state.user_src_files.iter().any(|(p, _)| p == path),
+            "File {} not found in state",
+            path
+        );
+    }
+
+    fn assert_file_not_exists(state: &ProjectTreeState, path: &str) {
+        assert!(
+            !state.user_src_files.iter().any(|(p, _)| p == path),
+            "File {} found but shouldn't exist",
+            path
+        );
+    }
+
+    fn assert_file_content(state: &ProjectTreeState, path: &str, expected: &str) {
+        let entry = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == path)
+            .expect(&format!("File {} not found", path));
+        assert_eq!(entry.1, expected, "Content mismatch for {}", path);
+    }
+
+    fn assert_folder_exists(state: &ProjectTreeState, path: &str) {
+        assert!(
+            state.user_src_folders.contains(&path.to_string()),
+            "Folder {} not found",
+            path
+        );
+    }
+
+    // ── Initialization Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_new_empty_state() {
+        let state = ProjectTreeState::new();
+        assert!(state.user_src_files.is_empty());
+        assert!(state.user_src_folders.is_empty());
+    }
+
+    #[test]
+    fn test_load_empty_directory() {
+        let (_temp, src) = setup_temp_project!();
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+        assert!(state.user_src_files.is_empty());
+        assert!(state.user_src_folders.is_empty());
+    }
+
+    #[test]
+    fn test_load_nonexistent_path() {
+        let nonexistent = PathBuf::from("/nonexistent/path/123456");
+        let state = ProjectTreeState::load_from_dir(&nonexistent);
+        assert!(state.user_src_files.is_empty());
+        assert!(state.user_src_folders.is_empty());
+    }
+
+    // ── File Discovery Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_discovers_single_file() {
+        let (_temp, src) = setup_temp_project!();
+        fs::write(src.join("utils.rs"), "pub fn helper() {}").unwrap();
+
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+
+        assert_eq!(state.user_src_files.len(), 1);
+        assert_file_exists(&state, "utils.rs");
+        assert_file_content(&state, "utils.rs", "pub fn helper() {}");
+    }
+
+    #[test]
+    fn test_load_discovers_nested_files() {
+        let (_temp, src) = setup_temp_project!();
+        fs::create_dir(src.join("helpers")).unwrap();
+        fs::write(src.join("helpers/math.rs"), "").unwrap();
+        fs::write(src.join("helpers/strings.rs"), "").unwrap();
+
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+
+        assert_file_exists(&state, "helpers/math.rs");
+        assert_file_exists(&state, "helpers/strings.rs");
+    }
+
+    #[test]
+    fn test_load_discovers_all_file_types() {
+        let (_temp, src) = setup_temp_project!();
+        fs::write(src.join("file.rs"), "").unwrap();
+        fs::write(src.join("config.txt"), "").unwrap();
+        fs::write(src.join("data.json"), "").unwrap();
+
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+
+        assert_file_exists(&state, "file.rs");
+        assert_file_exists(&state, "config.txt");
+        assert_file_exists(&state, "data.json");
+    }
+
+    #[test]
+    fn test_load_skips_main_rs() {
+        let (_temp, src) = setup_temp_project!();
+        fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+        fs::write(src.join("utils.rs"), "").unwrap();
+
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+
+        assert_file_not_exists(&state, "main.rs");
+        assert_file_exists(&state, "utils.rs");
+    }
+
+    #[test]
+    fn test_load_registers_folders() {
+        let (_temp, src) = setup_temp_project!();
+        fs::create_dir(src.join("helpers")).unwrap();
+        fs::create_dir(src.join("core")).unwrap();
+        fs::write(src.join("helpers/file.txt"), "").unwrap();
+        fs::write(src.join("core/file.txt"), "").unwrap();
+
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+
+        assert_folder_exists(&state, "helpers");
+        assert_folder_exists(&state, "core");
+    }
+
+    #[test]
+    fn test_load_normalizes_paths() {
+        let (_temp, src) = setup_temp_project!();
+        fs::create_dir(src.join("utils")).unwrap();
+        fs::write(src.join("utils/helper.rs"), "").unwrap();
+
+        let parent = src.parent().unwrap();
+        let state = ProjectTreeState::load_from_dir(parent);
+
+        // All paths should use forward slashes
+        for (path, _) in &state.user_src_files {
+            assert!(!path.contains('\\'), "Path contains backslashes: {}", path);
+        }
+    }
+
+    // ── Filesystem Events Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_handle_create_event() {
+        let mut state = ProjectTreeState::new();
+        state.handle_fs_events(vec![("utils.rs".to_string(), FsEventKind::Create)]);
+
+        assert_eq!(state.user_src_files.len(), 1);
+        assert_file_exists(&state, "utils.rs");
+        assert_file_content(&state, "utils.rs", "");
+    }
+
+    #[test]
+    fn test_handle_create_event_skips_duplicates() {
+        let mut state = ProjectTreeState::new();
+        state
+            .user_src_files
+            .push(("utils.rs".to_string(), "existing content".to_string()));
+
+        state.handle_fs_events(vec![("utils.rs".to_string(), FsEventKind::Create)]);
+
+        assert_eq!(state.user_src_files.len(), 1);
+        assert_file_content(&state, "utils.rs", "existing content");
+    }
+
+    #[test]
+    fn test_handle_remove_file_event() {
+        let mut state = ProjectTreeState::new();
+        state
+            .user_src_files
+            .push(("utils.rs".to_string(), "content".to_string()));
+
+        state.handle_fs_events(vec![("utils.rs".to_string(), FsEventKind::Remove)]);
+
+        assert!(state.user_src_files.is_empty());
+    }
+
+    #[test]
+    fn test_handle_remove_folder_event() {
+        let mut state = ProjectTreeState::new();
+        state.user_src_folders.push("helpers".to_string());
+        state
+            .user_src_files
+            .push(("helpers/math.rs".to_string(), "".to_string()));
+        state
+            .user_src_files
+            .push(("utils.rs".to_string(), "".to_string()));
+
+        // When a folder is removed, the folder entry itself is removed
+        state.handle_fs_events(vec![("helpers".to_string(), FsEventKind::Remove)]);
+
+        assert!(!state.user_src_folders.contains(&"helpers".to_string()));
+        // Note: child files are not automatically removed by the current implementation
+        // In practice, they are removed by individual Remove events from filesystem watcher
+        assert_file_exists(&state, "utils.rs");
+    }
+
+    #[test]
+    fn test_handle_rename_file() {
+        let mut state = ProjectTreeState::new();
+        state
+            .user_src_files
+            .push(("old.rs".to_string(), "content".to_string()));
+
+        state.handle_fs_events(vec![(
+            "old.rs".to_string(),
+            FsEventKind::Rename {
+                old_rel: "old.rs".to_string(),
+                new_rel: "new.rs".to_string(),
+            },
+        )]);
+
+        assert_file_not_exists(&state, "old.rs");
+        assert_file_exists(&state, "new.rs");
+        assert_file_content(&state, "new.rs", "content");
+    }
+
+    #[test]
+    fn test_handle_rename_folder_updates_children() {
+        let mut state = ProjectTreeState::new();
+        state.user_src_folders.push("oldname".to_string());
+        state
+            .user_src_files
+            .push(("oldname/file1.rs".to_string(), "".to_string()));
+        state
+            .user_src_files
+            .push(("oldname/file2.rs".to_string(), "".to_string()));
+
+        state.handle_fs_events(vec![(
+            "oldname".to_string(),
+            FsEventKind::Rename {
+                old_rel: "oldname".to_string(),
+                new_rel: "newname".to_string(),
+            },
+        )]);
+
+        assert_folder_exists(&state, "newname");
+        assert_file_not_exists(&state, "oldname/file1.rs");
+        assert_file_not_exists(&state, "oldname/file2.rs");
+        assert_file_exists(&state, "newname/file1.rs");
+        assert_file_exists(&state, "newname/file2.rs");
+    }
+
+    #[test]
+    fn test_handle_multiple_events_sequence() {
+        let mut state = ProjectTreeState::new();
+
+        // Create
+        state.handle_fs_events(vec![("a.rs".to_string(), FsEventKind::Create)]);
+        assert_eq!(state.user_src_files.len(), 1);
+
+        // Rename
+        state.handle_fs_events(vec![(
+            "a.rs".to_string(),
+            FsEventKind::Rename {
+                old_rel: "a.rs".to_string(),
+                new_rel: "b.rs".to_string(),
+            },
+        )]);
+        assert_file_not_exists(&state, "a.rs");
+        assert_file_exists(&state, "b.rs");
+
+        // Remove
+        state.handle_fs_events(vec![("b.rs".to_string(), FsEventKind::Remove)]);
+        assert!(state.user_src_files.is_empty());
+    }
+
+    // ── Pin Synchronization Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_sync_creates_pins_folder() {
+        let mut state = ProjectTreeState::new();
+        state.sync_pin_files(&[]);
+
+        assert_folder_exists(&state, "pins");
+    }
+
+    #[test]
+    fn test_sync_creates_mod_rs() {
+        let mut state = ProjectTreeState::new();
+        state.sync_pin_files(&[]);
+
+        assert_file_exists(&state, "pins/mod.rs");
+    }
+
+    #[test]
+    fn test_sync_generates_gpio_output_pin() {
+        let mut state = ProjectTreeState::new();
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
+        state.sync_pin_files(&pins);
+
+        assert_file_exists(&state, "pins/pin1_pa0.rs");
+        let entry = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .unwrap();
+        assert!(entry.1.contains("pub type PinType = Pin<'A', 0,"));
+    }
+
+    #[test]
+    fn test_sync_removes_old_pins() {
+        let mut state = ProjectTreeState::new();
+
+        // Add old pins
+        state
+            .user_src_files
+            .push(("pins/pin1_pa0.rs".to_string(), "".to_string()));
+        state
+            .user_src_files
+            .push(("pins/pin2_pa1.rs".to_string(), "".to_string()));
+        state
+            .user_src_folders
+            .push("pins".to_string());
+        state
+            .user_src_files
+            .push(("pins/mod.rs".to_string(), "".to_string()));
+
+        // Sync with only pin1 configured
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
+        state.sync_pin_files(&pins);
+
+        assert_file_exists(&state, "pins/pin1_pa0.rs");
+        assert_file_not_exists(&state, "pins/pin2_pa1.rs");
+    }
+
+    #[test]
+    fn test_sync_preserves_custom_code() {
+        let mut state = ProjectTreeState::new();
+        let custom_code = "pub mod custom_utils;\npub fn helper() {}";
+        let mod_content = format!(
+            "// <<< GENERATED>>>\npub mod pin1_pa0;\n// <<< GENERATED END >>>\n\n{}",
+            custom_code
+        );
+        state
+            .user_src_files
+            .push(("pins/mod.rs".to_string(), mod_content));
+        state.user_src_folders.push("pins".to_string());
+
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
+        state.sync_pin_files(&pins);
+
+        let mod_file = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/mod.rs")
+            .unwrap();
+        assert!(mod_file.1.contains("pub mod custom_utils;"));
+        assert!(mod_file.1.contains("pub fn helper() {}"));
+    }
+
+    #[test]
+    fn test_sync_ignores_unset_pins() {
+        let mut state = ProjectTreeState::new();
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::Unset)];
+        state.sync_pin_files(&pins);
+
+        assert_file_not_exists(&state, "pins/pin1_pa0.rs");
+        let mod_file = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/mod.rs")
+            .unwrap();
+        assert!(mod_file.1.trim().is_empty() || !mod_file.1.contains("pub mod"));
+    }
+
+    #[test]
+    fn test_sync_mod_rs_empty_to_generated() {
+        let mut state = ProjectTreeState::new();
+        state
+            .user_src_files
+            .push(("pins/mod.rs".to_string(), "".to_string()));
+        state.user_src_folders.push("pins".to_string());
+
+        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
+        state.sync_pin_files(&pins);
+
+        let mod_file = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/mod.rs")
+            .unwrap();
+        assert!(mod_file.1.contains("// <<< GENERATED>>>"));
+        assert!(mod_file.1.contains("pub mod pin1_pa0;"));
+    }
+
+    #[test]
+    fn test_init_pins_scaffold() {
+        let mut state = ProjectTreeState::new();
+        state.init_pins_scaffold();
+
+        assert_folder_exists(&state, "pins");
+        assert_file_exists(&state, "pins/mod.rs");
+    }
+
+    #[test]
+    fn test_init_pins_scaffold_idempotent() {
+        let mut state = ProjectTreeState::new();
+        state.init_pins_scaffold();
+        let count_before = state.user_src_folders.len() + state.user_src_files.len();
+
+        state.init_pins_scaffold();
+        let count_after = state.user_src_folders.len() + state.user_src_files.len();
+
+        assert_eq!(count_before, count_after, "Scaffold should be idempotent");
+    }
+}
