@@ -158,17 +158,23 @@ impl ProjectTreeState {
             active_slugs.contains(&slug)
         });
 
-        // 4. Create or update pin files
+        // 4. Create or update pin files (with GENERATED marker preservation)
         for (slug, num, name, func) in &configured {
             let file_path = format!("pins/{slug}.rs");
-            let content = generate_pin_content(*num, name, func);
+            let generated_content = generate_pin_content(*num, name, func);
+            let wrapped_content = format!(
+                "// <<< GENERATED>>>\n{}\n// <<< GENERATED END >>>\n",
+                generated_content
+            );
 
             if let Some((_, file_content)) = self.user_src_files.iter_mut().find(|(p, _)| p == &file_path) {
-                // Update existing file
-                *file_content = content;
+                // Update existing file: preserve user code, update only GENERATED section
+                let existing = file_content.clone();
+                let updated = splice_pin_file(&existing, &wrapped_content);
+                *file_content = updated;
             } else {
                 // Create new file
-                self.user_src_files.push((file_path, content));
+                self.user_src_files.push((file_path, wrapped_content));
             }
         }
 
@@ -226,6 +232,42 @@ impl ProjectTreeState {
         }
         if !self.user_src_files.iter().any(|(p, _)| p == &mod_path) {
             self.user_src_files.push((mod_path, String::new()));
+        }
+    }
+}
+
+/// Replace the GENERATED section in a pin file while preserving user code.
+/// If no markers exist, wraps the new content and appends any existing code.
+fn splice_pin_file(existing: &str, new_generated: &str) -> String {
+    const GEN_BEGIN: &str = "// <<< GENERATED>>>";
+    const GEN_END: &str = "// <<< GENERATED END >>>";
+
+    if let (Some(begin_pos), Some(end_pos)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
+        let before = &existing[..begin_pos].trim_end();
+        let after_end = end_pos + GEN_END.len();
+        let after = &existing[after_end..].trim_start();
+
+        // Rebuild with new generated section
+        if before.is_empty() && after.is_empty() {
+            new_generated.to_string()
+        } else if before.is_empty() {
+            format!("{}\n\n{}", new_generated.trim(), after)
+        } else if after.is_empty() {
+            format!("{}\n\n{}", before, new_generated.trim())
+        } else {
+            format!(
+                "{}\n\n{}\n\n{}",
+                before,
+                new_generated.trim(),
+                after
+            )
+        }
+    } else {
+        // No markers found: wrap and append existing code
+        if existing.trim().is_empty() {
+            new_generated.to_string()
+        } else {
+            format!("{}\n\n{}", new_generated.trim(), existing)
         }
     }
 }
@@ -749,7 +791,7 @@ mod tests {
     fn test_sync_updates_pin_comment_on_function_change() {
         let mut state = ProjectTreeState::new();
 
-        // Start with GPIO Output (no comment)
+        // Start with GPIO Output (no function comment on type alias)
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
 
@@ -758,7 +800,12 @@ mod tests {
             .iter()
             .find(|(p, _)| p == "pins/pin1_pa0.rs")
             .unwrap();
-        assert!(!entry.1.contains("//"), "GPIO pins should have no comment");
+        // GPIO pins should have PinType line without function comment
+        assert!(
+            entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"),
+            "GPIO pins should have no function comment on PinType: {}",
+            entry.1
+        );
 
         // Change to ADC with function label
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::AdcChannel { adc: 1, channel: 0 })];
@@ -769,10 +816,10 @@ mod tests {
             .iter()
             .find(|(p, _)| p == "pins/pin1_pa0.rs")
             .unwrap();
-        // ADC should have a comment with the function label
+        // ADC should have a comment with the function label on PinType line
         assert!(
-            entry.1.contains("// ADC1  IN0"),
-            "ADC pin should have function label comment: {}",
+            entry.1.contains("pub type PinType = Pin<'A', 0, Analog>; // ADC1  IN0"),
+            "ADC pin should have function label comment on PinType: {}",
             entry.1
         );
     }
