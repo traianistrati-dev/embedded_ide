@@ -1,18 +1,18 @@
 //! DFU and Flash programming tab.
+use crate::dfu::{self, DfuState};
+use crate::espflash::{self, EspFlashState};
+use crate::openocd::{self, OpenOcdState};
+use crate::panels::mcu_module::ToolchainKind;
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::dfu::{self, DfuState};
-use crate::openocd::{self, OpenOcdState};
-use crate::espflash::{self, EspFlashState};
-use crate::panels::mcu_module::ToolchainKind;
-
 pub fn show_dfu_tab(
     ui: &mut egui::Ui,
     dfu_state: &Arc<Mutex<DfuState>>,
     dfu_log: &Arc<Mutex<Vec<String>>>,
-    dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
-    dfu_sel_programmer: &mut usize,
+    dfu_programmers: &Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>>,
+    dfu_sel_programmer: &mut String,
     dfu_flash_addr: &mut String,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
@@ -26,8 +26,38 @@ pub fn show_dfu_tab(
     let log = dfu_log.lock().unwrap().clone();
     let progs = dfu_programmers.lock().unwrap().clone();
 
+    // Sort programmers: compatible with selected toolchain first, then by name
+    // progs.sort_by(|a, b| {
+    //     let a_is_stm = matches!(
+    //         a.kind,
+    //         "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP"
+    //     );
+    //     let a_is_esp = matches!(a.kind, "USB-Serial" | "ESP32");
+    //     let b_is_stm = matches!(
+    //         b.kind,
+    //         "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP"
+    //     );
+    //     let b_is_esp = matches!(b.kind, "USB-Serial" | "ESP32");
+
+    //     let a_compatible = match toolchain {
+    //         ToolchainKind::RustEmbedded => a_is_stm,
+    //         ToolchainKind::EspRust => a_is_esp,
+    //         ToolchainKind::SdccC => false,
+    //     };
+    //     let b_compatible = match toolchain {
+    //         ToolchainKind::RustEmbedded => b_is_stm,
+    //         ToolchainKind::EspRust => b_is_esp,
+    //         ToolchainKind::SdccC => false,
+    //     };
+
+    //     // Compatible first, then by name
+    //     b_compatible
+    //         .cmp(&a_compatible)
+    //         .then_with(|| a.name.cmp(&b.name))
+    // });
+
     // Determine selected programmer kind for adaptive config UI
-    let sel_kind = progs.get(*dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
+    let sel_kind = progs.get(dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
     let is_swd = matches!(sel_kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
     let interface_cfg = openocd::interface_cfg_for_kind(sel_kind);
 
@@ -43,7 +73,7 @@ pub fn show_dfu_tab(
             "— none detected —".to_string()
         } else {
             progs
-                .get(*dfu_sel_programmer)
+                .get(dfu_sel_programmer)
                 .map(|p| p.combo_label())
                 .unwrap_or_else(|| "— select —".to_string())
         };
@@ -59,10 +89,14 @@ pub fn show_dfu_tab(
                             .color(egui::Color32::GRAY),
                     );
                 }
-                for (i, p) in progs.iter().enumerate() {
+                for (i, (key, p)) in progs.iter().enumerate() {
                     // Determine if this programmer is compatible with the selected toolchain
-                    let is_stm_programmer = matches!(p.kind, "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP");
+                    let is_stm_programmer = matches!(
+                        p.kind,
+                        "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP"
+                    );
                     let is_esp_programmer = matches!(p.kind, "USB-Serial" | "ESP32");
+
                     let is_compatible = match toolchain {
                         ToolchainKind::RustEmbedded => is_stm_programmer,
                         ToolchainKind::EspRust => is_esp_programmer,
@@ -88,7 +122,7 @@ pub fn show_dfu_tab(
 
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(format!("[{}]", p.kind))
+                            egui::RichText::new(format!("[{}] {}", p.kind, p.port))
                                 .size(10.0)
                                 .monospace()
                                 .color(display_color),
@@ -96,14 +130,19 @@ pub fn show_dfu_tab(
                         ui.add_enabled(
                             is_compatible,
                             egui::SelectableLabel::new(
-                                *dfu_sel_programmer == i,
-                                egui::RichText::new(format!("{}  [{}]", p.name, p.vid_pid))
-                                    .size(10.5)
-                                    .monospace(),
+                                *dfu_sel_programmer == p.port.clone(),
+                                egui::RichText::new(format!(
+                                    "{}  [{}] {}",
+                                    p.name, p.vid_pid, p.port
+                                ))
+                                .size(10.5)
+                                .monospace(),
                             ),
-                        ).clicked().then(|| {
+                        )
+                        .clicked()
+                        .then(|| {
                             if is_compatible {
-                                *dfu_sel_programmer = i;
+                                *dfu_sel_programmer = p.port.clone();
                             }
                         });
                     });
@@ -112,7 +151,7 @@ pub fn show_dfu_tab(
     });
 
     // Guidance text for selected programmer
-    if let Some(p) = progs.get(*dfu_sel_programmer) {
+    if let Some(p) = progs.get(dfu_sel_programmer) {
         let guidance = p.guidance();
         if !guidance.is_empty() {
             let color = match p.kind {
@@ -355,50 +394,50 @@ pub fn show_dfu_tab(
             }
         });
     });
-
-    // ── ESP32 port selector ───────────────────────────────────────────────────
-    // Shown only for EspRust.  Lets the user type a COM port (e.g. "COM3") so
-    // espflash targets the correct device when multiple serial ports are present.
-    // Leave empty to let espflash auto-detect.
-    if *toolchain == ToolchainKind::EspRust {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Port:")
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(160)),
-            );
-            let resp = ui.add(
-                egui::TextEdit::singleline(espflash_port)
-                    .hint_text("auto (e.g. COM3)")
-                    .desired_width(120.0)
-                    .font(egui::TextStyle::Monospace),
-            );
-            resp.on_hover_text(
-                "Serial port for espflash.\n\
-                 Leave empty to auto-detect.\n\
-                 Windows example: COM3\n\
-                 Linux example:   /dev/ttyUSB0\n\
-                 macOS example:   /dev/cu.usbserial-0001",
-            );
-            if !espflash_port.is_empty() {
-                if ui
-                    .small_button("✕")
-                    .on_hover_text("Clear — use auto-detect")
-                    .clicked()
-                {
-                    espflash_port.clear();
+    /*
+        // ── ESP32 port selector ───────────────────────────────────────────────────
+        // Shown only for EspRust.  Lets the user type a COM port (e.g. "COM3") so
+        // espflash targets the correct device when multiple serial ports are present.
+        // Leave empty to let espflash auto-detect.
+        if *toolchain == ToolchainKind::EspRust {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Port:")
+                        .size(11.0)
+                        .color(egui::Color32::from_gray(160)),
+                );
+                let resp = ui.add(
+                    egui::TextEdit::singleline(espflash_port)
+                        .hint_text("auto (e.g. COM3)")
+                        .desired_width(120.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                resp.on_hover_text(
+                    "Serial port for espflash.\n\
+                     Leave empty to auto-detect.\n\
+                     Windows example: COM3\n\
+                     Linux example:   /dev/ttyUSB0\n\
+                     macOS example:   /dev/cu.usbserial-0001",
+                );
+                if !espflash_port.is_empty() {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Clear — use auto-detect")
+                        .clicked()
+                    {
+                        espflash_port.clear();
+                    }
                 }
-            }
-            ui.label(
-                egui::RichText::new("← leave empty for auto-detect")
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(100))
-                    .italics(),
-            );
-        });
-        ui.add_space(2.0);
-    }
-
+                ui.label(
+                    egui::RichText::new("← leave empty for auto-detect")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(100))
+                        .italics(),
+                );
+            });
+            ui.add_space(2.0);
+        }
+    */
     // ── ESP32 diagnostic row (read-only chip identification) ─────────────────
     // Shown only for EspRust; sits between the config row and the log area.
     if *toolchain == ToolchainKind::EspRust {

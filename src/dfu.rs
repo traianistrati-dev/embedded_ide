@@ -135,7 +135,7 @@ pub fn start_usb_monitor(state: Arc<Mutex<DfuState>>, ctx: eframe::egui::Context
 pub fn detect_dfu(
     state: Arc<Mutex<DfuState>>,
     dfu_log: Arc<Mutex<Vec<String>>>,
-    programmers: Arc<Mutex<Vec<ProgrammerInfo>>>,
+    programmers: Arc<Mutex<std::collections::HashMap<String, ProgrammerInfo>>>,
     ctx: eframe::egui::Context,
 ) {
     if state.lock().unwrap().is_busy() {
@@ -154,24 +154,25 @@ pub fn detect_dfu(
         let dfu_result = run_detect();
 
         // ── 2. Enumerate relevant USB programmer devices ───────────────────────
-        let mut found = list_programmer_devices();
+        let mut programmer_devices = list_programmer_devices();
 
         // Make sure a DFU device is listed even if the OS doesn't show it
         // (some DFU drivers hide the device in WMI / lsusb).
         if let DfuState::DeviceFound(ref desc) = dfu_result {
-            let already = found.iter().any(|p| p.kind == "DFU Bootloader");
-            if !already {
-                found.insert(
-                    0,
-                    ProgrammerInfo {
-                        name: desc.clone(),
-                        vid_pid: "0483:df11".to_string(),
-                        kind: "DFU Bootloader",
-                    },
-                );
-            }
+            // let already = programmer_devices.iter().any(|p| p.kind == "DFU Bootloader");
+            // if !already {
+            //     programmer_devices.insert(
+            //         String::new(),
+            //         ProgrammerInfo {
+            //             name: desc.clone(),
+            //             vid_pid: "0483:df11".to_string(),
+            //             kind: "DFU Bootloader",
+            //             port: String::new(),
+            //         },
+            //     );
+            // }
         }
-        *programmers.lock().unwrap() = found.clone();
+        *programmers.lock().unwrap() = programmer_devices.clone();
 
         // ── 3. Build log text ─────────────────────────────────────────────────
         {
@@ -202,12 +203,15 @@ pub fn detect_dfu(
             log.push(String::new());
 
             // Programmer list
-            if found.is_empty() {
+            if programmer_devices.is_empty() {
                 log.push("── No known programmer / serial adapter detected ─────".to_string());
             } else {
                 log.push("── Detected programmers / adapters ──────────────────".to_string());
-                for p in &found {
-                    log.push(format!("  [{}]  {}  [{}]", p.kind, p.name, p.vid_pid));
+                for (key, programmer) in &programmer_devices {
+                    log.push(format!(
+                        "  [{}]  {}  [{}] {}",
+                        programmer.kind, programmer.name, programmer.vid_pid, programmer.port
+                    ));
                 }
             }
         }
@@ -518,6 +522,8 @@ pub struct ProgrammerInfo {
     pub vid_pid: String,
     /// Programmer family (e.g. "ST-Link", "J-Link", "DFU Bootloader")
     pub kind: &'static str,
+    /// Serial port or device path (e.g. "COM3", "/dev/ttyUSB0")
+    pub port: String,
 }
 
 impl ProgrammerInfo {
@@ -624,9 +630,11 @@ fn find_programmer(vid_pid: &str) -> Option<(&'static str, &'static str)> {
 
 // ── USB device enumeration (platform-specific) ────────────────────────────────
 
+use std::collections::HashMap;
+
 /// Enumerate connected USB devices and return only those relevant for MCU programming.
 #[cfg(target_os = "windows")]
-pub fn list_programmer_devices() -> Vec<ProgrammerInfo> {
+pub fn list_programmer_devices() -> HashMap<String, ProgrammerInfo> {
     list_programmers_windows()
 }
 
@@ -642,68 +650,160 @@ pub fn list_programmer_devices() -> Vec<ProgrammerInfo> {
 
 /// Windows: enumerate via PowerShell + WMI, filter by KNOWN_PROGRAMMERS.
 #[cfg(target_os = "windows")]
-fn list_programmers_windows() -> Vec<ProgrammerInfo> {
+fn list_programmers_windows() -> HashMap<String, ProgrammerInfo> {
+    /*
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    // Output one "OsName|vid:pid" line per USB device.
-    let ps = r#"
+        // Output one "OsName|vid:pid|port" line per USB device.
+        // Gets COM ports from registry and correlates with USB devices.
+        let ps = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$ports = @{}
+Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Enum\USB' -ErrorAction SilentlyContinue | Get-ChildItem | ForEach-Object {
+  $vidpid = $_.PSChildName
+  Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB\$vidpid" | ForEach-Object {
+    $serial = $_.PSChildName
+    $devId = "USB\$vidpid\$serial"
+    $portPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId\Device Parameters"
+    $comPort = Get-ItemProperty $portPath -Name 'PortName' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty PortName
+    if ($comPort) { $ports[$devId] = $comPort }
+  }
+}
 Get-WmiObject Win32_PnPEntity |
   Where-Object { $_.DeviceID -like 'USB\VID*' } |
   ForEach-Object {
     if ($_.DeviceID -match 'VID_([0-9A-Fa-f]{4}).*PID_([0-9A-Fa-f]{4})') {
       $vp = $Matches[1].ToLower() + ':' + $Matches[2].ToLower()
-      if ($_.Name) { "$($_.Name)|$vp" }
+      $port = if ($ports[$_.DeviceID]) { $ports[$_.DeviceID] } else { "" }
+      if ($_.Name) { "$($_.Name)|$vp|$port" }
     }
   }
 "#;
 
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
 
-    let Ok(out) = out else { return vec![] };
+        let Ok(out) = out else { return vec![] };
 
-    let mut devices: Vec<ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let (os_name, vp) = line.split_once('|')?;
-            let os_name = os_name.trim();
-            let vp = vp.trim();
-            if os_name.is_empty() {
-                return None;
-            }
-            let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
-            // Prefer the OS name when it's more descriptive than the catalogue name
-            let name = if os_name.len() > catalogue_name.len() {
-                os_name.to_string()
-            } else {
-                catalogue_name.to_string()
-            };
-            Some(ProgrammerInfo {
-                name,
-                vid_pid: vp.to_string(),
-                kind,
+        let mut devices: Vec<ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+
+                println!("dfu.rs ProgrammerInfo line: {}", line);
+                if line.is_empty() {
+                    return None;
+                }
+                let parts: Vec<&str> = line.splitn(3, '|').collect();
+                if parts.len() < 2 {
+                    return None;
+                }
+                let os_name = parts[0].trim();
+                let vp = parts[1].trim();
+                let port = if parts.len() > 2 { parts[2].trim() } else { "" };
+                if os_name.is_empty() {
+                    return None;
+                }
+                let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
+                // Prefer the OS name when it's more descriptive than the catalogue name
+                let name = if os_name.len() > catalogue_name.len() {
+                    os_name.to_string()
+                } else {
+                    catalogue_name.to_string()
+                };
+                Some(ProgrammerInfo {
+                    name,
+                    vid_pid: vp.to_string(),
+                    kind,
+                    port: port.to_string(),
+                })
             })
-        })
-        .collect();
+            .collect();
+    */
+    let mut devices: HashMap<String, ProgrammerInfo> = HashMap::new();
 
-    devices.sort_by(|a, b| a.kind.cmp(b.kind).then(a.name.cmp(&b.name)));
-    devices.dedup_by(|a, b| a.vid_pid == b.vid_pid);
+    _ = match serialport::available_ports() {
+        Ok(ports) => {
+            for port in ports {
+                match port.port_type {
+                    serialport::SerialPortType::UsbPort(info) => {
+                        // println!("  VID : {:04X}", info.vid);
+                        // println!("  PID : {:04X}", info.pid);
+                        // println!("  Manufacturer : {:?}", info.manufacturer);
+                        // println!("  Product      : {:?}", info.product);
+                        // println!("  Serial Number: {:?}", info.serial_number);
+
+                        let vp = format!("{:04X}:{:04X}", info.vid, info.pid).to_lowercase();
+                        let progammer: Option<(&str, &str)> = find_programmer(&vp);
+                        //println!("vp {}, progammer: {:#?}", vp, progammer);
+
+                        if let Some((catalogue_name, kind)) = progammer {
+                            //   println!("  Catalogue Name: {}", catalogue_name);
+                            //   println!("  Kind          : {}", kind);
+                            devices.insert(
+                                port.port_name.clone(),
+                                ProgrammerInfo {
+                                    name: catalogue_name.to_string(),
+                                    vid_pid: vp.to_string(),
+                                    kind,
+                                    port: port.port_name,
+                                },
+                            );
+                        }
+                    }
+
+                    serialport::SerialPortType::BluetoothPort => {
+                        println!("  Bluetooth");
+                    }
+
+                    serialport::SerialPortType::PciPort => {
+                        println!("  PCI");
+                    }
+
+                    serialport::SerialPortType::Unknown => {
+                        println!("  Unknown");
+                    }
+                };
+            }
+        }
+        Err(e) => eprintln!("serial_usb_device Error: {}", e),
+    };
+
+    // devices.sort_by(|a, b| a.kind.cmp(b.kind).then(a.name.cmp(&b.name)));
+    // devices.dedup_by(|a, b| a.vid_pid == b.vid_pid);
+    // println!("devices: {:#?}", devices);
     devices
 }
 
 /// Linux: enumerate via `lsusb`, filter by KNOWN_PROGRAMMERS.
 #[cfg(target_os = "linux")]
 fn list_programmers_linux() -> Vec<ProgrammerInfo> {
+    // Build a map of VID:PID → /dev/ttyUSB* or /dev/ttyACM*
+    let mut port_map = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/tty") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(tty_name) = path.file_name().and_then(|n| n.to_str()) {
+                // Look for ttyUSB* or ttyACM*
+                if tty_name.starts_with("ttyUSB") || tty_name.starts_with("ttyACM") {
+                    // Try to find the device link to get VID:PID
+                    if let Ok(device_path) = std::fs::read_link(path.join("device")) {
+                        if let Some(device_name) = device_path.file_name().and_then(|n| n.to_str())
+                        {
+                            // device_name format: "1-1" or "1-1.1" (bus-port)
+                            // For now, just store the tty name; more advanced matching could be done
+                            port_map.insert(device_name.to_string(), format!("/dev/{}", tty_name));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let out = Command::new("lsusb")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -729,6 +829,7 @@ fn list_programmers_linux() -> Vec<ProgrammerInfo> {
                 name,
                 vid_pid: vp.to_string(),
                 kind,
+                port: String::new(), // Could be enhanced with udevadm queries
             })
         })
         .collect();

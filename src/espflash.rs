@@ -198,7 +198,8 @@ pub fn start_flash(
             &format!(
                 // "▶ espflash flash --chip {chip} --port {port_display} \
                 // --ignore-app-descriptor --after hard-reset {} …",
-                "▶ espflash flash --chip {chip}  --ignore-app-descriptor {}-",
+                "▶ espflash flash --chip {chip} --port {} --ignore-app-descriptor {}-",
+                port_display,
                 elf_path.display()
             ),
         );

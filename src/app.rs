@@ -18,6 +18,7 @@ use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme, Completer, Syntax};
 use egui_phosphor::regular as ph;
 use notify::Watcher as _;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 // ── Module structure ──────────────────────────────────────────────────────────
@@ -168,9 +169,11 @@ pub struct AppIde {
     /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
     dfu_log: Arc<Mutex<Vec<String>>>,
     /// Filtered list of detected USB programmers (ST-Link, J-Link, DFU, serial, …)
-    dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
+    // dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
+    dfu_programmers: Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>>,
     /// Index of the programmer currently selected in the ComboBox
-    dfu_sel_programmer: usize,
+    // dfu_sel_programmer: usize,
+    dfu_sel_programmer: String,
     /// Flash start address sent to dfu-util (editable; default = 0x08000000)
     dfu_flash_addr: String,
     /// Shared state for OpenOCD SWD flash operations
@@ -299,8 +302,8 @@ impl AppIde {
         // ── USB DFU state — created before Self so we can start monitoring ──
         let dfu_state: Arc<Mutex<DfuState>> = Arc::new(Mutex::new(DfuState::Idle));
         let dfu_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let dfu_programmers: Arc<Mutex<Vec<dfu::ProgrammerInfo>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let dfu_programmers: Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let openocd_state: Arc<Mutex<OpenOcdState>> = Arc::new(Mutex::new(OpenOcdState::Idle));
         let espflash_state: Arc<Mutex<EspFlashState>> = Arc::new(Mutex::new(EspFlashState::Idle));
 
@@ -329,7 +332,8 @@ impl AppIde {
             dfu_state,
             dfu_log,
             dfu_programmers,
-            dfu_sel_programmer: 0,
+            dfu_sel_programmer: "".to_owned(),
+            // dfu_sel_programmer: 0,
             dfu_flash_addr: "0x08000000".to_string(),
             openocd_state,
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
@@ -1263,7 +1267,7 @@ impl eframe::App for AppIde {
                         let (is_swd_capable, sel_interface_cfg) = {
                             let progs = self.dfu_programmers.lock().unwrap();
                             let kind = progs
-                                .get(self.dfu_sel_programmer)
+                                .get(&self.dfu_sel_programmer)
                                 .map(|p| p.kind)
                                 .unwrap_or("");
                             let swd = matches!(kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
@@ -1287,7 +1291,7 @@ impl eframe::App for AppIde {
                         );
                         if scan_btn.clicked() {
                             self.build_tab = BuildPanelTab::Dfu;
-                            self.dfu_sel_programmer = 0;
+                            self.dfu_sel_programmer = String::new();
                             dfu::detect_dfu(
                                 Arc::clone(&self.dfu_state),
                                 Arc::clone(&self.dfu_log),
@@ -1447,11 +1451,29 @@ impl eframe::App for AppIde {
                                         .is_ok()
                                         {
                                             self.build_tab = BuildPanelTab::Dfu;
+
+                                            // Extract port from selected programmer
+                                            let port = self
+                                                .dfu_programmers
+                                                .lock()
+                                                .unwrap()
+                                                .get(&self.dfu_sel_programmer)
+                                                .map(|p| p.port.clone())
+                                                .unwrap_or_default();
+
+                                            println!(
+                                                "port: {},self.dfu_sel_programmer: {:?}, dfu_programmers: {:?}",
+                                                port,
+                                                self.dfu_sel_programmer,
+
+                                                self.dfu_programmers.lock().unwrap()
+                                            );
+
                                             espflash::start_flash(
                                                 build_dir,
                                                 config.target.to_string(),
                                                 config.probe_chip.to_string(),
-                                                self.espflash_port.clone(),
+                                                port,
                                                 Arc::clone(&self.espflash_state),
                                                 Arc::clone(&self.dfu_log),
                                                 self.egui_ctx.clone(),
@@ -2298,8 +2320,8 @@ fn show_diag_panel(
     lsp_state: &Arc<Mutex<lsp::LspState>>,
     dfu_state: &Arc<Mutex<DfuState>>,
     dfu_log: &Arc<Mutex<Vec<String>>>,
-    dfu_programmers: &Arc<Mutex<Vec<dfu::ProgrammerInfo>>>,
-    dfu_sel_programmer: &mut usize,
+    dfu_programmers: &Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>>,
+    dfu_sel_programmer: &mut String,
     dfu_flash_addr: &mut String,
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
