@@ -481,6 +481,7 @@ pub fn show_dfu_tab(
                     Arc::clone(espflash_state),
                     Arc::clone(dfu_log),
                     ui.ctx().clone(),
+                    dfu_sel_programmer.clone(),
                 );
             }
 

@@ -43,7 +43,7 @@ fn test_rust_code_smart_pointers() {
     update_string_by_smart_pointer(ssss_ref);
 
     {
-        let ssss_ref: *mut String = (&ssss as *const String).clone().cast_mut();
+        let ssss_ref: *mut String = (&ssss as *const String).to_owned().cast_mut();
         unsafe {
             println!("ssss_ref = {:p}", ssss_ref);
             {

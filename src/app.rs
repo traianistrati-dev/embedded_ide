@@ -1461,13 +1461,13 @@ impl eframe::App for AppIde {
                                                 .map(|p| p.port.clone())
                                                 .unwrap_or_default();
 
-                                            println!(
-                                                "port: {},self.dfu_sel_programmer: {:?}, dfu_programmers: {:?}",
-                                                port,
-                                                self.dfu_sel_programmer,
+                                            // println!(
+                                            //     "port: {},self.dfu_sel_programmer: {:?}, dfu_programmers: {:?}",
+                                            //     port,
+                                            //     self.dfu_sel_programmer,
 
-                                                self.dfu_programmers.lock().unwrap()
-                                            );
+                                            //     self.dfu_programmers.lock().unwrap()
+                                            // );
 
                                             espflash::start_flash(
                                                 build_dir,

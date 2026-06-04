@@ -332,6 +332,7 @@ pub fn read_board_info(
     state: Arc<Mutex<EspFlashState>>,
     log: Arc<Mutex<Vec<String>>>,
     ctx: eframe::egui::Context,
+    port: String,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -345,7 +346,7 @@ pub fn read_board_info(
         push_log(&log, &ctx, "  (read-only — nothing is written to flash)");
 
         let mut cmd = Command::new("espflash");
-        cmd.args(["board-info"])
+        cmd.args(["board-info", "--port", &port])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

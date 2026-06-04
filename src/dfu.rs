@@ -532,8 +532,13 @@ impl ProgrammerInfo {
     /// One-line label for the ComboBox.
     pub fn combo_label(&self) -> String {
         format!(
-            "{} [{}]  {}  [{}] {}",
-            self.port, self.kind, self.name, self.vid_pid, self.extra_details
+            "[{}] {} {}  [{}] {}",
+            self.kind,
+            self.port,
+            self.name,
+            self.vid_pid,
+            self.extra_details // "{} [{}]  {}  [{}] {}",
+                               // self.port, self.kind, self.name, self.vid_pid, self.extra_details
         )
     }
 
@@ -659,9 +664,9 @@ fn list_programmers_windows() -> HashMap<String, ProgrammerInfo> {
     /*
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // Output one "OsName|vid:pid|port" line per USB device.
-        // Gets COM ports from registry and correlates with USB devices.
-        let ps = r#"
+    // Output one "OsName|vid:pid|port" line per USB device.
+    // Gets COM ports from registry and correlates with USB devices.
+    let ps = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ports = @{}
 Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Enum\USB' -ErrorAction SilentlyContinue | Get-ChildItem | ForEach-Object {
@@ -685,52 +690,57 @@ Get-WmiObject Win32_PnPEntity |
   }
 "#;
 
-        let out = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", ps])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
 
-        let Ok(out) = out else { return vec![] };
+    let Ok(out) = out else { return HashMap::new() };
 
-        let mut devices: Vec<ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
+    let mut devices_cmd: HashMap<String, ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
 
-                println!("dfu.rs ProgrammerInfo line: {}", line);
-                if line.is_empty() {
-                    return None;
-                }
-                let parts: Vec<&str> = line.splitn(3, '|').collect();
-                if parts.len() < 2 {
-                    return None;
-                }
-                let os_name = parts[0].trim();
-                let vp = parts[1].trim();
-                let port = if parts.len() > 2 { parts[2].trim() } else { "" };
-                if os_name.is_empty() {
-                    return None;
-                }
-                let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
-                // Prefer the OS name when it's more descriptive than the catalogue name
-                let name = if os_name.len() > catalogue_name.len() {
-                    os_name.to_string()
-                } else {
-                    catalogue_name.to_string()
-                };
-                Some(ProgrammerInfo {
-                    name,
+            println!("dfu.rs ProgrammerInfo line: {}", line);
+            if line.is_empty() {
+                return None;
+            }
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() < 2 {
+                return None;
+            }
+            let os_name = parts[0].trim();
+            let vp = parts[1].trim();
+            let port = if parts.len() > 2 { parts[2].trim() } else { "" };
+            if os_name.is_empty() {
+                return None;
+            }
+            let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
+            // Prefer the OS name when it's more descriptive than the catalogue name
+            let name = if os_name.len() > catalogue_name.len() {
+                os_name.to_string()
+            } else {
+                catalogue_name.to_string()
+            };
+            Some((
+                name.to_owned(),
+                ProgrammerInfo {
+                    name: format!("-- {}", name),
                     vid_pid: vp.to_string(),
-                    kind,
+                    kind: kind.to_owned(),
                     port: port.to_string(),
-                })
-            })
-            .collect();
-    */
-    let mut devices: HashMap<String, ProgrammerInfo> = HashMap::new();
+                    extra_details: line.to_owned(),
+                },
+            ))
+        })
+        .collect();
+     */
 
+    /**/
+    let mut devices: HashMap<String, ProgrammerInfo> = HashMap::new();
     _ = match serialport::available_ports() {
         Ok(ports) => {
             for port in ports {
@@ -766,30 +776,6 @@ Get-WmiObject Win32_PnPEntity |
                                 ),
                             },
                         );
-                        /*
-                            let progammer: Option<(&str, &str)> = find_programmer(&vp);
-                            //println!("vp {}, progammer: {:#?}", vp, progammer);
-
-                            if let Some((catalogue_name, kind)) = progammer {
-                                //   println!("  Catalogue Name: {}", catalogue_name);
-                                //   println!("  Kind          : {}", kind);
-                                devices.insert(
-                                    port.port_name.clone(),
-                                    ProgrammerInfo {
-                                        port: port.port_name,
-                                        name: catalogue_name.to_string(),
-                                        vid_pid: vp.to_string(),
-                                        kind,
-                                        extra_details: format!(
-                                            "'{},{},{}'",
-                                            info.manufacturer.unwrap_or_default(),
-                                            info.product.unwrap_or_default(),
-                                            info.serial_number.unwrap_or_default(),
-                                        ),
-                                    },
-                                );
-                            }
-                        */
                     }
 
                     serialport::SerialPortType::BluetoothPort => {
@@ -808,10 +794,135 @@ Get-WmiObject Win32_PnPEntity |
         }
         Err(e) => eprintln!("serial_usb_device Error: {}", e),
     };
+    /**/
+    /*
+        fn get_usb_devices() -> Result<HashMap<String, ProgrammerInfo>, rusb::Error> {
+            use rusb::{Context, UsbContext};
 
+            let mut detected_devices: HashMap<String, ProgrammerInfo> = HashMap::new();
+
+            let context = Context::new()?;
+            let devices = context.devices()?;
+
+            fn build_vid_pid(vid: u16, pid: u16) -> String {
+                format!("{:04X}:{:04X}", vid, pid).to_lowercase()
+            }
+
+            for device in devices.iter() {
+                let descriptor = device.device_descriptor()?;
+
+                let vid_pid = build_vid_pid(descriptor.vendor_id(), descriptor.product_id());
+
+                println!(
+                    "Bus {:03} Device {:03} ID {} Port {}",
+                    device.bus_number(),
+                    device.address(),
+                    vid_pid,
+                    device.port_number(),
+                );
+
+                if let Ok(handle) = device.open() {
+                    if let Ok(manufacturer) = handle.read_manufacturer_string_ascii(&descriptor) {
+                        println!("Manufacturer: {}", manufacturer);
+                    }
+
+                    if let Ok(product) = handle.read_product_string_ascii(&descriptor) {
+                        println!("Product: {}", product);
+                    }
+
+                    if let Ok(serial_number) = handle.read_serial_number_string_ascii(&descriptor) {
+                        println!("Serial Number: {}", serial_number);
+                    }
+
+                    let port_number = device.port_number().to_string();
+                    let product = handle
+                        .read_product_string_ascii(&descriptor)
+                        .unwrap_or_default();
+                    let serial_number = handle
+                        .read_serial_number_string_ascii(&descriptor)
+                        .unwrap_or_default();
+                    let manufacturer = handle
+                        .read_manufacturer_string_ascii(&descriptor)
+                        .unwrap_or_default();
+
+                    let kind = device.bus_number().to_string();
+                    detected_devices.insert(
+                        port_number.to_owned(),
+                        ProgrammerInfo {
+                            port: port_number,
+                            name: product,
+                            vid_pid: vid_pid.to_owned(),
+                            kind,
+                            extra_details: format!(
+                                "'{},{}, {}",
+                                serial_number,
+                                manufacturer,
+                                device.address()
+                            ),
+                        },
+                    );
+
+                    // println!("Handle: {:?}", handle);
+                    //
+                    //
+                }
+
+                _ = match serialport::available_ports() {
+                    Ok(ports) => {
+                        for port in ports {
+                            if let serialport::SerialPortType::UsbPort(info) = port.port_type {
+                                // println!("  VID : {:04X}", info.vid);
+                                // println!("  PID : {:04X}", info.pid);
+                                // println!("  Manufacturer : {:?}", info.manufacturer);
+                                // println!("  Product      : {:?}", info.product);
+                                // println!("  Serial Number: {:?}", info.serial_number);
+
+                                let vp = build_vid_pid(info.vid, info.pid);
+
+                                if vid_pid != vp {
+                                    continue;
+                                }
+
+                                let progammer: Option<(&str, &str)> = find_programmer(&vp);
+                                let (catalogue_name, kind) = match progammer {
+                                    Some((catalogue_name, kind)) => {
+                                        (catalogue_name.to_owned(), kind.to_owned())
+                                    }
+                                    None => ("Unknown".to_owned(), "Unknown".to_owned()),
+                                };
+
+                                detected_devices.insert(
+                                    port.port_name.clone(),
+                                    ProgrammerInfo {
+                                        port: port.port_name,
+                                        name: catalogue_name,
+                                        vid_pid: vp.to_string(),
+                                        kind,
+                                        extra_details: format!(
+                                            "'{},{},{}'",
+                                            info.manufacturer.unwrap_or_default(),
+                                            info.product.unwrap_or_default(),
+                                            info.serial_number.unwrap_or_default(),
+                                        ),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("serial_usb_device Error: {}", e),
+                };
+            }
+
+            Ok(detected_devices)
+        }
+
+        let mut devices: HashMap<String, ProgrammerInfo> =
+            get_usb_devices().expect("List of USB Programmers");
+    */
     // devices.sort_by(|a, b| a.kind.cmp(b.kind).then(a.name.cmp(&b.name)));
     // devices.dedup_by(|a, b| a.vid_pid == b.vid_pid);
     // println!("devices: {:#?}", devices);
+    //devices.extend(devices_cmd);
     devices
 }
 
