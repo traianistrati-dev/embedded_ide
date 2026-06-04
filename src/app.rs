@@ -1268,10 +1268,10 @@ impl eframe::App for AppIde {
                             let progs = self.dfu_programmers.lock().unwrap();
                             let kind = progs
                                 .get(&self.dfu_sel_programmer)
-                                .map(|p| p.kind)
-                                .unwrap_or("");
-                            let swd = matches!(kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
-                            let cfg = openocd::interface_cfg_for_kind(kind).to_string();
+                                .map(|p| p.kind.clone())
+                                .unwrap_or("".to_string());
+                            let swd = matches!(kind.as_str(), "ST-Link" | "J-Link" | "CMSIS-DAP");
+                            let cfg = openocd::interface_cfg_for_kind(&kind).to_string();
                             (swd, cfg)
                         };
 

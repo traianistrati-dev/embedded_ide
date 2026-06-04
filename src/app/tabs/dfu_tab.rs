@@ -4,6 +4,7 @@ use crate::espflash::{self, EspFlashState};
 use crate::openocd::{self, OpenOcdState};
 use crate::panels::mcu_module::ToolchainKind;
 use eframe::egui;
+use egui::TextBuffer;
 use egui_phosphor::regular as ph;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -57,9 +58,12 @@ pub fn show_dfu_tab(
     // });
 
     // Determine selected programmer kind for adaptive config UI
-    let sel_kind = progs.get(dfu_sel_programmer).map(|p| p.kind).unwrap_or("");
-    let is_swd = matches!(sel_kind, "ST-Link" | "J-Link" | "CMSIS-DAP");
-    let interface_cfg = openocd::interface_cfg_for_kind(sel_kind);
+    let sel_kind = progs
+        .get(dfu_sel_programmer)
+        .map(|p| p.kind.clone())
+        .unwrap_or("".to_string());
+    let is_swd = matches!(sel_kind.as_str(), "ST-Link" | "J-Link" | "CMSIS-DAP");
+    let interface_cfg = openocd::interface_cfg_for_kind(&sel_kind);
 
     // ── Programmer selector ComboBox ──────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -92,10 +96,10 @@ pub fn show_dfu_tab(
                 for (i, (key, p)) in progs.iter().enumerate() {
                     // Determine if this programmer is compatible with the selected toolchain
                     let is_stm_programmer = matches!(
-                        p.kind,
+                        p.kind.as_str(),
                         "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP"
                     );
-                    let is_esp_programmer = matches!(p.kind, "USB-Serial" | "ESP32");
+                    let is_esp_programmer = matches!(p.kind.as_str(), "USB-Serial" | "ESP32");
 
                     let is_compatible = match toolchain {
                         ToolchainKind::RustEmbedded => is_stm_programmer,
@@ -103,7 +107,7 @@ pub fn show_dfu_tab(
                         ToolchainKind::SdccC => false,
                     };
 
-                    let kind_color = match p.kind {
+                    let kind_color = match p.kind.as_str() {
                         "DFU Bootloader" => egui::Color32::from_rgb(100, 200, 255),
                         "ST-Link" => egui::Color32::from_rgb(100, 220, 120),
                         "J-Link" => egui::Color32::from_rgb(220, 180, 60),
@@ -154,7 +158,7 @@ pub fn show_dfu_tab(
     if let Some(p) = progs.get(dfu_sel_programmer) {
         let guidance = p.guidance();
         if !guidance.is_empty() {
-            let color = match p.kind {
+            let color = match p.kind.as_str() {
                 "DFU Bootloader" => egui::Color32::from_rgb(80, 200, 100),
                 "ST-Link" | "J-Link" | "CMSIS-DAP" => egui::Color32::from_rgb(180, 180, 100),
                 _ => egui::Color32::from_rgb(160, 160, 170),

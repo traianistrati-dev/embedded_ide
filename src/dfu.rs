@@ -521,20 +521,25 @@ pub struct ProgrammerInfo {
     /// Lowercase "vid:pid" (e.g. "0483:3748")
     pub vid_pid: String,
     /// Programmer family (e.g. "ST-Link", "J-Link", "DFU Bootloader")
-    pub kind: &'static str,
+    // pub kind: &'static str,
+    pub kind: String,
     /// Serial port or device path (e.g. "COM3", "/dev/ttyUSB0")
     pub port: String,
+    pub extra_details: String,
 }
 
 impl ProgrammerInfo {
     /// One-line label for the ComboBox.
     pub fn combo_label(&self) -> String {
-        format!("[{}]  {}  [{}]", self.kind, self.name, self.vid_pid)
+        format!(
+            "{} [{}]  {}  [{}] {}",
+            self.port, self.kind, self.name, self.vid_pid, self.extra_details
+        )
     }
 
     /// Contextual guidance shown below the ComboBox.
     pub fn guidance(&self) -> &'static str {
-        match self.kind {
+        match self.kind.as_str() {
             "DFU Bootloader" => "DFU bootloader detected — click Flash USB to program.",
             "ST-Link" => {
                 "ST-Link connected. DFU flashing needs the MCU in bootloader mode \
@@ -739,21 +744,52 @@ Get-WmiObject Win32_PnPEntity |
 
                         let vp = format!("{:04X}:{:04X}", info.vid, info.pid).to_lowercase();
                         let progammer: Option<(&str, &str)> = find_programmer(&vp);
-                        //println!("vp {}, progammer: {:#?}", vp, progammer);
+                        let (catalogue_name, kind) = match progammer {
+                            Some((catalogue_name, kind)) => {
+                                (catalogue_name.to_owned(), kind.to_owned())
+                            }
+                            None => ("Unknown".to_owned(), "Unknown".to_owned()),
+                        };
 
-                        if let Some((catalogue_name, kind)) = progammer {
-                            //   println!("  Catalogue Name: {}", catalogue_name);
-                            //   println!("  Kind          : {}", kind);
-                            devices.insert(
-                                port.port_name.clone(),
-                                ProgrammerInfo {
-                                    name: catalogue_name.to_string(),
-                                    vid_pid: vp.to_string(),
-                                    kind,
-                                    port: port.port_name,
-                                },
-                            );
-                        }
+                        devices.insert(
+                            port.port_name.clone(),
+                            ProgrammerInfo {
+                                port: port.port_name,
+                                name: catalogue_name,
+                                vid_pid: vp.to_string(),
+                                kind,
+                                extra_details: format!(
+                                    "'{},{},{}'",
+                                    info.manufacturer.unwrap_or_default(),
+                                    info.product.unwrap_or_default(),
+                                    info.serial_number.unwrap_or_default(),
+                                ),
+                            },
+                        );
+                        /*
+                            let progammer: Option<(&str, &str)> = find_programmer(&vp);
+                            //println!("vp {}, progammer: {:#?}", vp, progammer);
+
+                            if let Some((catalogue_name, kind)) = progammer {
+                                //   println!("  Catalogue Name: {}", catalogue_name);
+                                //   println!("  Kind          : {}", kind);
+                                devices.insert(
+                                    port.port_name.clone(),
+                                    ProgrammerInfo {
+                                        port: port.port_name,
+                                        name: catalogue_name.to_string(),
+                                        vid_pid: vp.to_string(),
+                                        kind,
+                                        extra_details: format!(
+                                            "'{},{},{}'",
+                                            info.manufacturer.unwrap_or_default(),
+                                            info.product.unwrap_or_default(),
+                                            info.serial_number.unwrap_or_default(),
+                                        ),
+                                    },
+                                );
+                            }
+                        */
                     }
 
                     serialport::SerialPortType::BluetoothPort => {
