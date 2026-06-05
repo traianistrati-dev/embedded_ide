@@ -3,7 +3,8 @@
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use crate::lsp::{LspStatus, LspState};
-use crate::app::{ProjectFileId, selected_file_rel_path};
+use crate::app::ProjectFileId;
+use crate::editor::gui::text_pos::selected_file_rel_path;
 
 /// Display the RA status bar above the code editor.
 /// Shows whether RA is indexing, checking, or ready, along with error/warning counts.

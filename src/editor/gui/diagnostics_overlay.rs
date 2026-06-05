@@ -2,7 +2,7 @@
 
 use eframe::egui;
 use crate::lsp::LspDiagnostic;
-use crate::app::{lsp_pos_to_char_idx, lsp_line_end_char_idx, draw_wavy_underline};
+use crate::editor::gui::text_pos::{draw_wavy_underline, lsp_line_end_char_idx, lsp_pos_to_char_idx};
 
 /// Draw inline diagnostics (wavy underlines, inline messages, hover tooltips)
 /// for the currently visible code in the editor.
