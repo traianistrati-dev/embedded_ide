@@ -107,8 +107,6 @@ pub fn show_project_tree(
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
 ) {
-    let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
-
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
             .size(12.0)
@@ -117,12 +115,13 @@ pub fn show_project_tree(
     );
     ui.add_space(2.0);
 
-    // .cargo/
+    // .cargo/  — fixed folder, no context menu → dark-red + bold.
     egui::CollapsingHeader::new(
         egui::RichText::new(".cargo/")
             .size(11.5)
             .monospace()
-            .color(default_tree_folder_color),
+            .strong()
+            .color(egui::Color32::from_rgb(100, 50, 50)),
     )
     .default_open(true)
     .show(ui, |ui| {
@@ -137,12 +136,13 @@ pub fn show_project_tree(
         );
     });
 
-    // src/
+    // src/  — fixed root, cannot be renamed/deleted → muted-red + bold.
     let src_ch = egui::CollapsingHeader::new(
         egui::RichText::new("src/")
             .size(11.5)
             .monospace()
-            .color(default_tree_folder_color),
+            .strong()
+            .color(egui::Color32::from_rgb(200, 100, 100)),
     )
     .default_open(true)
     .show(ui, |ui| {
@@ -290,7 +290,7 @@ pub fn show_project_tree(
 fn render_tree_node(
     ui: &mut egui::Ui,
     tree: &BTreeMap<String, TreeNode>,
-    user_src_files: &[(String, String)],
+    user_src_files: &mut Vec<(String, String)>,
     user_src_folders: &mut Vec<String>,
     selected: &mut ProjectFileId,
     indent: f32,
@@ -327,15 +327,21 @@ fn render_tree_node(
                 );
             }
             TreeNode::Folder(children) => {
+                let folder_path = if parent_path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{parent_path}/{name}")
+                };
                 let is_renaming = renaming_folder
                     .as_ref()
-                    .map(|(f, _)| f == name)
+                    .map(|(f, _)| f == &folder_path)
                     .unwrap_or(false);
 
                 if is_renaming {
-                    let should_cancel = if let Some((_, new_name)) = renaming_folder.as_mut() {
-                        let fid = egui::Id::new(("__rename_folder__", name.as_str()));
-                        let mut cancel = false;
+                    let mut do_apply = false;
+                    let mut do_cancel = false;
+                    if let Some((_, new_name)) = renaming_folder.as_mut() {
+                        let fid = egui::Id::new(("__rename_folder__", folder_path.as_str()));
                         ui.horizontal(|ui| {
                             ui.add_space(indent);
                             ui.label(
@@ -351,15 +357,49 @@ fn render_tree_node(
                                 resp.request_focus();
                                 ui.memory_mut(|m| m.data.insert_temp(fid, false));
                             }
-                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                            cancel = enter || esc || resp.lost_focus();
+                            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                do_apply = true;
+                            } else if ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                || resp.lost_focus()
+                            {
+                                do_cancel = true;
+                            }
                         });
-                        cancel
-                    } else {
-                        false
-                    };
-                    if should_cancel {
+                    }
+                    if do_apply {
+                        if let Some((_, new_name)) = renaming_folder.take() {
+                            let clean = new_name.trim().to_string();
+                            let new_path = if parent_path.is_empty() {
+                                clean.clone()
+                            } else {
+                                format!("{parent_path}/{clean}")
+                            };
+                            let collides = user_src_folders.iter().any(|f| f == &new_path)
+                                || user_src_files.iter().any(|(p, _)| p == &new_path);
+                            if !clean.is_empty() && new_path != folder_path && !collides {
+                                // Best-effort rename on disk (live workspace).
+                                let old_dest = workspace_dir.join("src").join(&folder_path);
+                                let new_dest = workspace_dir.join("src").join(&new_path);
+                                let _ = std::fs::rename(&old_dest, &new_dest);
+                                // Update the folder itself and any nested folders.
+                                let old_prefix = format!("{folder_path}/");
+                                for f in user_src_folders.iter_mut() {
+                                    if *f == folder_path {
+                                        *f = new_path.clone();
+                                    } else if let Some(rest) = f.strip_prefix(&old_prefix) {
+                                        *f = format!("{new_path}/{rest}");
+                                    }
+                                }
+                                // Update every file under the renamed folder.
+                                for (p, _) in user_src_files.iter_mut() {
+                                    if let Some(rest) = p.strip_prefix(&old_prefix) {
+                                        *p = format!("{new_path}/{rest}");
+                                    }
+                                }
+                                *save_needed = true;
+                            }
+                        }
+                    } else if do_cancel {
                         *renaming_folder = None;
                     }
                 } else {
@@ -378,11 +418,6 @@ fn render_tree_node(
                                     .color(egui::Color32::from_gray(95)),
                             );
                         }
-                        let folder_path = if parent_path.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{parent_path}/{name}")
-                        };
                         render_tree_node(
                             ui,
                             children,
@@ -405,11 +440,6 @@ fn render_tree_node(
                         );
                     });
 
-                    let folder_path = if parent_path.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{parent_path}/{name}")
-                    };
                     ch.header_response.context_menu(|ui| {
                         if ui
                             .button(
@@ -438,7 +468,11 @@ fn render_tree_node(
                             )
                             .clicked()
                         {
-                            *renaming_folder = Some((name.clone(), name.clone()));
+                            *renaming_folder = Some((folder_path.clone(), name.clone()));
+                            // Reset the focus flag so the edit box grabs focus next frame.
+                            let fid =
+                                egui::Id::new(("__rename_folder__", folder_path.as_str()));
+                            ui.memory_mut(|m| m.data.insert_temp(fid, true));
                             ui.close();
                         }
                         ui.separator();
@@ -458,13 +492,22 @@ fn render_tree_node(
                                 .filter(|(_, (p, _))| p.starts_with(&prefix))
                                 .map(|(i, _)| i)
                                 .collect();
+                            // If the selected file lives under this folder it's about
+                            // to be removed; fall back to main.rs before indices shift.
+                            if let ProjectFileId::UserFile(sel) = *selected {
+                                if to_rm.contains(&sel) {
+                                    *selected = ProjectFileId::MainRs;
+                                }
+                            }
                             for i in to_rm.into_iter().rev() {
-                                let dest = workspace_dir.join(&user_src_files[i].0);
+                                // user_src_files paths are relative to src/.
+                                let dest = workspace_dir.join("src").join(&user_src_files[i].0);
                                 let _ = std::fs::remove_file(&dest);
                             }
-                            // Remove from tracking (these will be auto-removed by polling)
+                            // Drop the entries directly instead of relying on fs-watcher polling.
+                            user_src_files.retain(|(p, _)| !p.starts_with(&prefix));
                             user_src_folders.retain(|f| f != &folder_path);
-                            let dest = workspace_dir.join(&folder_path);
+                            let dest = workspace_dir.join("src").join(&folder_path);
                             let _ = std::fs::remove_dir_all(&dest);
                             *save_needed = true;
                             ui.close();
@@ -486,18 +529,20 @@ fn file_row(
     lsp_state: Option<&lsp::LspState>,
 ) {
     let hi = egui::Color32::from_rgb(100, 180, 255);
-    let normal = egui::Color32::from_rgb(200, 205, 215);
+    // Fixed project files have no Rename/Delete menu — mark them dark-red + bold.
+    let fixed = egui::Color32::from_rgb(100, 50, 50);
 
     ui.horizontal(|ui| {
         ui.add_space(indent);
         let is_sel = *selected == id;
-        let color = if is_sel { hi } else { normal };
+        let color = if is_sel { hi } else { fixed };
         ui.label(egui::RichText::new(ph::FILE).size(11.5).color(color));
         let resp = ui.add(
             egui::Label::new(
                 egui::RichText::new(name)
                     .size(11.5)
                     .monospace()
+                    .strong()
                     .color(color),
             )
             .sense(egui::Sense::click()),
@@ -537,8 +582,14 @@ fn user_file_row(
         ui.horizontal(|ui| {
             ui.add_space(indent);
             if let Some((_, new_name)) = renaming.as_mut() {
+                let fid = egui::Id::new(("__rename_file__", idx));
                 let resp = ui
                     .add(egui::TextEdit::singleline(new_name).desired_width(ui.available_width()));
+                // Focus the field on the first frame it appears.
+                if ui.memory(|m| m.data.get_temp::<bool>(fid).unwrap_or(true)) {
+                    resp.request_focus();
+                    ui.memory_mut(|m| m.data.insert_temp(fid, false));
+                }
                 if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     *do_rename = Some(idx);
                 } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) || resp.lost_focus() {
@@ -568,7 +619,22 @@ fn user_file_row(
         }
         resp.context_menu(|ui| {
             if ui
-                .button(egui::RichText::new(format!("{} Delete", ph::TRASH)).size(11.5))
+                .button(egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5))
+                .clicked()
+            {
+                *renaming = Some((idx, name.to_string()));
+                // Reset the focus flag so the edit box grabs focus next frame.
+                let fid = egui::Id::new(("__rename_file__", idx));
+                ui.memory_mut(|m| m.data.insert_temp(fid, true));
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("{} Delete", ph::TRASH))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(220, 80, 60)),
+                )
                 .clicked()
             {
                 *to_delete = Some(idx);

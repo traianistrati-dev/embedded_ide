@@ -1,0 +1,179 @@
+//! Center-left "Code Editor" panel.
+//!
+//! Owns: the toolbar (Copy / Build / Scan / Flash buttons), the code editor
+//! widget itself, the embedded bottom diagnostics panel, the LSP completion
+//! popup, and the inline-diagnostic overlays.  It also writes the edited text
+//! back into `generated_code` (main.rs) or the matching user source file.
+//!
+//! Implemented as one inherent method on `AppIde`; it consumes the
+//! `project_files` snapshot (nothing after this panel needs it).
+
+use super::AppIde;
+use super::ProjectFileId;
+use crate::panels::mcu_module::project_gen::ProjectFiles;
+use eframe::egui;
+use egui_code_editor::{CodeEditor, ColorTheme};
+
+mod completion;
+mod diag_embed;
+mod toolbar;
+
+impl AppIde {
+    /// Render the central-left code editor panel (toolbar + editor + diagnostics).
+    pub(super) fn show_editor_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        project_files: Option<ProjectFiles>,
+    ) {
+        // ── Compute editor content AFTER the project tree ─────────────────────
+        // IMPORTANT: display_code must be computed AFTER the project tree panel
+        // so that self.selected_file reflects any click the user just made.
+        // Computing it before the tree caused a write-back bug: when the user
+        // clicked a user file, self.selected_file was already updated by the
+        // click handler, but display_code still held the OLD file's content.
+        // The write-back then wrongly stored the old content into the new file.
+        let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
+            self.project_tree
+                .user_src_files
+                .get(i)
+                .map(|(_, c)| c.clone())
+                .unwrap_or_default()
+        } else if self.selected_file == ProjectFileId::MainRs {
+            // Always read from self.generated_code — not from the project_files
+            // snapshot built at the start of this frame.  The snapshot is stale
+            // whenever load_project_from_dir() runs in the same frame (Open
+            // Project), which would otherwise show the previous project's code
+            // and then immediately overwrite generated_code via the write-back.
+            self.generated_code.clone()
+        } else {
+            match &project_files {
+                Some(files) => self.selected_file.content(files).to_owned(),
+                None => self.generated_code.clone(),
+            }
+        };
+        let display_syntax = self.selected_file.syntax();
+
+        // ── Panel 2: Code Editor ──────────────────────────────────────────────
+        let editor_width = ui.available_width() * 0.5;
+        egui::Panel::left("code_editor")
+            .resizable(true)
+            .default_size(editor_width)
+            .show_inside(ui, |ui| {
+                // Header row
+                self.show_editor_toolbar(ui, &display_code, &project_files);
+
+                ui.separator();
+
+                // ── Diagnostics panel (bottom, manually resizable) ────
+                self.show_editor_diag_panel(ui);
+
+                // Use a unique id per file so egui's TextEditState (galley,
+                // cursor, undo stack) is never shared between files.
+                // A fixed id caused the editor to keep the previous file's
+                // rendered galley when switching to a new file.
+                let editor_id: String = match &self.selected_file {
+                    ProjectFileId::UserFile(i) => {
+                        let path = self
+                            .project_tree
+                            .user_src_files
+                            .get(*i)
+                            .map(|(p, _)| p.as_str())
+                            .unwrap_or("?");
+                        format!("code_editor:user:{path}")
+                    }
+                    ProjectFileId::MainRs => "code_editor:main_rs".into(),
+                    ProjectFileId::CargoToml => "code_editor:cargo_toml".into(),
+                    ProjectFileId::CargoConfig => "code_editor:cargo_config".into(),
+                    ProjectFileId::MemoryX => "code_editor:memory_x".into(),
+                    ProjectFileId::BuildRs => "code_editor:build_rs".into(),
+                    ProjectFileId::GitIgnore => "code_editor:gitignore".into(),
+                };
+
+                // ── LSP completion: pre-editor key consumption ───────────────
+                // Consume navigation / accept keys BEFORE show_with_completer
+                // so the built-in Completer never sees them when our popup is open.
+                //
+                // Mouse clicks on popup items set `completion_pending_insert` last
+                // frame; apply them here so the same accept path is used for both
+                // keyboard and mouse.
+                let mut lsp_accepted: Option<String> = self.completion_pending_insert.take();
+                if lsp_accepted.is_some() {
+                    self.completion_open = false;
+                }
+
+                if self.completion_open {
+                    let has_items = !self.completion_filtered_items.is_empty();
+                    if has_items {
+                        let count = self.completion_filtered_items.len();
+                        ui.input_mut(|inp| {
+                            if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                                self.completion_open = false;
+                            } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                                // Clamp against the FILTERED count so selection never
+                                // goes out of the visible list.
+                                self.completion_sel =
+                                    (self.completion_sel + 1).min(count.saturating_sub(1));
+                            } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                                self.completion_sel = self.completion_sel.saturating_sub(1);
+                            } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                                || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            {
+                                // Use the filtered list — guaranteed same items as shown.
+                                let sel = self.completion_sel.min(count.saturating_sub(1));
+                                if let Some(item) = self.completion_filtered_items.get(sel) {
+                                    lsp_accepted = Some(item.insert_text.clone());
+                                }
+                                self.completion_open = false;
+                            }
+                        });
+                    }
+                }
+                // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
+                // to the TextEdit as a literal character.
+                let ctrl_space_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
+
+                let editor_resp = CodeEditor::default()
+                    .id_source(editor_id)
+                    .with_rows(50)
+                    .with_fontsize(13.0)
+                    .with_theme(ColorTheme::GRUVBOX)
+                    .with_numlines(true)
+                    .show_with_completer(
+                        ui,
+                        &mut display_code,
+                        &display_syntax,
+                        &mut self.completer,
+                    );
+
+                // ── Write user edits back ────────────────────────────────────
+                // display_code is a local clone; persist changes here.
+                if let ProjectFileId::UserFile(i) = self.selected_file {
+                    if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
+                        if display_code != entry.1 {
+                            entry.1 = display_code.clone();
+                            // Auto-save to workspace so LSP and build see the change
+                            let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+                            let dest = workspace.join("src").join(&entry.0);
+                            if let Some(parent) = dest.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(&dest, entry.1.as_bytes());
+                        }
+                    }
+                } else if self.selected_file == ProjectFileId::MainRs
+                    && display_code != self.generated_code
+                {
+                    self.generated_code = display_code.clone();
+                }
+
+                self.handle_editor_completion(
+                    ui,
+                    &editor_resp,
+                    display_code,
+                    lsp_accepted,
+                    ctrl_space_pressed,
+                );
+            });
+    }
+}

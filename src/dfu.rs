@@ -661,33 +661,34 @@ pub fn list_programmer_devices() -> Vec<ProgrammerInfo> {
 /// Windows: enumerate via PowerShell + WMI, filter by KNOWN_PROGRAMMERS.
 #[cfg(target_os = "windows")]
 fn list_programmers_windows() -> HashMap<String, ProgrammerInfo> {
-    /*
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // Output one "OsName|vid:pid|port" line per USB device.
-    // Gets COM ports from registry and correlates with USB devices.
+
+    // Enumerate EVERY USB device through WMI (Win32_PnPEntity).  This sees
+    // ST-Link / J-Link / CMSIS-DAP / DFU bootloaders just as well as USB-serial
+    // adapters — unlike `serialport` (COM ports only) or `rusb` (only devices
+    // bound to a WinUSB/libusbK driver).  For USB-serial devices we also resolve
+    // the assigned COM port from the registry.
+    // Output: one "OsName|vid:pid|COMport" line per device.
     let ps = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ports = @{}
-Get-Item 'HKLM:\SYSTEM\CurrentControlSet\Enum\USB' -ErrorAction SilentlyContinue | Get-ChildItem | ForEach-Object {
+Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Enum\USB' -ErrorAction SilentlyContinue | ForEach-Object {
   $vidpid = $_.PSChildName
-  Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB\$vidpid" | ForEach-Object {
-    $serial = $_.PSChildName
-    $devId = "USB\$vidpid\$serial"
-    $portPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId\Device Parameters"
-    $comPort = Get-ItemProperty $portPath -Name 'PortName' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty PortName
-    if ($comPort) { $ports[$devId] = $comPort }
+  Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Enum\USB\$vidpid" -ErrorAction SilentlyContinue | ForEach-Object {
+    $devId = "USB\$vidpid\$($_.PSChildName)"
+    $pn = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Enum\$devId\Device Parameters" -Name PortName -ErrorAction SilentlyContinue).PortName
+    if ($pn) { $ports[$devId] = $pn }
   }
 }
-Get-WmiObject Win32_PnPEntity |
-  Where-Object { $_.DeviceID -like 'USB\VID*' } |
-  ForEach-Object {
-    if ($_.DeviceID -match 'VID_([0-9A-Fa-f]{4}).*PID_([0-9A-Fa-f]{4})') {
-      $vp = $Matches[1].ToLower() + ':' + $Matches[2].ToLower()
-      $port = if ($ports[$_.DeviceID]) { $ports[$_.DeviceID] } else { "" }
-      if ($_.Name) { "$($_.Name)|$vp|$port" }
-    }
+Get-WmiObject Win32_PnPEntity | Where-Object { $_.DeviceID -like 'USB\VID*' } | ForEach-Object {
+  if ($_.DeviceID -match 'VID_([0-9A-Fa-f]{4}).*PID_([0-9A-Fa-f]{4})') {
+    $vp = $Matches[1].ToLower() + ':' + $Matches[2].ToLower()
+    $port = ''
+    if ($ports.ContainsKey($_.DeviceID)) { $port = $ports[$_.DeviceID] }
+    if ($_.Name) { "$($_.Name)|$vp|$port" }
   }
+}
 "#;
 
     let out = Command::new("powershell")
@@ -697,232 +698,52 @@ Get-WmiObject Win32_PnPEntity |
         .creation_flags(CREATE_NO_WINDOW)
         .output();
 
-    let Ok(out) = out else { return HashMap::new() };
-
-    let mut devices_cmd: HashMap<String, ProgrammerInfo> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-
-            println!("dfu.rs ProgrammerInfo line: {}", line);
-            if line.is_empty() {
-                return None;
-            }
-            let parts: Vec<&str> = line.splitn(3, '|').collect();
-            if parts.len() < 2 {
-                return None;
-            }
-            let os_name = parts[0].trim();
-            let vp = parts[1].trim();
-            let port = if parts.len() > 2 { parts[2].trim() } else { "" };
-            if os_name.is_empty() {
-                return None;
-            }
-            let (catalogue_name, kind) = find_programmer(vp)?; // filter: only known programmers
-            // Prefer the OS name when it's more descriptive than the catalogue name
-            let name = if os_name.len() > catalogue_name.len() {
-                os_name.to_string()
-            } else {
-                catalogue_name.to_string()
-            };
-            Some((
-                name.to_owned(),
-                ProgrammerInfo {
-                    name: format!("-- {}", name),
-                    vid_pid: vp.to_string(),
-                    kind: kind.to_owned(),
-                    port: port.to_string(),
-                    extra_details: line.to_owned(),
-                },
-            ))
-        })
-        .collect();
-     */
-
-    /**/
-    let mut devices: HashMap<String, ProgrammerInfo> = HashMap::new();
-    _ = match serialport::available_ports() {
-        Ok(ports) => {
-            for port in ports {
-                match port.port_type {
-                    serialport::SerialPortType::UsbPort(info) => {
-                        // println!("  VID : {:04X}", info.vid);
-                        // println!("  PID : {:04X}", info.pid);
-                        // println!("  Manufacturer : {:?}", info.manufacturer);
-                        // println!("  Product      : {:?}", info.product);
-                        // println!("  Serial Number: {:?}", info.serial_number);
-
-                        let vp = format!("{:04X}:{:04X}", info.vid, info.pid).to_lowercase();
-                        let progammer: Option<(&str, &str)> = find_programmer(&vp);
-                        let (catalogue_name, kind) = match progammer {
-                            Some((catalogue_name, kind)) => {
-                                (catalogue_name.to_owned(), kind.to_owned())
-                            }
-                            None => ("Unknown".to_owned(), "Unknown".to_owned()),
-                        };
-
-                        devices.insert(
-                            port.port_name.clone(),
-                            ProgrammerInfo {
-                                port: port.port_name,
-                                name: catalogue_name,
-                                vid_pid: vp.to_string(),
-                                kind,
-                                extra_details: format!(
-                                    "'{},{},{}'",
-                                    info.manufacturer.unwrap_or_default(),
-                                    info.product.unwrap_or_default(),
-                                    info.serial_number.unwrap_or_default(),
-                                ),
-                            },
-                        );
-                    }
-
-                    serialport::SerialPortType::BluetoothPort => {
-                        println!("  Bluetooth");
-                    }
-
-                    serialport::SerialPortType::PciPort => {
-                        println!("  PCI");
-                    }
-
-                    serialport::SerialPortType::Unknown => {
-                        println!("  Unknown");
-                    }
-                };
-            }
-        }
-        Err(e) => eprintln!("serial_usb_device Error: {}", e),
+    let Ok(out) = out else {
+        return HashMap::new();
     };
-    /**/
-    /*
-        fn get_usb_devices() -> Result<HashMap<String, ProgrammerInfo>, rusb::Error> {
-            use rusb::{Context, UsbContext};
 
-            let mut detected_devices: HashMap<String, ProgrammerInfo> = HashMap::new();
-
-            let context = Context::new()?;
-            let devices = context.devices()?;
-
-            fn build_vid_pid(vid: u16, pid: u16) -> String {
-                format!("{:04X}:{:04X}", vid, pid).to_lowercase()
-            }
-
-            for device in devices.iter() {
-                let descriptor = device.device_descriptor()?;
-
-                let vid_pid = build_vid_pid(descriptor.vendor_id(), descriptor.product_id());
-
-                println!(
-                    "Bus {:03} Device {:03} ID {} Port {}",
-                    device.bus_number(),
-                    device.address(),
-                    vid_pid,
-                    device.port_number(),
-                );
-
-                if let Ok(handle) = device.open() {
-                    if let Ok(manufacturer) = handle.read_manufacturer_string_ascii(&descriptor) {
-                        println!("Manufacturer: {}", manufacturer);
-                    }
-
-                    if let Ok(product) = handle.read_product_string_ascii(&descriptor) {
-                        println!("Product: {}", product);
-                    }
-
-                    if let Ok(serial_number) = handle.read_serial_number_string_ascii(&descriptor) {
-                        println!("Serial Number: {}", serial_number);
-                    }
-
-                    let port_number = device.port_number().to_string();
-                    let product = handle
-                        .read_product_string_ascii(&descriptor)
-                        .unwrap_or_default();
-                    let serial_number = handle
-                        .read_serial_number_string_ascii(&descriptor)
-                        .unwrap_or_default();
-                    let manufacturer = handle
-                        .read_manufacturer_string_ascii(&descriptor)
-                        .unwrap_or_default();
-
-                    let kind = device.bus_number().to_string();
-                    detected_devices.insert(
-                        port_number.to_owned(),
-                        ProgrammerInfo {
-                            port: port_number,
-                            name: product,
-                            vid_pid: vid_pid.to_owned(),
-                            kind,
-                            extra_details: format!(
-                                "'{},{}, {}",
-                                serial_number,
-                                manufacturer,
-                                device.address()
-                            ),
-                        },
-                    );
-
-                    // println!("Handle: {:?}", handle);
-                    //
-                    //
-                }
-
-                _ = match serialport::available_ports() {
-                    Ok(ports) => {
-                        for port in ports {
-                            if let serialport::SerialPortType::UsbPort(info) = port.port_type {
-                                // println!("  VID : {:04X}", info.vid);
-                                // println!("  PID : {:04X}", info.pid);
-                                // println!("  Manufacturer : {:?}", info.manufacturer);
-                                // println!("  Product      : {:?}", info.product);
-                                // println!("  Serial Number: {:?}", info.serial_number);
-
-                                let vp = build_vid_pid(info.vid, info.pid);
-
-                                if vid_pid != vp {
-                                    continue;
-                                }
-
-                                let progammer: Option<(&str, &str)> = find_programmer(&vp);
-                                let (catalogue_name, kind) = match progammer {
-                                    Some((catalogue_name, kind)) => {
-                                        (catalogue_name.to_owned(), kind.to_owned())
-                                    }
-                                    None => ("Unknown".to_owned(), "Unknown".to_owned()),
-                                };
-
-                                detected_devices.insert(
-                                    port.port_name.clone(),
-                                    ProgrammerInfo {
-                                        port: port.port_name,
-                                        name: catalogue_name,
-                                        vid_pid: vp.to_string(),
-                                        kind,
-                                        extra_details: format!(
-                                            "'{},{},{}'",
-                                            info.manufacturer.unwrap_or_default(),
-                                            info.product.unwrap_or_default(),
-                                            info.serial_number.unwrap_or_default(),
-                                        ),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("serial_usb_device Error: {}", e),
-                };
-            }
-
-            Ok(detected_devices)
+    let mut devices: HashMap<String, ProgrammerInfo> = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
         }
-
-        let mut devices: HashMap<String, ProgrammerInfo> =
-            get_usb_devices().expect("List of USB Programmers");
-    */
-    // devices.sort_by(|a, b| a.kind.cmp(b.kind).then(a.name.cmp(&b.name)));
-    // devices.dedup_by(|a, b| a.vid_pid == b.vid_pid);
-    // println!("devices: {:#?}", devices);
-    //devices.extend(devices_cmd);
+        let parts: Vec<&str> = line.splitn(3, '|').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let os_name = parts[0].trim();
+        let vp = parts[1].trim();
+        let port = parts.get(2).map(|s| s.trim()).unwrap_or("");
+        if os_name.is_empty() {
+            continue;
+        }
+        // Keep only recognised programmers / adapters.
+        let Some((catalogue_name, kind)) = find_programmer(vp) else {
+            continue;
+        };
+        // Prefer the OS-reported name when it is more descriptive.
+        let name = if os_name.len() > catalogue_name.len() {
+            os_name.to_string()
+        } else {
+            catalogue_name.to_string()
+        };
+        // Key by COM port when present (keeps several serial adapters distinct);
+        // otherwise by vid:pid (dedups the multiple interfaces a debug probe
+        // exposes for the same physical device).
+        let key = if port.is_empty() {
+            vp.to_string()
+        } else {
+            port.to_string()
+        };
+        devices.entry(key).or_insert(ProgrammerInfo {
+            name,
+            vid_pid: vp.to_string(),
+            kind: kind.to_string(),
+            port: port.to_string(),
+            extra_details: String::new(),
+        });
+    }
     devices
 }
 
