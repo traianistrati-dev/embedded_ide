@@ -133,9 +133,18 @@ impl AppIde {
                 let ctrl_space_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
 
+                // Size the editor to fill the height left over after the
+                // (resizable) diagnostics panel, so dragging that panel's handle
+                // grows/shrinks the code area in lock-step.  `available_height`
+                // here is already the space remaining below the toolbar and
+                // above the bottom diagnostics panel.
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
+                let editor_rows =
+                    (((ui.available_height() - 10.0) / row_h).floor() as usize).max(3);
+
                 let editor_resp = CodeEditor::default()
                     .id_source(editor_id)
-                    .with_rows(50)
+                    .with_rows(editor_rows)
                     .with_fontsize(13.0)
                     .with_theme(ColorTheme::GRUVBOX)
                     .with_numlines(true)
