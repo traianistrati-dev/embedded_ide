@@ -85,6 +85,7 @@ pub fn show_dfu_tab(
         egui::ComboBox::from_id_salt("dfu_programmer_selector")
             .selected_text(egui::RichText::new(&combo_label).size(10.5).monospace())
             .width(ui.available_width() - 2.0)
+            .height(progs.len() as f32 * 30.0)
             .show_ui(ui, |ui| {
                 if progs.is_empty() {
                     ui.label(
@@ -93,11 +94,11 @@ pub fn show_dfu_tab(
                             .color(egui::Color32::GRAY),
                     );
                 }
-                for (i, (key, p)) in progs.iter().enumerate() {
+                for (key, p) in progs.iter() {
                     // Determine if this programmer is compatible with the selected toolchain
                     let is_stm_programmer = matches!(
                         p.kind.as_str(),
-                        "DFU Bootloader" | "ST-Link" | "J-Link" | "CMSIS-DAP"
+                        "DFU Bootloader" | "ST-Link" | "STLink" | "STM" | "J-Link" | "CMSIS-DAP"
                     );
                     let is_esp_programmer = matches!(p.kind.as_str(), "USB-Serial" | "ESP32");
 
@@ -134,10 +135,10 @@ pub fn show_dfu_tab(
                         ui.add_enabled(
                             is_compatible,
                             egui::SelectableLabel::new(
-                                *dfu_sel_programmer == p.port.clone(),
+                                dfu_sel_programmer == key,
                                 egui::RichText::new(format!(
-                                    "{}  [{}] {}",
-                                    p.name, p.vid_pid, p.port
+                                    "{}  [{}] {}; {}",
+                                    p.name, p.vid_pid, p.port, p.extra_details
                                 ))
                                 .size(10.5)
                                 .monospace(),
@@ -146,7 +147,7 @@ pub fn show_dfu_tab(
                         .clicked()
                         .then(|| {
                             if is_compatible {
-                                *dfu_sel_programmer = p.port.clone();
+                                *dfu_sel_programmer = key.clone();
                             }
                         });
                     });
