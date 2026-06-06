@@ -24,7 +24,7 @@ impl Mcu {
         match self.toolchain {
             ToolchainKind::RustEmbedded => {
                 let all = self.all_pins();
-                let gen_ = stm32::make_generated_section(&self.name, &all);
+                let gen_ = stm32::make_generated_section(&self.name, &all, &self.clock);
                 format!(
                     "{header}{gen_}\n{tail}",
                     header = stm32::invariant_header(&self.name),
@@ -51,7 +51,7 @@ impl Mcu {
         match self.toolchain {
             ToolchainKind::RustEmbedded => {
                 let all = self.all_pins();
-                let new_section = stm32::make_generated_section(&self.name, &all);
+                let new_section = stm32::make_generated_section(&self.name, &all, &self.clock);
                 stm32::splice_section(existing, &new_section, &self.name)
             }
             ToolchainKind::EspRust => {
@@ -371,5 +371,81 @@ mod tests {
 
         assert_eq!(begin_count, 1);
         assert_eq!(end_count, 1);
+    }
+
+    // ── Clock codegen Tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_clock_chain_matches_legacy() {
+        use super::super::mock_mcu;
+
+        let mcu = mock_mcu::create_stm32f103c8tx();
+        let code = mcu.fresh_main_rs();
+
+        // Default 72 MHz config must reproduce the original hardcoded chain…
+        assert_contains_substring(&code, ".use_hse(8.MHz())");
+        assert_contains_substring(&code, ".sysclk(72.MHz())");
+        assert_contains_substring(&code, ".pclk1(36.MHz())");
+        // …and omit knobs that match the HAL defaults (ahb/1, apb2/1, adc/6).
+        assert_not_contains_substring(&code, ".hclk(");
+        assert_not_contains_substring(&code, ".pclk2(");
+        assert_not_contains_substring(&code, ".adcclk(");
+    }
+
+    #[test]
+    fn test_modified_clock_emits_extra_knobs() {
+        use super::super::clock::ClockConfig;
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        if let ClockConfig::Stm32f1(c) = &mut mcu.clock {
+            c.ahb_pre = 2; // HCLK = 36 → emits .hclk(...)
+            c.apb2_pre = 2; // PCLK2 = 18 → emits .pclk2(...)
+        }
+        let code = mcu.fresh_main_rs();
+
+        assert_contains_substring(&code, ".hclk(");
+        assert_contains_substring(&code, ".pclk2(");
+    }
+
+    #[test]
+    fn test_clock_marker_roundtrips_through_codegen() {
+        use super::super::clock::{persist, ClockConfig};
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        if let ClockConfig::Stm32f1(c) = &mut mcu.clock {
+            c.pll_mul = 6;
+            c.apb2_pre = 2;
+            c.adc_pre = 8;
+        }
+        let code = mcu.fresh_main_rs();
+
+        // Generated code carries the @clock marker, which parses back exactly.
+        let parsed = persist::parse_from_source(&code).expect("clock marker present");
+        if let ClockConfig::Stm32f1(orig) = &mcu.clock {
+            assert_eq!(&parsed, orig);
+        } else {
+            panic!("expected Stm32f1 clock");
+        }
+    }
+
+    #[test]
+    fn test_hsi_preset_omits_use_hse() {
+        use super::super::clock::model::{Stm32f1Clock, SysclkSrc};
+        use super::super::clock::ClockConfig;
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        // HSI-only: no crystal → no `.use_hse(...)`, SYSCLK = 8 MHz.
+        mcu.clock = ClockConfig::Stm32f1(Stm32f1Clock {
+            hse_enabled: false,
+            sysclk_src: SysclkSrc::Hsi,
+            ..Stm32f1Clock::default()
+        });
+        let code = mcu.fresh_main_rs();
+
+        assert_not_contains_substring(&code, ".use_hse(");
+        assert_contains_substring(&code, ".sysclk(8.MHz())");
     }
 }

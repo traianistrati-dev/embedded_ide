@@ -50,6 +50,13 @@ impl Mcu {
         left_pins: Vec<Pin>,
         right_pins: Vec<Pin>,
     ) -> Self {
+        use crate::panels::mcu_module::clock::{ClockConfig, Stm32f1Clock};
+        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+        // Only STM32F1 has a modelled clock tree for now; others get `None`.
+        let clock = match toolchain {
+            ToolchainKind::RustEmbedded => ClockConfig::Stm32f1(Stm32f1Clock::default()),
+            _ => ClockConfig::None,
+        };
         Self {
             name,
             toolchain,
@@ -60,6 +67,7 @@ impl Mcu {
             selected_pin: None,
             show_info: None,
             fn_scroll_offset: 0.0,
+            clock,
         }
     }
 
@@ -93,6 +101,15 @@ impl Mcu {
                     pin.selected_function = func.clone();
                 }
             }
+        }
+    }
+
+    /// Restores the clock-tree configuration parsed from a saved `main.rs`.
+    /// Only applies to MCUs that have a modelled clock tree (STM32F1).
+    pub fn apply_saved_clock(&mut self, clock: crate::panels::mcu_module::clock::Stm32f1Clock) {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        if matches!(self.clock, ClockConfig::Stm32f1(_)) {
+            self.clock = ClockConfig::Stm32f1(clock);
         }
     }
 

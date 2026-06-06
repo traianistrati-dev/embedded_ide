@@ -111,15 +111,24 @@ impl AppIde {
                 }
                 McuTab::Peripherals => show_peripherals_tab(ui, &self.mcu),
                 McuTab::Clock => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}  Clock configuration — coming soon",
-                                ph::CLOCK
-                            ))
-                            .size(16.0)
-                            .color(egui::Color32::GRAY),
-                        );
+                    egui::ScrollArea::both().show(ui, |ui| match &mut self.mcu {
+                        Some(mcu) => {
+                            // Mutating mcu.clock is enough — `init_frame`
+                            // regenerates main.rs from MCU state each frame.
+                            let _changed = mcu.draw_clock_tab(ui);
+                        }
+                        None => {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}  Clock configuration — coming soon",
+                                        ph::CLOCK
+                                    ))
+                                    .size(16.0)
+                                    .color(egui::Color32::GRAY),
+                                );
+                            });
+                        }
                     });
                 }
                 McuTab::System => {

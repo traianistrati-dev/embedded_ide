@@ -1,5 +1,7 @@
 //! STM32 code generation — HAL code building, section splicing, pin parsing.
 
+use super::super::clock::frequencies;
+use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL};
@@ -54,9 +56,69 @@ pub fn invariant_header(mcu_name: &str) -> String {
     )
 }
 
+// ── Clock setup (rcc.cfgr chain) ──────────────────────────────────────────────
+
+/// Format a Hz value as a stm32f1xx-hal rate literal (`72.MHz()`, `48.kHz()`…).
+fn freq_lit(hz: u32) -> String {
+    if hz % 1_000_000 == 0 {
+        format!("{}.MHz()", hz / 1_000_000)
+    } else if hz % 1_000 == 0 {
+        format!("{}.kHz()", hz / 1_000)
+    } else {
+        format!("{hz}.Hz()")
+    }
+}
+
+/// Build the `rcc.cfgr … .freeze(&mut flash.acr)` chain from the clock config.
+///
+/// Only knobs that deviate from the HAL's natural defaults are emitted, so the
+/// default 72 MHz config produces exactly the original
+/// `use_hse(8).sysclk(72).pclk1(36)` chain (no spurious diffs).
+pub fn clock_setup_chain(clock: &ClockConfig) -> String {
+    let c: Stm32f1Clock = match clock {
+        ClockConfig::Stm32f1(c) => c.clone(),
+        ClockConfig::None => Stm32f1Clock::default(),
+    };
+    let f = frequencies(&c);
+    // Newline + 17 spaces → lines up the `.method()` calls under `rcc.cfgr`.
+    const IND: &str = "\n                 ";
+
+    let mut s = String::from("rcc.cfgr");
+    let use_hse = c.hse_enabled
+        && (c.sysclk_src == SysclkSrc::Hse
+            || (c.sysclk_src == SysclkSrc::Pll
+                && matches!(c.pll_src, PllSrc::Hse | PllSrc::HseDiv2)));
+    if use_hse {
+        s.push_str(&format!("{IND}.use_hse({})", freq_lit(c.hse_hz)));
+    }
+    s.push_str(&format!("{IND}.sysclk({})", freq_lit(f.sysclk)));
+    s.push_str(&format!("{IND}.pclk1({})", freq_lit(f.pclk1)));
+    if c.ahb_pre != 1 {
+        s.push_str(&format!("{IND}.hclk({})", freq_lit(f.hclk)));
+    }
+    if c.apb2_pre != 1 {
+        s.push_str(&format!("{IND}.pclk2({})", freq_lit(f.pclk2)));
+    }
+    if c.adc_pre != 6 {
+        s.push_str(&format!("{IND}.adcclk({})", freq_lit(f.adcclk)));
+    }
+    s.push_str(&format!("{IND}.freeze(&mut flash.acr)"));
+    s
+}
+
+/// Machine-readable clock marker line, parsed back on project open so the Clock
+/// tab restores exactly (target-frequency code alone is ambiguous).
+fn clock_comment_line(clock: &ClockConfig) -> String {
+    let c = match clock {
+        ClockConfig::Stm32f1(c) => c.clone(),
+        ClockConfig::None => Stm32f1Clock::default(),
+    };
+    crate::panels::mcu_module::clock::persist::to_comment(&c)
+}
+
 // ── Generated section builder ─────────────────────────────────────────────────
 
-pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin]) -> String {
+pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin], clock: &ClockConfig) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
@@ -64,7 +126,7 @@ pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin]) -> String {
         .collect();
 
     if configured.is_empty() {
-        return make_default_gen_section(mcu_name);
+        return make_default_gen_section(mcu_name, clock);
     }
 
     // ── Ports used ───────────────────────────────────────────────────────────
@@ -454,9 +516,14 @@ where
         )
     };
 
+    // ── Clock setup chain (from the Clock tab config) ────────────────────────
+    let clock_chain = clock_setup_chain(clock);
+    let clock_comment = clock_comment_line(clock);
+
     // ── Put it all together ──────────────────────────────────────────────────
     format!(
         "{GEN_BEGIN}\n\
+         {clock_comment}\n\
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
          }};\n\n\
@@ -467,11 +534,7 @@ where
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
          {afio_line}\
-             let clocks = rcc.cfgr\n\
-                 .use_hse(8.MHz())\n\
-                 .sysclk(72.MHz())\n\
-                 .pclk1(36.MHz())\n\
-                 .freeze(&mut flash.acr);\n\n\
+             let clocks = {clock_chain};\n\n\
          {port_splits}\n\n\
          {pin_section}\
          {fn_calls}\
@@ -481,21 +544,20 @@ where
 
 // ── Default generated section (no pins configured yet) ────────────────────────
 
-fn make_default_gen_section(mcu_name: &str) -> String {
+fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
+    let clock_chain = clock_setup_chain(clock);
+    let clock_comment = clock_comment_line(clock);
     format!(
         "{GEN_BEGIN}\n\
          // MCU: {mcu_name}\n\
+         {clock_comment}\n\
          use stm32f1xx_hal::{{pac, prelude::*}};\n\n\
          #[entry]\n\
          fn main() -> ! {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
-             let _clocks = rcc.cfgr\n\
-                 .use_hse(8.MHz())\n\
-                 .sysclk(72.MHz())\n\
-                 .pclk1(36.MHz())\n\
-                 .freeze(&mut flash.acr);\n\n\
+             let _clocks = {clock_chain};\n\n\
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n"
     )

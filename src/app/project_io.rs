@@ -62,7 +62,17 @@ impl AppIde {
         // an ESP32-C3 project or a hand-written main.rs) this is a silent no-op.
         let main_rs_path = root.join("src").join("main.rs");
         if let Ok(source) = std::fs::read_to_string(&main_rs_path) {
+            use crate::panels::mcu_module::clock::persist as clock_persist;
             use crate::panels::mcu_module::codegen;
+
+            // Restore the clock-tree config first, so any regeneration below
+            // uses it (otherwise a custom clock would reset to the 72 MHz default).
+            if let Some(clock) = clock_persist::parse_from_source(&source) {
+                if let Some(mcu) = &mut self.mcu {
+                    mcu.apply_saved_clock(clock);
+                }
+            }
+
             let saved = codegen::parse_main_rs(&source);
             if !saved.is_empty() {
                 if let Some(mcu) = &mut self.mcu {

@@ -7,6 +7,7 @@
 //! - info: information popup
 
 pub mod chip;
+pub mod clock;
 pub mod info;
 pub mod layout;
 pub mod panel;

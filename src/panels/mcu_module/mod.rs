@@ -1,3 +1,4 @@
+pub mod clock;
 pub mod codegen;
 pub mod codegen_esp;
 pub mod mcu;

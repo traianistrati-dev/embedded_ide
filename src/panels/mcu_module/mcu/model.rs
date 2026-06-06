@@ -1,5 +1,6 @@
 //! MCU data model — struct definition and rendering constants.
 
+use crate::panels::mcu_module::clock::ClockConfig;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -28,4 +29,7 @@ pub struct Mcu {
     pub show_info: Option<PinFunction>,
     /// Vertical scroll offset (pixels) for the function-list panel inside the chip.
     pub fn_scroll_offset: f32,
+    /// Clock-tree configuration shown/edited in the "Clock" tab.
+    /// `ClockConfig::None` for MCUs without a modelled clock tree yet.
+    pub clock: ClockConfig,
 }
