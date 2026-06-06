@@ -166,15 +166,18 @@ impl AppIde {
                 let chip_toolchain = self.selected_mcu_type.toolchain();
 
                 // Determine if the selected programmer supports SWD flashing
-                let (is_swd_capable, sel_interface_cfg) = {
+                let (is_swd_capable, sel_interface_cfg, sel_adapter) = {
                     let progs = self.dfu_programmers.lock().unwrap();
-                    let kind = progs
+                    let (kind, vid_pid) = progs
                         .get(&self.dfu_sel_programmer)
-                        .map(|p| p.kind.clone())
-                        .unwrap_or("".to_string());
+                        .map(|p| (p.kind.clone(), p.vid_pid.clone()))
+                        .unwrap_or_default();
                     let swd = matches!(kind.as_str(), "ST-Link" | "J-Link" | "CMSIS-DAP");
                     let cfg = openocd::interface_cfg_for_kind(&kind).to_string();
-                    (swd, cfg)
+                    // Pin OpenOCD to the selected probe so the right one is used
+                    // when several ST-Links are connected.
+                    let adapter = openocd::adapter_select_cmd(&kind, &vid_pid);
+                    (swd, cfg, adapter)
                 };
 
                 // Keep UI refreshing while any flash operation is running
@@ -301,6 +304,7 @@ impl AppIde {
                                         config.target.to_string(),
                                         config.pkg_name.to_string(),
                                         sel_interface_cfg.clone(),
+                                        sel_adapter.clone(),
                                         self.openocd_target_cfg.clone(),
                                         Arc::clone(&self.openocd_state),
                                         Arc::clone(&self.dfu_log),

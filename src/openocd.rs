@@ -75,6 +75,33 @@ pub fn interface_cfg_for_kind(kind: &str) -> &'static str {
     }
 }
 
+/// Builds an OpenOCD `-c` command that pins the adapter to exactly the device
+/// the user selected, so the correct probe is used when several are connected.
+///
+/// The interface .cfg lists *all* PIDs for a family (e.g. stlink.cfg matches
+/// every ST-Link), so with two ST-Links plugged in OpenOCD just grabs the first.
+/// Restricting the VID:PID list to the selected device's PID disambiguates them.
+///
+/// `vid_pid` is the lowercase "vid:pid" string from `ProgrammerInfo`
+/// (e.g. "0483:374b").  Returns an empty string when no restriction applies
+/// (e.g. J-Link, which is selected by serial instead).
+pub fn adapter_select_cmd(kind: &str, vid_pid: &str) -> String {
+    let mut parts = vid_pid.split(':');
+    let (Some(vid), Some(pid)) = (parts.next(), parts.next()) else {
+        return String::new();
+    };
+    if vid.is_empty() || pid.is_empty() {
+        return String::new();
+    }
+    match kind {
+        // ST-Link uses the `hla` driver → `hla_vid_pid <vid> <pid>` replaces the
+        // built-in PID list with just this one.
+        "ST-Link" => format!("hla_vid_pid 0x{vid} 0x{pid}"),
+        "CMSIS-DAP" => format!("cmsis_dap_vid_pid 0x{vid} 0x{pid}"),
+        _ => String::new(),
+    }
+}
+
 // ── Flash ─────────────────────────────────────────────────────────────────────
 
 /// Spawn a background thread that:
@@ -90,6 +117,9 @@ pub fn start_flash(
     target: String,
     pkg_name: String,
     interface_cfg: String,
+    // OpenOCD `-c` snippet that pins the adapter to the selected device
+    // (e.g. "hla_vid_pid 0x0483 0x374b").  Empty = no restriction.
+    adapter_select: String,
     target_cfg: String,
     state: Arc<Mutex<OpenOcdState>>,
     log: Arc<Mutex<Vec<String>>>,
@@ -176,24 +206,36 @@ pub fn start_flash(
         let elf_fwd = elf.to_string_lossy().replace('\\', "/");
         let program_cmd = format!("program {elf_fwd} verify reset exit");
 
+        // Build args: interface cfg → (optional) adapter restriction → target
+        // cfg → program.  The `hla_vid_pid` restriction must come AFTER the
+        // interface cfg (which loads the driver) but BEFORE init (triggered by
+        // `program`), so it slots in right after the interface file.
+        let mut ocd_args: Vec<String> = vec!["-f".into(), interface_cfg.clone()];
+        if !adapter_select.is_empty() {
+            ocd_args.push("-c".into());
+            ocd_args.push(adapter_select.clone());
+        }
+        ocd_args.push("-f".into());
+        ocd_args.push(target_cfg.clone());
+        ocd_args.push("-c".into());
+        ocd_args.push(program_cmd.clone());
+
+        let sel_note = if adapter_select.is_empty() {
+            String::new()
+        } else {
+            format!(" -c \"{adapter_select}\"")
+        };
         push_log(
             &log,
             &ctx,
             &format!(
-                "▶ openocd -f {interface_cfg} -f {target_cfg} -c \"program … verify reset exit\""
+                "▶ openocd -f {interface_cfg}{sel_note} -f {target_cfg} -c \"program … verify reset exit\""
             ),
         );
 
         let mut ocd_cmd = Command::new("openocd");
         ocd_cmd
-            .args([
-                "-f",
-                &interface_cfg,
-                "-f",
-                &target_cfg,
-                "-c",
-                &program_cmd,
-            ])
+            .args(&ocd_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
