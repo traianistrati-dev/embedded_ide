@@ -1,7 +1,6 @@
 use eframe::egui;
 pub mod app;
 use app::AppIde;
-use egui::debug_text::print;
 
 pub mod build;
 pub mod dfu;
@@ -30,32 +29,36 @@ fn main() -> eframe::Result<()> {
 #[test]
 fn test_rust_code_smart_pointers() {
     let ssss = "123ABC".to_owned();
+    println!("Original ssss = {:?}", &ssss);
 
     let mut smart_pointer: *const String = &ssss;
     smart_pointer = &"xxxxxx".to_string();
+    println!("NOT Modified by smart_pointer ssss = {:?}", &ssss);
     // update_smart_pointer(&mut smart_pointer);
     // update_smart_pointer2(smart_pointer);
-
-    let ssss_ref: &String = &ssss;
-    let ssss_ref: *const String = &ssss;
-    // let ssss_ref: &str = &*ssss;
-
-    update_string_by_smart_pointer(ssss_ref);
-
     {
+        let ssss_ref: &String = &ssss;
+        let ssss_ref: *const String = &ssss;
+        // let ssss_ref: &str = &*ssss;
+
+        println!();
+        update_string_by_smart_pointer(ssss_ref);
+    }
+    {
+        println!();
         let ssss_ref: *mut String = (&ssss as *const String).to_owned().cast_mut();
         unsafe {
-            println!("ssss_ref = {:p}", ssss_ref);
+            println!("> local {:p} &ssss = {:?}", ssss_ref, &ssss);
             {
                 (*ssss_ref) = "vvvvv".to_owned();
             }
-            println!("ssss_ref = {:p}", ssss_ref);
+            println!("< local {:p} &ssss = {:?}", ssss_ref, &ssss);
         }
     }
 
     println!("ssss = {:?}", ssss);
 
-    if true {
+    if false {
         //TODO:
     } else {
         std::panic!(
@@ -93,7 +96,7 @@ fn test_rust_code_smart_pointers() {
         let smart_pointer = text.cast_mut();
         unsafe {
             println!(
-                "update_smart_pointer2 {:?}, *{:?}",
+                "> update_smart_pointer2 {:?}, *{:?}",
                 smart_pointer,
                 (*smart_pointer)
             );
@@ -104,7 +107,7 @@ fn test_rust_code_smart_pointers() {
             }
 
             println!(
-                "update_smart_pointer2 {:?}, *{:?}",
+                "< update_smart_pointer2 {:?}, *{:?}",
                 smart_pointer,
                 (*smart_pointer)
             );

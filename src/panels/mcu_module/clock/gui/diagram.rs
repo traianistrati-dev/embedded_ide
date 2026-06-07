@@ -21,7 +21,7 @@ use super::super::model::{
 
 // ── Virtual canvas ────────────────────────────────────────────────────────────
 const VW: f32 = 1000.0;
-const VH: f32 = 800.0;
+const VH: f32 = 790.0;
 const M: u32 = 1_000_000;
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -55,28 +55,35 @@ impl Tf {
 }
 
 /// Render the diagram + interactive nodes. Returns `true` on any change.
-pub fn draw(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
+///
+/// `avail_w`/`avail_h` are the viewport size — at `zoom == 1.0` the WHOLE figure
+/// fits (no scrolling needed); zooming in enlarges it and reveals scroll bars.
+pub fn draw(ui: &mut egui::Ui, c: &mut Stm32f1Clock, avail_w: f32, avail_h: f32, zoom: f32) -> bool {
     let f = frequencies(c);
 
-    let avail_w = ui.available_width().clamp(560.0, 1280.0);
-    let scale = avail_w / VW;
+    // Fit the whole diagram into the viewport (both dimensions), then apply zoom.
+    let fit = (avail_w / VW).min(avail_h / VH);
+    let scale = (fit * zoom).max(0.12);
     let size = Vec2::new(VW * scale, VH * scale);
 
     // Reserve the whole canvas up-front so the controls below never overlap the
     // diagram (the interactive widgets are then confined to this exact rect).
     let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let painter = ui.painter_at(rect);
     let tf = Tf { origin: rect.min, scale };
+
+    // Clip BOTH the painter and the interactive widgets to the visible viewport
+    // (rect ∩ current clip), so anything scrolled out of view disappears
+    // instead of floating on top of the panels.
+    let clip = rect.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(clip);
     painter.rect_filled(rect, 4.0, BG);
 
     draw_wires(&painter, &tf, c, &f);
     draw_static_blocks(&painter, &tf, c, &f);
 
-    // Place interactive widgets inside `rect` only — clamped so they can't push
-    // the parent layout and overlap the "Configuration" section below.
     let mut changed = false;
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-        ui.set_clip_rect(rect);
+        ui.set_clip_rect(clip);
         changed = interactive_nodes(ui, &tf, c);
     });
     changed
@@ -123,7 +130,7 @@ fn draw_wires(p: &egui::Painter, tf: &Tf, _c: &Stm32f1Clock, _f: &ClockFrequenci
     wire(p, tf, &[(560.0, 245.0), (818.0, 245.0)]); // USB → USBCLK box
 
     // MCO mux output (mirrored → left) → MCO pin box.
-    wire(p, tf, &[(250.0, 814.0), (134.0, 814.0)]);
+    wire(p, tf, &[(250.0, 638.0), (134.0, 638.0)]);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -154,7 +161,7 @@ fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFre
     out_box(p, tf, 820.0, 749.0, 160.0, 28.0, "ADC1/2", f.adcclk, Some(14 * M));
 
     // ── MCO pin box (far left, fed by the mirrored MCO mux) ──────────────────
-    out_box(p, tf, 28.0, 801.0, 106.0, 26.0, "MCO pin", mco_hz(c, f), None);
+    out_box(p, tf, 28.0, 625.0, 106.0, 26.0, "MCO pin", mco_hz(c, f), None);
 
     // ── Frequency tags on the main chain ─────────────────────────────────────
     tag(p, tf, 424.0, 422.0, &mhz(f.pllclk), over(f.pllclk, 72 * M), "PLLCLK");
@@ -177,7 +184,7 @@ fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFre
     p.text(tf.p(270.0, 64.0), Align2::CENTER_BOTTOM, "RTC Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
     p.text(tf.p(270.0, 364.0), Align2::CENTER_BOTTOM, "PLL Source", FontId::proportional(tf.fs(9.0)), DIM_C);
     p.text(tf.p(490.0, 294.0), Align2::CENTER_BOTTOM, "System Clock Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
-    p.text(tf.p(270.0, 750.0), Align2::CENTER_BOTTOM, "MCO Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
+    p.text(tf.p(270.0, 574.0), Align2::CENTER_BOTTOM, "MCO Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -213,7 +220,7 @@ fn interactive_nodes(ui: &mut egui::Ui, tf: &Tf, c: &mut Stm32f1Clock) -> bool {
         |idx| c.sysclk_src = [SysclkSrc::Hsi, SysclkSrc::Hse, SysclkSrc::Pll][idx]);
 
     // MCO Mux: mirrored (inputs on the right, output → left MCO pin)
-    changed |= mux_radios(ui, tf, 250.0, 756.0, MW, 116.0,
+    changed |= mux_radios(ui, tf, 250.0, 580.0, MW, 116.0,
         &[("SYSCLK", 20.0), ("HSI", 48.0), ("HSE", 76.0), ("PLL/2", 104.0)],
         mco_sel(c.mco), true,
         |idx| c.mco = [Mco::Sysclk, Mco::Hsi, Mco::Hse, Mco::PllDiv2][idx]);
@@ -251,7 +258,9 @@ fn mux_radios(
     mut on_pick: impl FnMut(usize),
 ) -> bool {
     let painter = ui.painter().clone();
-    let taper = h * 0.28;
+    // Small, bounded taper → nearly rectangular mux so the radio buttons always
+    // sit comfortably INSIDE the trapezoid (CubeMX style).
+    let taper = (h * 0.16).clamp(8.0, 12.0);
     let poly = if flip {
         // Tall on the right (inputs), short on the left (output).
         vec![
@@ -275,16 +284,18 @@ fn mux_radios(
     for (i, (label, dy)) in inputs.iter().enumerate() {
         let cy = y + dy;
         let stroke = Stroke::new(1.2, WIRE_C);
+        // Radio sits just inside the wide edge (left for normal, right for flip);
+        // the input stub stops at the mux edge so the wire meets the radio.
         let (stub_a, stub_b, lbl_x, lbl_align, radio_cx) = if flip {
-            (x + w + 24.0, x + w - 6.0, x + w + 26.0, Align2::LEFT_CENTER, x + w - 14.0)
+            (x + w + 24.0, x + w, x + w + 26.0, Align2::LEFT_CENTER, x + w - 11.0)
         } else {
-            (x - 24.0, x + 6.0, x - 26.0, Align2::RIGHT_CENTER, x + 14.0)
+            (x - 24.0, x, x - 26.0, Align2::RIGHT_CENTER, x + 11.0)
         };
         painter.line_segment([tf.p(stub_a, cy), tf.p(stub_b, cy)], stroke);
         painter.text(tf.p(lbl_x, cy), lbl_align, *label, FontId::proportional(tf.fs(8.0)), DIM_C);
 
         let center = tf.p(radio_cx, cy);
-        let rsz = 15.0 * tf.scale;
+        let rsz = 12.0 * tf.scale;
         let rrect = Rect::from_center_size(center, Vec2::splat(rsz));
         let is_sel = selected == Some(i);
         if ui.put(rrect, egui::RadioButton::new(is_sel, "")).clicked() {

@@ -86,12 +86,33 @@ pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
             });
         });
 
-    // ── Diagram (own vertical scroll; only what fits is shown) ───────────────
-    egui::ScrollArea::vertical()
+    // ── Zoom toolbar ─────────────────────────────────────────────────────────
+    let zoom_id = egui::Id::new("clock_diagram_zoom");
+    let mut zoom = ui.data(|d| d.get_temp::<f32>(zoom_id).unwrap_or(1.0));
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Diagram").strong());
+        ui.separator();
+        ui.label("Zoom:");
+        if ui.small_button("−").clicked() {
+            zoom = (zoom / 1.15).max(0.4);
+        }
+        if ui.small_button(format!("{:.0}%", zoom * 100.0)).on_hover_text("Reset to 100%").clicked() {
+            zoom = 1.0;
+        }
+        if ui.small_button("+").clicked() {
+            zoom = (zoom * 1.15).min(3.0);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(zoom_id, zoom));
+
+    // ── Diagram (fits the viewport at zoom 1.0; scrolls when zoomed in) ──────
+    let avail_w = ui.available_width();
+    let avail_h = ui.available_height();
+    egui::ScrollArea::both()
         .id_salt("clock_diagram_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            changed |= diagram::draw(ui, c);
+            changed |= diagram::draw(ui, c, avail_w, avail_h, zoom);
         });
 
     changed
