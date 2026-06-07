@@ -59,6 +59,27 @@ pub enum Mco {
     PllDiv2,
 }
 
+/// RTC clock source — the `RTCSEL` / RTC Clock Mux in Figure 2.
+/// UI/diagram only (the stm32f1xx-hal `freeze` chain doesn't configure RTC).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RtcSrc {
+    None,
+    /// HSE / 128
+    HseDiv128,
+    Lse,
+    Lsi,
+}
+
+/// Cortex SysTick source — `to Cortex System timer` in Figure 2.
+/// UI/diagram only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystickSrc {
+    /// HCLK / 8 (datasheet default)
+    HclkDiv8,
+    /// HCLK (no division)
+    Hclk,
+}
+
 // ── Allowed prescaler value tables ────────────────────────────────────────────
 
 /// AHB prescaler (HPRE) divider options.
@@ -97,6 +118,12 @@ pub struct Stm32f1Clock {
     pub usb_pre: UsbPre,
     /// Main clock output selection.
     pub mco: Mco,
+    /// RTC clock source (diagram only — not emitted in the HAL freeze chain).
+    pub rtc_src: RtcSrc,
+    /// Cortex SysTick source (diagram only).
+    pub systick_src: SystickSrc,
+    /// Clock Security System enable (diagram only).
+    pub css_on: bool,
 }
 
 impl Default for Stm32f1Clock {
@@ -117,6 +144,9 @@ impl Default for Stm32f1Clock {
             adc_pre: 6,
             usb_pre: UsbPre::Div1_5,
             mco: Mco::None,
+            rtc_src: RtcSrc::Lsi,
+            systick_src: SystickSrc::HclkDiv8,
+            css_on: false,
         }
     }
 }

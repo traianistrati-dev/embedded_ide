@@ -6,7 +6,7 @@
 //! it back on project open — giving an exact, lossless round-trip of the Clock
 //! tab state (mirroring how pins are restored from `main.rs`).
 
-use super::model::{Mco, PllSrc, Stm32f1Clock, SysclkSrc, UsbPre};
+use super::model::{Mco, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre};
 
 /// Marker prefix for the clock config comment line.
 pub const CLOCK_TAG: &str = "// @clock";
@@ -35,8 +35,18 @@ pub fn to_comment(c: &Stm32f1Clock) -> String {
         Mco::Hse => "hse",
         Mco::PllDiv2 => "pll2",
     };
+    let rtc = match c.rtc_src {
+        RtcSrc::None => "none",
+        RtcSrc::HseDiv128 => "hse128",
+        RtcSrc::Lse => "lse",
+        RtcSrc::Lsi => "lsi",
+    };
+    let systick = match c.systick_src {
+        SystickSrc::HclkDiv8 => "hclk8",
+        SystickSrc::Hclk => "hclk",
+    };
     format!(
-        "{CLOCK_TAG} hse={} hse_on={} src={src} pll={pll} mul={} ahb={} apb1={} apb2={} adc={} usb={usb} mco={mco}",
+        "{CLOCK_TAG} hse={} hse_on={} src={src} pll={pll} mul={} ahb={} apb1={} apb2={} adc={} usb={usb} mco={mco} rtc={rtc} systick={systick} css={}",
         c.hse_hz,
         if c.hse_enabled { 1 } else { 0 },
         c.pll_mul,
@@ -44,6 +54,7 @@ pub fn to_comment(c: &Stm32f1Clock) -> String {
         c.apb1_pre,
         c.apb2_pre,
         c.adc_pre,
+        if c.css_on { 1 } else { 0 },
     )
 }
 
@@ -117,6 +128,21 @@ pub fn from_comment(line: &str) -> Option<Stm32f1Clock> {
                     _ => Mco::None,
                 }
             }
+            "rtc" => {
+                c.rtc_src = match v {
+                    "hse128" => RtcSrc::HseDiv128,
+                    "lse" => RtcSrc::Lse,
+                    "lsi" => RtcSrc::Lsi,
+                    _ => RtcSrc::None,
+                }
+            }
+            "systick" => {
+                c.systick_src = match v {
+                    "hclk" => SystickSrc::Hclk,
+                    _ => SystickSrc::HclkDiv8,
+                }
+            }
+            "css" => c.css_on = v == "1",
             _ => {}
         }
     }
@@ -160,6 +186,9 @@ mod tests {
             adc_pre: 8,
             usb_pre: UsbPre::Div1,
             mco: Mco::PllDiv2,
+            rtc_src: RtcSrc::Lse,
+            systick_src: SystickSrc::Hclk,
+            css_on: true,
         };
         let line = to_comment(&c);
         assert_eq!(from_comment(&line), Some(c));
