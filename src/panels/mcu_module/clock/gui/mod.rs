@@ -19,10 +19,14 @@ use super::validate::{warnings, Severity};
 
 /// Render the Clock tab for an STM32F1 config. Returns `true` if anything
 /// changed (the caller relies on `init_frame` to regenerate `main.rs`).
+///
+/// Layout: a thin **Presets** bar on top, a **fixed 3-zone footer** (always
+/// visible — Configuration | Frequencies | Info), and in between the
+/// **interactive diagram** in its own vertical scroll area.
 pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
     let mut changed = false;
 
-    // ── Presets ──────────────────────────────────────────────────────────────
+    // ── Presets (thin top bar) ───────────────────────────────────────────────
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("Presets:").strong());
         for p in stm32f1_presets() {
@@ -32,42 +36,72 @@ pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
             }
         }
     });
-
-    ui.add_space(6.0);
-
-    // ── Figure-2 interactive diagram ─────────────────────────────────────────
-    changed |= diagram::draw(ui, c);
-
-    ui.add_space(6.0);
     ui.separator();
 
-    // ── Configurable nodes (precise dropdowns; mirror the diagram) ───────────
-    let mut grid_changed = false;
-    egui::CollapsingHeader::new("Configuration (all nodes)")
-        .default_open(false)
-        .show(ui, |ui| {
-            grid_changed = draw_controls_grid(ui, c);
+    // ── Fixed footer: 3 always-visible zones (25% | 25% | 50%) ───────────────
+    egui::TopBottomPanel::bottom("clock_footer")
+        .resizable(true)
+        .default_height(230.0)
+        .min_height(120.0)
+        .show_inside(ui, |ui| {
+            let f = frequencies(c);
+            let total = ui.available_width();
+            let h = ui.available_height();
+            ui.horizontal_top(|ui| {
+                // Zone 1 — Configuration (all nodes)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(total * 0.25, h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.strong("Configuration (all nodes)");
+                        egui::ScrollArea::vertical().id_salt("cfg_scroll").show(ui, |ui| {
+                            changed |= draw_controls_grid(ui, c);
+                        });
+                    },
+                );
+                ui.separator();
+                // Zone 2 — Frequencies
+                ui.allocate_ui_with_layout(
+                    egui::vec2(total * 0.23, h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.strong("Frequencies");
+                        egui::ScrollArea::vertical().id_salt("freq_scroll").show(ui, |ui| {
+                            freq_table(ui, &f);
+                        });
+                    },
+                );
+                ui.separator();
+                // Zone 3 — Info / validation (≈ 50% width)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(total * 0.48, h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.strong("Info");
+                        egui::ScrollArea::vertical().id_salt("info_scroll").show(ui, |ui| {
+                            info_zone(ui, c, &f);
+                        });
+                    },
+                );
+            });
         });
-    changed |= grid_changed;
 
-    ui.add_space(6.0);
-    ui.separator();
+    // ── Diagram (own vertical scroll; only what fits is shown) ───────────────
+    egui::ScrollArea::vertical()
+        .id_salt("clock_diagram_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            changed |= diagram::draw(ui, c);
+        });
 
-    // ── Derived frequencies ──────────────────────────────────────────────────
-    let f = frequencies(c);
-    ui.heading("Frequencies");
-    freq_table(ui, &f);
+    changed
+}
 
-    ui.add_space(6.0);
-    ui.separator();
-
-    // ── Validation ───────────────────────────────────────────────────────────
-    let ws = warnings(c, &f);
+/// The Info zone: validation messages plus the datasheet notes/legend.
+fn info_zone(ui: &mut egui::Ui, c: &Stm32f1Clock, f: &ClockFrequencies) {
+    let ws = warnings(c, f);
     if ws.is_empty() {
-        ui.colored_label(
-            egui::Color32::from_rgb(90, 200, 110),
-            "✔  Configuration is valid.",
-        );
+        ui.colored_label(egui::Color32::from_rgb(90, 200, 110), "✔  Configuration is valid.");
     } else {
         for w in ws {
             let (color, icon) = match w.severity {
@@ -77,8 +111,17 @@ pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
             ui.colored_label(color, format!("{icon}  {}", w.msg));
         }
     }
-
-    changed
+    ui.add_space(6.0);
+    ui.separator();
+    let dim = egui::Color32::from_rgb(150, 158, 172);
+    for line in [
+        "HSE = high-speed external · HSI = high-speed internal",
+        "LSE = low-speed external · LSI = low-speed internal",
+        "Limits: SYSCLK 72 · HCLK 72 · PCLK1 36 · PCLK2 72 · ADC 14 · USB 48 MHz",
+        "USB needs HSE+PLL with USBCLK = 48 MHz · ADC 1 µs needs PCLK2 ∈ {14,28,56}",
+    ] {
+        ui.label(egui::RichText::new(line).size(11.0).color(dim));
+    }
 }
 
 /// The full grid of node dropdowns (collapsible under the diagram).

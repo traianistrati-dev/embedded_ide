@@ -20,8 +20,8 @@ use super::super::model::{
 };
 
 // ── Virtual canvas ────────────────────────────────────────────────────────────
-const VW: f32 = 1180.0;
-const VH: f32 = 900.0;
+const VW: f32 = 1000.0;
+const VH: f32 = 800.0;
 const M: u32 = 1_000_000;
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -101,26 +101,26 @@ fn draw_wires(p: &egui::Painter, tf: &Tf, _c: &Stm32f1Clock, _f: &ClockFrequenci
     wire(p, tf, &[(290.0, 442.0), (336.0, 442.0)]); // mux out → PLLMUL
     wire(p, tf, &[(420.0, 442.0), (456.0, 442.0)]); // PLLMUL → PLLCLK
 
-    // System mux (SYSCLK) → AHB → HCLK → distribution lane (x = 760).
-    wire(p, tf, &[(510.0, 360.0), (620.0, 360.0)]); // SYSCLK → AHB
-    wire(p, tf, &[(706.0, 360.0), (760.0, 360.0)]); // AHB → HCLK node
-    wire(p, tf, &[(760.0, 360.0), (998.0, 360.0)]); // HCLK → AHB-bus out
-    wire(p, tf, &[(760.0, 360.0), (760.0, 700.0)]); // HCLK vertical lane
-    wire(p, tf, &[(760.0, 430.0), (820.0, 430.0)]); // → SysTick prescaler
-    wire(p, tf, &[(886.0, 430.0), (998.0, 430.0)]); // SysTick → out
-    wire(p, tf, &[(760.0, 470.0), (998.0, 470.0)]); // → FCLK out
-    wire(p, tf, &[(760.0, 543.0), (850.0, 543.0)]); // → APB1 prescaler
-    wire(p, tf, &[(916.0, 543.0), (998.0, 543.0)]); // PCLK1 → APB1 periph
-    wire(p, tf, &[(940.0, 556.0), (940.0, 590.0), (998.0, 590.0)]); // → APB1 timer
-    wire(p, tf, &[(760.0, 663.0), (850.0, 663.0)]); // → APB2 prescaler
-    wire(p, tf, &[(916.0, 663.0), (998.0, 663.0)]); // PCLK2 → APB2 periph
-    wire(p, tf, &[(940.0, 676.0), (940.0, 710.0), (998.0, 710.0)]); // → APB2 timer
-    wire(p, tf, &[(883.0, 676.0), (883.0, 763.0), (850.0, 763.0)]); // PCLK2 → ADC prescaler
-    wire(p, tf, &[(916.0, 763.0), (998.0, 763.0)]); // ADC → out
+    // System mux (SYSCLK) → AHB → HCLK → distribution lane (x = 640).
+    wire(p, tf, &[(510.0, 360.0), (540.0, 360.0)]); // SYSCLK → AHB
+    wire(p, tf, &[(626.0, 360.0), (640.0, 360.0)]); // AHB → HCLK node
+    wire(p, tf, &[(640.0, 360.0), (818.0, 360.0)]); // HCLK → AHB-bus out
+    wire(p, tf, &[(640.0, 360.0), (640.0, 700.0)]); // HCLK vertical lane
+    wire(p, tf, &[(640.0, 430.0), (700.0, 430.0)]); // → SysTick prescaler
+    wire(p, tf, &[(766.0, 430.0), (818.0, 430.0)]); // SysTick → out
+    wire(p, tf, &[(640.0, 470.0), (818.0, 470.0)]); // → FCLK out
+    wire(p, tf, &[(640.0, 543.0), (720.0, 543.0)]); // → APB1 prescaler
+    wire(p, tf, &[(786.0, 543.0), (818.0, 543.0)]); // PCLK1 → APB1 periph
+    wire(p, tf, &[(806.0, 556.0), (806.0, 590.0), (818.0, 590.0)]); // → APB1 timer
+    wire(p, tf, &[(640.0, 663.0), (720.0, 663.0)]); // → APB2 prescaler
+    wire(p, tf, &[(786.0, 663.0), (818.0, 663.0)]); // PCLK2 → APB2 periph
+    wire(p, tf, &[(806.0, 676.0), (806.0, 710.0), (818.0, 710.0)]); // → APB2 timer
+    wire(p, tf, &[(753.0, 676.0), (753.0, 763.0), (720.0, 763.0)]); // PCLK2 → ADC prescaler
+    wire(p, tf, &[(786.0, 763.0), (818.0, 763.0)]); // ADC → out
 
     // Right-margin outputs (clear top band — no block crossings).
-    wire(p, tf, &[(290.0, 122.0), (998.0, 122.0)]); // RTC mux → RTCCLK box
-    wire(p, tf, &[(560.0, 245.0), (998.0, 245.0)]); // USB → USBCLK box
+    wire(p, tf, &[(290.0, 122.0), (818.0, 122.0)]); // RTC mux → RTCCLK box
+    wire(p, tf, &[(560.0, 245.0), (818.0, 245.0)]); // USB → USBCLK box
 
     // MCO mux output (mirrored → left) → MCO pin box.
     wire(p, tf, &[(250.0, 814.0), (134.0, 814.0)]);
@@ -139,19 +139,19 @@ fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFre
     block(p, tf, 175.0, 372.0, 40.0, 22.0, "/2");
     block(p, tf, 28.0, 483.0, 92.0, 34.0, "HSE OSC\n4–16 MHz");
 
-    // ── All output boxes on the right margin (x = 1000) ──────────────────────
-    out_box(p, tf, 1000.0, 109.0, 168.0, 26.0, "RTCCLK → RTC", rtc_hz(c, f), None);
-    out_box(p, tf, 1000.0, 149.0, 168.0, 26.0, "IWDGCLK ← LSI", 40_000, None);
-    out_box(p, tf, 1000.0, 232.0, 168.0, 26.0, "USBCLK → USB", f.usbclk, None);
-    out_box(p, tf, 1000.0, 272.0, 168.0, 26.0, "FLITFCLK ← HSI", f.flitfclk, None);
-    out_box(p, tf, 1000.0, 346.0, 168.0, 28.0, "HCLK → AHB / core / DMA", f.hclk, Some(72 * M));
-    out_box(p, tf, 1000.0, 416.0, 168.0, 28.0, "Cortex SysTick", systick_hz(c, f), None);
-    out_box(p, tf, 1000.0, 456.0, 168.0, 28.0, "FCLK (free-running)", f.hclk, None);
-    out_box(p, tf, 1000.0, 529.0, 168.0, 28.0, "APB1 peripherals", f.pclk1, Some(36 * M));
-    out_box(p, tf, 1000.0, 576.0, 168.0, 28.0, "APB1 timers", f.tim_apb1, None);
-    out_box(p, tf, 1000.0, 649.0, 168.0, 28.0, "APB2 peripherals", f.pclk2, Some(72 * M));
-    out_box(p, tf, 1000.0, 696.0, 168.0, 28.0, "APB2 timers", f.tim_apb2, None);
-    out_box(p, tf, 1000.0, 749.0, 168.0, 28.0, "ADC1/2", f.adcclk, Some(14 * M));
+    // ── All output boxes on the right margin (x = 820) ───────────────────────
+    out_box(p, tf, 820.0, 109.0, 160.0, 26.0, "RTCCLK → RTC", rtc_hz(c, f), None);
+    out_box(p, tf, 820.0, 149.0, 160.0, 26.0, "IWDGCLK ← LSI", 40_000, None);
+    out_box(p, tf, 820.0, 232.0, 160.0, 26.0, "USBCLK → USB", f.usbclk, None);
+    out_box(p, tf, 820.0, 272.0, 160.0, 26.0, "FLITFCLK ← HSI", f.flitfclk, None);
+    out_box(p, tf, 820.0, 346.0, 160.0, 28.0, "HCLK → AHB / core / DMA", f.hclk, Some(72 * M));
+    out_box(p, tf, 820.0, 416.0, 160.0, 28.0, "Cortex SysTick", systick_hz(c, f), None);
+    out_box(p, tf, 820.0, 456.0, 160.0, 28.0, "FCLK (free-running)", f.hclk, None);
+    out_box(p, tf, 820.0, 529.0, 160.0, 28.0, "APB1 peripherals", f.pclk1, Some(36 * M));
+    out_box(p, tf, 820.0, 576.0, 160.0, 28.0, "APB1 timers", f.tim_apb1, None);
+    out_box(p, tf, 820.0, 649.0, 160.0, 28.0, "APB2 peripherals", f.pclk2, Some(72 * M));
+    out_box(p, tf, 820.0, 696.0, 160.0, 28.0, "APB2 timers", f.tim_apb2, None);
+    out_box(p, tf, 820.0, 749.0, 160.0, 28.0, "ADC1/2", f.adcclk, Some(14 * M));
 
     // ── MCO pin box (far left, fed by the mirrored MCO mux) ──────────────────
     out_box(p, tf, 28.0, 801.0, 106.0, 26.0, "MCO pin", mco_hz(c, f), None);
@@ -159,49 +159,25 @@ fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFre
     // ── Frequency tags on the main chain ─────────────────────────────────────
     tag(p, tf, 424.0, 422.0, &mhz(f.pllclk), over(f.pllclk, 72 * M), "PLLCLK");
     tag(p, tf, 516.0, 344.0, &mhz(f.sysclk), over(f.sysclk, 72 * M), "SYSCLK");
-    tag(p, tf, 712.0, 344.0, &mhz(f.hclk), over(f.hclk, 72 * M), "HCLK");
-    tag(p, tf, 922.0, 524.0, &mhz(f.pclk1), over(f.pclk1, 36 * M), "PCLK1");
-    tag(p, tf, 922.0, 644.0, &mhz(f.pclk2), over(f.pclk2, 72 * M), "PCLK2");
+    tag(p, tf, 592.0, 344.0, &mhz(f.hclk), over(f.hclk, 72 * M), "HCLK");
+    tag(p, tf, 792.0, 524.0, &mhz(f.pclk1), over(f.pclk1, 36 * M), "PCLK1");
+    tag(p, tf, 792.0, 644.0, &mhz(f.pclk2), over(f.pclk2, 72 * M), "PCLK2");
 
     // ── Node name labels (ABOVE their dropdowns) ─────────────────────────────
     label_above(p, tf, 148.0, 478.0, "PLLXTPRE");
     label_above(p, tf, 336.0, 418.0, "PLLMUL");
     label_above(p, tf, 470.0, 228.0, "USB Prescaler");
-    label_above(p, tf, 620.0, 335.0, "AHB Prescaler");
-    label_above(p, tf, 820.0, 408.0, "SysTick");
-    label_above(p, tf, 850.0, 518.0, "APB1 Prescaler");
-    label_above(p, tf, 850.0, 638.0, "APB2 Prescaler");
-    label_above(p, tf, 850.0, 738.0, "ADC Prescaler");
+    label_above(p, tf, 540.0, 335.0, "AHB Prescaler");
+    label_above(p, tf, 700.0, 408.0, "SysTick");
+    label_above(p, tf, 720.0, 518.0, "APB1 Prescaler");
+    label_above(p, tf, 720.0, 638.0, "APB2 Prescaler");
+    label_above(p, tf, 720.0, 738.0, "ADC Prescaler");
     label_above(p, tf, 28.0, 521.0, "HSE crystal");
     // Mux titles (mux center x = 270)
     p.text(tf.p(270.0, 64.0), Align2::CENTER_BOTTOM, "RTC Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
     p.text(tf.p(270.0, 364.0), Align2::CENTER_BOTTOM, "PLL Source", FontId::proportional(tf.fs(9.0)), DIM_C);
     p.text(tf.p(490.0, 294.0), Align2::CENTER_BOTTOM, "System Clock Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
     p.text(tf.p(270.0, 750.0), Align2::CENTER_BOTTOM, "MCO Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
-
-    // ── Legend ───────────────────────────────────────────────────────────────
-    legend(p, tf);
-}
-
-fn legend(p: &egui::Painter, tf: &Tf) {
-    let r = tf.r(640.0, 786.0, 300.0, 96.0);
-    p.rect(r, 3.0, Color32::from_rgb(32, 35, 42), Stroke::new(1.0, STROKE_C), egui::StrokeKind::Inside);
-    let lines = [
-        "Legend",
-        "HSE = high-speed external   HSI = high-speed internal",
-        "LSE = low-speed external    LSI = low-speed internal",
-        "Limits: SYSCLK 72 · PCLK1 36 · ADC 14 · USB 48 MHz",
-    ];
-    for (i, l) in lines.iter().enumerate() {
-        let strong = i == 0;
-        p.text(
-            tf.p(650.0, 794.0 + i as f32 * 18.0),
-            Align2::LEFT_TOP,
-            *l,
-            FontId::proportional(tf.fs(if strong { 11.0 } else { 9.5 })),
-            if strong { LABEL_C } else { DIM_C },
-        );
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -248,11 +224,11 @@ fn interactive_nodes(ui: &mut egui::Ui, tf: &Tf, c: &mut Stm32f1Clock) -> bool {
     changed |= combo_u8(ui, tf, 336.0, 430.0, 84.0, "pllmul", &mut c.pll_mul,
         &(PLL_MUL_MIN..=PLL_MUL_MAX).collect::<Vec<_>>(), |v| format!("×{v}"));
     changed |= usb_dropdown(ui, tf, c);
-    changed |= combo_u16(ui, tf, 620.0, 347.0, 86.0, "ahb", &mut c.ahb_pre, AHB_PRESCALERS, |v| format!("/ {v}"));
+    changed |= combo_u16(ui, tf, 540.0, 347.0, 86.0, "ahb", &mut c.ahb_pre, AHB_PRESCALERS, |v| format!("/ {v}"));
     changed |= systick_dropdown(ui, tf, c);
-    changed |= combo_u8(ui, tf, 850.0, 530.0, 66.0, "apb1", &mut c.apb1_pre, APB_PRESCALERS, |v| format!("/ {v}"));
-    changed |= combo_u8(ui, tf, 850.0, 650.0, 66.0, "apb2", &mut c.apb2_pre, APB_PRESCALERS, |v| format!("/ {v}"));
-    changed |= combo_u8(ui, tf, 850.0, 750.0, 66.0, "adc", &mut c.adc_pre, ADC_PRESCALERS, |v| format!("/ {v}"));
+    changed |= combo_u8(ui, tf, 720.0, 530.0, 66.0, "apb1", &mut c.apb1_pre, APB_PRESCALERS, |v| format!("/ {v}"));
+    changed |= combo_u8(ui, tf, 720.0, 650.0, 66.0, "apb2", &mut c.apb2_pre, APB_PRESCALERS, |v| format!("/ {v}"));
+    changed |= combo_u8(ui, tf, 720.0, 750.0, 66.0, "adc", &mut c.adc_pre, ADC_PRESCALERS, |v| format!("/ {v}"));
 
     changed
 }
@@ -402,7 +378,7 @@ fn usb_dropdown(ui: &mut egui::Ui, tf: &Tf, c: &mut Stm32f1Clock) -> bool {
 }
 
 fn systick_dropdown(ui: &mut egui::Ui, tf: &Tf, c: &mut Stm32f1Clock) -> bool {
-    let rect = tf.r(820.0, 418.0, 66.0, 24.0);
+    let rect = tf.r(700.0, 418.0, 66.0, 24.0);
     let cur = match c.systick_src {
         SystickSrc::HclkDiv8 => "/ 8",
         SystickSrc::Hclk => "/ 1",

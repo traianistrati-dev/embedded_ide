@@ -110,27 +110,27 @@ impl AppIde {
                     }
                 }
                 McuTab::Peripherals => show_peripherals_tab(ui, &self.mcu),
-                McuTab::Clock => {
-                    egui::ScrollArea::both().show(ui, |ui| match &mut self.mcu {
-                        Some(mcu) => {
-                            // Mutating mcu.clock is enough — `init_frame`
-                            // regenerates main.rs from MCU state each frame.
-                            let _changed = mcu.draw_clock_tab(ui);
-                        }
-                        None => {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}  Clock configuration — coming soon",
-                                        ph::CLOCK
-                                    ))
-                                    .size(16.0)
-                                    .color(egui::Color32::GRAY),
-                                );
-                            });
-                        }
-                    });
-                }
+                McuTab::Clock => match &mut self.mcu {
+                    Some(mcu) => {
+                        // The Clock tab owns its layout (fixed 3-zone footer +
+                        // scrollable diagram), so no outer ScrollArea here.
+                        // Mutating mcu.clock is enough — `init_frame`
+                        // regenerates main.rs from MCU state each frame.
+                        let _changed = mcu.draw_clock_tab(ui);
+                    }
+                    None => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  Clock configuration — coming soon",
+                                    ph::CLOCK
+                                ))
+                                .size(16.0)
+                                .color(egui::Color32::GRAY),
+                            );
+                        });
+                    }
+                },
                 McuTab::System => {
                     ui.centered_and_justified(|ui| {
                         ui.label(
