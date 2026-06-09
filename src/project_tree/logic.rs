@@ -655,6 +655,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_pin_file_name_includes_type() {
+        let mut state = ProjectTreeState::new();
+        let pins = vec![
+            (2usize, "PC13".to_string(), PinFunction::GpioOutput),
+            (10usize, "PA0".to_string(), PinFunction::GpioInput),
+            (11usize, "PA1".to_string(), PinFunction::AdcChannel { adc: 1, channel: 1 }),
+            (30usize, "PA9".to_string(), PinFunction::TimerPwm { timer: 1, channel: 2 }),
+        ];
+        state.sync_pin_files(&pins);
+
+        // File names carry the selected function type (e.g. pin2_pc13_out.rs).
+        assert_file_exists(&state, "pins/pin2_pc13_out.rs");
+        assert_file_exists(&state, "pins/pin10_pa0_in.rs");
+        assert_file_exists(&state, "pins/pin11_pa1_adc.rs");
+        assert_file_exists(&state, "pins/pin30_pa9_pwm.rs");
+
+        // mod.rs declares the type-suffixed modules.
+        let mod_file = state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "pins/mod.rs")
+            .unwrap();
+        assert!(mod_file.1.contains("pub mod pin2_pc13_out;"));
+        assert!(mod_file.1.contains("pub mod pin30_pa9_pwm;"));
+    }
+
+    #[test]
     fn test_sync_removes_old_pins() {
         let mut state = ProjectTreeState::new();
 
@@ -685,7 +712,7 @@ mod tests {
         let mut state = ProjectTreeState::new();
         let custom_code = "pub mod custom_utils;\npub fn helper() {}";
         let mod_content = format!(
-            "// <<< GENERATED>>>\npub mod pin1_pa0;\n// <<< GENERATED END >>>\n\n{}",
+            "// <<< GENERATED>>>\npub mod pin1_pa0_out;\n// <<< GENERATED END >>>\n\n{}",
             custom_code
         );
         state
@@ -737,7 +764,7 @@ mod tests {
             .find(|(p, _)| p == "pins/mod.rs")
             .unwrap();
         assert!(mod_file.1.contains("// <<< GENERATED>>>"));
-        assert!(mod_file.1.contains("pub mod pin1_pa0;"));
+        assert!(mod_file.1.contains("pub mod pin1_pa0_out;"));
     }
 
     #[test]
@@ -772,18 +799,19 @@ mod tests {
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .find(|(p, _)| p == "pins/pin1_pa0_out.rs")
             .unwrap();
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"));
 
-        // Change to ADC (Analog)
+        // Change to ADC (Analog) — the file renames to the new type suffix.
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::AdcChannel { adc: 1, channel: 0 })];
         state.sync_pin_files(&pins);
 
+        assert_file_not_exists(&state, "pins/pin1_pa0_out.rs");
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .find(|(p, _)| p == "pins/pin1_pa0_adc.rs")
             .unwrap();
         // After function change, the file should be regenerated with new type
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Analog>;"));
@@ -801,7 +829,7 @@ mod tests {
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .find(|(p, _)| p == "pins/pin1_pa0_out.rs")
             .unwrap();
         // GPIO pins should have PinType line without function comment
         assert!(
@@ -817,7 +845,7 @@ mod tests {
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .find(|(p, _)| p == "pins/pin1_pa0_adc.rs")
             .unwrap();
         // ADC should have a comment with the function label on PinType line
         assert!(

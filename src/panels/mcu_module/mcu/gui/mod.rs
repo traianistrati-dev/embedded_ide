@@ -271,26 +271,9 @@ impl Mcu {
             );
         }
 
-        // Apply the selected function to the pin
-        let mut pin_changed: Option<(usize, String, PinFunction)> = None;
-        if let Some((pin_num, func)) = new_function {
-            let old_func = self
-                .find_pin(pin_num)
-                .map(|p| p.selected_function.clone())
-                .unwrap_or(PinFunction::Unset);
-
-            if let Some(pin) = self.find_pin_mut(pin_num) {
-                pin_changed = Some((pin.number, pin.name.clone(), func.clone()));
-                pin.selected_function = func.clone();
-            }
-            self.show_info = None;
-
-            if func == PinFunction::Unset {
-                self.deselect_partners(pin_num, &old_func);
-            } else {
-                self.auto_assign_partners(pin_num, &func);
-            }
-        }
+        // Apply the selected function to the pin (sets partners + clears info).
+        let pin_changed = new_function
+            .and_then(|(pin_num, func)| self.apply_pin_function(pin_num, func));
 
         // Toggle the info popup
         if let Some(func) = toggle_info {

@@ -188,6 +188,35 @@ impl Mcu {
         }
     }
 
+    /// Assign `func` to pin `pin_num`, applying the same side effects as a
+    /// click on the Pins tab: auto-assign partner functions (or deselect them
+    /// when clearing), and close any open info popup.
+    ///
+    /// Returns the `(number, name, func)` change tuple so code-sync callers can
+    /// regenerate the `pins/` files; `None` if `pin_num` doesn't exist.
+    pub fn apply_pin_function(
+        &mut self,
+        pin_num: usize,
+        func: PinFunction,
+    ) -> Option<(usize, String, PinFunction)> {
+        let old_func = self.find_pin(pin_num)?.selected_function.clone();
+
+        let changed = {
+            let pin = self.find_pin_mut(pin_num)?;
+            pin.selected_function = func.clone();
+            (pin.number, pin.name.clone(), func.clone())
+        };
+        self.show_info = None;
+
+        if func == PinFunction::Unset {
+            self.deselect_partners(pin_num, &old_func);
+        } else {
+            self.auto_assign_partners(pin_num, &func);
+        }
+
+        Some(changed)
+    }
+
     /// Finds a pin by number (immutable)
     pub fn find_pin(&self, number: usize) -> Option<&Pin> {
         self.iter_all_pins().find(|p| p.number == number)

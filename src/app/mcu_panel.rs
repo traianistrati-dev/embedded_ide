@@ -110,7 +110,17 @@ impl AppIde {
                         }
                     }
                 }
-                McuTab::Peripherals => show_peripherals_tab(ui, &self.mcu),
+                McuTab::Peripherals => {
+                    // Assigning a function here mutates the MCU just like the
+                    // Pins tab, so re-sync the generated pins/ files on change.
+                    let changed = show_peripherals_tab(ui, &mut self.mcu);
+                    if changed.is_some() {
+                        if let Some(mcu) = &self.mcu {
+                            let all_pins = mcu.all_pin_functions();
+                            self.project_tree.sync_pin_files(&all_pins);
+                        }
+                    }
+                }
                 McuTab::Clock => match &mut self.mcu {
                     Some(mcu) => {
                         // The Clock tab owns its layout (fixed 3-zone footer +
