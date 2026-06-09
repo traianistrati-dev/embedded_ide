@@ -39,12 +39,12 @@ impl AppIde {
             ui.horizontal(|ui| {
                 ui.label("Chip:");
                 ui.label(
-                    egui::RichText::new(self.selected_mcu_type.label())
+                    egui::RichText::new(self.selected_label())
                         .strong()
                         .color(egui::Color32::LIGHT_BLUE),
                 );
                 ui.label(
-                    egui::RichText::new(format!("·  {}", self.selected_mcu_type.family()))
+                    egui::RichText::new(format!("·  {}", self.selected_family()))
                         .color(egui::Color32::GRAY)
                         .size(11.0),
                 );
@@ -79,6 +79,8 @@ impl AppIde {
             // Tab content
             match self.active_tab {
                 McuTab::Pins => {
+                    // Computed before borrowing `self.mcu` mutably below.
+                    let chip_label = self.selected_label();
                     let pin_changed = egui::ScrollArea::both()
                         .show(ui, |ui| match &mut self.mcu {
                             Some(mcu) => mcu.draw(ui),
@@ -87,8 +89,7 @@ impl AppIde {
                                     ui.label(
                                         egui::RichText::new(format!(
                                             "{}  {}  —  support coming soon",
-                                            ph::GEAR,
-                                            self.selected_mcu_type.label()
+                                            ph::GEAR, chip_label
                                         ))
                                         .size(18.0)
                                         .color(egui::Color32::GRAY),

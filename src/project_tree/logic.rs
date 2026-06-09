@@ -121,7 +121,10 @@ impl ProjectTreeState {
             .iter()
             .filter(|(_, _, f)| *f != PinFunction::Unset)
             .map(|(num, name, func)| {
-                let slug = format!("pin{}_{}", num, name.to_lowercase());
+                // Suffix the file/module name with the selected function type
+                // (e.g. `pin2_pc13_out`). Changing a pin's function renames its
+                // file accordingly — the old file is dropped in step 3.
+                let slug = format!("pin{}_{}_{}", num, name.to_lowercase(), func.file_token());
                 (slug, *num, name.as_str(), func)
             })
             .collect();
@@ -642,11 +645,11 @@ mod tests {
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
 
-        assert_file_exists(&state, "pins/pin1_pa0.rs");
+        assert_file_exists(&state, "pins/pin1_pa0_out.rs");
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0.rs")
+            .find(|(p, _)| p == "pins/pin1_pa0_out.rs")
             .unwrap();
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0,"));
     }
@@ -655,13 +658,13 @@ mod tests {
     fn test_sync_removes_old_pins() {
         let mut state = ProjectTreeState::new();
 
-        // Add old pins
+        // Add old pins (using the type-suffixed naming convention)
         state
             .user_src_files
-            .push(("pins/pin1_pa0.rs".to_string(), "".to_string()));
+            .push(("pins/pin1_pa0_out.rs".to_string(), "".to_string()));
         state
             .user_src_files
-            .push(("pins/pin2_pa1.rs".to_string(), "".to_string()));
+            .push(("pins/pin2_pa1_out.rs".to_string(), "".to_string()));
         state
             .user_src_folders
             .push("pins".to_string());
@@ -673,8 +676,8 @@ mod tests {
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
 
-        assert_file_exists(&state, "pins/pin1_pa0.rs");
-        assert_file_not_exists(&state, "pins/pin2_pa1.rs");
+        assert_file_exists(&state, "pins/pin1_pa0_out.rs");
+        assert_file_not_exists(&state, "pins/pin2_pa1_out.rs");
     }
 
     #[test]

@@ -4,10 +4,9 @@ use crate::espflash::EspFlashState;
 use crate::lsp::{self, LspStatus};
 use crate::openocd::OpenOcdState;
 use crate::panels::mcu_module::mcu::Mcu;
-use crate::panels::mcu_module::mcu_catalog::McuType;
-use crate::panels::mcu_module::mock_esp32c3::create_esp32c3;
-use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
-use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
+use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+use crate::panels::mcu_module::mcu_def::{McuDefinition, ProjectDef};
+use crate::panels::mcu_module::{project_gen, project_gen::ProjectFiles, registry};
 use crate::project_tree::ProjectTreeState;
 use crate::required_tools;
 use eframe::egui;
@@ -148,7 +147,10 @@ struct PersistedState {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct AppIde {
-    selected_mcu_type: McuType,
+    /// All known MCU definitions (built-in + later: imported from a folder).
+    mcu_registry: Vec<McuDefinition>,
+    /// `id` of the currently selected MCU (key into `mcu_registry`).
+    selected_mcu_id: String,
     /// None when the selected chip is not yet implemented
     mcu: Option<Mcu>,
     /// Generated Rust HAL code — rebuilt each frame from pin state
@@ -243,9 +245,12 @@ pub struct AppIde {
     // ── Project management ────────────────────────────────────────────────────
     /// `true` while the "New Project" confirmation dialog is open.
     confirm_new_project: bool,
-    /// Chip type staged inside the "New Project" popup.
+    /// Chip `id` staged inside the "New Project" popup.
     /// `None` = "Empty" (no chip change on confirm).
-    pending_mcu_type: Option<McuType>,
+    pending_mcu_id: Option<String>,
+    /// Last "Import MCU…" result message shown in the New Project popup
+    /// (`✔ …` on success, `✗ …` on failure). Cleared when the popup closes.
+    mcu_import_status: Option<String>,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -275,7 +280,12 @@ impl AppIde {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
 
-        let mcu = create_stm32f103c8tx();
+        // Load the MCU registry: bundled built-ins + any user `.ron` imports
+        // from the per-user `mcus/` folder (Phase 5 — runtime import).
+        let mcu_registry = registry::load_registry();
+        let selected_mcu_id = "stm32f103c8t6".to_owned();
+        let mcu = Self::build_mcu_for(&mcu_registry, &selected_mcu_id)
+            .expect("built-in STM32F103 definition must load");
         let generated_code = mcu.fresh_main_rs();
 
         // Pre-compute the saved project dir so we can use it both in the
@@ -324,7 +334,8 @@ impl AppIde {
         dfu::start_usb_monitor(Arc::clone(&dfu_state), cc.egui_ctx.clone());
 
         let mut app = Self {
-            selected_mcu_type: McuType::Stm32f103c8t6,
+            mcu_registry,
+            selected_mcu_id,
             generated_code,
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
@@ -371,7 +382,8 @@ impl AppIde {
             renaming_file: None,
             renaming_folder: None,
             confirm_new_project: false,
-            pending_mcu_type: None,
+            pending_mcu_id: None,
+            mcu_import_status: None,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -391,12 +403,40 @@ impl AppIde {
         app
     }
 
-    fn init_mcu(mcu_type: &McuType) -> Option<Mcu> {
-        match mcu_type {
-            McuType::Stm32f103c8t6 => Some(create_stm32f103c8tx()),
-            McuType::Esp32c3 => Some(create_esp32c3()),
-            _ => None,
-        }
+    /// Build the runtime `Mcu` for `id` from the registry, if present.
+    fn build_mcu_for(registry: &[McuDefinition], id: &str) -> Option<Mcu> {
+        registry.iter().find(|d| d.id == id).map(|d| d.build_mcu())
+    }
+
+    /// The currently-selected MCU definition (key = `selected_mcu_id`).
+    fn selected_def(&self) -> Option<&McuDefinition> {
+        self.mcu_registry.iter().find(|d| d.id == self.selected_mcu_id)
+    }
+
+    /// True when a real chip is selected (replaces `project_config().is_some()`).
+    fn has_project(&self) -> bool {
+        self.selected_def().is_some()
+    }
+
+    /// Display name of the selected chip (empty if none).
+    fn selected_label(&self) -> String {
+        self.selected_def().map(|d| d.display_name.clone()).unwrap_or_default()
+    }
+
+    /// CPU family string of the selected chip (empty if none).
+    fn selected_family(&self) -> String {
+        self.selected_def().map(|d| d.cpu.clone()).unwrap_or_default()
+    }
+
+    /// Toolchain of the selected chip (None if no chip selected).
+    fn selected_toolchain(&self) -> Option<ToolchainKind> {
+        self.selected_def().map(|d| d.toolchain.clone())
+    }
+
+    /// Owned `(project params, toolchain)` for project generation — cloned so no
+    /// borrow of `self` is held across the subsequent `self` mutations.
+    fn selected_build_cfg(&self) -> Option<(ProjectDef, ToolchainKind)> {
+        self.selected_def().map(|d| (d.project.clone(), d.toolchain.clone()))
     }
 
     // ── Frame initialization (frame state, LSP, MCU synchronization) ───────────
@@ -424,12 +464,13 @@ impl AppIde {
         let lsp_status = self.lsp_state.lock().unwrap().status.clone();
         match lsp_status {
             LspStatus::Stopped => {
-                if self.selected_mcu_type.project_config().is_some() {
+                if self.has_project() {
                     let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                    if let Some(config) = self.selected_mcu_type.project_config() {
+                    if let Some((project, toolchain)) = self.selected_build_cfg() {
                         if project_gen::write_project(
                             &build_dir,
-                            &config,
+                            &project,
+                            &toolchain,
                             &self.generated_code,
                             &self.project_tree.user_src_files,
                         )
@@ -490,10 +531,9 @@ impl eframe::App for AppIde {
         let ctrl_s_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S));
 
         // Build project files snapshot (used by both tree and editor panels)
-        let project_files: Option<ProjectFiles> = self
-            .selected_mcu_type
-            .project_config()
-            .map(|cfg| project_gen::build_project_files(&cfg, &self.generated_code));
+        let project_files: Option<ProjectFiles> = self.selected_build_cfg().map(|(project, toolchain)| {
+            project_gen::build_project_files(&project, &toolchain, &self.generated_code)
+        });
 
         // ── Panel 1: Project Tree ─────
         // `save_project_needed` is set when the tree mutates files/folders, so
@@ -510,7 +550,7 @@ impl eframe::App for AppIde {
         // "New Project" → ask for confirmation; default chip selection = Empty
         if new_project_clicked {
             self.confirm_new_project = true;
-            self.pending_mcu_type = None;
+            self.pending_mcu_id = None;
         }
 
         // "Open Project" → show native folder picker, then load files
@@ -526,7 +566,7 @@ impl eframe::App for AppIde {
 
         // "Save Project" → export to folder
         if save_project_clicked {
-            if let Some(config) = self.selected_mcu_type.project_config() {
+            if let Some((project, toolchain)) = self.selected_build_cfg() {
                 if let Some(dest) = rfd::FileDialog::new()
                     .set_title("Choose folder to save the project")
                     .pick_folder()
@@ -534,7 +574,8 @@ impl eframe::App for AppIde {
                     let code = self.generated_code.clone();
                     match project_gen::write_project(
                         &dest,
-                        &config,
+                        &project,
+                        &toolchain,
                         &code,
                         &self.project_tree.user_src_files,
                     ) {
@@ -566,11 +607,12 @@ impl eframe::App for AppIde {
         // tree changed (file added, deleted, or project opened/cleared).
         // This ensures Cargo.toml and all other required files are in sync.
         if save_project_needed {
-            if let Some(config) = self.selected_mcu_type.project_config() {
+            if let Some((project, toolchain)) = self.selected_build_cfg() {
                 let workspace = std::env::temp_dir().join("embedded_ide_0_check");
                 let _ = project_gen::write_project(
                     &workspace,
-                    &config,
+                    &project,
+                    &toolchain,
                     &self.generated_code,
                     &self.project_tree.user_src_files,
                 );

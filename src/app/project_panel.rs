@@ -91,8 +91,11 @@ impl AppIde {
                     );
                 }
 
-                match (project_files, self.selected_mcu_type.project_config()) {
-                    (Some(_), Some(cfg)) => {
+                // Owned (project params, toolchain) so no `self` borrow is held
+                // across the `&mut self` arguments below.
+                let build_cfg = self.selected_build_cfg();
+                match (project_files, build_cfg) {
+                    (Some(_), Some((project, toolchain))) => {
                         let build_guard = self.build_state.lock().unwrap();
                         let build_result = build_guard.result().cloned();
                         drop(build_guard);
@@ -105,8 +108,8 @@ impl AppIde {
                         };
                         show_project_tree_panel(
                             ui,
-                            cfg.pkg_name,
-                            &cfg.toolchain,
+                            &project.pkg_name,
+                            &toolchain,
                             &mut self.selected_file,
                             build_result.as_ref(),
                             Some(&*lsp_guard),

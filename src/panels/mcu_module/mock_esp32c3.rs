@@ -273,6 +273,7 @@ pub fn create_esp32c3() -> Mcu {
 
     Mcu::new(
         "ESP32-C3".to_owned(),
+        "esp32c3".to_owned(),
         ToolchainKind::EspRust,
         top_pins,
         bottom_pins,

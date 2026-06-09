@@ -42,8 +42,12 @@ pub fn partner_functions(func: &PinFunction) -> Vec<PinFunction> {
 
 impl Mcu {
     /// Create a new MCU with the given configuration.
+    ///
+    /// `family` is the codegen backend key (e.g. "stm32f1", "esp32c3"); see
+    /// [`FamilyBackend`](crate::panels::mcu_module::codegen::family::FamilyBackend).
     pub fn new(
         name: String,
+        family: String,
         toolchain: crate::panels::mcu_module::mcu_catalog::ToolchainKind,
         top_pins: Vec<Pin>,
         bottom_pins: Vec<Pin>,
@@ -59,6 +63,7 @@ impl Mcu {
         };
         Self {
             name,
+            family,
             toolchain,
             top_pins,
             bottom_pins,

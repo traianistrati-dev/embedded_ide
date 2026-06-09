@@ -9,6 +9,7 @@ use crate::build::BuildState;
 use crate::dfu::DfuState;
 use crate::espflash::EspFlashState;
 use crate::openocd::OpenOcdState;
+use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use eframe::egui;
 
 impl AppIde {
@@ -34,8 +35,8 @@ impl AppIde {
             // of the remaining area before the editor is laid out.
             // exact_height gives us full control — no egui-internal
             // default_height that would reset on show/hide.
-            egui::TopBottomPanel::bottom("diag_panel")
-                .exact_height(self.diag_panel_height + HANDLE_H)
+            egui::Panel::bottom("diag_panel")
+                .exact_size(self.diag_panel_height + HANDLE_H)
                 .show_inside(ui, |ui| {
                     // ── Drag handle (top edge of panel) ───────
                     let (handle_rect, _) = ui.allocate_exact_size(
@@ -72,12 +73,12 @@ impl AppIde {
 
                     if drag_resp.dragged() {
                         // Dragging up → negative delta.y → panel grows
-                        self.diag_panel_height = (self.diag_panel_height
-                            - drag_resp.drag_delta().y)
-                            .clamp(MIN_H, max_h);
+                        self.diag_panel_height =
+                            (self.diag_panel_height - drag_resp.drag_delta().y).clamp(MIN_H, max_h);
                     }
 
                     // ── Content ────────────────────────────────
+                    let toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
                     show_diag_panel(
                         ui,
                         &self.egui_ctx,
@@ -93,7 +94,7 @@ impl AppIde {
                         &self.espflash_state,
                         &mut self.espflash_port,
                         &self.tools_state,
-                        &self.selected_mcu_type.toolchain(),
+                        &toolchain,
                         &mut self.build_tab,
                         &mut self.selected_diagnostic,
                         &mut self.lsp_selected_diagnostic,

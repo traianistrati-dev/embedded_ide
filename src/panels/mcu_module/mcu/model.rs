@@ -17,7 +17,12 @@ pub const PIN_SPACING: f32 = 3.0;
 #[derive(Clone)]
 pub struct Mcu {
     pub name: String,
-    /// Toolchain family — governs which code template is generated.
+    /// Family / backend key (e.g. "stm32f1", "esp32c3") — selects the
+    /// [`FamilyBackend`](crate::panels::mcu_module::codegen::family::FamilyBackend)
+    /// used for code generation. Distinguishes chips that share a toolchain
+    /// (e.g. all ARM HALs are `RustEmbedded` but differ per family).
+    pub family: String,
+    /// Toolchain family — governs which build/flash pipeline is used.
     pub toolchain: ToolchainKind,
     pub top_pins: Vec<Pin>,
     pub bottom_pins: Vec<Pin>,

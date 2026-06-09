@@ -461,6 +461,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "base64"
+version = "0.21.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
+
+[[package]]
 name = "bit-set"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -874,7 +880,7 @@ dependencies = [
  "pollster",
  "profiling",
  "raw-window-handle",
- "ron",
+ "ron 0.12.1",
  "serde",
  "static_assertions",
  "wasm-bindgen",
@@ -900,7 +906,7 @@ dependencies = [
  "log",
  "nohash-hasher",
  "profiling",
- "ron",
+ "ron 0.12.1",
  "serde",
  "smallvec",
  "unicode-segmentation",
@@ -1004,6 +1010,7 @@ dependencies = [
  "egui_code_editor",
  "notify",
  "rfd",
+ "ron 0.8.1",
  "rusb",
  "serde",
  "serde_json",
@@ -2924,6 +2931,18 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "ron"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91f7eff05f748767f183df4320a63d6936e9c6107d97c9e6bdd9784f4289c94"
+dependencies = [
+ "base64",
+ "bitflags 2.11.1",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]

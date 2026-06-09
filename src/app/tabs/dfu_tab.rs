@@ -4,7 +4,6 @@ use crate::espflash::{self, EspFlashState};
 use crate::openocd::{self, OpenOcdState};
 use crate::panels::mcu_module::ToolchainKind;
 use eframe::egui;
-use egui::TextBuffer;
 use egui_phosphor::regular as ph;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

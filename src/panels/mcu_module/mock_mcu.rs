@@ -258,6 +258,7 @@ pub fn create_stm32f103c8tx() -> Mcu {
 
     Mcu::new(
         "STM32F103C8Tx".to_owned(),
+        "stm32f1".to_owned(),
         ToolchainKind::RustEmbedded,
         top_pins,
         bottom_pins,

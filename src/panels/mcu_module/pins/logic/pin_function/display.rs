@@ -3,6 +3,39 @@ use super::enum_::PinFunction;
 // ── Display helpers ──────────────────────────────────────────────────────────
 
 impl PinFunction {
+    /// Short, filesystem-safe token for the selected function, used as the
+    /// suffix of a generated pin file name (`pin<n>_<name>_<token>.rs`, e.g.
+    /// `pin2_pc13_out.rs`). Always a valid Rust identifier so it can also be a
+    /// `pub mod` name. Peripheral numbers are intentionally omitted — the pin
+    /// number already makes each file name unique.
+    pub fn file_token(&self) -> &'static str {
+        match self {
+            PinFunction::Unset       => "unset",
+            PinFunction::GpioInput   => "in",
+            PinFunction::GpioOutput  => "out",
+            PinFunction::AdcChannel { .. } => "adc",
+            PinFunction::TimerPwm { .. }   => "pwm",
+            PinFunction::UsartTx(_)  => "uart_tx",
+            PinFunction::UsartRx(_)  => "uart_rx",
+            PinFunction::UsartCts(_) => "uart_cts",
+            PinFunction::UsartRts(_) => "uart_rts",
+            PinFunction::UsartCk(_)  => "uart_ck",
+            PinFunction::SpiNss(_)   => "spi_nss",
+            PinFunction::SpiSck(_)   => "spi_sck",
+            PinFunction::SpiMiso(_)  => "spi_miso",
+            PinFunction::SpiMosi(_)  => "spi_mosi",
+            PinFunction::I2cScl(_)   => "i2c_scl",
+            PinFunction::I2cSda(_)   => "i2c_sda",
+            PinFunction::UsbDm       => "usb_dm",
+            PinFunction::UsbDp       => "usb_dp",
+            PinFunction::CanRx       => "can_rx",
+            PinFunction::CanTx       => "can_tx",
+            PinFunction::SwdIo       => "swdio",
+            PinFunction::SwdClk      => "swclk",
+            PinFunction::Mco         => "mco",
+        }
+    }
+
     /// Full label shown on the function button
     pub fn label(&self) -> String {
         match self {

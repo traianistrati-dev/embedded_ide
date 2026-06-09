@@ -21,7 +21,7 @@ pub const HSE_MAX_HZ: u32 = 16_000_000;
 // ── Selectable node options (for UI dropdowns) ────────────────────────────────
 
 /// SYSCLK source — the `SW` mux in Figure 2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SysclkSrc {
     Hsi,
     Hse,
@@ -29,7 +29,7 @@ pub enum SysclkSrc {
 }
 
 /// PLL input — combines the `PLLSRC` mux and the `PLLXTPRE` (/1 or /2) divider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PllSrc {
     /// HSI / 2
     HsiDiv2,
@@ -40,7 +40,7 @@ pub enum PllSrc {
 }
 
 /// USB prescaler — the `USB Prescaler /1, 1.5` block. USBCLK must equal 48 MHz.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UsbPre {
     /// USBCLK = PLLCLK / 1.5  (the usual choice for a 72 MHz PLL)
     Div1_5,
@@ -49,7 +49,7 @@ pub enum UsbPre {
 }
 
 /// Main Clock Output (MCO) selection — the bottom-left mux in Figure 2.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Mco {
     None,
     Sysclk,
@@ -61,7 +61,7 @@ pub enum Mco {
 
 /// RTC clock source — the `RTCSEL` / RTC Clock Mux in Figure 2.
 /// UI/diagram only (the stm32f1xx-hal `freeze` chain doesn't configure RTC).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RtcSrc {
     None,
     /// HSE / 128
@@ -72,7 +72,7 @@ pub enum RtcSrc {
 
 /// Cortex SysTick source — `to Cortex System timer` in Figure 2.
 /// UI/diagram only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SystickSrc {
     /// HCLK / 8 (datasheet default)
     HclkDiv8,
@@ -94,7 +94,7 @@ pub const PLL_MUL_MAX: u8 = 16;
 
 // ── STM32F1 clock configuration ───────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stm32f1Clock {
     /// External crystal frequency in Hz (only meaningful when `hse_enabled`).
     pub hse_hz: u32,

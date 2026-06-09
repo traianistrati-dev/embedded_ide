@@ -106,12 +106,13 @@ impl AppIde {
                 );
 
                 if build_btn.clicked() {
-                    if let Some(config) = self.selected_mcu_type.project_config() {
+                    if let Some((project, toolchain)) = self.selected_build_cfg() {
                         let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                         let code = self.generated_code.clone();
                         match project_gen::write_project(
                             &build_dir,
-                            &config,
+                            &project,
+                            &toolchain,
                             &code,
                             &self.project_tree.user_src_files,
                         ) {
@@ -120,15 +121,15 @@ impl AppIde {
                                 self.build_tab = BuildPanelTab::Cargo;
                                 build::start_build(
                                     build_dir,
-                                    config.target.to_string(),
+                                    project.target.clone(),
                                     Arc::clone(&self.build_state),
                                     self.egui_ctx.clone(),
                                 );
                             }
                             Err(e) => {
-                                *self.build_state.lock().unwrap() = BuildState::Failed(
-                                    format!("Could not write project to temp dir: {e}"),
-                                );
+                                *self.build_state.lock().unwrap() = BuildState::Failed(format!(
+                                    "Could not write project to temp dir: {e}"
+                                ));
                             }
                         }
                     }
@@ -155,15 +156,15 @@ impl AppIde {
                 let dfu_label = dfu_guard.status_label().to_string();
                 let dfu_color = dfu_guard.status_color();
                 let dfu_detail = dfu_guard.detail();
-                let device_ok = matches!(*dfu_guard, DfuState::DeviceFound(_));
+                _ = matches!(*dfu_guard, DfuState::DeviceFound(_));
                 drop(dfu_guard);
 
                 let ocd_busy = self.openocd_state.lock().unwrap().is_busy();
                 let esp_busy = self.espflash_state.lock().unwrap().is_busy();
                 let any_busy = dfu_busy || ocd_busy || esp_busy;
 
-                // Determine toolchain of the selected chip
-                let chip_toolchain = self.selected_mcu_type.toolchain();
+                // Determine toolchain of the selected chip (SdccC = no flash UI).
+                let chip_toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
 
                 // Determine if the selected programmer supports SWD flashing
                 let (is_swd_capable, sel_interface_cfg, sel_adapter) = {
@@ -286,13 +287,13 @@ impl AppIde {
                             ),
                         );
                         if flash_swd_btn.clicked() {
-                            if let Some(config) = self.selected_mcu_type.project_config() {
-                                let build_dir =
-                                    std::env::temp_dir().join("embedded_ide_0_check");
+                            if let Some((project, toolchain)) = self.selected_build_cfg() {
+                                let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                                 let code = self.generated_code.clone();
                                 if project_gen::write_project(
                                     &build_dir,
-                                    &config,
+                                    &project,
+                                    &toolchain,
                                     &code,
                                     &self.project_tree.user_src_files,
                                 )
@@ -301,8 +302,8 @@ impl AppIde {
                                     self.build_tab = BuildPanelTab::Dfu;
                                     openocd::start_flash(
                                         build_dir,
-                                        config.target.to_string(),
-                                        config.pkg_name.to_string(),
+                                        project.target.clone(),
+                                        project.pkg_name.clone(),
                                         sel_interface_cfg.clone(),
                                         sel_adapter.clone(),
                                         self.openocd_target_cfg.clone(),
@@ -329,28 +330,23 @@ impl AppIde {
                         let flash_esp_btn = ui.add_enabled(
                             flash_esp_enabled,
                             egui::Button::new(
-                                egui::RichText::new(format!(
-                                    "{} Flash ESP32",
-                                    ph::LIGHTNING
-                                ))
-                                .size(11.0)
-                                .color(
-                                    if flash_esp_enabled {
+                                egui::RichText::new(format!("{} Flash ESP32", ph::LIGHTNING))
+                                    .size(11.0)
+                                    .color(if flash_esp_enabled {
                                         egui::Color32::from_rgb(220, 140, 60)
                                     } else {
                                         egui::Color32::GRAY
-                                    },
-                                ),
+                                    }),
                             ),
                         );
                         if flash_esp_btn.clicked() {
-                            if let Some(config) = self.selected_mcu_type.project_config() {
-                                let build_dir =
-                                    std::env::temp_dir().join("embedded_ide_0_check");
+                            if let Some((project, toolchain)) = self.selected_build_cfg() {
+                                let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
                                 let code = self.generated_code.clone();
                                 if project_gen::write_project(
                                     &build_dir,
-                                    &config,
+                                    &project,
+                                    &toolchain,
                                     &code,
                                     &self.project_tree.user_src_files,
                                 )
@@ -377,8 +373,8 @@ impl AppIde {
 
                                     espflash::start_flash(
                                         build_dir,
-                                        config.target.to_string(),
-                                        config.probe_chip.to_string(),
+                                        project.target.clone(),
+                                        project.probe_chip.clone(),
                                         port,
                                         Arc::clone(&self.espflash_state),
                                         Arc::clone(&self.dfu_log),

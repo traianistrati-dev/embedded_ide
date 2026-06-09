@@ -108,7 +108,7 @@ pub fn apply_dark_theme(ctx: &egui::Context) {
     ctx.set_visuals(vis);
 
     // ── Global style tweaks ──────────────────────────────────────────────────
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
 
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(8.0, 3.0);
@@ -137,5 +137,5 @@ pub fn apply_dark_theme(ctx: &egui::Context) {
         egui::FontId::new(13.0, egui::FontFamily::Monospace),
     );
 
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }

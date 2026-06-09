@@ -6,7 +6,7 @@
 //! (writing the whole project to disk when the tree changed).
 
 use super::{AppIde, McuTab, ProjectFileId};
-use crate::panels::mcu_module::mcu_catalog::McuType;
+use crate::panels::mcu_module::{codegen, registry};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
@@ -33,40 +33,128 @@ impl AppIde {
                 );
                 ui.add_space(8.0);
 
-                // ── Chip selector ─────────────────────────────────────────
+                // ── Chip selector (driven by the MCU registry) ────────────
+                // (id, display_name) snapshot so the closure doesn't borrow the
+                // registry while mutating `pending_mcu_id`.
+                let options: Vec<(String, String)> = self
+                    .mcu_registry
+                    .iter()
+                    .map(|d| (d.id.clone(), d.display_name.clone()))
+                    .collect();
+                let selected_text = match &self.pending_mcu_id {
+                    None => "— Empty —".to_string(),
+                    Some(id) => options
+                        .iter()
+                        .find(|(oid, _)| oid == id)
+                        .map(|(_, name)| name.clone())
+                        .unwrap_or_else(|| id.clone()),
+                };
+                let family = self
+                    .pending_mcu_id
+                    .as_ref()
+                    .and_then(|id| self.mcu_registry.iter().find(|d| &d.id == id))
+                    .map(|d| d.cpu.clone());
+
                 ui.horizontal(|ui| {
                     ui.label("Chip:");
-                    let selected_text = match &self.pending_mcu_type {
-                        None => "— Empty —".to_string(),
-                        Some(t) => t.label().to_string(),
-                    };
                     egui::ComboBox::from_id_salt("new_project_chip_selector")
                         .selected_text(selected_text)
                         .show_ui(ui, |ui| {
                             // "Empty" — first entry, no chip selected
-                            ui.selectable_value(&mut self.pending_mcu_type, None, "— Empty —");
-                            for mcu_type in McuType::all() {
-                                let label = if mcu_type.is_supported() {
-                                    mcu_type.label().to_string()
-                                } else {
-                                    format!("{} — coming soon", mcu_type.label())
-                                };
+                            ui.selectable_value(&mut self.pending_mcu_id, None, "— Empty —");
+                            for (id, name) in &options {
                                 ui.selectable_value(
-                                    &mut self.pending_mcu_type,
-                                    Some(mcu_type),
-                                    label,
+                                    &mut self.pending_mcu_id,
+                                    Some(id.clone()),
+                                    name,
                                 );
                             }
                         });
                     // Architecture family hint
-                    if let Some(t) = &self.pending_mcu_type {
+                    if let Some(fam) = family {
                         ui.label(
-                            egui::RichText::new(t.family())
+                            egui::RichText::new(fam)
                                 .color(egui::Color32::GRAY)
                                 .size(11.0),
                         );
                     }
+
+                    // ── Import MCU… (runtime .ron import) ──────────────
+                    if ui
+                        .button(egui::RichText::new(format!("{} Import…", ph::PLUS)).size(12.0))
+                        .on_hover_text("Import an MCU definition from a .ron file")
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("MCU definition", &["ron"])
+                            .set_title("Import MCU definition (.ron)")
+                            .pick_file()
+                        {
+                            match registry::import_file(&path) {
+                                Ok(def) => {
+                                    let id = def.id.clone();
+                                    let name = def.display_name.clone();
+                                    let fam = def.family.clone();
+                                    registry::merge_def(&mut self.mcu_registry, def);
+                                    self.pending_mcu_id = Some(id);
+                                    let note = if codegen::family::backend_for(&fam).is_none() {
+                                        format!(" — no codegen backend for '{fam}'")
+                                    } else {
+                                        String::new()
+                                    };
+                                    self.mcu_import_status =
+                                        Some(format!("{}  Imported {name}{note}", ph::CHECK));
+                                }
+                                Err(e) => {
+                                    self.mcu_import_status =
+                                        Some(format!("{}  {e}", ph::WARNING));
+                                }
+                            }
+                        }
+                    }
                 });
+
+                // Last import result (persists until the popup closes).
+                if let Some(msg) = &self.mcu_import_status {
+                    let ok = msg.starts_with(ph::CHECK);
+                    let col = if ok {
+                        egui::Color32::from_rgb(120, 200, 120)
+                    } else {
+                        egui::Color32::from_rgb(220, 120, 90)
+                    };
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new(msg).size(11.0).color(col));
+                }
+
+                // ── Import-folder discoverability ──────────────────────────
+                // Show where user .ron definitions live + a one-click "Open".
+                if let Some(dir) = registry::user_mcus_dir() {
+                    let path_str = dir.display().to_string();
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} Import folder:", ph::FOLDER))
+                                .size(10.5)
+                                .color(egui::Color32::GRAY),
+                        );
+                        if ui
+                            .button(egui::RichText::new("Open").size(10.5))
+                            .on_hover_text(format!("Open {path_str}\n(drop .ron files here)"))
+                            .clicked()
+                        {
+                            registry::open_user_mcus_dir();
+                        }
+                    });
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(path_str)
+                                .size(9.5)
+                                .monospace()
+                                .color(egui::Color32::from_gray(120)),
+                        )
+                        .truncate(),
+                    );
+                }
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -78,10 +166,11 @@ impl AppIde {
                         .clicked()
                     {
                         // ── Apply chip change (if any) ────────────────────
-                        if let Some(new_chip) = self.pending_mcu_type.take() {
-                            if new_chip != self.selected_mcu_type {
-                                self.selected_mcu_type = new_chip;
-                                self.mcu = Self::init_mcu(&self.selected_mcu_type);
+                        if let Some(new_id) = self.pending_mcu_id.take() {
+                            if new_id != self.selected_mcu_id {
+                                self.selected_mcu_id = new_id;
+                                self.mcu =
+                                    Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
                                 self.generated_code = self
                                     .mcu
                                     .as_ref()
@@ -106,6 +195,7 @@ impl AppIde {
                         self.new_folder_parent_folder = None;
                         self.new_file_in_folder = None;
                         self.confirm_new_project = false;
+                        self.mcu_import_status = None;
                         // Pre-populate the pins/ scaffold so the tree shows
                         // the folder immediately, before any pin is configured.
                         self.project_tree.init_pins_scaffold();
@@ -114,7 +204,8 @@ impl AppIde {
                     ui.add_space(8.0);
                     if ui.button("Cancel").clicked() {
                         self.confirm_new_project = false;
-                        self.pending_mcu_type = None;
+                        self.pending_mcu_id = None;
+                        self.mcu_import_status = None;
                     }
                 });
                 ui.add_space(4.0);

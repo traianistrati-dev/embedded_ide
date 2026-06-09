@@ -9,7 +9,7 @@ pub struct FunctionInfo {
 
 // ── PinFunction enum ─────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum PinFunction {
     #[default]
     Unset,

@@ -28,7 +28,8 @@
 //! needed in rustflags; adding a second `-Tmemory.x` redefines IROM/DROM/etc.
 //! and causes a linker error ("region already defined").
 
-use super::mcu_catalog::{McuProjectConfig, ToolchainKind};
+use super::mcu_catalog::ToolchainKind;
+use super::mcu_def::ProjectDef;
 use std::{fs, io, path::Path};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -47,8 +48,12 @@ pub struct ProjectFiles {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Builds all file contents in memory without touching the filesystem.
-pub fn build_project_files(config: &McuProjectConfig, main_rs: &str) -> ProjectFiles {
-    match config.toolchain {
+pub fn build_project_files(
+    config: &ProjectDef,
+    toolchain: &ToolchainKind,
+    main_rs: &str,
+) -> ProjectFiles {
+    match toolchain {
         ToolchainKind::RustEmbedded => ProjectFiles {
             main_rs: main_rs.to_owned(),
             cargo_toml: cargo_toml_embedded(config),
@@ -84,11 +89,12 @@ pub fn build_project_files(config: &McuProjectConfig, main_rs: &str) -> ProjectF
 /// `user_src_files` is a list of `(path_relative_to_src, content)` pairs.
 pub fn write_project(
     dest: &Path,
-    config: &McuProjectConfig,
+    config: &ProjectDef,
+    toolchain: &ToolchainKind,
     main_rs: &str,
     user_src_files: &[(String, String)],
 ) -> io::Result<()> {
-    let files = build_project_files(config, main_rs);
+    let files = build_project_files(config, toolchain, main_rs);
 
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
@@ -207,7 +213,7 @@ fn main() -> ! {
 
 // ── RustEmbedded file generators ──────────────────────────────────────────────
 
-fn cargo_toml_embedded(c: &McuProjectConfig) -> String {
+fn cargo_toml_embedded(c: &ProjectDef) -> String {
     format!(
         "[package]\n\
          name    = \"{name}-project\"\n\
@@ -244,7 +250,7 @@ fn cargo_toml_embedded(c: &McuProjectConfig) -> String {
     )
 }
 
-fn cargo_config_embedded(c: &McuProjectConfig) -> String {
+fn cargo_config_embedded(c: &ProjectDef) -> String {
     format!(
         "[build]\n\
          target = \"{target}\"\n\
@@ -260,7 +266,7 @@ fn cargo_config_embedded(c: &McuProjectConfig) -> String {
     )
 }
 
-fn memory_x(c: &McuProjectConfig) -> String {
+fn memory_x(c: &ProjectDef) -> String {
     format!(
         "/* {comment} */\n\
          MEMORY\n\
@@ -300,7 +306,7 @@ fn build_rs_embedded() -> String {
 
 // ── EspRust file generators ───────────────────────────────────────────────────
 
-fn cargo_toml_esp(c: &McuProjectConfig) -> String {
+fn cargo_toml_esp(c: &ProjectDef) -> String {
     format!(
         "[package]\n\
          name    = \"{name}-project\"\n\
@@ -334,7 +340,7 @@ fn cargo_toml_esp(c: &McuProjectConfig) -> String {
     )
 }
 
-fn cargo_config_esp(c: &McuProjectConfig) -> String {
+fn cargo_config_esp(c: &ProjectDef) -> String {
     format!(
         "[target.{target}]\n\
          # --ignore-app-descriptor: esp-hal bare-metal binaries do not carry an\n\

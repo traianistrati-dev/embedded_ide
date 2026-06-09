@@ -1,0 +1,607 @@
+McuDefinition(
+    id: "stm32f103c8t6",
+    display_name: "STM32F103C8Tx",
+    family: "stm32f1",
+    package: "LQFP48",
+    cpu: "ARM Cortex-M3",
+    toolchain: RustEmbedded,
+    project: ProjectDef(
+        pkg_name: "stm32f103c8t6",
+        target: "thumbv7m-none-eabi",
+        flash_origin: "0x08000000",
+        flash_size: "64K",
+        ram_origin: "0x20000000",
+        ram_size: "20K",
+        hal_dep: "stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"medium\", \"rt\"] }",
+        probe_chip: "STM32F103C8",
+        memory_comment: "STM32F103C8T6  —  64 KiB Flash / 20 KiB RAM",
+    ),
+    pins: PinLayout(
+        top: [
+            PinDef(
+                number: 48,
+                name: "VDD",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 47,
+                name: "VSS",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 46,
+                name: "PB9",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 4,
+                        channel: 4,
+                    ),
+                    CanTx,
+                    I2cSda(1),
+                ],
+            ),
+            PinDef(
+                number: 45,
+                name: "PB8",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 4,
+                        channel: 3,
+                    ),
+                    CanRx,
+                    I2cScl(1),
+                ],
+            ),
+            PinDef(
+                number: 44,
+                name: "BOOT0",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 43,
+                name: "PB7",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cSda(1),
+                    TimerPwm(
+                        timer: 4,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 42,
+                name: "PB6",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cScl(1),
+                    TimerPwm(
+                        timer: 4,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 41,
+                name: "PB5",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMosi(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 40,
+                name: "PB4",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMiso(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 39,
+                name: "PB3",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiSck(1),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 38,
+                name: "PA15",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiNss(1),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 37,
+                name: "PA14",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SwdClk,
+                ],
+            ),
+        ],
+        bottom: [
+            PinDef(
+                number: 13,
+                name: "PA3",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 3,
+                    ),
+                    UsartRx(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 4,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 14,
+                name: "PA4",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 4,
+                    ),
+                    SpiNss(1),
+                    UsartCk(2),
+                ],
+            ),
+            PinDef(
+                number: 15,
+                name: "PA5",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 5,
+                    ),
+                    SpiSck(1),
+                ],
+            ),
+            PinDef(
+                number: 16,
+                name: "PA6",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 6,
+                    ),
+                    SpiMiso(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 17,
+                name: "PA7",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 7,
+                    ),
+                    SpiMosi(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 18,
+                name: "PB0",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 8,
+                    ),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 3,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 19,
+                name: "PB1",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 9,
+                    ),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 4,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 20,
+                name: "PB2",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 21,
+                name: "PB10",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cScl(2),
+                    UsartTx(3),
+                ],
+            ),
+            PinDef(
+                number: 22,
+                name: "PB11",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cSda(2),
+                    UsartRx(3),
+                ],
+            ),
+            PinDef(
+                number: 23,
+                name: "VSS",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 24,
+                name: "VDD",
+                reserved: true,
+                functions: [],
+            ),
+        ],
+        left: [
+            PinDef(
+                number: 1,
+                name: "VBAT",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 2,
+                name: "PC13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 3,
+                name: "PC14",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 4,
+                name: "PC15",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 5,
+                name: "PD0",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 6,
+                name: "PD1",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 7,
+                name: "NRST",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 8,
+                name: "VSSA",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 9,
+                name: "VDDA",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 10,
+                name: "PA0",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 0,
+                    ),
+                    UsartCts(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 11,
+                name: "PA1",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 1,
+                    ),
+                    UsartRts(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 12,
+                name: "PA2",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 2,
+                    ),
+                    UsartTx(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 3,
+                    ),
+                ],
+            ),
+        ],
+        right: [
+            PinDef(
+                number: 36,
+                name: "VDD",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 35,
+                name: "VSS",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 34,
+                name: "PA13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SwdIo,
+                ],
+            ),
+            PinDef(
+                number: 33,
+                name: "PA12",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsbDp,
+                    CanTx,
+                    UsartRts(1),
+                ],
+            ),
+            PinDef(
+                number: 32,
+                name: "PA11",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsbDm,
+                    CanRx,
+                    UsartCts(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 4,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 31,
+                name: "PA10",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsartRx(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 3,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 30,
+                name: "PA9",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsartTx(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 29,
+                name: "PA8",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    Mco,
+                    UsartCk(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 28,
+                name: "PB15",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMosi(2),
+                ],
+            ),
+            PinDef(
+                number: 27,
+                name: "PB14",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMiso(2),
+                    UsartRts(3),
+                ],
+            ),
+            PinDef(
+                number: 26,
+                name: "PB13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiSck(2),
+                    UsartCts(3),
+                ],
+            ),
+            PinDef(
+                number: 25,
+                name: "PB12",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiNss(2),
+                    UsartCk(3),
+                    I2cScl(2),
+                ],
+            ),
+        ],
+    ),
+    clock: Stm32f1(Stm32f1Clock(
+        hse_hz: 8000000,
+        hse_enabled: true,
+        sysclk_src: Pll,
+        pll_src: Hse,
+        pll_mul: 9,
+        ahb_pre: 1,
+        apb1_pre: 2,
+        apb2_pre: 1,
+        adc_pre: 6,
+        usb_pre: Div1_5,
+        mco: None,
+        rtc_src: Lsi,
+        systick_src: HclkDiv8,
+        css_on: false,
+    )),
+)

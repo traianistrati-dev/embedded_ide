@@ -6,7 +6,6 @@
 
 use super::AppIde;
 use super::ProjectFileId;
-use crate::panels::mcu_module::mcu_catalog::McuType;
 use crate::project_tree::ProjectTreeState;
 use notify::Watcher as _;
 
@@ -38,17 +37,21 @@ impl AppIde {
         // pin diagram is active when parse_main_rs() is applied.
         let cargo_toml = root.join("Cargo.toml");
         if let Ok(cargo) = std::fs::read_to_string(&cargo_toml) {
-            let detected = if cargo.contains("stm32f1xx-hal") {
-                Some(McuType::Stm32f103c8t6)
-            } else if cargo.contains("esp-hal") {
-                Some(McuType::Esp32c3)
-            } else {
-                None
-            };
-            if let Some(mcu_type) = detected {
-                if mcu_type != self.selected_mcu_type {
-                    self.selected_mcu_type = mcu_type.clone();
-                    self.mcu = Self::init_mcu(&mcu_type);
+            // Match the project's HAL crate against each registered MCU's hal_dep
+            // (the crate name = first whitespace token of `hal_dep`).
+            let detected_id: Option<String> = self
+                .mcu_registry
+                .iter()
+                .find(|d| {
+                    let crate_name = d.project.hal_dep.split_whitespace().next().unwrap_or("");
+                    !crate_name.is_empty() && cargo.contains(crate_name)
+                })
+                .map(|d| d.id.clone());
+
+            if let Some(id) = detected_id {
+                if id != self.selected_mcu_id {
+                    self.selected_mcu_id = id;
+                    self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
                     // Reset LSP — it was attached to the previous chip's workspace.
                     self.lsp_state.lock().unwrap().reset();
                     self.lsp_selected_diagnostic = None;
