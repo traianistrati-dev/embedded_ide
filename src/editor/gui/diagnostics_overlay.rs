@@ -105,8 +105,11 @@ pub fn show_diagnostics_overlay(
         let same_row_eol = (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
         if same_row_eol {
             let msg_x = gp.x + loc_eol.min.x + 16.0;
-            let short_msg: String = diag.message.chars().take(72).collect();
-            let short_msg = if diag.message.chars().count() > 72 {
+            // First line only, then cap length — a multi-line message rendered
+            // raw would draw extra rows and overlap the code below it.
+            let headline = diag.headline();
+            let short_msg: String = headline.chars().take(72).collect();
+            let short_msg = if headline.chars().count() > 72 || diag.has_more_lines() {
                 format!("{short_msg}…")
             } else {
                 short_msg

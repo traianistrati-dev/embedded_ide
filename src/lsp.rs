@@ -68,6 +68,21 @@ pub struct LspDiagnostic {
     pub code:     Option<String>,
 }
 
+impl LspDiagnostic {
+    /// First line of the message, for compact one-line rows. Rust-analyzer
+    /// messages are frequently multi-line (e.g. "mismatched types\nexpected …")
+    /// — the remainder is shown only on expand (RA tab detail) or hover.
+    pub fn headline(&self) -> &str {
+        self.message.lines().next().unwrap_or("").trim_end()
+    }
+
+    /// `true` when the message has meaningful content beyond the first line,
+    /// so callers can hint that more is available (e.g. append "…").
+    pub fn has_more_lines(&self) -> bool {
+        self.message.lines().skip(1).any(|l| !l.trim().is_empty())
+    }
+}
+
 /// A single item returned by a `textDocument/completion` response.
 #[derive(Clone, Debug, Default)]
 pub struct CompletionItem {
@@ -891,4 +906,42 @@ fn strip_md_fences(s: &str) -> String {
         }
     }
     out.trim().to_owned()
+}
+
+#[cfg(test)]
+mod diagnostic_headline_tests {
+    use super::*;
+
+    fn diag(message: &str) -> LspDiagnostic {
+        LspDiagnostic {
+            severity: DiagSeverity::Error,
+            message: message.to_owned(),
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 1,
+            code: None,
+        }
+    }
+
+    #[test]
+    fn headline_is_first_line_only() {
+        let d = diag("mismatched types\nexpected `u8`, found `u16`");
+        assert_eq!(d.headline(), "mismatched types");
+        assert!(d.has_more_lines());
+    }
+
+    #[test]
+    fn single_line_has_no_more() {
+        let d = diag("unused variable: `x`");
+        assert_eq!(d.headline(), "unused variable: `x`");
+        assert!(!d.has_more_lines());
+    }
+
+    #[test]
+    fn trailing_blank_lines_do_not_count() {
+        let d = diag("cannot find value `foo`\n\n  ");
+        assert_eq!(d.headline(), "cannot find value `foo`");
+        assert!(!d.has_more_lines(), "blank trailing lines aren't 'more'");
+    }
 }

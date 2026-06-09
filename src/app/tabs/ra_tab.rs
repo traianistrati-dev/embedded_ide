@@ -208,16 +208,22 @@ pub fn show_ra_tab(
                         x = r.right() + 6.0;
                     }
 
-                    // Message
+                    // Message — first line only (the full body is shown in the
+                    // detail view below when the row is expanded/selected).
                     let msg_color = if is_sel {
                         egui::Color32::WHITE
                     } else {
                         egui::Color32::from_rgb(210, 210, 220)
                     };
+                    let headline = if diag.has_more_lines() {
+                        format!("{}  …", diag.headline())
+                    } else {
+                        diag.headline().to_owned()
+                    };
                     painter.text(
                         egui::pos2(x, cy),
                         egui::Align2::LEFT_CENTER,
-                        &diag.message,
+                        headline,
                         egui::FontId::proportional(11.0),
                         msg_color,
                     );
