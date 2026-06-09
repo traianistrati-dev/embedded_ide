@@ -340,6 +340,75 @@ mod tests {
         assert_eq!(end_count, 1);
     }
 
+    // ── Peripheral helper placement / ADC fix ────────────────────────────────
+
+    #[test]
+    fn test_adc_helper_takes_clocks_by_value_after_main() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        // PA0 (pin 10) supports ADC1 IN0.
+        mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
+        let code = mcu.fresh_main_rs();
+
+        // Bug fix: the helper takes `Clocks` BY VALUE, not `&Clocks`.
+        assert_contains_substring(
+            &code,
+            "fn init_adc1(adc1: pac::ADC1, clocks: Clocks) -> adc::Adc<pac::ADC1>",
+        );
+        assert_not_contains_substring(&code, "clocks: &Clocks)");
+        // …and the call passes `clocks` by value (Clocks is Copy).
+        assert_contains_substring(&code, "init_adc1(dp.ADC1, clocks)");
+
+        // The helper is placed AFTER `fn main`, outside the GENERATED block.
+        let main_pos = code.find("fn main()").unwrap();
+        let helper_pos = code.find("fn init_adc1(").unwrap();
+        let gen_end = code.find(GEN_END).unwrap();
+        assert!(helper_pos > main_pos, "helper must come after fn main");
+        assert!(helper_pos > gen_end, "helper must be outside the GEN block");
+    }
+
+    #[test]
+    fn test_helper_added_on_update_and_idempotent() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
+
+        let blank = "// <<< GENERATED BEGIN — do not edit between these markers >>>\n\
+                     OLD\n\
+                     // <<< GENERATED END >>>\n    loop {}\n}\n";
+        let once = mcu.update_main_rs(blank);
+        assert_contains_substring(&once, "fn init_adc1(adc1: pac::ADC1, clocks: Clocks)");
+
+        let twice = mcu.update_main_rs(&once);
+        assert_eq!(once.matches("fn init_adc1(").count(), 1, "no duplicate helper");
+        assert_eq!(twice.matches("fn init_adc1(").count(), 1, "still single helper");
+        assert_eq!(once, twice, "update must be idempotent");
+    }
+
+    #[test]
+    fn test_user_edited_helper_is_preserved() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
+
+        // A file where the user customised the helper body.
+        let edited = "// <<< GENERATED BEGIN — do not edit between these markers >>>\n\
+                      OLD\n\
+                      // <<< GENERATED END >>>\n    loop {}\n}\n\n\
+                      fn init_adc1(adc1: pac::ADC1, clocks: Clocks) -> adc::Adc<pac::ADC1> {\n\
+                          let mut a = adc::Adc::adc1(adc1, clocks);\n\
+                          a.set_sample_time(adc::SampleTime::T_239);\n\
+                          a\n}\n";
+        let out = mcu.update_main_rs(edited);
+
+        // The custom body survives and the helper is not duplicated.
+        assert_contains_substring(&out, "set_sample_time");
+        assert_eq!(out.matches("fn init_adc1(").count(), 1, "must not re-add helper");
+    }
+
     // ── Clock codegen Tests ───────────────────────────────────────────────────
 
     #[test]

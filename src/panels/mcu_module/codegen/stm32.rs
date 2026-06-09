@@ -246,118 +246,11 @@ pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin], clock: &ClockCo
         pin_section.push('\n');
     }
 
-    // ── Peripheral helper function definitions ───────────────────────────────
-    let mut fn_defs = String::new();
-
-    for n in 1u8..=3 {
-        let tx = configured
-            .iter()
-            .find(|(p, _)| p.selected_function == PinFunction::UsartTx(n));
-        let rx = configured
-            .iter()
-            .find(|(p, _)| p.selected_function == PinFunction::UsartRx(n));
-        if tx.is_none() && rx.is_none() {
-            continue;
-        }
-        fn_defs.push_str(&format!(
-            r#"fn init_usart{n}(
-    usart:  pac::USART{n},
-    pins:   impl serial::Pins<pac::USART{n}>,
-    afio:   &mut afio::Parts,
-    clocks: &Clocks,
-) -> (serial::Tx<pac::USART{n}>, serial::Rx<pac::USART{n}>) {{
-    Serial::new(
-        usart,
-        pins,
-        &mut afio.mapr,
-        Config::default().baudrate(115_200.bps()),
-        clocks,
-    )
-    .split()
-}}
-
-"#
-        ));
-    }
-
-    for n in 1u8..=2 {
-        let sck = configured
-            .iter()
-            .find(|(p, _)| p.selected_function == PinFunction::SpiSck(n));
-        let mosi = configured
-            .iter()
-            .find(|(p, _)| p.selected_function == PinFunction::SpiMosi(n));
-        if sck.is_none() && mosi.is_none() {
-            continue;
-        }
-        let remap = format!("Spi{n}NoRemap");
-        fn_defs.push_str(&format!(
-            r#"fn init_spi{n}<PINS>(
-    spi:    pac::SPI{n},
-    pins:   PINS,
-    afio:   &mut afio::Parts,
-    clocks: &Clocks,
-) -> Spi<pac::SPI{n}, {remap}, PINS>
-where
-    PINS: spi::Pins<{remap}>,
-{{
-    Spi::spi{n}(
-        spi,
-        pins,
-        &mut afio.mapr,
-        Mode {{
-            polarity: Polarity::IdleLow,
-            phase: Phase::CaptureOnFirstTransition,
-        }},
-        1.MHz(),
-        clocks,
-    )
-}}
-
-"#
-        ));
-    }
-
-    for n in 1u8..=2 {
-        let scl = configured
-            .iter()
-            .find(|(p, _)| p.selected_function == PinFunction::I2cScl(n));
-        let sda = configured
-            .iter()
-            .find(|(p, _)| p.selected_function == PinFunction::I2cSda(n));
-        if scl.is_none() || sda.is_none() {
-            continue;
-        }
-        fn_defs.push_str(&format!(
-            r#"fn init_i2c{n}<PINS>(
-    i2c:    pac::I2C{n},
-    pins:   PINS,
-    afio:   &mut afio::Parts,
-    clocks: &Clocks,
-) -> BlockingI2c<pac::I2C{n}, PINS>
-where
-    PINS: i2c::Pins<pac::I2C{n}>,
-{{
-    BlockingI2c::i2c{n}(
-        i2c,
-        pins,
-        &mut afio.mapr,
-        I2cMode::Standard {{ frequency: 100_000.Hz() }},
-        clocks,
-        1000, 10, 1000, 1000,
-    )
-}}
-
-"#
-        ));
-    }
-
-    if has_adc {
-        fn_defs
-            .push_str("fn init_adc1(adc1: pac::ADC1, clocks: &Clocks) -> adc::Adc<pac::ADC1> {\n");
-        fn_defs.push_str("    adc::Adc::adc1(adc1, clocks)\n");
-        fn_defs.push_str("}\n\n");
-    }
+    // Peripheral helper functions (init_usartN, init_spiN, init_i2cN,
+    // init_adc1) are NO LONGER emitted inside this generated block. They are
+    // placed in the editable region AFTER `fn main` (see `helper_defs` /
+    // `ensure_helper_defs`) so the user can tweak them. `fn_calls` below still
+    // references them by name.
 
     // ── Peripheral init calls (inside fn main) ───────────────────────────────
     let mut fn_calls = String::new();
@@ -445,7 +338,7 @@ where
 
     if has_adc {
         header!();
-        fn_calls.push_str("    let mut _adc1 = init_adc1(dp.ADC1, &clocks);\n");
+        fn_calls.push_str("    let mut _adc1 = init_adc1(dp.ADC1, clocks);\n");
         for (_, meta) in configured
             .iter()
             .filter(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
@@ -506,28 +399,18 @@ where
         ""
     };
 
-    let fn_defs_block = if fn_defs.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "// ── Peripheral init helpers \
-             ─────────────────────────────────────────────────────\n\n\
-             {fn_defs}"
-        )
-    };
-
     // ── Clock setup chain (from the Clock tab config) ────────────────────────
     let clock_chain = clock_setup_chain(clock);
     let clock_comment = clock_comment_line(clock);
 
     // ── Put it all together ──────────────────────────────────────────────────
+    // Helper fns are appended after `fn main` by `ensure_helper_defs`.
     format!(
         "{GEN_BEGIN}\n\
          {clock_comment}\n\
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
          }};\n\n\
-         {fn_defs_block}\
          #[entry]\n\
          fn main() -> ! {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
@@ -561,6 +444,156 @@ fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n"
     )
+}
+
+// ── Editable peripheral init helpers (placed after `fn main`) ─────────────────
+
+/// Peripheral init helper functions needed for the configured peripherals.
+/// Each entry is `(fn_name, full_definition)`. These live in the user-editable
+/// region **after `fn main`** (added additively by [`ensure_helper_defs`]) so
+/// the user can customise them (baud rate, SPI mode, ADC sample time…) without
+/// regeneration clobbering their edits. The generated `fn_calls` inside `main`
+/// reference them by name; their imports come from the generated `use` block.
+pub fn helper_defs(all_pins: &[&Pin]) -> Vec<(String, String)> {
+    let funcs: Vec<&PinFunction> = all_pins
+        .iter()
+        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+        .map(|p| &p.selected_function)
+        .collect();
+    let has = |want: PinFunction| funcs.iter().any(|f| **f == want);
+
+    let mut defs: Vec<(String, String)> = Vec::new();
+
+    for n in 1u8..=3 {
+        if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
+            defs.push((
+                format!("init_usart{n}"),
+                format!(
+                    "fn init_usart{n}(
+    usart:  pac::USART{n},
+    pins:   impl serial::Pins<pac::USART{n}>,
+    afio:   &mut afio::Parts,
+    clocks: &Clocks,
+) -> (serial::Tx<pac::USART{n}>, serial::Rx<pac::USART{n}>) {{
+    Serial::new(
+        usart,
+        pins,
+        &mut afio.mapr,
+        Config::default().baudrate(115_200.bps()),
+        clocks,
+    )
+    .split()
+}}"
+                ),
+            ));
+        }
+    }
+
+    for n in 1u8..=2 {
+        if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
+            let remap = format!("Spi{n}NoRemap");
+            defs.push((
+                format!("init_spi{n}"),
+                format!(
+                    "fn init_spi{n}<PINS>(
+    spi:    pac::SPI{n},
+    pins:   PINS,
+    afio:   &mut afio::Parts,
+    clocks: &Clocks,
+) -> Spi<pac::SPI{n}, {remap}, PINS>
+where
+    PINS: spi::Pins<{remap}>,
+{{
+    Spi::spi{n}(
+        spi,
+        pins,
+        &mut afio.mapr,
+        Mode {{
+            polarity: Polarity::IdleLow,
+            phase: Phase::CaptureOnFirstTransition,
+        }},
+        1.MHz(),
+        clocks,
+    )
+}}"
+                ),
+            ));
+        }
+    }
+
+    for n in 1u8..=2 {
+        if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
+            defs.push((
+                format!("init_i2c{n}"),
+                format!(
+                    "fn init_i2c{n}<PINS>(
+    i2c:    pac::I2C{n},
+    pins:   PINS,
+    afio:   &mut afio::Parts,
+    clocks: &Clocks,
+) -> BlockingI2c<pac::I2C{n}, PINS>
+where
+    PINS: i2c::Pins<pac::I2C{n}>,
+{{
+    BlockingI2c::i2c{n}(
+        i2c,
+        pins,
+        &mut afio.mapr,
+        I2cMode::Standard {{ frequency: 100_000.Hz() }},
+        clocks,
+        1000, 10, 1000, 1000,
+    )
+}}"
+                ),
+            ));
+        }
+    }
+
+    // ADC — `Adc::adc1` takes `Clocks` BY VALUE (Clocks is Copy), not `&Clocks`.
+    if funcs
+        .iter()
+        .any(|f| matches!(f, PinFunction::AdcChannel { .. }))
+    {
+        defs.push((
+            "init_adc1".to_string(),
+            "fn init_adc1(adc1: pac::ADC1, clocks: Clocks) -> adc::Adc<pac::ADC1> {
+    adc::Adc::adc1(adc1, clocks)
+}"
+            .to_string(),
+        ));
+    }
+
+    defs
+}
+
+/// Append any **missing** helper functions to `file`, after `fn main`, in the
+/// user-editable region. Helpers already present (matched by `fn <name>(`) are
+/// left untouched so user edits survive every regeneration — only brand-new
+/// ones are appended. A section header is inserted once.
+pub fn ensure_helper_defs(mut file: String, all_pins: &[&Pin]) -> String {
+    let defs = helper_defs(all_pins);
+    let missing: Vec<&(String, String)> = defs
+        .iter()
+        .filter(|(name, _)| !file.contains(&format!("fn {name}(")))
+        .collect();
+    if missing.is_empty() {
+        return file;
+    }
+
+    if !file.ends_with('\n') {
+        file.push('\n');
+    }
+    if !file.contains("── Peripheral init helpers") {
+        file.push_str(
+            "\n// ── Peripheral init helpers (editable — tweak as needed) ────────────────\n",
+        );
+    }
+    for (_, def) in missing {
+        file.push('\n');
+        file.push_str(def);
+        file.push('\n');
+    }
+    file
 }
 
 // ── Pin helpers ───────────────────────────────────────────────────────────────

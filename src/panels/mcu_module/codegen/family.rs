@@ -47,17 +47,21 @@ impl FamilyBackend for Stm32f1Backend {
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let all = pins_of(mcu);
         let gen_ = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
-        format!(
+        let base = format!(
             "{header}{gen_}\n{tail}",
             header = stm32::invariant_header(&mcu.name),
             tail = USER_TAIL,
-        )
+        );
+        // Peripheral init helpers live after `fn main`, in the editable region.
+        stm32::ensure_helper_defs(base, &all)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
         let new_section = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
-        stm32::splice_section(existing, &new_section, &mcu.name)
+        let spliced = stm32::splice_section(existing, &new_section, &mcu.name);
+        // Add helpers for newly-selected peripherals; preserve user-edited ones.
+        stm32::ensure_helper_defs(spliced, &all)
     }
 }
 
