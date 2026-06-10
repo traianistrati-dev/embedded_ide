@@ -92,6 +92,53 @@ pub const ADC_PRESCALERS: &[u8] = &[2, 4, 6, 8];
 pub const PLL_MUL_MIN: u8 = 2;
 pub const PLL_MUL_MAX: u8 = 16;
 
+// ── Per-chip datasheet limits ─────────────────────────────────────────────────
+
+/// Datasheet frequency ceilings for one chip — consumed by `validate`, the
+/// frequency table and the diagram's red over-limit tags.
+///
+/// Defaults are the STM32F103 (performance line) Figure-2 values. Imported
+/// `.ron` definitions may override any subset via the `clock_limits` field
+/// (e.g. a 24 MHz value-line part); omitted fields keep the F103 default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ClockLimits {
+    /// Maximum SYSCLK / PLL output.
+    pub sysclk_max: u32,
+    /// Maximum SYSCLK when the PLL is fed from HSI (datasheet footnote 1).
+    pub sysclk_max_hsi_pll: u32,
+    /// Maximum HCLK (AHB / core).
+    pub hclk_max: u32,
+    /// Maximum PCLK1 (APB1).
+    pub pclk1_max: u32,
+    /// Maximum PCLK2 (APB2).
+    pub pclk2_max: u32,
+    /// Maximum ADC clock.
+    pub adcclk_max: u32,
+    /// Exact USB clock requirement (footnote 2).
+    pub usbclk_hz: u32,
+    /// Valid HSE crystal range.
+    pub hse_min_hz: u32,
+    pub hse_max_hz: u32,
+}
+
+impl Default for ClockLimits {
+    /// STM32F103 datasheet limits (Figure 2 + footnotes).
+    fn default() -> Self {
+        Self {
+            sysclk_max: 72_000_000,
+            sysclk_max_hsi_pll: 64_000_000,
+            hclk_max: 72_000_000,
+            pclk1_max: 36_000_000,
+            pclk2_max: 72_000_000,
+            adcclk_max: 14_000_000,
+            usbclk_hz: 48_000_000,
+            hse_min_hz: HSE_MIN_HZ,
+            hse_max_hz: HSE_MAX_HZ,
+        }
+    }
+}
+
 // ── STM32F1 clock configuration ───────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

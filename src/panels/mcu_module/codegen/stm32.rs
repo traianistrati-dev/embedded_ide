@@ -572,9 +572,16 @@ where
 /// ones are appended. A section header is inserted once.
 pub fn ensure_helper_defs(mut file: String, all_pins: &[&Pin]) -> String {
     let defs = helper_defs(all_pins);
+    // A helper is "present" if its `fn <name>` is followed by either `(` (plain
+    // fns like `init_adc1`) or `<` (generic fns like `init_spi1<PINS>` /
+    // `init_i2c1<PINS>`). Checking only `(` missed the generic ones, so they
+    // were re-appended on every regen — the infinite-growth bug.
     let missing: Vec<&(String, String)> = defs
         .iter()
-        .filter(|(name, _)| !file.contains(&format!("fn {name}(")))
+        .filter(|(name, _)| {
+            !(file.contains(&format!("fn {name}("))
+                || file.contains(&format!("fn {name}<")))
+        })
         .collect();
     if missing.is_empty() {
         return file;

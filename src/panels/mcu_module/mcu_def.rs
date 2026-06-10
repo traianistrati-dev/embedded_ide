@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::clock::{ClockConfig, Stm32f1Clock};
+use super::clock::{ClockConfig, ClockLimits, ClockPreset, Stm32f1Clock};
 use super::mcu::Mcu;
 use super::mcu_catalog::ToolchainKind;
 use super::pins::logic::pin::Pin;
@@ -102,6 +102,31 @@ impl ClockDef {
             ClockDef::None => ClockConfig::None,
         }
     }
+
+    /// Same clock family? Used to filter presets that don't fit the chip.
+    fn same_family(&self, other: &ClockDef) -> bool {
+        matches!(
+            (self, other),
+            (ClockDef::Stm32f1(_), ClockDef::Stm32f1(_)) | (ClockDef::None, ClockDef::None)
+        )
+    }
+}
+
+/// One named clock preset shipped with a definition. `config` reuses the
+/// family-tagged [`ClockDef`], so presets stay extensible per family; presets
+/// whose family doesn't match the chip's `clock` are dropped at build time.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClockPresetDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub config: ClockDef,
+}
+
+/// `skip_serializing_if` helper — omit `clock_limits` from generated RON when
+/// it carries only the family defaults.
+fn limits_are_default(l: &ClockLimits) -> bool {
+    *l == ClockLimits::default()
 }
 
 /// A complete, importable MCU definition.
@@ -123,6 +148,16 @@ pub struct McuDefinition {
     #[serde(default)]
     pub pins: PinLayout,
     pub clock: ClockDef,
+    /// Per-chip datasheet frequency ceilings. Omitted (or partial) fields fall
+    /// back to the family defaults (STM32F103 values), so existing `.ron`
+    /// files keep parsing unchanged. Example override in RON:
+    /// `clock_limits: (sysclk_max: 24000000, hclk_max: 24000000)`.
+    #[serde(default, skip_serializing_if = "limits_are_default")]
+    pub clock_limits: ClockLimits,
+    /// Chip-specific one-click presets for the Clock tab; when empty the
+    /// family's built-in presets are shown instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clock_presets: Vec<ClockPresetDef>,
 }
 
 impl McuDefinition {
@@ -139,6 +174,20 @@ impl McuDefinition {
             map(&self.pins.right),
         );
         mcu.clock = self.clock.to_config();
+        mcu.clock_limits = self.clock_limits;
+        mcu.clock_presets = self
+            .clock_presets
+            .iter()
+            .filter(|p| p.config.same_family(&self.clock))
+            .filter_map(|p| match &p.config {
+                ClockDef::Stm32f1(c) => Some(ClockPreset {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    config: c.clone(),
+                }),
+                ClockDef::None => None,
+            })
+            .collect();
         mcu
     }
 }
@@ -199,5 +248,82 @@ mod tests {
         assert!(same(&built.left_pins, &factory.left_pins), "left pins differ");
         assert!(same(&built.right_pins, &factory.right_pins), "right pins differ");
         assert_eq!(built.clock, factory.clock, "clock differs");
+    }
+
+    /// A definition without `clock_limits` / `clock_presets` (every existing
+    /// `.ron`) must keep parsing and fall back to the family defaults.
+    #[test]
+    fn missing_clock_fields_fall_back_to_defaults() {
+        let def = stm_def(); // bundled RON predates the new fields
+        assert_eq!(def.clock_limits, ClockLimits::default());
+        assert!(def.clock_presets.is_empty());
+
+        let mcu = def.build_mcu();
+        assert_eq!(mcu.clock_limits, ClockLimits::default());
+        assert!(mcu.clock_presets.is_empty(), "empty → family presets in the GUI");
+    }
+
+    /// Custom limits and presets declared in a definition reach the runtime Mcu.
+    #[test]
+    fn clock_limits_and_presets_flow_into_mcu() {
+        let mut def = stm_def();
+        def.clock_limits = ClockLimits {
+            sysclk_max: 24_000_000,
+            hclk_max: 24_000_000,
+            ..ClockLimits::default()
+        };
+        def.clock_presets = vec![ClockPresetDef {
+            name: "24 MHz max".to_owned(),
+            description: "Value-line style cap.".to_owned(),
+            config: ClockDef::Stm32f1(Stm32f1Clock::default()),
+        }];
+
+        let mcu = def.build_mcu();
+        assert_eq!(mcu.clock_limits.sysclk_max, 24_000_000);
+        assert_eq!(mcu.clock_presets.len(), 1);
+        assert_eq!(mcu.clock_presets[0].name, "24 MHz max");
+    }
+
+    /// Presets from a different clock family are dropped, not mis-applied.
+    #[test]
+    fn foreign_family_presets_are_filtered() {
+        let mut def = stm_def(); // chip clock family: Stm32f1
+        def.clock_presets = vec![
+            ClockPresetDef {
+                name: "fits".to_owned(),
+                description: String::new(),
+                config: ClockDef::Stm32f1(Stm32f1Clock::default()),
+            },
+            ClockPresetDef {
+                name: "foreign".to_owned(),
+                description: String::new(),
+                config: ClockDef::None,
+            },
+        ];
+
+        let mcu = def.build_mcu();
+        assert_eq!(mcu.clock_presets.len(), 1);
+        assert_eq!(mcu.clock_presets[0].name, "fits");
+    }
+
+    /// New fields survive a RON round-trip (and stay omitted when default).
+    #[test]
+    fn clock_fields_round_trip_in_ron() {
+        let mut def = stm_def();
+        def.clock_limits = ClockLimits { adcclk_max: 12_000_000, ..ClockLimits::default() };
+        def.clock_presets = vec![ClockPresetDef {
+            name: "p".to_owned(),
+            description: "d".to_owned(),
+            config: ClockDef::Stm32f1(Stm32f1Clock::default()),
+        }];
+
+        let ron = ron::to_string(&def).expect("serialize");
+        let parsed: McuDefinition = ron::from_str(&ron).expect("parse");
+        assert_eq!(parsed, def);
+
+        // Default limits / empty presets are skipped in the output entirely.
+        let plain = ron::to_string(&stm_def()).expect("serialize");
+        assert!(!plain.contains("clock_limits"));
+        assert!(!plain.contains("clock_presets"));
     }
 }

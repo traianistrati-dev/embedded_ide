@@ -1,24 +1,14 @@
-//! Validate a clock configuration against the STM32F103 datasheet limits.
+//! Validate a clock configuration against the chip's datasheet limits.
 //!
 //! Produces human-readable errors (hard limits that would hang/brick the chip)
 //! and warnings (works, but probably not intended — e.g. USB clock ≠ 48 MHz).
-//! The three footnotes under Figure 2 are encoded here.
+//! The ceilings come from a per-chip [`ClockLimits`] (defaults = STM32F103);
+//! the three footnotes under Figure 2 are encoded here.
 
 use super::compute::ClockFrequencies;
-use super::model::{HSE_MAX_HZ, HSE_MIN_HZ, PllSrc, Stm32f1Clock, SysclkSrc};
+use super::model::{ClockLimits, PllSrc, Stm32f1Clock, SysclkSrc};
 
 const MHZ: u32 = 1_000_000;
-
-/// Maximum SYSCLK / HCLK / PCLK2 / PLL output.
-const MAX_SYSCLK: u32 = 72 * MHZ;
-/// Maximum SYSCLK when the PLL is fed from HSI (footnote 1).
-const MAX_SYSCLK_HSI_PLL: u32 = 64 * MHZ;
-/// Maximum PCLK1 (APB1).
-const MAX_PCLK1: u32 = 36 * MHZ;
-/// Maximum ADC clock.
-const MAX_ADCCLK: u32 = 14 * MHZ;
-/// Required USB clock (footnote 2).
-const USB_HZ: u32 = 48 * MHZ;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -46,15 +36,17 @@ fn mhz(hz: u32) -> String {
     format!("{:.1}", hz as f64 / MHZ as f64)
 }
 
-/// Collect all validation findings for `c` / `f`.
-pub fn warnings(c: &Stm32f1Clock, f: &ClockFrequencies) -> Vec<ClockWarning> {
+/// Collect all validation findings for `c` / `f` against the chip limits `l`.
+pub fn warnings(c: &Stm32f1Clock, f: &ClockFrequencies, l: &ClockLimits) -> Vec<ClockWarning> {
     let mut out = Vec::new();
 
     // ── HSE crystal range ────────────────────────────────────────────────────
-    if c.hse_enabled && (c.hse_hz < HSE_MIN_HZ || c.hse_hz > HSE_MAX_HZ) {
+    if c.hse_enabled && (c.hse_hz < l.hse_min_hz || c.hse_hz > l.hse_max_hz) {
         out.push(ClockWarning::warn(format!(
-            "HSE crystal {} MHz is outside the 4–16 MHz range.",
-            mhz(c.hse_hz)
+            "HSE crystal {} MHz is outside the {}–{} MHz range.",
+            mhz(c.hse_hz),
+            mhz(l.hse_min_hz),
+            mhz(l.hse_max_hz)
         )));
     }
 
@@ -67,47 +59,54 @@ pub fn warnings(c: &Stm32f1Clock, f: &ClockFrequencies) -> Vec<ClockWarning> {
     }
 
     // ── Hard frequency ceilings ──────────────────────────────────────────────
-    if f.sysclk > MAX_SYSCLK {
+    if f.sysclk > l.sysclk_max {
         out.push(ClockWarning::error(format!(
-            "SYSCLK {} MHz exceeds the 72 MHz maximum.",
+            "SYSCLK {} MHz exceeds the {} MHz maximum.",
+            mhz(f.sysclk),
+            mhz(l.sysclk_max)
+        )));
+    }
+    // Footnote 1: HSI→PLL caps the system clock below the HSE-fed maximum.
+    if uses_pll && c.pll_src == PllSrc::HsiDiv2 && f.sysclk > l.sysclk_max_hsi_pll {
+        out.push(ClockWarning::error(format!(
+            "With HSI as PLL input, SYSCLK is limited to {} MHz (got {} MHz).",
+            mhz(l.sysclk_max_hsi_pll),
             mhz(f.sysclk)
         )));
     }
-    // Footnote 1: HSI→PLL caps system clock at 64 MHz.
-    if uses_pll && c.pll_src == PllSrc::HsiDiv2 && f.sysclk > MAX_SYSCLK_HSI_PLL {
+    if f.pllclk > l.sysclk_max {
         out.push(ClockWarning::error(format!(
-            "With HSI as PLL input, SYSCLK is limited to 64 MHz (got {} MHz).",
-            mhz(f.sysclk)
+            "PLL output {} MHz exceeds the {} MHz maximum.",
+            mhz(f.pllclk),
+            mhz(l.sysclk_max)
         )));
     }
-    if f.pllclk > MAX_SYSCLK {
+    if f.hclk > l.hclk_max {
         out.push(ClockWarning::error(format!(
-            "PLL output {} MHz exceeds the 72 MHz maximum.",
-            mhz(f.pllclk)
+            "HCLK {} MHz exceeds the {} MHz maximum.",
+            mhz(f.hclk),
+            mhz(l.hclk_max)
         )));
     }
-    if f.hclk > MAX_SYSCLK {
+    if f.pclk1 > l.pclk1_max {
         out.push(ClockWarning::error(format!(
-            "HCLK {} MHz exceeds the 72 MHz maximum.",
-            mhz(f.hclk)
+            "PCLK1 {} MHz exceeds the {} MHz APB1 maximum.",
+            mhz(f.pclk1),
+            mhz(l.pclk1_max)
         )));
     }
-    if f.pclk1 > MAX_PCLK1 {
+    if f.pclk2 > l.pclk2_max {
         out.push(ClockWarning::error(format!(
-            "PCLK1 {} MHz exceeds the 36 MHz APB1 maximum.",
-            mhz(f.pclk1)
+            "PCLK2 {} MHz exceeds the {} MHz APB2 maximum.",
+            mhz(f.pclk2),
+            mhz(l.pclk2_max)
         )));
     }
-    if f.pclk2 > MAX_SYSCLK {
+    if f.adcclk > l.adcclk_max {
         out.push(ClockWarning::error(format!(
-            "PCLK2 {} MHz exceeds the 72 MHz APB2 maximum.",
-            mhz(f.pclk2)
-        )));
-    }
-    if f.adcclk > MAX_ADCCLK {
-        out.push(ClockWarning::error(format!(
-            "ADCCLK {} MHz exceeds the 14 MHz maximum.",
-            mhz(f.adcclk)
+            "ADCCLK {} MHz exceeds the {} MHz maximum.",
+            mhz(f.adcclk),
+            mhz(l.adcclk_max)
         )));
     }
 
@@ -124,10 +123,11 @@ pub fn warnings(c: &Stm32f1Clock, f: &ClockFrequencies) -> Vec<ClockWarning> {
         out.push(ClockWarning::warn(
             "USB is unavailable: it requires the PLL to be the SYSCLK source.".to_string(),
         ));
-    } else if f.usbclk != USB_HZ {
+    } else if f.usbclk != l.usbclk_hz {
         out.push(ClockWarning::warn(format!(
-            "USBCLK is {} MHz; USB needs exactly 48 MHz (adjust PLL or USB prescaler).",
-            mhz(f.usbclk)
+            "USBCLK is {} MHz; USB needs exactly {} MHz (adjust PLL or USB prescaler).",
+            mhz(f.usbclk),
+            mhz(l.usbclk_hz)
         )));
     }
 
@@ -140,8 +140,8 @@ fn pll_needs_hse(c: &Stm32f1Clock) -> bool {
 }
 
 /// Convenience: does the config have any hard error?
-pub fn has_errors(c: &Stm32f1Clock, f: &ClockFrequencies) -> bool {
-    warnings(c, f)
+pub fn has_errors(c: &Stm32f1Clock, f: &ClockFrequencies, l: &ClockLimits) -> bool {
+    warnings(c, f, l)
         .iter()
         .any(|w| w.severity == Severity::Error)
 }
@@ -157,13 +157,16 @@ mod tests {
     use super::super::model::{Stm32f1Clock, SysclkSrc};
 
     fn warns(c: &Stm32f1Clock) -> Vec<ClockWarning> {
-        warnings(c, &frequencies(c))
+        warnings(c, &frequencies(c), &ClockLimits::default())
     }
 
     #[test]
     fn default_72mhz_has_no_errors() {
         let c = Stm32f1Clock::default();
-        assert!(!has_errors(&c, &frequencies(&c)), "default config should be valid");
+        assert!(
+            !has_errors(&c, &frequencies(&c), &ClockLimits::default()),
+            "default config should be valid"
+        );
     }
 
     #[test]
@@ -204,5 +207,25 @@ mod tests {
         c.pll_mul = 16; // 64 MHz — OK
         assert!(!warns(&c).iter().any(|w| w.msg.contains("64 MHz")));
         // Bump APB so nothing else errors, but sysclk stays 64 — still fine.
+    }
+
+    /// Custom per-chip limits change the verdict: the default 72 MHz config is
+    /// fine on an F103 but must error on a 24 MHz value-line-style part.
+    #[test]
+    fn custom_limits_flag_default_config() {
+        let c = Stm32f1Clock::default(); // SYSCLK 72 MHz
+        let f = frequencies(&c);
+        let lim = ClockLimits {
+            sysclk_max: 24_000_000,
+            hclk_max: 24_000_000,
+            pclk1_max: 24_000_000,
+            pclk2_max: 24_000_000,
+            ..ClockLimits::default()
+        };
+        assert!(!has_errors(&c, &f, &ClockLimits::default()));
+        assert!(has_errors(&c, &f, &lim), "72 MHz must violate a 24 MHz cap");
+        assert!(warnings(&c, &f, &lim)
+            .iter()
+            .any(|w| w.msg.contains("24.0 MHz maximum")));
     }
 }

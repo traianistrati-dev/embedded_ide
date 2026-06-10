@@ -15,8 +15,8 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, UiB
 
 use super::super::compute::{frequencies, ClockFrequencies};
 use super::super::model::{
-    Mco, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre, ADC_PRESCALERS,
-    AHB_PRESCALERS, APB_PRESCALERS, PLL_MUL_MAX, PLL_MUL_MIN,
+    ClockLimits, Mco, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre,
+    ADC_PRESCALERS, AHB_PRESCALERS, APB_PRESCALERS, PLL_MUL_MAX, PLL_MUL_MIN,
 };
 
 // ── Virtual canvas ────────────────────────────────────────────────────────────
@@ -56,9 +56,17 @@ impl Tf {
 
 /// Render the diagram + interactive nodes. Returns `true` on any change.
 ///
+/// `l` carries the chip's datasheet ceilings (red over-limit tags).
 /// `avail_w`/`avail_h` are the viewport size — at `zoom == 1.0` the WHOLE figure
 /// fits (no scrolling needed); zooming in enlarges it and reveals scroll bars.
-pub fn draw(ui: &mut egui::Ui, c: &mut Stm32f1Clock, avail_w: f32, avail_h: f32, zoom: f32) -> bool {
+pub fn draw(
+    ui: &mut egui::Ui,
+    c: &mut Stm32f1Clock,
+    l: &ClockLimits,
+    avail_w: f32,
+    avail_h: f32,
+    zoom: f32,
+) -> bool {
     let f = frequencies(c);
 
     // Fit the whole diagram into the viewport (both dimensions), then apply zoom.
@@ -79,7 +87,7 @@ pub fn draw(ui: &mut egui::Ui, c: &mut Stm32f1Clock, avail_w: f32, avail_h: f32,
     painter.rect_filled(rect, 4.0, BG);
 
     draw_wires(&painter, &tf, c, &f);
-    draw_static_blocks(&painter, &tf, c, &f);
+    draw_static_blocks(&painter, &tf, c, &f, l);
 
     let mut changed = false;
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
@@ -137,38 +145,39 @@ fn draw_wires(p: &egui::Painter, tf: &Tf, _c: &Stm32f1Clock, _f: &ClockFrequenci
 // Static blocks + labels + frequency tags
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFrequencies) {
+fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFrequencies, l: &ClockLimits) {
     // ── Oscillators (left) ───────────────────────────────────────────────────
     block(p, tf, 28.0, 78.0, 92.0, 34.0, "LSE OSC\n32.768 kHz");
     block(p, tf, 170.0, 84.0, 46.0, 22.0, "/128");
     block(p, tf, 28.0, 153.0, 92.0, 34.0, "LSI RC\n40 kHz");
     block(p, tf, 28.0, 283.0, 92.0, 34.0, "HSI RC\n8 MHz");
     block(p, tf, 175.0, 372.0, 40.0, 22.0, "/2");
-    block(p, tf, 28.0, 483.0, 92.0, 34.0, "HSE OSC\n4–16 MHz");
+    block(p, tf, 28.0, 483.0, 92.0, 34.0,
+        &format!("HSE OSC\n{}–{} MHz", l.hse_min_hz / M, l.hse_max_hz / M));
 
     // ── All output boxes on the right margin (x = 820) ───────────────────────
     out_box(p, tf, 820.0, 109.0, 160.0, 26.0, "RTCCLK → RTC", rtc_hz(c, f), None);
     out_box(p, tf, 820.0, 149.0, 160.0, 26.0, "IWDGCLK ← LSI", 40_000, None);
     out_box(p, tf, 820.0, 232.0, 160.0, 26.0, "USBCLK → USB", f.usbclk, None);
     out_box(p, tf, 820.0, 272.0, 160.0, 26.0, "FLITFCLK ← HSI", f.flitfclk, None);
-    out_box(p, tf, 820.0, 346.0, 160.0, 28.0, "HCLK → AHB / core / DMA", f.hclk, Some(72 * M));
+    out_box(p, tf, 820.0, 346.0, 160.0, 28.0, "HCLK → AHB / core / DMA", f.hclk, Some(l.hclk_max));
     out_box(p, tf, 820.0, 416.0, 160.0, 28.0, "Cortex SysTick", systick_hz(c, f), None);
     out_box(p, tf, 820.0, 456.0, 160.0, 28.0, "FCLK (free-running)", f.hclk, None);
-    out_box(p, tf, 820.0, 529.0, 160.0, 28.0, "APB1 peripherals", f.pclk1, Some(36 * M));
+    out_box(p, tf, 820.0, 529.0, 160.0, 28.0, "APB1 peripherals", f.pclk1, Some(l.pclk1_max));
     out_box(p, tf, 820.0, 576.0, 160.0, 28.0, "APB1 timers", f.tim_apb1, None);
-    out_box(p, tf, 820.0, 649.0, 160.0, 28.0, "APB2 peripherals", f.pclk2, Some(72 * M));
+    out_box(p, tf, 820.0, 649.0, 160.0, 28.0, "APB2 peripherals", f.pclk2, Some(l.pclk2_max));
     out_box(p, tf, 820.0, 696.0, 160.0, 28.0, "APB2 timers", f.tim_apb2, None);
-    out_box(p, tf, 820.0, 749.0, 160.0, 28.0, "ADC1/2", f.adcclk, Some(14 * M));
+    out_box(p, tf, 820.0, 749.0, 160.0, 28.0, "ADC1/2", f.adcclk, Some(l.adcclk_max));
 
     // ── MCO pin box (far left, fed by the mirrored MCO mux) ──────────────────
     out_box(p, tf, 28.0, 625.0, 106.0, 26.0, "MCO pin", mco_hz(c, f), None);
 
     // ── Frequency tags on the main chain ─────────────────────────────────────
-    tag(p, tf, 424.0, 422.0, &mhz(f.pllclk), over(f.pllclk, 72 * M), "PLLCLK");
-    tag(p, tf, 516.0, 344.0, &mhz(f.sysclk), over(f.sysclk, 72 * M), "SYSCLK");
-    tag(p, tf, 592.0, 344.0, &mhz(f.hclk), over(f.hclk, 72 * M), "HCLK");
-    tag(p, tf, 792.0, 524.0, &mhz(f.pclk1), over(f.pclk1, 36 * M), "PCLK1");
-    tag(p, tf, 792.0, 644.0, &mhz(f.pclk2), over(f.pclk2, 72 * M), "PCLK2");
+    tag(p, tf, 424.0, 422.0, &mhz(f.pllclk), over(f.pllclk, l.sysclk_max), "PLLCLK");
+    tag(p, tf, 516.0, 344.0, &mhz(f.sysclk), over(f.sysclk, l.sysclk_max), "SYSCLK");
+    tag(p, tf, 592.0, 344.0, &mhz(f.hclk), over(f.hclk, l.hclk_max), "HCLK");
+    tag(p, tf, 792.0, 524.0, &mhz(f.pclk1), over(f.pclk1, l.pclk1_max), "PCLK1");
+    tag(p, tf, 792.0, 644.0, &mhz(f.pclk2), over(f.pclk2, l.pclk2_max), "PCLK2");
 
     // ── Node name labels (ABOVE their dropdowns) ─────────────────────────────
     label_above(p, tf, 148.0, 478.0, "PLLXTPRE");

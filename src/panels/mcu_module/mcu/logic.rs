@@ -54,7 +54,7 @@ impl Mcu {
         left_pins: Vec<Pin>,
         right_pins: Vec<Pin>,
     ) -> Self {
-        use crate::panels::mcu_module::clock::{ClockConfig, Stm32f1Clock};
+        use crate::panels::mcu_module::clock::{ClockConfig, ClockLimits, Stm32f1Clock};
         use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
         // Only STM32F1 has a modelled clock tree for now; others get `None`.
         let clock = match toolchain {
@@ -73,6 +73,8 @@ impl Mcu {
             show_info: None,
             fn_scroll_offset: 0.0,
             clock,
+            clock_limits: ClockLimits::default(),
+            clock_presets: Vec::new(),
         }
     }
 

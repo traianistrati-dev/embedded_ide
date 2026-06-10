@@ -11,27 +11,42 @@ use eframe::egui;
 
 use super::compute::{frequencies, ClockFrequencies};
 use super::model::{
-    Mco, PllSrc, Stm32f1Clock, SysclkSrc, UsbPre, ADC_PRESCALERS, AHB_PRESCALERS, APB_PRESCALERS,
-    PLL_MUL_MAX, PLL_MUL_MIN,
+    ClockLimits, Mco, PllSrc, Stm32f1Clock, SysclkSrc, UsbPre, ADC_PRESCALERS, AHB_PRESCALERS,
+    APB_PRESCALERS, PLL_MUL_MAX, PLL_MUL_MIN,
 };
-use super::presets::stm32f1_presets;
+use super::presets::{stm32f1_presets, ClockPreset};
 use super::validate::{warnings, Severity};
 
 /// Render the Clock tab for an STM32F1 config. Returns `true` if anything
 /// changed (the caller relies on `init_frame` to regenerate `main.rs`).
 ///
+/// `limits` are the chip's datasheet ceilings; `presets` the chip-specific
+/// one-click configs (empty → the built-in family presets).
+///
 /// Layout: a thin **Presets** bar on top, a **fixed 3-zone footer** (always
 /// visible — Configuration | Frequencies | Info), and in between the
 /// **interactive diagram** in its own vertical scroll area.
-pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
+pub fn draw_clock_tree(
+    ui: &mut egui::Ui,
+    c: &mut Stm32f1Clock,
+    limits: &ClockLimits,
+    presets: &[ClockPreset],
+) -> bool {
     let mut changed = false;
 
     // ── Presets (thin top bar) ───────────────────────────────────────────────
+    let family_presets;
+    let presets: &[ClockPreset] = if presets.is_empty() {
+        family_presets = stm32f1_presets();
+        &family_presets
+    } else {
+        presets
+    };
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("Presets:").strong());
-        for p in stm32f1_presets() {
-            if ui.button(p.name).on_hover_text(p.description).clicked() {
-                *c = p.config;
+        for p in presets {
+            if ui.button(&p.name).on_hover_text(&p.description).clicked() {
+                *c = p.config.clone();
                 changed = true;
             }
         }
@@ -67,7 +82,7 @@ pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
                     |ui| {
                         ui.strong("Frequencies");
                         egui::ScrollArea::vertical().id_salt("freq_scroll").show(ui, |ui| {
-                            freq_table(ui, &f);
+                            freq_table(ui, &f, limits);
                         });
                     },
                 );
@@ -79,7 +94,7 @@ pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
                     |ui| {
                         ui.strong("Info");
                         egui::ScrollArea::vertical().id_salt("info_scroll").show(ui, |ui| {
-                            info_zone(ui, c, &f);
+                            info_zone(ui, c, &f, limits);
                         });
                     },
                 );
@@ -112,15 +127,15 @@ pub fn draw_clock_tree(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
         .id_salt("clock_diagram_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            changed |= diagram::draw(ui, c, avail_w, avail_h, zoom);
+            changed |= diagram::draw(ui, c, limits, avail_w, avail_h, zoom);
         });
 
     changed
 }
 
 /// The Info zone: validation messages plus the datasheet notes/legend.
-fn info_zone(ui: &mut egui::Ui, c: &Stm32f1Clock, f: &ClockFrequencies) {
-    let ws = warnings(c, f);
+fn info_zone(ui: &mut egui::Ui, c: &Stm32f1Clock, f: &ClockFrequencies, l: &ClockLimits) {
+    let ws = warnings(c, f, l);
     if ws.is_empty() {
         ui.colored_label(egui::Color32::from_rgb(90, 200, 110), "✔  Configuration is valid.");
     } else {
@@ -136,10 +151,21 @@ fn info_zone(ui: &mut egui::Ui, c: &Stm32f1Clock, f: &ClockFrequencies) {
     ui.separator();
     let dim = egui::Color32::from_rgb(150, 158, 172);
     for line in [
-        "HSE = high-speed external · HSI = high-speed internal",
-        "LSE = low-speed external · LSI = low-speed internal",
-        "Limits: SYSCLK 72 · HCLK 72 · PCLK1 36 · PCLK2 72 · ADC 14 · USB 48 MHz",
-        "USB needs HSE+PLL with USBCLK = 48 MHz · ADC 1 µs needs PCLK2 ∈ {14,28,56}",
+        "HSE = high-speed external · HSI = high-speed internal".to_owned(),
+        "LSE = low-speed external · LSI = low-speed internal".to_owned(),
+        format!(
+            "Limits: SYSCLK {} · HCLK {} · PCLK1 {} · PCLK2 {} · ADC {} · USB {} MHz",
+            mhz_num(l.sysclk_max),
+            mhz_num(l.hclk_max),
+            mhz_num(l.pclk1_max),
+            mhz_num(l.pclk2_max),
+            mhz_num(l.adcclk_max),
+            mhz_num(l.usbclk_hz),
+        ),
+        format!(
+            "USB needs HSE+PLL with USBCLK = {} MHz · ADC 1 µs needs PCLK2 ∈ {{14,28,56}}",
+            mhz_num(l.usbclk_hz)
+        ),
     ] {
         ui.label(egui::RichText::new(line).size(11.0).color(dim));
     }
@@ -264,7 +290,7 @@ fn draw_controls_grid(ui: &mut egui::Ui, c: &mut Stm32f1Clock) -> bool {
 
 // ── Frequency table ───────────────────────────────────────────────────────────
 
-fn freq_table(ui: &mut egui::Ui, f: &ClockFrequencies) {
+fn freq_table(ui: &mut egui::Ui, f: &ClockFrequencies, l: &ClockLimits) {
     egui::Grid::new("clock_freqs")
         .num_columns(2)
         .spacing([16.0, 4.0])
@@ -281,17 +307,16 @@ fn freq_table(ui: &mut egui::Ui, f: &ClockFrequencies) {
                 ui.colored_label(color, fmt_mhz(hz));
                 ui.end_row();
             };
-            const M: u32 = 1_000_000;
-            row(ui, "SYSCLK", f.sysclk, Some(72 * M));
-            row(ui, "HCLK (AHB / core)", f.hclk, Some(72 * M));
-            row(ui, "PCLK1 (APB1)", f.pclk1, Some(36 * M));
-            row(ui, "PCLK2 (APB2)", f.pclk2, Some(72 * M));
+            row(ui, "SYSCLK", f.sysclk, Some(l.sysclk_max));
+            row(ui, "HCLK (AHB / core)", f.hclk, Some(l.hclk_max));
+            row(ui, "PCLK1 (APB1)", f.pclk1, Some(l.pclk1_max));
+            row(ui, "PCLK2 (APB2)", f.pclk2, Some(l.pclk2_max));
             row(ui, "TIM2/3/4 clk", f.tim_apb1, None);
             row(ui, "TIM1 clk", f.tim_apb2, None);
-            row(ui, "ADCCLK", f.adcclk, Some(14 * M));
+            row(ui, "ADCCLK", f.adcclk, Some(l.adcclk_max));
             row(ui, "USBCLK", f.usbclk, None);
             row(ui, "SysTick (HCLK/8)", f.systick, None);
-            row(ui, "PLLCLK", f.pllclk, Some(72 * M));
+            row(ui, "PLLCLK", f.pllclk, Some(l.sysclk_max));
         });
 }
 
@@ -302,6 +327,16 @@ fn fmt_mhz(hz: u32) -> String {
         format!("{} MHz", mhz as u32)
     } else {
         format!("{mhz:.2} MHz")
+    }
+}
+
+/// Bare MHz number for the compact legend lines, e.g. 72_000_000 → "72".
+fn mhz_num(hz: u32) -> String {
+    let mhz = hz as f64 / 1_000_000.0;
+    if (mhz.fract()).abs() < 1e-6 {
+        format!("{}", mhz as u32)
+    } else {
+        format!("{mhz:.1}")
     }
 }
 

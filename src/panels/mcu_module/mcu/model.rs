@@ -1,6 +1,6 @@
 //! MCU data model — struct definition and rendering constants.
 
-use crate::panels::mcu_module::clock::ClockConfig;
+use crate::panels::mcu_module::clock::{ClockConfig, ClockLimits, ClockPreset};
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -37,4 +37,10 @@ pub struct Mcu {
     /// Clock-tree configuration shown/edited in the "Clock" tab.
     /// `ClockConfig::None` for MCUs without a modelled clock tree yet.
     pub clock: ClockConfig,
+    /// Per-chip datasheet frequency ceilings (validation + red diagram tags).
+    /// Defaults to the STM32F103 values; imported `.ron` chips may override.
+    pub clock_limits: ClockLimits,
+    /// Chip-specific clock presets from the definition; empty → the family's
+    /// built-in presets are shown in the Clock tab.
+    pub clock_presets: Vec<ClockPreset>,
 }

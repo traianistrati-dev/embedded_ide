@@ -72,6 +72,8 @@ mod tests {
             project,
             pins: layout(m),
             clock,
+            clock_limits: m.clock_limits,
+            clock_presets: Vec::new(),
         }
     }
 
@@ -255,7 +257,7 @@ mod tests {
             right,
         );
 
-        let def = def_of(
+        let mut def = def_of(
             "stm32f103rb", "stm32f1", "LQFP64", "ARM Cortex-M3",
             &m,
             ProjectDef {
@@ -270,6 +272,31 @@ mod tests {
                 memory_comment: "STM32F103RBT6  —  128 KiB Flash / 20 KiB RAM (LQFP64)".into(),
             },
         );
+
+        // Demonstrate a chip-specific preset in the importable format (when
+        // `clock_presets` is non-empty it replaces the family defaults in the
+        // Clock tab). 48 MHz keeps USB valid with the /1 prescaler.
+        {
+            use crate::panels::mcu_module::clock::model::{Stm32f1Clock, UsbPre};
+            use crate::panels::mcu_module::mcu_def::ClockPresetDef;
+            def.clock_presets = vec![
+                ClockPresetDef {
+                    name: "72 MHz (HSE 8 + PLL×9)".into(),
+                    description: "Max performance. SYSCLK 72, PCLK1 36, USB 48 MHz.".into(),
+                    config: ClockDef::Stm32f1(Stm32f1Clock::default()),
+                },
+                ClockPresetDef {
+                    name: "48 MHz USB (HSE 8 + PLL×6)".into(),
+                    description: "SYSCLK 48, PCLK1 24, USBCLK 48 via /1 prescaler.".into(),
+                    config: ClockDef::Stm32f1(Stm32f1Clock {
+                        pll_mul: 6,
+                        adc_pre: 4, // 48/1/4 = 12 ≤ 14
+                        usb_pre: UsbPre::Div1,
+                        ..Stm32f1Clock::default()
+                    }),
+                },
+            ];
+        }
 
         std::fs::create_dir_all("assets/mcus/examples").unwrap();
         let ron = ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();

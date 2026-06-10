@@ -388,6 +388,33 @@ mod tests {
     }
 
     #[test]
+    fn test_generic_helpers_not_duplicated_on_repeated_update() {
+        use super::super::mock_mcu;
+
+        // SPI1 (PA5 = pin 15 → SpiSck(1); partners auto-assign MISO/MOSI) and
+        // I2C1 (PB6 = pin 42 → I2cScl(1); PB7 → I2cSda(1)) both emit GENERIC
+        // helpers `fn init_spi1<PINS>(` / `fn init_i2c1<PINS>(`. These were the
+        // ones that grew without bound.
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(15, PinFunction::SpiSck(1));
+        mcu.apply_pin_function(42, PinFunction::I2cScl(1));
+        mcu.apply_pin_function(43, PinFunction::I2cSda(1));
+
+        let mut code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "fn init_spi1<PINS>(");
+        assert_contains_substring(&code, "fn init_i2c1<PINS>(");
+
+        // Re-run the per-frame regeneration many times.
+        for _ in 0..10 {
+            code = mcu.update_main_rs(&code);
+        }
+        assert_eq!(code.matches("fn init_spi1<").count(), 1, "SPI helper duplicated");
+        assert_eq!(code.matches("fn init_i2c1<").count(), 1, "I2C helper duplicated");
+        // And the section header is added exactly once.
+        assert_eq!(code.matches("Peripheral init helpers").count(), 1);
+    }
+
+    #[test]
     fn test_user_edited_helper_is_preserved() {
         use super::super::mock_mcu;
 

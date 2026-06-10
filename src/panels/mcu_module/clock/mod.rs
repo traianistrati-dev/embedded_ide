@@ -15,5 +15,6 @@ pub mod presets;
 pub mod validate;
 
 pub use compute::{frequencies, ClockFrequencies};
-pub use model::{ClockConfig, Stm32f1Clock};
+pub use model::{ClockConfig, ClockLimits, Stm32f1Clock};
+pub use presets::ClockPreset;
 pub use validate::{warnings, ClockWarning, Severity};
