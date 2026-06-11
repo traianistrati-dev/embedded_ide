@@ -60,6 +60,7 @@ mod tests {
     fn def_of(id: &str, family: &str, package: &str, cpu: &str, m: &Mcu, project: ProjectDef) -> McuDefinition {
         let clock = match &m.clock {
             ClockConfig::Stm32f1(c) => ClockDef::Stm32f1(c.clone()),
+            ClockConfig::Graph(g) => ClockDef::Graph(g.clone()),
             ClockConfig::None => ClockDef::None,
         };
         McuDefinition {
@@ -321,6 +322,55 @@ mod tests {
         assert_eq!(total, 64, "LQFP64 must expose exactly 64 pins");
         // A family backend exists, so it generates real code.
         assert!(!mcu.fresh_main_rs().is_empty(), "stm32f1 example must generate code");
+    }
+
+    /// One-shot: write an example chip that uses a **data-driven `ClockDef::Graph`**
+    /// (the F103 tree + diagram as data) so the generic graph clock tab can be
+    /// exercised by importing it. Run with:
+    /// `cargo test generate_graph_clock_example -- --ignored`
+    #[test]
+    #[ignore]
+    fn generate_graph_clock_example() {
+        use crate::panels::mcu_module::clock::graph::layout::stm32f1_layout;
+        use crate::panels::mcu_module::clock::graph::{stm32f1_graph, GraphClock};
+        use crate::panels::mcu_module::clock::model::{ClockLimits, Stm32f1Clock};
+        use ron::ser::PrettyConfig;
+
+        // Start from the built-in C8T6, swap the clock for an embedded graph.
+        let mut def = builtin_for("stm32f103c8t6").expect("base def");
+        def.id = "stm32f103c8t6-graph".to_owned();
+        def.display_name = "STM32F103C8T6 (graph clock demo)".to_owned();
+        def.clock = ClockDef::Graph(GraphClock {
+            graph: stm32f1_graph(&Stm32f1Clock::default()),
+            layout: stm32f1_layout(&ClockLimits::default()),
+        });
+
+        std::fs::create_dir_all("assets/mcus/examples").unwrap();
+        let ron =
+            ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
+        std::fs::write("assets/mcus/examples/stm32f103_graphclock.ron", ron).unwrap();
+    }
+
+    /// The graph-clock example parses and builds into a `ClockConfig::Graph`
+    /// carrying both the evaluatable graph and its diagram layout.
+    #[test]
+    fn graph_clock_example_is_valid() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+
+        let path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mcus/examples/stm32f103_graphclock.ron");
+        let text = std::fs::read_to_string(path).expect("example exists (run generator)");
+        let def: McuDefinition = ron::from_str(&text).expect("graph-clock example parses");
+        assert_eq!(def.id, "stm32f103c8t6-graph");
+        assert!(matches!(def.clock, ClockDef::Graph(_)));
+
+        match def.build_mcu().clock {
+            ClockConfig::Graph(gc) => {
+                assert!(!gc.graph.nodes.is_empty(), "graph must carry nodes");
+                assert!(!gc.layout.outputs.is_empty(), "layout must carry the diagram");
+            }
+            _ => panic!("expected a graph clock"),
+        }
     }
 
     #[test]

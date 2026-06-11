@@ -15,6 +15,7 @@ impl Mcu {
             ClockConfig::Stm32f1(c) => {
                 clock_gui::draw_clock_tree(ui, c, clock_limits, clock_presets)
             }
+            ClockConfig::Graph(gc) => clock_gui::draw_graph_clock(ui, gc, clock_limits),
             ClockConfig::None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(

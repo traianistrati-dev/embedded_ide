@@ -205,6 +205,8 @@ impl Default for Stm32f1Clock {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClockConfig {
     Stm32f1(Stm32f1Clock),
+    /// Data-driven clock tree imported from a chip's `.ron` (topology + layout).
+    Graph(super::graph::GraphClock),
     /// No modelled clock tree yet (ESP32-C3, STM8, …).
     None,
 }
@@ -214,7 +216,7 @@ impl ClockConfig {
     pub fn as_stm32f1(&self) -> Option<&Stm32f1Clock> {
         match self {
             ClockConfig::Stm32f1(c) => Some(c),
-            ClockConfig::None => None,
+            _ => None,
         }
     }
 
@@ -222,7 +224,7 @@ impl ClockConfig {
     pub fn as_stm32f1_mut(&mut self) -> Option<&mut Stm32f1Clock> {
         match self {
             ClockConfig::Stm32f1(c) => Some(c),
-            ClockConfig::None => None,
+            _ => None,
         }
     }
 }

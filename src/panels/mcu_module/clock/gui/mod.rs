@@ -9,7 +9,8 @@ pub mod diagram;
 
 use eframe::egui;
 
-use super::compute::{frequencies, ClockFrequencies};
+use super::compute::ClockFrequencies;
+use super::graph::graph_frequencies;
 use super::model::{
     ClockLimits, Mco, PllSrc, Stm32f1Clock, SysclkSrc, UsbPre, ADC_PRESCALERS, AHB_PRESCALERS,
     APB_PRESCALERS, PLL_MUL_MAX, PLL_MUL_MIN,
@@ -59,7 +60,7 @@ pub fn draw_clock_tree(
         .default_height(230.0)
         .min_height(120.0)
         .show_inside(ui, |ui| {
-            let f = frequencies(c);
+            let f = graph_frequencies(c);
             let total = ui.available_width();
             let h = ui.available_height();
             ui.horizontal_top(|ui| {
@@ -131,6 +132,85 @@ pub fn draw_clock_tree(
         });
 
     changed
+}
+
+/// Render an **imported graph clock** (`ClockConfig::Graph`): the data-driven
+/// diagram (drawn by the *same* `draw_static_diagram` the F103 path uses, with
+/// values resolved from the graph) plus a validation footer. Read-only for now
+/// (interactive editing of graph node states is the next step) → returns `false`.
+pub fn draw_graph_clock(
+    ui: &mut egui::Ui,
+    gc: &super::graph::GraphClock,
+    limits: &ClockLimits,
+) -> bool {
+    use super::graph::{evaluate, over_limits, value_from_graph};
+
+    let freqs = evaluate(&gc.graph);
+
+    // ── Validation footer (always visible) ───────────────────────────────────
+    egui::TopBottomPanel::bottom("graph_clock_footer")
+        .resizable(true)
+        .default_height(110.0)
+        .min_height(56.0)
+        .show_inside(ui, |ui| {
+            ui.strong("Validation");
+            egui::ScrollArea::vertical().id_salt("graph_clock_info").show(ui, |ui| {
+                let issues = over_limits(&gc.graph, limits, &freqs);
+                if issues.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(90, 200, 110),
+                        "✔  All clocks within datasheet limits.",
+                    );
+                } else {
+                    for o in issues {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 90, 80),
+                            format!("✖  {} = {} exceeds {}", o.node, fmt_mhz(o.hz), fmt_mhz(o.limit)),
+                        );
+                    }
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Imported data-driven clock graph (read-only diagram for now).",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 158, 172)),
+                );
+            });
+        });
+
+    // ── Zoom toolbar ─────────────────────────────────────────────────────────
+    let zoom_id = egui::Id::new("graph_clock_zoom");
+    let mut zoom = ui.data(|d| d.get_temp::<f32>(zoom_id).unwrap_or(1.0));
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Diagram").strong());
+        ui.separator();
+        ui.label("Zoom:");
+        if ui.small_button("−").clicked() {
+            zoom = (zoom / 1.15).max(0.4);
+        }
+        if ui.small_button(format!("{:.0}%", zoom * 100.0)).on_hover_text("Reset to 100%").clicked() {
+            zoom = 1.0;
+        }
+        if ui.small_button("+").clicked() {
+            zoom = (zoom * 1.15).min(3.0);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(zoom_id, zoom));
+
+    // ── Diagram (read-only) — shared renderer, graph-backed values ───────────
+    let avail_w = ui.available_width();
+    let avail_h = ui.available_height();
+    egui::ScrollArea::both()
+        .id_salt("graph_clock_diagram")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let resolve = |src| value_from_graph(src, &freqs);
+            diagram::draw_static_diagram(ui, &gc.layout, limits, avail_w, avail_h, zoom, &resolve);
+        });
+
+    false
 }
 
 /// The Info zone: validation messages plus the datasheet notes/legend.

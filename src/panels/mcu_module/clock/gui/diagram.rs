@@ -13,7 +13,12 @@
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, UiBuilder, Vec2};
 
-use super::super::compute::{frequencies, ClockFrequencies};
+use super::super::compute::ClockFrequencies;
+use super::super::graph::layout::{stm32f1_layout, ClockLayout, ValueSrc};
+use super::super::graph::render::graph_frequencies;
+use super::super::graph::validate::ceiling_for;
+// (`value_from_graph` is used by the graph-clock tab, which calls the shared
+//  `draw_static_diagram` below with a graph-backed resolver.)
 use super::super::model::{
     ClockLimits, Mco, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre,
     ADC_PRESCALERS, AHB_PRESCALERS, APB_PRESCALERS, PLL_MUL_MAX, PLL_MUL_MIN,
@@ -22,7 +27,6 @@ use super::super::model::{
 // ── Virtual canvas ────────────────────────────────────────────────────────────
 const VW: f32 = 1000.0;
 const VH: f32 = 790.0;
-const M: u32 = 1_000_000;
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 const BG: Color32 = Color32::from_rgb(26, 28, 34);
@@ -38,7 +42,7 @@ const FREQ_OK: Color32 = Color32::from_rgb(120, 205, 140);
 const FREQ_BAD: Color32 = Color32::from_rgb(235, 95, 85);
 
 #[derive(Clone, Copy)]
-struct Tf {
+pub(crate) struct Tf {
     origin: Pos2,
     scale: f32,
 }
@@ -67,28 +71,22 @@ pub fn draw(
     avail_h: f32,
     zoom: f32,
 ) -> bool {
-    let f = frequencies(c);
+    // Frequencies come from the generic graph evaluator (Phase 3); identical to
+    // the old `compute::frequencies` by the Phase-2 equivalence sweep.
+    let f = graph_frequencies(c);
+    // Static structure (blocks, outputs, tags, labels, wires) is data now.
+    let lay = stm32f1_layout(l);
 
-    // Fit the whole diagram into the viewport (both dimensions), then apply zoom.
-    let fit = (avail_w / VW).min(avail_h / VH);
-    let scale = (fit * zoom).max(0.12);
-    let size = Vec2::new(VW * scale, VH * scale);
+    // Static layer via the SHARED renderer (graph clocks use the very same one),
+    // resolving each box/tag from the live config. Scoped so the resolver's
+    // borrow of `c` ends before the interactive pass needs `&mut c`.
+    let (rect, tf) = {
+        let resolve = |src: ValueSrc| value_of(src, c, &f);
+        draw_static_diagram(ui, &lay, l, avail_w, avail_h, zoom, &resolve)
+    };
 
-    // Reserve the whole canvas up-front so the controls below never overlap the
-    // diagram (the interactive widgets are then confined to this exact rect).
-    let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let tf = Tf { origin: rect.min, scale };
-
-    // Clip BOTH the painter and the interactive widgets to the visible viewport
-    // (rect ∩ current clip), so anything scrolled out of view disappears
-    // instead of floating on top of the panels.
+    // Interactive widgets (F103 typed path) — clipped to the visible viewport.
     let clip = rect.intersect(ui.clip_rect());
-    let painter = ui.painter().with_clip_rect(clip);
-    painter.rect_filled(rect, 4.0, BG);
-
-    draw_wires(&painter, &tf, c, &f);
-    draw_static_blocks(&painter, &tf, c, &f, l);
-
     let mut changed = false;
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(clip);
@@ -97,103 +95,110 @@ pub fn draw(
     changed
 }
 
+/// Shared static-diagram renderer. Scales `lay` to the viewport, paints the
+/// background + wires + blocks/outputs/tags/labels/mux-titles, and returns the
+/// canvas `Rect` + transform. `resolve` supplies each box/tag's frequency —
+/// `value_of` for the F103 typed path, `value_from_graph` for imported graph
+/// clocks. No interactivity (callers add their own).
+pub(crate) fn draw_static_diagram(
+    ui: &mut egui::Ui,
+    lay: &ClockLayout,
+    l: &ClockLimits,
+    avail_w: f32,
+    avail_h: f32,
+    zoom: f32,
+    resolve: &dyn Fn(ValueSrc) -> u32,
+) -> (Rect, Tf) {
+    // Fit the whole diagram into the viewport (both dimensions), then apply zoom.
+    let fit = (avail_w / VW).min(avail_h / VH);
+    let scale = (fit * zoom).max(0.12);
+    let size = Vec2::new(VW * scale, VH * scale);
+
+    let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let tf = Tf { origin: rect.min, scale };
+
+    let clip = rect.intersect(ui.clip_rect());
+    let painter = ui.painter().with_clip_rect(clip);
+    painter.rect_filled(rect, 4.0, BG);
+
+    draw_wires(&painter, &tf, lay);
+    draw_static(&painter, &tf, lay, l, resolve);
+    (rect, tf)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Wires (drawn first, under the blocks)
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn draw_wires(p: &egui::Painter, tf: &Tf, _c: &Stm32f1Clock, _f: &ClockFrequencies) {
+fn draw_wires(p: &egui::Painter, tf: &Tf, lay: &ClockLayout) {
     // CubeMX style: muxes show their sources as labelled stubs (drawn inside
-    // `mux_radios`), so we avoid long cross-canvas wires.  Only short, local
-    // links are drawn here — none of them cross a block.
-
-    // Oscillator → local divider → mux input.
-    wire(p, tf, &[(120.0, 300.0), (157.0, 300.0), (157.0, 383.0), (175.0, 383.0)]); // HSI → /2
-    wire(p, tf, &[(215.0, 383.0), (226.0, 383.0)]); // /2 → PLL-src HSI/2 input
-    wire(p, tf, &[(120.0, 500.0), (148.0, 500.0)]); // HSE → PLLXTPRE
-    wire(p, tf, &[(208.0, 502.0), (226.0, 502.0)]); // PLLXTPRE → PLL-src HSE input
-
-    // PLL chain: PLLsrc mux → PLLMUL → PLLCLK node.
-    wire(p, tf, &[(290.0, 442.0), (336.0, 442.0)]); // mux out → PLLMUL
-    wire(p, tf, &[(420.0, 442.0), (456.0, 442.0)]); // PLLMUL → PLLCLK
-
-    // System mux (SYSCLK) → AHB → HCLK → distribution lane (x = 640).
-    wire(p, tf, &[(510.0, 360.0), (540.0, 360.0)]); // SYSCLK → AHB
-    wire(p, tf, &[(626.0, 360.0), (640.0, 360.0)]); // AHB → HCLK node
-    wire(p, tf, &[(640.0, 360.0), (818.0, 360.0)]); // HCLK → AHB-bus out
-    wire(p, tf, &[(640.0, 360.0), (640.0, 700.0)]); // HCLK vertical lane
-    wire(p, tf, &[(640.0, 430.0), (700.0, 430.0)]); // → SysTick prescaler
-    wire(p, tf, &[(766.0, 430.0), (818.0, 430.0)]); // SysTick → out
-    wire(p, tf, &[(640.0, 470.0), (818.0, 470.0)]); // → FCLK out
-    wire(p, tf, &[(640.0, 543.0), (720.0, 543.0)]); // → APB1 prescaler
-    wire(p, tf, &[(786.0, 543.0), (818.0, 543.0)]); // PCLK1 → APB1 periph
-    wire(p, tf, &[(806.0, 556.0), (806.0, 590.0), (818.0, 590.0)]); // → APB1 timer
-    wire(p, tf, &[(640.0, 663.0), (720.0, 663.0)]); // → APB2 prescaler
-    wire(p, tf, &[(786.0, 663.0), (818.0, 663.0)]); // PCLK2 → APB2 periph
-    wire(p, tf, &[(806.0, 676.0), (806.0, 710.0), (818.0, 710.0)]); // → APB2 timer
-    wire(p, tf, &[(753.0, 676.0), (753.0, 763.0), (720.0, 763.0)]); // PCLK2 → ADC prescaler
-    wire(p, tf, &[(786.0, 763.0), (818.0, 763.0)]); // ADC → out
-
-    // Right-margin outputs (clear top band — no block crossings).
-    wire(p, tf, &[(290.0, 122.0), (818.0, 122.0)]); // RTC mux → RTCCLK box
-    wire(p, tf, &[(560.0, 245.0), (818.0, 245.0)]); // USB → USBCLK box
-
-    // MCO mux output (mirrored → left) → MCO pin box.
-    wire(p, tf, &[(250.0, 638.0), (134.0, 638.0)]);
+    // `mux_radios`), so the routed wires are short, local links only. The
+    // polyline geometry is data ([`ClockLayout::wires`]).
+    for poly in &lay.wires {
+        wire(p, tf, poly);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Static blocks + labels + frequency tags
+// Static blocks + labels + frequency tags — all driven by `ClockLayout` data
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn draw_static_blocks(p: &egui::Painter, tf: &Tf, c: &Stm32f1Clock, f: &ClockFrequencies, l: &ClockLimits) {
-    // ── Oscillators (left) ───────────────────────────────────────────────────
-    block(p, tf, 28.0, 78.0, 92.0, 34.0, "LSE OSC\n32.768 kHz");
-    block(p, tf, 170.0, 84.0, 46.0, 22.0, "/128");
-    block(p, tf, 28.0, 153.0, 92.0, 34.0, "LSI RC\n40 kHz");
-    block(p, tf, 28.0, 283.0, 92.0, 34.0, "HSI RC\n8 MHz");
-    block(p, tf, 175.0, 372.0, 40.0, 22.0, "/2");
-    block(p, tf, 28.0, 483.0, 92.0, 34.0,
-        &format!("HSE OSC\n{}–{} MHz", l.hse_min_hz / M, l.hse_max_hz / M));
+fn draw_static(
+    p: &egui::Painter,
+    tf: &Tf,
+    lay: &ClockLayout,
+    l: &ClockLimits,
+    resolve: &dyn Fn(ValueSrc) -> u32,
+) {
+    for b in &lay.blocks {
+        block(p, tf, b.x, b.y, b.w, b.h, &b.label);
+    }
 
-    // ── All output boxes on the right margin (x = 820) ───────────────────────
-    out_box(p, tf, 820.0, 109.0, 160.0, 26.0, "RTCCLK → RTC", rtc_hz(c, f), None);
-    out_box(p, tf, 820.0, 149.0, 160.0, 26.0, "IWDGCLK ← LSI", 40_000, None);
-    out_box(p, tf, 820.0, 232.0, 160.0, 26.0, "USBCLK → USB", f.usbclk, None);
-    out_box(p, tf, 820.0, 272.0, 160.0, 26.0, "FLITFCLK ← HSI", f.flitfclk, None);
-    out_box(p, tf, 820.0, 346.0, 160.0, 28.0, "HCLK → AHB / core / DMA", f.hclk, Some(l.hclk_max));
-    out_box(p, tf, 820.0, 416.0, 160.0, 28.0, "Cortex SysTick", systick_hz(c, f), None);
-    out_box(p, tf, 820.0, 456.0, 160.0, 28.0, "FCLK (free-running)", f.hclk, None);
-    out_box(p, tf, 820.0, 529.0, 160.0, 28.0, "APB1 peripherals", f.pclk1, Some(l.pclk1_max));
-    out_box(p, tf, 820.0, 576.0, 160.0, 28.0, "APB1 timers", f.tim_apb1, None);
-    out_box(p, tf, 820.0, 649.0, 160.0, 28.0, "APB2 peripherals", f.pclk2, Some(l.pclk2_max));
-    out_box(p, tf, 820.0, 696.0, 160.0, 28.0, "APB2 timers", f.tim_apb2, None);
-    out_box(p, tf, 820.0, 749.0, 160.0, 28.0, "ADC1/2", f.adcclk, Some(l.adcclk_max));
+    for o in &lay.outputs {
+        let hz = resolve(o.src);
+        let limit = o.limit.and_then(|k| ceiling_for(k, l));
+        out_box(p, tf, o.x, o.y, o.w, o.h, &o.label, hz, limit);
+    }
 
-    // ── MCO pin box (far left, fed by the mirrored MCO mux) ──────────────────
-    out_box(p, tf, 28.0, 625.0, 106.0, 26.0, "MCO pin", mco_hz(c, f), None);
+    for t in &lay.tags {
+        let hz = resolve(t.src);
+        let bad = t.limit.and_then(|k| ceiling_for(k, l)).map_or(false, |lim| over(hz, lim));
+        tag(p, tf, t.x, t.y, &mhz(hz), bad, &t.name);
+    }
 
-    // ── Frequency tags on the main chain ─────────────────────────────────────
-    tag(p, tf, 424.0, 422.0, &mhz(f.pllclk), over(f.pllclk, l.sysclk_max), "PLLCLK");
-    tag(p, tf, 516.0, 344.0, &mhz(f.sysclk), over(f.sysclk, l.sysclk_max), "SYSCLK");
-    tag(p, tf, 592.0, 344.0, &mhz(f.hclk), over(f.hclk, l.hclk_max), "HCLK");
-    tag(p, tf, 792.0, 524.0, &mhz(f.pclk1), over(f.pclk1, l.pclk1_max), "PCLK1");
-    tag(p, tf, 792.0, 644.0, &mhz(f.pclk2), over(f.pclk2, l.pclk2_max), "PCLK2");
+    for lb in &lay.labels_above {
+        label_above(p, tf, lb.x, lb.y, &lb.text);
+    }
 
-    // ── Node name labels (ABOVE their dropdowns) ─────────────────────────────
-    label_above(p, tf, 148.0, 478.0, "PLLXTPRE");
-    label_above(p, tf, 336.0, 418.0, "PLLMUL");
-    label_above(p, tf, 470.0, 228.0, "USB Prescaler");
-    label_above(p, tf, 540.0, 335.0, "AHB Prescaler");
-    label_above(p, tf, 700.0, 408.0, "SysTick");
-    label_above(p, tf, 720.0, 518.0, "APB1 Prescaler");
-    label_above(p, tf, 720.0, 638.0, "APB2 Prescaler");
-    label_above(p, tf, 720.0, 738.0, "ADC Prescaler");
-    label_above(p, tf, 28.0, 521.0, "HSE crystal");
-    // Mux titles (mux center x = 270)
-    p.text(tf.p(270.0, 64.0), Align2::CENTER_BOTTOM, "RTC Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
-    p.text(tf.p(270.0, 364.0), Align2::CENTER_BOTTOM, "PLL Source", FontId::proportional(tf.fs(9.0)), DIM_C);
-    p.text(tf.p(490.0, 294.0), Align2::CENTER_BOTTOM, "System Clock Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
-    p.text(tf.p(270.0, 574.0), Align2::CENTER_BOTTOM, "MCO Mux", FontId::proportional(tf.fs(9.0)), DIM_C);
+    for mt in &lay.mux_titles {
+        p.text(
+            tf.p(mt.x, mt.y),
+            Align2::CENTER_BOTTOM,
+            &mt.text,
+            FontId::proportional(tf.fs(9.0)),
+            DIM_C,
+        );
+    }
+}
+
+/// Resolve a layout [`ValueSrc`] to the frequency to display (Hz).
+fn value_of(src: ValueSrc, c: &Stm32f1Clock, f: &ClockFrequencies) -> u32 {
+    match src {
+        ValueSrc::Hclk => f.hclk,
+        ValueSrc::Sysclk => f.sysclk,
+        ValueSrc::Pclk1 => f.pclk1,
+        ValueSrc::Pclk2 => f.pclk2,
+        ValueSrc::Pclk1Tim => f.tim_apb1,
+        ValueSrc::Pclk2Tim => f.tim_apb2,
+        ValueSrc::Adc => f.adcclk,
+        ValueSrc::Usb => f.usbclk,
+        ValueSrc::Pllclk => f.pllclk,
+        ValueSrc::Flitf => f.flitfclk,
+        ValueSrc::Systick => systick_hz(c, f),
+        ValueSrc::Rtc => rtc_hz(c, f),
+        ValueSrc::Mco => mco_hz(c, f),
+        ValueSrc::Fixed(v) => v,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

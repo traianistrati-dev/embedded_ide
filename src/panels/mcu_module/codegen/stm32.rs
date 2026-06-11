@@ -77,7 +77,9 @@ fn freq_lit(hz: u32) -> String {
 pub fn clock_setup_chain(clock: &ClockConfig) -> String {
     let c: Stm32f1Clock = match clock {
         ClockConfig::Stm32f1(c) => c.clone(),
-        ClockConfig::None => Stm32f1Clock::default(),
+        // Graph / None aren't STM32F1-specific; the stm32 backend only runs for
+        // the "stm32f1" family, so this fallback is just for exhaustiveness.
+        _ => Stm32f1Clock::default(),
     };
     let f = frequencies(&c);
     // Newline + 17 spaces → lines up the `.method()` calls under `rcc.cfgr`.
@@ -111,7 +113,7 @@ pub fn clock_setup_chain(clock: &ClockConfig) -> String {
 fn clock_comment_line(clock: &ClockConfig) -> String {
     let c = match clock {
         ClockConfig::Stm32f1(c) => c.clone(),
-        ClockConfig::None => Stm32f1Clock::default(),
+        _ => Stm32f1Clock::default(),
     };
     crate::panels::mcu_module::clock::persist::to_comment(&c)
 }

@@ -1,0 +1,1411 @@
+McuDefinition(
+    id: "stm32f103c8t6-graph",
+    display_name: "STM32F103C8T6 (graph clock demo)",
+    family: "stm32f1",
+    package: "LQFP48",
+    cpu: "ARM Cortex-M3",
+    toolchain: RustEmbedded,
+    project: ProjectDef(
+        pkg_name: "stm32f103c8t6",
+        target: "thumbv7m-none-eabi",
+        flash_origin: "0x08000000",
+        flash_size: "64K",
+        ram_origin: "0x20000000",
+        ram_size: "20K",
+        hal_dep: "stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"medium\", \"rt\"] }",
+        probe_chip: "STM32F103C8",
+        memory_comment: "STM32F103C8T6  —  64 KiB Flash / 20 KiB RAM",
+    ),
+    pins: PinLayout(
+        top: [
+            PinDef(
+                number: 48,
+                name: "VDD",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 47,
+                name: "VSS",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 46,
+                name: "PB9",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 4,
+                        channel: 4,
+                    ),
+                    CanTx,
+                    I2cSda(1),
+                ],
+            ),
+            PinDef(
+                number: 45,
+                name: "PB8",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    TimerPwm(
+                        timer: 4,
+                        channel: 3,
+                    ),
+                    CanRx,
+                    I2cScl(1),
+                ],
+            ),
+            PinDef(
+                number: 44,
+                name: "BOOT0",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 43,
+                name: "PB7",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cSda(1),
+                    TimerPwm(
+                        timer: 4,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 42,
+                name: "PB6",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cScl(1),
+                    TimerPwm(
+                        timer: 4,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 41,
+                name: "PB5",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMosi(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 40,
+                name: "PB4",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMiso(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 39,
+                name: "PB3",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiSck(1),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 38,
+                name: "PA15",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiNss(1),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 37,
+                name: "PA14",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SwdClk,
+                ],
+            ),
+        ],
+        bottom: [
+            PinDef(
+                number: 13,
+                name: "PA3",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 3,
+                    ),
+                    UsartRx(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 4,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 14,
+                name: "PA4",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 4,
+                    ),
+                    SpiNss(1),
+                    UsartCk(2),
+                ],
+            ),
+            PinDef(
+                number: 15,
+                name: "PA5",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 5,
+                    ),
+                    SpiSck(1),
+                ],
+            ),
+            PinDef(
+                number: 16,
+                name: "PA6",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 6,
+                    ),
+                    SpiMiso(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 17,
+                name: "PA7",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 7,
+                    ),
+                    SpiMosi(1),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 18,
+                name: "PB0",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 8,
+                    ),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 3,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 19,
+                name: "PB1",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 9,
+                    ),
+                    TimerPwm(
+                        timer: 3,
+                        channel: 4,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 20,
+                name: "PB2",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 21,
+                name: "PB10",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cScl(2),
+                    UsartTx(3),
+                ],
+            ),
+            PinDef(
+                number: 22,
+                name: "PB11",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    I2cSda(2),
+                    UsartRx(3),
+                ],
+            ),
+            PinDef(
+                number: 23,
+                name: "VSS",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 24,
+                name: "VDD",
+                reserved: true,
+                functions: [],
+            ),
+        ],
+        left: [
+            PinDef(
+                number: 1,
+                name: "VBAT",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 2,
+                name: "PC13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 3,
+                name: "PC14",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 4,
+                name: "PC15",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 5,
+                name: "PD0",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 6,
+                name: "PD1",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                ],
+            ),
+            PinDef(
+                number: 7,
+                name: "NRST",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 8,
+                name: "VSSA",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 9,
+                name: "VDDA",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 10,
+                name: "PA0",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 0,
+                    ),
+                    UsartCts(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 11,
+                name: "PA1",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 1,
+                    ),
+                    UsartRts(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 12,
+                name: "PA2",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    AdcChannel(
+                        adc: 1,
+                        channel: 2,
+                    ),
+                    UsartTx(2),
+                    TimerPwm(
+                        timer: 2,
+                        channel: 3,
+                    ),
+                ],
+            ),
+        ],
+        right: [
+            PinDef(
+                number: 36,
+                name: "VDD",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 35,
+                name: "VSS",
+                reserved: true,
+                functions: [],
+            ),
+            PinDef(
+                number: 34,
+                name: "PA13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SwdIo,
+                ],
+            ),
+            PinDef(
+                number: 33,
+                name: "PA12",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsbDp,
+                    CanTx,
+                    UsartRts(1),
+                ],
+            ),
+            PinDef(
+                number: 32,
+                name: "PA11",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsbDm,
+                    CanRx,
+                    UsartCts(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 4,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 31,
+                name: "PA10",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsartRx(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 3,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 30,
+                name: "PA9",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    UsartTx(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 2,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 29,
+                name: "PA8",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    Mco,
+                    UsartCk(1),
+                    TimerPwm(
+                        timer: 1,
+                        channel: 1,
+                    ),
+                ],
+            ),
+            PinDef(
+                number: 28,
+                name: "PB15",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMosi(2),
+                ],
+            ),
+            PinDef(
+                number: 27,
+                name: "PB14",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiMiso(2),
+                    UsartRts(3),
+                ],
+            ),
+            PinDef(
+                number: 26,
+                name: "PB13",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiSck(2),
+                    UsartCts(3),
+                ],
+            ),
+            PinDef(
+                number: 25,
+                name: "PB12",
+                reserved: false,
+                functions: [
+                    GpioInput,
+                    GpioOutput,
+                    SpiNss(2),
+                    UsartCk(3),
+                    I2cScl(2),
+                ],
+            ),
+        ],
+    ),
+    clock: Graph(GraphClock(
+        graph: ClockGraph(
+            nodes: [
+                Node(
+                    id: "hsi",
+                    kind: Source(
+                        min_hz: 8000000,
+                        max_hz: 8000000,
+                        gated: false,
+                    ),
+                    state: Source(
+                        enabled: true,
+                        hz: 8000000,
+                    ),
+                    limit: None,
+                ),
+                Node(
+                    id: "hse",
+                    kind: Source(
+                        min_hz: 4000000,
+                        max_hz: 16000000,
+                        gated: true,
+                    ),
+                    state: Source(
+                        enabled: true,
+                        hz: 8000000,
+                    ),
+                    limit: None,
+                ),
+                Node(
+                    id: "hsi_div2",
+                    kind: FixedDiv(
+                        by: 2,
+                    ),
+                    state: Fixed,
+                    limit: None,
+                ),
+                Node(
+                    id: "pllxtpre",
+                    kind: Choice(
+                        ratios: [
+                            (1, 1),
+                            (1, 2),
+                        ],
+                    ),
+                    state: Index(0),
+                    limit: None,
+                ),
+                Node(
+                    id: "pllsrc",
+                    kind: Mux(
+                        inputs: 2,
+                    ),
+                    state: Index(1),
+                    limit: None,
+                ),
+                Node(
+                    id: "pllmul",
+                    kind: Multiplier(
+                        min: 2,
+                        max: 16,
+                    ),
+                    state: Value(9),
+                    limit: None,
+                ),
+                Node(
+                    id: "pllclk",
+                    kind: Tap,
+                    state: Fixed,
+                    limit: Some(SysclkMax),
+                ),
+                Node(
+                    id: "sw",
+                    kind: Mux(
+                        inputs: 3,
+                    ),
+                    state: Index(2),
+                    limit: None,
+                ),
+                Node(
+                    id: "sysclk",
+                    kind: Tap,
+                    state: Fixed,
+                    limit: Some(SysclkMax),
+                ),
+                Node(
+                    id: "ahb",
+                    kind: Divider(
+                        options: [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                            64,
+                            128,
+                            256,
+                            512,
+                        ],
+                    ),
+                    state: Index(0),
+                    limit: None,
+                ),
+                Node(
+                    id: "hclk",
+                    kind: Output,
+                    state: Fixed,
+                    limit: Some(HclkMax),
+                ),
+                Node(
+                    id: "apb1",
+                    kind: Divider(
+                        options: [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                        ],
+                    ),
+                    state: Index(1),
+                    limit: None,
+                ),
+                Node(
+                    id: "pclk1",
+                    kind: Output,
+                    state: Fixed,
+                    limit: Some(Pclk1Max),
+                ),
+                Node(
+                    id: "apb2",
+                    kind: Divider(
+                        options: [
+                            1,
+                            2,
+                            4,
+                            8,
+                            16,
+                        ],
+                    ),
+                    state: Index(0),
+                    limit: None,
+                ),
+                Node(
+                    id: "pclk2",
+                    kind: Output,
+                    state: Fixed,
+                    limit: Some(Pclk2Max),
+                ),
+                Node(
+                    id: "adc",
+                    kind: Divider(
+                        options: [
+                            2,
+                            4,
+                            6,
+                            8,
+                        ],
+                    ),
+                    state: Index(2),
+                    limit: None,
+                ),
+                Node(
+                    id: "adcclk",
+                    kind: Output,
+                    state: Fixed,
+                    limit: Some(AdcclkMax),
+                ),
+                Node(
+                    id: "tim_apb1",
+                    kind: TimerMul(
+                        prescaler: "apb1",
+                    ),
+                    state: Fixed,
+                    limit: None,
+                ),
+                Node(
+                    id: "tim_apb2",
+                    kind: TimerMul(
+                        prescaler: "apb2",
+                    ),
+                    state: Fixed,
+                    limit: None,
+                ),
+                Node(
+                    id: "usb",
+                    kind: Choice(
+                        ratios: [
+                            (2, 3),
+                            (1, 1),
+                        ],
+                    ),
+                    state: Index(0),
+                    limit: None,
+                ),
+                Node(
+                    id: "usbclk",
+                    kind: Output,
+                    state: Fixed,
+                    limit: Some(UsbclkHz),
+                ),
+                Node(
+                    id: "systick",
+                    kind: Choice(
+                        ratios: [
+                            (1, 8),
+                            (1, 1),
+                        ],
+                    ),
+                    state: Index(0),
+                    limit: None,
+                ),
+                Node(
+                    id: "flitfclk",
+                    kind: Tap,
+                    state: Fixed,
+                    limit: None,
+                ),
+                Node(
+                    id: "lse",
+                    kind: Source(
+                        min_hz: 32768,
+                        max_hz: 32768,
+                        gated: true,
+                    ),
+                    state: Source(
+                        enabled: true,
+                        hz: 32768,
+                    ),
+                    limit: None,
+                ),
+                Node(
+                    id: "lsi",
+                    kind: Source(
+                        min_hz: 40000,
+                        max_hz: 40000,
+                        gated: false,
+                    ),
+                    state: Source(
+                        enabled: true,
+                        hz: 40000,
+                    ),
+                    limit: None,
+                ),
+                Node(
+                    id: "hse_div128",
+                    kind: FixedDiv(
+                        by: 128,
+                    ),
+                    state: Fixed,
+                    limit: None,
+                ),
+                Node(
+                    id: "pll_div2",
+                    kind: FixedDiv(
+                        by: 2,
+                    ),
+                    state: Fixed,
+                    limit: None,
+                ),
+                Node(
+                    id: "rtc",
+                    kind: Mux(
+                        inputs: 3,
+                    ),
+                    state: Index(2),
+                    limit: None,
+                ),
+                Node(
+                    id: "mco",
+                    kind: Mux(
+                        inputs: 4,
+                    ),
+                    state: Unset,
+                    limit: None,
+                ),
+            ],
+            edges: [
+                Edge(
+                    from: "hsi",
+                    to: "hsi_div2",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hse",
+                    to: "pllxtpre",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hsi_div2",
+                    to: "pllsrc",
+                    input: 0,
+                ),
+                Edge(
+                    from: "pllxtpre",
+                    to: "pllsrc",
+                    input: 1,
+                ),
+                Edge(
+                    from: "pllsrc",
+                    to: "pllmul",
+                    input: 0,
+                ),
+                Edge(
+                    from: "pllmul",
+                    to: "pllclk",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hsi",
+                    to: "sw",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hse",
+                    to: "sw",
+                    input: 1,
+                ),
+                Edge(
+                    from: "pllclk",
+                    to: "sw",
+                    input: 2,
+                ),
+                Edge(
+                    from: "sw",
+                    to: "sysclk",
+                    input: 0,
+                ),
+                Edge(
+                    from: "sysclk",
+                    to: "ahb",
+                    input: 0,
+                ),
+                Edge(
+                    from: "ahb",
+                    to: "hclk",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hclk",
+                    to: "apb1",
+                    input: 0,
+                ),
+                Edge(
+                    from: "apb1",
+                    to: "pclk1",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hclk",
+                    to: "apb2",
+                    input: 0,
+                ),
+                Edge(
+                    from: "apb2",
+                    to: "pclk2",
+                    input: 0,
+                ),
+                Edge(
+                    from: "pclk2",
+                    to: "adc",
+                    input: 0,
+                ),
+                Edge(
+                    from: "adc",
+                    to: "adcclk",
+                    input: 0,
+                ),
+                Edge(
+                    from: "pclk1",
+                    to: "tim_apb1",
+                    input: 0,
+                ),
+                Edge(
+                    from: "pclk2",
+                    to: "tim_apb2",
+                    input: 0,
+                ),
+                Edge(
+                    from: "pllclk",
+                    to: "usb",
+                    input: 0,
+                ),
+                Edge(
+                    from: "usb",
+                    to: "usbclk",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hclk",
+                    to: "systick",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hsi",
+                    to: "flitfclk",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hse",
+                    to: "hse_div128",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hse_div128",
+                    to: "rtc",
+                    input: 0,
+                ),
+                Edge(
+                    from: "lse",
+                    to: "rtc",
+                    input: 1,
+                ),
+                Edge(
+                    from: "lsi",
+                    to: "rtc",
+                    input: 2,
+                ),
+                Edge(
+                    from: "pllclk",
+                    to: "pll_div2",
+                    input: 0,
+                ),
+                Edge(
+                    from: "sysclk",
+                    to: "mco",
+                    input: 0,
+                ),
+                Edge(
+                    from: "hsi",
+                    to: "mco",
+                    input: 1,
+                ),
+                Edge(
+                    from: "hse",
+                    to: "mco",
+                    input: 2,
+                ),
+                Edge(
+                    from: "pll_div2",
+                    to: "mco",
+                    input: 3,
+                ),
+            ],
+        ),
+        layout: ClockLayout(
+            blocks: [
+                BlockDef(
+                    x: 28.0,
+                    y: 78.0,
+                    w: 92.0,
+                    h: 34.0,
+                    label: "LSE OSC\n32.768 kHz",
+                ),
+                BlockDef(
+                    x: 170.0,
+                    y: 84.0,
+                    w: 46.0,
+                    h: 22.0,
+                    label: "/128",
+                ),
+                BlockDef(
+                    x: 28.0,
+                    y: 153.0,
+                    w: 92.0,
+                    h: 34.0,
+                    label: "LSI RC\n40 kHz",
+                ),
+                BlockDef(
+                    x: 28.0,
+                    y: 283.0,
+                    w: 92.0,
+                    h: 34.0,
+                    label: "HSI RC\n8 MHz",
+                ),
+                BlockDef(
+                    x: 175.0,
+                    y: 372.0,
+                    w: 40.0,
+                    h: 22.0,
+                    label: "/2",
+                ),
+                BlockDef(
+                    x: 28.0,
+                    y: 483.0,
+                    w: 92.0,
+                    h: 34.0,
+                    label: "HSE OSC\n4–16 MHz",
+                ),
+            ],
+            outputs: [
+                OutputDef(
+                    x: 820.0,
+                    y: 109.0,
+                    w: 160.0,
+                    h: 26.0,
+                    label: "RTCCLK → RTC",
+                    src: Rtc,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 149.0,
+                    w: 160.0,
+                    h: 26.0,
+                    label: "IWDGCLK ← LSI",
+                    src: Fixed(40000),
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 232.0,
+                    w: 160.0,
+                    h: 26.0,
+                    label: "USBCLK → USB",
+                    src: Usb,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 272.0,
+                    w: 160.0,
+                    h: 26.0,
+                    label: "FLITFCLK ← HSI",
+                    src: Flitf,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 346.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "HCLK → AHB / core / DMA",
+                    src: Hclk,
+                    limit: Some(HclkMax),
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 416.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "Cortex SysTick",
+                    src: Systick,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 456.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "FCLK (free-running)",
+                    src: Hclk,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 529.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "APB1 peripherals",
+                    src: Pclk1,
+                    limit: Some(Pclk1Max),
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 576.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "APB1 timers",
+                    src: Pclk1Tim,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 649.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "APB2 peripherals",
+                    src: Pclk2,
+                    limit: Some(Pclk2Max),
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 696.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "APB2 timers",
+                    src: Pclk2Tim,
+                    limit: None,
+                ),
+                OutputDef(
+                    x: 820.0,
+                    y: 749.0,
+                    w: 160.0,
+                    h: 28.0,
+                    label: "ADC1/2",
+                    src: Adc,
+                    limit: Some(AdcclkMax),
+                ),
+                OutputDef(
+                    x: 28.0,
+                    y: 625.0,
+                    w: 106.0,
+                    h: 26.0,
+                    label: "MCO pin",
+                    src: Mco,
+                    limit: None,
+                ),
+            ],
+            tags: [
+                TagDef(
+                    x: 424.0,
+                    y: 422.0,
+                    name: "PLLCLK",
+                    src: Pllclk,
+                    limit: Some(SysclkMax),
+                ),
+                TagDef(
+                    x: 516.0,
+                    y: 344.0,
+                    name: "SYSCLK",
+                    src: Sysclk,
+                    limit: Some(SysclkMax),
+                ),
+                TagDef(
+                    x: 592.0,
+                    y: 344.0,
+                    name: "HCLK",
+                    src: Hclk,
+                    limit: Some(HclkMax),
+                ),
+                TagDef(
+                    x: 792.0,
+                    y: 524.0,
+                    name: "PCLK1",
+                    src: Pclk1,
+                    limit: Some(Pclk1Max),
+                ),
+                TagDef(
+                    x: 792.0,
+                    y: 644.0,
+                    name: "PCLK2",
+                    src: Pclk2,
+                    limit: Some(Pclk2Max),
+                ),
+            ],
+            labels_above: [
+                LabelDef(
+                    x: 148.0,
+                    y: 478.0,
+                    text: "PLLXTPRE",
+                ),
+                LabelDef(
+                    x: 336.0,
+                    y: 418.0,
+                    text: "PLLMUL",
+                ),
+                LabelDef(
+                    x: 470.0,
+                    y: 228.0,
+                    text: "USB Prescaler",
+                ),
+                LabelDef(
+                    x: 540.0,
+                    y: 335.0,
+                    text: "AHB Prescaler",
+                ),
+                LabelDef(
+                    x: 700.0,
+                    y: 408.0,
+                    text: "SysTick",
+                ),
+                LabelDef(
+                    x: 720.0,
+                    y: 518.0,
+                    text: "APB1 Prescaler",
+                ),
+                LabelDef(
+                    x: 720.0,
+                    y: 638.0,
+                    text: "APB2 Prescaler",
+                ),
+                LabelDef(
+                    x: 720.0,
+                    y: 738.0,
+                    text: "ADC Prescaler",
+                ),
+                LabelDef(
+                    x: 28.0,
+                    y: 521.0,
+                    text: "HSE crystal",
+                ),
+            ],
+            mux_titles: [
+                LabelDef(
+                    x: 270.0,
+                    y: 64.0,
+                    text: "RTC Mux",
+                ),
+                LabelDef(
+                    x: 270.0,
+                    y: 364.0,
+                    text: "PLL Source",
+                ),
+                LabelDef(
+                    x: 490.0,
+                    y: 294.0,
+                    text: "System Clock Mux",
+                ),
+                LabelDef(
+                    x: 270.0,
+                    y: 574.0,
+                    text: "MCO Mux",
+                ),
+            ],
+            wires: [
+                [
+                    (120.0, 300.0),
+                    (157.0, 300.0),
+                    (157.0, 383.0),
+                    (175.0, 383.0),
+                ],
+                [
+                    (215.0, 383.0),
+                    (226.0, 383.0),
+                ],
+                [
+                    (120.0, 500.0),
+                    (148.0, 500.0),
+                ],
+                [
+                    (208.0, 502.0),
+                    (226.0, 502.0),
+                ],
+                [
+                    (290.0, 442.0),
+                    (336.0, 442.0),
+                ],
+                [
+                    (420.0, 442.0),
+                    (456.0, 442.0),
+                ],
+                [
+                    (510.0, 360.0),
+                    (540.0, 360.0),
+                ],
+                [
+                    (626.0, 360.0),
+                    (640.0, 360.0),
+                ],
+                [
+                    (640.0, 360.0),
+                    (818.0, 360.0),
+                ],
+                [
+                    (640.0, 360.0),
+                    (640.0, 700.0),
+                ],
+                [
+                    (640.0, 430.0),
+                    (700.0, 430.0),
+                ],
+                [
+                    (766.0, 430.0),
+                    (818.0, 430.0),
+                ],
+                [
+                    (640.0, 470.0),
+                    (818.0, 470.0),
+                ],
+                [
+                    (640.0, 543.0),
+                    (720.0, 543.0),
+                ],
+                [
+                    (786.0, 543.0),
+                    (818.0, 543.0),
+                ],
+                [
+                    (806.0, 556.0),
+                    (806.0, 590.0),
+                    (818.0, 590.0),
+                ],
+                [
+                    (640.0, 663.0),
+                    (720.0, 663.0),
+                ],
+                [
+                    (786.0, 663.0),
+                    (818.0, 663.0),
+                ],
+                [
+                    (806.0, 676.0),
+                    (806.0, 710.0),
+                    (818.0, 710.0),
+                ],
+                [
+                    (753.0, 676.0),
+                    (753.0, 763.0),
+                    (720.0, 763.0),
+                ],
+                [
+                    (786.0, 763.0),
+                    (818.0, 763.0),
+                ],
+                [
+                    (290.0, 122.0),
+                    (818.0, 122.0),
+                ],
+                [
+                    (560.0, 245.0),
+                    (818.0, 245.0),
+                ],
+                [
+                    (250.0, 638.0),
+                    (134.0, 638.0),
+                ],
+            ],
+        ),
+    )),
+)

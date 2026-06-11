@@ -1,0 +1,22 @@
+//! Data-driven clock-graph (Phase 1 — model + evaluator, not yet wired to UI).
+//!
+//! - `model`   — the typed node taxonomy + `ClockGraph`.
+//! - `eval`    — generic topological frequency evaluator.
+//! - `stm32f1` — bridge that builds the F103 tree as a graph and proves the
+//!               evaluator matches the hardcoded `compute.rs`.
+
+pub mod config;
+pub mod eval;
+pub mod layout;
+pub mod model;
+pub mod render;
+pub mod stm32f1;
+pub mod validate;
+
+pub use config::GraphClock;
+pub use eval::evaluate;
+pub use layout::{stm32f1_layout, ClockLayout, ValueSrc};
+pub use model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
+pub use render::{graph_frequencies, value_from_graph, value_node_id};
+pub use stm32f1::stm32f1_graph;
+pub use validate::{over_limits, Overflow};

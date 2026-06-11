@@ -8,6 +8,7 @@
 //! - `gui`      — the interactive Figure-2 diagram (added in a later phase).
 
 pub mod compute;
+pub mod graph;
 pub mod gui;
 pub mod model;
 pub mod persist;

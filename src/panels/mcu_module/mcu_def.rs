@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::clock::graph::GraphClock;
 use super::clock::{ClockConfig, ClockLimits, ClockPreset, Stm32f1Clock};
 use super::mcu::Mcu;
 use super::mcu_catalog::ToolchainKind;
@@ -91,6 +92,8 @@ pub struct ProjectDef {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClockDef {
     Stm32f1(Stm32f1Clock),
+    /// Data-driven clock tree + diagram, importable for any family.
+    Graph(GraphClock),
     /// No modelled clock tree yet (ESP32-C3, STM8, …).
     None,
 }
@@ -99,6 +102,7 @@ impl ClockDef {
     fn to_config(&self) -> ClockConfig {
         match self {
             ClockDef::Stm32f1(c) => ClockConfig::Stm32f1(c.clone()),
+            ClockDef::Graph(g) => ClockConfig::Graph(g.clone()),
             ClockDef::None => ClockConfig::None,
         }
     }
@@ -107,7 +111,9 @@ impl ClockDef {
     fn same_family(&self, other: &ClockDef) -> bool {
         matches!(
             (self, other),
-            (ClockDef::Stm32f1(_), ClockDef::Stm32f1(_)) | (ClockDef::None, ClockDef::None)
+            (ClockDef::Stm32f1(_), ClockDef::Stm32f1(_))
+                | (ClockDef::Graph(_), ClockDef::Graph(_))
+                | (ClockDef::None, ClockDef::None)
         )
     }
 }
@@ -185,7 +191,9 @@ impl McuDefinition {
                     description: p.description.clone(),
                     config: c.clone(),
                 }),
-                ClockDef::None => None,
+                // `ClockPreset` is the Stm32f1 runtime preset; graph clocks carry
+                // their presets in-graph, so they don't convert here.
+                ClockDef::Graph(_) | ClockDef::None => None,
             })
             .collect();
         mcu
@@ -325,5 +333,28 @@ mod tests {
         let plain = ron::to_string(&stm_def()).expect("serialize");
         assert!(!plain.contains("clock_limits"));
         assert!(!plain.contains("clock_presets"));
+    }
+
+    /// A chip can ship a data-driven `ClockDef::Graph`: it round-trips through
+    /// RON and builds into a runtime `ClockConfig::Graph`.
+    #[test]
+    fn graph_clock_def_round_trips_and_builds() {
+        use crate::panels::mcu_module::clock::graph::layout::stm32f1_layout;
+        use crate::panels::mcu_module::clock::graph::{stm32f1_graph, GraphClock};
+        use crate::panels::mcu_module::clock::ClockConfig;
+
+        let gc = GraphClock {
+            graph: stm32f1_graph(&Stm32f1Clock::default()),
+            layout: stm32f1_layout(&ClockLimits::default()),
+        };
+        let mut def = stm_def();
+        def.clock = ClockDef::Graph(gc);
+
+        let mcu = def.build_mcu();
+        assert!(matches!(mcu.clock, ClockConfig::Graph(_)), "build_mcu yields a graph clock");
+
+        let ron = ron::to_string(&def).expect("serialize def with graph clock");
+        let back: McuDefinition = ron::from_str(&ron).expect("parse def with graph clock");
+        assert_eq!(def, back, "definition with embedded graph + layout must round-trip");
     }
 }
