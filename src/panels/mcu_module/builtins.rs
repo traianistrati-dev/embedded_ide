@@ -373,6 +373,55 @@ mod tests {
         }
     }
 
+    /// One-shot: write an **ESP32-C3** chip whose clock is a data-driven
+    /// `ClockDef::Graph` (a totally different tree from STM32F1), proving the
+    /// graph clock is family-agnostic. Run with:
+    /// `cargo test generate_esp32c3_graph_clock_example -- --ignored`
+    #[test]
+    #[ignore]
+    fn generate_esp32c3_graph_clock_example() {
+        use crate::panels::mcu_module::clock::graph::{esp32c3_graph, esp32c3_layout, GraphClock};
+        use ron::ser::PrettyConfig;
+
+        let mut def = builtin_for("esp32c3").expect("base def");
+        def.id = "esp32c3-graph".to_owned();
+        def.display_name = "ESP32-C3 (graph clock demo)".to_owned();
+        def.clock = ClockDef::Graph(GraphClock {
+            graph: esp32c3_graph(),
+            layout: esp32c3_layout(),
+        });
+
+        std::fs::create_dir_all("assets/mcus/examples").unwrap();
+        let ron =
+            ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
+        std::fs::write("assets/mcus/examples/esp32c3_graphclock.ron", ron).unwrap();
+    }
+
+    /// The ESP32-C3 graph-clock example parses, builds, and evaluates to the
+    /// expected default frequencies (CPU 160 MHz).
+    #[test]
+    fn esp32c3_graph_clock_example_is_valid() {
+        use crate::panels::mcu_module::clock::graph::evaluate;
+        use crate::panels::mcu_module::clock::ClockConfig;
+
+        let path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mcus/examples/esp32c3_graphclock.ron");
+        let text = std::fs::read_to_string(path).expect("example exists (run generator)");
+        let def: McuDefinition = ron::from_str(&text).expect("esp32c3 graph-clock parses");
+        assert_eq!(def.id, "esp32c3-graph");
+        assert!(matches!(def.clock, ClockDef::Graph(_)));
+
+        match def.build_mcu().clock {
+            ClockConfig::Graph(gc) => {
+                let f = evaluate(&gc.graph);
+                assert_eq!(f.get("cpu").copied().unwrap_or(0), 160_000_000, "CPU 160 MHz");
+                assert_eq!(f.get("apb").copied().unwrap_or(0), 80_000_000, "APB 80 MHz");
+                assert!(!gc.layout.outputs.is_empty(), "layout must carry the diagram");
+            }
+            _ => panic!("expected a graph clock"),
+        }
+    }
+
     #[test]
     fn all_builtins_parse() {
         let defs = builtin_definitions();

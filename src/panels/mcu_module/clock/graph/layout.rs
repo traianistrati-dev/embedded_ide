@@ -14,12 +14,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::model::LimitKey;
+use super::model::{LimitKey, NodeState};
 use crate::panels::mcu_module::clock::model::ClockLimits;
 
 /// Which frequency a box/tag displays. Resolved at draw time from the evaluated
-/// frequencies (+ the live config for the diagram-only RTC / MCO / SysTick muxes).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// graph frequencies. The named variants are F103 conveniences; [`ValueSrc::Node`]
+/// references an arbitrary graph node by id, so any chip's layout works.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValueSrc {
     Hclk,
     Sysclk,
@@ -39,6 +40,8 @@ pub enum ValueSrc {
     Rtc,
     /// MCO pin (honours the MCO mux).
     Mco,
+    /// An arbitrary graph node, by id — for chips beyond STM32F1.
+    Node(String),
     /// A constant (e.g. IWDG = LSI 40 kHz).
     Fixed(u32),
 }
@@ -83,6 +86,56 @@ pub struct LabelDef {
     pub text: String,
 }
 
+/// An interactive control overlaid on the diagram, editing one graph node's
+/// state. Kept deliberately simple + uniform: a dropdown whose options each
+/// carry the [`NodeState`] to apply (so muxes, dividers and multipliers are all
+/// just "pick an option"). Position is in virtual-canvas coords.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Widget {
+    /// Dropdown over `options` (label → state) bound to node `node`.
+    Combo {
+        node: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        options: Vec<(String, NodeState)>,
+    },
+    /// CubeMX-style trapezoid mux with one radio button per input — same look
+    /// as the hand-tuned F103 muxes. `inputs` = (label, dy from `y` where the
+    /// input enters, state to apply on pick). `flip` mirrors it horizontally
+    /// (inputs on the right, output to the left — e.g. MCO).
+    MuxRadios {
+        node: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        flip: bool,
+        inputs: Vec<(String, f32, NodeState)>,
+    },
+    /// Drag-editable frequency (MHz) for a `Source` node (e.g. the HSE
+    /// crystal). Keeps the node's `enabled` flag untouched.
+    DragMhz {
+        node: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        min_mhz: f32,
+        max_mhz: f32,
+    },
+}
+
+impl Widget {
+    /// The graph node this control edits.
+    pub fn node_id(&self) -> &str {
+        match self {
+            Widget::Combo { node, .. }
+            | Widget::MuxRadios { node, .. }
+            | Widget::DragMhz { node, .. } => node,
+        }
+    }
+}
+
 /// The complete static diagram description.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClockLayout {
@@ -95,6 +148,9 @@ pub struct ClockLayout {
     pub mux_titles: Vec<LabelDef>,
     /// Routed wire polylines (arrowhead on the last segment).
     pub wires: Vec<Vec<(f32, f32)>>,
+    /// Interactive controls (dropdowns) editing graph node states.
+    #[serde(default)]
+    pub widgets: Vec<Widget>,
 }
 
 const M: u32 = 1_000_000;
@@ -108,6 +164,21 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
     };
     let tag = |x, y, name: &str, src, limit| TagDef { x, y, name: name.to_owned(), src, limit };
     let lbl = |x, y, text: &str| LabelDef { x, y, text: text.to_owned() };
+    let combo = |node: &str, x, y, w, options: Vec<(String, NodeState)>| Widget::Combo {
+        node: node.to_owned(), x, y, w, options,
+    };
+    let mux = |node: &str, x, y, w, h, flip, inputs: Vec<(String, f32, NodeState)>| {
+        Widget::MuxRadios { node: node.to_owned(), x, y, w, h, flip, inputs }
+    };
+    // One trapezoid input: (label, dy where the wire enters, mux index to pick).
+    let mi = |label: &str, dy: f32, i: usize| (label.to_owned(), dy, NodeState::Index(i));
+    // Index-based options for a divider (`/N`), and value-based for the PLL mul.
+    let div_opts = |vals: &[u32]| -> Vec<(String, NodeState)> {
+        vals.iter().enumerate().map(|(i, v)| (format!("/ {v}"), NodeState::Index(i))).collect()
+    };
+    let mul_opts: Vec<(String, NodeState)> =
+        (2..=16u32).map(|v| (format!("×{v}"), NodeState::Value(v))).collect();
+    let s = |label: &str, state: NodeState| (label.to_owned(), state);
 
     ClockLayout {
         blocks: vec![
@@ -185,6 +256,48 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
             vec![(290.0, 122.0), (818.0, 122.0)],
             vec![(560.0, 245.0), (818.0, 245.0)],
             vec![(250.0, 638.0), (134.0, 638.0)],
+        ],
+        // Interactive controls for the F103 *graph* path — same look and the
+        // SAME positions as the typed path's `interactive_nodes`: trapezoid
+        // mux radios for the four muxes, a drag-MHz for the HSE crystal, and
+        // dropdowns for the prescalers (the typed path ignores these).
+        widgets: vec![
+            mux("rtc", 250.0, 72.0, 40.0, 100.0, false, vec![
+                mi("HSE/128", 28.0, 0),
+                mi("LSE", 50.0, 1),
+                mi("LSI", 72.0, 2),
+            ]),
+            mux("pllsrc", 250.0, 370.0, 40.0, 145.0, false, vec![
+                mi("HSI/2", 13.0, 0),
+                mi("HSE", 132.0, 1),
+            ]),
+            mux("sw", 470.0, 300.0, 40.0, 120.0, false, vec![
+                mi("HSI", 24.0, 0),
+                mi("HSE", 60.0, 1),
+                mi("PLLCLK", 96.0, 2),
+            ]),
+            mux("mco", 250.0, 580.0, 40.0, 116.0, true, vec![
+                mi("SYSCLK", 20.0, 0),
+                mi("HSI", 48.0, 1),
+                mi("HSE", 76.0, 2),
+                mi("PLL/2", 104.0, 3),
+            ]),
+            Widget::DragMhz {
+                node: "hse".to_owned(),
+                x: 28.0, y: 533.0, w: 92.0,
+                min_mhz: 1.0, max_mhz: 25.0,
+            },
+            combo("pllxtpre", 150.0, 490.0, 60.0,
+                vec![s("/ 1", NodeState::Index(0)), s("/ 2", NodeState::Index(1))]),
+            combo("pllmul", 336.0, 430.0, 84.0, mul_opts),
+            combo("ahb", 540.0, 347.0, 86.0, div_opts(&[1, 2, 4, 8, 16, 64, 128, 256, 512])),
+            combo("apb1", 720.0, 530.0, 66.0, div_opts(&[1, 2, 4, 8, 16])),
+            combo("apb2", 720.0, 650.0, 66.0, div_opts(&[1, 2, 4, 8, 16])),
+            combo("adc", 720.0, 750.0, 66.0, div_opts(&[2, 4, 6, 8])),
+            combo("usb", 470.0, 232.0, 90.0,
+                vec![s("/ 1.5", NodeState::Index(0)), s("/ 1", NodeState::Index(1))]),
+            combo("systick", 700.0, 418.0, 66.0,
+                vec![s("/ 8", NodeState::Index(0)), s("/ 1", NodeState::Index(1))]),
         ],
     }
 }

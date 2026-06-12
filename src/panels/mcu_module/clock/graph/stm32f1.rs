@@ -148,6 +148,78 @@ pub fn stm32f1_graph(c: &Stm32f1Clock) -> ClockGraph {
     ClockGraph { nodes, edges }
 }
 
+/// Inverse of [`stm32f1_graph`]: read an STM32F1-shaped graph's node states back
+/// into a typed [`Stm32f1Clock`], so the existing codegen (`clock_setup_chain`)
+/// can emit the `rcc.cfgr` chain for an imported `ClockConfig::Graph`. Unknown
+/// graphs (e.g. ESP32-C3) leave the defaults untouched.
+pub fn graph_to_stm32f1(g: &ClockGraph) -> Stm32f1Clock {
+    let mut c = Stm32f1Clock::default();
+
+    if let Some(NodeState::Source { enabled, hz }) = g.node("hse").map(|n| &n.state) {
+        c.hse_enabled = *enabled;
+        c.hse_hz = *hz;
+    }
+    if let Some(NodeState::Value(v)) = g.node("pllmul").map(|n| &n.state) {
+        c.pll_mul = *v as u8;
+    }
+    // PLL source = the PLLSRC mux (HSI/2 vs HSE branch) + the PLLXTPRE /1·/2.
+    c.pll_src = match (index_of(g, "pllsrc"), index_of(g, "pllxtpre")) {
+        (Some(0), _) => PllSrc::HsiDiv2,
+        (_, Some(1)) => PllSrc::HseDiv2,
+        _ => PllSrc::Hse,
+    };
+    c.sysclk_src = match index_of(g, "sw") {
+        Some(0) => SysclkSrc::Hsi,
+        Some(1) => SysclkSrc::Hse,
+        _ => SysclkSrc::Pll,
+    };
+    c.ahb_pre = divisor_of(g, "ahb").unwrap_or(1) as u16;
+    c.apb1_pre = divisor_of(g, "apb1").unwrap_or(2) as u8;
+    c.apb2_pre = divisor_of(g, "apb2").unwrap_or(1) as u8;
+    c.adc_pre = divisor_of(g, "adc").unwrap_or(6) as u8;
+    c.usb_pre = match index_of(g, "usb") {
+        Some(1) => UsbPre::Div1,
+        _ => UsbPre::Div1_5,
+    };
+    c.systick_src = match index_of(g, "systick") {
+        Some(1) => SystickSrc::Hclk,
+        _ => SystickSrc::HclkDiv8,
+    };
+    c.rtc_src = match g.node("rtc").map(|n| &n.state) {
+        Some(NodeState::Unset) => RtcSrc::None,
+        Some(NodeState::Index(0)) => RtcSrc::HseDiv128,
+        Some(NodeState::Index(1)) => RtcSrc::Lse,
+        Some(NodeState::Index(2)) => RtcSrc::Lsi,
+        _ => c.rtc_src,
+    };
+    c.mco = match g.node("mco").map(|n| &n.state) {
+        Some(NodeState::Unset) => Mco::None,
+        Some(NodeState::Index(0)) => Mco::Sysclk,
+        Some(NodeState::Index(1)) => Mco::Hsi,
+        Some(NodeState::Index(2)) => Mco::Hse,
+        Some(NodeState::Index(3)) => Mco::PllDiv2,
+        _ => c.mco,
+    };
+
+    c
+}
+
+/// Selected index of a Mux / Choice node, if any.
+fn index_of(g: &ClockGraph, id: &str) -> Option<usize> {
+    match g.node(id).map(|n| &n.state) {
+        Some(NodeState::Index(i)) => Some(*i),
+        _ => None,
+    }
+}
+
+/// Effective divisor of a Divider node, if any.
+fn divisor_of(g: &ClockGraph, id: &str) -> Option<u32> {
+    match g.node(id).map(|n| (&n.kind, &n.state)) {
+        Some((NodeKind::Divider { options }, NodeState::Index(i))) => options.get(*i).copied(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +257,79 @@ mod tests {
     #[test]
     fn default_72mhz_blue_pill() {
         assert_equiv(&Stm32f1Clock::default());
+    }
+
+    /// `graph_to_stm32f1 ∘ stm32f1_graph` is the identity — so codegen for a
+    /// graph clock matches the typed config exactly.
+    /// Every F103 graph widget targets a real node, and the default config's
+    /// state is one of the widget's options (so the dropdown shows a real label).
+    #[test]
+    fn f103_widgets_match_graph_nodes() {
+        use super::super::layout::{stm32f1_layout, Widget};
+        use crate::panels::mcu_module::clock::model::ClockLimits;
+
+        let g = stm32f1_graph(&Stm32f1Clock::default());
+        let lay = stm32f1_layout(&ClockLimits::default());
+        assert!(!lay.widgets.is_empty(), "F103 graph should expose widgets");
+        for w in &lay.widgets {
+            let node = w.node_id();
+            let n = g.node(node).unwrap_or_else(|| panic!("widget node {node} missing"));
+            match w {
+                Widget::Combo { options, .. } => assert!(
+                    options.iter().any(|(_, st)| st == &n.state),
+                    "node {node} default state {:?} not selectable in combo",
+                    n.state
+                ),
+                // Radios may legitimately start unselected (MCO = Unset).
+                Widget::MuxRadios { inputs, .. } => {
+                    assert!(!inputs.is_empty(), "mux {node} has no inputs")
+                }
+                Widget::DragMhz { .. } => assert!(
+                    matches!(n.state, NodeState::Source { .. }),
+                    "drag widget {node} must target a Source node"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn graph_to_stm32f1_round_trips() {
+        use crate::panels::mcu_module::clock::model::{Mco, RtcSrc};
+
+        let mut cfgs = vec![Stm32f1Clock::default()];
+        // A thoroughly non-default config exercising every field.
+        cfgs.push(Stm32f1Clock {
+            hse_hz: 12_000_000,
+            hse_enabled: true,
+            sysclk_src: SysclkSrc::Hse,
+            pll_src: PllSrc::HseDiv2,
+            pll_mul: 6,
+            ahb_pre: 2,
+            apb1_pre: 4,
+            apb2_pre: 2,
+            adc_pre: 8,
+            usb_pre: UsbPre::Div1,
+            mco: Mco::PllDiv2,
+            rtc_src: RtcSrc::HseDiv128,
+            systick_src: SystickSrc::Hclk,
+            css_on: false,
+        });
+        // HSI-only + disabled HSE + RTC/MCO off.
+        cfgs.push(Stm32f1Clock {
+            hse_enabled: false,
+            sysclk_src: SysclkSrc::Hsi,
+            pll_src: PllSrc::HsiDiv2,
+            mco: Mco::None,
+            rtc_src: RtcSrc::None,
+            ..Stm32f1Clock::default()
+        });
+
+        for c in &cfgs {
+            // `css_on` is diagram-only and not modelled in the graph; ignore it.
+            let mut back = graph_to_stm32f1(&stm32f1_graph(c));
+            back.css_on = c.css_on;
+            assert_eq!(&back, c, "round-trip mismatch for {c:?}");
+        }
     }
 
     /// The newly-added RTC / MCO nodes evaluate like the diagram's helpers.

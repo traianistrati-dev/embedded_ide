@@ -140,12 +140,14 @@ pub fn draw_clock_tree(
 /// (interactive editing of graph node states is the next step) → returns `false`.
 pub fn draw_graph_clock(
     ui: &mut egui::Ui,
-    gc: &super::graph::GraphClock,
+    gc: &mut super::graph::GraphClock,
     limits: &ClockLimits,
 ) -> bool {
+    use super::graph::layout::ValueSrc;
     use super::graph::{evaluate, over_limits, value_from_graph};
 
     let freqs = evaluate(&gc.graph);
+    let mut changed = false;
 
     // ── Validation footer (always visible) ───────────────────────────────────
     egui::TopBottomPanel::bottom("graph_clock_footer")
@@ -199,18 +201,27 @@ pub fn draw_graph_clock(
     });
     ui.data_mut(|d| d.insert_temp(zoom_id, zoom));
 
-    // ── Diagram (read-only) — shared renderer, graph-backed values ───────────
+    // ── Diagram + interactive dropdowns — shared static renderer + generic
+    //    `interactive_graph` editing node states. ─────────────────────────────
     let avail_w = ui.available_width();
     let avail_h = ui.available_height();
     egui::ScrollArea::both()
         .id_salt("graph_clock_diagram")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let resolve = |src| value_from_graph(src, &freqs);
-            diagram::draw_static_diagram(ui, &gc.layout, limits, avail_w, avail_h, zoom, &resolve);
+            let (rect, tf) = {
+                let resolve = |src: &ValueSrc| value_from_graph(src, &freqs);
+                diagram::draw_static_diagram(ui, &gc.layout, limits, avail_w, avail_h, zoom, resolve)
+            };
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+                if diagram::interactive_graph(ui, &tf, &mut gc.graph, &gc.layout.widgets) {
+                    changed = true;
+                }
+            });
         });
 
-    false
+    changed
 }
 
 /// The Info zone: validation messages plus the datasheet notes/legend.

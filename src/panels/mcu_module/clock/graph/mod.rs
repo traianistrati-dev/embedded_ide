@@ -6,6 +6,7 @@
 //!               evaluator matches the hardcoded `compute.rs`.
 
 pub mod config;
+pub mod esp32c3;
 pub mod eval;
 pub mod layout;
 pub mod model;
@@ -14,9 +15,10 @@ pub mod stm32f1;
 pub mod validate;
 
 pub use config::GraphClock;
+pub use esp32c3::{esp32c3_graph, esp32c3_layout};
 pub use eval::evaluate;
 pub use layout::{stm32f1_layout, ClockLayout, ValueSrc};
 pub use model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
 pub use render::{graph_frequencies, value_from_graph, value_node_id};
-pub use stm32f1::stm32f1_graph;
+pub use stm32f1::{graph_to_stm32f1, stm32f1_graph};
 pub use validate::{over_limits, Overflow};

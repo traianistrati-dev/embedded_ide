@@ -14,7 +14,8 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, UiBuilder, Vec2};
 
 use super::super::compute::ClockFrequencies;
-use super::super::graph::layout::{stm32f1_layout, ClockLayout, ValueSrc};
+use super::super::graph::layout::{stm32f1_layout, ClockLayout, ValueSrc, Widget};
+use super::super::graph::model::{ClockGraph, NodeState};
 use super::super::graph::render::graph_frequencies;
 use super::super::graph::validate::ceiling_for;
 // (`value_from_graph` is used by the graph-clock tab, which calls the shared
@@ -81,8 +82,8 @@ pub fn draw(
     // resolving each box/tag from the live config. Scoped so the resolver's
     // borrow of `c` ends before the interactive pass needs `&mut c`.
     let (rect, tf) = {
-        let resolve = |src: ValueSrc| value_of(src, c, &f);
-        draw_static_diagram(ui, &lay, l, avail_w, avail_h, zoom, &resolve)
+        let resolve = |src: &ValueSrc| value_of(src, c, &f);
+        draw_static_diagram(ui, &lay, l, avail_w, avail_h, zoom, resolve)
     };
 
     // Interactive widgets (F103 typed path) — clipped to the visible viewport.
@@ -100,14 +101,14 @@ pub fn draw(
 /// canvas `Rect` + transform. `resolve` supplies each box/tag's frequency —
 /// `value_of` for the F103 typed path, `value_from_graph` for imported graph
 /// clocks. No interactivity (callers add their own).
-pub(crate) fn draw_static_diagram(
+pub(crate) fn draw_static_diagram<R: Fn(&ValueSrc) -> u32>(
     ui: &mut egui::Ui,
     lay: &ClockLayout,
     l: &ClockLimits,
     avail_w: f32,
     avail_h: f32,
     zoom: f32,
-    resolve: &dyn Fn(ValueSrc) -> u32,
+    resolve: R,
 ) -> (Rect, Tf) {
     // Fit the whole diagram into the viewport (both dimensions), then apply zoom.
     let fit = (avail_w / VW).min(avail_h / VH);
@@ -122,7 +123,7 @@ pub(crate) fn draw_static_diagram(
     painter.rect_filled(rect, 4.0, BG);
 
     draw_wires(&painter, &tf, lay);
-    draw_static(&painter, &tf, lay, l, resolve);
+    draw_static(&painter, &tf, lay, l, &resolve);
     (rect, tf)
 }
 
@@ -143,25 +144,25 @@ fn draw_wires(p: &egui::Painter, tf: &Tf, lay: &ClockLayout) {
 // Static blocks + labels + frequency tags — all driven by `ClockLayout` data
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn draw_static(
+fn draw_static<R: Fn(&ValueSrc) -> u32>(
     p: &egui::Painter,
     tf: &Tf,
     lay: &ClockLayout,
     l: &ClockLimits,
-    resolve: &dyn Fn(ValueSrc) -> u32,
+    resolve: &R,
 ) {
     for b in &lay.blocks {
         block(p, tf, b.x, b.y, b.w, b.h, &b.label);
     }
 
     for o in &lay.outputs {
-        let hz = resolve(o.src);
+        let hz = resolve(&o.src);
         let limit = o.limit.and_then(|k| ceiling_for(k, l));
         out_box(p, tf, o.x, o.y, o.w, o.h, &o.label, hz, limit);
     }
 
     for t in &lay.tags {
-        let hz = resolve(t.src);
+        let hz = resolve(&t.src);
         let bad = t.limit.and_then(|k| ceiling_for(k, l)).map_or(false, |lim| over(hz, lim));
         tag(p, tf, t.x, t.y, &mhz(hz), bad, &t.name);
     }
@@ -181,8 +182,122 @@ fn draw_static(
     }
 }
 
-/// Resolve a layout [`ValueSrc`] to the frequency to display (Hz).
-fn value_of(src: ValueSrc, c: &Stm32f1Clock, f: &ClockFrequencies) -> u32 {
+// ──────────────────────────────────────────────────────────────────────────────
+// Generic interactive overlay for graph clocks
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Draw each [`Widget`] dropdown from the layout and write the picked
+/// [`NodeState`] back into `graph`. Returns `true` when a state changed.
+pub(crate) fn interactive_graph(
+    ui: &mut egui::Ui,
+    tf: &Tf,
+    graph: &mut ClockGraph,
+    widgets: &[Widget],
+) -> bool {
+    let mut pending: Option<(String, NodeState)> = None;
+    for w in widgets {
+        match w {
+            Widget::Combo { node, x, y, w: cw, options } => {
+                let Some(cur) = graph.node(node).map(|n| n.state.clone()) else {
+                    continue;
+                };
+                if let Some(state) = graph_combo(ui, tf, *x, *y, *cw, node, &cur, options) {
+                    pending = Some((node.clone(), state));
+                }
+            }
+            // Trapezoid mux — reuses the proven `mux_radios` primitive 1:1.
+            Widget::MuxRadios { node, x, y, w: mw, h, flip, inputs } => {
+                let Some(cur) = graph.node(node).map(|n| n.state.clone()) else {
+                    continue;
+                };
+                let selected = inputs.iter().position(|(_, _, st)| st == &cur);
+                let labels: Vec<(&str, f32)> =
+                    inputs.iter().map(|(l, dy, _)| (l.as_str(), *dy)).collect();
+                let mut picked: Option<usize> = None;
+                mux_radios(ui, tf, *x, *y, *mw, *h, &labels, selected, *flip, |i| {
+                    picked = Some(i);
+                });
+                if let Some((_, _, st)) = picked.and_then(|i| inputs.get(i)) {
+                    pending = Some((node.clone(), st.clone()));
+                }
+            }
+            Widget::DragMhz { node, x, y, w: dw, min_mhz, max_mhz } => {
+                let Some(NodeState::Source { enabled, hz }) =
+                    graph.node(node).map(|n| n.state.clone())
+                else {
+                    continue;
+                };
+                let rect = tf.r(*x, *y, *dw, 22.0);
+                let mut mhz = hz as f64 / 1e6;
+                let mut dragged = false;
+                ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut mhz)
+                                .range(*min_mhz as f64..=*max_mhz as f64)
+                                .speed(0.1)
+                                .suffix(" MHz"),
+                        )
+                        .changed()
+                    {
+                        dragged = true;
+                    }
+                });
+                if dragged {
+                    pending = Some((
+                        node.clone(),
+                        NodeState::Source { enabled, hz: (mhz * 1e6).round() as u32 },
+                    ));
+                }
+            }
+        }
+    }
+    if let Some((id, state)) = pending {
+        if let Some(n) = graph.node_mut(&id) {
+            if n.state != state {
+                n.state = state;
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A dropdown over `(label, state)` options bound to a graph node.
+fn graph_combo(
+    ui: &mut egui::Ui,
+    tf: &Tf,
+    x: f32,
+    y: f32,
+    w: f32,
+    id: &str,
+    current: &NodeState,
+    options: &[(String, NodeState)],
+) -> Option<NodeState> {
+    let rect = tf.r(x, y, w, 26.0);
+    let cur_label = options
+        .iter()
+        .find(|(_, s)| s == current)
+        .map(|(l, _)| l.as_str())
+        .unwrap_or("?");
+    let mut picked = None;
+    ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+        egui::ComboBox::from_id_salt(("graph_combo", id))
+            .selected_text(egui::RichText::new(cur_label).size(tf.fs(9.0)))
+            .width(rect.width())
+            .show_ui(ui, |ui| {
+                for (label, state) in options {
+                    if ui.selectable_label(state == current, label).clicked() {
+                        picked = Some(state.clone());
+                    }
+                }
+            });
+    });
+    picked
+}
+
+/// Resolve a layout [`ValueSrc`] to the frequency to display (Hz), F103 path.
+fn value_of(src: &ValueSrc, c: &Stm32f1Clock, f: &ClockFrequencies) -> u32 {
     match src {
         ValueSrc::Hclk => f.hclk,
         ValueSrc::Sysclk => f.sysclk,
@@ -197,7 +312,9 @@ fn value_of(src: ValueSrc, c: &Stm32f1Clock, f: &ClockFrequencies) -> u32 {
         ValueSrc::Systick => systick_hz(c, f),
         ValueSrc::Rtc => rtc_hz(c, f),
         ValueSrc::Mco => mco_hz(c, f),
-        ValueSrc::Fixed(v) => v,
+        ValueSrc::Fixed(v) => *v,
+        // The F103 layout never uses Node(_); unreachable in practice.
+        ValueSrc::Node(_) => 0,
     }
 }
 

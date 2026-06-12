@@ -39,9 +39,9 @@ pub fn graph_frequencies(c: &Stm32f1Clock) -> ClockFrequencies {
     }
 }
 
-/// The graph node id whose frequency a [`ValueSrc`] displays. `Fixed` carries
-/// its own constant, so it has no node.
-pub fn value_node_id(src: ValueSrc) -> Option<&'static str> {
+/// The fixed graph node id a named [`ValueSrc`] maps to (F103 conveniences).
+/// `Node`/`Fixed` carry their own target/constant, so they return `None` here.
+pub fn value_node_id(src: &ValueSrc) -> Option<&'static str> {
     Some(match src {
         ValueSrc::Hclk => "hclk",
         ValueSrc::Sysclk => "sysclk",
@@ -56,17 +56,18 @@ pub fn value_node_id(src: ValueSrc) -> Option<&'static str> {
         ValueSrc::Systick => "systick",
         ValueSrc::Rtc => "rtc",
         ValueSrc::Mco => "mco",
-        ValueSrc::Fixed(_) => return None,
+        ValueSrc::Node(_) | ValueSrc::Fixed(_) => return None,
     })
 }
 
 /// Resolve a layout [`ValueSrc`] to a frequency (Hz) directly from a graph's
 /// evaluated node map — the data-driven counterpart of the typed `value_of` in
 /// `gui/diagram.rs`. Lets a generic renderer fill every box/tag from the graph
-/// alone (no `Stm32f1Clock` needed).
-pub fn value_from_graph(src: ValueSrc, freqs: &BTreeMap<String, u32>) -> u32 {
+/// alone (no `Stm32f1Clock` needed), for any chip.
+pub fn value_from_graph(src: &ValueSrc, freqs: &BTreeMap<String, u32>) -> u32 {
     match src {
-        ValueSrc::Fixed(v) => v,
+        ValueSrc::Fixed(v) => *v,
+        ValueSrc::Node(id) => freqs.get(id).copied().unwrap_or(0),
         other => value_node_id(other)
             .and_then(|id| freqs.get(id).copied())
             .unwrap_or(0),
@@ -103,15 +104,18 @@ mod tests {
     #[test]
     fn value_from_graph_resolves_every_box() {
         let freqs = evaluate(&stm32f1_graph(&Stm32f1Clock::default()));
-        assert_eq!(value_from_graph(ValueSrc::Hclk, &freqs), 72_000_000);
-        assert_eq!(value_from_graph(ValueSrc::Pclk1, &freqs), 36_000_000);
-        assert_eq!(value_from_graph(ValueSrc::Adc, &freqs), 12_000_000);
-        assert_eq!(value_from_graph(ValueSrc::Usb, &freqs), 48_000_000);
-        assert_eq!(value_from_graph(ValueSrc::Flitf, &freqs), 8_000_000);
-        assert_eq!(value_from_graph(ValueSrc::Systick, &freqs), 9_000_000);
-        assert_eq!(value_from_graph(ValueSrc::Fixed(40_000), &freqs), 40_000);
+        assert_eq!(value_from_graph(&ValueSrc::Hclk, &freqs), 72_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Pclk1, &freqs), 36_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Adc, &freqs), 12_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Usb, &freqs), 48_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Flitf, &freqs), 8_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Systick, &freqs), 9_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Fixed(40_000), &freqs), 40_000);
         // Default config: rtc_src = LSI (40 kHz), mco = disabled (0).
-        assert_eq!(value_from_graph(ValueSrc::Rtc, &freqs), 40_000);
-        assert_eq!(value_from_graph(ValueSrc::Mco, &freqs), 0);
+        assert_eq!(value_from_graph(&ValueSrc::Rtc, &freqs), 40_000);
+        assert_eq!(value_from_graph(&ValueSrc::Mco, &freqs), 0);
+        // Node(id) resolves an arbitrary node directly.
+        assert_eq!(value_from_graph(&ValueSrc::Node("sysclk".into()), &freqs), 72_000_000);
+        assert_eq!(value_from_graph(&ValueSrc::Node("nope".into()), &freqs), 0);
     }
 }

@@ -455,6 +455,30 @@ mod tests {
         assert_not_contains_substring(&code, ".adcclk(");
     }
 
+    /// An imported `ClockConfig::Graph` drives the generated `rcc.cfgr` chain —
+    /// not the hardcoded default — closing the data-driven loop.
+    #[test]
+    fn test_graph_clock_drives_generated_chain() {
+        use super::super::clock::graph::layout::stm32f1_layout;
+        use super::super::clock::graph::{stm32f1_graph, GraphClock};
+        use super::super::clock::model::{Stm32f1Clock, SysclkSrc};
+        use super::super::clock::{ClockConfig, ClockLimits};
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        // HSI-direct config carried as a graph → SYSCLK 8 MHz (not the default 72).
+        let mut cfg = Stm32f1Clock::default();
+        cfg.sysclk_src = SysclkSrc::Hsi;
+        mcu.clock = ClockConfig::Graph(GraphClock {
+            graph: stm32f1_graph(&cfg),
+            layout: stm32f1_layout(&ClockLimits::default()),
+        });
+
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, ".sysclk(8.MHz())");
+        assert_not_contains_substring(&code, ".sysclk(72.MHz())");
+    }
+
     #[test]
     fn test_modified_clock_emits_extra_knobs() {
         use super::super::clock::ClockConfig;
