@@ -16,6 +16,10 @@ pub const PIN_SPACING: f32 = 3.0;
 /// Represents a microcontroller with four sides of pins and UI state.
 #[derive(Clone)]
 pub struct Mcu {
+    /// Stable definition id (e.g. "esp32c3-graph"). Written into the generated
+    /// `main.rs` header so reopening restores the exact chip. Empty when built
+    /// outside the registry (e.g. unit tests via [`Mcu::new`]).
+    pub id: String,
     pub name: String,
     /// Family / backend key (e.g. "stm32f1", "esp32c3") — selects the
     /// [`FamilyBackend`](crate::panels::mcu_module::codegen::family::FamilyBackend)

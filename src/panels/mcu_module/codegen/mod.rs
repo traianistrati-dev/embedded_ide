@@ -14,7 +14,9 @@ pub mod stm32;
 use super::mcu::Mcu;
 
 // Re-export public API for backward compatibility
-pub use common::{parse_main_rs, GEN_BEGIN, GEN_END, USER_TAIL};
+pub use common::{
+    mcu_id_marker_line, parse_main_rs, parse_mcu_id, GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL,
+};
 
 // ── Public API on Mcu ─────────────────────────────────────────────────────────
 

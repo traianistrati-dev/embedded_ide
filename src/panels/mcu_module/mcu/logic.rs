@@ -68,6 +68,7 @@ impl Mcu {
             _ => ClockConfig::None,
         };
         Self {
+            id: String::new(),
             name,
             family,
             toolchain,

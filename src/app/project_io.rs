@@ -31,31 +31,42 @@ impl AppIde {
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
         self.project_dir = Some(root.to_path_buf());
 
-        // ── Detect MCU type from Cargo.toml ──────────────────────────────────
-        // Read the dependency block to determine which chip this project targets.
+        // ── Detect which chip this project targets ───────────────────────────
         // Switching the MCU type BEFORE restoring pin state ensures the correct
-        // pin diagram is active when parse_main_rs() is applied.
-        let cargo_toml = root.join("Cargo.toml");
-        if let Ok(cargo) = std::fs::read_to_string(&cargo_toml) {
-            // Match the project's HAL crate against each registered MCU's hal_dep
-            // (the crate name = first whitespace token of `hal_dep`).
-            let detected_id: Option<String> = self
-                .mcu_registry
-                .iter()
-                .find(|d| {
-                    let crate_name = d.project.hal_dep.split_whitespace().next().unwrap_or("");
-                    !crate_name.is_empty() && cargo.contains(crate_name)
-                })
-                .map(|d| d.id.clone());
+        // pin diagram + clock graph are active when parse_main_rs() is applied.
+        //
+        // Two signals, in priority order:
+        //   1. The `// embedded-ide:mcu=<id>` marker in src/main.rs — written by
+        //      our own codegen. This pins the EXACT definition (incl. imported
+        //      chips that share a HAL crate with a built-in, which step 2 can't
+        //      disambiguate — e.g. "esp32c3-graph" vs "esp32c3").
+        //   2. Fallback: match the Cargo.toml HAL crate (first token of each
+        //      definition's `hal_dep`) for older projects without the marker.
+        let main_rs_path = root.join("src").join("main.rs");
+        let main_rs_source = std::fs::read_to_string(&main_rs_path).ok();
 
-            if let Some(id) = detected_id {
-                if id != self.selected_mcu_id {
-                    self.selected_mcu_id = id;
-                    self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
-                    // Reset LSP — it was attached to the previous chip's workspace.
-                    self.lsp_state.lock().unwrap().reset();
-                    self.lsp_selected_diagnostic = None;
-                }
+        let detected_id: Option<String> = main_rs_source
+            .as_deref()
+            .and_then(crate::panels::mcu_module::codegen::parse_mcu_id)
+            .filter(|id| self.mcu_registry.iter().any(|d| &d.id == id))
+            .or_else(|| {
+                let cargo = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+                self.mcu_registry
+                    .iter()
+                    .find(|d| {
+                        let crate_name = d.project.hal_dep.split_whitespace().next().unwrap_or("");
+                        !crate_name.is_empty() && cargo.contains(crate_name)
+                    })
+                    .map(|d| d.id.clone())
+            });
+
+        if let Some(id) = detected_id {
+            if id != self.selected_mcu_id {
+                self.selected_mcu_id = id;
+                self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                // Reset LSP — it was attached to the previous chip's workspace.
+                self.lsp_state.lock().unwrap().reset();
+                self.lsp_selected_diagnostic = None;
             }
         }
 
@@ -63,8 +74,7 @@ impl AppIde {
         // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
         // assignment back to the MCU diagram.  If no markers are found (e.g.
         // an ESP32-C3 project or a hand-written main.rs) this is a silent no-op.
-        let main_rs_path = root.join("src").join("main.rs");
-        if let Ok(source) = std::fs::read_to_string(&main_rs_path) {
+        if let Some(source) = main_rs_source {
             use crate::panels::mcu_module::clock::persist as clock_persist;
             use crate::panels::mcu_module::codegen;
 

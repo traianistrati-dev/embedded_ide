@@ -197,6 +197,7 @@ impl McuDefinition {
             map(&self.pins.left),
             map(&self.pins.right),
         );
+        mcu.id = self.id.clone();
         mcu.clock = self.clock.to_config(&self.clock_limits);
         mcu.clock_limits = self.clock_limits;
         mcu.clock_presets = self

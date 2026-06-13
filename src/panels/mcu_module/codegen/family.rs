@@ -49,7 +49,7 @@ impl FamilyBackend for Stm32f1Backend {
         let gen_ = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
         let base = format!(
             "{header}{gen_}\n{tail}",
-            header = stm32::invariant_header(&mcu.name),
+            header = stm32::invariant_header(&mcu.name, &mcu.id),
             tail = USER_TAIL,
         );
         // Peripheral init helpers live after `fn main`, in the editable region.
@@ -59,7 +59,7 @@ impl FamilyBackend for Stm32f1Backend {
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
         let new_section = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
-        let spliced = stm32::splice_section(existing, &new_section, &mcu.name);
+        let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Add helpers for newly-selected peripherals; preserve user-edited ones.
         stm32::ensure_helper_defs(spliced, &all)
     }
@@ -74,11 +74,11 @@ impl FamilyBackend for Esp32Backend {
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
-        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu))
+        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu), &mcu.clock, &mcu.id)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
-        codegen_esp::update_esp32c3_main_rs(existing, &pins_of(mcu))
+        codegen_esp::update_esp32c3_main_rs(existing, &pins_of(mcu), &mcu.clock, &mcu.id)
     }
 }
 

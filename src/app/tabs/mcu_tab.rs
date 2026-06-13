@@ -1,9 +1,10 @@
 //! MCU "Peripherals" tab — the inverse of the Pins tab.
 //!
-//! Lists **every** selectable function the current chip exposes, grouped by
-//! peripheral category. Each category shows how many pins support it and all of
-//! those pins (the assigned ones highlighted). An "Assign ▾" popup — and the
-//! clickable pin chips — let you pick which pin gets the function, the mirror of
+//! Lists every peripheral category the chip exposes and, under each, the pins
+//! that can serve it — **one chip per pin**. A pin that can take several signals
+//! of the same peripheral (e.g. an ESP32-C3 GPIO that the GPIO matrix can route
+//! to SPI2 SCK/MOSI/MISO/NSS) shows a single chip with a ▾ menu to pick the
+//! signal, instead of repeating the pin once per signal. This is the mirror of
 //! choosing a function on a pin in the Pins tab.
 
 use crate::panels::mcu_module::Mcu;
@@ -11,21 +12,34 @@ use crate::panels::mcu_module::Pin;
 use crate::panels::mcu_module::PinFunction;
 use eframe::egui;
 
-/// One assignable `(pin, function)` option inside a category.
-struct Entry {
-    pin_num: usize,
-    pin_name: String,
+/// One signal a pin can take inside a category (e.g. "SPI2  SCK").
+struct PinOption {
     func: PinFunction,
-    func_label: String,
-    /// `true` when this pin currently has exactly this function selected.
+    label: String,
+    /// `true` when the pin currently has exactly this function selected.
     assigned: bool,
 }
 
-/// A peripheral category and all its assignable options on this chip.
+/// A pin and every signal it can serve within one category (deduped — the pin
+/// appears once even when it supports several signals of the peripheral).
+struct PinEntry {
+    pin_num: usize,
+    pin_name: String,
+    options: Vec<PinOption>,
+}
+
+impl PinEntry {
+    /// The signal currently selected on this pin within the category, if any.
+    fn assigned(&self) -> Option<&PinOption> {
+        self.options.iter().find(|o| o.assigned)
+    }
+}
+
+/// A peripheral category and the pins that can serve it on this chip.
 struct CategoryView {
     name: &'static str,
     color: egui::Color32,
-    entries: Vec<Entry>,
+    pins: Vec<PinEntry>,
 }
 
 /// Render the Peripherals tab. Returns the `(num, name, func)` change when the
@@ -62,8 +76,9 @@ pub fn show_peripherals_tab(
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "Every function this chip can use. Click a pin chip — or use \
-                 “Assign ▾” — to set it. This is the inverse of the Pins tab.",
+                "Every peripheral this chip can use, with the pins that can serve it. \
+                 Click a pin to assign it; pins with several roles open a ▾ menu. \
+                 This is the inverse of the Pins tab.",
             )
             .size(11.0)
             .color(egui::Color32::from_rgb(130, 130, 145)),
@@ -81,7 +96,8 @@ pub fn show_peripherals_tab(
     None
 }
 
-/// Build the per-category view from the chip's pins (available functions).
+/// Build the per-category view from the chip's pins (available functions),
+/// grouping each pin's matching signals into a single [`PinEntry`].
 fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
     type Pred = fn(&PinFunction) -> bool;
     // Ordered category table: (display name, RGB, "is this function mine?").
@@ -126,40 +142,72 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
 
     let pins: Vec<&Pin> = mcu.iter_all_pins().filter(|p| !p.reserved).collect();
 
+    // Mirror the Pins panel's visibility rule (mcu/gui/mod.rs): a function that
+    // is already selected on a *different* pin is hidden everywhere else, so an
+    // exclusive signal (e.g. SPI2 SCK) can't be offered — or assigned — twice.
+    // GPIO In/Out are shareable and never hidden. This keeps the Peripherals tab
+    // consistent with the Pins tab (a signal taken on one pin disappears from
+    // the others in both views).
+    let taken_elsewhere = |pin_num: usize, f: &PinFunction| {
+        !matches!(f, PinFunction::GpioInput | PinFunction::GpioOutput)
+            && pins
+                .iter()
+                .any(|p| p.number != pin_num && &p.selected_function == f)
+    };
+
     defs.iter()
         .filter_map(|(name, (r, g, b), pred)| {
-            let mut entries = Vec::new();
+            let mut pin_entries = Vec::new();
             for pin in &pins {
+                let mut options = Vec::new();
                 for f in &pin.available_functions {
-                    if pred(f) {
-                        entries.push(Entry {
-                            pin_num: pin.number,
-                            pin_name: pin.name.clone(),
+                    // Always keep the owning pin's option (so a signal can be
+                    // unassigned even if it ended up on two pins); hide it only
+                    // on pins that don't currently hold it.
+                    let owns = &pin.selected_function == f;
+                    if pred(f) && (owns || !taken_elsewhere(pin.number, f)) {
+                        options.push(PinOption {
                             func: f.clone(),
-                            func_label: f.label(),
-                            assigned: &pin.selected_function == f,
+                            label: f.label(),
+                            assigned: owns,
                         });
                     }
                 }
+                if !options.is_empty() {
+                    pin_entries.push(PinEntry {
+                        pin_num: pin.number,
+                        pin_name: pin.name.clone(),
+                        options,
+                    });
+                }
             }
-            if entries.is_empty() {
+            if pin_entries.is_empty() {
                 None
             } else {
                 Some(CategoryView {
                     name,
                     color: egui::Color32::from_rgb(*r, *g, *b),
-                    entries,
+                    pins: pin_entries,
                 })
             }
         })
         .collect()
 }
 
-/// Draw one category: header (swatch + name + count + Assign popup) and the
-/// wrapped, clickable pin chips.
+/// The `(pin, func)` to apply when an option is clicked: assigned → clear, else
+/// → assign.
+fn click_action(pin_num: usize, opt: &PinOption) -> (usize, PinFunction) {
+    if opt.assigned {
+        (pin_num, PinFunction::Unset)
+    } else {
+        (pin_num, opt.func.clone())
+    }
+}
+
+/// Draw one category: header (swatch + name + count) and one chip per pin.
 fn category_row(ui: &mut egui::Ui, cat: &CategoryView, pending: &mut Option<(usize, PinFunction)>) {
-    let assigned = cat.entries.iter().filter(|e| e.assigned).count();
-    let total = cat.entries.len();
+    let assigned = cat.pins.iter().filter(|p| p.assigned().is_some()).count();
+    let total = cat.pins.len();
 
     ui.add_space(6.0);
     ui.horizontal(|ui| {
@@ -168,69 +216,21 @@ fn category_row(ui: &mut egui::Ui, cat: &CategoryView, pending: &mut Option<(usi
         ui.label(egui::RichText::new(cat.name).size(13.0).strong().color(cat.color));
 
         let badge = if assigned > 0 {
-            format!("{assigned}/{total}")
+            format!("{assigned}/{total} pins")
         } else {
-            format!("{total}")
+            format!("{total} pins")
         };
         ui.label(
             egui::RichText::new(badge)
                 .size(11.0)
                 .color(egui::Color32::from_rgb(150, 150, 160)),
         );
-
-        // ── Assign popup — pick which pin gets the function ──
-        ui.menu_button(egui::RichText::new("Assign ▾").size(11.0), |ui| {
-            ui.set_min_width(200.0);
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                for e in &cat.entries {
-                    let mark = if e.assigned { "✓ " } else { "    " };
-                    let text =
-                        format!("{mark}pin{} {}  ·  {}", e.pin_num, e.pin_name, e.func_label);
-                    let col = if e.assigned {
-                        cat.color
-                    } else {
-                        egui::Color32::from_rgb(200, 200, 210)
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(egui::RichText::new(text).size(11.0).color(col))
-                                .frame(false),
-                        )
-                        .clicked()
-                    {
-                        *pending = Some(toggle(e));
-                        ui.close_menu();
-                    }
-                }
-            });
-        });
     });
 
-    // ── Inline chips: all supporting pins; assigned ones highlighted ──
+    // ── One chip per pin; assigned ones highlighted ──
     ui.horizontal_wrapped(|ui| {
-        for e in &cat.entries {
-            let chip = format!("pin{} {}", e.pin_num, e.pin_name);
-            let btn = if e.assigned {
-                egui::Button::new(
-                    egui::RichText::new(chip).size(11.0).color(egui::Color32::WHITE),
-                )
-                .fill(cat.color)
-            } else {
-                egui::Button::new(
-                    egui::RichText::new(chip)
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(170, 170, 180)),
-                )
-                .fill(egui::Color32::from_rgb(45, 45, 52))
-            };
-            let resp = ui.add(btn).on_hover_text(format!(
-                "{}\nclick to {}",
-                e.func_label,
-                if e.assigned { "unassign" } else { "assign" }
-            ));
-            if resp.clicked() {
-                *pending = Some(toggle(e));
-            }
+        for pe in &cat.pins {
+            pin_chip(ui, cat.color, pe, pending);
         }
     });
 
@@ -238,19 +238,92 @@ fn category_row(ui: &mut egui::Ui, cat: &CategoryView, pending: &mut Option<(usi
     ui.separator();
 }
 
-/// Clicking an entry toggles it: assigned → clear (Unset), else → assign.
-fn toggle(e: &Entry) -> (usize, PinFunction) {
-    if e.assigned {
-        (e.pin_num, PinFunction::Unset)
+/// One pin chip. A single-signal pin is a plain toggle button; a multi-signal
+/// pin opens a ▾ menu listing its signals so the pin is shown only once.
+fn pin_chip(
+    ui: &mut egui::Ui,
+    color: egui::Color32,
+    pe: &PinEntry,
+    pending: &mut Option<(usize, PinFunction)>,
+) {
+    let assigned = pe.assigned();
+    let base = format!("pin{} {}", pe.pin_num, pe.pin_name);
+
+    let text_col = if assigned.is_some() {
+        egui::Color32::WHITE
     } else {
-        (e.pin_num, e.func.clone())
+        egui::Color32::from_rgb(170, 170, 180)
+    };
+
+    if pe.options.len() == 1 {
+        // Single role — direct toggle, with the signal shown inline.
+        let opt = &pe.options[0];
+        let label = format!("{base} · {}", opt.label);
+        let btn = egui::Button::new(egui::RichText::new(label).size(11.0).color(text_col))
+            .fill(chip_fill(color, opt.assigned));
+        let resp = ui.add(btn).on_hover_text(format!(
+            "{}\nclick to {}",
+            opt.label,
+            if opt.assigned { "unassign" } else { "assign" }
+        ));
+        if resp.clicked() {
+            *pending = Some(click_action(pe.pin_num, opt));
+        }
+        return;
+    }
+
+    // Multiple roles — one chip with a ▾ menu, so the pin is listed once.
+    let label = match assigned {
+        Some(o) => format!("{base} · {} ▾", o.label),
+        None => format!("{base} ▾"),
+    };
+    let title = egui::RichText::new(label).size(11.0).color(text_col);
+    let button = egui::Button::new(title).fill(chip_fill(color, assigned.is_some()));
+    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        ui.set_min_width(150.0);
+        for opt in &pe.options {
+            let mark = if opt.assigned { "✓ " } else { "    " };
+            let col = if opt.assigned {
+                color
+            } else {
+                egui::Color32::from_rgb(205, 205, 215)
+            };
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(format!("{mark}{}", opt.label))
+                            .size(11.0)
+                            .color(col),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+            {
+                *pending = Some(click_action(pe.pin_num, opt));
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Chip background: category colour when assigned, neutral otherwise.
+fn chip_fill(color: egui::Color32, assigned: bool) -> egui::Color32 {
+    if assigned {
+        color
+    } else {
+        egui::Color32::from_rgb(45, 45, 52)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
     use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
+
+    fn category<'a>(cats: &'a [CategoryView], name: &str) -> &'a CategoryView {
+        cats.iter().find(|c| c.name == name).unwrap()
+    }
 
     #[test]
     fn categories_cover_expected_peripherals() {
@@ -262,13 +335,15 @@ mod tests {
             assert!(names.contains(&expected), "missing category {expected}");
         }
         // ADC exposes many analog-capable pins.
-        let adc = cats.iter().find(|c| c.name == "ADC").unwrap();
-        assert!(adc.entries.len() >= 8, "expected ≥8 ADC pins");
-        // Every entry carries a non-empty full label, and starts unassigned.
+        assert!(category(&cats, "ADC").pins.len() >= 8, "expected ≥8 ADC pins");
+        // Every option carries a non-empty label, and starts unassigned.
         for c in &cats {
-            for e in &c.entries {
-                assert!(!e.func_label.is_empty());
-                assert!(!e.assigned, "nothing is configured on a fresh chip");
+            for p in &c.pins {
+                assert!(!p.options.is_empty());
+                for o in &p.options {
+                    assert!(!o.label.is_empty());
+                    assert!(!o.assigned, "nothing is configured on a fresh chip");
+                }
             }
         }
     }
@@ -280,28 +355,83 @@ mod tests {
         mcu.apply_pin_function(10, PinFunction::GpioOutput);
 
         let cats = build_categories(&mcu);
-        let out = cats.iter().find(|c| c.name == "GPIO Output").unwrap();
-        let pa0 = out.entries.iter().find(|e| e.pin_num == 10).unwrap();
-        assert!(pa0.assigned, "PA0 must be marked assigned in GPIO Output");
+        let pa0 = category(&cats, "GPIO Output")
+            .pins
+            .iter()
+            .find(|p| p.pin_num == 10)
+            .unwrap();
+        assert!(pa0.assigned().is_some(), "PA0 must be assigned in GPIO Output");
 
         // The same pin appears unassigned under other categories it supports.
-        let input = cats.iter().find(|c| c.name == "GPIO Input").unwrap();
-        let pa0_in = input.entries.iter().find(|e| e.pin_num == 10).unwrap();
-        assert!(!pa0_in.assigned);
+        let pa0_in = category(&cats, "GPIO Input")
+            .pins
+            .iter()
+            .find(|p| p.pin_num == 10)
+            .unwrap();
+        assert!(pa0_in.assigned().is_none());
+    }
+
+    /// A pin that supports several signals of one peripheral (ESP32-C3 GPIO
+    /// matrix) is listed ONCE with every signal as a menu option — not repeated.
+    #[test]
+    fn multi_signal_pin_is_listed_once() {
+        let mcu = Mcu::new(
+            "t".into(),
+            "esp32c3".into(),
+            ToolchainKind::EspRust,
+            vec![],
+            vec![],
+            vec![Pin::new(28, "GPIO21").with_functions(vec![
+                PinFunction::SpiSck(2),
+                PinFunction::SpiMosi(2),
+                PinFunction::SpiMiso(2),
+                PinFunction::SpiNss(2),
+            ])],
+            vec![],
+        );
+        let cats = build_categories(&mcu);
+        let spi = category(&cats, "SPI");
+        assert_eq!(spi.pins.len(), 1, "GPIO21 should appear once, not 4×");
+        assert_eq!(spi.pins[0].options.len(), 4, "all 4 SPI signals as options");
+    }
+
+    /// An exclusive signal assigned to one pin is hidden from the others in the
+    /// Peripherals tab (mirrors the Pins panel), so it can't be assigned twice.
+    #[test]
+    fn taken_signal_is_hidden_on_other_pins() {
+        let spi_sck = || vec![PinFunction::SpiSck(1)];
+        let mut mcu = Mcu::new(
+            "t".into(),
+            "stm32f1".into(),
+            ToolchainKind::RustEmbedded,
+            vec![],
+            vec![],
+            vec![Pin::new(1, "PA5").with_functions(spi_sck())],
+            vec![Pin::new(2, "PB3").with_functions(spi_sck())],
+        );
+
+        // Both pins offer SPI1 SCK before anything is assigned.
+        assert_eq!(category(&build_categories(&mcu), "SPI").pins.len(), 2);
+
+        // Assign it to pin 1 → it disappears from pin 2 (only the owner remains).
+        mcu.apply_pin_function(1, PinFunction::SpiSck(1));
+        let cats = build_categories(&mcu);
+        let spi = category(&cats, "SPI");
+        assert_eq!(spi.pins.len(), 1, "taken signal hidden on the other pin");
+        assert_eq!(spi.pins[0].pin_num, 1);
+        assert!(spi.pins[0].assigned().is_some());
     }
 
     #[test]
-    fn toggle_assigns_then_clears() {
-        let e = Entry {
-            pin_num: 2,
-            pin_name: "PC13".into(),
+    fn click_action_assigns_then_clears() {
+        let unset = PinOption {
             func: PinFunction::GpioOutput,
-            func_label: "GPIO Output".into(),
+            label: "GPIO Output".into(),
             assigned: false,
         };
-        assert_eq!(toggle(&e), (2, PinFunction::GpioOutput));
+        assert_eq!(click_action(2, &unset), (2, PinFunction::GpioOutput));
 
-        let e2 = Entry { assigned: true, ..e };
-        assert_eq!(toggle(&e2), (2, PinFunction::Unset));
+        let set = PinOption { assigned: true, ..unset };
+        assert_eq!(click_action(2, &set), (2, PinFunction::Unset));
     }
 }

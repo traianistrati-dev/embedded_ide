@@ -9,6 +9,36 @@
 pub const GEN_BEGIN: &str = "// <<< GENERATED BEGIN — do not edit between these markers >>>";
 pub const GEN_END: &str = "// <<< GENERATED END >>>";
 
+// ── MCU identity marker ───────────────────────────────────────────────────────
+//
+// Written into the invariant file header (above GEN_BEGIN, so it survives every
+// re-splice). Lets a reopened project restore the *exact* chip it was created
+// with — including user-imported chips that share a HAL crate with a built-in
+// (e.g. an imported "esp32c3-graph" vs the built-in "esp32c3"), which the
+// Cargo.toml `hal_dep` sniff alone cannot tell apart.
+
+pub const MCU_ID_MARKER: &str = "// embedded-ide:mcu=";
+
+/// The header line that records the MCU id, or an empty string when the id is
+/// unknown (so older/unidentified projects emit nothing).
+pub fn mcu_id_marker_line(id: &str) -> String {
+    if id.is_empty() {
+        String::new()
+    } else {
+        format!("{MCU_ID_MARKER}{id}\n")
+    }
+}
+
+/// Extract the MCU id recorded by [`mcu_id_marker_line`], if present.
+pub fn parse_mcu_id(source: &str) -> Option<String> {
+    source.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix(MCU_ID_MARKER)
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty())
+    })
+}
+
 // ── User tail — closes fn main() ─────────────────────────────────────────────
 //
 // Written once on first generation; the loop body is user-editable and is
@@ -178,4 +208,24 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcu_id_marker_round_trips() {
+        let line = mcu_id_marker_line("esp32c3-graph");
+        assert_eq!(line, "// embedded-ide:mcu=esp32c3-graph\n");
+        // Embedded anywhere in a file, possibly indented, parse_mcu_id finds it.
+        let src = format!("// Auto-generated\n{line}#![no_std]\n");
+        assert_eq!(parse_mcu_id(&src).as_deref(), Some("esp32c3-graph"));
+    }
+
+    #[test]
+    fn empty_id_emits_no_marker() {
+        assert_eq!(mcu_id_marker_line(""), "");
+        assert!(parse_mcu_id("// Auto-generated\n#![no_std]\n").is_none());
+    }
 }
