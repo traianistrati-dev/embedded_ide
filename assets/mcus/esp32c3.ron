@@ -1063,5 +1063,5 @@ McuDefinition(
             ),
         ],
     ),
-    clock: None,
+    clock: Esp32c3,
 )

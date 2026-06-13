@@ -112,4 +112,16 @@ impl ClockGraph {
     pub fn node_mut(&mut self, id: &str) -> Option<&mut Node> {
         self.nodes.iter_mut().find(|n| n.id == id)
     }
+
+    /// Copy node **states** from `other` into this graph, matched by id.
+    /// Nodes missing on either side are skipped, so adopting states from a
+    /// different-family graph is a harmless no-op. Used to restore a saved
+    /// `@clock` config and to apply presets onto a live graph.
+    pub fn adopt_states(&mut self, other: &ClockGraph) {
+        for node in &mut self.nodes {
+            if let Some(src) = other.nodes.iter().find(|n| n.id == node.id) {
+                node.state = src.state.clone();
+            }
+        }
+    }
 }

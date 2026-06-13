@@ -292,6 +292,22 @@ mod tests {
         }
     }
 
+    /// `adopt_states` + `graph_to_stm32f1` restores a saved `@clock` config onto
+    /// a default graph — exactly what `Mcu::apply_saved_clock` does on reopen.
+    #[test]
+    fn adopt_states_restores_saved_clock() {
+        let saved = Stm32f1Clock {
+            sysclk_src: SysclkSrc::Hsi,
+            pll_mul: 4,
+            apb1_pre: 4,
+            adc_pre: 8,
+            ..Stm32f1Clock::default()
+        };
+        let mut live = stm32f1_graph(&Stm32f1Clock::default());
+        live.adopt_states(&stm32f1_graph(&saved));
+        assert_eq!(graph_to_stm32f1(&live), saved);
+    }
+
     #[test]
     fn graph_to_stm32f1_round_trips() {
         use crate::panels::mcu_module::clock::model::{Mco, RtcSrc};

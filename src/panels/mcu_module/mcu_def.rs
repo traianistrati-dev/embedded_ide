@@ -91,17 +91,34 @@ pub struct ProjectDef {
 /// Clock model + defaults for this chip, keyed per clock family.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClockDef {
+    /// Compact STM32F1 authoring form — upgraded to a full graph at load.
     Stm32f1(Stm32f1Clock),
+    /// Built-in ESP32-C3 clock graph (topology + diagram are code).
+    Esp32c3,
     /// Data-driven clock tree + diagram, importable for any family.
     Graph(GraphClock),
-    /// No modelled clock tree yet (ESP32-C3, STM8, …).
+    /// No modelled clock tree yet (STM8, …).
     None,
 }
 
 impl ClockDef {
-    fn to_config(&self) -> ClockConfig {
+    /// Build the runtime clock. The graph is the only runtime model, so the
+    /// compact family forms are upgraded to a full graph here (topology +
+    /// diagram from the family's `*_graph` / `*_layout`; `limits` only feeds the
+    /// STM32F1 HSE-range label).
+    fn to_config(&self, limits: &ClockLimits) -> ClockConfig {
+        use super::clock::graph::{
+            esp32c3_graph, esp32c3_layout, layout::stm32f1_layout, stm32f1_graph, GraphClock,
+        };
         match self {
-            ClockDef::Stm32f1(c) => ClockConfig::Stm32f1(c.clone()),
+            ClockDef::Stm32f1(c) => ClockConfig::Graph(GraphClock {
+                graph: stm32f1_graph(c),
+                layout: stm32f1_layout(limits),
+            }),
+            ClockDef::Esp32c3 => ClockConfig::Graph(GraphClock {
+                graph: esp32c3_graph(),
+                layout: esp32c3_layout(),
+            }),
             ClockDef::Graph(g) => ClockConfig::Graph(g.clone()),
             ClockDef::None => ClockConfig::None,
         }
@@ -112,6 +129,7 @@ impl ClockDef {
         matches!(
             (self, other),
             (ClockDef::Stm32f1(_), ClockDef::Stm32f1(_))
+                | (ClockDef::Esp32c3, ClockDef::Esp32c3)
                 | (ClockDef::Graph(_), ClockDef::Graph(_))
                 | (ClockDef::None, ClockDef::None)
         )
@@ -179,7 +197,7 @@ impl McuDefinition {
             map(&self.pins.left),
             map(&self.pins.right),
         );
-        mcu.clock = self.clock.to_config();
+        mcu.clock = self.clock.to_config(&self.clock_limits);
         mcu.clock_limits = self.clock_limits;
         mcu.clock_presets = self
             .clock_presets
@@ -191,9 +209,9 @@ impl McuDefinition {
                     description: p.description.clone(),
                     config: c.clone(),
                 }),
-                // `ClockPreset` is the Stm32f1 runtime preset; graph clocks carry
-                // their presets in-graph, so they don't convert here.
-                ClockDef::Graph(_) | ClockDef::None => None,
+                // `ClockPreset` is the Stm32f1 runtime preset; other families
+                // carry presets in-graph, so they don't convert here.
+                ClockDef::Esp32c3 | ClockDef::Graph(_) | ClockDef::None => None,
             })
             .collect();
         mcu

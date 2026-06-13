@@ -59,7 +59,6 @@ mod tests {
 
     fn def_of(id: &str, family: &str, package: &str, cpu: &str, m: &Mcu, project: ProjectDef) -> McuDefinition {
         let clock = match &m.clock {
-            ClockConfig::Stm32f1(c) => ClockDef::Stm32f1(c.clone()),
             ClockConfig::Graph(g) => ClockDef::Graph(g.clone()),
             ClockConfig::None => ClockDef::None,
         };
@@ -464,6 +463,9 @@ mod tests {
         assert!(same(&built.left_pins, &factory.left_pins));
         assert!(same(&built.right_pins, &factory.right_pins));
         assert_eq!(built.toolchain, factory.toolchain);
-        assert_eq!(built.clock, factory.clock);
+        // The built-in now ships a graph clock (`ClockDef::Esp32c3`); the bare
+        // factory has none, so only the pin/toolchain identity is compared.
+        use crate::panels::mcu_module::clock::ClockConfig;
+        assert!(matches!(built.clock, ClockConfig::Graph(_)), "esp32c3 built-in carries a graph clock");
     }
 }

@@ -54,11 +54,17 @@ impl Mcu {
         left_pins: Vec<Pin>,
         right_pins: Vec<Pin>,
     ) -> Self {
+        use crate::panels::mcu_module::clock::graph::{
+            layout::stm32f1_layout, stm32f1_graph, GraphClock,
+        };
         use crate::panels::mcu_module::clock::{ClockConfig, ClockLimits, Stm32f1Clock};
-        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
-        // Only STM32F1 has a modelled clock tree for now; others get `None`.
-        let clock = match toolchain {
-            ToolchainKind::RustEmbedded => ClockConfig::Stm32f1(Stm32f1Clock::default()),
+        // Only the STM32F1 family has a built-in clock graph; others get `None`
+        // (a definition's `ClockDef` overrides this in `build_mcu`).
+        let clock = match family.as_str() {
+            "stm32f1" => ClockConfig::Graph(GraphClock {
+                graph: stm32f1_graph(&Stm32f1Clock::default()),
+                layout: stm32f1_layout(&ClockLimits::default()),
+            }),
             _ => ClockConfig::None,
         };
         Self {
@@ -111,12 +117,15 @@ impl Mcu {
         }
     }
 
-    /// Restores the clock-tree configuration parsed from a saved `main.rs`.
-    /// Only applies to MCUs that have a modelled clock tree (STM32F1).
+    /// Restores the clock-tree configuration parsed from a saved `main.rs`
+    /// (`// @clock` marker). The saved config is expanded to graph node states
+    /// and adopted by id — F103-shaped graphs restore fully; other-family
+    /// graphs (no matching ids) are an intentional no-op.
     pub fn apply_saved_clock(&mut self, clock: crate::panels::mcu_module::clock::Stm32f1Clock) {
+        use crate::panels::mcu_module::clock::graph::stm32f1_graph;
         use crate::panels::mcu_module::clock::ClockConfig;
-        if matches!(self.clock, ClockConfig::Stm32f1(_)) {
-            self.clock = ClockConfig::Stm32f1(clock);
+        if let ClockConfig::Graph(gc) = &mut self.clock {
+            gc.graph.adopt_states(&stm32f1_graph(&clock));
         }
     }
 

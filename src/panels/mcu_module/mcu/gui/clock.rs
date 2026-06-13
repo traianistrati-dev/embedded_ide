@@ -8,14 +8,13 @@ impl Mcu {
     /// Render the "Clock" tab. Returns `true` if the configuration changed
     /// (the app regenerates `main.rs` from MCU state every frame in `init_frame`).
     pub fn draw_clock_tab(&mut self, ui: &mut egui::Ui) -> bool {
-        // Destructure so the config borrows mutably while the chip's limits and
-        // presets stay readable alongside it.
-        let Mcu { clock, clock_limits, clock_presets, name, .. } = self;
+        // Destructure so the config borrows mutably while the chip's limits,
+        // presets and family stay readable alongside it.
+        let Mcu { clock, clock_limits, clock_presets, family, name, .. } = self;
         match clock {
-            ClockConfig::Stm32f1(c) => {
-                clock_gui::draw_clock_tree(ui, c, clock_limits, clock_presets)
+            ClockConfig::Graph(gc) => {
+                clock_gui::draw_graph_clock(ui, gc, clock_limits, clock_presets, family)
             }
-            ClockConfig::Graph(gc) => clock_gui::draw_graph_clock(ui, gc, clock_limits),
             ClockConfig::None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(

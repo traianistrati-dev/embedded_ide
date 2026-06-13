@@ -1,15 +1,11 @@
 //! Information popup window — displays detailed specifications for pin functions.
 
-use eframe::egui;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+use eframe::egui;
 
 /// Render the info popup window for a pin function.
 /// Returns `true` if the window should stay open, `false` if closed.
-pub fn draw_info_popup(
-    func: &PinFunction,
-    chip_rect: egui::Rect,
-    ui: &mut egui::Ui,
-) -> bool {
+pub fn draw_info_popup(func: &PinFunction, chip_rect: egui::Rect, ui: &mut egui::Ui) -> bool {
     let info = func.info();
     let mut open = true;
 
@@ -25,7 +21,7 @@ pub fn draw_info_popup(
             ui.label(
                 egui::RichText::new(&info.description)
                     .size(14.0)
-                    .color(egui::Color32::from_rgb(20, 20, 20)),
+                    .color(egui::Color32::from_rgb(255, 255, 255)),
             );
 
             if !info.specs.is_empty() {
@@ -43,12 +39,12 @@ pub fn draw_info_popup(
                             ui.label(
                                 egui::RichText::new(key)
                                     .size(12.0)
-                                    .color(egui::Color32::from_rgb(0, 50, 250)),
+                                    .color(egui::Color32::from_rgb(150, 150, 250)),
                             );
                             ui.label(
                                 egui::RichText::new(value)
                                     .size(12.0)
-                                    .color(egui::Color32::DARK_GRAY),
+                                    .color(egui::Color32::from_rgb(155, 155, 155)),
                             );
                             ui.end_row();
                         }

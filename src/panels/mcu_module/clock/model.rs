@@ -200,31 +200,18 @@ impl Default for Stm32f1Clock {
 
 // ── Extensible per-MCU wrapper ────────────────────────────────────────────────
 
-/// Per-MCU clock configuration. Extend with more variants as families gain
-/// their own clock models.
+/// Per-MCU clock configuration.
+///
+/// The data-driven [`graph`](super::graph) is the ONLY runtime clock model —
+/// the old typed `Stm32f1(Stm32f1Clock)` variant was retired. `Stm32f1Clock`
+/// itself survives as (a) the compact authoring format in `.ron`
+/// ([`ClockDef::Stm32f1`](crate::panels::mcu_module::mcu_def::ClockDef) is
+/// auto-upgraded to a graph at load), (b) the codegen intermediate
+/// (`graph_to_stm32f1` → `rcc.cfgr` chain), and (c) the `@clock` persist format.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClockConfig {
-    Stm32f1(Stm32f1Clock),
-    /// Data-driven clock tree imported from a chip's `.ron` (topology + layout).
+    /// Data-driven clock tree + diagram (from the chip's `.ron` or built-in).
     Graph(super::graph::GraphClock),
-    /// No modelled clock tree yet (ESP32-C3, STM8, …).
+    /// No modelled clock tree yet (ESP32-C3 built-in, STM8, …).
     None,
-}
-
-impl ClockConfig {
-    /// Borrow the STM32F1 config, if this is one.
-    pub fn as_stm32f1(&self) -> Option<&Stm32f1Clock> {
-        match self {
-            ClockConfig::Stm32f1(c) => Some(c),
-            _ => None,
-        }
-    }
-
-    /// Mutably borrow the STM32F1 config, if this is one.
-    pub fn as_stm32f1_mut(&mut self) -> Option<&mut Stm32f1Clock> {
-        match self {
-            ClockConfig::Stm32f1(c) => Some(c),
-            _ => None,
-        }
-    }
 }

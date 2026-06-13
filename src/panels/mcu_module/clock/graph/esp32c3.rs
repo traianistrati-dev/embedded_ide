@@ -77,89 +77,78 @@ pub fn esp32c3_layout() -> ClockLayout {
         limit: None,
     };
     let lbl = |x, y, text: &str| LabelDef { x, y, text: text.to_owned() };
+    // CubeMX-style trapezoid mux (many inputs → 1 output). Inputs are labelled
+    // stubs (label, dy, mux index) so no long crossing wires are needed.
+    let mux = |node: &str, x, y, w, h, inputs: Vec<(String, f32, NodeState)>| {
+        Widget::MuxRadios { node: node.to_owned(), x, y, w, h, flip: false, inputs }
+    };
+    let mi = |label: &str, dy: f32, i: usize| (label.to_owned(), dy, NodeState::Index(i));
 
     ClockLayout {
-        // Interactive nodes (CPU mux/div, RTC muxes) are dropdowns (`widgets`),
-        // so only the fixed blocks live here.
         blocks: vec![
             blk(28.0, 92.0, 120.0, 36.0, "XTAL\n40 MHz"),
             blk(28.0, 300.0, 120.0, 36.0, "RC_FAST\n17.5 MHz"),
-            blk(28.0, 480.0, 120.0, 36.0, "RC_SLOW\n136 kHz"),
-            blk(28.0, 560.0, 120.0, 36.0, "XTAL32K\n32.768 kHz"),
-            blk(28.0, 640.0, 120.0, 36.0, "RC32K\n~32 kHz"),
-            blk(220.0, 92.0, 120.0, 36.0, "SPLL\n480 MHz"),
-            blk(390.0, 196.0, 95.0, 28.0, "APB /6"),
-            blk(220.0, 306.0, 56.0, 24.0, "/2"),
+            blk(28.0, 470.0, 120.0, 36.0, "RC_SLOW\n136 kHz"),
+            blk(28.0, 550.0, 120.0, 36.0, "XTAL32K\n32.768 kHz"),
+            blk(28.0, 630.0, 120.0, 36.0, "RC32K\n~32 kHz"),
+            blk(220.0, 92.0, 120.0, 36.0, "SPLL\n×12 → 480 MHz"),
+            blk(220.0, 250.0, 56.0, 24.0, "/2"),
+            blk(390.0, 200.0, 95.0, 28.0, "APB /6"),
         ],
         outputs: vec![
-            out(720.0, 96.0, 210.0, 30.0, "CPU_CLK → core", "cpu"),
-            out(720.0, 196.0, 210.0, 30.0, "APB_CLK → peripherals", "apb"),
+            out(720.0, 105.0, 210.0, 30.0, "CPU_CLK → core", "cpu"),
+            out(720.0, 200.0, 210.0, 30.0, "APB_CLK → peripherals", "apb"),
             out(720.0, 303.0, 210.0, 30.0, "RTC_FAST_CLK", "rtc_fast"),
-            out(720.0, 483.0, 210.0, 30.0, "RTC_SLOW_CLK", "rtc_slow"),
+            out(720.0, 485.0, 210.0, 30.0, "RTC_SLOW_CLK", "rtc_slow"),
         ],
         tags: vec![
-            tag(660.0, 110.0, "CPU", "cpu"),
-            tag(500.0, 210.0, "APB", "apb"),
+            tag(655.0, 120.0, "CPU", "cpu"),
+            tag(505.0, 214.0, "APB", "apb"),
         ],
         labels_above: vec![
             lbl(220.0, 86.0, "PLL ×12"),
-            lbl(390.0, 90.0, "CPU divider"),
-            lbl(545.0, 90.0, "CPU source"),
-            lbl(380.0, 298.0, "RTC fast source"),
-            lbl(380.0, 478.0, "RTC slow source"),
+            lbl(390.0, 91.0, "CPU divider"),
         ],
-        mux_titles: vec![],
+        // Mux names (CENTER_BOTTOM-anchored above each trapezoid).
+        mux_titles: vec![
+            lbl(582.0, 76.0, "CPU Mux"),
+            lbl(422.0, 284.0, "RTC Fast"),
+            lbl(422.0, 452.0, "RTC Slow"),
+        ],
         wires: vec![
             vec![(148.0, 110.0), (220.0, 110.0)],                  // xtal → pll
             vec![(340.0, 110.0), (390.0, 110.0)],                  // pll → cpu_div
-            vec![(485.0, 110.0), (545.0, 110.0)],                  // cpu_div → cpu mux
-            vec![(645.0, 110.0), (720.0, 111.0)],                  // cpu → CPU_CLK
-            vec![(280.0, 128.0), (280.0, 210.0), (390.0, 210.0)],  // pll → apb
-            vec![(485.0, 210.0), (720.0, 211.0)],                  // apb → APB_CLK
-            vec![(88.0, 128.0), (88.0, 318.0), (220.0, 318.0)],    // xtal → /2
-            vec![(276.0, 318.0), (380.0, 318.0)],                  // /2 → RTC_FAST
-            vec![(148.0, 310.0), (380.0, 310.0)],                  // rc_fast → RTC_FAST
-            vec![(500.0, 318.0), (720.0, 318.0)],                  // RTC_FAST → out
-            vec![(148.0, 498.0), (380.0, 498.0)],                  // rc_slow → RTC_SLOW
-            vec![(148.0, 578.0), (355.0, 578.0), (355.0, 505.0), (380.0, 505.0)], // xtal32k → RTC_SLOW
-            vec![(148.0, 658.0), (345.0, 658.0), (345.0, 510.0), (380.0, 510.0)], // rc32k → RTC_SLOW
-            vec![(500.0, 498.0), (720.0, 498.0)],                  // RTC_SLOW → out
+            vec![(485.0, 110.0), (536.0, 110.0)],                  // cpu_div → cpu mux (PLL input)
+            vec![(605.0, 120.0), (720.0, 120.0)],                  // cpu mux → CPU_CLK
+            vec![(280.0, 128.0), (280.0, 214.0), (390.0, 214.0)],  // pll → apb
+            vec![(485.0, 214.0), (720.0, 214.0)],                  // apb → APB_CLK
+            vec![(88.0, 128.0), (88.0, 262.0), (220.0, 262.0)],    // xtal → /2
+            vec![(445.0, 318.0), (720.0, 318.0)],                  // RTC_FAST mux → out
+            vec![(445.0, 500.0), (720.0, 500.0)],                  // RTC_SLOW mux → out
         ],
         widgets: vec![
             Widget::Combo {
                 node: "cpu_div".to_owned(),
-                x: 390.0, y: 96.0, w: 95.0,
+                x: 390.0, y: 97.0, w: 95.0,
                 options: vec![
                     ("/3 → 160 MHz".to_owned(), NodeState::Index(0)),
                     ("/6 → 80 MHz".to_owned(), NodeState::Index(1)),
                 ],
             },
-            Widget::Combo {
-                node: "cpu".to_owned(),
-                x: 545.0, y: 96.0, w: 100.0,
-                options: vec![
-                    ("XTAL (40)".to_owned(), NodeState::Index(0)),
-                    ("PLL ÷N".to_owned(), NodeState::Index(1)),
-                    ("RC_FAST".to_owned(), NodeState::Index(2)),
-                ],
-            },
-            Widget::Combo {
-                node: "rtc_fast".to_owned(),
-                x: 380.0, y: 304.0, w: 120.0,
-                options: vec![
-                    ("XTAL/2 (20 MHz)".to_owned(), NodeState::Index(0)),
-                    ("RC_FAST (17.5 MHz)".to_owned(), NodeState::Index(1)),
-                ],
-            },
-            Widget::Combo {
-                node: "rtc_slow".to_owned(),
-                x: 380.0, y: 484.0, w: 120.0,
-                options: vec![
-                    ("RC_SLOW (136 kHz)".to_owned(), NodeState::Index(0)),
-                    ("XTAL32K (32.768 kHz)".to_owned(), NodeState::Index(1)),
-                    ("RC32K (~32 kHz)".to_owned(), NodeState::Index(2)),
-                ],
-            },
+            mux("cpu", 560.0, 84.0, 45.0, 72.0, vec![
+                mi("XTAL", 10.0, 0),
+                mi("PLL ÷N", 26.0, 1),
+                mi("RC_FAST", 52.0, 2),
+            ]),
+            mux("rtc_fast", 400.0, 292.0, 45.0, 52.0, vec![
+                mi("XTAL/2", 14.0, 0),
+                mi("RC_FAST", 38.0, 1),
+            ]),
+            mux("rtc_slow", 400.0, 460.0, 45.0, 80.0, vec![
+                mi("RC_SLOW", 16.0, 0),
+                mi("XTAL32K", 40.0, 1),
+                mi("RC32K", 64.0, 2),
+            ]),
         ],
     }
 }

@@ -1,21 +1,24 @@
 //! Project tree GUI — file browser with create/rename/delete operations.
 
-use std::collections::BTreeMap;
+use crate::app::ProjectFileId;
+use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+use crate::{build, lsp};
 use eframe::egui;
 use egui_phosphor::regular as ph;
-use crate::app::ProjectFileId;
-use crate::{build, lsp};
-use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+use std::collections::BTreeMap;
 
 /// Tree node representing a file or folder.
 #[derive(Clone, Debug)]
 enum TreeNode {
-    File(usize),  // index into user_src_files
+    File(usize), // index into user_src_files
     Folder(BTreeMap<String, TreeNode>),
 }
 
 /// Build a hierarchical tree from user_src_files and user_src_folders.
-fn build_tree(user_src_files: &[(String, String)], user_src_folders: &[String]) -> BTreeMap<String, TreeNode> {
+fn build_tree(
+    user_src_files: &[(String, String)],
+    user_src_folders: &[String],
+) -> BTreeMap<String, TreeNode> {
     let mut root: BTreeMap<String, TreeNode> = BTreeMap::new();
 
     // First, ensure all folders exist in the tree
@@ -111,7 +114,7 @@ pub fn show_project_tree(
         egui::RichText::new(format!("package: {pkg_name}"))
             .size(12.0)
             .strong()
-            .color(egui::Color32::DARK_RED),
+            .color(egui::Color32::LIGHT_YELLOW),
     );
     ui.add_space(2.0);
 
@@ -183,7 +186,7 @@ pub fn show_project_tree(
             new_src_folder_name,
             new_file_parent_folder,
             new_folder_parent_folder,
-            "",  // parent path at root is empty (relative to src/)
+            "", // parent path at root is empty (relative to src/)
         );
 
         // Apply file deletion
@@ -208,8 +211,7 @@ pub fn show_project_tree(
                     } else {
                         clean
                     };
-                    if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path)
-                    {
+                    if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path) {
                         let old_dest = workspace_dir.join("src").join(&old_path);
                         let new_dest = workspace_dir.join("src").join(&new_path);
                         let _ = std::fs::rename(&old_dest, &new_dest);
@@ -229,7 +231,7 @@ pub fn show_project_tree(
             .clicked()
         {
             *new_src_name = Some(String::new());
-            *new_file_parent_folder = Some(String::new());  // empty = root of src/
+            *new_file_parent_folder = Some(String::new()); // empty = root of src/
             ui.close();
         }
         if ui
@@ -237,7 +239,7 @@ pub fn show_project_tree(
             .clicked()
         {
             *new_src_folder_name = Some(String::new());
-            *new_folder_parent_folder = Some(String::new());  // empty = root of src/
+            *new_folder_parent_folder = Some(String::new()); // empty = root of src/
             ui.close();
         }
     });
@@ -443,7 +445,8 @@ fn render_tree_node(
                     ch.header_response.context_menu(|ui| {
                         if ui
                             .button(
-                                egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5),
+                                egui::RichText::new(format!("{} New File", ph::FILE_PLUS))
+                                    .size(11.5),
                             )
                             .clicked()
                         {
@@ -453,7 +456,8 @@ fn render_tree_node(
                         }
                         if ui
                             .button(
-                                egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5),
+                                egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS))
+                                    .size(11.5),
                             )
                             .clicked()
                         {
@@ -464,14 +468,14 @@ fn render_tree_node(
                         ui.separator();
                         if ui
                             .button(
-                                egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5),
+                                egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE))
+                                    .size(11.5),
                             )
                             .clicked()
                         {
                             *renaming_folder = Some((folder_path.clone(), name.clone()));
                             // Reset the focus flag so the edit box grabs focus next frame.
-                            let fid =
-                                egui::Id::new(("__rename_folder__", folder_path.as_str()));
+                            let fid = egui::Id::new(("__rename_folder__", folder_path.as_str()));
                             ui.memory_mut(|m| m.data.insert_temp(fid, true));
                             ui.close();
                         }
@@ -554,9 +558,11 @@ fn file_row(
             let cargo_err = build_result.map_or(false, |r| r.has_errors_in(cargo_path));
             let lsp_err = lsp_state.map_or(false, |l| l.error_count_for(cargo_path) > 0);
             if cargo_err || lsp_err {
-                ui.label(egui::RichText::new(ph::X_CIRCLE).size(10.0).color(
-                    egui::Color32::from_rgb(220, 80, 70),
-                ));
+                ui.label(
+                    egui::RichText::new(ph::X_CIRCLE)
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(220, 80, 70)),
+                );
             }
         }
     });

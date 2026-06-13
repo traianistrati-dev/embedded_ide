@@ -479,16 +479,26 @@ mod tests {
         assert_not_contains_substring(&code, ".sysclk(72.MHz())");
     }
 
+    /// Build a graph clock from a typed config (the only runtime clock model).
+    fn graph_clock(cfg: &super::super::clock::model::Stm32f1Clock) -> super::super::clock::ClockConfig {
+        use super::super::clock::graph::{layout::stm32f1_layout, stm32f1_graph, GraphClock};
+        use super::super::clock::{ClockConfig, ClockLimits};
+        ClockConfig::Graph(GraphClock {
+            graph: stm32f1_graph(cfg),
+            layout: stm32f1_layout(&ClockLimits::default()),
+        })
+    }
+
     #[test]
     fn test_modified_clock_emits_extra_knobs() {
-        use super::super::clock::ClockConfig;
+        use super::super::clock::model::Stm32f1Clock;
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
-        if let ClockConfig::Stm32f1(c) = &mut mcu.clock {
-            c.ahb_pre = 2; // HCLK = 36 → emits .hclk(...)
-            c.apb2_pre = 2; // PCLK2 = 18 → emits .pclk2(...)
-        }
+        let mut cfg = Stm32f1Clock::default();
+        cfg.ahb_pre = 2; // HCLK = 36 → emits .hclk(...)
+        cfg.apb2_pre = 2; // PCLK2 = 18 → emits .pclk2(...)
+        mcu.clock = graph_clock(&cfg);
         let code = mcu.fresh_main_rs();
 
         assert_contains_substring(&code, ".hclk(");
@@ -497,35 +507,34 @@ mod tests {
 
     #[test]
     fn test_clock_marker_roundtrips_through_codegen() {
+        use super::super::clock::graph::graph_to_stm32f1;
+        use super::super::clock::model::Stm32f1Clock;
         use super::super::clock::{persist, ClockConfig};
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
-        if let ClockConfig::Stm32f1(c) = &mut mcu.clock {
-            c.pll_mul = 6;
-            c.apb2_pre = 2;
-            c.adc_pre = 8;
-        }
+        let mut cfg = Stm32f1Clock::default();
+        cfg.pll_mul = 6;
+        cfg.apb2_pre = 2;
+        cfg.adc_pre = 8;
+        mcu.clock = graph_clock(&cfg);
         let code = mcu.fresh_main_rs();
 
-        // Generated code carries the @clock marker, which parses back exactly.
+        // Generated code carries the @clock marker, which parses back to the
+        // graph's effective config.
         let parsed = persist::parse_from_source(&code).expect("clock marker present");
-        if let ClockConfig::Stm32f1(orig) = &mcu.clock {
-            assert_eq!(&parsed, orig);
-        } else {
-            panic!("expected Stm32f1 clock");
-        }
+        let ClockConfig::Graph(gc) = &mcu.clock else { panic!("expected graph clock") };
+        assert_eq!(parsed, graph_to_stm32f1(&gc.graph));
     }
 
     #[test]
     fn test_hsi_preset_omits_use_hse() {
         use super::super::clock::model::{Stm32f1Clock, SysclkSrc};
-        use super::super::clock::ClockConfig;
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         // HSI-only: no crystal → no `.use_hse(...)`, SYSCLK = 8 MHz.
-        mcu.clock = ClockConfig::Stm32f1(Stm32f1Clock {
+        mcu.clock = graph_clock(&Stm32f1Clock {
             hse_enabled: false,
             sysclk_src: SysclkSrc::Hsi,
             ..Stm32f1Clock::default()

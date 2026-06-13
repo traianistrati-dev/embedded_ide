@@ -208,7 +208,7 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
             out(28.0, 625.0, 106.0, 26.0, "MCO pin", ValueSrc::Mco, None),
         ],
         tags: vec![
-            tag(424.0, 422.0, "PLLCLK", ValueSrc::Pllclk, Some(LimitKey::SysclkMax)),
+            tag(460.0, 442.0, "PLLCLK", ValueSrc::Pllclk, Some(LimitKey::SysclkMax)),
             tag(516.0, 344.0, "SYSCLK", ValueSrc::Sysclk, Some(LimitKey::SysclkMax)),
             tag(592.0, 344.0, "HCLK", ValueSrc::Hclk, Some(LimitKey::HclkMax)),
             tag(792.0, 524.0, "PCLK1", ValueSrc::Pclk1, Some(LimitKey::Pclk1Max)),
@@ -232,12 +232,12 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
             lbl(270.0, 574.0, "MCO Mux"),
         ],
         wires: vec![
-            vec![(120.0, 300.0), (157.0, 300.0), (157.0, 383.0), (175.0, 383.0)],
+            vec![(120.0, 300.0), (120.0, 383.0), (175.0, 383.0)], // HSI → /2 (single bend)
             vec![(215.0, 383.0), (226.0, 383.0)],
             vec![(120.0, 500.0), (148.0, 500.0)],
             vec![(208.0, 502.0), (226.0, 502.0)],
             vec![(290.0, 442.0), (336.0, 442.0)],
-            vec![(420.0, 442.0), (456.0, 442.0)],
+            vec![(420.0, 442.0), (456.0, 442.0)], // PLLMUL → PLLCLK (tag now at 460,442)
             vec![(510.0, 360.0), (540.0, 360.0)],
             vec![(626.0, 360.0), (640.0, 360.0)],
             vec![(640.0, 360.0), (818.0, 360.0)],

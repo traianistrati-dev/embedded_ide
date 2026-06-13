@@ -76,8 +76,8 @@ fn freq_lit(hz: u32) -> String {
 /// `use_hse(8).sysclk(72).pclk1(36)` chain (no spurious diffs).
 pub fn clock_setup_chain(clock: &ClockConfig) -> String {
     let c: Stm32f1Clock = match clock {
-        ClockConfig::Stm32f1(c) => c.clone(),
-        // An imported graph clock (stm32f1-shaped) → read its node states back.
+        // The graph is the only clock model — read its node states back into
+        // the typed codegen intermediate.
         ClockConfig::Graph(gc) => {
             crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.graph)
         }
@@ -114,7 +114,6 @@ pub fn clock_setup_chain(clock: &ClockConfig) -> String {
 /// tab restores exactly (target-frequency code alone is ambiguous).
 fn clock_comment_line(clock: &ClockConfig) -> String {
     let c = match clock {
-        ClockConfig::Stm32f1(c) => c.clone(),
         ClockConfig::Graph(gc) => {
             crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.graph)
         }

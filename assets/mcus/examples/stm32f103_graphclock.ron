@@ -1199,8 +1199,8 @@ McuDefinition(
             ],
             tags: [
                 TagDef(
-                    x: 424.0,
-                    y: 422.0,
+                    x: 460.0,
+                    y: 442.0,
                     name: "PLLCLK",
                     src: Pllclk,
                     limit: Some(SysclkMax),
@@ -1306,8 +1306,7 @@ McuDefinition(
             wires: [
                 [
                     (120.0, 300.0),
-                    (157.0, 300.0),
-                    (157.0, 383.0),
+                    (120.0, 383.0),
                     (175.0, 383.0),
                 ],
                 [
