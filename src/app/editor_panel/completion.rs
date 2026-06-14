@@ -15,6 +15,15 @@ use crate::lsp;
 use eframe::egui;
 use egui::text_edit::TextEditOutput;
 
+/// Master switch for the **inline** diagnostic overlay — the squiggles and
+/// error/warning/info text drawn over the code in the editor.
+///
+/// Disabled: rust-analyzer's diagnostic positions can lag behind quick edits and
+/// land on lines that no longer have the error, which is misleading. The full,
+/// always-accurate diagnostics remain in the bottom panel (Cargo Check /
+/// rust-analyzer tabs). Flip to `true` to re-enable the inline overlay.
+const SHOW_INLINE_DIAGNOSTICS: bool = false;
+
 impl AppIde {
     /// Apply/trigger LSP completion and draw diagnostics, after the editor.
     ///
@@ -404,7 +413,10 @@ impl AppIde {
         }
 
         // ── Diagnostic overlays ───────────────────────────────────────
-        if lsp_file_tracked {
+        // Gated off (SHOW_INLINE_DIAGNOSTICS): the inline squiggles/messages are
+        // disabled because their positions can lag behind edits. The bottom
+        // diagnostics panel still lists everything. Code kept for easy re-enable.
+        if lsp_file_tracked && SHOW_INLINE_DIAGNOSTICS {
             let diags: Vec<lsp::LspDiagnostic> = current_rel_path
                 .as_deref()
                 .map(|rel| {
