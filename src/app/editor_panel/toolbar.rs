@@ -106,14 +106,11 @@ impl AppIde {
                 );
 
                 if build_btn.clicked() {
-                    if let Some((project, toolchain)) = self.selected_build_cfg() {
+                    if let Some((project, _toolchain)) = self.selected_build_cfg() {
                         let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                        let code = self.generated_code.clone();
                         match project_gen::write_project(
                             &build_dir,
-                            &project,
-                            &toolchain,
-                            &code,
+                            &self.current_project_files(),
                             &self.project_tree.user_src_files,
                         ) {
                             Ok(()) => {
@@ -287,14 +284,11 @@ impl AppIde {
                             ),
                         );
                         if flash_swd_btn.clicked() {
-                            if let Some((project, toolchain)) = self.selected_build_cfg() {
+                            if let Some((project, _toolchain)) = self.selected_build_cfg() {
                                 let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                                let code = self.generated_code.clone();
                                 if project_gen::write_project(
                                     &build_dir,
-                                    &project,
-                                    &toolchain,
-                                    &code,
+                                    &self.current_project_files(),
                                     &self.project_tree.user_src_files,
                                 )
                                 .is_ok()
@@ -340,14 +334,11 @@ impl AppIde {
                             ),
                         );
                         if flash_esp_btn.clicked() {
-                            if let Some((project, toolchain)) = self.selected_build_cfg() {
+                            if let Some((project, _toolchain)) = self.selected_build_cfg() {
                                 let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                                let code = self.generated_code.clone();
                                 if project_gen::write_project(
                                     &build_dir,
-                                    &project,
-                                    &toolchain,
-                                    &code,
+                                    &self.current_project_files(),
                                     &self.project_tree.user_src_files,
                                 )
                                 .is_ok()

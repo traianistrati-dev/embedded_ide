@@ -174,6 +174,22 @@ impl AppIde {
                     && display_code != self.generated_code
                 {
                     self.generated_code = display_code.clone();
+                } else {
+                    // Editable project config files — persist edits to the
+                    // matching field (the per-frame snapshot reads them back).
+                    let slot = match self.selected_file {
+                        ProjectFileId::CargoToml => Some(&mut self.cargo_toml),
+                        ProjectFileId::CargoConfig => Some(&mut self.cargo_config),
+                        ProjectFileId::MemoryX => Some(&mut self.memory_x),
+                        ProjectFileId::BuildRs => Some(&mut self.build_rs),
+                        ProjectFileId::GitIgnore => Some(&mut self.gitignore),
+                        _ => None,
+                    };
+                    if let Some(slot) = slot {
+                        if *slot != display_code {
+                            *slot = display_code.clone();
+                        }
+                    }
                 }
 
                 self.handle_editor_completion(

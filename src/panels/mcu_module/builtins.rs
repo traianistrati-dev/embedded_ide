@@ -44,7 +44,9 @@ mod tests {
     use super::*;
     use crate::panels::mcu_module::clock::ClockConfig;
     use crate::panels::mcu_module::mcu::Mcu;
-    use crate::panels::mcu_module::mcu_def::{ClockDef, McuDefinition, PinDef, PinLayout, ProjectDef};
+    use crate::panels::mcu_module::mcu_def::{
+        ClockDef, McuDefinition, PinDef, PinLayout, ProjectDef,
+    };
     use crate::panels::mcu_module::mock_esp32c3::create_esp32c3;
     use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
 
@@ -57,7 +59,14 @@ mod tests {
         }
     }
 
-    fn def_of(id: &str, family: &str, package: &str, cpu: &str, m: &Mcu, project: ProjectDef) -> McuDefinition {
+    fn def_of(
+        id: &str,
+        family: &str,
+        package: &str,
+        cpu: &str,
+        m: &Mcu,
+        project: ProjectDef,
+    ) -> McuDefinition {
         let clock = match &m.clock {
             ClockConfig::Graph(g) => ClockDef::Graph(g.clone()),
             ClockConfig::None => ClockDef::None,
@@ -103,7 +112,10 @@ mod tests {
             },
         );
         let esp = def_of(
-            "esp32c3", "esp32c3", "QFN32", "RISC-V 32-bit",
+            "esp32c3",
+            "esp32c3",
+            "QFN32",
+            "RISC-V 32-bit",
             &create_esp32c3(),
             ProjectDef {
                 pkg_name: "esp32c3".into(),
@@ -112,7 +124,8 @@ mod tests {
                 flash_size: String::new(),
                 ram_origin: String::new(),
                 ram_size: String::new(),
-                hal_dep: r#"esp-hal = { version = "0.23", features = ["esp32c3"] }"#.into(),
+                hal_dep: r#"esp-hal = { version = "0.23", features = ["esp32c3", "unstable"] }"#
+                    .into(),
                 probe_chip: "esp32c3".into(),
                 memory_comment: String::new(),
             },
@@ -156,33 +169,66 @@ mod tests {
             Pin::new_with_analog(11, "PC3", 1, 13),
             Pin::new_reserved(12, "VSSA"),
             Pin::new_reserved(13, "VDDA"),
-            Pin::new_with_analog(14, "PA0", 1, 0)
-                .with_functions(vec![F::UsartCts(2), F::TimerPwm { timer: 2, channel: 1 }]),
-            Pin::new_with_analog(15, "PA1", 1, 1)
-                .with_functions(vec![F::UsartRts(2), F::TimerPwm { timer: 2, channel: 2 }]),
-            Pin::new_with_analog(16, "PA2", 1, 2)
-                .with_functions(vec![F::UsartTx(2), F::TimerPwm { timer: 2, channel: 3 }]),
+            Pin::new_with_analog(14, "PA0", 1, 0).with_functions(vec![
+                F::UsartCts(2),
+                F::TimerPwm {
+                    timer: 2,
+                    channel: 1,
+                },
+            ]),
+            Pin::new_with_analog(15, "PA1", 1, 1).with_functions(vec![
+                F::UsartRts(2),
+                F::TimerPwm {
+                    timer: 2,
+                    channel: 2,
+                },
+            ]),
+            Pin::new_with_analog(16, "PA2", 1, 2).with_functions(vec![
+                F::UsartTx(2),
+                F::TimerPwm {
+                    timer: 2,
+                    channel: 3,
+                },
+            ]),
         ];
 
         // ── BOTTOM — pins 17..32 (left→right) ───────────────────────
         let bottom = vec![
-            Pin::new_with_analog(17, "PA3", 1, 3)
-                .with_functions(vec![F::UsartRx(2), F::TimerPwm { timer: 2, channel: 4 }]),
+            Pin::new_with_analog(17, "PA3", 1, 3).with_functions(vec![
+                F::UsartRx(2),
+                F::TimerPwm {
+                    timer: 2,
+                    channel: 4,
+                },
+            ]),
             Pin::new_reserved(18, "VSS"),
             Pin::new_reserved(19, "VDD"),
-            Pin::new_with_analog(20, "PA4", 1, 4)
-                .with_functions(vec![F::SpiNss(1), F::UsartCk(2)]),
+            Pin::new_with_analog(20, "PA4", 1, 4).with_functions(vec![F::SpiNss(1), F::UsartCk(2)]),
             Pin::new_with_analog(21, "PA5", 1, 5).with_functions(vec![F::SpiSck(1)]),
-            Pin::new_with_analog(22, "PA6", 1, 6)
-                .with_functions(vec![F::SpiMiso(1), F::TimerPwm { timer: 3, channel: 1 }]),
-            Pin::new_with_analog(23, "PA7", 1, 7)
-                .with_functions(vec![F::SpiMosi(1), F::TimerPwm { timer: 3, channel: 2 }]),
+            Pin::new_with_analog(22, "PA6", 1, 6).with_functions(vec![
+                F::SpiMiso(1),
+                F::TimerPwm {
+                    timer: 3,
+                    channel: 1,
+                },
+            ]),
+            Pin::new_with_analog(23, "PA7", 1, 7).with_functions(vec![
+                F::SpiMosi(1),
+                F::TimerPwm {
+                    timer: 3,
+                    channel: 2,
+                },
+            ]),
             Pin::new_with_analog(24, "PC4", 1, 14),
             Pin::new_with_analog(25, "PC5", 1, 15),
-            Pin::new_with_analog(26, "PB0", 1, 8)
-                .with_functions(vec![F::TimerPwm { timer: 3, channel: 3 }]),
-            Pin::new_with_analog(27, "PB1", 1, 9)
-                .with_functions(vec![F::TimerPwm { timer: 3, channel: 4 }]),
+            Pin::new_with_analog(26, "PB0", 1, 8).with_functions(vec![F::TimerPwm {
+                timer: 3,
+                channel: 3,
+            }]),
+            Pin::new_with_analog(27, "PB1", 1, 9).with_functions(vec![F::TimerPwm {
+                timer: 3,
+                channel: 4,
+            }]),
             Pin::new(28, "PB2"),
             Pin::new(29, "PB10").with_functions(vec![F::I2cScl(2), F::UsartTx(3)]),
             Pin::new(30, "PB11").with_functions(vec![F::I2cSda(2), F::UsartRx(3)]),
@@ -200,19 +246,49 @@ mod tests {
                 F::UsbDm,
                 F::CanRx,
                 F::UsartCts(1),
-                F::TimerPwm { timer: 1, channel: 4 },
+                F::TimerPwm {
+                    timer: 1,
+                    channel: 4,
+                },
             ]),
-            Pin::new(43, "PA10").with_functions(vec![F::UsartRx(1), F::TimerPwm { timer: 1, channel: 3 }]),
-            Pin::new(42, "PA9").with_functions(vec![F::UsartTx(1), F::TimerPwm { timer: 1, channel: 2 }]),
+            Pin::new(43, "PA10").with_functions(vec![
+                F::UsartRx(1),
+                F::TimerPwm {
+                    timer: 1,
+                    channel: 3,
+                },
+            ]),
+            Pin::new(42, "PA9").with_functions(vec![
+                F::UsartTx(1),
+                F::TimerPwm {
+                    timer: 1,
+                    channel: 2,
+                },
+            ]),
             Pin::new(41, "PA8").with_functions(vec![
                 F::Mco,
                 F::UsartCk(1),
-                F::TimerPwm { timer: 1, channel: 1 },
+                F::TimerPwm {
+                    timer: 1,
+                    channel: 1,
+                },
             ]),
-            Pin::new(40, "PC9").with_functions(vec![F::TimerPwm { timer: 3, channel: 4 }]),
-            Pin::new(39, "PC8").with_functions(vec![F::TimerPwm { timer: 3, channel: 3 }]),
-            Pin::new(38, "PC7").with_functions(vec![F::TimerPwm { timer: 3, channel: 2 }]),
-            Pin::new(37, "PC6").with_functions(vec![F::TimerPwm { timer: 3, channel: 1 }]),
+            Pin::new(40, "PC9").with_functions(vec![F::TimerPwm {
+                timer: 3,
+                channel: 4,
+            }]),
+            Pin::new(39, "PC8").with_functions(vec![F::TimerPwm {
+                timer: 3,
+                channel: 3,
+            }]),
+            Pin::new(38, "PC7").with_functions(vec![F::TimerPwm {
+                timer: 3,
+                channel: 2,
+            }]),
+            Pin::new(37, "PC6").with_functions(vec![F::TimerPwm {
+                timer: 3,
+                channel: 1,
+            }]),
             Pin::new(36, "PB15").with_functions(vec![F::SpiMosi(2)]),
             Pin::new(35, "PB14").with_functions(vec![F::SpiMiso(2), F::UsartRts(3)]),
             Pin::new(34, "PB13").with_functions(vec![F::SpiSck(2), F::UsartCts(3)]),
@@ -224,26 +300,68 @@ mod tests {
             Pin::new_reserved(64, "VDD"),
             Pin::new_reserved(63, "VSS"),
             Pin::new(62, "PB9").with_functions(vec![
-                F::TimerPwm { timer: 4, channel: 4 },
+                F::TimerPwm {
+                    timer: 4,
+                    channel: 4,
+                },
                 F::CanTx,
                 F::I2cSda(1),
             ]),
             Pin::new(61, "PB8").with_functions(vec![
-                F::TimerPwm { timer: 4, channel: 3 },
+                F::TimerPwm {
+                    timer: 4,
+                    channel: 3,
+                },
                 F::CanRx,
                 F::I2cScl(1),
             ]),
             Pin::new_reserved(60, "BOOT0"),
-            Pin::new(59, "PB7").with_functions(vec![F::I2cSda(1), F::TimerPwm { timer: 4, channel: 2 }]),
-            Pin::new(58, "PB6").with_functions(vec![F::I2cScl(1), F::TimerPwm { timer: 4, channel: 1 }]),
-            Pin::new(57, "PB5").with_functions(vec![F::SpiMosi(1), F::TimerPwm { timer: 3, channel: 2 }]),
-            Pin::new(56, "PB4").with_functions(vec![F::SpiMiso(1), F::TimerPwm { timer: 3, channel: 1 }]),
-            Pin::new(55, "PB3").with_functions(vec![F::SpiSck(1), F::TimerPwm { timer: 2, channel: 2 }]),
+            Pin::new(59, "PB7").with_functions(vec![
+                F::I2cSda(1),
+                F::TimerPwm {
+                    timer: 4,
+                    channel: 2,
+                },
+            ]),
+            Pin::new(58, "PB6").with_functions(vec![
+                F::I2cScl(1),
+                F::TimerPwm {
+                    timer: 4,
+                    channel: 1,
+                },
+            ]),
+            Pin::new(57, "PB5").with_functions(vec![
+                F::SpiMosi(1),
+                F::TimerPwm {
+                    timer: 3,
+                    channel: 2,
+                },
+            ]),
+            Pin::new(56, "PB4").with_functions(vec![
+                F::SpiMiso(1),
+                F::TimerPwm {
+                    timer: 3,
+                    channel: 1,
+                },
+            ]),
+            Pin::new(55, "PB3").with_functions(vec![
+                F::SpiSck(1),
+                F::TimerPwm {
+                    timer: 2,
+                    channel: 2,
+                },
+            ]),
             Pin::new(54, "PD2"),
             Pin::new(53, "PC12").with_functions(vec![F::UsartCk(3)]),
             Pin::new(52, "PC11").with_functions(vec![F::UsartRx(3)]),
             Pin::new(51, "PC10").with_functions(vec![F::UsartTx(3)]),
-            Pin::new(50, "PA15").with_functions(vec![F::SpiNss(1), F::TimerPwm { timer: 2, channel: 1 }]),
+            Pin::new(50, "PA15").with_functions(vec![
+                F::SpiNss(1),
+                F::TimerPwm {
+                    timer: 2,
+                    channel: 1,
+                },
+            ]),
             Pin::new(49, "PA14").with_functions(vec![F::SwdClk]),
         ];
 
@@ -299,7 +417,8 @@ mod tests {
         }
 
         std::fs::create_dir_all("assets/mcus/examples").unwrap();
-        let ron = ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
+        let ron =
+            ron::ser::to_string_pretty(&def, PrettyConfig::default().struct_names(true)).unwrap();
         std::fs::write("assets/mcus/examples/stm32f103rb.ron", ron).unwrap();
     }
 
@@ -308,19 +427,23 @@ mod tests {
     /// generator has produced the file.
     #[test]
     fn stm32f103rb_example_is_valid() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mcus/examples/stm32f103rb.ron");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/mcus/examples/stm32f103rb.ron"
+        );
         let text = std::fs::read_to_string(path).expect("example file exists (run generator)");
         let def: McuDefinition = ron::from_str(&text).expect("example RON parses");
         assert_eq!(def.id, "stm32f103rb");
         assert_eq!(def.family, "stm32f1");
         let mcu = def.build_mcu();
-        let total = mcu.top_pins.len()
-            + mcu.bottom_pins.len()
-            + mcu.left_pins.len()
-            + mcu.right_pins.len();
+        let total =
+            mcu.top_pins.len() + mcu.bottom_pins.len() + mcu.left_pins.len() + mcu.right_pins.len();
         assert_eq!(total, 64, "LQFP64 must expose exactly 64 pins");
         // A family backend exists, so it generates real code.
-        assert!(!mcu.fresh_main_rs().is_empty(), "stm32f1 example must generate code");
+        assert!(
+            !mcu.fresh_main_rs().is_empty(),
+            "stm32f1 example must generate code"
+        );
     }
 
     /// One-shot: write an example chip that uses a **data-driven `ClockDef::Graph`**
@@ -331,14 +454,14 @@ mod tests {
     #[ignore]
     fn generate_graph_clock_example() {
         use crate::panels::mcu_module::clock::graph::layout::stm32f1_layout;
-        use crate::panels::mcu_module::clock::graph::{stm32f1_graph, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32f1_graph};
         use crate::panels::mcu_module::clock::model::{ClockLimits, Stm32f1Clock};
         use ron::ser::PrettyConfig;
 
         // Start from the built-in C8T6, swap the clock for an embedded graph.
         let mut def = builtin_for("stm32f103c8t6").expect("base def");
         def.id = "stm32f103c8t6-graph".to_owned();
-        def.display_name = "STM32F103C8T6 (graph clock demo)".to_owned();
+        def.display_name = "STM32F103C8T6".to_owned();
         def.clock = ClockDef::Graph(GraphClock {
             graph: stm32f1_graph(&Stm32f1Clock::default()),
             layout: stm32f1_layout(&ClockLimits::default()),
@@ -356,8 +479,10 @@ mod tests {
     fn graph_clock_example_is_valid() {
         use crate::panels::mcu_module::clock::ClockConfig;
 
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mcus/examples/stm32f103_graphclock.ron");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/mcus/examples/stm32f103_graphclock.ron"
+        );
         let text = std::fs::read_to_string(path).expect("example exists (run generator)");
         let def: McuDefinition = ron::from_str(&text).expect("graph-clock example parses");
         assert_eq!(def.id, "stm32f103c8t6-graph");
@@ -366,7 +491,10 @@ mod tests {
         match def.build_mcu().clock {
             ClockConfig::Graph(gc) => {
                 assert!(!gc.graph.nodes.is_empty(), "graph must carry nodes");
-                assert!(!gc.layout.outputs.is_empty(), "layout must carry the diagram");
+                assert!(
+                    !gc.layout.outputs.is_empty(),
+                    "layout must carry the diagram"
+                );
             }
             _ => panic!("expected a graph clock"),
         }
@@ -379,12 +507,12 @@ mod tests {
     #[test]
     #[ignore]
     fn generate_esp32c3_graph_clock_example() {
-        use crate::panels::mcu_module::clock::graph::{esp32c3_graph, esp32c3_layout, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, esp32c3_graph, esp32c3_layout};
         use ron::ser::PrettyConfig;
 
         let mut def = builtin_for("esp32c3").expect("base def");
         def.id = "esp32c3-graph".to_owned();
-        def.display_name = "ESP32-C3 (graph clock demo)".to_owned();
+        def.display_name = "ESP32-C3".to_owned();
         def.clock = ClockDef::Graph(GraphClock {
             graph: esp32c3_graph(),
             layout: esp32c3_layout(),
@@ -400,11 +528,13 @@ mod tests {
     /// expected default frequencies (CPU 160 MHz).
     #[test]
     fn esp32c3_graph_clock_example_is_valid() {
-        use crate::panels::mcu_module::clock::graph::evaluate;
         use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::evaluate;
 
-        let path =
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mcus/examples/esp32c3_graphclock.ron");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/mcus/examples/esp32c3_graphclock.ron"
+        );
         let text = std::fs::read_to_string(path).expect("example exists (run generator)");
         let def: McuDefinition = ron::from_str(&text).expect("esp32c3 graph-clock parses");
         assert_eq!(def.id, "esp32c3-graph");
@@ -413,9 +543,16 @@ mod tests {
         match def.build_mcu().clock {
             ClockConfig::Graph(gc) => {
                 let f = evaluate(&gc.graph);
-                assert_eq!(f.get("cpu").copied().unwrap_or(0), 160_000_000, "CPU 160 MHz");
+                assert_eq!(
+                    f.get("cpu").copied().unwrap_or(0),
+                    160_000_000,
+                    "CPU 160 MHz"
+                );
                 assert_eq!(f.get("apb").copied().unwrap_or(0), 80_000_000, "APB 80 MHz");
-                assert!(!gc.layout.outputs.is_empty(), "layout must carry the diagram");
+                assert!(
+                    !gc.layout.outputs.is_empty(),
+                    "layout must carry the diagram"
+                );
             }
             _ => panic!("expected a graph clock"),
         }
@@ -466,6 +603,9 @@ mod tests {
         // The built-in now ships a graph clock (`ClockDef::Esp32c3`); the bare
         // factory has none, so only the pin/toolchain identity is compared.
         use crate::panels::mcu_module::clock::ClockConfig;
-        assert!(matches!(built.clock, ClockConfig::Graph(_)), "esp32c3 built-in carries a graph clock");
+        assert!(
+            matches!(built.clock, ClockConfig::Graph(_)),
+            "esp32c3 built-in carries a graph clock"
+        );
     }
 }

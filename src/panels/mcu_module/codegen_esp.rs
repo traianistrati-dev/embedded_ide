@@ -27,9 +27,9 @@
 //! }
 //! ```
 
-use super::clock::graph::evaluate;
 use super::clock::ClockConfig;
-use super::codegen::{mcu_id_marker_line, GEN_BEGIN, GEN_END};
+use super::clock::graph::evaluate;
+use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line};
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,7 +72,12 @@ pub fn fresh_esp32c3_main_rs(pins: &[&Pin], clock: &ClockConfig, id: &str) -> St
 
 /// Replace only the GEN block inside `existing`, preserving the user's loop body.
 /// If markers are not found, rebuilds from scratch.
-pub fn update_esp32c3_main_rs(existing: &str, pins: &[&Pin], clock: &ClockConfig, id: &str) -> String {
+pub fn update_esp32c3_main_rs(
+    existing: &str,
+    pins: &[&Pin],
+    clock: &ClockConfig,
+    id: &str,
+) -> String {
     let new_section = make_gen_section(pins, clock);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
@@ -164,7 +169,10 @@ fn make_gen_section(pins: &[&Pin], clock: &ClockConfig) -> String {
 
     // ── fn main() body ────────────────────────────────────────────────────────
     let mut body = String::new();
-    body.push_str(&format!("    let peripherals = {};\n", esp_init_line(clock)));
+    body.push_str(&format!(
+        "    let peripherals = {};\n",
+        esp_init_line(clock)
+    ));
 
     // ── GPIO Output / Input ───────────────────────────────────────────────────
     let outputs: Vec<&Pin> = configured
@@ -219,7 +227,7 @@ fn make_gen_section(pins: &[&Pin], clock: &ClockConfig) -> String {
                 if let PinFunction::AdcChannel { .. } = p.selected_function {
                     body.push_str(&format!(
                         "    let mut {var}_adc = adc{adc_n}_config\
-                         .enable_pin(peripherals.{gpio}, Attenuation::Db11); // {label}\n",
+                         .enable_pin(peripherals.{gpio}, Attenuation::_11dB); // {label}\n",
                         var = pin_var(&p.name),
                         gpio = p.name,
                         label = p.selected_function.label(),
@@ -520,12 +528,15 @@ fn pin_var(pin_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panels::mcu_module::clock::graph::{esp32c3_graph, esp32c3_layout, GraphClock};
     use crate::panels::mcu_module::clock::graph::NodeState;
+    use crate::panels::mcu_module::clock::graph::{GraphClock, esp32c3_graph, esp32c3_layout};
     use crate::panels::mcu_module::codegen::parse_mcu_id;
 
     fn esp_graph_clock() -> GraphClock {
-        GraphClock { graph: esp32c3_graph(), layout: esp32c3_layout() }
+        GraphClock {
+            graph: esp32c3_graph(),
+            layout: esp32c3_layout(),
+        }
     }
 
     /// The ESP CPU clock chosen in the diagram drives the generated
@@ -533,7 +544,10 @@ mod tests {
     #[test]
     fn default_cpu_clock_is_160mhz() {
         let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(esp_graph_clock()), "esp32c3");
-        assert!(code.contains("CpuClock::_160MHz"), "default ESP CPU = 160 MHz:\n{code}");
+        assert!(
+            code.contains("CpuClock::_160MHz"),
+            "default ESP CPU = 160 MHz:\n{code}"
+        );
     }
 
     #[test]
@@ -541,7 +555,10 @@ mod tests {
         let mut gc = esp_graph_clock();
         gc.graph.node_mut("cpu_div").unwrap().state = NodeState::Index(1); // ÷6 → 80 MHz
         let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(gc), "esp32c3");
-        assert!(code.contains("CpuClock::_80MHz"), "ESP CPU ÷6 = 80 MHz:\n{code}");
+        assert!(
+            code.contains("CpuClock::_80MHz"),
+            "ESP CPU ÷6 = 80 MHz:\n{code}"
+        );
         assert!(!code.contains("_160MHz"));
     }
 

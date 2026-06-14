@@ -1,6 +1,6 @@
 McuDefinition(
     id: "esp32c3-graph",
-    display_name: "ESP32-C3 (graph clock demo)",
+    display_name: "ESP32-C3",
     family: "esp32c3",
     package: "QFN32",
     cpu: "RISC-V 32-bit",
@@ -12,7 +12,7 @@ McuDefinition(
         flash_size: "",
         ram_origin: "",
         ram_size: "",
-        hal_dep: "esp-hal = { version = \"0.23\", features = [\"esp32c3\"] }",
+        hal_dep: "esp-hal = { version = \"0.23\", features = [\"esp32c3\", \"unstable\"] }",
         probe_chip: "esp32c3",
         memory_comment: "",
     ),

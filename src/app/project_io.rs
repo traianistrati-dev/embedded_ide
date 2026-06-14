@@ -105,6 +105,28 @@ impl AppIde {
                 self.generated_code = source;
             }
         }
+
+        // ── Restore editable config files from disk ──────────────────────────
+        // Read each generated config file the project carries and refresh its
+        // `<<< GENERATED >>>` block from the (now-selected) chip, preserving any
+        // edits the user made outside the block. Missing files are generated
+        // fresh; files a toolchain doesn't use (memory.x/build.rs on ESP) stay
+        // empty.
+        if let Some((cfg, tc)) = self.selected_build_cfg() {
+            use crate::panels::mcu_module::project_gen::{gen_config, splice_config, ConfigFile};
+            let load = |file: ConfigFile, path: std::path::PathBuf| -> String {
+                match std::fs::read_to_string(&path) {
+                    Ok(disk) => splice_config(file, &disk, &cfg, &tc),
+                    Err(_) => gen_config(file, &cfg, &tc),
+                }
+            };
+            self.cargo_toml = load(ConfigFile::CargoToml, root.join("Cargo.toml"));
+            self.cargo_config =
+                load(ConfigFile::CargoConfig, root.join(".cargo").join("config.toml"));
+            self.memory_x = load(ConfigFile::MemoryX, root.join("memory.x"));
+            self.build_rs = load(ConfigFile::BuildRs, root.join("build.rs"));
+            self.gitignore = load(ConfigFile::GitIgnore, root.join(".gitignore"));
+        }
     }
 
     // ── Filesystem watcher polling ────────────────────────────────────────────

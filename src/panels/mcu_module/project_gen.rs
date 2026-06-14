@@ -45,6 +45,147 @@ pub struct ProjectFiles {
     pub gitignore: String,
 }
 
+// ── Generated-block markers (per comment style) ────────────────────────────────
+//
+// Every generated config file carries its chip-derived content inside a
+// `<<< GENERATED >>> … <<< GENERATED END >>>` block, written with the comment
+// syntax of that file. Anything the user adds outside the block is preserved
+// when the block is refreshed (e.g. on a chip change) — the same contract as the
+// GEN_BEGIN…GEN_END block in `main.rs`.
+
+/// Comment syntax of a config file, used to frame the generated block.
+#[derive(Clone, Copy)]
+enum Cmt {
+    /// `//` line comments — Rust (`build.rs`).
+    Slash,
+    /// `#` line comments — TOML, `.gitignore`.
+    Hash,
+    /// `/* … */` block comments — GNU ld linker script (`memory.x`).
+    Block,
+}
+
+impl Cmt {
+    fn begin(self) -> &'static str {
+        match self {
+            Cmt::Slash => "// <<< GENERATED — do not edit inside this block >>>",
+            Cmt::Hash => "# <<< GENERATED — do not edit inside this block >>>",
+            Cmt::Block => "/* <<< GENERATED — do not edit inside this block >>> */",
+        }
+    }
+    fn end(self) -> &'static str {
+        match self {
+            Cmt::Slash => "// <<< GENERATED END >>>",
+            Cmt::Hash => "# <<< GENERATED END >>>",
+            Cmt::Block => "/* <<< GENERATED END >>> */",
+        }
+    }
+    /// The user-editable tail invitation placed below the block on first build.
+    fn tail(self) -> &'static str {
+        match self {
+            Cmt::Slash => "// Add your own code below — preserved when the block above is refreshed.\n",
+            Cmt::Hash => "# Add your own entries below — preserved when the block above is refreshed.\n",
+            Cmt::Block => "/* Add your own entries below — preserved when the block above is refreshed. */\n",
+        }
+    }
+}
+
+/// The framed generated block (`begin … body … end`); `body` must end in `\n`.
+fn gen_block(style: Cmt, body: &str) -> String {
+    format!("{}\n{}{}", style.begin(), body, style.end())
+}
+
+/// First-time file layout: the generated block followed by a user-editable tail.
+fn initial_file(style: Cmt, body: &str) -> String {
+    format!("{}\n{}", gen_block(style, body), style.tail())
+}
+
+/// Refresh the generated block in `existing`, preserving everything the user
+/// added before or after the markers. Falls back to a fresh layout when the
+/// markers are missing (legacy or hand-cleared file).
+fn splice_block(existing: &str, style: Cmt, body: &str) -> String {
+    let (begin, end) = (style.begin(), style.end());
+    if let (Some(b), Some(e)) = (existing.find(begin), existing.find(end)) {
+        if b < e {
+            let before = &existing[..b];
+            // Trim leading newlines after the end marker, then re-add exactly one
+            // so repeated splices are idempotent (no blank-line creep).
+            let after = existing[e + end.len()..].trim_start_matches('\n');
+            return format!("{before}{}\n{after}", gen_block(style, body));
+        }
+    }
+    if existing.trim().is_empty() {
+        initial_file(style, body)
+    } else {
+        // Non-empty but no markers — an externally-authored file (or one whose
+        // markers the user removed). Leave it untouched: the IDE only manages a
+        // block in files it generated itself, so it never duplicates a hand-
+        // written `[package]`/MEMORY/etc.
+        existing.to_owned()
+    }
+}
+
+/// The five generated project files that live at the project root (outside
+/// `src/`). Each maps to a [`ProjectFileId`](crate::app::ProjectFileId).
+#[derive(Clone, Copy)]
+pub enum ConfigFile {
+    CargoToml,
+    CargoConfig,
+    MemoryX,
+    BuildRs,
+    GitIgnore,
+}
+
+impl ConfigFile {
+    /// The generated body + comment style for this file, or `None` when the file
+    /// does not apply to the toolchain (e.g. `memory.x`/`build.rs` for ESP, which
+    /// esp-hal supplies itself).
+    fn body(self, c: &ProjectDef, toolchain: &ToolchainKind) -> Option<(Cmt, String)> {
+        use ToolchainKind::{EspRust, RustEmbedded};
+        match self {
+            ConfigFile::CargoToml => match toolchain {
+                RustEmbedded => Some((Cmt::Hash, cargo_toml_embedded(c))),
+                EspRust => Some((Cmt::Hash, cargo_toml_esp(c))),
+                _ => None,
+            },
+            ConfigFile::CargoConfig => match toolchain {
+                RustEmbedded => Some((Cmt::Hash, cargo_config_embedded(c))),
+                EspRust => Some((Cmt::Hash, cargo_config_esp(c))),
+                _ => None,
+            },
+            ConfigFile::MemoryX => match toolchain {
+                RustEmbedded => Some((Cmt::Block, memory_x(c))),
+                _ => None,
+            },
+            ConfigFile::BuildRs => match toolchain {
+                RustEmbedded => Some((Cmt::Slash, build_rs_embedded())),
+                _ => None,
+            },
+            ConfigFile::GitIgnore => Some((Cmt::Hash, "/target\n".to_owned())),
+        }
+    }
+}
+
+/// Fresh full content for a config file (generated block + user tail), or an
+/// empty string when the file does not apply to the toolchain.
+pub fn gen_config(file: ConfigFile, c: &ProjectDef, toolchain: &ToolchainKind) -> String {
+    file.body(c, toolchain)
+        .map(|(style, body)| initial_file(style, &body))
+        .unwrap_or_default()
+}
+
+/// Refresh the generated block of an already-edited config file, preserving the
+/// user's surrounding edits. Empty string when the file does not apply.
+pub fn splice_config(
+    file: ConfigFile,
+    existing: &str,
+    c: &ProjectDef,
+    toolchain: &ToolchainKind,
+) -> String {
+    file.body(c, toolchain)
+        .map(|(style, body)| splice_block(existing, style, &body))
+        .unwrap_or_default()
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Builds all file contents in memory without touching the filesystem.
@@ -53,49 +194,31 @@ pub fn build_project_files(
     toolchain: &ToolchainKind,
     main_rs: &str,
 ) -> ProjectFiles {
-    match toolchain {
-        ToolchainKind::RustEmbedded => ProjectFiles {
-            main_rs: main_rs.to_owned(),
-            cargo_toml: cargo_toml_embedded(config),
-            cargo_config: cargo_config_embedded(config),
-            memory_x: memory_x(config),
-            build_rs: build_rs_embedded(),
-            gitignore: "/target\n".to_owned(),
-        },
-        ToolchainKind::EspRust => ProjectFiles {
-            main_rs: main_rs.to_owned(),
-            cargo_toml: cargo_toml_esp(config),
-            cargo_config: cargo_config_esp(config),
-            // esp-hal 0.23 generates memory.x + linkall.x in its own OUT_DIR
-            // via its build script.  linkall.x uses `INCLUDE memory.x` so the
-            // chip memory map is already available — we must NOT supply our own
-            // or the linker sees IROM/DROM/etc. defined twice.
-            memory_x: String::new(),
-            build_rs: String::new(),
-            gitignore: "/target\n".to_owned(),
-        },
-        ToolchainKind::SdccC => ProjectFiles {
-            main_rs: main_rs.to_owned(),
-            cargo_toml: String::new(),
-            cargo_config: String::new(),
-            memory_x: String::new(),
-            build_rs: String::new(),
-            gitignore: String::new(),
-        },
+    // Each config file carries its chip-derived content in a `<<< GENERATED >>>`
+    // block (`gen_config` frames it with the file's comment syntax and returns
+    // an empty string for files the toolchain doesn't use, e.g. memory.x/build.rs
+    // on ESP, where esp-hal supplies them itself).
+    ProjectFiles {
+        main_rs: main_rs.to_owned(),
+        cargo_toml: gen_config(ConfigFile::CargoToml, config, toolchain),
+        cargo_config: gen_config(ConfigFile::CargoConfig, config, toolchain),
+        memory_x: gen_config(ConfigFile::MemoryX, config, toolchain),
+        build_rs: gen_config(ConfigFile::BuildRs, config, toolchain),
+        gitignore: gen_config(ConfigFile::GitIgnore, config, toolchain),
     }
 }
 
-/// Writes all project files into `dest` (creates the directory tree as needed).
-/// `user_src_files` is a list of `(path_relative_to_src, content)` pairs.
+/// Writes the given project `files` into `dest` (creating the directory tree as
+/// needed). `files` carries the *current* (possibly user-edited) content of each
+/// generated file, so edits made in the IDE are written verbatim rather than
+/// regenerated. `user_src_files` is a list of `(path_relative_to_src, content)`
+/// pairs. A file with empty content (e.g. `memory.x`/`build.rs` on ESP) is not
+/// written.
 pub fn write_project(
     dest: &Path,
-    config: &ProjectDef,
-    toolchain: &ToolchainKind,
-    main_rs: &str,
+    files: &ProjectFiles,
     user_src_files: &[(String, String)],
 ) -> io::Result<()> {
-    let files = build_project_files(config, toolchain, main_rs);
-
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
 
@@ -319,7 +442,7 @@ fn cargo_toml_esp(c: &ProjectDef) -> String {
          bench = false\n\
          \n\
          [dependencies]\n\
-         esp-hal       = {{ version = \"~1.1.0\", features = [\"{chip}\"] }}\n\
+         esp-hal       = {{ version = \"~1.1.0\", features = [\"{chip}\", \"unstable\"] }}\n\
          esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
          esp-bootloader-esp-idf = {{ version = \"0.5.0\", features = [\"{chip}\"] }}\n\
          critical-section = \"1.2.0\"\n\
@@ -369,4 +492,95 @@ fn cargo_config_esp(c: &ProjectDef) -> String {
         target = c.target,
         chip = c.probe_chip,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stm32_def() -> ProjectDef {
+        ProjectDef {
+            pkg_name: "demo".into(),
+            target: "thumbv7m-none-eabi".into(),
+            flash_origin: "0x08000000".into(),
+            flash_size: "64K".into(),
+            ram_origin: "0x20000000".into(),
+            ram_size: "20K".into(),
+            hal_dep: "stm32f1xx-hal = { version = \"0.10\" }".into(),
+            probe_chip: "STM32F103C8".into(),
+            memory_comment: "STM32F103C8".into(),
+        }
+    }
+
+    #[test]
+    fn cargo_toml_has_hash_markers_and_user_tail() {
+        let f = gen_config(ConfigFile::CargoToml, &stm32_def(), &ToolchainKind::RustEmbedded);
+        assert!(f.contains("# <<< GENERATED"), "begin marker:\n{f}");
+        assert!(f.contains("# <<< GENERATED END >>>"), "end marker");
+        assert!(f.contains("stm32f1xx-hal"), "generated body present");
+        assert!(f.contains("Add your own entries below"), "user tail present");
+    }
+
+    #[test]
+    fn memory_x_uses_block_comments_build_rs_uses_slashes() {
+        let mx = gen_config(ConfigFile::MemoryX, &stm32_def(), &ToolchainKind::RustEmbedded);
+        assert!(mx.starts_with("/* <<< GENERATED"), "ld block comment:\n{mx}");
+        assert!(mx.contains("0x08000000"), "flash origin in body");
+        let br = gen_config(ConfigFile::BuildRs, &stm32_def(), &ToolchainKind::RustEmbedded);
+        assert!(br.contains("// <<< GENERATED"), "rust line comment:\n{br}");
+    }
+
+    #[test]
+    fn esp_has_no_memory_x_or_build_rs() {
+        assert!(gen_config(ConfigFile::MemoryX, &stm32_def(), &ToolchainKind::EspRust).is_empty());
+        assert!(gen_config(ConfigFile::BuildRs, &stm32_def(), &ToolchainKind::EspRust).is_empty());
+    }
+
+    #[test]
+    fn splice_preserves_user_tail_and_is_idempotent() {
+        let tc = ToolchainKind::RustEmbedded;
+        // User adds an extra dependency in the editable tail.
+        let edited = format!(
+            "{}\n[dependencies.heapless]\nversion = \"0.8\"\n",
+            gen_config(ConfigFile::CargoToml, &stm32_def(), &tc)
+        );
+
+        let once = splice_config(ConfigFile::CargoToml, &edited, &stm32_def(), &tc);
+        assert!(once.contains("heapless"), "user tail preserved:\n{once}");
+        assert!(once.contains("stm32f1xx-hal"), "generated block refreshed");
+
+        // Re-splicing with the same chip is a no-op (no blank-line creep).
+        let twice = splice_config(ConfigFile::CargoToml, &once, &stm32_def(), &tc);
+        assert_eq!(once, twice, "splice must be idempotent");
+    }
+
+    #[test]
+    fn splice_refreshes_block_on_chip_change_keeping_edits() {
+        let tc = ToolchainKind::RustEmbedded;
+        let edited = format!(
+            "{}/* my note */\n",
+            gen_config(ConfigFile::MemoryX, &stm32_def(), &tc)
+        );
+        let mut other = stm32_def();
+        other.flash_origin = "0x08002000".into(); // different chip memory map
+        let spliced = splice_config(ConfigFile::MemoryX, &edited, &other, &tc);
+        assert!(spliced.contains("0x08002000"), "block reflects new chip");
+        assert!(!spliced.contains("0x08000000"), "old generated value gone");
+        assert!(spliced.contains("/* my note */"), "user edit preserved");
+    }
+
+    /// A hand-written file with no GEN markers (external project) must be shown
+    /// verbatim — never get a generated block injected above it (which would
+    /// duplicate `[package]`).
+    #[test]
+    fn external_file_without_markers_is_left_untouched() {
+        let external = "[package]\nname = \"theirs\"\n\n[dependencies]\nserde = \"1\"\n";
+        let out = splice_config(
+            ConfigFile::CargoToml,
+            external,
+            &stm32_def(),
+            &ToolchainKind::RustEmbedded,
+        );
+        assert_eq!(out, external);
+    }
 }

@@ -155,6 +155,14 @@ pub struct AppIde {
     mcu: Option<Mcu>,
     /// Generated Rust HAL code — rebuilt each frame from pin state
     generated_code: String,
+    /// Editable project config files. Each holds the current content (a
+    /// `<<< GENERATED >>>` block the IDE refreshes on chip change, plus whatever
+    /// the user adds outside it). `memory_x`/`build_rs` are empty for ESP.
+    cargo_toml: String,
+    cargo_config: String,
+    memory_x: String,
+    build_rs: String,
+    gitignore: String,
     /// Active tab in the MCU configurator
     active_tab: McuTab,
     /// Currently selected file in the project tree
@@ -288,6 +296,16 @@ impl AppIde {
             .expect("built-in STM32F103 definition must load");
         let generated_code = mcu.fresh_main_rs();
 
+        // Seed the editable project config files from the default chip — each
+        // carries a `<<< GENERATED >>>` block plus a user-editable tail.
+        let init_files = {
+            let d = mcu_registry
+                .iter()
+                .find(|d| d.id == selected_mcu_id)
+                .expect("selected definition exists");
+            project_gen::build_project_files(&d.project, &d.toolchain, &generated_code)
+        };
+
         // Pre-compute the saved project dir so we can use it both in the
         // Self initialiser and in the post-construction load call below.
         let saved_project_dir: Option<std::path::PathBuf> = persisted
@@ -337,6 +355,11 @@ impl AppIde {
             mcu_registry,
             selected_mcu_id,
             generated_code,
+            cargo_toml: init_files.cargo_toml,
+            cargo_config: init_files.cargo_config,
+            memory_x: init_files.memory_x,
+            build_rs: init_files.build_rs,
+            gitignore: init_files.gitignore,
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
             selected_file: ProjectFileId::MainRs,
@@ -439,6 +462,35 @@ impl AppIde {
         self.selected_def().map(|d| (d.project.clone(), d.toolchain.clone()))
     }
 
+    /// The live project files: generated `main.rs` plus the five editable config
+    /// files (with their current user edits). This — not a fresh regeneration —
+    /// is what the editor shows and what `write_project` persists.
+    fn current_project_files(&self) -> ProjectFiles {
+        ProjectFiles {
+            main_rs: self.generated_code.clone(),
+            cargo_toml: self.cargo_toml.clone(),
+            cargo_config: self.cargo_config.clone(),
+            memory_x: self.memory_x.clone(),
+            build_rs: self.build_rs.clone(),
+            gitignore: self.gitignore.clone(),
+        }
+    }
+
+    /// Regenerate every editable config file fresh from the selected chip,
+    /// discarding prior edits. Used when starting a New Project / switching chip
+    /// (a clean slate, like clearing `user_src_files`). Toolchains that don't use
+    /// a file (e.g. `memory.x`/`build.rs` on ESP) get an empty string.
+    fn reset_config_files(&mut self) {
+        if let Some((cfg, tc)) = self.selected_build_cfg() {
+            let f = project_gen::build_project_files(&cfg, &tc, &self.generated_code);
+            self.cargo_toml = f.cargo_toml;
+            self.cargo_config = f.cargo_config;
+            self.memory_x = f.memory_x;
+            self.build_rs = f.build_rs;
+            self.gitignore = f.gitignore;
+        }
+    }
+
     // ── Frame initialization (frame state, LSP, MCU synchronization) ───────────
     fn init_frame(&mut self, _ui: &mut egui::Ui) {
         // ── Poll filesystem watcher events ────────────────────────────────────
@@ -466,12 +518,10 @@ impl AppIde {
             LspStatus::Stopped => {
                 if self.has_project() {
                     let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                    if let Some((project, toolchain)) = self.selected_build_cfg() {
+                    if self.selected_build_cfg().is_some() {
                         if project_gen::write_project(
                             &build_dir,
-                            &project,
-                            &toolchain,
-                            &self.generated_code,
+                            &self.current_project_files(),
                             &self.project_tree.user_src_files,
                         )
                         .is_ok()
@@ -531,9 +581,12 @@ impl eframe::App for AppIde {
         let ctrl_s_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S));
 
         // Build project files snapshot (used by both tree and editor panels)
-        let project_files: Option<ProjectFiles> = self.selected_build_cfg().map(|(project, toolchain)| {
-            project_gen::build_project_files(&project, &toolchain, &self.generated_code)
-        });
+        // Snapshot from the live editable state (main.rs + the five editable
+        // config files), so the tree/editor show current edits — not a fresh
+        // regeneration that would discard them.
+        let project_files: Option<ProjectFiles> = self
+            .selected_build_cfg()
+            .map(|_| self.current_project_files());
 
         // ── Panel 1: Project Tree ─────
         // `save_project_needed` is set when the tree mutates files/folders, so
@@ -566,17 +619,14 @@ impl eframe::App for AppIde {
 
         // "Save Project" → export to folder
         if save_project_clicked {
-            if let Some((project, toolchain)) = self.selected_build_cfg() {
+            if self.selected_build_cfg().is_some() {
                 if let Some(dest) = rfd::FileDialog::new()
                     .set_title("Choose folder to save the project")
                     .pick_folder()
                 {
-                    let code = self.generated_code.clone();
                     match project_gen::write_project(
                         &dest,
-                        &project,
-                        &toolchain,
-                        &code,
+                        &self.current_project_files(),
                         &self.project_tree.user_src_files,
                     ) {
                         Ok(()) => {
@@ -607,13 +657,11 @@ impl eframe::App for AppIde {
         // tree changed (file added, deleted, or project opened/cleared).
         // This ensures Cargo.toml and all other required files are in sync.
         if save_project_needed {
-            if let Some((project, toolchain)) = self.selected_build_cfg() {
+            if self.selected_build_cfg().is_some() {
                 let workspace = std::env::temp_dir().join("embedded_ide_0_check");
                 let _ = project_gen::write_project(
                     &workspace,
-                    &project,
-                    &toolchain,
-                    &self.generated_code,
+                    &self.current_project_files(),
                     &self.project_tree.user_src_files,
                 );
             }

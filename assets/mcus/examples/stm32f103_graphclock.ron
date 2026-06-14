@@ -1,6 +1,6 @@
 McuDefinition(
     id: "stm32f103c8t6-graph",
-    display_name: "STM32F103C8T6 (graph clock demo)",
+    display_name: "STM32F103C8T6",
     family: "stm32f1",
     package: "LQFP48",
     cpu: "ARM Cortex-M3",

@@ -184,6 +184,9 @@ impl AppIde {
                         // ── Reset project files ───────────────────────────
                         self.project_tree.user_src_files.clear();
                         self.project_tree.user_src_folders.clear();
+                        // Fresh config files (Cargo.toml, memory.x, …) for the
+                        // selected chip — a clean slate for the new project.
+                        self.reset_config_files();
                         self.selected_file = ProjectFileId::MainRs;
                         self.project_name = None;
                         self.project_dir = None;

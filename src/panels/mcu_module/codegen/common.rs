@@ -117,7 +117,7 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
         //   let mut gpio2 = Output::new(peripherals.GPIO2, Level::Low); // GPIO Output
         //   let gpio9 = Input::new(peripherals.GPIO9, Pull::None);       // GPIO Input
         //   let mut gpio0_adc = adc1_config                              // ADC1  IN0
-        //       .enable_pin(peripherals.GPIO0, Attenuation::Db11);
+        //       .enable_pin(peripherals.GPIO0, Attenuation::_11dB);
         //
         // STM32 port-split lines ("let mut gpioa = dp.GPIOA.split()") are also
         // caught by these guards, but they fail the "starts with digit" check below.
@@ -141,7 +141,7 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
             // Separate ADC suffix ("_adc") from the numeric pin number
             let (pin_num_str, is_adc) = match gpio_rest.strip_suffix("_adc") {
                 Some(num) => (num, true),
-                None      => (gpio_rest, false),
+                None => (gpio_rest, false),
             };
             if pin_num_str.is_empty() || !pin_num_str.chars().all(|c| c.is_ascii_digit()) {
                 continue;
@@ -153,7 +153,10 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
                 continue;
             };
             // Strip trailing ';' — can appear on single-method init lines
-            let label = trimmed[comment_pos + 3..].trim().trim_end_matches(';').trim();
+            let label = trimmed[comment_pos + 3..]
+                .trim()
+                .trim_end_matches(';')
+                .trim();
 
             if is_adc {
                 // label = "ADC1  IN0"  →  matches PinFunction::from_label
@@ -163,7 +166,7 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
             } else {
                 match label {
                     "GPIO Output" => result.push((pin_name, PinFunction::GpioOutput)),
-                    "GPIO Input"  => result.push((pin_name, PinFunction::GpioInput)),
+                    "GPIO Input" => result.push((pin_name, PinFunction::GpioInput)),
                     other => {
                         if let Some(func) = PinFunction::from_label(other) {
                             result.push((pin_name, func));
@@ -198,7 +201,10 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
                 continue;
             };
             // Strip trailing ';' — appears on the last method of a builder chain
-            let label = trimmed[comment_pos + 3..].trim().trim_end_matches(';').trim();
+            let label = trimmed[comment_pos + 3..]
+                .trim()
+                .trim_end_matches(';')
+                .trim();
 
             if let Some(func) = PinFunction::from_label(label) {
                 result.push((pin_name, func));
