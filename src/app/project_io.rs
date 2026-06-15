@@ -86,6 +86,15 @@ impl AppIde {
                 }
             }
 
+            // Restore virtual modules (GI_USART…) from the `@modules` marker.
+            let restored_modules =
+                crate::panels::mcu_module::modules::persist::parse_from_source(&source);
+            if !restored_modules.is_empty() {
+                if let Some(mcu) = &mut self.mcu {
+                    mcu.modules = restored_modules;
+                }
+            }
+
             let saved = codegen::parse_main_rs(&source);
             if !saved.is_empty() {
                 if let Some(mcu) = &mut self.mcu {

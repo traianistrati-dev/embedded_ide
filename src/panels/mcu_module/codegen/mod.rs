@@ -25,9 +25,12 @@ impl Mcu {
     /// selected or reset). Dispatches on `self.family`; families without a
     /// registered backend produce an empty file.
     pub fn fresh_main_rs(&self) -> String {
-        family::backend_for(&self.family)
+        let code = family::backend_for(&self.family)
             .map(|b| b.fresh_main_rs(self))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let code = common::ensure_module_models(code, &self.modules);
+        // Lossless module state for restore on project open.
+        super::modules::persist::with_marker(&code, &self.modules)
     }
 
     /// Update `existing` in-place: replace only the generated section
@@ -36,9 +39,11 @@ impl Mcu {
     /// Families without a GEN block (ESP32-C3 has its own scheme; STM8 has
     /// no backend) return the existing file unchanged.
     pub fn update_main_rs(&self, existing: &str) -> String {
-        family::backend_for(&self.family)
+        let code = family::backend_for(&self.family)
             .map(|b| b.update_main_rs(self, existing))
-            .unwrap_or_else(|| existing.to_owned())
+            .unwrap_or_else(|| existing.to_owned());
+        let code = common::ensure_module_models(code, &self.modules);
+        super::modules::persist::with_marker(&code, &self.modules)
     }
 
     /// Kept for any remaining call sites — delegates to `fresh_main_rs`.

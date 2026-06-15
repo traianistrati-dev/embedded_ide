@@ -41,10 +41,10 @@ impl OpenOcdState {
     /// Short status label for the toolbar badge.
     pub fn status_label(&self) -> &str {
         match self {
-            OpenOcdState::Idle     => "—",
+            OpenOcdState::Idle => "—",
             OpenOcdState::Building => "Building…",
             OpenOcdState::Flashing => "Flashing (SWD)…",
-            OpenOcdState::Success  => "SWD Flash OK ✔",
+            OpenOcdState::Success => "SWD Flash OK ✔",
             OpenOcdState::Error(_) => "SWD Error",
         }
     }
@@ -53,11 +53,10 @@ impl OpenOcdState {
     pub fn status_color(&self) -> eframe::egui::Color32 {
         use eframe::egui::Color32;
         match self {
-            OpenOcdState::Success  => Color32::from_rgb(80, 220, 100),
+            OpenOcdState::Success => Color32::from_rgb(80, 220, 100),
             OpenOcdState::Error(_) => Color32::from_rgb(230, 80, 60),
-            OpenOcdState::Building
-            | OpenOcdState::Flashing => Color32::from_rgb(220, 180, 60),
-            _                        => Color32::GRAY,
+            OpenOcdState::Building | OpenOcdState::Flashing => Color32::from_rgb(220, 180, 60),
+            _ => Color32::GRAY,
         }
     }
 }
@@ -68,10 +67,10 @@ impl OpenOcdState {
 /// The returned string is ready to pass to `openocd -f <value>`.
 pub fn interface_cfg_for_kind(kind: &str) -> &'static str {
     match kind {
-        "ST-Link"   => "interface/stlink.cfg",
-        "J-Link"    => "interface/jlink.cfg",
+        "ST-Link" => "interface/stlink.cfg",
+        "J-Link" => "interface/jlink.cfg",
         "CMSIS-DAP" => "interface/cmsis-dap.cfg",
-        _           => "interface/stlink.cfg", // safe default
+        _ => "interface/stlink.cfg", // safe default
     }
 }
 
@@ -341,7 +340,7 @@ fn run_cargo_build(
 ) -> bool {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_dir)
-        .args(["build", "--release", "--target", target])
+        .args(["build", "--release", "--verbose", "--target", target])
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 

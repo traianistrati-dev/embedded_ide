@@ -10,6 +10,7 @@ pub mod chip;
 pub mod clock;
 pub mod info;
 pub mod layout;
+pub mod modules;
 pub mod panel;
 
 use eframe::egui;
@@ -24,10 +25,23 @@ impl Mcu {
         let top_count = self.top_pins.len();
         let left_count = self.left_pins.len();
 
-        let (mcu_width, mcu_height, canvas_w, canvas_h) = layout::calculate_layout(top_count, left_count);
+        // Drop any module wire whose pin was re-purposed away from USART.
+        self.reconcile_modules();
 
-        let (response, painter) =
-            ui.allocate_painter(egui::vec2(canvas_w, canvas_h), egui::Sense::hover());
+        let (mcu_width, mcu_height, base_w, base_h) = layout::calculate_layout(top_count, left_count);
+
+        // Reserve a margin all around the chip for virtual modules, so their
+        // boxes + wires sit beyond the pins (on the pins' own side) without
+        // overlapping the chip.
+        let (mx, my) = if self.modules.is_empty() {
+            (0.0, 0.0)
+        } else {
+            (modules::MARGIN_X, modules::MARGIN_Y)
+        };
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(base_w + 2.0 * mx, base_h + 2.0 * my),
+            egui::Sense::hover(),
+        );
 
         let rect = response.rect;
         let chip_rect =
@@ -38,6 +52,11 @@ impl Mcu {
 
         // ── Pins + click detection ───────────────────────────────────────────
         let clicked_pin = chip::render_pins_and_detect_clicks(self, &painter, chip_rect, ui);
+
+        // ── Virtual modules (boxes + wires) around the chip ───────────────────
+        if !self.modules.is_empty() {
+            modules::draw_modules(self, &painter, chip_rect);
+        }
 
         // Toggle selected_pin (click again to deselect); reset scroll on change.
         if let Some(n) = clicked_pin {

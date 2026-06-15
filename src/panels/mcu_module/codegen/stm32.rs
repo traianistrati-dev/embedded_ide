@@ -2,6 +2,7 @@
 
 use super::super::clock::frequencies;
 use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
+use super::super::modules::{Parity, StopBits, UsartModuleConfig};
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
 use super::{mcu_id_marker_line, GEN_BEGIN, GEN_END, USER_TAIL};
@@ -462,7 +463,28 @@ fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
 /// the user can customise them (baud rate, SPI mode, ADC sample time…) without
 /// regeneration clobbering their edits. The generated `fn_calls` inside `main`
 /// reference them by name; their imports come from the generated `use` block.
-pub fn helper_defs(all_pins: &[&Pin]) -> Vec<(String, String)> {
+/// The `Config` builder expression for a USART helper. Defaults to 115200 8N1;
+/// a wired GI_USART module overrides baud rate, parity and stop bits.
+fn usart_config_expr(cfg: Option<&UsartModuleConfig>) -> String {
+    let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
+    let mut s = format!("Config::default().baudrate({baud}.bps())");
+    if let Some(c) = cfg {
+        match c.parity {
+            Parity::None => {}
+            Parity::Even => s.push_str(".parity_even()"),
+            Parity::Odd => s.push_str(".parity_odd()"),
+        }
+        if c.stop_bits == StopBits::Two {
+            s.push_str(".stopbits(serial::StopBits::STOP2)");
+        }
+    }
+    s
+}
+
+pub fn helper_defs(
+    all_pins: &[&Pin],
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+) -> Vec<(String, String)> {
     let funcs: Vec<&PinFunction> = all_pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
@@ -474,6 +496,9 @@ pub fn helper_defs(all_pins: &[&Pin]) -> Vec<(String, String)> {
 
     for n in 1u8..=3 {
         if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
+            // Baud/parity/stop come from a wired GI_USART module when present,
+            // else the 115200 8N1 default.
+            let cfg_expr = usart_config_expr(usart.get(&n));
             defs.push((
                 format!("init_usart{n}"),
                 format!(
@@ -487,7 +512,7 @@ pub fn helper_defs(all_pins: &[&Pin]) -> Vec<(String, String)> {
         usart,
         pins,
         &mut afio.mapr,
-        Config::default().baudrate(115_200.bps()),
+        {cfg_expr},
         clocks,
     )
     .split()
@@ -578,8 +603,12 @@ where
 /// user-editable region. Helpers already present (matched by `fn <name>(`) are
 /// left untouched so user edits survive every regeneration — only brand-new
 /// ones are appended. A section header is inserted once.
-pub fn ensure_helper_defs(mut file: String, all_pins: &[&Pin]) -> String {
-    let defs = helper_defs(all_pins);
+pub fn ensure_helper_defs(
+    mut file: String,
+    all_pins: &[&Pin],
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+) -> String {
+    let defs = helper_defs(all_pins, usart);
     // A helper is "present" if its `fn <name>` is followed by either `(` (plain
     // fns like `init_adc1`) or `<` (generic fns like `init_spi1<PINS>` /
     // `init_i2c1<PINS>`). Checking only `(` missed the generic ones, so they

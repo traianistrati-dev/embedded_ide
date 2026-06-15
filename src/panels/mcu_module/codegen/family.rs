@@ -15,6 +15,7 @@ use super::common::USER_TAIL;
 use super::stm32;
 use crate::panels::mcu_module::codegen_esp;
 use crate::panels::mcu_module::mcu::Mcu;
+use crate::panels::mcu_module::modules;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 
 /// Family-specific `main.rs` generation. One implementor per chip family.
@@ -46,6 +47,7 @@ impl FamilyBackend for Stm32f1Backend {
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let all = pins_of(mcu);
+        let usart = modules::usart_configs(&mcu.modules);
         let gen_ = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
         let base = format!(
             "{header}{gen_}\n{tail}",
@@ -53,15 +55,16 @@ impl FamilyBackend for Stm32f1Backend {
             tail = USER_TAIL,
         );
         // Peripheral init helpers live after `fn main`, in the editable region.
-        stm32::ensure_helper_defs(base, &all)
+        stm32::ensure_helper_defs(base, &all, &usart)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
+        let usart = modules::usart_configs(&mcu.modules);
         let new_section = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Add helpers for newly-selected peripherals; preserve user-edited ones.
-        stm32::ensure_helper_defs(spliced, &all)
+        stm32::ensure_helper_defs(spliced, &all, &usart)
     }
 }
 
@@ -74,11 +77,13 @@ impl FamilyBackend for Esp32Backend {
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
-        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu), &mcu.clock, &mcu.id)
+        let usart = modules::usart_configs(&mcu.modules);
+        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu), &mcu.clock, &mcu.id, &usart)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
-        codegen_esp::update_esp32c3_main_rs(existing, &pins_of(mcu), &mcu.clock, &mcu.id)
+        let usart = modules::usart_configs(&mcu.modules);
+        codegen_esp::update_esp32c3_main_rs(existing, &pins_of(mcu), &mcu.clock, &mcu.id, &usart)
     }
 }
 

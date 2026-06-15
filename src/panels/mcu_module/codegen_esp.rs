@@ -30,6 +30,7 @@
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line};
+use super::modules::UsartModuleConfig;
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,8 +66,13 @@ fn esp_init_line(clock: &ClockConfig) -> String {
 
 /// Build a brand-new `src/main.rs` for an ESP32-C3 project.
 /// Called when the MCU type is first selected or the project is reset.
-pub fn fresh_esp32c3_main_rs(pins: &[&Pin], clock: &ClockConfig, id: &str) -> String {
-    let section = make_gen_section(pins, clock);
+pub fn fresh_esp32c3_main_rs(
+    pins: &[&Pin],
+    clock: &ClockConfig,
+    id: &str,
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+) -> String {
+    let section = make_gen_section(pins, clock, usart);
     format!("{}{section}\n{USER_TAIL}", invariant_header(id))
 }
 
@@ -77,8 +83,9 @@ pub fn update_esp32c3_main_rs(
     pins: &[&Pin],
     clock: &ClockConfig,
     id: &str,
+    usart: &BTreeMap<u8, UsartModuleConfig>,
 ) -> String {
-    let new_section = make_gen_section(pins, clock);
+    let new_section = make_gen_section(pins, clock, usart);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
@@ -115,7 +122,11 @@ fn invariant_header(id: &str) -> String {
 
 // ── Generated section builder ─────────────────────────────────────────────────
 
-fn make_gen_section(pins: &[&Pin], clock: &ClockConfig) -> String {
+fn make_gen_section(
+    pins: &[&Pin],
+    clock: &ClockConfig,
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+) -> String {
     let configured: Vec<&Pin> = pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
@@ -279,8 +290,13 @@ fn make_gen_section(pins: &[&Pin], clock: &ClockConfig) -> String {
                     )
                 })
                 .unwrap_or_default();
+            // A wired GI_USART module sets the baud rate; else esp-hal's default.
+            let cfg = match usart.get(&n) {
+                Some(c) => format!("UartConfig::default().with_baudrate({})", c.baud_rate),
+                None => "UartConfig::default()".to_owned(),
+            };
             body.push_str(&format!(
-                "    let mut _uart{n} = Uart::new(peripherals.UART{n}, UartConfig::default()){rx_part}{tx_part};\n"
+                "    let mut _uart{n} = Uart::new(peripherals.UART{n}, {cfg}){rx_part}{tx_part};\n"
             ));
         }
     }
@@ -539,11 +555,15 @@ mod tests {
         }
     }
 
+    fn no_usart() -> BTreeMap<u8, UsartModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
     fn default_cpu_clock_is_160mhz() {
-        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(esp_graph_clock()), "esp32c3");
+        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(esp_graph_clock()), "esp32c3", &no_usart());
         assert!(
             code.contains("CpuClock::_160MHz"),
             "default ESP CPU = 160 MHz:\n{code}"
@@ -554,7 +574,7 @@ mod tests {
     fn cpu_div6_emits_80mhz() {
         let mut gc = esp_graph_clock();
         gc.graph.node_mut("cpu_div").unwrap().state = NodeState::Index(1); // ÷6 → 80 MHz
-        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(gc), "esp32c3");
+        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(gc), "esp32c3", &no_usart());
         assert!(
             code.contains("CpuClock::_80MHz"),
             "ESP CPU ÷6 = 80 MHz:\n{code}"
@@ -565,7 +585,7 @@ mod tests {
     /// A chip with no modelled clock keeps the previous `max()` default.
     #[test]
     fn none_clock_falls_back_to_max() {
-        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3");
+        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3", &no_usart());
         assert!(code.contains("CpuClock::max()"), "{code}");
     }
 
@@ -573,9 +593,32 @@ mod tests {
     /// reopened project can restore the exact chip.
     #[test]
     fn id_marker_present_and_stable_across_update() {
-        let fresh = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3-graph");
+        let fresh = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3-graph", &no_usart());
         assert_eq!(parse_mcu_id(&fresh).as_deref(), Some("esp32c3-graph"));
-        let updated = update_esp32c3_main_rs(&fresh, &[], &ClockConfig::None, "esp32c3-graph");
+        let updated = update_esp32c3_main_rs(&fresh, &[], &ClockConfig::None, "esp32c3-graph", &no_usart());
         assert_eq!(parse_mcu_id(&updated).as_deref(), Some("esp32c3-graph"));
+    }
+
+    /// A wired GI_USART module sets the baud rate on the generated `Uart::new`.
+    #[test]
+    fn module_baud_drives_uart_config() {
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        let mut tx = Pin::new(28, "GPIO21").with_functions(vec![PinFunction::UsartTx(0)]);
+        tx.selected_function = PinFunction::UsartTx(0);
+        let mut rx = Pin::new(27, "GPIO20").with_functions(vec![PinFunction::UsartRx(0)]);
+        rx.selected_function = PinFunction::UsartRx(0);
+
+        let mut usart = no_usart();
+        let mut cfg = UsartModuleConfig::new(0);
+        cfg.baud_rate = 9600;
+        usart.insert(0, cfg);
+
+        let code = fresh_esp32c3_main_rs(&[&tx, &rx], &ClockConfig::None, "esp32c3", &usart);
+        assert!(code.contains("with_baudrate(9600)"), "baud on Uart::new:\n{code}");
+
+        // No module → plain default config.
+        let plain = fresh_esp32c3_main_rs(&[&tx, &rx], &ClockConfig::None, "esp32c3", &no_usart());
+        assert!(plain.contains("UartConfig::default())"), "default config:\n{plain}");
+        assert!(!plain.contains("with_baudrate"));
     }
 }

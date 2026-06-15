@@ -47,4 +47,7 @@ pub struct Mcu {
     /// Chip-specific clock presets from the definition; empty → the family's
     /// built-in presets are shown in the Clock tab.
     pub clock_presets: Vec<ClockPreset>,
+    /// Virtual electronic modules (e.g. GI_USART) wired to the chip's pins and
+    /// drawn beside it on the Pins canvas.
+    pub modules: Vec<crate::panels::mcu_module::modules::VirtualModule>,
 }

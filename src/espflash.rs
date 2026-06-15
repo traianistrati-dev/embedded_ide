@@ -108,7 +108,7 @@ pub fn start_flash(
         cargo_cmd
             .current_dir(&project_dir)
             //.args(["build", "--release"])
-            .args(["build", "--release", "--target", &target])
+            .args(["build", "--release", "--verbose", "--target", &target])
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 

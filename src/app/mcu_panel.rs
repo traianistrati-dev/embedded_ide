@@ -79,6 +79,65 @@ impl AppIde {
             // Tab content
             match self.active_tab {
                 McuTab::Pins => {
+                    // ── Virtual-module palette + config ───────────────────────
+                    // Add a module (auto-wires to compatible pins), edit its
+                    // config, or remove it. Add/remove change pin functions, so
+                    // re-sync the pins/ files afterwards.
+                    let mut modules_changed = false;
+                    if let Some(mcu) = &mut self.mcu {
+                        use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
+                        use crate::panels::mcu_module::modules::ModuleKind;
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Virtual modules:")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(150, 150, 160)),
+                            );
+                            if ui
+                                .button(format!("{} GI_USART", ph::PLUS))
+                                .on_hover_text(
+                                    "Add a virtual USART device and auto-wire it to a free \
+                                     USART TX/RX pin pair",
+                                )
+                                .clicked()
+                                && mcu.add_module(ModuleKind::GenericInterfaceUsart)
+                            {
+                                modules_changed = true;
+                            }
+                        });
+
+                        if !mcu.modules.is_empty() {
+                            let pin_names: std::collections::HashMap<usize, String> = mcu
+                                .iter_all_pins()
+                                .map(|p| (p.number, p.name.clone()))
+                                .collect();
+                            let mut remove_id: Option<String> = None;
+                            for m in &mut mcu.modules {
+                                let header = m.name.clone();
+                                let salt = m.id.clone();
+                                egui::CollapsingHeader::new(header).id_salt(salt).show(ui, |ui| {
+                                    mod_gui::module_config_ui(ui, m, &pin_names);
+                                    ui.add_space(4.0);
+                                    if ui.button(format!("{} Remove module", ph::TRASH)).clicked() {
+                                        remove_id = Some(m.id.clone());
+                                    }
+                                });
+                            }
+                            if let Some(id) = remove_id {
+                                mcu.remove_module(&id);
+                                modules_changed = true;
+                            }
+                        }
+                        ui.separator();
+                    }
+                    if modules_changed {
+                        if let Some(mcu) = &self.mcu {
+                            let all_pins = mcu.all_pin_functions();
+                            self.project_tree.sync_pin_files(&all_pins);
+                        }
+                    }
+
                     // Computed before borrowing `self.mcu` mutably below.
                     let chip_label = self.selected_label();
                     let pin_changed = egui::ScrollArea::both()

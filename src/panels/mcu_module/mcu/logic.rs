@@ -82,7 +82,68 @@ impl Mcu {
             clock,
             clock_limits: ClockLimits::default(),
             clock_presets: Vec::new(),
+            modules: Vec::new(),
         }
+    }
+
+    // ── Virtual modules ───────────────────────────────────────────────────────
+
+    /// Add a virtual module and auto-wire it to compatible MCU pins, setting
+    /// those pins' functions. Returns `false` (and adds nothing) when the chip
+    /// has no free pins for the module's interface.
+    pub fn add_module(
+        &mut self,
+        kind: crate::panels::mcu_module::modules::ModuleKind,
+    ) -> bool {
+        use crate::panels::mcu_module::modules::ModuleKind;
+        match kind {
+            ModuleKind::GenericInterfaceUsart => self.add_usart_module(),
+        }
+    }
+
+    /// Wire a GI_USART module to a free USART TX/RX pin pair.
+    fn add_usart_module(&mut self) -> bool {
+        use crate::panels::mcu_module::modules::{
+            autowire, Connection, ModuleConfig, ModuleKind, ModuleSignal, UsartModuleConfig,
+            VirtualModule,
+        };
+        // Pins already wired to an existing module are off-limits.
+        let used: std::collections::HashSet<usize> = self
+            .modules
+            .iter()
+            .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
+            .collect();
+
+        let Some((n, tx_pin, rx_pin)) = autowire::pick_usart_pins(self, &used) else {
+            return false;
+        };
+
+        if let Some(p) = self.find_pin_mut(tx_pin) {
+            p.selected_function = PinFunction::UsartTx(n);
+        }
+        if let Some(p) = self.find_pin_mut(rx_pin) {
+            p.selected_function = PinFunction::UsartRx(n);
+        }
+
+        let idx = self.modules.len() + 1;
+        self.modules.push(VirtualModule {
+            id: format!("gi_usart_{idx}"),
+            kind: ModuleKind::GenericInterfaceUsart,
+            name: format!("GI_USART{n}"),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Usart(UsartModuleConfig::new(n)),
+            connections: vec![
+                Connection { signal: ModuleSignal::Tx, mcu_pin: tx_pin },
+                Connection { signal: ModuleSignal::Rx, mcu_pin: rx_pin },
+            ],
+        });
+        true
+    }
+
+    /// Remove a module by id. Does not clear the pins it had wired (they keep
+    /// their USART functions; the user can change them in the Pins tab).
+    pub fn remove_module(&mut self, id: &str) {
+        self.modules.retain(|m| m.id != id);
     }
 
     /// Returns `(number, name, selected_function)` for every non-reserved pin.
@@ -226,7 +287,31 @@ impl Mcu {
             self.auto_assign_partners(pin_num, &func);
         }
 
+        // A pin re-purposed away from USART must drop any virtual-module wire.
+        self.reconcile_modules();
+
         Some(changed)
+    }
+
+    /// Drop each module connection whose pin no longer carries the matching
+    /// USART function — so re-purposing a pin disconnects the GI_USART from it
+    /// (the module stays, just unwired). Idempotent.
+    pub fn reconcile_modules(&mut self) {
+        use crate::panels::mcu_module::modules::ModuleSignal;
+        let funcs: std::collections::HashMap<usize, PinFunction> = self
+            .iter_all_pins()
+            .map(|p| (p.number, p.selected_function.clone()))
+            .collect();
+        for m in &mut self.modules {
+            let inst = m.usart_instance();
+            m.connections.retain(|conn| {
+                let want = match conn.signal {
+                    ModuleSignal::Tx => PinFunction::UsartTx(inst),
+                    ModuleSignal::Rx => PinFunction::UsartRx(inst),
+                };
+                funcs.get(&conn.mcu_pin) == Some(&want)
+            });
+        }
     }
 
     /// Finds a pin by number (immutable)

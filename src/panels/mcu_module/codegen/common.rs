@@ -46,6 +46,66 @@ pub fn parse_mcu_id(source: &str) -> Option<String> {
 
 pub const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
 
+// ── Virtual-module data models ────────────────────────────────────────────────
+
+use super::super::modules::{ModuleConfig, VirtualModule};
+
+fn indent_block(s: &str) -> String {
+    s.lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                "\n".to_owned()
+            } else {
+                format!("    {l}\n")
+            }
+        })
+        .collect()
+}
+
+/// Append each module's RX/TX data model as an inline `mod <id> { … }` at the end
+/// of `main.rs` (family-agnostic). Additive: a module already present (matched by
+/// `mod <id>`) is left untouched, so edits survive every regeneration — and a
+/// module with an empty data model emits nothing. The module's id is a valid Rust
+/// identifier (e.g. `gi_usart_1`), so its types are reachable as `gi_usart_1::…`.
+pub fn ensure_module_models(mut file: String, modules: &[VirtualModule]) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    for m in modules {
+        let ModuleConfig::Usart(c) = &m.config;
+        if c.rx_model.trim().is_empty() && c.tx_model.trim().is_empty() {
+            continue;
+        }
+        if file.contains(&format!("mod {} ", m.id)) || file.contains(&format!("mod {}{{", m.id)) {
+            continue;
+        }
+        let mut body = String::new();
+        if !c.rx_model.trim().is_empty() {
+            body.push_str("    // ── RX data model ──\n");
+            body.push_str(&indent_block(&c.rx_model));
+        }
+        if !c.tx_model.trim().is_empty() {
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str("    // ── TX data model ──\n");
+            body.push_str(&indent_block(&c.tx_model));
+        }
+        blocks.push(format!(
+            "\n// Data model for {} (editable — kept across regeneration)\nmod {} {{\n{body}}}\n",
+            m.name, m.id,
+        ));
+    }
+    if blocks.is_empty() {
+        return file;
+    }
+    if !file.ends_with('\n') {
+        file.push('\n');
+    }
+    for b in blocks {
+        file.push_str(&b);
+    }
+    file
+}
+
 // ── Pin state parser ──────────────────────────────────────────────────────────
 
 use super::super::pins::logic::pin_function::PinFunction;
