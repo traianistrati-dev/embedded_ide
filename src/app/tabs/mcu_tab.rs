@@ -159,6 +159,16 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
         .filter_map(|(name, (r, g, b), pred)| {
             let mut pin_entries = Vec::new();
             for pin in &pins {
+                // A pin already configured for a function belongs to a single
+                // category: once it holds a function, it disappears from every
+                // *other* category, so the same pin can never be selected twice
+                // with two different functionalities. Within its own category
+                // the signal menu still lets the user re-pick or unassign it.
+                let configured = pin.selected_function != PinFunction::Unset;
+                if configured && !pred(&pin.selected_function) {
+                    continue;
+                }
+
                 let mut options = Vec::new();
                 for f in &pin.available_functions {
                     // Always keep the owning pin's option (so a signal can be
@@ -362,13 +372,40 @@ mod tests {
             .unwrap();
         assert!(pa0.assigned().is_some(), "PA0 must be assigned in GPIO Output");
 
-        // The same pin appears unassigned under other categories it supports.
+        // A configured pin disappears from every *other* category, so it can't
+        // be selected twice with a different functionality.
         let pa0_in = category(&cats, "GPIO Input")
             .pins
             .iter()
-            .find(|p| p.pin_num == 10)
-            .unwrap();
-        assert!(pa0_in.assigned().is_none());
+            .find(|p| p.pin_num == 10);
+        assert!(
+            pa0_in.is_none(),
+            "PA0 is configured as GPIO Output → must not appear under GPIO Input"
+        );
+    }
+
+    /// Once a pin holds a function it is offered only inside that function's
+    /// category — never under any other peripheral it could otherwise serve.
+    #[test]
+    fn configured_pin_hidden_from_other_categories() {
+        let mut mcu = create_stm32f103c8tx();
+        // PA0 (pin 10) supports both GPIO and ADC1 IN0 on the C8T6.
+        // Before assignment it shows under both GPIO Output and ADC.
+        let before = build_categories(&mcu);
+        assert!(category(&before, "ADC").pins.iter().any(|p| p.pin_num == 10));
+        assert!(category(&before, "GPIO Output").pins.iter().any(|p| p.pin_num == 10));
+
+        // Assign ADC → PA0 must vanish from GPIO Output (and every other row).
+        mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
+        let after = build_categories(&mcu);
+        assert!(
+            category(&after, "ADC").pins.iter().any(|p| p.pin_num == 10),
+            "PA0 stays in its own ADC category"
+        );
+        assert!(
+            !category(&after, "GPIO Output").pins.iter().any(|p| p.pin_num == 10),
+            "PA0 is taken by ADC → hidden from GPIO Output"
+        );
     }
 
     /// A pin that supports several signals of one peripheral (ESP32-C3 GPIO

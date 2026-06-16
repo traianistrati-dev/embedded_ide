@@ -7,8 +7,16 @@ use super::super::modules::{
 };
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
-use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
+use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, var_suffix};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Variable (binding) name for a pin: `<pin>_<type>`, e.g. `pc13_out`,
+/// `pb9_i2c1_sda`. Only the `let` binding and later references carry the
+/// suffix — the HAL field access stays the bare pin (`meta.var`, e.g.
+/// `gpioc.pc13`).
+fn binding_of(pin: &Pin, meta: &PinMeta) -> String {
+    format!("{}_{}", meta.var, var_suffix(&pin.selected_function))
+}
 
 // ── Section splicing ──────────────────────────────────────────────────────────
 
@@ -250,8 +258,9 @@ pub fn make_generated_section(
                 ""
             };
             format!(
-                "    let {var} = {prefix}{pv}.{var}.{expr}; // {comment}",
-                var = meta.var,
+                "    let {binding} = {prefix}{pv}.{field}.{expr}; // {comment}",
+                binding = binding_of(pin, meta),
+                field = meta.var,
                 pv = meta.port_var,
             )
         };
@@ -299,10 +308,10 @@ pub fn make_generated_section(
         }
         header!();
         let tx_v = tx
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_tx{n}"));
         let rx_v = rx
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_rx{n}"));
         fn_calls.push_str(&format!(
             "    let (mut _tx{n}, mut _rx{n}) = \
@@ -325,13 +334,13 @@ pub fn make_generated_section(
         }
         header!();
         let sck_v = sck
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_sck{n}"));
         let miso_v = miso
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_miso{n}"));
         let mosi_v = mosi
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_mosi{n}"));
         fn_calls.push_str(&format!(
             "    let _spi{n} = \
@@ -350,8 +359,8 @@ pub fn make_generated_section(
             continue;
         }
         header!();
-        let scl_v = scl.unwrap().1.var.clone();
-        let sda_v = sda.unwrap().1.var.clone();
+        let scl_v = { let (p, m) = scl.unwrap(); binding_of(p, m) };
+        let sda_v = { let (p, m) = sda.unwrap(); binding_of(p, m) };
         fn_calls.push_str(&format!(
             "    let _i2c{n} = \
              init_i2c{n}(dp.I2C{n}, ({scl_v}, {sda_v}), &mut afio, &clocks);\n"
@@ -361,13 +370,13 @@ pub fn make_generated_section(
     if has_adc {
         header!();
         fn_calls.push_str("    let mut _adc1 = init_adc1(dp.ADC1, clocks);\n");
-        for (_, meta) in configured
+        for (p, meta) in configured
             .iter()
             .filter(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
         {
             fn_calls.push_str(&format!(
                 "    // let val: u16 = _adc1.read(&mut {}).unwrap();\n",
-                meta.var
+                binding_of(p, meta)
             ));
         }
     }
@@ -390,10 +399,10 @@ pub fn make_generated_section(
     if can_rx.is_some() || can_tx_pin.is_some() {
         header!();
         let rx_v = can_rx
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or("_can_rx".into());
         let tx_v = can_tx_pin
-            .map(|(_, m)| m.var.clone())
+            .map(|(p, m)| binding_of(p, m))
             .unwrap_or("_can_tx".into());
         fn_calls.push_str("    // ── CAN ──\n");
         fn_calls.push_str(&format!(
