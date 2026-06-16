@@ -29,7 +29,7 @@
 
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
-use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line};
+use super::codegen::{mcu_id_marker_line, var_suffix, GEN_BEGIN, GEN_END};
 use super::modules::UsartModuleConfig;
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -203,14 +203,14 @@ fn make_gen_section(
         for p in &outputs {
             body.push_str(&format!(
                 "    let mut {var} = Output::new(peripherals.{gpio}, Level::High, OutputConfig::default()); // GPIO Output\n",
-                var = pin_var(&p.name),
+                var = esp_binding(p),
                 gpio = p.name,
             ));
         }
         for p in &inputs {
             body.push_str(&format!(
                 "    let {var} = Input::new(peripherals.{gpio}, InputConfig::default()); // GPIO Input\n",
-                var = pin_var(&p.name),
+                var = esp_binding(p),
                 gpio = p.name,
             ));
         }
@@ -237,9 +237,9 @@ fn make_gen_section(
             for p in pin_list {
                 if let PinFunction::AdcChannel { .. } = p.selected_function {
                     body.push_str(&format!(
-                        "    let mut {var}_adc = adc{adc_n}_config\
+                        "    let mut {var} = adc{adc_n}_config\
                          .enable_pin(peripherals.{gpio}, Attenuation::_11dB); // {label}\n",
-                        var = pin_var(&p.name),
+                        var = esp_binding(p),
                         gpio = p.name,
                         label = p.selected_function.label(),
                     ));
@@ -539,6 +539,12 @@ fn build_use_block(
 /// - `"GPIO20"` → `"gpio20"`
 fn pin_var(pin_name: &str) -> String {
     pin_name.to_ascii_lowercase()
+}
+
+/// Binding (variable) name for a pin: `<gpio>_<type>`, e.g. `gpio2_out`,
+/// `gpio0_adc1_in0` — the ESP analogue of the STM32 `<pin>_<type>` format.
+fn esp_binding(p: &Pin) -> String {
+    format!("{}_{}", pin_var(&p.name), var_suffix(&p.selected_function))
 }
 
 #[cfg(test)]

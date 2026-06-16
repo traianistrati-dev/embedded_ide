@@ -549,7 +549,7 @@ impl AppIde {
                 }
             }
             LspStatus::Ready => {
-                /*
+                /**/
 
                 let mut lsp = self.lsp_state.lock().unwrap();
                 lsp.did_change("src/main.rs", &self.generated_code.clone());
@@ -557,7 +557,7 @@ impl AppIde {
                     let full_rel = format!("src/{rel}");
                     lsp.did_change(&full_rel, content);
                 }
-                 */
+                /**/
             }
             _ => {}
         }

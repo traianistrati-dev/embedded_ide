@@ -106,9 +106,42 @@ pub fn ensure_module_models(mut file: String, modules: &[VirtualModule]) -> Stri
     file
 }
 
-// ── Pin state parser ──────────────────────────────────────────────────────────
+// ── Variable name suffix ──────────────────────────────────────────────────────
 
 use super::super::pins::logic::pin_function::PinFunction;
+
+/// The `<type>` half of a generated binding name `<pin>_<type>`, e.g.
+/// `out` / `in` / `i2c1_sda` / `spi2_sck` / `usart1_tx` / `adc1_in0`. So a
+/// PC13 output binds as `pc13_out`, a PB9 I2C1 SDA as `pb9_i2c1_sda`.
+pub fn var_suffix(func: &PinFunction) -> String {
+    match func {
+        PinFunction::GpioOutput => "out".into(),
+        PinFunction::GpioInput => "in".into(),
+        PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_in{channel}"),
+        PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_ch{channel}"),
+        PinFunction::UsartTx(n) => format!("usart{n}_tx"),
+        PinFunction::UsartRx(n) => format!("usart{n}_rx"),
+        PinFunction::UsartCts(n) => format!("usart{n}_cts"),
+        PinFunction::UsartRts(n) => format!("usart{n}_rts"),
+        PinFunction::UsartCk(n) => format!("usart{n}_ck"),
+        PinFunction::SpiSck(n) => format!("spi{n}_sck"),
+        PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
+        PinFunction::SpiMiso(n) => format!("spi{n}_miso"),
+        PinFunction::SpiNss(n) => format!("spi{n}_nss"),
+        PinFunction::I2cScl(n) => format!("i2c{n}_scl"),
+        PinFunction::I2cSda(n) => format!("i2c{n}_sda"),
+        PinFunction::UsbDm => "usb_dm".into(),
+        PinFunction::UsbDp => "usb_dp".into(),
+        PinFunction::CanRx => "can_rx".into(),
+        PinFunction::CanTx => "can_tx".into(),
+        PinFunction::SwdIo => "swd_io".into(),
+        PinFunction::SwdClk => "swd_clk".into(),
+        PinFunction::Mco => "mco".into(),
+        PinFunction::Unset => "unset".into(),
+    }
+}
+
+// ── Pin state parser ──────────────────────────────────────────────────────────
 
 /// Parses pin assignments from an existing `src/main.rs`.
 ///
@@ -154,12 +187,14 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
                 Some(c) if c.is_ascii_lowercase() => c,
                 _ => continue,
             };
-            let pin_num_str = &var[2..];
-            if pin_num_str.is_empty() || !pin_num_str.chars().all(|c| c.is_ascii_digit()) {
+            // Read the pin-number digits, stopping at the `_<type>` suffix (so
+            // both `pc13` and `pc13_out` yield "13").
+            let pin_num_str: String = var[2..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if pin_num_str.is_empty() {
                 continue;
             }
 
-            // "pc13" → "PC13"
+            // "pc13" / "pc13_out" → "PC13"
             let pin_name = format!("P{}{}", port_lc.to_ascii_uppercase(), pin_num_str);
 
             let Some(comment_pos) = trimmed.rfind("// ") else {
@@ -198,12 +233,10 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
                 _ => continue,
             };
 
-            // Separate ADC suffix ("_adc") from the numeric pin number
-            let (pin_num_str, is_adc) = match gpio_rest.strip_suffix("_adc") {
-                Some(num) => (num, true),
-                None => (gpio_rest, false),
-            };
-            if pin_num_str.is_empty() || !pin_num_str.chars().all(|c| c.is_ascii_digit()) {
+            // Read the pin-number digits, stopping at any `_<type>` suffix (so
+            // `gpio2`, `gpio2_out`, `gpio0_adc1_in0` all yield the number).
+            let pin_num_str: String = gpio_rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if pin_num_str.is_empty() {
                 continue;
             }
 
@@ -212,27 +245,14 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
             let Some(comment_pos) = trimmed.rfind("// ") else {
                 continue;
             };
-            // Strip trailing ';' — can appear on single-method init lines
+            // The function comes from the comment label (robust to the binding
+            // name format). Strip a trailing ';' from single-method init lines.
             let label = trimmed[comment_pos + 3..]
                 .trim()
                 .trim_end_matches(';')
                 .trim();
-
-            if is_adc {
-                // label = "ADC1  IN0"  →  matches PinFunction::from_label
-                if let Some(func) = PinFunction::from_label(label) {
-                    result.push((pin_name, func));
-                }
-            } else {
-                match label {
-                    "GPIO Output" => result.push((pin_name, PinFunction::GpioOutput)),
-                    "GPIO Input" => result.push((pin_name, PinFunction::GpioInput)),
-                    other => {
-                        if let Some(func) = PinFunction::from_label(other) {
-                            result.push((pin_name, func));
-                        }
-                    }
-                }
+            if let Some(func) = PinFunction::from_label(label) {
+                result.push((pin_name, func));
             }
             continue;
         }

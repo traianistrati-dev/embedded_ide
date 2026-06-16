@@ -826,9 +826,9 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
           //  | PinFunction::UsartTx(_)
             | PinFunction::UsartCk(_)
             | PinFunction::UsartRts(_)
-            | PinFunction::SpiSck(_)
-            | PinFunction::SpiMosi(_)
-            | PinFunction::SpiNss(_)
+           //cd  | PinFunction::SpiSck(_)
+           // | PinFunction::SpiMosi(_)
+           // | PinFunction::SpiNss(_)
            // | PinFunction::I2cScl(_)
            // | PinFunction::I2cSda(_)
             | PinFunction::Mco

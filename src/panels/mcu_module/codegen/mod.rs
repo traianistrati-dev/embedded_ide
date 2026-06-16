@@ -15,7 +15,8 @@ use super::mcu::Mcu;
 
 // Re-export public API for backward compatibility
 pub use common::{
-    mcu_id_marker_line, parse_main_rs, parse_mcu_id, GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL,
+    mcu_id_marker_line, parse_main_rs, parse_mcu_id, var_suffix, GEN_BEGIN, GEN_END, MCU_ID_MARKER,
+    USER_TAIL,
 };
 
 // ── Public API on Mcu ─────────────────────────────────────────────────────────
@@ -550,5 +551,37 @@ mod tests {
 
         assert_not_contains_substring(&code, ".use_hse(");
         assert_contains_substring(&code, ".sysclk(8.MHz())");
+    }
+
+    // ── Variable naming: `<pin>_<type>` bindings ─────────────────────────────
+
+    /// The generated `let` binding carries the type suffix (`pa0_out`), while
+    /// the HAL field access stays the bare pin (`gpioa.pa0`).
+    #[test]
+    fn test_binding_uses_pin_type_format_gpio() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        // PA0 (pin 10) → GPIO output.
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        let code = mcu.fresh_main_rs();
+
+        assert_contains_substring(&code, "let pa0_out = &mut gpioa.pa0.into_push_pull_output");
+        // The bare-field form must NOT be used for the binding name.
+        assert_not_contains_substring(&code, "let pa0 = &mut gpioa.pa0");
+    }
+
+    /// A `<pin>_<type>` binding still round-trips back through `parse_main_rs`.
+    #[test]
+    fn test_binding_pin_type_format_roundtrips() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        let code = mcu.fresh_main_rs();
+
+        let parsed = parse_main_rs(&code);
+        assert!(parsed.iter().any(|(name, func)| name == "PA0"
+            && *func == PinFunction::GpioOutput));
     }
 }
