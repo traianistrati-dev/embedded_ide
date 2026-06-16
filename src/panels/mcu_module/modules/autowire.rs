@@ -1,65 +1,71 @@
 //! Auto-wiring: pick compatible MCU pins for a new module.
 //!
-//! For a USART module, find a peripheral instance that has both a TX-capable and
-//! a distinct RX-capable pin, preferring pins the user already assigned to that
-//! USART, then free pins — and never reusing a pin already taken by another
-//! module.
+//! Finds a peripheral instance whose required signals all map to distinct
+//! free/assigned pins (optional signals added when available), preferring pins
+//! the user already assigned, and never reusing a pin taken by another module.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
+use super::ModuleSignal;
 use crate::panels::mcu_module::mcu::model::Mcu;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 
-/// Candidate pins per USART instance: `(pin_number, already_assigned_to_role)`.
-type Candidates = BTreeMap<u8, Vec<(usize, bool)>>;
-
-/// Choose `(instance, tx_pin, rx_pin)` for a new USART module, skipping any pin
-/// in `used_pins` (already wired to another module). Returns `None` when no
-/// instance has a free/assigned TX + distinct RX.
-pub fn pick_usart_pins(mcu: &Mcu, used_pins: &HashSet<usize>) -> Option<(u8, usize, usize)> {
-    let mut tx: Candidates = BTreeMap::new();
-    let mut rx: Candidates = BTreeMap::new();
-
-    for pin in mcu.iter_all_pins().filter(|p| !p.reserved) {
-        if used_pins.contains(&pin.number) {
-            continue;
-        }
-        let free = pin.selected_function == PinFunction::Unset;
-        for f in &pin.available_functions {
-            match f {
-                PinFunction::UsartTx(n) => {
-                    let assigned = pin.selected_function == PinFunction::UsartTx(*n);
-                    if free || assigned {
-                        tx.entry(*n).or_default().push((pin.number, assigned));
-                    }
-                }
-                PinFunction::UsartRx(n) => {
-                    let assigned = pin.selected_function == PinFunction::UsartRx(*n);
-                    if free || assigned {
-                        rx.entry(*n).or_default().push((pin.number, assigned));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // First try instances where the user already wired TX *and* RX (reuse their
-    // setup); otherwise the lowest instance with a free TX + distinct RX.
-    choose(&tx, &rx, true).or_else(|| choose(&tx, &rx, false))
-}
-
-fn choose(tx: &Candidates, rx: &Candidates, require_assigned: bool) -> Option<(u8, usize, usize)> {
-    for (&n, txs) in tx {
-        let Some(rxs) = rx.get(&n) else {
-            continue;
-        };
-        let keep = |(_, a): &&(usize, bool)| !require_assigned || *a;
-        for &(t, _) in txs.iter().filter(keep) {
-            if let Some(&(r, _)) = rxs.iter().filter(keep).find(|(p, _)| *p != t) {
-                return Some((n, t, r));
+/// Choose `(instance, [(signal, pin_number), …])` for a new module. `required`
+/// signals must all be satisfiable on the same instance with distinct pins;
+/// `optional` ones (e.g. SPI NSS) are added when a pin is available. Pins in
+/// `used` (wired to another module) are skipped. Tries instances 0..=3,
+/// preferring instances where the pins are already assigned to the signal.
+pub fn pick_pins(
+    mcu: &Mcu,
+    used: &HashSet<usize>,
+    required: &[ModuleSignal],
+    optional: &[ModuleSignal],
+) -> Option<(u8, Vec<(ModuleSignal, usize)>)> {
+    for require_assigned in [true, false] {
+        for inst in 0u8..=3 {
+            if let Some(chosen) =
+                try_instance(mcu, used, required, optional, inst, require_assigned)
+            {
+                return Some((inst, chosen));
             }
         }
     }
     None
+}
+
+fn try_instance(
+    mcu: &Mcu,
+    used: &HashSet<usize>,
+    required: &[ModuleSignal],
+    optional: &[ModuleSignal],
+    inst: u8,
+    require_assigned: bool,
+) -> Option<Vec<(ModuleSignal, usize)>> {
+    let find = |sig: ModuleSignal, taken: &HashSet<usize>| -> Option<usize> {
+        let want = sig.pin_function(inst);
+        mcu.iter_all_pins()
+            .filter(|p| !p.reserved && !taken.contains(&p.number))
+            .find(|p| {
+                p.available_functions.contains(&want)
+                    && (p.selected_function == want
+                        || (!require_assigned && p.selected_function == PinFunction::Unset))
+            })
+            .map(|p| p.number)
+    };
+
+    let mut taken: HashSet<usize> = used.clone();
+    let mut chosen: Vec<(ModuleSignal, usize)> = Vec::new();
+
+    for &sig in required {
+        let pin = find(sig, &taken)?;
+        taken.insert(pin);
+        chosen.push((sig, pin));
+    }
+    for &sig in optional {
+        if let Some(pin) = find(sig, &taken) {
+            taken.insert(pin);
+            chosen.push((sig, pin));
+        }
+    }
+    Some(chosen)
 }

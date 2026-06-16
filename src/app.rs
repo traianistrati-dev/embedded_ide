@@ -433,7 +433,9 @@ impl AppIde {
 
     /// The currently-selected MCU definition (key = `selected_mcu_id`).
     fn selected_def(&self) -> Option<&McuDefinition> {
-        self.mcu_registry.iter().find(|d| d.id == self.selected_mcu_id)
+        self.mcu_registry
+            .iter()
+            .find(|d| d.id == self.selected_mcu_id)
     }
 
     /// True when a real chip is selected (replaces `project_config().is_some()`).
@@ -443,12 +445,16 @@ impl AppIde {
 
     /// Display name of the selected chip (empty if none).
     fn selected_label(&self) -> String {
-        self.selected_def().map(|d| d.display_name.clone()).unwrap_or_default()
+        self.selected_def()
+            .map(|d| d.display_name.clone())
+            .unwrap_or_default()
     }
 
     /// CPU family string of the selected chip (empty if none).
     fn selected_family(&self) -> String {
-        self.selected_def().map(|d| d.cpu.clone()).unwrap_or_default()
+        self.selected_def()
+            .map(|d| d.cpu.clone())
+            .unwrap_or_default()
     }
 
     /// Toolchain of the selected chip (None if no chip selected).
@@ -459,7 +465,8 @@ impl AppIde {
     /// Owned `(project params, toolchain)` for project generation — cloned so no
     /// borrow of `self` is held across the subsequent `self` mutations.
     fn selected_build_cfg(&self) -> Option<(ProjectDef, ToolchainKind)> {
-        self.selected_def().map(|d| (d.project.clone(), d.toolchain.clone()))
+        self.selected_def()
+            .map(|d| (d.project.clone(), d.toolchain.clone()))
     }
 
     /// The live project files: generated `main.rs` plus the five editable config
@@ -542,12 +549,15 @@ impl AppIde {
                 }
             }
             LspStatus::Ready => {
+                /*
+
                 let mut lsp = self.lsp_state.lock().unwrap();
                 lsp.did_change("src/main.rs", &self.generated_code.clone());
                 for (rel, content) in &self.project_tree.user_src_files {
                     let full_rel = format!("src/{rel}");
                     lsp.did_change(&full_rel, content);
                 }
+                 */
             }
             _ => {}
         }

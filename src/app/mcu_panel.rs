@@ -94,16 +94,28 @@ impl AppIde {
                                     .size(12.0)
                                     .color(egui::Color32::from_rgb(150, 150, 160)),
                             );
-                            if ui
-                                .button(format!("{} GI_USART", ph::PLUS))
-                                .on_hover_text(
-                                    "Add a virtual USART device and auto-wire it to a free \
-                                     USART TX/RX pin pair",
-                                )
-                                .clicked()
-                                && mcu.add_module(ModuleKind::GenericInterfaceUsart)
-                            {
-                                modules_changed = true;
+                            for (kind, hover) in [
+                                (
+                                    ModuleKind::GenericInterfaceUsart,
+                                    "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
+                                ),
+                                (
+                                    ModuleKind::GenericInterfaceSpi,
+                                    "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
+                                ),
+                                (
+                                    ModuleKind::GenericInterfaceI2c,
+                                    "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                ),
+                            ] {
+                                if ui
+                                    .button(format!("{} {}", ph::PLUS, kind.short()))
+                                    .on_hover_text(hover)
+                                    .clicked()
+                                    && mcu.add_module(kind)
+                                {
+                                    modules_changed = true;
+                                }
                             }
                         });
 

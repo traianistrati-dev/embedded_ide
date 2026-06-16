@@ -3,6 +3,7 @@
 //! tab toolbar; config is the Module panel).
 
 use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ModuleConfig, ModuleSignal, Parity, StopBits, VirtualModule,
 };
@@ -58,9 +59,12 @@ fn pin_anchor_side(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<(
 }
 
 fn signal_color(sig: ModuleSignal) -> egui::Color32 {
+    use ModuleSignal::*;
     match sig {
-        ModuleSignal::Tx => egui::Color32::from_rgb(90, 170, 230), // blue
-        ModuleSignal::Rx => egui::Color32::from_rgb(230, 160, 70), // orange
+        Tx | Mosi | Scl => egui::Color32::from_rgb(90, 170, 230), // blue — outbound/clock
+        Rx | Miso | Sda => egui::Color32::from_rgb(230, 160, 70), // orange — inbound/data
+        Sck => egui::Color32::from_rgb(150, 130, 220),            // purple — SPI clock
+        Nss => egui::Color32::from_rgb(120, 200, 120),            // green — chip select
     }
 }
 
@@ -129,9 +133,8 @@ fn draw_box(painter: &egui::Painter, rect: egui::Rect, m: &VirtualModule, connec
         egui::FontId::proportional(13.0),
         egui::Color32::WHITE,
     );
-    let ModuleConfig::Usart(cfg) = &m.config;
     let summary = if connected {
-        format!("USART{}  ·  {} baud", cfg.instance, cfg.baud_rate)
+        m.config.summary()
     } else {
         "disconnected".to_owned()
     };
@@ -232,63 +235,101 @@ pub fn module_config_ui(
     m: &mut VirtualModule,
     pin_names: &HashMap<usize, String>,
 ) {
-    let tx = m.pin_for(ModuleSignal::Tx);
-    let rx = m.pin_for(ModuleSignal::Rx);
-    let name_of = |p: Option<usize>| {
-        p.and_then(|n| pin_names.get(&n).cloned())
-            .unwrap_or_else(|| "—".to_owned())
-    };
-    let ModuleConfig::Usart(cfg) = &mut m.config;
+    // Connection rows (generic over kind), computed before borrowing config.
+    let conn_rows: Vec<(&'static str, String)> = m
+        .connections
+        .iter()
+        .map(|c| {
+            let pin = pin_names
+                .get(&c.mcu_pin)
+                .cloned()
+                .unwrap_or_else(|| format!("pin{}", c.mcu_pin));
+            (c.signal.label(), pin)
+        })
+        .collect();
 
     egui::Grid::new("module_cfg")
         .num_columns(2)
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
-            ui.label("Baud rate");
-            egui::ComboBox::from_id_salt("baud")
-                .selected_text(cfg.baud_rate.to_string())
-                .show_ui(ui, |ui| {
-                    for b in [9600u32, 19200, 38400, 57600, 115200, 230400, 460800, 921600] {
-                        ui.selectable_value(&mut cfg.baud_rate, b, b.to_string());
-                    }
-                });
-            ui.end_row();
+            match &mut m.config {
+                ModuleConfig::Usart(cfg) => {
+                    ui.label("Baud rate");
+                    egui::ComboBox::from_id_salt("baud")
+                        .selected_text(cfg.baud_rate.to_string())
+                        .show_ui(ui, |ui| {
+                            for b in [9600u32, 19200, 38400, 57600, 115200, 230400, 460800, 921600] {
+                                ui.selectable_value(&mut cfg.baud_rate, b, b.to_string());
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Data bits");
+                    egui::ComboBox::from_id_salt("databits")
+                        .selected_text(cfg.data_bits.to_string())
+                        .show_ui(ui, |ui| {
+                            for d in [8u8, 9] {
+                                ui.selectable_value(&mut cfg.data_bits, d, d.to_string());
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Parity");
+                    egui::ComboBox::from_id_salt("parity")
+                        .selected_text(parity_label(cfg.parity))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cfg.parity, Parity::None, "None");
+                            ui.selectable_value(&mut cfg.parity, Parity::Even, "Even");
+                            ui.selectable_value(&mut cfg.parity, Parity::Odd, "Odd");
+                        });
+                    ui.end_row();
+                    ui.label("Stop bits");
+                    egui::ComboBox::from_id_salt("stop")
+                        .selected_text(stop_label(cfg.stop_bits))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cfg.stop_bits, StopBits::One, "1");
+                            ui.selectable_value(&mut cfg.stop_bits, StopBits::Two, "2");
+                        });
+                    ui.end_row();
+                }
+                ModuleConfig::Spi(cfg) => {
+                    ui.label("SPI mode");
+                    egui::ComboBox::from_id_salt("spimode")
+                        .selected_text(format!("Mode {}", cfg.mode))
+                        .show_ui(ui, |ui| {
+                            for md in 0u8..=3 {
+                                ui.selectable_value(&mut cfg.mode, md, format!("Mode {md}"));
+                            }
+                        });
+                    ui.end_row();
+                    ui.label("Clock");
+                    egui::ComboBox::from_id_salt("spiclk")
+                        .selected_text(hz_label(cfg.clock_hz))
+                        .show_ui(ui, |ui| {
+                            for hz in [125_000u32, 250_000, 500_000, 1_000_000, 2_000_000, 4_000_000, 8_000_000] {
+                                ui.selectable_value(&mut cfg.clock_hz, hz, hz_label(hz));
+                            }
+                        });
+                    ui.end_row();
+                }
+                ModuleConfig::I2c(cfg) => {
+                    ui.label("Clock");
+                    egui::ComboBox::from_id_salt("i2cclk")
+                        .selected_text(hz_label(cfg.clock_hz))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut cfg.clock_hz, 100_000, "100 kHz");
+                            ui.selectable_value(&mut cfg.clock_hz, 400_000, "400 kHz");
+                        });
+                    ui.end_row();
+                    ui.label("Address (7-bit)");
+                    ui.add(egui::DragValue::new(&mut cfg.address).range(0..=127).hexadecimal(2, false, true));
+                    ui.end_row();
+                }
+            }
 
-            ui.label("Data bits");
-            egui::ComboBox::from_id_salt("databits")
-                .selected_text(cfg.data_bits.to_string())
-                .show_ui(ui, |ui| {
-                    for d in [8u8, 9] {
-                        ui.selectable_value(&mut cfg.data_bits, d, d.to_string());
-                    }
-                });
-            ui.end_row();
-
-            ui.label("Parity");
-            egui::ComboBox::from_id_salt("parity")
-                .selected_text(parity_label(cfg.parity))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut cfg.parity, Parity::None, "None");
-                    ui.selectable_value(&mut cfg.parity, Parity::Even, "Even");
-                    ui.selectable_value(&mut cfg.parity, Parity::Odd, "Odd");
-                });
-            ui.end_row();
-
-            ui.label("Stop bits");
-            egui::ComboBox::from_id_salt("stop")
-                .selected_text(stop_label(cfg.stop_bits))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut cfg.stop_bits, StopBits::One, "1");
-                    ui.selectable_value(&mut cfg.stop_bits, StopBits::Two, "2");
-                });
-            ui.end_row();
-
-            ui.label("TX → pin");
-            ui.label(name_of(tx));
-            ui.end_row();
-            ui.label("RX → pin");
-            ui.label(name_of(rx));
-            ui.end_row();
+            for (sig, pin) in &conn_rows {
+                ui.label(format!("{sig} → pin"));
+                ui.label(pin);
+                ui.end_row();
+            }
         });
 
     ui.add_space(4.0);
@@ -301,7 +342,7 @@ pub fn module_config_ui(
     };
     label(ui, "RX data model");
     ui.add(
-        egui::TextEdit::multiline(&mut cfg.rx_model)
+        egui::TextEdit::multiline(m.config.rx_model_mut())
             .desired_rows(3)
             .desired_width(f32::INFINITY)
             .code_editor()
@@ -309,7 +350,7 @@ pub fn module_config_ui(
     );
     label(ui, "TX data model");
     ui.add(
-        egui::TextEdit::multiline(&mut cfg.tx_model)
+        egui::TextEdit::multiline(m.config.tx_model_mut())
             .desired_rows(3)
             .desired_width(f32::INFINITY)
             .code_editor()

@@ -48,7 +48,7 @@ pub const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n 
 
 // ── Virtual-module data models ────────────────────────────────────────────────
 
-use super::super::modules::{ModuleConfig, VirtualModule};
+use super::super::modules::VirtualModule;
 
 fn indent_block(s: &str) -> String {
     s.lines()
@@ -70,24 +70,24 @@ fn indent_block(s: &str) -> String {
 pub fn ensure_module_models(mut file: String, modules: &[VirtualModule]) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for m in modules {
-        let ModuleConfig::Usart(c) = &m.config;
-        if c.rx_model.trim().is_empty() && c.tx_model.trim().is_empty() {
+        let (rx, tx) = (m.config.rx_model(), m.config.tx_model());
+        if rx.trim().is_empty() && tx.trim().is_empty() {
             continue;
         }
         if file.contains(&format!("mod {} ", m.id)) || file.contains(&format!("mod {}{{", m.id)) {
             continue;
         }
         let mut body = String::new();
-        if !c.rx_model.trim().is_empty() {
+        if !rx.trim().is_empty() {
             body.push_str("    // ── RX data model ──\n");
-            body.push_str(&indent_block(&c.rx_model));
+            body.push_str(&indent_block(rx));
         }
-        if !c.tx_model.trim().is_empty() {
+        if !tx.trim().is_empty() {
             if !body.is_empty() {
                 body.push('\n');
             }
             body.push_str("    // ── TX data model ──\n");
-            body.push_str(&indent_block(&c.tx_model));
+            body.push_str(&indent_block(tx));
         }
         blocks.push(format!(
             "\n// Data model for {} (editable — kept across regeneration)\nmod {} {{\n{body}}}\n",

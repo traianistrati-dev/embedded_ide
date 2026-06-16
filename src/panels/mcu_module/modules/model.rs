@@ -1,16 +1,21 @@
 //! Virtual electronic modules attached to the MCU on the Pins canvas.
 //!
-//! A module mimics a physical peripheral device (e.g. a USART sensor) and
+//! A module mimics a physical peripheral device (USART / SPI / I2C) and
 //! auto-connects to compatible MCU pins, drawn as a simplified schematic next to
 //! the chip. This is the data model; auto-wiring lives in [`super::autowire`].
 
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use serde::{Deserialize, Serialize};
 
-/// Kind of virtual module. New kinds (I2C/SPI/…) are added here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Kind of virtual module. New kinds are added here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleKind {
-    /// Generic device speaking over USART (TX/RX) — shown as "GI_USART".
+    /// Generic device speaking over USART (TX/RX) — "GI_USART".
     GenericInterfaceUsart,
+    /// Generic device on an SPI bus (SCK/MOSI/MISO/NSS) — "GI_SPI".
+    GenericInterfaceSpi,
+    /// Generic device on an I2C bus (SCL/SDA) — "GI_I2C".
+    GenericInterfaceI2c,
 }
 
 impl ModuleKind {
@@ -18,15 +23,56 @@ impl ModuleKind {
     pub fn short(self) -> &'static str {
         match self {
             ModuleKind::GenericInterfaceUsart => "GI_USART",
+            ModuleKind::GenericInterfaceSpi => "GI_SPI",
+            ModuleKind::GenericInterfaceI2c => "GI_I2C",
+        }
+    }
+
+    /// Default config for this kind on `instance`.
+    pub fn default_config(self, instance: u8) -> ModuleConfig {
+        match self {
+            ModuleKind::GenericInterfaceUsart => {
+                ModuleConfig::Usart(UsartModuleConfig::new(instance))
+            }
+            ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
         }
     }
 }
 
+/// Map an assigned pin function to the module `(kind, instance, signal)` it
+/// implies — the inverse of [`ModuleSignal::pin_function`]. `None` for functions
+/// that don't belong to a module (GPIO, ADC, timer, USART CTS/RTS/CK, …).
+pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSignal)> {
+    use ModuleKind::*;
+    use ModuleSignal::*;
+    Some(match func {
+        PinFunction::UsartTx(n) => (GenericInterfaceUsart, *n, Tx),
+        PinFunction::UsartRx(n) => (GenericInterfaceUsart, *n, Rx),
+        PinFunction::SpiSck(n) => (GenericInterfaceSpi, *n, Sck),
+        PinFunction::SpiMosi(n) => (GenericInterfaceSpi, *n, Mosi),
+        PinFunction::SpiMiso(n) => (GenericInterfaceSpi, *n, Miso),
+        PinFunction::SpiNss(n) => (GenericInterfaceSpi, *n, Nss),
+        PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
+        PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
+        _ => return None,
+    })
+}
+
 /// One terminal of a module that wires to an MCU pin.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleSignal {
+    // USART
     Tx,
     Rx,
+    // SPI
+    Sck,
+    Mosi,
+    Miso,
+    Nss,
+    // I2C
+    Scl,
+    Sda,
 }
 
 impl ModuleSignal {
@@ -34,6 +80,26 @@ impl ModuleSignal {
         match self {
             ModuleSignal::Tx => "TX",
             ModuleSignal::Rx => "RX",
+            ModuleSignal::Sck => "SCK",
+            ModuleSignal::Mosi => "MOSI",
+            ModuleSignal::Miso => "MISO",
+            ModuleSignal::Nss => "NSS",
+            ModuleSignal::Scl => "SCL",
+            ModuleSignal::Sda => "SDA",
+        }
+    }
+
+    /// The MCU pin function this signal needs on peripheral `instance`.
+    pub fn pin_function(self, instance: u8) -> PinFunction {
+        match self {
+            ModuleSignal::Tx => PinFunction::UsartTx(instance),
+            ModuleSignal::Rx => PinFunction::UsartRx(instance),
+            ModuleSignal::Sck => PinFunction::SpiSck(instance),
+            ModuleSignal::Mosi => PinFunction::SpiMosi(instance),
+            ModuleSignal::Miso => PinFunction::SpiMiso(instance),
+            ModuleSignal::Nss => PinFunction::SpiNss(instance),
+            ModuleSignal::Scl => PinFunction::I2cScl(instance),
+            ModuleSignal::Sda => PinFunction::I2cSda(instance),
         }
     }
 }
@@ -87,10 +153,127 @@ impl UsartModuleConfig {
     }
 }
 
+/// SPI device settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpiModuleConfig {
+    pub instance: u8,
+    /// SPI mode 0..=3 (CPOL/CPHA).
+    pub mode: u8,
+    /// Bus clock in Hz.
+    pub clock_hz: u32,
+    pub rx_model: String,
+    pub tx_model: String,
+}
+
+impl SpiModuleConfig {
+    /// Defaults: mode 0, 1 MHz.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            mode: 0,
+            clock_hz: 1_000_000,
+            rx_model: String::new(),
+            tx_model: String::new(),
+        }
+    }
+}
+
+/// I2C device settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct I2cModuleConfig {
+    pub instance: u8,
+    /// Bus clock in Hz (100 kHz standard / 400 kHz fast).
+    pub clock_hz: u32,
+    /// 7-bit device address.
+    pub address: u8,
+    pub rx_model: String,
+    pub tx_model: String,
+}
+
+impl I2cModuleConfig {
+    /// Defaults: 100 kHz, address 0x00.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            clock_hz: 100_000,
+            address: 0x00,
+            rx_model: String::new(),
+            tx_model: String::new(),
+        }
+    }
+}
+
 /// Per-kind configuration payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleConfig {
     Usart(UsartModuleConfig),
+    Spi(SpiModuleConfig),
+    I2c(I2cModuleConfig),
+}
+
+impl ModuleConfig {
+    /// The peripheral instance this module targets.
+    pub fn instance(&self) -> u8 {
+        match self {
+            ModuleConfig::Usart(c) => c.instance,
+            ModuleConfig::Spi(c) => c.instance,
+            ModuleConfig::I2c(c) => c.instance,
+        }
+    }
+
+    pub fn rx_model(&self) -> &str {
+        match self {
+            ModuleConfig::Usart(c) => &c.rx_model,
+            ModuleConfig::Spi(c) => &c.rx_model,
+            ModuleConfig::I2c(c) => &c.rx_model,
+        }
+    }
+
+    pub fn tx_model(&self) -> &str {
+        match self {
+            ModuleConfig::Usart(c) => &c.tx_model,
+            ModuleConfig::Spi(c) => &c.tx_model,
+            ModuleConfig::I2c(c) => &c.tx_model,
+        }
+    }
+
+    pub fn rx_model_mut(&mut self) -> &mut String {
+        match self {
+            ModuleConfig::Usart(c) => &mut c.rx_model,
+            ModuleConfig::Spi(c) => &mut c.rx_model,
+            ModuleConfig::I2c(c) => &mut c.rx_model,
+        }
+    }
+
+    pub fn tx_model_mut(&mut self) -> &mut String {
+        match self {
+            ModuleConfig::Usart(c) => &mut c.tx_model,
+            ModuleConfig::Spi(c) => &mut c.tx_model,
+            ModuleConfig::I2c(c) => &mut c.tx_model,
+        }
+    }
+
+    /// One-line summary for the schematic box (e.g. "USART1 · 9600 baud").
+    pub fn summary(&self) -> String {
+        match self {
+            ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
+            ModuleConfig::Spi(c) => {
+                format!("SPI{}  ·  mode {}  ·  {}", c.instance, c.mode, hz_label(c.clock_hz))
+            }
+            ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
+        }
+    }
+}
+
+/// Compact frequency label, e.g. "1 MHz", "400 kHz".
+pub fn hz_label(hz: u32) -> String {
+    if hz % 1_000_000 == 0 {
+        format!("{} MHz", hz / 1_000_000)
+    } else if hz % 1_000 == 0 {
+        format!("{} kHz", hz / 1_000)
+    } else {
+        format!("{hz} Hz")
+    }
 }
 
 /// A virtual module placed beside the MCU on the Pins canvas.
@@ -117,10 +300,8 @@ impl VirtualModule {
             .map(|c| c.mcu_pin)
     }
 
-    /// The USART instance this module targets (only kind today).
-    pub fn usart_instance(&self) -> u8 {
-        match &self.config {
-            ModuleConfig::Usart(c) => c.instance,
-        }
+    /// The peripheral instance this module targets.
+    pub fn instance(&self) -> u8 {
+        self.config.instance()
     }
 }

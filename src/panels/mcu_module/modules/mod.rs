@@ -12,17 +12,42 @@ pub mod model;
 pub mod persist;
 
 pub use model::{
-    Connection, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, UsartModuleConfig,
-    VirtualModule,
+    module_signal_of, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity,
+    SpiModuleConfig, StopBits, UsartModuleConfig, VirtualModule,
 };
+
+use std::collections::BTreeMap;
 
 /// USART module configs keyed by peripheral instance — consumed by codegen to
 /// drive the generated USART init (baud rate, parity, stop bits).
-pub fn usart_configs(modules: &[VirtualModule]) -> std::collections::BTreeMap<u8, UsartModuleConfig> {
-    let mut map = std::collections::BTreeMap::new();
+pub fn usart_configs(modules: &[VirtualModule]) -> BTreeMap<u8, UsartModuleConfig> {
+    let mut map = BTreeMap::new();
     for m in modules {
-        let ModuleConfig::Usart(c) = &m.config;
-        map.insert(c.instance, c.clone());
+        if let ModuleConfig::Usart(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// SPI module configs keyed by peripheral instance (mode + clock for codegen).
+pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// I2C module configs keyed by peripheral instance (clock for codegen).
+pub fn i2c_configs(modules: &[VirtualModule]) -> BTreeMap<u8, I2cModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::I2c(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
     }
     map
 }
@@ -40,7 +65,7 @@ mod tests {
         assert_eq!(mcu.modules.len(), 1);
 
         let m = &mcu.modules[0];
-        let n = m.usart_instance();
+        let n = m.instance();
         let tx = m.pin_for(ModuleSignal::Tx).unwrap();
         let rx = m.pin_for(ModuleSignal::Rx).unwrap();
         assert_ne!(tx, rx, "TX and RX must be different pins");
@@ -63,23 +88,63 @@ mod tests {
         assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
         assert_eq!(mcu.modules.len(), 2);
 
-        let n0 = mcu.modules[0].usart_instance();
-        let n1 = mcu.modules[1].usart_instance();
+        let n0 = mcu.modules[0].instance();
+        let n1 = mcu.modules[1].instance();
         assert_ne!(n0, n1, "second module must pick a free USART instance");
 
         // No MCU pin is shared between the two modules.
-        let pins0: Vec<usize> = mcu.modules[0].connections.iter().map(|c| c.mcu_pin).collect();
-        let pins1: Vec<usize> = mcu.modules[1].connections.iter().map(|c| c.mcu_pin).collect();
+        let pins0: Vec<usize> = mcu.modules[0]
+            .connections
+            .iter()
+            .map(|c| c.mcu_pin)
+            .collect();
+        let pins1: Vec<usize> = mcu.modules[1]
+            .connections
+            .iter()
+            .map(|c| c.mcu_pin)
+            .collect();
         assert!(pins0.iter().all(|p| !pins1.contains(p)));
     }
 
+    /// Removing a module resets the pins it was wired to back to `Unset`.
     #[test]
-    fn remove_module_drops_it() {
+    fn remove_module_resets_pins() {
         let mut mcu = create_stm32f103c8tx();
         mcu.add_module(ModuleKind::GenericInterfaceUsart);
+        let tx = mcu.modules[0].pin_for(ModuleSignal::Tx).unwrap();
+        let rx = mcu.modules[0].pin_for(ModuleSignal::Rx).unwrap();
         let id = mcu.modules[0].id.clone();
+
         mcu.remove_module(&id);
+
         assert!(mcu.modules.is_empty());
+        assert_eq!(
+            mcu.find_pin(tx).unwrap().selected_function,
+            PinFunction::Unset,
+            "TX pin freed"
+        );
+        assert_eq!(
+            mcu.find_pin(rx).unwrap().selected_function,
+            PinFunction::Unset,
+            "RX pin freed"
+        );
+    }
+
+    /// The config constant lives in the regenerated GEN block, so editing the
+    /// module config updates the constant value on the next regeneration.
+    #[test]
+    fn const_updates_with_module_config() {
+        let mut mcu = create_stm32f103c8tx();
+        mcu.add_module(ModuleKind::GenericInterfaceUsart);
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("const USART1_BAUDRATE: u32 = 115200;"), "default:\n{code}");
+
+        if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
+            cfg.baud_rate = 9600;
+        }
+        let code = mcu.update_main_rs(&code);
+        assert!(code.contains("const USART1_BAUDRATE: u32 = 9600;"), "updated:\n{code}");
+        assert!(!code.contains("115200"), "old value gone");
     }
 
     /// The module's USART config drives the generated `init_usartN` helper.
@@ -93,9 +158,19 @@ mod tests {
             cfg.stop_bits = StopBits::Two;
         }
         let code = mcu.fresh_main_rs();
-        assert!(code.contains(".baudrate(9600.bps())"), "baud rate in init:\n{code}");
+        assert!(
+            code.contains("const USART1_BAUDRATE: u32 = 9600;"),
+            "baud constant:\n{code}"
+        );
+        assert!(
+            code.contains(".baudrate(USART1_BAUDRATE.bps())"),
+            "init references the constant"
+        );
         assert!(code.contains(".parity_even()"), "parity in init");
-        assert!(code.contains("serial::StopBits::STOP2"), "stop bits in init");
+        assert!(
+            code.contains("serial::StopBits::STOP2"),
+            "stop bits in init"
+        );
     }
 
     /// The RX/TX data model is emitted as an inline `mod <id>` and not
@@ -110,7 +185,10 @@ mod tests {
         let id = mcu.modules[0].id.clone();
 
         let code = mcu.fresh_main_rs();
-        assert!(code.contains(&format!("mod {id} {{")), "inline mod:\n{code}");
+        assert!(
+            code.contains(&format!("mod {id} {{")),
+            "inline mod:\n{code}"
+        );
         assert!(code.contains("pub struct Reading"), "rx model body present");
 
         let again = mcu.update_main_rs(&code);
@@ -156,8 +234,125 @@ mod tests {
 
         assert_eq!(mcu.modules[0].connections.len(), 1, "TX wire dropped");
         assert!(mcu.modules[0].pin_for(ModuleSignal::Tx).is_none());
-        assert!(mcu.modules[0].pin_for(ModuleSignal::Rx).is_some(), "RX still wired");
+        assert!(
+            mcu.modules[0].pin_for(ModuleSignal::Rx).is_some(),
+            "RX still wired"
+        );
         assert!(!mcu.modules.is_empty(), "module stays (disconnected)");
+    }
+
+    #[test]
+    fn add_spi_module_wires_pins() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        let m = &mcu.modules[0];
+        let n = m.instance();
+        let sck = m.pin_for(ModuleSignal::Sck).unwrap();
+        assert!(m.pin_for(ModuleSignal::Mosi).is_some());
+        assert!(m.pin_for(ModuleSignal::Miso).is_some());
+        assert_eq!(
+            mcu.find_pin(sck).unwrap().selected_function,
+            PinFunction::SpiSck(n)
+        );
+    }
+
+    /// The config constant is emitted once and not duplicated on regeneration.
+    #[test]
+    fn config_constant_not_duplicated_on_regen() {
+        let mut mcu = create_stm32f103c8tx();
+        mcu.add_module(ModuleKind::GenericInterfaceUsart);
+        let code = mcu.fresh_main_rs();
+        assert_eq!(code.matches("const USART1_BAUDRATE").count(), 1);
+        let again = mcu.update_main_rs(&code);
+        assert_eq!(
+            again.matches("const USART1_BAUDRATE").count(),
+            1,
+            "constant must not be duplicated on regen"
+        );
+    }
+
+    #[test]
+    fn add_i2c_module_wires_pins() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceI2c));
+        let m = &mcu.modules[0];
+        let n = m.instance();
+        let scl = m.pin_for(ModuleSignal::Scl).unwrap();
+        let sda = m.pin_for(ModuleSignal::Sda).unwrap();
+        assert_ne!(scl, sda);
+        assert_eq!(
+            mcu.find_pin(scl).unwrap().selected_function,
+            PinFunction::I2cScl(n)
+        );
+        assert_eq!(
+            mcu.find_pin(sda).unwrap().selected_function,
+            PinFunction::I2cSda(n)
+        );
+    }
+
+    #[test]
+    fn spi_config_drives_codegen() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        if let ModuleConfig::Spi(cfg) = &mut mcu.modules[0].config {
+            cfg.mode = 3;
+            cfg.clock_hz = 4_000_000;
+        }
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("Polarity::IdleHigh"), "mode 3 polarity:\n{code}");
+        assert!(code.contains("Phase::CaptureOnSecondTransition"), "mode 3 phase");
+        assert!(code.contains("const SPI1_CLOCK_KHZ: u32 = 4000;"), "spi clock const");
+        assert!(code.contains("SPI1_CLOCK_KHZ.kHz()"), "init references the constant");
+    }
+
+    #[test]
+    fn i2c_config_drives_codegen() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceI2c));
+        if let ModuleConfig::I2c(cfg) = &mut mcu.modules[0].config {
+            cfg.clock_hz = 400_000;
+        }
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("I2cMode::Fast"), "fast mode:\n{code}");
+        assert!(code.contains("const I2C1_CLOCK_KHZ: u32 = 400;"), "i2c clock const");
+        assert!(code.contains("I2C1_CLOCK_KHZ.kHz()"), "init references the constant");
+    }
+
+    /// Assigning a peripheral signal pin (as the Peripherals tab does) auto-adds
+    /// the matching virtual module; clearing the last pin removes it.
+    #[test]
+    fn assigning_peripheral_pin_adds_and_clearing_removes_module() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.modules.is_empty());
+
+        let scl = mcu
+            .iter_all_pins()
+            .find(|p| p.available_functions.contains(&PinFunction::I2cScl(1)))
+            .map(|p| p.number)
+            .unwrap();
+
+        // Assign I2C1 SCL → a GI_I2C module appears, wired to that pin.
+        mcu.apply_pin_function(scl, PinFunction::I2cScl(1));
+        assert_eq!(mcu.modules.len(), 1, "I2C module auto-added");
+        assert_eq!(mcu.modules[0].kind, ModuleKind::GenericInterfaceI2c);
+        assert_eq!(mcu.modules[0].instance(), 1);
+        assert_eq!(mcu.modules[0].pin_for(ModuleSignal::Scl), Some(scl));
+
+        // Clear every I2C pin → the module disappears.
+        for n in mcu
+            .iter_all_pins()
+            .filter(|p| {
+                matches!(
+                    p.selected_function,
+                    PinFunction::I2cScl(_) | PinFunction::I2cSda(_)
+                )
+            })
+            .map(|p| p.number)
+            .collect::<Vec<_>>()
+        {
+            mcu.apply_pin_function(n, PinFunction::Unset);
+        }
+        assert!(mcu.modules.is_empty(), "module removed once its pins are cleared");
     }
 
     /// A chip with no USART pins can't host a GI_USART module.

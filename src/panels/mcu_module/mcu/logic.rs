@@ -88,25 +88,22 @@ impl Mcu {
 
     // ── Virtual modules ───────────────────────────────────────────────────────
 
-    /// Add a virtual module and auto-wire it to compatible MCU pins, setting
-    /// those pins' functions. Returns `false` (and adds nothing) when the chip
-    /// has no free pins for the module's interface.
+    /// Add a virtual module (GI_USART / GI_SPI / GI_I2C) and auto-wire it to
+    /// compatible MCU pins, setting those pins' functions. Returns `false` (and
+    /// adds nothing) when the chip has no free pins for the module's interface.
     pub fn add_module(
         &mut self,
         kind: crate::panels::mcu_module::modules::ModuleKind,
     ) -> bool {
-        use crate::panels::mcu_module::modules::ModuleKind;
-        match kind {
-            ModuleKind::GenericInterfaceUsart => self.add_usart_module(),
-        }
-    }
+        use crate::panels::mcu_module::modules::ModuleSignal::*;
+        use crate::panels::mcu_module::modules::{autowire, ModuleKind};
 
-    /// Wire a GI_USART module to a free USART TX/RX pin pair.
-    fn add_usart_module(&mut self) -> bool {
-        use crate::panels::mcu_module::modules::{
-            autowire, Connection, ModuleConfig, ModuleKind, ModuleSignal, UsartModuleConfig,
-            VirtualModule,
+        let (required, optional): (&[_], &[_]) = match kind {
+            ModuleKind::GenericInterfaceUsart => (&[Tx, Rx][..], &[][..]),
+            ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso][..], &[Nss][..]),
+            ModuleKind::GenericInterfaceI2c => (&[Scl, Sda][..], &[][..]),
         };
+
         // Pins already wired to an existing module are off-limits.
         let used: std::collections::HashSet<usize> = self
             .modules
@@ -114,35 +111,37 @@ impl Mcu {
             .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
             .collect();
 
-        let Some((n, tx_pin, rx_pin)) = autowire::pick_usart_pins(self, &used) else {
+        let Some((inst, chosen)) = autowire::pick_pins(self, &used, required, optional) else {
             return false;
         };
 
-        if let Some(p) = self.find_pin_mut(tx_pin) {
-            p.selected_function = PinFunction::UsartTx(n);
+        // Assign the picked pins; the module itself is created (with default
+        // config) by `reconcile_modules`, the single source of truth that mirrors
+        // pin assignments — so the palette and the Peripherals tab behave the same.
+        for (sig, pin) in &chosen {
+            if let Some(p) = self.find_pin_mut(*pin) {
+                p.selected_function = sig.pin_function(inst);
+            }
         }
-        if let Some(p) = self.find_pin_mut(rx_pin) {
-            p.selected_function = PinFunction::UsartRx(n);
-        }
-
-        let idx = self.modules.len() + 1;
-        self.modules.push(VirtualModule {
-            id: format!("gi_usart_{idx}"),
-            kind: ModuleKind::GenericInterfaceUsart,
-            name: format!("GI_USART{n}"),
-            pos: (0.0, 0.0),
-            config: ModuleConfig::Usart(UsartModuleConfig::new(n)),
-            connections: vec![
-                Connection { signal: ModuleSignal::Tx, mcu_pin: tx_pin },
-                Connection { signal: ModuleSignal::Rx, mcu_pin: rx_pin },
-            ],
-        });
+        self.reconcile_modules();
         true
     }
 
-    /// Remove a module by id. Does not clear the pins it had wired (they keep
-    /// their USART functions; the user can change them in the Pins tab).
+    /// Remove a module by id, resetting the pins it was wired to back to `Unset`
+    /// (so removing a GI_USART/SPI/I2C frees its pins, mirroring "unplugging" the
+    /// device).
     pub fn remove_module(&mut self, id: &str) {
+        let pins: Vec<usize> = self
+            .modules
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.connections.iter().map(|c| c.mcu_pin).collect())
+            .unwrap_or_default();
+        for pin in pins {
+            if let Some(p) = self.find_pin_mut(pin) {
+                p.selected_function = PinFunction::Unset;
+            }
+        }
         self.modules.retain(|m| m.id != id);
     }
 
@@ -296,21 +295,55 @@ impl Mcu {
     /// Drop each module connection whose pin no longer carries the matching
     /// USART function — so re-purposing a pin disconnects the GI_USART from it
     /// (the module stays, just unwired). Idempotent.
+    /// Make the virtual modules mirror the pin assignments: a peripheral
+    /// instance with any assigned USART/SPI/I2C signal pin gets (or keeps) a
+    /// module wired to exactly those pins; an instance with no assigned pins
+    /// loses its module. So selecting peripheral pins in the Peripherals tab
+    /// auto-adds the matching module, and clearing them removes it. Existing
+    /// modules keep their config (only connections are re-synced); newly created
+    /// ones get the default config. Idempotent; never mutates pins.
     pub fn reconcile_modules(&mut self) {
-        use crate::panels::mcu_module::modules::ModuleSignal;
-        let funcs: std::collections::HashMap<usize, PinFunction> = self
-            .iter_all_pins()
-            .map(|p| (p.number, p.selected_function.clone()))
-            .collect();
-        for m in &mut self.modules {
-            let inst = m.usart_instance();
-            m.connections.retain(|conn| {
-                let want = match conn.signal {
-                    ModuleSignal::Tx => PinFunction::UsartTx(inst),
-                    ModuleSignal::Rx => PinFunction::UsartRx(inst),
-                };
-                funcs.get(&conn.mcu_pin) == Some(&want)
-            });
+        use crate::panels::mcu_module::modules::{
+            module_signal_of, Connection, ModuleKind, ModuleSignal, VirtualModule,
+        };
+        use std::collections::BTreeMap;
+
+        let mut wanted: BTreeMap<(ModuleKind, u8), Vec<(ModuleSignal, usize)>> = BTreeMap::new();
+        for p in self.iter_all_pins() {
+            if let Some((kind, inst, sig)) = module_signal_of(&p.selected_function) {
+                wanted.entry((kind, inst)).or_default().push((sig, p.number));
+            }
+        }
+
+        // Drop modules whose peripheral no longer has any assigned pins.
+        self.modules
+            .retain(|m| wanted.contains_key(&(m.kind, m.instance())));
+
+        // Ensure a module per wanted peripheral and re-sync its connections.
+        for ((kind, inst), mut conns) in wanted {
+            conns.sort_by_key(|(s, _)| *s);
+            let connections: Vec<Connection> = conns
+                .into_iter()
+                .map(|(signal, mcu_pin)| Connection { signal, mcu_pin })
+                .collect();
+
+            if let Some(pos) = self
+                .modules
+                .iter()
+                .position(|m| m.kind == kind && m.instance() == inst)
+            {
+                self.modules[pos].connections = connections;
+            } else {
+                let idx = self.modules.len() + 1;
+                self.modules.push(VirtualModule {
+                    id: format!("{}_{idx}", kind.short().to_ascii_lowercase()),
+                    kind,
+                    name: format!("{}{inst}", kind.short()),
+                    pos: (0.0, 0.0),
+                    config: kind.default_config(inst),
+                    connections,
+                });
+            }
         }
     }
 

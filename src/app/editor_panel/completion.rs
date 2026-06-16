@@ -175,11 +175,7 @@ impl AppIde {
                 // Compute what the user has typed since the trigger point.
                 let prefix = cursor_char_idx
                     .map(|cur| {
-                        lsp_completion_prefix(
-                            &display_code,
-                            self.completion_trigger_idx,
-                            cur,
-                        )
+                        lsp_completion_prefix(&display_code, self.completion_trigger_idx, cur)
                     })
                     .unwrap_or_default();
 
@@ -206,8 +202,7 @@ impl AppIde {
                     let sel = self.completion_sel;
 
                     // ── Popup screen position ────────────────────────────
-                    let popup_pos = if let Some(char_range) =
-                        editor_resp.state.cursor.char_range()
+                    let popup_pos = if let Some(char_range) = editor_resp.state.cursor.char_range()
                     {
                         let cursor_idx = char_range.primary.index;
                         let text_char_count = editor_resp.galley.job.text.chars().count();
@@ -216,9 +211,7 @@ impl AppIde {
                             .galley
                             .pos_from_cursor(egui::text::CCursor::new(clamped));
                         let offset = egui::vec2(0.0, cursor_local.height() + 2.0);
-                        editor_resp.response.rect.left_top()
-                            + cursor_local.min.to_vec2()
-                            + offset
+                        editor_resp.response.rect.left_top() + cursor_local.min.to_vec2() + offset
                     } else {
                         editor_resp.response.rect.left_top()
                     };
@@ -246,10 +239,8 @@ impl AppIde {
                                             } else {
                                                 egui::Color32::from_rgb(200, 210, 230)
                                             };
-                                            let sel_bg =
-                                                egui::Color32::from_rgb(40, 90, 160);
-                                            let hover_bg =
-                                                egui::Color32::from_rgb(50, 60, 80);
+                                            let sel_bg = egui::Color32::from_rgb(40, 90, 160);
+                                            let hover_bg = egui::Color32::from_rgb(50, 60, 80);
                                             let detail_fg = if selected {
                                                 egui::Color32::from_rgb(160, 195, 255)
                                             } else {
@@ -268,8 +259,7 @@ impl AppIde {
                                             if selected {
                                                 ui.painter().rect_filled(rect, 2.0, sel_bg);
                                             } else if row_resp.hovered() {
-                                                ui.painter()
-                                                    .rect_filled(rect, 2.0, hover_bg);
+                                                ui.painter().rect_filled(rect, 2.0, hover_bg);
                                             }
 
                                             let painter = ui.painter();
@@ -294,17 +284,14 @@ impl AppIde {
                                                     if chars.len() > 38 {
                                                         format!(
                                                             "{}…",
-                                                            chars[..35]
-                                                                .iter()
-                                                                .collect::<String>()
+                                                            chars[..35].iter().collect::<String>()
                                                         )
                                                     } else {
                                                         item.detail.clone()
                                                     }
                                                 };
                                                 painter.text(
-                                                    rect.right_center()
-                                                        - egui::vec2(4.0, 0.0),
+                                                    rect.right_center() - egui::vec2(4.0, 0.0),
                                                     egui::Align2::RIGHT_CENTER,
                                                     det,
                                                     egui::FontId::monospace(10.5),
@@ -328,10 +315,8 @@ impl AppIde {
                                             // then full detail as fallback.
                                             if !item.documentation.is_empty() {
                                                 row_resp.on_hover_text(
-                                                    egui::RichText::new(
-                                                        &item.documentation,
-                                                    )
-                                                    .size(11.5),
+                                                    egui::RichText::new(&item.documentation)
+                                                        .size(11.5),
                                                 );
                                             } else if !item.detail.is_empty() {
                                                 row_resp.on_hover_text(
@@ -388,23 +373,18 @@ impl AppIde {
                             .fixed_pos(pos)
                             .order(egui::Order::Foreground)
                             .show(ui.ctx(), |ui| {
-                                egui::Frame::popup(&ui.ctx().global_style()).show(
-                                    ui,
-                                    |ui| {
-                                        ui.add_space(2.0);
-                                        ui.horizontal(|ui| {
-                                            ui.spinner();
-                                            ui.label(
-                                                egui::RichText::new("  rust-analyzer…")
-                                                    .size(11.5)
-                                                    .color(egui::Color32::from_rgb(
-                                                        160, 175, 200,
-                                                    )),
-                                            );
-                                        });
-                                        ui.add_space(2.0);
-                                    },
-                                );
+                                egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
+                                    ui.add_space(2.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(
+                                            egui::RichText::new("  rust-analyzer…")
+                                                .size(11.5)
+                                                .color(egui::Color32::from_rgb(160, 175, 200)),
+                                        );
+                                    });
+                                    ui.add_space(2.0);
+                                });
                             });
                         ui.ctx().request_repaint();
                     }

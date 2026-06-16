@@ -48,23 +48,28 @@ impl FamilyBackend for Stm32f1Backend {
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let all = pins_of(mcu);
         let usart = modules::usart_configs(&mcu.modules);
-        let gen_ = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
+        let spi = modules::spi_configs(&mcu.modules);
+        let i2c = modules::i2c_configs(&mcu.modules);
+        let gen_ = stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c);
         let base = format!(
             "{header}{gen_}\n{tail}",
             header = stm32::invariant_header(&mcu.name, &mcu.id),
             tail = USER_TAIL,
         );
         // Peripheral init helpers live after `fn main`, in the editable region.
-        stm32::ensure_helper_defs(base, &all, &usart)
+        stm32::ensure_helper_defs(base, &all, &usart, &spi, &i2c)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
         let usart = modules::usart_configs(&mcu.modules);
-        let new_section = stm32::make_generated_section(&mcu.name, &all, &mcu.clock);
+        let spi = modules::spi_configs(&mcu.modules);
+        let i2c = modules::i2c_configs(&mcu.modules);
+        let new_section =
+            stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c);
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Add helpers for newly-selected peripherals; preserve user-edited ones.
-        stm32::ensure_helper_defs(spliced, &all, &usart)
+        stm32::ensure_helper_defs(spliced, &all, &usart, &spi, &i2c)
     }
 }
 

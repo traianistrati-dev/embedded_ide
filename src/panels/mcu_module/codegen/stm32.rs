@@ -2,10 +2,12 @@
 
 use super::super::clock::frequencies;
 use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
-use super::super::modules::{Parity, StopBits, UsartModuleConfig};
+use super::super::modules::{
+    I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
+};
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
-use super::{mcu_id_marker_line, GEN_BEGIN, GEN_END, USER_TAIL};
+use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ── Section splicing ──────────────────────────────────────────────────────────
@@ -127,7 +129,14 @@ fn clock_comment_line(clock: &ClockConfig) -> String {
 
 // ── Generated section builder ─────────────────────────────────────────────────
 
-pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin], clock: &ClockConfig) -> String {
+pub fn make_generated_section(
+    mcu_name: &str,
+    all_pins: &[&Pin],
+    clock: &ClockConfig,
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
+) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
@@ -235,7 +244,11 @@ pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin], clock: &ClockCo
                 expr.trim_start_matches("//").trim()
             )
         } else {
-            let prefix = if needs_mut_ref(&pin.selected_function) { "&mut " } else { "" };
+            let prefix = if needs_mut_ref(&pin.selected_function) {
+                "&mut "
+            } else {
+                ""
+            };
             format!(
                 "    let {var} = {prefix}{pv}.{var}.{expr}; // {comment}",
                 var = meta.var,
@@ -412,6 +425,20 @@ pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin], clock: &ClockCo
     let clock_chain = clock_setup_chain(clock);
     let clock_comment = clock_comment_line(clock);
 
+    // ── Peripheral config constants (from the Virtual Modules) ───────────────
+    // Generated here, INSIDE the GEN block, so they're regenerated every frame
+    // and track the module config live; the editable init helpers reference them
+    // by name (USART{n}_BAUDRATE, SPI{n}_CLOCK_KHZ, I2C{n}_CLOCK_KHZ).
+    let const_block = {
+        let consts = module_constants(all_pins, usart, spi, i2c);
+        if consts.is_empty() {
+            String::new()
+        } else {
+            let lines: String = consts.iter().map(|(_, l)| format!("{l}\n")).collect();
+            format!("\n// ── Peripheral config constants (from Virtual Modules) ──\n{lines}")
+        }
+    };
+
     // ── Put it all together ──────────────────────────────────────────────────
     // Helper fns are appended after `fn main` by `ensure_helper_defs`.
     format!(
@@ -419,7 +446,8 @@ pub fn make_generated_section(mcu_name: &str, all_pins: &[&Pin], clock: &ClockCo
          {clock_comment}\n\
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
-         }};\n\n\
+         }};\n\
+         {const_block}\n\
          #[entry]\n\
          fn main() -> ! {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
@@ -463,11 +491,10 @@ fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
 /// the user can customise them (baud rate, SPI mode, ADC sample time…) without
 /// regeneration clobbering their edits. The generated `fn_calls` inside `main`
 /// reference them by name; their imports come from the generated `use` block.
-/// The `Config` builder expression for a USART helper. Defaults to 115200 8N1;
-/// a wired GI_USART module overrides baud rate, parity and stop bits.
-fn usart_config_expr(cfg: Option<&UsartModuleConfig>) -> String {
-    let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
-    let mut s = format!("Config::default().baudrate({baud}.bps())");
+/// The `Config` builder expression for a USART helper — the baud rate comes from
+/// the generated `USART{n}_BAUDRATE` constant; parity/stop from the module config.
+fn usart_config_expr(cfg: Option<&UsartModuleConfig>, n: u8) -> String {
+    let mut s = format!("Config::default().baudrate(USART{n}_BAUDRATE.bps())");
     if let Some(c) = cfg {
         match c.parity {
             Parity::None => {}
@@ -481,9 +508,87 @@ fn usart_config_expr(cfg: Option<&UsartModuleConfig>) -> String {
     s
 }
 
+/// SPI `Mode {…}` block (from the module's mode) + clock expression (the
+/// generated `SPI{n}_CLOCK_KHZ` constant) for an init helper.
+fn spi_mode_freq_expr(cfg: Option<&SpiModuleConfig>, n: u8) -> (String, String) {
+    let mode = cfg.map(|c| c.mode).unwrap_or(0);
+    let (pol, ph) = match mode {
+        1 => ("IdleLow", "CaptureOnSecondTransition"),
+        2 => ("IdleHigh", "CaptureOnFirstTransition"),
+        3 => ("IdleHigh", "CaptureOnSecondTransition"),
+        _ => ("IdleLow", "CaptureOnFirstTransition"),
+    };
+    let block = format!(
+        "Mode {{\n            polarity: Polarity::{pol},\n            phase: Phase::{ph},\n        }}"
+    );
+    (block, format!("SPI{n}_CLOCK_KHZ.kHz()"))
+}
+
+/// I2C `Mode` expression for an init helper — frequency from the generated
+/// `I2C{n}_CLOCK_KHZ` constant; Standard (≤100 kHz) / Fast (>100 kHz) from config.
+fn i2c_mode_expr(cfg: Option<&I2cModuleConfig>, n: u8) -> String {
+    let hz = cfg.map(|c| c.clock_hz).unwrap_or(100_000);
+    let freq = format!("I2C{n}_CLOCK_KHZ.kHz()");
+    if hz <= 100_000 {
+        format!("I2cMode::Standard {{ frequency: {freq} }}")
+    } else {
+        format!("I2cMode::Fast {{ frequency: {freq}, duty_cycle: i2c::DutyCycle::Ratio2to1 }}")
+    }
+}
+
+/// The module-level config constants for the configured peripherals (seeded from
+/// the module config, default otherwise). Each is `(name, full `const …;` line)`,
+/// appended to the editable region by [`ensure_helper_defs`] and referenced by
+/// the init helpers (so the user has one named place to tune each value).
+fn module_constants(
+    all_pins: &[&Pin],
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
+) -> Vec<(String, String)> {
+    let funcs: Vec<&PinFunction> = all_pins
+        .iter()
+        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+        .map(|p| &p.selected_function)
+        .collect();
+    let has = |want: PinFunction| funcs.iter().any(|f| **f == want);
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    for n in 1u8..=3 {
+        if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
+            let baud = usart.get(&n).map(|c| c.baud_rate).unwrap_or(115_200);
+            out.push((
+                format!("USART{n}_BAUDRATE"),
+                format!("const USART{n}_BAUDRATE: u32 = {baud};"),
+            ));
+        }
+    }
+    for n in 1u8..=2 {
+        if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
+            let khz = spi.get(&n).map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
+            out.push((
+                format!("SPI{n}_CLOCK_KHZ"),
+                format!("const SPI{n}_CLOCK_KHZ: u32 = {khz};"),
+            ));
+        }
+    }
+    for n in 1u8..=2 {
+        if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
+            let khz = i2c.get(&n).map(|c| c.clock_hz).unwrap_or(100_000) / 1_000;
+            out.push((
+                format!("I2C{n}_CLOCK_KHZ"),
+                format!("const I2C{n}_CLOCK_KHZ: u32 = {khz};"),
+            ));
+        }
+    }
+    out
+}
+
 pub fn helper_defs(
     all_pins: &[&Pin],
     usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
 ) -> Vec<(String, String)> {
     let funcs: Vec<&PinFunction> = all_pins
         .iter()
@@ -498,7 +603,7 @@ pub fn helper_defs(
         if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
             // Baud/parity/stop come from a wired GI_USART module when present,
             // else the 115200 8N1 default.
-            let cfg_expr = usart_config_expr(usart.get(&n));
+            let cfg_expr = usart_config_expr(usart.get(&n), n);
             defs.push((
                 format!("init_usart{n}"),
                 format!(
@@ -525,6 +630,7 @@ pub fn helper_defs(
     for n in 1u8..=2 {
         if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
             let remap = format!("Spi{n}NoRemap");
+            let (mode_block, freq) = spi_mode_freq_expr(spi.get(&n), n);
             defs.push((
                 format!("init_spi{n}"),
                 format!(
@@ -541,11 +647,8 @@ where
         spi,
         pins,
         &mut afio.mapr,
-        Mode {{
-            polarity: Polarity::IdleLow,
-            phase: Phase::CaptureOnFirstTransition,
-        }},
-        1.MHz(),
+        {mode_block},
+        {freq},
         clocks,
     )
 }}"
@@ -556,6 +659,7 @@ where
 
     for n in 1u8..=2 {
         if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
+            let mode = i2c_mode_expr(i2c.get(&n), n);
             defs.push((
                 format!("init_i2c{n}"),
                 format!(
@@ -572,7 +676,7 @@ where
         i2c,
         pins,
         &mut afio.mapr,
-        I2cMode::Standard {{ frequency: 100_000.Hz() }},
+        {mode},
         clocks,
         1000, 10, 1000, 1000,
     )
@@ -607,17 +711,20 @@ pub fn ensure_helper_defs(
     mut file: String,
     all_pins: &[&Pin],
     usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
 ) -> String {
-    let defs = helper_defs(all_pins, usart);
+    let defs = helper_defs(all_pins, usart, spi, i2c);
     // A helper is "present" if its `fn <name>` is followed by either `(` (plain
     // fns like `init_adc1`) or `<` (generic fns like `init_spi1<PINS>` /
     // `init_i2c1<PINS>`). Checking only `(` missed the generic ones, so they
-    // were re-appended on every regen — the infinite-growth bug.
+    // were re-appended on every regen — the infinite-growth bug. (The config
+    // constants the helpers reference live in the regenerated GEN block, not
+    // here, so they track the module config live.)
     let missing: Vec<&(String, String)> = defs
         .iter()
         .filter(|(name, _)| {
-            !(file.contains(&format!("fn {name}("))
-                || file.contains(&format!("fn {name}<")))
+            !(file.contains(&format!("fn {name}(")) || file.contains(&format!("fn {name}<")))
         })
         .collect();
     if missing.is_empty() {
@@ -716,14 +823,14 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
         func,
         PinFunction::GpioOutput
             | PinFunction::TimerPwm { .. }
-            | PinFunction::UsartTx(_)
+          //  | PinFunction::UsartTx(_)
             | PinFunction::UsartCk(_)
             | PinFunction::UsartRts(_)
             | PinFunction::SpiSck(_)
             | PinFunction::SpiMosi(_)
             | PinFunction::SpiNss(_)
-            | PinFunction::I2cScl(_)
-            | PinFunction::I2cSda(_)
+           // | PinFunction::I2cScl(_)
+           // | PinFunction::I2cSda(_)
             | PinFunction::Mco
             | PinFunction::CanTx
     )
