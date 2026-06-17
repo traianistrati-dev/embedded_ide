@@ -7,6 +7,7 @@ use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
 };
+use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 use std::collections::HashMap;
@@ -146,6 +147,24 @@ fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui
     }
 }
 
+/// Live preview of the generated handle variable name(s), with the user's
+/// label appended — the module analogue of the pin's `pc13_out_board_led`
+/// caption. SPI/I2C have one handle; USART has two (`_txN` / `_rxN`).
+fn handle_preview(m: &VirtualModule) -> String {
+    let n = m.instance();
+    let lbl = sanitize_label(m.config.custom_label());
+    let sfx = if lbl.is_empty() {
+        String::new()
+    } else {
+        format!("_{lbl}")
+    };
+    match m.kind {
+        ModuleKind::GenericInterfaceUsart => format!("_tx{n}{sfx}, _rx{n}{sfx}"),
+        ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
+        ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
+    }
+}
+
 /// The rename-field rect at the bottom of a module box (edited in a later pass).
 fn label_field_rect(box_rect: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_max(
@@ -193,13 +212,15 @@ fn draw_box(
         egui::FontId::proportional(10.0),
         egui::Color32::from_rgb(150, 150, 160),
     );
-    // Caption for the rename field below.
-    painter.text(
+    // Live preview of the resulting variable name(s) above the rename field —
+    // updates as the user types (same as the pin's `pc13_out_board_led`).
+    // Clipped to the box so a long label can't overflow the border.
+    painter.with_clip_rect(rect).text(
         egui::pos2(rect.left() + 10.0, rect.bottom() - 26.0),
         egui::Align2::LEFT_BOTTOM,
-        "var name",
-        egui::FontId::proportional(8.0),
-        egui::Color32::from_rgb(120, 120, 130),
+        handle_preview(m),
+        egui::FontId::proportional(9.0),
+        egui::Color32::from_rgb(140, 140, 150),
     );
 }
 
