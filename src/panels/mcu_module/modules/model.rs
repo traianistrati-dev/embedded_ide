@@ -136,6 +136,10 @@ pub struct UsartModuleConfig {
     /// Free-text data model the user authors for received / transmitted frames.
     pub rx_model: String,
     pub tx_model: String,
+    /// User label appended to the generated peripheral-handle variable names
+    /// (e.g. `_tx1_imu`). `#[serde(default)]` keeps old `@modules` markers valid.
+    #[serde(default)]
+    pub custom_label: String,
 }
 
 impl UsartModuleConfig {
@@ -149,6 +153,7 @@ impl UsartModuleConfig {
             stop_bits: StopBits::One,
             rx_model: String::new(),
             tx_model: String::new(),
+            custom_label: String::new(),
         }
     }
 }
@@ -163,6 +168,9 @@ pub struct SpiModuleConfig {
     pub clock_hz: u32,
     pub rx_model: String,
     pub tx_model: String,
+    /// User label appended to the generated `_spiN` handle (e.g. `_spi1_imu`).
+    #[serde(default)]
+    pub custom_label: String,
 }
 
 impl SpiModuleConfig {
@@ -174,6 +182,7 @@ impl SpiModuleConfig {
             clock_hz: 1_000_000,
             rx_model: String::new(),
             tx_model: String::new(),
+            custom_label: String::new(),
         }
     }
 }
@@ -188,6 +197,9 @@ pub struct I2cModuleConfig {
     pub address: u8,
     pub rx_model: String,
     pub tx_model: String,
+    /// User label appended to the generated `_i2cN` handle (e.g. `_i2c1_imu`).
+    #[serde(default)]
+    pub custom_label: String,
 }
 
 impl I2cModuleConfig {
@@ -199,6 +211,7 @@ impl I2cModuleConfig {
             address: 0x00,
             rx_model: String::new(),
             tx_model: String::new(),
+            custom_label: String::new(),
         }
     }
 }
@@ -250,6 +263,23 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &mut c.tx_model,
             ModuleConfig::Spi(c) => &mut c.tx_model,
             ModuleConfig::I2c(c) => &mut c.tx_model,
+        }
+    }
+
+    /// User label appended to the module's generated handle variable(s).
+    pub fn custom_label(&self) -> &str {
+        match self {
+            ModuleConfig::Usart(c) => &c.custom_label,
+            ModuleConfig::Spi(c) => &c.custom_label,
+            ModuleConfig::I2c(c) => &c.custom_label,
+        }
+    }
+
+    pub fn custom_label_mut(&mut self) -> &mut String {
+        match self {
+            ModuleConfig::Usart(c) => &mut c.custom_label,
+            ModuleConfig::Spi(c) => &mut c.custom_label,
+            ModuleConfig::I2c(c) => &mut c.custom_label,
         }
     }
 

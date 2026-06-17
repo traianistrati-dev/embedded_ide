@@ -63,7 +63,7 @@ impl Mcu {
 
         // ── Virtual modules (boxes + wires) around the chip ───────────────────
         if !self.modules.is_empty() {
-            modules::draw_modules(self, &painter, chip_rect);
+            modules::draw_modules(self, &painter, chip_rect, ui);
         }
 
         // ── In/out arrows + rename fields for GPIO In/Out/PWM pins ────────────

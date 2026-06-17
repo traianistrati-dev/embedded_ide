@@ -83,12 +83,24 @@ impl FamilyBackend for Esp32Backend {
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let usart = modules::usart_configs(&mcu.modules);
-        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu), &mcu.clock, &mcu.id, &usart)
+        let spi = modules::spi_configs(&mcu.modules);
+        let i2c = modules::i2c_configs(&mcu.modules);
+        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu), &mcu.clock, &mcu.id, &usart, &spi, &i2c)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let usart = modules::usart_configs(&mcu.modules);
-        codegen_esp::update_esp32c3_main_rs(existing, &pins_of(mcu), &mcu.clock, &mcu.id, &usart)
+        let spi = modules::spi_configs(&mcu.modules);
+        let i2c = modules::i2c_configs(&mcu.modules);
+        codegen_esp::update_esp32c3_main_rs(
+            existing,
+            &pins_of(mcu),
+            &mcu.clock,
+            &mcu.id,
+            &usart,
+            &spi,
+            &i2c,
+        )
     }
 }
 

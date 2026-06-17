@@ -5,13 +5,16 @@
 use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ModuleConfig, ModuleSignal, Parity, StopBits, VirtualModule,
+    ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
 };
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 use std::collections::HashMap;
 
 const BOX_W: f32 = 170.0;
-const BOX_H: f32 = 76.0;
+/// Tall enough for the name, the config summary, and the rename field at the
+/// bottom.
+const BOX_H: f32 = 98.0;
 const BOX_GAP: f32 = 14.0;
 /// Gap between the pin tips and a module box.
 const PIN_GAP: f32 = 18.0;
@@ -77,14 +80,21 @@ fn pin_anchor_side(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<(
     None
 }
 
-fn signal_color(sig: ModuleSignal) -> egui::Color32 {
-    use ModuleSignal::*;
-    match sig {
-        Tx | Mosi | Scl => egui::Color32::from_rgb(90, 170, 230), // blue — outbound/clock
-        Rx | Miso | Sda => egui::Color32::from_rgb(230, 160, 70), // orange — inbound/data
-        Sck => egui::Color32::from_rgb(150, 130, 220),            // purple — SPI clock
-        Nss => egui::Color32::from_rgb(120, 200, 120),            // green — chip select
-    }
+/// Wire/terminal colour for a module signal — the **same colour as the MCU pin**
+/// it connects to (so the schematic matches the pin colours on the chip).
+fn signal_color(sig: ModuleSignal, instance: u8) -> egui::Color32 {
+    sig.pin_function(instance).color()
+}
+
+/// The module's representative colour = the peripheral's pin colour (USART/SPI/
+/// I2C category), used for the box border + title so it matches its pins.
+fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
+    let f = match kind {
+        ModuleKind::GenericInterfaceUsart => PinFunction::UsartTx(instance),
+        ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
+        ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
+    };
+    f.color()
 }
 
 /// The box that sits just beyond `side`, near the connected pins' centroid,
@@ -136,21 +146,40 @@ fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui
     }
 }
 
-fn draw_box(painter: &egui::Painter, rect: egui::Rect, m: &VirtualModule, connected: bool) {
-    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(38, 52, 44));
+/// The rename-field rect at the bottom of a module box (edited in a later pass).
+fn label_field_rect(box_rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(box_rect.left() + 10.0, box_rect.bottom() - 24.0),
+        egui::pos2(box_rect.right() - 10.0, box_rect.bottom() - 6.0),
+    )
+}
+
+fn draw_box(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    m: &VirtualModule,
+    connected: bool,
+    color: egui::Color32,
+) {
+    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(38, 42, 50));
     let stroke = if connected {
-        egui::Stroke::new(1.2, egui::Color32::from_rgb(90, 160, 110))
+        egui::Stroke::new(1.4, color) // border matches the pin colour
     } else {
         egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 90, 90)) // disconnected
     };
     painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Middle);
 
+    let title_color = if connected {
+        color
+    } else {
+        egui::Color32::from_rgb(175, 150, 150)
+    };
     painter.text(
         rect.center_top() + egui::vec2(0.0, 13.0),
         egui::Align2::CENTER_CENTER,
         &m.name,
         egui::FontId::proportional(13.0),
-        egui::Color32::WHITE,
+        title_color,
     );
     let summary = if connected {
         m.config.summary()
@@ -164,16 +193,35 @@ fn draw_box(painter: &egui::Painter, rect: egui::Rect, m: &VirtualModule, connec
         egui::FontId::proportional(10.0),
         egui::Color32::from_rgb(150, 150, 160),
     );
+    // Caption for the rename field below.
+    painter.text(
+        egui::pos2(rect.left() + 10.0, rect.bottom() - 26.0),
+        egui::Align2::LEFT_BOTTOM,
+        "var name",
+        egui::FontId::proportional(8.0),
+        egui::Color32::from_rgb(120, 120, 130),
+    );
 }
 
 /// Draw each module beside the chip, on the side of the pins it connects to,
 /// with short direct wires (no crossing the chip). Fully-disconnected modules
-/// float in the right margin.
-pub fn draw_modules(mcu: &Mcu, painter: &egui::Painter, chip_rect: egui::Rect) {
+/// float in the right margin. Each box carries a rename field whose text is
+/// appended to the module's generated handle variable (e.g. `_spi1_imu`).
+pub fn draw_modules(
+    mcu: &mut Mcu,
+    painter: &egui::Painter,
+    chip_rect: egui::Rect,
+    ui: &mut egui::Ui,
+) {
     let mut per_side: HashMap<Side, usize> = HashMap::new();
     let mut floating = 0usize;
+    // (module index, box rect) collected for the mutable rename-field pass below.
+    let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
 
-    for m in &mcu.modules {
+    for (i, m) in mcu.modules.iter().enumerate() {
+        let inst = m.instance();
+        let mcolor = module_color(m.kind, inst);
+
         // Connected pins → their anchors + sides.
         let conns: Vec<(ModuleSignal, egui::Pos2, Side)> = m
             .connections
@@ -190,7 +238,9 @@ pub fn draw_modules(mcu: &Mcu, painter: &egui::Painter, chip_rect: egui::Rect) {
                 chip_rect.top() + floating as f32 * (BOX_H + BOX_GAP),
             );
             floating += 1;
-            draw_box(painter, egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H)), m, false);
+            let rect = egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H));
+            draw_box(painter, rect, m, false, mcolor);
+            field_pass.push((i, rect));
             continue;
         }
 
@@ -207,15 +257,32 @@ pub fn draw_modules(mcu: &Mcu, painter: &egui::Painter, chip_rect: egui::Rect) {
         let box_rect = place_box(chip_rect, side, centroid, *idx);
         *idx += 1;
 
-        draw_box(painter, box_rect, m, true);
+        draw_box(painter, box_rect, m, true, mcolor);
 
         for (sig, anchor, _) in &conns {
-            let color = signal_color(*sig);
+            let color = signal_color(*sig, inst);
             let term = facing_terminal(box_rect, side, *anchor);
             painter.circle_filled(term, 3.5, color);
             painter.circle_filled(*anchor, 3.5, color);
             painter.line_segment([term, *anchor], egui::Stroke::new(1.6, color));
         }
+        field_pass.push((i, box_rect));
+    }
+
+    // ── Rename fields (mutable pass) ──────────────────────────────────────────
+    // The typed text is appended to the module's generated variable name(s);
+    // regenerated every frame by `update_main_rs`, so it updates as you type.
+    for (i, box_rect) in field_pass {
+        let field_rect = label_field_rect(box_rect);
+        let label = mcu.modules[i].config.custom_label_mut();
+        ui.push_id(("module_label", i), |ui| {
+            ui.put(
+                field_rect,
+                egui::TextEdit::singleline(label)
+                    .hint_text("name")
+                    .font(egui::FontId::proportional(10.0)),
+            );
+        });
     }
 }
 

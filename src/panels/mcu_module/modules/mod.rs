@@ -271,6 +271,42 @@ mod tests {
         );
     }
 
+    /// A module's custom label is appended to its generated handle variable(s)
+    /// and survives the `@modules` round-trip (persisted in the config).
+    #[test]
+    fn module_label_appended_to_handle_vars() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
+            cfg.custom_label = "IMU sensor".into();
+        }
+        let n = mcu.modules[0].instance();
+        let code = mcu.fresh_main_rs();
+
+        // USART handles carry the sanitized label: `_tx1_imu_sensor`.
+        assert!(
+            code.contains(&format!("_tx{n}_imu_sensor")),
+            "tx handle labelled:\n{code}"
+        );
+        assert!(code.contains(&format!("_rx{n}_imu_sensor")), "rx handle labelled");
+
+        // The label persists through the @modules marker (serde on the config).
+        assert_eq!(persist::parse_from_source(&code), mcu.modules);
+    }
+
+    /// An SPI module label lands on the `_spiN` handle.
+    #[test]
+    fn spi_module_label_on_handle() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        if let ModuleConfig::Spi(cfg) = &mut mcu.modules[0].config {
+            cfg.custom_label = "flash".into();
+        }
+        let n = mcu.modules[0].instance();
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains(&format!("let _spi{n}_flash =")), "spi handle:\n{code}");
+    }
+
     #[test]
     fn add_i2c_module_wires_pins() {
         let mut mcu = create_stm32f103c8tx();

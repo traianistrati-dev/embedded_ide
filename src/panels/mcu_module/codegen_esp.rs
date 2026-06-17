@@ -29,8 +29,8 @@
 
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
-use super::codegen::{mcu_id_marker_line, pin_binding, GEN_BEGIN, GEN_END};
-use super::modules::UsartModuleConfig;
+use super::codegen::{mcu_id_marker_line, pin_binding, sanitize_label, GEN_BEGIN, GEN_END};
+use super::modules::{I2cModuleConfig, SpiModuleConfig, UsartModuleConfig};
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,8 +71,10 @@ pub fn fresh_esp32c3_main_rs(
     clock: &ClockConfig,
     id: &str,
     usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
 ) -> String {
-    let section = make_gen_section(pins, clock, usart);
+    let section = make_gen_section(pins, clock, usart, spi, i2c);
     format!("{}{section}\n{USER_TAIL}", invariant_header(id))
 }
 
@@ -84,8 +86,10 @@ pub fn update_esp32c3_main_rs(
     clock: &ClockConfig,
     id: &str,
     usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
 ) -> String {
-    let new_section = make_gen_section(pins, clock, usart);
+    let new_section = make_gen_section(pins, clock, usart, spi, i2c);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
@@ -126,6 +130,8 @@ fn make_gen_section(
     pins: &[&Pin],
     clock: &ClockConfig,
     usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
 ) -> String {
     let configured: Vec<&Pin> = pins
         .iter()
@@ -295,8 +301,9 @@ fn make_gen_section(
                 Some(c) => format!("UartConfig::default().with_baudrate({})", c.baud_rate),
                 None => "UartConfig::default()".to_owned(),
             };
+            let sfx = usart.get(&n).map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
             body.push_str(&format!(
-                "    let mut _uart{n} = Uart::new(peripherals.UART{n}, {cfg}){rx_part}{tx_part};\n"
+                "    let mut _uart{n}{sfx} = Uart::new(peripherals.UART{n}, {cfg}){rx_part}{tx_part};\n"
             ));
         }
     }
@@ -374,8 +381,9 @@ fn make_gen_section(
                     )
                 })
                 .unwrap_or_default();
+            let sfx = spi.get(&n).map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
             body.push_str(&format!(
-                "    let mut _spi{n} = Spi::new(peripherals.SPI{n}, SpiConfig::default())\
+                "    let mut _spi{n}{sfx} = Spi::new(peripherals.SPI{n}, SpiConfig::default())\
                  {sck_part}{mosi_part}{miso_part}{nss_part};\n"
             ));
         }
@@ -420,8 +428,9 @@ fn make_gen_section(
                     )
                 })
                 .unwrap_or_default();
+            let sfx = i2c.get(&n).map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
             body.push_str(&format!(
-                "    let mut _i2c{n} = I2c::new(peripherals.I2C{n}, I2cConfig::default())\
+                "    let mut _i2c{n}{sfx} = I2c::new(peripherals.I2C{n}, I2cConfig::default())\
                  {scl_part}{sda_part};\n"
             ));
         }
@@ -548,6 +557,17 @@ fn esp_binding(p: &Pin) -> String {
     pin_binding(&pin_var(&p.name), &p.selected_function, &p.custom_label)
 }
 
+/// `_<sanitized label>` suffix for a module's generated handle (`_uart1_imu`),
+/// or "" when the module has no user label. Mirror of `stm32::module_label_sfx`.
+fn module_label_sfx(label: &str) -> String {
+    let s = sanitize_label(label);
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!("_{s}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,11 +586,19 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn no_spi() -> BTreeMap<u8, SpiModuleConfig> {
+        BTreeMap::new()
+    }
+
+    fn no_i2c() -> BTreeMap<u8, I2cModuleConfig> {
+        BTreeMap::new()
+    }
+
     /// The ESP CPU clock chosen in the diagram drives the generated
     /// `with_cpu_clock(...)` (bug: previously hardcoded to `max()`).
     #[test]
     fn default_cpu_clock_is_160mhz() {
-        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(esp_graph_clock()), "esp32c3", &no_usart());
+        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(esp_graph_clock()), "esp32c3", &no_usart(), &no_spi(), &no_i2c());
         assert!(
             code.contains("CpuClock::_160MHz"),
             "default ESP CPU = 160 MHz:\n{code}"
@@ -581,7 +609,7 @@ mod tests {
     fn cpu_div6_emits_80mhz() {
         let mut gc = esp_graph_clock();
         gc.graph.node_mut("cpu_div").unwrap().state = NodeState::Index(1); // ÷6 → 80 MHz
-        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(gc), "esp32c3", &no_usart());
+        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::Graph(gc), "esp32c3", &no_usart(), &no_spi(), &no_i2c());
         assert!(
             code.contains("CpuClock::_80MHz"),
             "ESP CPU ÷6 = 80 MHz:\n{code}"
@@ -592,7 +620,7 @@ mod tests {
     /// A chip with no modelled clock keeps the previous `max()` default.
     #[test]
     fn none_clock_falls_back_to_max() {
-        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3", &no_usart());
+        let code = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3", &no_usart(), &no_spi(), &no_i2c());
         assert!(code.contains("CpuClock::max()"), "{code}");
     }
 
@@ -600,9 +628,9 @@ mod tests {
     /// reopened project can restore the exact chip.
     #[test]
     fn id_marker_present_and_stable_across_update() {
-        let fresh = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3-graph", &no_usart());
+        let fresh = fresh_esp32c3_main_rs(&[], &ClockConfig::None, "esp32c3-graph", &no_usart(), &no_spi(), &no_i2c());
         assert_eq!(parse_mcu_id(&fresh).as_deref(), Some("esp32c3-graph"));
-        let updated = update_esp32c3_main_rs(&fresh, &[], &ClockConfig::None, "esp32c3-graph", &no_usart());
+        let updated = update_esp32c3_main_rs(&fresh, &[], &ClockConfig::None, "esp32c3-graph", &no_usart(), &no_spi(), &no_i2c());
         assert_eq!(parse_mcu_id(&updated).as_deref(), Some("esp32c3-graph"));
     }
 
@@ -620,11 +648,11 @@ mod tests {
         cfg.baud_rate = 9600;
         usart.insert(0, cfg);
 
-        let code = fresh_esp32c3_main_rs(&[&tx, &rx], &ClockConfig::None, "esp32c3", &usart);
+        let code = fresh_esp32c3_main_rs(&[&tx, &rx], &ClockConfig::None, "esp32c3", &usart, &no_spi(), &no_i2c());
         assert!(code.contains("with_baudrate(9600)"), "baud on Uart::new:\n{code}");
 
         // No module → plain default config.
-        let plain = fresh_esp32c3_main_rs(&[&tx, &rx], &ClockConfig::None, "esp32c3", &no_usart());
+        let plain = fresh_esp32c3_main_rs(&[&tx, &rx], &ClockConfig::None, "esp32c3", &no_usart(), &no_spi(), &no_i2c());
         assert!(plain.contains("UartConfig::default())"), "default config:\n{plain}");
         assert!(!plain.contains("with_baudrate"));
     }
