@@ -12,6 +12,7 @@ impl Pin {
             reserved: false,
             available_functions: vec![PinFunction::GpioInput, PinFunction::GpioOutput],
             selected_function: PinFunction::Unset,
+            custom_label: String::new(),
         }
     }
 
@@ -27,6 +28,7 @@ impl Pin {
                 PinFunction::AdcChannel { adc, channel },
             ],
             selected_function: PinFunction::Unset,
+            custom_label: String::new(),
         }
     }
 
@@ -38,6 +40,7 @@ impl Pin {
             reserved: true,
             available_functions: vec![],
             selected_function: PinFunction::Unset,
+            custom_label: String::new(),
         }
     }
 

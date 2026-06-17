@@ -178,6 +178,24 @@ impl Mcu {
         }
     }
 
+    /// Restores the per-pin user labels parsed from a saved `src/main.rs` by
+    /// `codegen::parse_pin_labels()` (the `_<label>` suffix on a binding name).
+    /// Apply this *after* [`apply_saved_pins`], since clearing a pin to `Unset`
+    /// drops its label. Pins not in this layout (wrong name) are skipped.
+    pub fn apply_saved_pin_labels(&mut self, labels: &[(String, String)]) {
+        for (name, label) in labels {
+            let num = self
+                .iter_all_pins()
+                .find(|p| p.name == *name && !p.reserved)
+                .map(|p| p.number);
+            if let Some(num) = num {
+                if let Some(pin) = self.find_pin_mut(num) {
+                    pin.custom_label = label.clone();
+                }
+            }
+        }
+    }
+
     /// Restores the clock-tree configuration parsed from a saved `main.rs`
     /// (`// @clock` marker). The saved config is expanded to graph node states
     /// and adopted by id — F103-shaped graphs restore fully; other-family
@@ -276,6 +294,11 @@ impl Mcu {
         let changed = {
             let pin = self.find_pin_mut(pin_num)?;
             pin.selected_function = func.clone();
+            // Clearing a pin also clears its user label, so a freed pin starts
+            // clean if it's reassigned later.
+            if func == PinFunction::Unset {
+                pin.custom_label.clear();
+            }
             (pin.number, pin.name.clone(), func.clone())
         };
         self.show_info = None;

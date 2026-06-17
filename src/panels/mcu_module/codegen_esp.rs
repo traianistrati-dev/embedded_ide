@@ -29,7 +29,7 @@
 
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
-use super::codegen::{mcu_id_marker_line, var_suffix, GEN_BEGIN, GEN_END};
+use super::codegen::{mcu_id_marker_line, pin_binding, GEN_BEGIN, GEN_END};
 use super::modules::UsartModuleConfig;
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -541,10 +541,11 @@ fn pin_var(pin_name: &str) -> String {
     pin_name.to_ascii_lowercase()
 }
 
-/// Binding (variable) name for a pin: `<gpio>_<type>`, e.g. `gpio2_out`,
-/// `gpio0_adc1_in0` — the ESP analogue of the STM32 `<pin>_<type>` format.
+/// Binding (variable) name for a pin: `<gpio>_<type>[_<label>]`, e.g.
+/// `gpio2_out`, `gpio0_adc1_in0`, or `gpio2_out_led` with a user label — the
+/// ESP analogue of the STM32 `<pin>_<type>` format.
 fn esp_binding(p: &Pin) -> String {
-    format!("{}_{}", pin_var(&p.name), var_suffix(&p.selected_function))
+    pin_binding(&pin_var(&p.name), &p.selected_function, &p.custom_label)
 }
 
 #[cfg(test)]

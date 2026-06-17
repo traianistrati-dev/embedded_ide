@@ -7,15 +7,15 @@ use super::super::modules::{
 };
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
-use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, var_suffix};
+use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Variable (binding) name for a pin: `<pin>_<type>`, e.g. `pc13_out`,
-/// `pb9_i2c1_sda`. Only the `let` binding and later references carry the
-/// suffix — the HAL field access stays the bare pin (`meta.var`, e.g.
-/// `gpioc.pc13`).
+/// Variable (binding) name for a pin: `<pin>_<type>[_<label>]`, e.g. `pc13_out`,
+/// `pb9_i2c1_sda`, or `pc13_out_led` when the pin carries a user label. Only the
+/// `let` binding and later references carry the suffix — the HAL field access
+/// stays the bare pin (`meta.var`, e.g. `gpioc.pc13`).
 fn binding_of(pin: &Pin, meta: &PinMeta) -> String {
-    format!("{}_{}", meta.var, var_suffix(&pin.selected_function))
+    pin_binding(&meta.var, &pin.selected_function, &pin.custom_label)
 }
 
 // ── Section splicing ──────────────────────────────────────────────────────────

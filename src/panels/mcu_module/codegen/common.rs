@@ -141,6 +141,116 @@ pub fn var_suffix(func: &PinFunction) -> String {
     }
 }
 
+// ── Custom label → binding name ───────────────────────────────────────────────
+
+/// Sanitize a user-typed pin label into a Rust-identifier fragment: lowercase
+/// ASCII alphanumerics kept, every other run collapsed to a single `_`, with
+/// leading/trailing `_` trimmed. Returns "" when nothing usable remains.
+///
+/// e.g. `"Status LED"` → `status_led`, `"  D7! "` → `d7`.
+pub fn sanitize_label(label: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('_');
+            }
+            pending_sep = false;
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            pending_sep = true;
+        }
+    }
+    out
+}
+
+/// Full generated binding name: `<base>_<type>` with the user's sanitized label
+/// appended as `_<label>` when present. So a `pc13` output (base `pc13`) labelled
+/// "led" binds as `pc13_out_led`; with no label it stays `pc13_out`.
+pub fn pin_binding(base_var: &str, func: &PinFunction, custom_label: &str) -> String {
+    let mut s = format!("{}_{}", base_var, var_suffix(func));
+    let extra = sanitize_label(custom_label);
+    if !extra.is_empty() {
+        s.push('_');
+        s.push_str(&extra);
+    }
+    s
+}
+
+/// Recover the user labels embedded in generated binding names, mirroring
+/// [`parse_main_rs`]. Scans the GEN block's per-pin `let` bindings and, for each
+/// one carrying a `<base>_<type>_<label>` suffix, returns `(pin_name, label)`.
+/// Only GPIO/PWM bindings (the ones the rename field targets) can carry a label.
+pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
+    let (Some(begin_pos), Some(end_pos)) = (source.find(GEN_BEGIN), source.find(GEN_END)) else {
+        return vec![];
+    };
+    if begin_pos >= end_pos {
+        return vec![];
+    }
+
+    let mut result = Vec::new();
+    for line in source[begin_pos..end_pos].lines() {
+        let trimmed = line.trim();
+
+        // Identify the binding var + pin name for the two `let`-binding shapes.
+        let (var, pin_name) = if trimmed.starts_with("let p") {
+            let after_let = &trimmed["let ".len()..];
+            let Some(eq_pos) = after_let.find(" =") else { continue };
+            let var = after_let[..eq_pos].trim();
+            if var.len() < 3 || !var.starts_with('p') {
+                continue;
+            }
+            let port_lc = match var.chars().nth(1) {
+                Some(c) if c.is_ascii_lowercase() => c,
+                _ => continue,
+            };
+            let num: String = var[2..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if num.is_empty() {
+                continue;
+            }
+            (var, format!("P{}{}", port_lc.to_ascii_uppercase(), num))
+        } else if trimmed.starts_with("let mut gpio") || trimmed.starts_with("let gpio") {
+            let after_let = if trimmed.starts_with("let mut ") {
+                &trimmed["let mut ".len()..]
+            } else {
+                &trimmed["let ".len()..]
+            };
+            let Some(eq_pos) = after_let.find(" =") else { continue };
+            let var = after_let[..eq_pos].trim();
+            let rest = match var.strip_prefix("gpio") {
+                Some(r) if r.starts_with(|c: char| c.is_ascii_digit()) => r,
+                _ => continue,
+            };
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if num.is_empty() {
+                continue;
+            }
+            (var, format!("GPIO{num}"))
+        } else {
+            continue;
+        };
+
+        // Function from the comment, then strip the `<base>_<type>` prefix; the
+        // remaining `_<label>` (if any) is the user's custom name.
+        let Some(comment_pos) = trimmed.rfind("// ") else { continue };
+        let label_str = trimmed[comment_pos + 3..].trim().trim_end_matches(';').trim();
+        let Some(func) = PinFunction::from_label(label_str) else { continue };
+
+        let needle = format!("_{}", var_suffix(&func));
+        if let Some(pos) = var.find(&needle) {
+            let after_suffix = &var[pos + needle.len()..];
+            if let Some(label) = after_suffix.strip_prefix('_') {
+                if !label.is_empty() {
+                    result.push((pin_name, label.to_owned()));
+                }
+            }
+        }
+    }
+    result
+}
+
 // ── Pin state parser ──────────────────────────────────────────────────────────
 
 /// Parses pin assignments from an existing `src/main.rs`.
@@ -313,5 +423,60 @@ mod tests {
     fn empty_id_emits_no_marker() {
         assert_eq!(mcu_id_marker_line(""), "");
         assert!(parse_mcu_id("// Auto-generated\n#![no_std]\n").is_none());
+    }
+
+    #[test]
+    fn sanitize_label_makes_identifier_fragments() {
+        assert_eq!(sanitize_label("led"), "led");
+        assert_eq!(sanitize_label("Status LED"), "status_led");
+        assert_eq!(sanitize_label("  D7! "), "d7");
+        assert_eq!(sanitize_label("a--b__c"), "a_b_c");
+        assert_eq!(sanitize_label(""), "");
+        assert_eq!(sanitize_label("***"), "");
+    }
+
+    #[test]
+    fn pin_binding_appends_sanitized_label() {
+        // No label → plain `<base>_<type>`.
+        assert_eq!(pin_binding("pc13", &PinFunction::GpioOutput, ""), "pc13_out");
+        // Label appended and sanitized.
+        assert_eq!(
+            pin_binding("pc13", &PinFunction::GpioOutput, "Status LED"),
+            "pc13_out_status_led"
+        );
+        // ESP-style base + ADC suffix.
+        assert_eq!(
+            pin_binding("gpio0", &PinFunction::AdcChannel { adc: 1, channel: 0 }, ""),
+            "gpio0_adc1_in0"
+        );
+    }
+
+    #[test]
+    fn parse_pin_labels_recovers_custom_names() {
+        let src = format!(
+            "{GEN_BEGIN}\n\
+             let pc13_out_led = &mut gpioc.pc13.into_push_pull_output(&mut gpioc.crh); // GPIO Output\n\
+             let pa1_in = &mut gpioa.pa1.into_floating_input(&mut gpioa.crl); // GPIO Input\n\
+             let mut gpio2_out_relay = Output::new(peripherals.GPIO2, Level::Low); // GPIO Output\n\
+             {GEN_END}"
+        );
+        let labels = parse_pin_labels(&src);
+        // Pins with a label are recovered; the unlabelled one is absent.
+        assert!(labels.contains(&("PC13".to_owned(), "led".to_owned())));
+        assert!(labels.contains(&("GPIO2".to_owned(), "relay".to_owned())));
+        assert!(!labels.iter().any(|(n, _)| n == "PA1"));
+    }
+
+    #[test]
+    fn pin_binding_round_trips_through_parse_pin_labels() {
+        let var = pin_binding("pc13", &PinFunction::GpioOutput, "My Pin 7");
+        assert_eq!(var, "pc13_out_my_pin_7");
+        let src = format!(
+            "{GEN_BEGIN}\nlet {var} = &mut gpioc.pc13.into_push_pull_output(&mut gpioc.crh); // GPIO Output\n{GEN_END}"
+        );
+        assert_eq!(
+            parse_pin_labels(&src),
+            vec![("PC13".to_owned(), "my_pin_7".to_owned())]
+        );
     }
 }

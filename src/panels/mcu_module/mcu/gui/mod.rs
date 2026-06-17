@@ -9,6 +9,7 @@
 pub mod chip;
 pub mod clock;
 pub mod info;
+pub mod io_arrows;
 pub mod layout;
 pub mod modules;
 pub mod panel;
@@ -30,14 +31,21 @@ impl Mcu {
 
         let (mcu_width, mcu_height, base_w, base_h) = layout::calculate_layout(top_count, left_count);
 
-        // Reserve a margin all around the chip for virtual modules, so their
-        // boxes + wires sit beyond the pins (on the pins' own side) without
-        // overlapping the chip.
-        let (mx, my) = if self.modules.is_empty() {
-            (0.0, 0.0)
-        } else {
-            (modules::MARGIN_X, modules::MARGIN_Y)
-        };
+        // Reserve a margin all around the chip for virtual modules and in/out
+        // arrows, so their boxes/arrows + wires sit beyond the pins (on the
+        // pins' own side) without overlapping the chip. Use the larger of the
+        // two when both are present.
+        let mut mx = 0.0_f32;
+        let mut my = 0.0_f32;
+        if !self.modules.is_empty() {
+            mx = modules::MARGIN_X;
+            my = modules::MARGIN_Y;
+        }
+        let has_io = io_arrows::has_io_pins(self);
+        if has_io {
+            mx = mx.max(io_arrows::MARGIN_X);
+            my = my.max(io_arrows::MARGIN_Y);
+        }
         let (response, painter) = ui.allocate_painter(
             egui::vec2(base_w + 2.0 * mx, base_h + 2.0 * my),
             egui::Sense::hover(),
@@ -56,6 +64,11 @@ impl Mcu {
         // ── Virtual modules (boxes + wires) around the chip ───────────────────
         if !self.modules.is_empty() {
             modules::draw_modules(self, &painter, chip_rect);
+        }
+
+        // ── In/out arrows + rename fields for GPIO In/Out/PWM pins ────────────
+        if has_io {
+            io_arrows::draw_io_arrows(self, &painter, chip_rect, ui);
         }
 
         // Toggle selected_pin (click again to deselect); reset scroll on change.

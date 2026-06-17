@@ -36,6 +36,25 @@ pub fn pin_anchor(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<eg
     pin_anchor_side(mcu, chip_rect, pin_num).map(|(p, _)| p)
 }
 
+/// Outer connection point of an MCU pin + the unit vector pointing **away** from
+/// the chip on that pin's side. `None` if the pin isn't on this chip. Used to
+/// draw in/out arrows that extend straight out past the pin.
+pub fn pin_anchor_dir(
+    mcu: &Mcu,
+    chip_rect: egui::Rect,
+    pin_num: usize,
+) -> Option<(egui::Pos2, egui::Vec2)> {
+    pin_anchor_side(mcu, chip_rect, pin_num).map(|(p, s)| {
+        let dir = match s {
+            Side::Right => egui::vec2(1.0, 0.0),
+            Side::Left => egui::vec2(-1.0, 0.0),
+            Side::Top => egui::vec2(0.0, -1.0),
+            Side::Bottom => egui::vec2(0.0, 1.0),
+        };
+        (p, dir)
+    })
+}
+
 fn pin_anchor_side(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<(egui::Pos2, Side)> {
     let row_y = |i: usize| {
         chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING) + PIN_WIDTH / 2.0

@@ -99,6 +99,9 @@ impl AppIde {
             if !saved.is_empty() {
                 if let Some(mcu) = &mut self.mcu {
                     mcu.apply_saved_pins(&saved);
+                    // Restore the per-pin user labels (the `_<label>` suffix on a
+                    // binding) — after apply_saved_pins, which would clear them.
+                    mcu.apply_saved_pin_labels(&codegen::parse_pin_labels(&source));
                     // Rebuild generated_code from the restored pin state while
                     // keeping the user's loop body from the existing file.
                     self.generated_code = mcu.update_main_rs(&source);

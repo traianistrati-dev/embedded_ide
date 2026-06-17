@@ -15,8 +15,8 @@ use super::mcu::Mcu;
 
 // Re-export public API for backward compatibility
 pub use common::{
-    mcu_id_marker_line, parse_main_rs, parse_mcu_id, var_suffix, GEN_BEGIN, GEN_END, MCU_ID_MARKER,
-    USER_TAIL,
+    mcu_id_marker_line, parse_main_rs, parse_mcu_id, parse_pin_labels, pin_binding, sanitize_label,
+    var_suffix, GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL,
 };
 
 // ── Public API on Mcu ─────────────────────────────────────────────────────────
@@ -583,5 +583,40 @@ mod tests {
         let parsed = parse_main_rs(&code);
         assert!(parsed.iter().any(|(name, func)| name == "PA0"
             && *func == PinFunction::GpioOutput));
+    }
+
+    /// A user label on a pin is appended to the generated binding name
+    /// (`pa0_out_led`) while the HAL field access stays bare (`gpioa.pa0`).
+    #[test]
+    fn test_custom_label_appended_to_binding() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        mcu.find_pin_mut(10).unwrap().custom_label = "Status LED".into();
+        let code = mcu.fresh_main_rs();
+
+        assert_contains_substring(
+            &code,
+            "let pa0_out_status_led = &mut gpioa.pa0.into_push_pull_output",
+        );
+
+        // The label round-trips back into the pin's custom_label on reopen.
+        let labels = parse_pin_labels(&code);
+        assert!(labels.contains(&("PA0".to_owned(), "status_led".to_owned())));
+    }
+
+    /// Clearing a pin (Unset) drops its custom label, so a reassigned pin
+    /// starts clean.
+    #[test]
+    fn test_unset_clears_custom_label() {
+        use super::super::mock_mcu;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        mcu.find_pin_mut(10).unwrap().custom_label = "led".into();
+        mcu.apply_pin_function(10, PinFunction::Unset);
+
+        assert!(mcu.find_pin(10).unwrap().custom_label.is_empty());
     }
 }
