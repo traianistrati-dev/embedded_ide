@@ -83,6 +83,7 @@ impl Mcu {
             clock_limits: ClockLimits::default(),
             clock_presets: Vec::new(),
             modules: Vec::new(),
+            expand_module: None,
         }
     }
 
@@ -110,8 +111,19 @@ impl Mcu {
             .iter()
             .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
             .collect();
+        // Peripheral instances already hosting a module of THIS kind are off-limits
+        // too — so a 2nd "+GI_SPI" advances to SPI2 instead of re-picking SPI1 on
+        // its alternate pin set (which `reconcile_modules` would then merge in).
+        let used_instances: std::collections::HashSet<u8> = self
+            .modules
+            .iter()
+            .filter(|m| m.kind == kind)
+            .map(|m| m.instance())
+            .collect();
 
-        let Some((inst, chosen)) = autowire::pick_pins(self, &used, required, optional) else {
+        let Some((inst, chosen)) =
+            autowire::pick_pins(self, &used, &used_instances, required, optional)
+        else {
             return false;
         };
 

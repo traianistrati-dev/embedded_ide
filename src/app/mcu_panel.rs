@@ -79,70 +79,114 @@ impl AppIde {
             // Tab content
             match self.active_tab {
                 McuTab::Pins => {
-                    // ── Virtual-module palette + config ───────────────────────
-                    // Add a module (auto-wires to compatible pins), edit its
-                    // config, or remove it. Add/remove change pin functions, so
-                    // re-sync the pins/ files afterwards.
+                    // ── Virtual-module palette + list, in a scrollable strip
+                    //    BELOW the chip. Add a module (auto-wires to compatible
+                    //    pins), rename it, edit its config, or remove it. Add/
+                    //    remove change pin functions, so re-sync pins/ after.
                     let mut modules_changed = false;
-                    if let Some(mcu) = &mut self.mcu {
-                        use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
-                        use crate::panels::mcu_module::modules::ModuleKind;
+                    egui::TopBottomPanel::bottom("vmodules_panel")
+                        .resizable(true)
+                        .default_height(190.0)
+                        .show_inside(ui, |ui| {
+                            let Some(mcu) = &mut self.mcu else { return };
+                            use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
+                            use crate::panels::mcu_module::modules::ModuleKind;
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("Virtual modules:")
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(150, 150, 160)),
-                            );
-                            for (kind, hover) in [
-                                (
-                                    ModuleKind::GenericInterfaceUsart,
-                                    "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
-                                ),
-                                (
-                                    ModuleKind::GenericInterfaceSpi,
-                                    "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
-                                ),
-                                (
-                                    ModuleKind::GenericInterfaceI2c,
-                                    "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
-                                ),
-                            ] {
-                                if ui
-                                    .button(format!("{} {}", ph::PLUS, kind.short()))
-                                    .on_hover_text(hover)
-                                    .clicked()
-                                    && mcu.add_module(kind)
-                                {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Virtual modules:")
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(150, 150, 160)),
+                                );
+                                for (kind, hover) in [
+                                    (
+                                        ModuleKind::GenericInterfaceUsart,
+                                        "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
+                                    ),
+                                    (
+                                        ModuleKind::GenericInterfaceSpi,
+                                        "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
+                                    ),
+                                    (
+                                        ModuleKind::GenericInterfaceI2c,
+                                        "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                    ),
+                                ] {
+                                    if ui
+                                        .button(format!("{} {}", ph::PLUS, kind.short()))
+                                        .on_hover_text(hover)
+                                        .clicked()
+                                        && mcu.add_module(kind)
+                                    {
+                                        modules_changed = true;
+                                    }
+                                }
+                            });
+
+                            // Id of a module clicked on the canvas last frame →
+                            // TOGGLE its list entry this frame (expand if closed,
+                            // collapse if open), then it's user-controlled again.
+                            let to_open = mcu.expand_module.take();
+
+                            if !mcu.modules.is_empty() {
+                                let pin_names: std::collections::HashMap<usize, String> = mcu
+                                    .iter_all_pins()
+                                    .map(|p| (p.number, p.name.clone()))
+                                    .collect();
+                                let mut remove_id: Option<String> = None;
+                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    for m in &mut mcu.modules {
+                                        let title = mod_gui::module_title(m);
+                                        let toggle = to_open.as_deref() == Some(m.id.as_str());
+                                        // Drive the section via CollapsingState so a canvas
+                                        // click can TOGGLE (not just force-open) the entry.
+                                        let cs_id =
+                                            ui.make_persistent_id(("vmod_hdr", m.id.as_str()));
+                                        let mut state =
+                                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                                ui.ctx(),
+                                                cs_id,
+                                                false,
+                                            );
+                                        if toggle {
+                                            state.toggle(ui);
+                                        }
+                                        state
+                                            .show_header(ui, |ui| {
+                                                ui.label(egui::RichText::new(title).strong());
+                                            })
+                                            .body(|ui| {
+                                                // Rename field — appended to the generated
+                                                // variable name(s); also shown in the title.
+                                                ui.horizontal(|ui| {
+                                                    ui.label("Name:");
+                                                    ui.add(
+                                                        egui::TextEdit::singleline(
+                                                            m.config.custom_label_mut(),
+                                                        )
+                                                        .hint_text("variable name")
+                                                        .desired_width(160.0),
+                                                    );
+                                                });
+                                                mod_gui::module_config_ui(ui, m, &pin_names);
+                                                ui.add_space(4.0);
+                                                if ui
+                                                    .button(format!("{} Remove module", ph::TRASH))
+                                                    .clicked()
+                                                {
+                                                    remove_id = Some(m.id.clone());
+                                                }
+                                            });
+                                    }
+                                });
+                                if let Some(id) = remove_id {
+                                    mcu.remove_module(&id);
                                     modules_changed = true;
                                 }
                             }
                         });
 
-                        if !mcu.modules.is_empty() {
-                            let pin_names: std::collections::HashMap<usize, String> = mcu
-                                .iter_all_pins()
-                                .map(|p| (p.number, p.name.clone()))
-                                .collect();
-                            let mut remove_id: Option<String> = None;
-                            for m in &mut mcu.modules {
-                                let header = m.name.clone();
-                                let salt = m.id.clone();
-                                egui::CollapsingHeader::new(header).id_salt(salt).show(ui, |ui| {
-                                    mod_gui::module_config_ui(ui, m, &pin_names);
-                                    ui.add_space(4.0);
-                                    if ui.button(format!("{} Remove module", ph::TRASH)).clicked() {
-                                        remove_id = Some(m.id.clone());
-                                    }
-                                });
-                            }
-                            if let Some(id) = remove_id {
-                                mcu.remove_module(&id);
-                                modules_changed = true;
-                            }
-                        }
-                        ui.separator();
-                    }
                     if modules_changed {
                         if let Some(mcu) = &self.mcu {
                             let all_pins = mcu.all_pin_functions();
@@ -150,6 +194,7 @@ impl AppIde {
                         }
                     }
 
+                    // Diagram fills the remaining (top) area.
                     // Computed before borrowing `self.mcu` mutably below.
                     let chip_label = self.selected_label();
                     let pin_changed = egui::ScrollArea::both()

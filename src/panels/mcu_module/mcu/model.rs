@@ -50,4 +50,8 @@ pub struct Mcu {
     /// Virtual electronic modules (e.g. GI_USART) wired to the chip's pins and
     /// drawn beside it on the Pins canvas.
     pub modules: Vec<crate::panels::mcu_module::modules::VirtualModule>,
+    /// Transient: id of a module the user clicked on the canvas, so the module
+    /// list (below the chip) expands its entry next frame. Consumed + cleared by
+    /// the panel. Not part of project state.
+    pub expand_module: Option<String>,
 }

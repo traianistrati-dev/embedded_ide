@@ -307,6 +307,32 @@ mod tests {
         assert!(code.contains(&format!("let _spi{n}_flash =")), "spi handle:\n{code}");
     }
 
+    /// Adding GI_SPI twice must advance to SPI2 — not re-pick SPI1 on its
+    /// alternate (PA5/6/7) pins, which would merge into the first module.
+    /// (Regression: 2nd "+GI_SPI" wrongly grabbed PA4/5/6/7 for SPI1.)
+    #[test]
+    fn second_spi_module_picks_spi2_not_spi1_again() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        assert_eq!(mcu.modules.len(), 2, "two distinct SPI modules");
+
+        let mut instances: Vec<u8> = mcu.modules.iter().map(|m| m.instance()).collect();
+        instances.sort();
+        assert_eq!(instances, vec![1, 2], "instances must be SPI1 and SPI2");
+
+        // No pin is shared between the two modules.
+        let pins0: Vec<usize> =
+            mcu.modules[0].connections.iter().map(|c| c.mcu_pin).collect();
+        let pins1: Vec<usize> =
+            mcu.modules[1].connections.iter().map(|c| c.mcu_pin).collect();
+        assert!(pins0.iter().all(|p| !pins1.contains(p)), "no shared pins");
+
+        // A 3rd add fails — the F103 has only SPI1/SPI2.
+        assert!(!mcu.add_module(ModuleKind::GenericInterfaceSpi));
+        assert_eq!(mcu.modules.len(), 2);
+    }
+
     #[test]
     fn add_i2c_module_wires_pins() {
         let mut mcu = create_stm32f103c8tx();

@@ -13,16 +13,23 @@ use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 /// Choose `(instance, [(signal, pin_number), …])` for a new module. `required`
 /// signals must all be satisfiable on the same instance with distinct pins;
 /// `optional` ones (e.g. SPI NSS) are added when a pin is available. Pins in
-/// `used` (wired to another module) are skipped. Tries instances 0..=3,
-/// preferring instances where the pins are already assigned to the signal.
+/// `used` (wired to another module) are skipped, and peripheral instances in
+/// `used_instances` (already hosting a module of this kind) are skipped entirely
+/// — otherwise a 2nd "+GI_SPI" would re-pick SPI1 on its alternate pins instead
+/// of moving to SPI2. Tries instances 0..=3, preferring instances where the pins
+/// are already assigned to the signal.
 pub fn pick_pins(
     mcu: &Mcu,
     used: &HashSet<usize>,
+    used_instances: &HashSet<u8>,
     required: &[ModuleSignal],
     optional: &[ModuleSignal],
 ) -> Option<(u8, Vec<(ModuleSignal, usize)>)> {
     for require_assigned in [true, false] {
         for inst in 0u8..=3 {
+            if used_instances.contains(&inst) {
+                continue;
+            }
             if let Some(chosen) =
                 try_instance(mcu, used, required, optional, inst, require_assigned)
             {

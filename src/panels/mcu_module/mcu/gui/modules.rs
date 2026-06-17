@@ -98,29 +98,41 @@ fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
     f.color()
 }
 
-/// The box that sits just beyond `side`, near the connected pins' centroid,
-/// offset by `idx` so stacked modules on the same side don't overlap.
-fn place_box(chip_rect: egui::Rect, side: Side, centroid: egui::Pos2, idx: usize) -> egui::Rect {
-    let off = idx as f32;
-    let min = match side {
-        Side::Right => egui::pos2(
-            chip_rect.right() + PIN_HEIGHT + PIN_GAP,
-            centroid.y - BOX_H / 2.0 + off * (BOX_H + BOX_GAP),
-        ),
-        Side::Left => egui::pos2(
-            chip_rect.left() - PIN_HEIGHT - PIN_GAP - BOX_W,
-            centroid.y - BOX_H / 2.0 + off * (BOX_H + BOX_GAP),
-        ),
-        Side::Top => egui::pos2(
-            centroid.x - BOX_W / 2.0 + off * (BOX_W + BOX_GAP),
-            chip_rect.top() - PIN_HEIGHT - PIN_GAP - BOX_H,
-        ),
-        Side::Bottom => egui::pos2(
-            centroid.x - BOX_W / 2.0 + off * (BOX_W + BOX_GAP),
-            chip_rect.bottom() + PIN_HEIGHT + PIN_GAP,
-        ),
-    };
-    egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H))
+/// Place a box just beyond `side`, centred on `along` (the pins' centroid along
+/// the side axis) but **nudged forward** past `cursor` so same-side boxes never
+/// overlap. `cursor` tracks the trailing edge of the previously placed box on
+/// this side and is advanced here. Call with boxes pre-sorted by `along`.
+fn packed_rect(chip_rect: egui::Rect, side: Side, along: f32, cursor: &mut f32) -> egui::Rect {
+    match side {
+        Side::Right | Side::Left => {
+            let half = BOX_H / 2.0;
+            let mut cy = along;
+            if cy - half < *cursor + BOX_GAP {
+                cy = *cursor + BOX_GAP + half;
+            }
+            *cursor = cy + half;
+            let x = if side == Side::Right {
+                chip_rect.right() + PIN_HEIGHT + PIN_GAP
+            } else {
+                chip_rect.left() - PIN_HEIGHT - PIN_GAP - BOX_W
+            };
+            egui::Rect::from_min_size(egui::pos2(x, cy - half), egui::vec2(BOX_W, BOX_H))
+        }
+        Side::Top | Side::Bottom => {
+            let half = BOX_W / 2.0;
+            let mut cx = along;
+            if cx - half < *cursor + BOX_GAP {
+                cx = *cursor + BOX_GAP + half;
+            }
+            *cursor = cx + half;
+            let y = if side == Side::Top {
+                chip_rect.top() - PIN_HEIGHT - PIN_GAP - BOX_H
+            } else {
+                chip_rect.bottom() + PIN_HEIGHT + PIN_GAP
+            };
+            egui::Rect::from_min_size(egui::pos2(cx - half, y), egui::vec2(BOX_W, BOX_H))
+        }
+    }
 }
 
 /// A terminal point on the box edge that faces the chip, aligned to `anchor`
@@ -144,6 +156,23 @@ fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui
             anchor.x.clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
             box_rect.top(),
         ),
+    }
+}
+
+/// The module name without the `GI_` prefix (e.g. `GI_I2C1` → `I2C1`).
+pub fn module_base_name(m: &VirtualModule) -> &str {
+    m.name.strip_prefix("GI_").unwrap_or(&m.name)
+}
+
+/// Display title for the module list/box: the base name plus the user's **raw**
+/// label, verbatim — e.g. `GI_I2C1` + "128x32 display" → `I2C1 - 128x32 display`.
+pub fn module_title(m: &VirtualModule) -> String {
+    let base = module_base_name(m);
+    let label = m.config.custom_label();
+    if label.trim().is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base} - {label}")
     }
 }
 
@@ -196,7 +225,7 @@ fn draw_box(
     painter.text(
         rect.center_top() + egui::vec2(0.0, 13.0),
         egui::Align2::CENTER_CENTER,
-        &m.name,
+        module_base_name(m),
         egui::FontId::proportional(13.0),
         title_color,
     );
@@ -234,16 +263,18 @@ pub fn draw_modules(
     chip_rect: egui::Rect,
     ui: &mut egui::Ui,
 ) {
-    let mut per_side: HashMap<Side, usize> = HashMap::new();
-    let mut floating = 0usize;
-    // (module index, box rect) collected for the mutable rename-field pass below.
-    let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
+    // ── 1. Classify each module: connected (side + along-axis centroid) or
+    //       floating (no wired pins). `conns` keeps the wire endpoints.
+    struct Sided {
+        idx: usize,
+        conns: Vec<(ModuleSignal, egui::Pos2)>,
+        side: Side,
+        along: f32,
+    }
+    let mut sided: Vec<Sided> = Vec::new();
+    let mut floating_idx: Vec<usize> = Vec::new();
 
     for (i, m) in mcu.modules.iter().enumerate() {
-        let inst = m.instance();
-        let mcolor = module_color(m.kind, inst);
-
-        // Connected pins → their anchors + sides.
         let conns: Vec<(ModuleSignal, egui::Pos2, Side)> = m
             .connections
             .iter()
@@ -251,46 +282,81 @@ pub fn draw_modules(
                 pin_anchor_side(mcu, chip_rect, c.mcu_pin).map(|(p, s)| (c.signal, p, s))
             })
             .collect();
-
         if conns.is_empty() {
-            // Disconnected — float it in the right margin.
-            let min = egui::pos2(
-                chip_rect.right() + PIN_HEIGHT + PIN_GAP,
-                chip_rect.top() + floating as f32 * (BOX_H + BOX_GAP),
-            );
-            floating += 1;
-            let rect = egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H));
-            draw_box(painter, rect, m, false, mcolor);
-            field_pass.push((i, rect));
+            floating_idx.push(i);
             continue;
         }
-
-        // Dominant side = where most of its pins are.
         let side = dominant_side(&conns);
-        let centroid = {
-            let on_side: Vec<egui::Pos2> =
-                conns.iter().filter(|(_, _, s)| *s == side).map(|(_, p, _)| *p).collect();
-            let n = on_side.len().max(1) as f32;
-            let sum = on_side.iter().fold(egui::Vec2::ZERO, |a, p| a + p.to_vec2());
-            (sum / n).to_pos2()
-        };
-        let idx = per_side.entry(side).or_insert(0);
-        let box_rect = place_box(chip_rect, side, centroid, *idx);
-        *idx += 1;
+        // Centroid along the side axis, from the pins actually on that side.
+        let on_side: Vec<f32> = conns
+            .iter()
+            .filter(|(_, _, s)| *s == side)
+            .map(|(_, p, _)| match side {
+                Side::Top | Side::Bottom => p.x,
+                Side::Left | Side::Right => p.y,
+            })
+            .collect();
+        let along = on_side.iter().sum::<f32>() / on_side.len().max(1) as f32;
+        let conns2 = conns.iter().map(|(sig, p, _)| (*sig, *p)).collect();
+        sided.push(Sided { idx: i, conns: conns2, side, along });
+    }
 
-        draw_box(painter, box_rect, m, true, mcolor);
+    // ── 2. Pack each side independently so same-side boxes never overlap. ──────
+    // (module index, rect, conns, side, connected)
+    let mut boxes: Vec<(usize, egui::Rect, Vec<(ModuleSignal, egui::Pos2)>, Side, bool)> =
+        Vec::new();
+    for target in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
+        let mut group: Vec<&Sided> = sided.iter().filter(|e| e.side == target).collect();
+        group.sort_by(|a, b| a.along.total_cmp(&b.along));
+        let mut cursor = f32::MIN;
+        for e in group {
+            let rect = packed_rect(chip_rect, e.side, e.along, &mut cursor);
+            boxes.push((e.idx, rect, e.conns.clone(), e.side, true));
+        }
+    }
+    // Disconnected modules stack in the right margin.
+    let mut fy = chip_rect.top();
+    for i in floating_idx {
+        let min = egui::pos2(chip_rect.right() + PIN_HEIGHT + PIN_GAP, fy);
+        fy += BOX_H + BOX_GAP;
+        boxes.push((i, egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H)), Vec::new(), Side::Right, false));
+    }
 
-        for (sig, anchor, _) in &conns {
+    // ── 3. Draw boxes + wires; detect a header click to expand the list entry. ─
+    let mut clicked_id: Option<String> = None;
+    let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
+    for (i, rect, conns, side, connected) in &boxes {
+        let m = &mcu.modules[*i];
+        let inst = m.instance();
+        draw_box(painter, *rect, m, *connected, module_color(m.kind, inst));
+
+        for (sig, anchor) in conns {
             let color = signal_color(*sig, inst);
-            let term = facing_terminal(box_rect, side, *anchor);
+            let term = facing_terminal(*rect, *side, *anchor);
             painter.circle_filled(term, 3.5, color);
             painter.circle_filled(*anchor, 3.5, color);
             painter.line_segment([term, *anchor], egui::Stroke::new(1.6, color));
         }
-        field_pass.push((i, box_rect));
+
+        // Click the header area (above the rename field) to expand the list entry.
+        let header_rect =
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - 30.0));
+        let resp = ui.interact(header_rect, ui.id().with(("vmod_box", *i)), egui::Sense::click());
+        if resp.hovered() {
+            painter.rect_stroke(
+                *rect,
+                6.0,
+                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(50)),
+                egui::StrokeKind::Middle,
+            );
+        }
+        if resp.clicked() {
+            clicked_id = Some(m.id.clone());
+        }
+        field_pass.push((*i, *rect));
     }
 
-    // ── Rename fields (mutable pass) ──────────────────────────────────────────
+    // ── 4. Rename fields (mutable pass) ───────────────────────────────────────
     // The typed text is appended to the module's generated variable name(s);
     // regenerated every frame by `update_main_rs`, so it updates as you type.
     for (i, box_rect) in field_pass {
@@ -304,6 +370,10 @@ pub fn draw_modules(
                     .font(egui::FontId::proportional(10.0)),
             );
         });
+    }
+
+    if clicked_id.is_some() {
+        mcu.expand_module = clicked_id;
     }
 }
 
