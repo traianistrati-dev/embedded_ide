@@ -14,6 +14,7 @@ use crate::panels::mcu_module::project_gen::ProjectFiles;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme};
 
+mod comment;
 mod completion;
 mod diag_embed;
 mod toolbar;
@@ -132,6 +133,10 @@ impl AppIde {
                 // to the TextEdit as a literal character.
                 let ctrl_space_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
+                // Ctrl+/ → toggle line comments on the selection (consumed before
+                // the editor so `/` is never typed into the text).
+                let ctrl_slash_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
 
                 // Size the editor to fill the height left over after the
                 // (resizable) diagnostics panel, so dragging that panel's handle
@@ -142,7 +147,7 @@ impl AppIde {
                 let editor_rows =
                     (((ui.available_height() - 10.0) / row_h).floor() as usize).max(3);
 
-                let editor_resp = CodeEditor::default()
+                let mut editor_resp = CodeEditor::default()
                     .id_source(editor_id)
                     .with_rows(editor_rows)
                     .with_fontsize(13.0)
@@ -154,6 +159,30 @@ impl AppIde {
                         &display_syntax,
                         &mut self.completer,
                     );
+
+                // ── Ctrl+/ : toggle line comments on the selected lines ───────
+                // Uses the file's comment marker (`//` for .rs, `#` for TOML /
+                // .gitignore). Re-selects the affected block so repeated presses
+                // toggle the same lines. Applied before the write-back below so
+                // the new text is persisted; the cursor is stored for next frame.
+                if ctrl_slash_pressed {
+                    if let Some(range) = editor_resp.state.cursor.char_range() {
+                        let lo = range.primary.index.min(range.secondary.index);
+                        let hi = range.primary.index.max(range.secondary.index);
+                        let (new_code, new_lo, new_hi) =
+                            comment::toggle_line_comments(&display_code, lo, hi, display_syntax.comment());
+                        display_code = new_code;
+                        // Store a clone with the new selection (store() consumes
+                        // the state, so don't move `editor_resp.state` itself —
+                        // it's still read by handle_editor_completion below).
+                        let mut st = editor_resp.state.clone();
+                        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(new_lo),
+                            egui::text::CCursor::new(new_hi),
+                        )));
+                        st.store(ui.ctx(), editor_resp.response.id);
+                    }
+                }
 
                 // ── Write user edits back ────────────────────────────────────
                 // display_code is a local clone; persist changes here.
