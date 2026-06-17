@@ -392,34 +392,35 @@ impl AppIde {
 
         // ── Diagnostic overlays ───────────────────────────────────────
         if lsp_file_tracked && SHOW_INLINE_DIAGNOSTICS {
-            // Only draw the inline overlay when the editor content matches what
-            // rust-analyzer last verified. With pending edits the diagnostics are
-            // stale — their line/col cling to a row that was moved or deleted, so
-            // a squiggle/message "sticks" after the bad line is gone. Hiding them
-            // until the LSP debounce re-verifies (3 s idle / Project Save) makes
-            // the message vanish the instant you edit the line away.
-            let up_to_date = self.lsp_content_hash() == self.lsp_synced_hash;
-            let diags: Vec<lsp::LspDiagnostic> = if up_to_date {
-                current_rel_path
-                    .as_deref()
-                    .map(|rel| {
-                        let lsp = self.lsp_state.lock().unwrap();
+            // Only draw the inline overlay when RA holds the CURRENT text for the
+            // displayed file (per-file, not a global check). With pending edits
+            // the diagnostics are stale — their line/col cling to a row that was
+            // moved or deleted, so a squiggle/message "sticks" after the bad line
+            // is gone. They reappear (refreshed) once the LSP debounce re-verifies
+            // (3 s idle / Project Save). Errors that live inside `#[entry] fn main`
+            // come from cargo-check (RA can't expand the entry macro), so they
+            // surface a moment after that check completes.
+            let diags: Vec<lsp::LspDiagnostic> = current_rel_path
+                .as_deref()
+                .map(|rel| {
+                    let lsp = self.lsp_state.lock().unwrap();
+                    if lsp.last_sent_matches(rel, &display_code) {
                         diags_for_file(&lsp.diagnostics, rel)
-                    })
-                    .unwrap_or_default()
-                    .into_iter()
-                    // Inline overlay shows only errors and info; warnings + hints
-                    // are left to the bottom diagnostics panel.
-                    .filter(|d| {
-                        matches!(
-                            d.severity,
-                            lsp::DiagSeverity::Error | lsp::DiagSeverity::Info
-                        )
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+                            .into_iter()
+                            // Inline overlay shows only errors and info; warnings +
+                            // hints are left to the bottom diagnostics panel.
+                            .filter(|d| {
+                                matches!(
+                                    d.severity,
+                                    lsp::DiagSeverity::Error | lsp::DiagSeverity::Info
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .unwrap_or_default();
 
             show_diagnostics_overlay(
                 ui,

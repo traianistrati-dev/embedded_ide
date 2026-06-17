@@ -198,6 +198,17 @@ impl LspState {
         self.open_files.contains_key(rel_path)
     }
 
+    /// `true` when `rel_path` is open and the text rust-analyzer last received
+    /// for it equals `text` — i.e. no edits are pending sync for this file.
+    /// Used to gate the inline diagnostic overlay so it never draws diagnostics
+    /// computed for a different (older) version of the file at stale positions.
+    pub fn last_sent_matches(&self, rel_path: &str, text: &str) -> bool {
+        self.open_files
+            .get(rel_path)
+            .map(|f| f.last_sent_code == text)
+            .unwrap_or(false)
+    }
+
     /// Send `textDocument/didOpen` for `rel_path` and record the text.
     ///
     /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
