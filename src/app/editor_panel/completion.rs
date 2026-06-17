@@ -16,13 +16,14 @@ use eframe::egui;
 use egui::text_edit::TextEditOutput;
 
 /// Master switch for the **inline** diagnostic overlay — the squiggles and
-/// error/warning/info text drawn over the code in the editor.
+/// message text drawn over the code in the editor.
 ///
-/// Disabled: rust-analyzer's diagnostic positions can lag behind quick edits and
-/// land on lines that no longer have the error, which is misleading. The full,
-/// always-accurate diagnostics remain in the bottom panel (Cargo Check /
-/// rust-analyzer tabs). Flip to `true` to re-enable the inline overlay.
-const SHOW_INLINE_DIAGNOSTICS: bool = false;
+/// Only **errors and info** are drawn inline; warnings (and hints) are filtered
+/// out at the call site below and remain in the bottom panel (Cargo Check /
+/// rust-analyzer tabs) to keep the code view uncluttered. Diagnostics refresh on
+/// the LSP debounce (3 s after typing stops, or on Project Save — see
+/// `app::init_frame`), so their positions no longer lag behind active typing.
+const SHOW_INLINE_DIAGNOSTICS: bool = true;
 
 impl AppIde {
     /// Apply/trigger LSP completion and draw diagnostics, after the editor.
@@ -52,14 +53,11 @@ impl AppIde {
                 let before: String = chars[..word_start].iter().collect();
                 let after: String = chars[cur_idx..].iter().collect();
                 display_code = format!("{}{}{}", before, insert_text, after);
-                // Persist the change so the write-back below picks it up
-                // (the write-back already happened above; redo it for this file)
+                // Persist the change in memory so the write-back picks it up; the
+                // debounced LSP flush (3 s idle / Project Save) handles disk + RA.
                 if let ProjectFileId::UserFile(i) = self.selected_file {
                     if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                         entry.1 = display_code.clone();
-                        let workspace = std::env::temp_dir().join("embedded_ide_0_check");
-                        let dest = workspace.join("src").join(&entry.0);
-                        let _ = std::fs::write(&dest, entry.1.as_bytes());
                     }
                 } else if self.selected_file == ProjectFileId::MainRs {
                     self.generated_code = display_code.clone();
@@ -393,17 +391,35 @@ impl AppIde {
         }
 
         // ── Diagnostic overlays ───────────────────────────────────────
-        // Gated off (SHOW_INLINE_DIAGNOSTICS): the inline squiggles/messages are
-        // disabled because their positions can lag behind edits. The bottom
-        // diagnostics panel still lists everything. Code kept for easy re-enable.
         if lsp_file_tracked && SHOW_INLINE_DIAGNOSTICS {
-            let diags: Vec<lsp::LspDiagnostic> = current_rel_path
-                .as_deref()
-                .map(|rel| {
-                    let lsp = self.lsp_state.lock().unwrap();
-                    diags_for_file(&lsp.diagnostics, rel)
-                })
-                .unwrap_or_default();
+            // Only draw the inline overlay when the editor content matches what
+            // rust-analyzer last verified. With pending edits the diagnostics are
+            // stale — their line/col cling to a row that was moved or deleted, so
+            // a squiggle/message "sticks" after the bad line is gone. Hiding them
+            // until the LSP debounce re-verifies (3 s idle / Project Save) makes
+            // the message vanish the instant you edit the line away.
+            let up_to_date = self.lsp_content_hash() == self.lsp_synced_hash;
+            let diags: Vec<lsp::LspDiagnostic> = if up_to_date {
+                current_rel_path
+                    .as_deref()
+                    .map(|rel| {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        diags_for_file(&lsp.diagnostics, rel)
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    // Inline overlay shows only errors and info; warnings + hints
+                    // are left to the bottom diagnostics panel.
+                    .filter(|d| {
+                        matches!(
+                            d.severity,
+                            lsp::DiagSeverity::Error | lsp::DiagSeverity::Info
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             show_diagnostics_overlay(
                 ui,

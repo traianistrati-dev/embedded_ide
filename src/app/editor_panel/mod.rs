@@ -160,14 +160,10 @@ impl AppIde {
                 if let ProjectFileId::UserFile(i) = self.selected_file {
                     if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                         if display_code != entry.1 {
+                            // In-memory only; the debounced LSP flush (3 s idle or
+                            // Project Save, see app::init_frame) writes it to the
+                            // workspace and notifies RA — not on every keystroke.
                             entry.1 = display_code.clone();
-                            // Auto-save to workspace so LSP and build see the change
-                            let workspace = std::env::temp_dir().join("embedded_ide_0_check");
-                            let dest = workspace.join("src").join(&entry.0);
-                            if let Some(parent) = dest.parent() {
-                                let _ = std::fs::create_dir_all(parent);
-                            }
-                            let _ = std::fs::write(&dest, entry.1.as_bytes());
                         }
                     }
                 } else if self.selected_file == ProjectFileId::MainRs

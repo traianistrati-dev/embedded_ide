@@ -129,6 +129,10 @@ enum BuildPanelTab {
 
 const STORAGE_KEY: &str = "embedded_ide_project_v1";
 
+/// How long editing must pause before rust-analyzer is asked to re-verify
+/// (diagnostics / cargo-check). A Project Save flushes immediately regardless.
+const LSP_IDLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(3);
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedState {
     /// `(path_relative_to_src, content)` for every user-created file.
@@ -224,6 +228,17 @@ pub struct AppIde {
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
+    /// LSP edit-debounce: RA only re-verifies (didChange + workspace disk write)
+    /// 3 s after editing stops, or on an explicit Project Save — NOT on every
+    /// keystroke. `lsp_prev_hash` detects a change this frame (resets the idle
+    /// timer); `lsp_synced_hash` is what RA last received (so we know if there
+    /// is anything to flush). See `init_frame`.
+    lsp_prev_hash: u64,
+    lsp_synced_hash: u64,
+    /// When the LSP-relevant content (main.rs + user files) last changed.
+    lsp_last_edit: Option<std::time::Instant>,
+    /// Set by a Project Save to flush pending changes to RA immediately.
+    lsp_flush_requested: bool,
     /// Which tab is active in the bottom diagnostics panel
     build_tab: BuildPanelTab,
     /// Index of the RA diagnostic row that is expanded
@@ -390,6 +405,10 @@ impl AppIde {
             completion_pending_insert: None,
             completion_filtered_items: Vec::new(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
+            lsp_prev_hash: 0,
+            lsp_synced_hash: 0,
+            lsp_last_edit: None,
+            lsp_flush_requested: false,
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
@@ -549,17 +568,69 @@ impl AppIde {
                 }
             }
             LspStatus::Ready => {
-                /**/
-
-                let mut lsp = self.lsp_state.lock().unwrap();
-                lsp.did_change("src/main.rs", &self.generated_code.clone());
-                for (rel, content) in &self.project_tree.user_src_files {
-                    let full_rel = format!("src/{rel}");
-                    lsp.did_change(&full_rel, content);
+                // Debounced verification: push edits to rust-analyzer (and the
+                // workspace on disk for cargo-check) ONLY 3 s after editing stops
+                // or on an explicit Project Save — never on every keystroke.
+                let cur_hash = self.lsp_content_hash();
+                if cur_hash != self.lsp_prev_hash {
+                    // Content changed this frame → reset the idle timer.
+                    self.lsp_prev_hash = cur_hash;
+                    self.lsp_last_edit = Some(std::time::Instant::now());
                 }
-                /**/
+                let dirty = cur_hash != self.lsp_synced_hash;
+                let idle_done = self
+                    .lsp_last_edit
+                    .map(|t| t.elapsed() >= LSP_IDLE_DEBOUNCE)
+                    .unwrap_or(true);
+                if dirty && (self.lsp_flush_requested || idle_done) {
+                    self.flush_lsp_to_workspace();
+                    self.lsp_synced_hash = cur_hash;
+                    self.lsp_flush_requested = false;
+                } else if dirty {
+                    // Still typing — wake up after the debounce so the flush
+                    // fires even with no further input events.
+                    self.egui_ctx.request_repaint_after(LSP_IDLE_DEBOUNCE);
+                }
             }
             _ => {}
+        }
+    }
+
+    /// Hash of the LSP-relevant content (main.rs + every user source file), used
+    /// to detect edits between frames without sending anything to RA.
+    fn lsp_content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.generated_code.hash(&mut h);
+        for (rel, content) in &self.project_tree.user_src_files {
+            rel.hash(&mut h);
+            content.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Single point where rust-analyzer is asked to re-verify: writes main.rs +
+    /// every user source file to the LSP workspace (so cargo-check/flycheck sees
+    /// them) and pushes `didChange` (so RA's in-memory analysis updates). Called
+    /// only from the debounced path — never on every keystroke.
+    fn flush_lsp_to_workspace(&mut self) {
+        let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+        let write = |rel: &str, content: &str| {
+            let dest = workspace.join("src").join(rel);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&dest, content.as_bytes());
+        };
+        write("main.rs", &self.generated_code);
+        for (rel, content) in &self.project_tree.user_src_files {
+            write(rel, content);
+        }
+
+        let mut lsp = self.lsp_state.lock().unwrap();
+        lsp.did_change("src/main.rs", &self.generated_code);
+        for (rel, content) in &self.project_tree.user_src_files {
+            lsp.did_change(&format!("src/{rel}"), content);
         }
     }
 }
@@ -627,13 +698,20 @@ impl eframe::App for AppIde {
             }
         }
 
-        // "Save Project" → export to folder
+        // "Save Project" → write to the project's folder.
+        //   • Existing project (opened/already saved → `project_dir` is set):
+        //     save straight to that path, no dialog.
+        //   • New project (`project_dir` is None): ask once where to save, then
+        //     remember the chosen folder so later saves go there directly.
         if save_project_clicked {
             if self.selected_build_cfg().is_some() {
-                if let Some(dest) = rfd::FileDialog::new()
-                    .set_title("Choose folder to save the project")
-                    .pick_folder()
-                {
+                let dest: Option<std::path::PathBuf> = match &self.project_dir {
+                    Some(dir) => Some(dir.clone()),
+                    None => rfd::FileDialog::new()
+                        .set_title("Choose folder to save the new project")
+                        .pick_folder(),
+                };
+                if let Some(dest) = dest {
                     match project_gen::write_project(
                         &dest,
                         &self.current_project_files(),
@@ -648,6 +726,9 @@ impl eframe::App for AppIde {
                             self.export_msg = format!("✔  {name}");
                             self.export_flash = 180;
                             self.project_name = Some(name);
+                            // A new project now has a home — subsequent saves
+                            // write here without prompting.
+                            self.project_dir = Some(dest);
                         }
                         Err(e) => {
                             self.export_msg = format!("✗  {e}");
@@ -675,6 +756,13 @@ impl eframe::App for AppIde {
                     &self.project_tree.user_src_files,
                 );
             }
+        }
+
+        // A Project Save (or a tree change that rewrote the workspace) flushes
+        // pending edits to rust-analyzer next frame, so RA re-verifies on save —
+        // outside the 3 s idle debounce.
+        if save_project_clicked || save_project_needed {
+            self.lsp_flush_requested = true;
         }
 
         // ── Panel 2: Code Editor ─────

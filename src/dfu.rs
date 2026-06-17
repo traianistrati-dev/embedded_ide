@@ -154,7 +154,7 @@ pub fn detect_dfu(
         let dfu_result = run_detect();
 
         // ── 2. Enumerate relevant USB programmer devices ───────────────────────
-        let mut programmer_devices = list_programmer_devices();
+        let programmer_devices = list_programmer_devices();
 
         // Make sure a DFU device is listed even if the OS doesn't show it
         // (some DFU drivers hide the device in WMI / lsusb).
