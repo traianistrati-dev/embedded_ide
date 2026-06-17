@@ -17,6 +17,7 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 mod comment;
 mod completion;
 mod diag_embed;
+mod move_lines;
 mod toolbar;
 
 impl AppIde {
@@ -137,6 +138,11 @@ impl AppIde {
                 // the editor so `/` is never typed into the text).
                 let ctrl_slash_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
+                // Ctrl+Up / Ctrl+Down → move the selected lines up / down.
+                let ctrl_up_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
+                let ctrl_down_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
 
                 // Size the editor to fill the height left over after the
                 // (resizable) diagnostics panel, so dragging that panel's handle
@@ -160,28 +166,43 @@ impl AppIde {
                         &mut self.completer,
                     );
 
-                // ── Ctrl+/ : toggle line comments on the selected lines ───────
-                // Uses the file's comment marker (`//` for .rs, `#` for TOML /
-                // .gitignore). Re-selects the affected block so repeated presses
-                // toggle the same lines. Applied before the write-back below so
-                // the new text is persisted; the cursor is stored for next frame.
-                if ctrl_slash_pressed {
-                    if let Some(range) = editor_resp.state.cursor.char_range() {
-                        let lo = range.primary.index.min(range.secondary.index);
-                        let hi = range.primary.index.max(range.secondary.index);
-                        let (new_code, new_lo, new_hi) =
-                            comment::toggle_line_comments(&display_code, lo, hi, display_syntax.comment());
-                        display_code = new_code;
-                        // Store a clone with the new selection (store() consumes
-                        // the state, so don't move `editor_resp.state` itself —
-                        // it's still read by handle_editor_completion below).
-                        let mut st = editor_resp.state.clone();
-                        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                            egui::text::CCursor::new(new_lo),
-                            egui::text::CCursor::new(new_hi),
-                        )));
-                        st.store(ui.ctx(), editor_resp.response.id);
-                    }
+                // ── Editor line operations on the selection ───────────────────
+                // Ctrl+/ toggles line comments (`//` for .rs, `#` for TOML /
+                // .gitignore); Ctrl+Up / Ctrl+Down move the selected lines. Each
+                // re-selects the affected block so repeated presses keep working.
+                // Applied before the write-back below so the new text persists;
+                // the cursor is stored (on a clone — `store()` consumes the state,
+                // which handle_editor_completion still reads) for the next frame.
+                let line_op: Option<(String, usize, usize)> = editor_resp
+                    .state
+                    .cursor
+                    .char_range()
+                    .and_then(|r| {
+                        let lo = r.primary.index.min(r.secondary.index);
+                        let hi = r.primary.index.max(r.secondary.index);
+                        if ctrl_slash_pressed {
+                            Some(comment::toggle_line_comments(
+                                &display_code,
+                                lo,
+                                hi,
+                                display_syntax.comment(),
+                            ))
+                        } else if ctrl_up_pressed {
+                            Some(move_lines::move_lines(&display_code, lo, hi, false))
+                        } else if ctrl_down_pressed {
+                            Some(move_lines::move_lines(&display_code, lo, hi, true))
+                        } else {
+                            None
+                        }
+                    });
+                if let Some((new_code, new_lo, new_hi)) = line_op {
+                    display_code = new_code;
+                    let mut st = editor_resp.state.clone();
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(new_lo),
+                        egui::text::CCursor::new(new_hi),
+                    )));
+                    st.store(ui.ctx(), editor_resp.response.id);
                 }
 
                 // ── Write user edits back ────────────────────────────────────
