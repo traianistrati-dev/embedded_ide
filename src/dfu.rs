@@ -974,7 +974,12 @@ fn run_cargo_build(
 ) -> bool {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_dir)
-        .args(["build", "--release", "--verbose", "--target", target])
+        .args([
+            "build",
+            "--release",
+            /*"--verbose",*/ "--target",
+            target,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 

@@ -148,6 +148,11 @@ pub struct LspState {
     sender:          Option<mpsc::Sender<String>>,
     /// Per-file open state.  Key = relative path, e.g. `"src/main.rs"`.
     open_files:      HashMap<String, OpenFileState>,
+    /// Files for which a `didChange` was sent but no `publishDiagnostics` has
+    /// arrived since — their current diagnostics are stale (computed for the
+    /// previous text). The inline overlay hides them until RA re-publishes, so a
+    /// fixed/deleted error never lingers at a stale position. Key = rel path.
+    awaiting_diagnostics: std::collections::HashSet<String>,
     /// Workspace root URI (e.g. `file:///tmp/embedded_ide_0_check`).
     pub root_uri:    String,
     /// True while RA is running a background `cargo check` pass.
@@ -173,6 +178,7 @@ impl Default for LspState {
             generation:    0,
             sender:        None,
             open_files:    HashMap::new(),
+            awaiting_diagnostics: std::collections::HashSet::new(),
             root_uri:          String::new(),
             checking:          false,
             completion_items:  Vec::new(),
@@ -207,6 +213,13 @@ impl LspState {
             .get(rel_path)
             .map(|f| f.last_sent_code == text)
             .unwrap_or(false)
+    }
+
+    /// `true` when RA has published diagnostics for `rel_path` *since* the last
+    /// `didChange` — i.e. the current `diagnostics` reflect the latest text, not
+    /// a stale version. `false` between sending an edit and RA's response.
+    pub fn diagnostics_fresh(&self, rel_path: &str) -> bool {
+        !self.awaiting_diagnostics.contains(rel_path)
     }
 
     /// Send `textDocument/didOpen` for `rel_path` and record the text.
@@ -249,6 +262,9 @@ impl LspState {
         file.last_sent_code = text.to_owned();
         file.doc_version   += 1;
         let version = file.doc_version;
+        // New text sent → current diagnostics for this file are now stale until
+        // RA re-publishes (see `diagnostics_fresh`).
+        self.awaiting_diagnostics.insert(rel_path.to_owned());
         let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(serde_json::json!({
             "jsonrpc": "2.0",
@@ -342,6 +358,7 @@ impl LspState {
         self.diagnostics   .clear();
         self.sender        = None;   // write thread's Receiver will close → it exits
         self.open_files    .clear();
+        self.awaiting_diagnostics.clear();
         self.root_uri      = String::new();
         self.checking      = false;
         self.completion_items.clear();
@@ -671,6 +688,9 @@ fn handle_incoming(
             if s.generation != my_gen {
                 return;
             }
+            // RA has re-evaluated this file → its diagnostics are fresh again,
+            // so the inline overlay may show them (see `diagnostics_fresh`).
+            s.awaiting_diagnostics.remove(&rel_path);
             if diags.is_empty() {
                 s.diagnostics.remove(&rel_path);
             } else {

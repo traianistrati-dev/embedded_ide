@@ -404,7 +404,11 @@ impl AppIde {
                 .as_deref()
                 .map(|rel| {
                     let lsp = self.lsp_state.lock().unwrap();
-                    if lsp.last_sent_matches(rel, &display_code) {
+                    // Show only when (a) RA holds the current text for this file
+                    // AND (b) RA has re-published diagnostics since that text was
+                    // sent — otherwise the diagnostics are stale (an old error
+                    // would linger at a position whose line was edited away).
+                    if lsp.last_sent_matches(rel, &display_code) && lsp.diagnostics_fresh(rel) {
                         diags_for_file(&lsp.diagnostics, rel)
                             .into_iter()
                             // Inline overlay shows only errors and info; warnings +

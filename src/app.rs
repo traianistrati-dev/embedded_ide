@@ -74,9 +74,16 @@ impl ProjectFileId {
     }
 
     fn syntax(self) -> Syntax {
-        // All .rs files get full Rust highlighting.
-        // TOML/memory.x use the same for now (no other built-in syntax available).
-        Syntax::rust()
+        match self {
+            // TOML (Cargo.toml, .cargo/config.toml) and .gitignore use `#` line
+            // comments — give them a syntax whose comment marker is `#` so those
+            // lines render in the comment (gray) colour, matching `//` comments
+            // in .rs files (same theme → same Comment token colour).
+            Self::CargoToml | Self::CargoConfig | Self::GitIgnore => Syntax::simple("#"),
+            // main.rs / build.rs are Rust; memory.x uses C-style `/* */`, which
+            // Rust highlighting already renders as comments.
+            _ => Syntax::rust(),
+        }
     }
 
     /// Path as reported by `rustc` in JSON diagnostics (relative to project root).
