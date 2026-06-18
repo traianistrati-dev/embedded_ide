@@ -249,8 +249,10 @@ impl LspState {
     /// Send `textDocument/didChange` for `rel_path` when the text has changed.
     /// Auto-opens the file via `didOpen` if it hasn't been opened yet.
     ///
-    /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
-    pub fn did_change(&mut self, rel_path: &str, text: &str) {
+    /// `force` re-sends (with a bumped version) even when the text is unchanged,
+    /// so rust-analyzer re-runs its analysis — used by Project Save to restart
+    /// verification. `rel_path` is relative to the workspace root.
+    pub fn did_change(&mut self, rel_path: &str, text: &str, force: bool) {
         if self.sender.is_none() { return; }
         // Auto-open the file on first access.
         if !self.open_files.contains_key(rel_path) {
@@ -258,7 +260,7 @@ impl LspState {
             return;
         }
         let file = self.open_files.get_mut(rel_path).unwrap();
-        if text == file.last_sent_code { return; }
+        if text == file.last_sent_code && !force { return; }
         file.last_sent_code = text.to_owned();
         file.doc_version   += 1;
         let version = file.doc_version;

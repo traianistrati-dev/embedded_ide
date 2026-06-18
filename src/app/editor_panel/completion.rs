@@ -91,7 +91,7 @@ impl AppIde {
                         // at the top of update()) used last frame's code.
                         {
                             let mut lsp = self.lsp_state.lock().unwrap();
-                            lsp.did_change(rel, &display_code);
+                            lsp.did_change(rel, &display_code, false);
                             lsp.request_completion(rel, line, col, None);
                         }
                         self.completion_trigger_idx = idx;
@@ -113,7 +113,7 @@ impl AppIde {
                         let (line, col) = lsp_cursor_pos(&display_code, idx);
                         {
                             let mut lsp = self.lsp_state.lock().unwrap();
-                            lsp.did_change(rel, &display_code);
+                            lsp.did_change(rel, &display_code, false);
                             lsp.request_completion(rel, line, col, Some('.'));
                         }
                         self.completion_trigger_idx = idx;
@@ -139,7 +139,7 @@ impl AppIde {
                         let (line, col) = lsp_cursor_pos(&display_code, idx);
                         {
                             let mut lsp = self.lsp_state.lock().unwrap();
-                            lsp.did_change(rel, &display_code);
+                            lsp.did_change(rel, &display_code, false);
                             lsp.request_completion(rel, line, col, Some(':'));
                         }
                         self.completion_trigger_idx = idx;
@@ -405,11 +405,12 @@ impl AppIde {
                 .as_deref()
                 .map(|rel| {
                     let lsp = self.lsp_state.lock().unwrap();
-                    // Show only when (a) RA holds the current text for this file
-                    // AND (b) RA has re-published diagnostics since that text was
-                    // sent — otherwise the diagnostics are stale (an old error
-                    // would linger at a position whose line was edited away).
-                    if lsp.last_sent_matches(rel, &display_code) && lsp.diagnostics_fresh(rel) {
+                    // Show the diagnostics only when RA holds the CURRENT text for
+                    // this file — so stale ones (clinging to a line that was edited
+                    // away) hide the instant you type, and reappear once the edit
+                    // is synced to RA (after the 3 s idle debounce or a Project
+                    // Save, which forces a re-verify).
+                    if lsp.last_sent_matches(rel, &display_code) {
                         diags_for_file(&lsp.diagnostics, rel)
                             .into_iter()
                             // Inline overlay shows only errors and info; warnings +

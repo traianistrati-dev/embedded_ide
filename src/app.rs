@@ -596,8 +596,12 @@ impl AppIde {
                     .lsp_last_edit
                     .map(|t| t.elapsed() >= LSP_IDLE_DEBOUNCE)
                     .unwrap_or(true);
-                if dirty && (self.lsp_flush_requested || idle_done) {
-                    self.flush_lsp_to_workspace();
+                // Flush (→ RA re-verifies) on a Project Save unconditionally, or
+                // 3 s after editing stops. A Save re-writes the workspace + re-sends
+                // the document even when unchanged, so verification always restarts.
+                let force = self.lsp_flush_requested;
+                if force || (dirty && idle_done) {
+                    self.flush_lsp_to_workspace(force);
                     self.lsp_synced_hash = cur_hash;
                     self.lsp_flush_requested = false;
                 } else if dirty {
@@ -627,7 +631,10 @@ impl AppIde {
     /// every user source file to the LSP workspace (so cargo-check/flycheck sees
     /// them) and pushes `didChange` (so RA's in-memory analysis updates). Called
     /// only from the debounced path — never on every keystroke.
-    fn flush_lsp_to_workspace(&mut self) {
+    ///
+    /// `force` (a Project Save) re-sends every document even if unchanged, so RA
+    /// re-runs its analysis/flycheck — i.e. Save restarts verification.
+    fn flush_lsp_to_workspace(&mut self, force: bool) {
         let workspace = std::env::temp_dir().join("embedded_ide_0_check");
         let write = |rel: &str, content: &str| {
             let dest = workspace.join("src").join(rel);
@@ -642,9 +649,9 @@ impl AppIde {
         }
 
         let mut lsp = self.lsp_state.lock().unwrap();
-        lsp.did_change("src/main.rs", &self.generated_code);
+        lsp.did_change("src/main.rs", &self.generated_code, force);
         for (rel, content) in &self.project_tree.user_src_files {
-            lsp.did_change(&format!("src/{rel}"), content);
+            lsp.did_change(&format!("src/{rel}"), content, force);
         }
     }
 }
