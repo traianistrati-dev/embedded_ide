@@ -50,6 +50,14 @@ pub fn show_diagnostics_overlay(
         let line_h = loc_s.height().max(1.0);
         let sy_mid = (sy_top + sy_bot) * 0.5;
 
+        // Skip lines scrolled out of the visible editor — otherwise the squiggle,
+        // inline message, and hover region would land below the editor in the
+        // bottom diagnostics panel (the painter clip hides the drawing, but the
+        // hover interaction must be skipped too).
+        if sy_bot < clip.top() || sy_top > clip.bottom() {
+            continue;
+        }
+
         // Same-line check
         let same_line = (loc_s.min.y - loc_e.min.y).abs() < line_h * 0.5;
         let ex = if same_line {

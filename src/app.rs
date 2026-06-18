@@ -509,6 +509,12 @@ impl AppIde {
         }
     }
 
+    /// The `mcu.config` text for the live MCU (virtual modules + clock), written
+    /// alongside the project by `write_project`. Empty when no chip is selected.
+    fn mcu_config_text(&self) -> String {
+        self.mcu.as_ref().map(|m| m.mcu_config_text()).unwrap_or_default()
+    }
+
     /// Regenerate every editable config file fresh from the selected chip,
     /// discarding prior edits. Used when starting a New Project / switching chip
     /// (a clean slate, like clearing `user_src_files`). Toolchains that don't use
@@ -556,6 +562,7 @@ impl AppIde {
                             &build_dir,
                             &self.current_project_files(),
                             &self.project_tree.user_src_files,
+                            &self.mcu_config_text(),
                         )
                         .is_ok()
                         {
@@ -723,6 +730,7 @@ impl eframe::App for AppIde {
                         &dest,
                         &self.current_project_files(),
                         &self.project_tree.user_src_files,
+                        &self.mcu_config_text(),
                     ) {
                         Ok(()) => {
                             let name = dest
@@ -761,6 +769,7 @@ impl eframe::App for AppIde {
                     &workspace,
                     &self.current_project_files(),
                     &self.project_tree.user_src_files,
+                    &self.mcu_config_text(),
                 );
             }
         }

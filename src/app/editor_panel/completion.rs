@@ -34,6 +34,7 @@ impl AppIde {
         &mut self,
         ui: &mut egui::Ui,
         editor_resp: &TextEditOutput,
+        editor_clip: egui::Rect,
         mut display_code: String,
         lsp_accepted: Option<String>,
         ctrl_space_pressed: bool,
@@ -426,10 +427,19 @@ impl AppIde {
                 })
                 .unwrap_or_default();
 
+            // Clip strictly to the VISIBLE editor area. The code editor wraps the
+            // text in nested scroll areas, so `text_clip_rect` (and the editor's
+            // response rect) cover the *full* galley — every line, even scrolled-
+            // off ones — which is why clipping to those let squiggles/messages for
+            // off-screen lines bleed into the bottom panel. `editor_clip` is the
+            // editor's on-screen region (captured before it filled the space; its
+            // bottom edge is the top of the diagnostics panel), so it bounds the
+            // overlay to what's actually visible.
+            let visible_clip = editor_clip;
             show_diagnostics_overlay(
                 ui,
                 editor_resp.galley_pos,
-                editor_resp.text_clip_rect,
+                visible_clip,
                 &editor_resp.galley,
                 &diags,
                 &display_code,

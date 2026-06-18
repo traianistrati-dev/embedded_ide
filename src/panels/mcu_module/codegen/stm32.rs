@@ -135,17 +135,6 @@ pub fn clock_setup_chain(clock: &ClockConfig) -> String {
     s
 }
 
-/// Machine-readable clock marker line, parsed back on project open so the Clock
-/// tab restores exactly (target-frequency code alone is ambiguous).
-fn clock_comment_line(clock: &ClockConfig) -> String {
-    let c = match clock {
-        ClockConfig::Graph(gc) => {
-            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.graph)
-        }
-        ClockConfig::None => Stm32f1Clock::default(),
-    };
-    crate::panels::mcu_module::clock::persist::to_comment(&c)
-}
 
 // ── Generated section builder ─────────────────────────────────────────────────
 
@@ -447,7 +436,6 @@ pub fn make_generated_section(
 
     // ── Clock setup chain (from the Clock tab config) ────────────────────────
     let clock_chain = clock_setup_chain(clock);
-    let clock_comment = clock_comment_line(clock);
 
     // ── Peripheral config constants (from the Virtual Modules) ───────────────
     // Generated here, INSIDE the GEN block, so they're regenerated every frame
@@ -467,7 +455,6 @@ pub fn make_generated_section(
     // Helper fns are appended after `fn main` by `ensure_helper_defs`.
     format!(
         "{GEN_BEGIN}\n\
-         {clock_comment}\n\
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
          }};\n\
@@ -490,11 +477,9 @@ pub fn make_generated_section(
 
 fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
     let clock_chain = clock_setup_chain(clock);
-    let clock_comment = clock_comment_line(clock);
     format!(
         "{GEN_BEGIN}\n\
          // MCU: {mcu_name}\n\
-         {clock_comment}\n\
          use stm32f1xx_hal::{{pac, prelude::*}};\n\n\
          #[entry]\n\
          fn main() -> ! {{\n\

@@ -112,6 +112,7 @@ impl AppIde {
                             &build_dir,
                             &self.current_project_files(),
                             &self.project_tree.user_src_files,
+                            &self.mcu_config_text(),
                         ) {
                             Ok(()) => {
                                 self.selected_diagnostic = None;
@@ -290,6 +291,7 @@ impl AppIde {
                                     &build_dir,
                                     &self.current_project_files(),
                                     &self.project_tree.user_src_files,
+                                    &self.mcu_config_text(),
                                 )
                                 .is_ok()
                                 {
@@ -340,6 +342,7 @@ impl AppIde {
                                     &build_dir,
                                     &self.current_project_files(),
                                     &self.project_tree.user_src_files,
+                                    &self.mcu_config_text(),
                                 )
                                 .is_ok()
                                 {

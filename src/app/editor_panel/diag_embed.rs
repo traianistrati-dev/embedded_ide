@@ -14,7 +14,10 @@ use eframe::egui;
 
 impl AppIde {
     /// Render the embedded bottom diagnostics panel (drag handle + content).
-    pub(super) fn show_editor_diag_panel(&mut self, ui: &mut egui::Ui) {
+    /// Returns the panel's top Y (= the bottom edge of the editor region above
+    /// it), or `None` when the panel isn't shown — used to clip the inline
+    /// diagnostic overlay so it can't bleed into this panel.
+    pub(super) fn show_editor_diag_panel(&mut self, ui: &mut egui::Ui) -> Option<f32> {
         let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
         let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
         let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)
@@ -23,21 +26,22 @@ impl AppIde {
             || !self.dfu_log.lock().unwrap().is_empty();
         let show_panel = cargo_has || lsp_active || dfu_active;
 
-        if show_panel {
-            const HANDLE_H: f32 = 6.0;
-            const MIN_H: f32 = 56.0;
+        if !show_panel {
+            return None;
+        }
+        const HANDLE_H: f32 = 6.0;
+        const MIN_H: f32 = 56.0;
 
-            // Keep height in valid range for current window size.
-            let max_h = (ui.available_height() - 60.0).max(MIN_H);
-            self.diag_panel_height = self.diag_panel_height.clamp(MIN_H, max_h);
+        // Keep height in valid range for current window size.
+        let max_h = (ui.available_height() - 60.0).max(MIN_H);
+        self.diag_panel_height = self.diag_panel_height.clamp(MIN_H, max_h);
 
-            // TopBottomPanel::bottom takes space from the bottom
-            // of the remaining area before the editor is laid out.
-            // exact_height gives us full control — no egui-internal
-            // default_height that would reset on show/hide.
-            egui::Panel::bottom("diag_panel")
-                .exact_size(self.diag_panel_height + HANDLE_H)
-                .show_inside(ui, |ui| {
+        // Panel::bottom takes space from the bottom of the remaining area
+        // before the editor is laid out. exact_size gives us full control —
+        // no egui-internal default that would reset on show/hide.
+        let panel = egui::Panel::bottom("diag_panel")
+            .exact_size(self.diag_panel_height + HANDLE_H)
+            .show_inside(ui, |ui| {
                     // ── Drag handle (top edge of panel) ───────
                     let (handle_rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), HANDLE_H),
@@ -101,6 +105,6 @@ impl AppIde {
                         &mut self.selected_file,
                     );
                 });
-        }
+        Some(panel.response.rect.top())
     }
 }

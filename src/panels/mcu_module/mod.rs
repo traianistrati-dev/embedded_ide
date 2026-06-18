@@ -4,6 +4,7 @@ pub mod codegen;
 pub mod codegen_esp;
 pub mod mcu;
 pub mod mcu_catalog;
+pub mod mcu_config;
 pub mod mcu_def;
 pub mod mock_esp32c3;
 pub mod mock_mcu;

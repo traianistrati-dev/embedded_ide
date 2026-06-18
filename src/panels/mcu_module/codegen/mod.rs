@@ -29,9 +29,9 @@ impl Mcu {
         let code = family::backend_for(&self.family)
             .map(|b| b.fresh_main_rs(self))
             .unwrap_or_default();
-        let code = common::ensure_module_models(code, &self.modules);
-        // Lossless module state for restore on project open.
-        super::modules::persist::with_marker(&code, &self.modules)
+        // Module/clock state is persisted out-of-source in `mcu.config`
+        // (see `Mcu::mcu_config_text`), not as comment markers in main.rs.
+        common::ensure_module_models(code, &self.modules)
     }
 
     /// Update `existing` in-place: replace only the generated section
@@ -43,8 +43,8 @@ impl Mcu {
         let code = family::backend_for(&self.family)
             .map(|b| b.update_main_rs(self, existing))
             .unwrap_or_else(|| existing.to_owned());
-        let code = common::ensure_module_models(code, &self.modules);
-        super::modules::persist::with_marker(&code, &self.modules)
+        // Module/clock state is persisted in `mcu.config`, not in main.rs.
+        common::ensure_module_models(code, &self.modules)
     }
 
     /// Kept for any remaining call sites — delegates to `fresh_main_rs`.
@@ -514,10 +514,11 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_marker_roundtrips_through_codegen() {
+    fn test_clock_marker_roundtrips_through_mcu_config() {
         use super::super::clock::graph::graph_to_stm32f1;
         use super::super::clock::model::Stm32f1Clock;
-        use super::super::clock::{persist, ClockConfig};
+        use super::super::clock::ClockConfig;
+        use super::super::mcu_config;
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
@@ -526,13 +527,13 @@ mod tests {
         cfg.apb2_pre = 2;
         cfg.adc_pre = 8;
         mcu.clock = graph_clock(&cfg);
-        let code = mcu.fresh_main_rs();
 
-        // Generated code carries the @clock marker, which parses back to the
-        // graph's effective config.
-        let parsed = persist::parse_from_source(&code).expect("clock marker present");
+        // The clock is persisted in mcu.config (no longer a marker in main.rs),
+        // and parses back to the graph's effective config.
+        assert!(!mcu.fresh_main_rs().contains("@clock"), "no marker in main.rs");
+        let (_, parsed) = mcu_config::parse(&mcu.mcu_config_text());
         let ClockConfig::Graph(gc) = &mcu.clock else { panic!("expected graph clock") };
-        assert_eq!(parsed, graph_to_stm32f1(&gc.graph));
+        assert_eq!(parsed, Some(graph_to_stm32f1(&gc.graph)));
     }
 
     #[test]

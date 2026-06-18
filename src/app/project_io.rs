@@ -75,23 +75,34 @@ impl AppIde {
         // assignment back to the MCU diagram.  If no markers are found (e.g.
         // an ESP32-C3 project or a hand-written main.rs) this is a silent no-op.
         if let Some(source) = main_rs_source {
-            use crate::panels::mcu_module::clock::persist as clock_persist;
             use crate::panels::mcu_module::codegen;
+            use crate::panels::mcu_module::mcu_config;
 
-            // Restore the clock-tree config first, so any regeneration below
-            // uses it (otherwise a custom clock would reset to the 72 MHz default).
-            if let Some(clock) = clock_persist::parse_from_source(&source) {
-                if let Some(mcu) = &mut self.mcu {
-                    mcu.apply_saved_clock(clock);
+            // Restore virtual modules + clock-tree config from the project-root
+            // `mcu.config` file (must happen before update_main_rs below, so the
+            // restored clock drives the regenerated chain). Older projects
+            // without that file fall back to the legacy `@modules` / `@clock`
+            // comment markers that used to live in main.rs.
+            match std::fs::read_to_string(root.join(mcu_config::FILE_NAME)) {
+                Ok(cfg) => {
+                    if let Some(mcu) = &mut self.mcu {
+                        mcu.apply_mcu_config(&cfg);
+                    }
                 }
-            }
-
-            // Restore virtual modules (GI_USART…) from the `@modules` marker.
-            let restored_modules =
-                crate::panels::mcu_module::modules::persist::parse_from_source(&source);
-            if !restored_modules.is_empty() {
-                if let Some(mcu) = &mut self.mcu {
-                    mcu.modules = restored_modules;
+                Err(_) => {
+                    use crate::panels::mcu_module::clock::persist as clock_persist;
+                    if let Some(clock) = clock_persist::parse_from_source(&source) {
+                        if let Some(mcu) = &mut self.mcu {
+                            mcu.apply_saved_clock(clock);
+                        }
+                    }
+                    let restored =
+                        crate::panels::mcu_module::modules::persist::parse_from_source(&source);
+                    if !restored.is_empty() {
+                        if let Some(mcu) = &mut self.mcu {
+                            mcu.modules = restored;
+                        }
+                    }
                 }
             }
 

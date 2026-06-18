@@ -67,7 +67,9 @@ impl AppIde {
                 ui.separator();
 
                 // ── Diagnostics panel (bottom, manually resizable) ────
-                self.show_editor_diag_panel(ui);
+                // Its top Y bounds the editor region below, so the inline
+                // diagnostic overlay can be clipped to what's actually visible.
+                let diag_panel_top = self.show_editor_diag_panel(ui);
 
                 // Use a unique id per file so egui's TextEditState (galley,
                 // cursor, undo stack) is never shared between files.
@@ -152,6 +154,19 @@ impl AppIde {
                 let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
                 let editor_rows =
                     (((ui.available_height() - 10.0) / row_h).floor() as usize).max(3);
+
+                // The on-screen editor region. `available_rect_before_wrap` does
+                // NOT exclude the bottom panel (egui only moves the cursor, not
+                // max_rect), so the editor's scroll area actually overflows under
+                // the panel. Bound the bottom explicitly to the diagnostics panel's
+                // top so the inline overlay can't paint over (or into) it.
+                let editor_clip = {
+                    let mut r = ui.available_rect_before_wrap();
+                    if let Some(top) = diag_panel_top {
+                        r.max.y = r.max.y.min(top);
+                    }
+                    r
+                };
 
                 let mut editor_resp = CodeEditor::default()
                     .id_source(editor_id)
@@ -241,6 +256,7 @@ impl AppIde {
                 self.handle_editor_completion(
                     ui,
                     &editor_resp,
+                    editor_clip,
                     display_code,
                     lsp_accepted,
                     ctrl_space_pressed,

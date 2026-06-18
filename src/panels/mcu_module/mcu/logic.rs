@@ -208,6 +208,37 @@ impl Mcu {
         }
     }
 
+    /// The `mcu.config` text for this chip — its virtual modules (`@modules`)
+    /// and, for the STM32F1 family, the clock-tree config (`@clock`). Written to
+    /// the project root on save; empty when there is nothing to persist.
+    pub fn mcu_config_text(&self) -> String {
+        use crate::panels::mcu_module::clock::graph::graph_to_stm32f1;
+        use crate::panels::mcu_module::clock::{ClockConfig, Stm32f1Clock};
+        use crate::panels::mcu_module::mcu_config;
+        let clock = if self.family == "stm32f1" {
+            Some(match &self.clock {
+                ClockConfig::Graph(gc) => graph_to_stm32f1(&gc.graph),
+                _ => Stm32f1Clock::default(),
+            })
+        } else {
+            None
+        };
+        mcu_config::serialize(&self.modules, clock.as_ref())
+    }
+
+    /// Restore virtual modules + clock from an `mcu.config` file on project open.
+    /// Apply *after* `apply_saved_pins` (which derives default modules from the
+    /// pins) so the saved per-module config (labels, baud, …) wins.
+    pub fn apply_mcu_config(&mut self, text: &str) {
+        let (modules, clock) = crate::panels::mcu_module::mcu_config::parse(text);
+        if !modules.is_empty() {
+            self.modules = modules;
+        }
+        if let Some(c) = clock {
+            self.apply_saved_clock(c);
+        }
+    }
+
     /// Restores the clock-tree configuration parsed from a saved `main.rs`
     /// (`// @clock` marker). The saved config is expanded to graph node states
     /// and adopted by id — F103-shaped graphs restore fully; other-family

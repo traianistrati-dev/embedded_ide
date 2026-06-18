@@ -199,18 +199,20 @@ mod tests {
         );
     }
 
-    /// Modules survive a full codegen → `@modules` marker → parse round-trip,
-    /// so a saved project restores them exactly.
+    /// Modules survive the `mcu.config` serialize → parse round-trip, so a saved
+    /// project restores them exactly. (They no longer live in main.rs.)
     #[test]
-    fn modules_round_trip_through_generated_main_rs() {
+    fn modules_round_trip_through_mcu_config() {
+        use crate::panels::mcu_module::mcu_config;
         let mut mcu = create_stm32f103c8tx();
         assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
         if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
             cfg.baud_rate = 9600;
             cfg.rx_model = "pub struct R { pub t: f32 }".into();
         }
-        let code = mcu.fresh_main_rs();
-        assert_eq!(persist::parse_from_source(&code), mcu.modules);
+        assert!(!mcu.fresh_main_rs().contains("@modules"), "no marker in main.rs");
+        let (parsed, _) = mcu_config::parse(&mcu.mcu_config_text());
+        assert_eq!(parsed, mcu.modules);
     }
 
     /// An empty data model emits no module block.
@@ -290,8 +292,9 @@ mod tests {
         );
         assert!(code.contains(&format!("_rx{n}_imu_sensor")), "rx handle labelled");
 
-        // The label persists through the @modules marker (serde on the config).
-        assert_eq!(persist::parse_from_source(&code), mcu.modules);
+        // The label persists through the mcu.config round-trip (serde on config).
+        let (parsed, _) = crate::panels::mcu_module::mcu_config::parse(&mcu.mcu_config_text());
+        assert_eq!(parsed, mcu.modules);
     }
 
     /// An SPI module label lands on the `_spiN` handle.

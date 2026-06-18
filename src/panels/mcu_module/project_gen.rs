@@ -218,6 +218,7 @@ pub fn write_project(
     dest: &Path,
     files: &ProjectFiles,
     user_src_files: &[(String, String)],
+    mcu_config: &str,
 ) -> io::Result<()> {
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
@@ -280,6 +281,16 @@ pub fn write_project(
             fs::create_dir_all(parent)?;
         }
         fs::write(full, content)?;
+    }
+
+    // mcu.config — virtual modules + clock state, persisted out-of-source at the
+    // project root (not in src/, so the project tree doesn't show it). Written
+    // only when there's something to persist; a stale one is removed otherwise.
+    let mcu_config_path = dest.join(crate::panels::mcu_module::mcu_config::FILE_NAME);
+    if mcu_config.trim().is_empty() {
+        let _ = fs::remove_file(&mcu_config_path);
+    } else {
+        fs::write(&mcu_config_path, mcu_config)?;
     }
 
     println!("project_gen write_project()");

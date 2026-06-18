@@ -11,9 +11,9 @@ use super::model::{Mco, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, Usb
 /// Marker prefix for the clock config comment line.
 pub const CLOCK_TAG: &str = "// @clock";
 
-/// Serialise to a single comment line, e.g.
-/// `// @clock hse=8000000 hse_on=1 src=pll pll=hse mul=9 ahb=1 apb1=2 apb2=1 adc=6 usb=1_5 mco=none`
-pub fn to_comment(c: &Stm32f1Clock) -> String {
+/// The ordered `key=value` fields of a clock config (shared by the one-line
+/// `// @clock` comment and the multi-line `mcu.config` block).
+fn fields(c: &Stm32f1Clock) -> Vec<(&'static str, String)> {
     let src = match c.sysclk_src {
         SysclkSrc::Hsi => "hsi",
         SysclkSrc::Hse => "hse",
@@ -45,23 +45,49 @@ pub fn to_comment(c: &Stm32f1Clock) -> String {
         SystickSrc::HclkDiv8 => "hclk8",
         SystickSrc::Hclk => "hclk",
     };
-    format!(
-        "{CLOCK_TAG} hse={} hse_on={} src={src} pll={pll} mul={} ahb={} apb1={} apb2={} adc={} usb={usb} mco={mco} rtc={rtc} systick={systick} css={}",
-        c.hse_hz,
-        if c.hse_enabled { 1 } else { 0 },
-        c.pll_mul,
-        c.ahb_pre,
-        c.apb1_pre,
-        c.apb2_pre,
-        c.adc_pre,
-        if c.css_on { 1 } else { 0 },
-    )
+    vec![
+        ("hse", c.hse_hz.to_string()),
+        ("hse_on", if c.hse_enabled { "1" } else { "0" }.to_string()),
+        ("src", src.to_string()),
+        ("pll", pll.to_string()),
+        ("mul", c.pll_mul.to_string()),
+        ("ahb", c.ahb_pre.to_string()),
+        ("apb1", c.apb1_pre.to_string()),
+        ("apb2", c.apb2_pre.to_string()),
+        ("adc", c.adc_pre.to_string()),
+        ("usb", usb.to_string()),
+        ("mco", mco.to_string()),
+        ("rtc", rtc.to_string()),
+        ("systick", systick.to_string()),
+        ("css", if c.css_on { "1" } else { "0" }.to_string()),
+    ]
 }
 
-/// Parse a `// @clock …` line back into a config. Returns `None` if `line`
-/// isn't a clock marker; unknown / missing fields fall back to the default.
-pub fn from_comment(line: &str) -> Option<Stm32f1Clock> {
-    let rest = line.trim().strip_prefix(CLOCK_TAG)?;
+/// Serialise to a single comment line, e.g.
+/// `// @clock hse=8000000 hse_on=1 src=pll pll=hse mul=9 ahb=1 apb1=2 apb2=1 adc=6 usb=1_5 mco=none`
+pub fn to_comment(c: &Stm32f1Clock) -> String {
+    let body = fields(c)
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{CLOCK_TAG} {body}")
+}
+
+/// Serialise to a multi-line `key=value` block (no comment prefix), for the
+/// `mcu.config` file — one field per line:
+/// `hse=8000000\nhse_on=0\nsrc=pll\n…`
+pub fn to_config_block(c: &Stm32f1Clock) -> String {
+    fields(c)
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Parse `key=value` tokens (whitespace- OR newline-separated) into a config.
+/// Unknown / missing fields fall back to the default.
+fn from_tokens(rest: &str) -> Stm32f1Clock {
     let mut c = Stm32f1Clock::default();
     for tok in rest.split_whitespace() {
         let Some((k, v)) = tok.split_once('=') else {
@@ -146,7 +172,19 @@ pub fn from_comment(line: &str) -> Option<Stm32f1Clock> {
             _ => {}
         }
     }
-    Some(c)
+    c
+}
+
+/// Parse a `// @clock …` comment line back into a config. Returns `None` if
+/// `line` isn't a clock marker.
+pub fn from_comment(line: &str) -> Option<Stm32f1Clock> {
+    let rest = line.trim().strip_prefix(CLOCK_TAG)?;
+    Some(from_tokens(rest))
+}
+
+/// Parse the multi-line `mcu.config` clock block (the body after `@clock`).
+pub fn from_config_block(body: &str) -> Stm32f1Clock {
+    from_tokens(body)
 }
 
 /// Scan an entire `main.rs` for the clock marker line and parse it.
