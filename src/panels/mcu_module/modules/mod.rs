@@ -12,8 +12,8 @@ pub mod model;
 pub mod persist;
 
 pub use model::{
-    module_signal_of, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity,
-    SpiModuleConfig, StopBits, UsartModuleConfig, VirtualModule,
+    Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity, SpiModuleConfig,
+    StopBits, UsartModuleConfig, VirtualModule, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -137,13 +137,19 @@ mod tests {
         let mut mcu = create_stm32f103c8tx();
         mcu.add_module(ModuleKind::GenericInterfaceUsart);
         let code = mcu.fresh_main_rs();
-        assert!(code.contains("const USART1_BAUDRATE: u32 = 115200;"), "default:\n{code}");
+        assert!(
+            code.contains("const USART1_BAUDRATE: u32 = 115200;"),
+            "default:\n{code}"
+        );
 
         if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
             cfg.baud_rate = 9600;
         }
         let code = mcu.update_main_rs(&code);
-        assert!(code.contains("const USART1_BAUDRATE: u32 = 9600;"), "updated:\n{code}");
+        assert!(
+            code.contains("const USART1_BAUDRATE: u32 = 9600;"),
+            "updated:\n{code}"
+        );
         assert!(!code.contains("115200"), "old value gone");
     }
 
@@ -210,7 +216,10 @@ mod tests {
             cfg.baud_rate = 9600;
             cfg.rx_model = "pub struct R { pub t: f32 }".into();
         }
-        assert!(!mcu.fresh_main_rs().contains("@modules"), "no marker in main.rs");
+        assert!(
+            !mcu.fresh_main_rs().contains("@modules"),
+            "no marker in main.rs"
+        );
         let (parsed, _) = mcu_config::parse(&mcu.mcu_config_text());
         assert_eq!(parsed, mcu.modules);
     }
@@ -290,7 +299,10 @@ mod tests {
             code.contains(&format!("_tx{n}_imu_sensor")),
             "tx handle labelled:\n{code}"
         );
-        assert!(code.contains(&format!("_rx{n}_imu_sensor")), "rx handle labelled");
+        assert!(
+            code.contains(&format!("_rx{n}_imu_sensor")),
+            "rx handle labelled"
+        );
 
         // The label persists through the mcu.config round-trip (serde on config).
         let (parsed, _) = crate::panels::mcu_module::mcu_config::parse(&mcu.mcu_config_text());
@@ -307,7 +319,10 @@ mod tests {
         }
         let n = mcu.modules[0].instance();
         let code = mcu.fresh_main_rs();
-        assert!(code.contains(&format!("let _spi{n}_flash =")), "spi handle:\n{code}");
+        assert!(
+            code.contains(&format!("let _spi{n}_flash =")),
+            "spi handle:\n{code}"
+        );
     }
 
     /// Adding GI_SPI twice must advance to SPI2 — not re-pick SPI1 on its
@@ -325,10 +340,16 @@ mod tests {
         assert_eq!(instances, vec![1, 2], "instances must be SPI1 and SPI2");
 
         // No pin is shared between the two modules.
-        let pins0: Vec<usize> =
-            mcu.modules[0].connections.iter().map(|c| c.mcu_pin).collect();
-        let pins1: Vec<usize> =
-            mcu.modules[1].connections.iter().map(|c| c.mcu_pin).collect();
+        let pins0: Vec<usize> = mcu.modules[0]
+            .connections
+            .iter()
+            .map(|c| c.mcu_pin)
+            .collect();
+        let pins1: Vec<usize> = mcu.modules[1]
+            .connections
+            .iter()
+            .map(|c| c.mcu_pin)
+            .collect();
         assert!(pins0.iter().all(|p| !pins1.contains(p)), "no shared pins");
 
         // A 3rd add fails — the F103 has only SPI1/SPI2.
@@ -364,10 +385,22 @@ mod tests {
             cfg.clock_hz = 4_000_000;
         }
         let code = mcu.fresh_main_rs();
-        assert!(code.contains("Polarity::IdleHigh"), "mode 3 polarity:\n{code}");
-        assert!(code.contains("Phase::CaptureOnSecondTransition"), "mode 3 phase");
-        assert!(code.contains("const SPI1_CLOCK_KHZ: u32 = 4000;"), "spi clock const");
-        assert!(code.contains("SPI1_CLOCK_KHZ.kHz()"), "init references the constant");
+        assert!(
+            code.contains("Polarity::IdleHigh"),
+            "mode 3 polarity:\n{code}"
+        );
+        assert!(
+            code.contains("Phase::CaptureOnSecondTransition"),
+            "mode 3 phase"
+        );
+        assert!(
+            code.contains("const SPI1_CLOCK_KHZ: u32 = 4000;"),
+            "spi clock const"
+        );
+        assert!(
+            code.contains("SPI1_CLOCK_KHZ.kHz()"),
+            "init references the constant"
+        );
     }
 
     #[test]
@@ -379,8 +412,14 @@ mod tests {
         }
         let code = mcu.fresh_main_rs();
         assert!(code.contains("I2cMode::Fast"), "fast mode:\n{code}");
-        assert!(code.contains("const I2C1_CLOCK_KHZ: u32 = 400;"), "i2c clock const");
-        assert!(code.contains("I2C1_CLOCK_KHZ.kHz()"), "init references the constant");
+        assert!(
+            code.contains("const I2C1_CLOCK_KHZ: u32 = 400;"),
+            "i2c clock const"
+        );
+        assert!(
+            code.contains("I2C1_CLOCK_KHZ.kHz()"),
+            "init references the constant"
+        );
     }
 
     /// Assigning a peripheral signal pin (as the Peripherals tab does) auto-adds
@@ -417,7 +456,10 @@ mod tests {
         {
             mcu.apply_pin_function(n, PinFunction::Unset);
         }
-        assert!(mcu.modules.is_empty(), "module removed once its pins are cleared");
+        assert!(
+            mcu.modules.is_empty(),
+            "module removed once its pins are cleared"
+        );
     }
 
     /// A chip with no USART pins can't host a GI_USART module.

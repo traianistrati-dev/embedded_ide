@@ -8,6 +8,17 @@ use crate::editor::gui::text_pos::{draw_wavy_underline, lsp_line_end_char_idx, l
 /// for the currently visible code in the editor.
 ///
 /// Called after rendering the code editor but before closing the UI panel.
+/// The rustc error-index URL for a compiler error code like `E0599`, or `None`
+/// for lint names (e.g. `unused_variables`) which have no such page.
+fn rustc_error_doc_url(code: &str) -> Option<String> {
+    let digits = code.strip_prefix('E')?;
+    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+        Some(format!("https://doc.rust-lang.org/error_codes/{code}.html"))
+    } else {
+        None
+    }
+}
+
 pub fn show_diagnostics_overlay(
     ui: &mut egui::Ui,
     galley_pos: egui::Pos2,
@@ -15,6 +26,9 @@ pub fn show_diagnostics_overlay(
     galley: &egui::text::Galley,
     diags: &[LspDiagnostic],
     display_code: &str,
+    // `copy_requested`: true when Ctrl+C was pressed this frame — the hovered
+    // diagnostic copies its message to the clipboard.
+    copy_requested: bool,
 ) {
     if diags.is_empty() {
         return;
@@ -131,7 +145,7 @@ pub fn show_diagnostics_overlay(
             );
         }
 
-        // ── Hover tooltip (full message) ──────────────────────────────────
+        // ── Hover tooltip (full message + docs link) ──────────────────────
         let hover_rect =
             egui::Rect::from_min_max(egui::pos2(sx, sy_top), egui::pos2(ex, sy_bot + 3.0));
         let hover = ui.interact(
@@ -139,32 +153,50 @@ pub fn show_diagnostics_overlay(
             egui::Id::new("inline_diag").with(di),
             egui::Sense::hover(),
         );
-        if hover.hovered() {
-            let icon = match diag.severity {
-                crate::lsp::DiagSeverity::Error => "⛔",
-                crate::lsp::DiagSeverity::Warning => "⚠",
-                crate::lsp::DiagSeverity::Info => "ℹ",
-                crate::lsp::DiagSeverity::Hint => "·",
-            };
-            let msg = format!("{icon}  {}", diag.message);
-            let code = diag.code.clone();
-            #[allow(deprecated)]
-            egui::show_tooltip_at_pointer(
-                ui.ctx(),
-                ui.layer_id(),
-                egui::Id::new("inline_diag_tip").with(di),
-                |ui: &mut egui::Ui| {
-                    ui.set_max_width(420.0);
-                    ui.label(egui::RichText::new(&msg).size(12.0));
-                    if let Some(c) = &code {
+
+        // Ctrl+C while hovering copies the message (overwrites any selection the
+        // editor copied earlier this frame, so the error text wins).
+        if hover.hovered() && copy_requested {
+            ui.ctx().copy_text(diag.message.clone());
+        }
+
+        let icon = match diag.severity {
+            crate::lsp::DiagSeverity::Error => "⛔",
+            crate::lsp::DiagSeverity::Warning => "⚠",
+            crate::lsp::DiagSeverity::Info => "ℹ",
+            crate::lsp::DiagSeverity::Hint => "·",
+        };
+        let msg = format!("{icon}  {}", diag.message);
+        let code = diag.code.clone();
+        // Interactive tooltip — the user can move into it to click the docs link.
+        hover.on_hover_ui(|ui: &mut egui::Ui| {
+            ui.set_max_width(420.0);
+            ui.label(egui::RichText::new(&msg).size(12.0));
+            if let Some(c) = &code {
+                match rustc_error_doc_url(c) {
+                    // Clickable link → opens the rust error index in the browser.
+                    Some(url) => {
+                        ui.hyperlink_to(
+                            egui::RichText::new(format!("[{c}]  open docs ↗"))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(110, 165, 240)),
+                            url,
+                        );
+                    }
+                    None => {
                         ui.label(
                             egui::RichText::new(format!("[{c}]"))
                                 .size(10.5)
                                 .color(egui::Color32::from_rgb(140, 150, 170)),
                         );
                     }
-                },
+                }
+            }
+            ui.label(
+                egui::RichText::new("Ctrl+C to copy")
+                    .size(9.0)
+                    .color(egui::Color32::from_rgb(110, 120, 140)),
             );
-        }
+        });
     }
 }

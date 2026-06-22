@@ -38,6 +38,7 @@ impl AppIde {
         mut display_code: String,
         lsp_accepted: Option<String>,
         ctrl_space_pressed: bool,
+        copy_requested: bool,
     ) {
         // ── LSP completion: post-editor apply + trigger + popup ───────
         let cursor_char_idx = editor_resp
@@ -444,6 +445,7 @@ impl AppIde {
                 &editor_resp.galley,
                 &diags,
                 &display_code,
+                copy_requested,
             );
         }
     }

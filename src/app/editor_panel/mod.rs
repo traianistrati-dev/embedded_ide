@@ -146,6 +146,11 @@ impl AppIde {
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
                 let ctrl_down_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
+                // Ctrl+C state (peeked, not consumed — the editor still copies any
+                // selection). When the pointer is over a diagnostic, the overlay
+                // overwrites the clipboard with the error message instead.
+                let copy_requested =
+                    ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
                 // Ctrl+X → delete the line(s) where the cursor / selection is.
                 // egui (via winit) turns Ctrl+X into an `Event::Cut`, not a
                 // `Key::X` — so consuming the key alone leaves the editor's native
@@ -275,6 +280,7 @@ impl AppIde {
                     display_code,
                     lsp_accepted,
                     ctrl_space_pressed,
+                    copy_requested,
                 );
             });
     }
