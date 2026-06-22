@@ -16,6 +16,7 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 
 mod comment;
 mod completion;
+mod delete_line;
 mod diag_embed;
 mod move_lines;
 mod toolbar;
@@ -145,6 +146,17 @@ impl AppIde {
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
                 let ctrl_down_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
+                // Ctrl+X → delete the line(s) where the cursor / selection is.
+                // egui (via winit) turns Ctrl+X into an `Event::Cut`, not a
+                // `Key::X` — so consuming the key alone leaves the editor's native
+                // cut (which only removes the selection) running. Remove the Cut
+                // event too, then we handle the whole-line delete ourselves.
+                let ctrl_x_pressed = ui.input_mut(|i| {
+                    let had_cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
+                    i.events.retain(|e| !matches!(e, egui::Event::Cut));
+                    let key = i.consume_key(egui::Modifiers::CTRL, egui::Key::X);
+                    had_cut || key
+                });
 
                 // Size the editor to fill the height left over after the
                 // (resizable) diagnostics panel, so dragging that panel's handle
@@ -183,7 +195,8 @@ impl AppIde {
 
                 // ── Editor line operations on the selection ───────────────────
                 // Ctrl+/ toggles line comments (`//` for .rs, `#` for TOML /
-                // .gitignore); Ctrl+Up / Ctrl+Down move the selected lines. Each
+                // .gitignore); Ctrl+Up / Ctrl+Down move the selected lines;
+                // Ctrl+X deletes the line(s) at the cursor/selection. Each
                 // re-selects the affected block so repeated presses keep working.
                 // Applied before the write-back below so the new text persists;
                 // the cursor is stored (on a clone — `store()` consumes the state,
@@ -206,6 +219,8 @@ impl AppIde {
                             Some(move_lines::move_lines(&display_code, lo, hi, false))
                         } else if ctrl_down_pressed {
                             Some(move_lines::move_lines(&display_code, lo, hi, true))
+                        } else if ctrl_x_pressed {
+                            Some(delete_line::delete_lines(&display_code, lo, hi))
                         } else {
                             None
                         }
