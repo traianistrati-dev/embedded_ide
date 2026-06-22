@@ -99,6 +99,29 @@ pub struct CompletionItem {
     pub documentation: String,
 }
 
+/// One text replacement from a `textDocument/rename` WorkspaceEdit. Positions
+/// are 0-based LSP (line, character) ranges. Applied across files to perform a
+/// project-wide rename.
+#[derive(Clone, Debug)]
+pub struct RenameEdit {
+    /// Path relative to the workspace root, e.g. `"src/main.rs"`.
+    pub rel_path: String,
+    pub start_line: u32,
+    pub start_char: u32,
+    pub end_line: u32,
+    pub end_char: u32,
+    pub new_text: String,
+}
+
+/// A `textDocument/definition` target: the file + 0-based position RA points to.
+#[derive(Clone, Debug)]
+pub struct DefinitionLoc {
+    /// Absolute filesystem path (decoded from the `file://` URI).
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LspStatus {
     #[default]
@@ -168,6 +191,19 @@ pub struct LspState {
     next_req_id:           u64,
     /// When the last completion request was sent (for spinner timeout).
     pub completion_request_sent_at: Option<std::time::Instant>,
+    /// The request id of the pending `textDocument/rename`, if any.
+    rename_req_id:          Option<u64>,
+    /// Set when a rename response (success OR error) arrives; the app then
+    /// applies `rename_edits` and clears this.
+    pub rename_response_received: bool,
+    /// The edits returned by the last rename (empty on error / no-op).
+    pub rename_edits:       Vec<RenameEdit>,
+    /// The request id of the pending `textDocument/definition`, if any.
+    definition_req_id:      Option<u64>,
+    /// Set when a definition response arrives; consumed by the app.
+    pub definition_response_received: bool,
+    /// The definition target from the last F12, if any.
+    pub definition_result:  Option<DefinitionLoc>,
 }
 
 impl Default for LspState {
@@ -186,6 +222,12 @@ impl Default for LspState {
             completion_req_id: None,
             next_req_id:       1,
             completion_request_sent_at: None,
+            rename_req_id:      None,
+            rename_response_received: false,
+            rename_edits:       Vec::new(),
+            definition_req_id:  None,
+            definition_response_received: false,
+            definition_result:  None,
         }
     }
 }
@@ -319,6 +361,84 @@ impl LspState {
         }).to_string());
     }
 
+    /// Request a project-wide rename of the symbol at `(line, character)` in
+    /// `rel_path` to `new_name` (`textDocument/rename`). The result arrives
+    /// asynchronously; poll [`take_rename_result`].
+    pub fn request_rename(&mut self, rel_path: &str, line: u32, character: u32, new_name: &str) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.rename_req_id = Some(id);
+        self.rename_response_received = false;
+        self.rename_edits.clear();
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                    "newName":  new_name,
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the rename edits once RA has responded, clearing the pending state.
+    /// Returns `None` while no response is ready (and `Some(vec![])` for a
+    /// no-op / failed rename, so the caller can stop waiting).
+    pub fn take_rename_result(&mut self) -> Option<Vec<RenameEdit>> {
+        if self.rename_response_received {
+            self.rename_response_received = false;
+            Some(std::mem::take(&mut self.rename_edits))
+        } else {
+            None
+        }
+    }
+
+    /// Request the definition of the symbol at `(line, character)` in `rel_path`
+    /// (`textDocument/definition`). Result arrives async; poll
+    /// [`take_definition_result`].
+    pub fn request_definition(&mut self, rel_path: &str, line: u32, character: u32) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.definition_req_id = Some(id);
+        self.definition_response_received = false;
+        self.definition_result = None;
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the definition result once RA responded. `Some(Some(loc))` = found,
+    /// `Some(None)` = no definition (stop waiting), `None` = not ready yet.
+    pub fn take_definition_result(&mut self) -> Option<Option<DefinitionLoc>> {
+        if self.definition_response_received {
+            self.definition_response_received = false;
+            Some(self.definition_result.take())
+        } else {
+            None
+        }
+    }
+
     // ── Diagnostic helpers ────────────────────────────────────────────────────
 
     pub fn error_count_for(&self, path: &str) -> usize {
@@ -365,6 +485,12 @@ impl LspState {
         self.checking      = false;
         self.completion_items.clear();
         self.completion_req_id = None;
+        self.rename_req_id = None;
+        self.rename_response_received = false;
+        self.rename_edits.clear();
+        self.definition_req_id = None;
+        self.definition_response_received = false;
+        self.definition_result = None;
     }
 }
 
@@ -747,7 +873,22 @@ fn handle_incoming(
         {
             if let Some(req_id) = msg["id"].as_u64() {
                 let mut s = state.lock().unwrap();
-                if s.generation == my_gen && s.completion_req_id == Some(req_id) {
+                if s.generation != my_gen {
+                    return;
+                }
+                // Rename response (a WorkspaceEdit) — must be checked before the
+                // completion branch since both are id-keyed result messages.
+                if s.rename_req_id == Some(req_id) {
+                    s.rename_req_id = None;
+                    s.rename_edits = parse_workspace_edit(&msg["result"], root_uri);
+                    s.rename_response_received = true;
+                    ctx.request_repaint();
+                } else if s.definition_req_id == Some(req_id) {
+                    s.definition_req_id = None;
+                    s.definition_result = parse_definition(&msg["result"]);
+                    s.definition_response_received = true;
+                    ctx.request_repaint();
+                } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
                     s.completion_response_received = true;
                     let result = &msg["result"];
@@ -779,7 +920,19 @@ fn handle_incoming(
         {
             if let Some(req_id) = msg["id"].as_u64() {
                 let mut s = state.lock().unwrap();
-                if s.generation == my_gen && s.completion_req_id == Some(req_id) {
+                if s.generation != my_gen {
+                    return;
+                }
+                if s.rename_req_id == Some(req_id) {
+                    // Rename failed / not allowed → empty edits, stop waiting.
+                    s.rename_req_id = None;
+                    s.rename_response_received = true;
+                    ctx.request_repaint();
+                } else if s.definition_req_id == Some(req_id) {
+                    s.definition_req_id = None;
+                    s.definition_response_received = true; // no result, stop waiting
+                    ctx.request_repaint();
+                } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
                     s.completion_response_received = true;
                     // completion_items stays empty — App will close the popup.
@@ -868,6 +1021,114 @@ fn uri_to_rel(uri: &str, root_uri: &str) -> String {
     // Nothing matched — return the full URI as-is; the diags_for_main_rs
     // helper in app.rs will still find it by suffix matching.
     uri.to_owned()
+}
+
+/// Parse a `textDocument/rename` result (a WorkspaceEdit) into flat edits.
+/// Handles both `documentChanges` (RA's default) and the older `changes` map.
+fn parse_workspace_edit(result: &serde_json::Value, root_uri: &str) -> Vec<RenameEdit> {
+    let mut out = Vec::new();
+    if let Some(dcs) = result["documentChanges"].as_array() {
+        for dc in dcs {
+            // Skip rename/create/delete file ops (they have a "kind"); we only
+            // apply text edits to existing documents.
+            let uri = dc["textDocument"]["uri"].as_str().unwrap_or("");
+            if uri.is_empty() {
+                continue;
+            }
+            let rel = uri_to_rel(uri, root_uri);
+            if let Some(edits) = dc["edits"].as_array() {
+                out.extend(edits.iter().filter_map(|e| parse_text_edit(e, &rel)));
+            }
+        }
+    } else if let Some(changes) = result["changes"].as_object() {
+        for (uri, edits) in changes {
+            let rel = uri_to_rel(uri, root_uri);
+            if let Some(arr) = edits.as_array() {
+                out.extend(arr.iter().filter_map(|e| parse_text_edit(e, &rel)));
+            }
+        }
+    }
+    out
+}
+
+/// Parse a `textDocument/definition` result (Location / Location[] / LocationLink[])
+/// into a single target — the first location.
+fn parse_definition(result: &serde_json::Value) -> Option<DefinitionLoc> {
+    let loc = if result.is_array() {
+        result.as_array()?.first()?
+    } else if result.is_object() {
+        result
+    } else {
+        return None;
+    };
+    // Location { uri, range } | LocationLink { targetUri, targetSelectionRange }
+    let (uri, range) = if let Some(u) = loc["uri"].as_str() {
+        (u, &loc["range"])
+    } else if let Some(u) = loc["targetUri"].as_str() {
+        let r = if loc["targetSelectionRange"].is_object() {
+            &loc["targetSelectionRange"]
+        } else {
+            &loc["targetRange"]
+        };
+        (u, r)
+    } else {
+        return None;
+    };
+    Some(DefinitionLoc {
+        path: uri_to_path(uri),
+        line: range["start"]["line"].as_u64()? as u32,
+        character: range["start"]["character"].as_u64().unwrap_or(0) as u32,
+    })
+}
+
+/// Decode a `file://` URI to a filesystem path (with minimal `%XX` decoding).
+fn uri_to_path(uri: &str) -> String {
+    let mut p = uri.strip_prefix("file://").unwrap_or(uri).to_owned();
+    // Percent-decode common sequences (spaces etc.) without a full URL crate.
+    if p.contains('%') {
+        p = percent_decode(&p);
+    }
+    #[cfg(windows)]
+    {
+        // file:///C:/foo → /C:/foo → C:/foo, then backslashes.
+        let stripped = p.strip_prefix('/').unwrap_or(&p);
+        stripped.replace('/', "\\")
+    }
+    #[cfg(not(windows))]
+    {
+        p
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_text_edit(e: &serde_json::Value, rel: &str) -> Option<RenameEdit> {
+    let s = &e["range"]["start"];
+    let en = &e["range"]["end"];
+    Some(RenameEdit {
+        rel_path: rel.to_owned(),
+        start_line: s["line"].as_u64()? as u32,
+        start_char: s["character"].as_u64()? as u32,
+        end_line: en["line"].as_u64()? as u32,
+        end_char: en["character"].as_u64()? as u32,
+        new_text: e["newText"].as_str().unwrap_or("").to_owned(),
+    })
 }
 
 fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {

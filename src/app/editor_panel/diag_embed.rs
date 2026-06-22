@@ -4,6 +4,7 @@
 //! activity.  Pure self-state; independent of the edited text.
 
 use crate::app::AppIde;
+use crate::app::BuildPanelTab;
 use crate::app::diag_panel::show_diag_panel;
 use crate::build::BuildState;
 use crate::dfu::DfuState;
@@ -24,7 +25,7 @@ impl AppIde {
             || !matches!(*self.openocd_state.lock().unwrap(), OpenOcdState::Idle)
             || !matches!(*self.espflash_state.lock().unwrap(), EspFlashState::Idle)
             || !self.dfu_log.lock().unwrap().is_empty();
-        let show_panel = cargo_has || lsp_active || dfu_active;
+        let show_panel = cargo_has || lsp_active || dfu_active || self.definition_view.is_some();
 
         if !show_panel {
             return None;
@@ -39,6 +40,7 @@ impl AppIde {
         // Panel::bottom takes space from the bottom of the remaining area
         // before the editor is laid out. exact_size gives us full control —
         // no egui-internal default that would reset on show/hide.
+        let mut def_close = false;
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
@@ -83,6 +85,10 @@ impl AppIde {
 
                     // ── Content ────────────────────────────────
                     let toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
+                    let definition = self
+                        .definition_view
+                        .as_ref()
+                        .map(|d| (d.header.as_str(), d.code.as_str()));
                     show_diag_panel(
                         ui,
                         &self.egui_ctx,
@@ -103,8 +109,17 @@ impl AppIde {
                         &mut self.selected_diagnostic,
                         &mut self.lsp_selected_diagnostic,
                         &mut self.selected_file,
+                        definition,
+                        &mut def_close,
                     );
                 });
+        // Closing the Definition tab clears the snippet and switches away.
+        if def_close {
+            self.definition_view = None;
+            if self.build_tab == BuildPanelTab::Definition {
+                self.build_tab = BuildPanelTab::RustAnalyzer;
+            }
+        }
         Some(panel.response.rect.top())
     }
 }

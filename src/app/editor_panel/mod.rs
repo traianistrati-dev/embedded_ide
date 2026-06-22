@@ -20,6 +20,7 @@ mod delete_line;
 mod diag_embed;
 mod format;
 mod move_lines;
+mod rename;
 mod toolbar;
 
 impl AppIde {
@@ -167,6 +168,12 @@ impl AppIde {
                 let ctrl_shift_f_pressed = ui.input_mut(|i| {
                     i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::F)
                 });
+                // Ctrl+R → rename the symbol at the cursor project-wide.
+                let ctrl_r_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R));
+                // F12 → show the definition of the symbol at the cursor.
+                let f12_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
 
                 // Size the editor to fill the height left over after the
                 // (resizable) diagnostics panel, so dragging that panel's handle
@@ -290,7 +297,12 @@ impl AppIde {
                     lsp_accepted,
                     ctrl_space_pressed,
                     copy_requested,
+                    ctrl_r_pressed,
+                    f12_pressed,
                 );
+                // Rename input popup (shown while active; sends the request on
+                // submit). Rendered after the editor so it overlays the code.
+                self.show_rename_popup(ui);
             });
     }
 }

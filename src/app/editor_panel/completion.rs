@@ -39,6 +39,8 @@ impl AppIde {
         lsp_accepted: Option<String>,
         ctrl_space_pressed: bool,
         copy_requested: bool,
+        ctrl_r_pressed: bool,
+        f12_pressed: bool,
     ) {
         // ── LSP completion: post-editor apply + trigger + popup ───────
         let cursor_char_idx = editor_resp
@@ -163,6 +165,51 @@ impl AppIde {
                         self.completion_open = false;
                     }
                 }
+            }
+        }
+
+        // ── Rename (Ctrl+R): capture the symbol + open the rename popup ──
+        if ctrl_r_pressed && lsp_file_tracked {
+            if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
+                let word = super::rename::identifier_at(&display_code, idx);
+                if !word.is_empty() {
+                    let (line, col) = lsp_cursor_pos(&display_code, idx);
+                    self.rename_active = true;
+                    self.rename_focus = true;
+                    self.rename_input = word;
+                    self.rename_rel = rel;
+                    self.rename_line = line;
+                    self.rename_char = col;
+                    // Anchor the popup just below the cursor.
+                    self.rename_popup_pos = editor_resp
+                        .state
+                        .cursor
+                        .char_range()
+                        .map(|cr| {
+                            let clamped = cr.primary.index.min(
+                                editor_resp.galley.job.text.chars().count().saturating_sub(1),
+                            );
+                            let local = editor_resp
+                                .galley
+                                .pos_from_cursor(egui::text::CCursor::new(clamped));
+                            editor_resp.response.rect.left_top()
+                                + local.min.to_vec2()
+                                + egui::vec2(0.0, local.height() + 4.0)
+                        })
+                        .unwrap_or_else(|| editor_resp.response.rect.left_top());
+                }
+            }
+        }
+
+        // ── F12 go to definition: request; result shown in the Definition tab ──
+        if f12_pressed && lsp_file_tracked {
+            if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
+                let (line, col) = lsp_cursor_pos(&display_code, idx);
+                let mut lsp = self.lsp_state.lock().unwrap();
+                lsp.did_change(&rel, &display_code, false);
+                lsp.request_definition(&rel, line, col);
+                drop(lsp);
+                self.definition_in_flight = true;
             }
         }
 

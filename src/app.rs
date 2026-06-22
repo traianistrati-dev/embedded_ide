@@ -128,6 +128,17 @@ enum BuildPanelTab {
     Cargo,
     Dfu,
     RequiredTools,
+    /// F12 "Go to definition" result. Only selectable while `definition_view` is
+    /// set (the tab is hidden otherwise).
+    Definition,
+}
+
+/// The source snippet shown in the F12 "Definition" bottom tab.
+struct DefinitionView {
+    /// Header line, e.g. `src/pins/utils/i2c1.rs  (line 42)`.
+    header: String,
+    /// The code snippet around the definition.
+    code: String,
 }
 
 // ── Persisted project state ───────────────────────────────────────────────────
@@ -139,6 +150,73 @@ const STORAGE_KEY: &str = "embedded_ide_project_v1";
 /// How long editing must pause before rust-analyzer is asked to re-verify
 /// (diagnostics / cargo-check). A Project Save flushes immediately regardless.
 const LSP_IDLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Byte offset in `text` of the 0-based LSP position `(line, character)`.
+/// Character is treated as a char count (correct for ASCII identifiers), clamped
+/// to the line's end.
+fn lsp_pos_to_byte(text: &str, line: u32, character: u32) -> usize {
+    let mut offset = 0usize;
+    for (li, l) in text.split_inclusive('\n').enumerate() {
+        if li as u32 == line {
+            let mut c = 0u32;
+            for (b, _) in l.char_indices() {
+                if c == character {
+                    return offset + b;
+                }
+                c += 1;
+            }
+            return offset + l.trim_end_matches('\n').len(); // char beyond EOL
+        }
+        offset += l.len();
+    }
+    text.len()
+}
+
+/// Read the file a definition points to and build the snippet shown in the
+/// "Definition" tab (a window of lines around the target). `None` if unreadable.
+fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
+    let content = std::fs::read_to_string(&loc.path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let target = (loc.line as usize).min(lines.len() - 1);
+    let from = target.saturating_sub(2); // a little context above
+    let to = (target + 150).min(lines.len());
+    let code = lines[from..to].join("\n");
+    Some(DefinitionView {
+        header: format!("{}  (line {})", short_path(&loc.path), loc.line + 1),
+        code,
+    })
+}
+
+/// Shorten a definition path for the tab header: the `src/…` tail when present,
+/// else the bare file name.
+fn short_path(path: &str) -> String {
+    let norm = path.replace('\\', "/");
+    if let Some(i) = norm.rfind("/src/") {
+        norm[i + 1..].to_string()
+    } else {
+        norm.rsplit('/').next().unwrap_or(&norm).to_string()
+    }
+}
+
+/// Apply LSP text edits to `text`. Edits are non-overlapping; applying them
+/// back-to-front (by start position) keeps earlier offsets valid.
+fn apply_text_edits(text: &str, mut edits: Vec<lsp::RenameEdit>) -> String {
+    edits.sort_by(|a, b| {
+        (b.start_line, b.start_char).cmp(&(a.start_line, a.start_char))
+    });
+    let mut s = text.to_owned();
+    for e in edits {
+        let start = lsp_pos_to_byte(&s, e.start_line, e.start_char);
+        let end = lsp_pos_to_byte(&s, e.end_line, e.end_char);
+        if start <= end && end <= s.len() {
+            s.replace_range(start..end, &e.new_text);
+        }
+    }
+    s
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedState {
@@ -246,6 +324,26 @@ pub struct AppIde {
     lsp_last_edit: Option<std::time::Instant>,
     /// Set by a Project Save to flush pending changes to RA immediately.
     lsp_flush_requested: bool,
+    // ── Rename symbol (Ctrl+R → textDocument/rename) ─────────────────────────
+    /// While `true`, the rename input popup is shown.
+    rename_active: bool,
+    /// The new name being typed in the rename popup (pre-filled with the symbol).
+    rename_input: String,
+    /// File + 0-based (line, char) where the rename was triggered.
+    rename_rel: String,
+    rename_line: u32,
+    rename_char: u32,
+    /// Screen position to anchor the rename popup at.
+    rename_popup_pos: egui::Pos2,
+    /// `true` after a rename request was sent, until RA's edits are applied.
+    rename_in_flight: bool,
+    /// Request keyboard focus for the rename input on the frame it opens.
+    rename_focus: bool,
+    // ── Go to definition (F12 → textDocument/definition) ─────────────────────
+    /// `true` after an F12 request, until the definition arrives.
+    definition_in_flight: bool,
+    /// The fetched definition snippet — its presence shows the "Definition" tab.
+    definition_view: Option<DefinitionView>,
     /// Which tab is active in the bottom diagnostics panel
     build_tab: BuildPanelTab,
     /// Index of the RA diagnostic row that is expanded
@@ -416,6 +514,16 @@ impl AppIde {
             lsp_synced_hash: 0,
             lsp_last_edit: None,
             lsp_flush_requested: false,
+            rename_active: false,
+            rename_input: String::new(),
+            rename_rel: String::new(),
+            rename_line: 0,
+            rename_char: 0,
+            rename_popup_pos: egui::Pos2::ZERO,
+            rename_in_flight: false,
+            rename_focus: false,
+            definition_in_flight: false,
+            definition_view: None,
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
@@ -612,6 +720,53 @@ impl AppIde {
             }
             _ => {}
         }
+
+        // ── Apply a completed rename (textDocument/rename) across files ───────
+        if self.rename_in_flight {
+            let result = self.lsp_state.lock().unwrap().take_rename_result();
+            if let Some(edits) = result {
+                self.rename_in_flight = false;
+                if !edits.is_empty() {
+                    self.apply_rename_edits(edits);
+                }
+                self.egui_ctx.request_repaint();
+            }
+        }
+
+        // ── Show a completed F12 go-to-definition in the Definition tab ───────
+        if self.definition_in_flight {
+            let result = self.lsp_state.lock().unwrap().take_definition_result();
+            if let Some(loc) = result {
+                self.definition_in_flight = false;
+                if let Some(loc) = loc.and_then(|l| build_definition_view(&l)) {
+                    self.definition_view = Some(loc);
+                    self.build_tab = BuildPanelTab::Definition;
+                }
+                self.egui_ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Apply rename edits returned by rust-analyzer to the in-memory files
+    /// (main.rs + user source files). Per file, edits are applied back-to-front
+    /// so earlier positions stay valid; the debounce then re-syncs RA.
+    fn apply_rename_edits(&mut self, edits: Vec<lsp::RenameEdit>) {
+        use std::collections::HashMap;
+        let mut by_file: HashMap<String, Vec<lsp::RenameEdit>> = HashMap::new();
+        for e in edits {
+            by_file.entry(e.rel_path.clone()).or_default().push(e);
+        }
+        for (rel, es) in by_file {
+            if rel == "src/main.rs" {
+                self.generated_code = apply_text_edits(&self.generated_code, es);
+            } else if let Some(sub) = rel.strip_prefix("src/") {
+                if let Some(entry) =
+                    self.project_tree.user_src_files.iter_mut().find(|(p, _)| p == sub)
+                {
+                    entry.1 = apply_text_edits(&entry.1, es);
+                }
+            }
+        }
     }
 
     /// Hash of the LSP-relevant content (main.rs + every user source file), used
@@ -793,5 +948,53 @@ impl eframe::App for AppIde {
 
         // ── Panel 3: MCU Configurator ─────
         self.show_mcu_panel(ui);
+    }
+}
+
+#[cfg(test)]
+mod rename_apply_tests {
+    use super::{apply_text_edits, lsp_pos_to_byte};
+    use crate::lsp::RenameEdit;
+
+    fn edit(sl: u32, sc: u32, el: u32, ec: u32, t: &str) -> RenameEdit {
+        RenameEdit {
+            rel_path: "src/main.rs".into(),
+            start_line: sl,
+            start_char: sc,
+            end_line: el,
+            end_char: ec,
+            new_text: t.into(),
+        }
+    }
+
+    #[test]
+    fn applies_multiple_edits_same_line() {
+        let text = "let foo = foo + 1;";
+        let edits = vec![edit(0, 4, 0, 7, "bar"), edit(0, 10, 0, 13, "bar")];
+        assert_eq!(apply_text_edits(text, edits), "let bar = bar + 1;");
+    }
+
+    #[test]
+    fn applies_edits_across_lines_with_length_change() {
+        let text = "fn foo() {}\nfoo();\n";
+        let edits = vec![edit(0, 3, 0, 6, "longer"), edit(1, 0, 1, 3, "longer")];
+        assert_eq!(apply_text_edits(text, edits), "fn longer() {}\nlonger();\n");
+    }
+
+    #[test]
+    fn pos_to_byte_maps_line_and_char() {
+        let text = "ab\ncd";
+        assert_eq!(lsp_pos_to_byte(text, 0, 0), 0);
+        assert_eq!(lsp_pos_to_byte(text, 0, 2), 2);
+        assert_eq!(lsp_pos_to_byte(text, 1, 0), 3);
+        assert_eq!(lsp_pos_to_byte(text, 1, 2), 5);
+    }
+
+    #[test]
+    fn short_path_keeps_src_tail_or_filename() {
+        use super::short_path;
+        assert_eq!(short_path("C:/x/proj/src/pins/utils/i2c1.rs"), "src/pins/utils/i2c1.rs");
+        assert_eq!(short_path(r"C:\x\proj\src\main.rs"), "src/main.rs");
+        assert_eq!(short_path("/home/u/.cargo/.../esp-hal/lib.rs"), "lib.rs");
     }
 }

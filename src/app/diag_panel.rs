@@ -37,6 +37,10 @@ pub(super) fn show_diag_panel(
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
     selected_file: &mut ProjectFileId,
+    // `definition`: the F12 snippet (header, code); the "Definition" tab is shown
+    // only when this is Some. `definition_close`: set true when the user closes it.
+    definition: Option<(&str, &str)>,
+    definition_close: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -202,6 +206,32 @@ pub(super) fn show_diag_panel(
                 *tab = BuildPanelTab::RequiredTools;
             }
         }
+
+        // Definition tab (F12) — only present while there is a definition to show.
+        if definition.is_some() {
+            ui.separator();
+            let active = *tab == BuildPanelTab::Definition;
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new("Definition").size(11.0).color(
+                    if active {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(120, 180, 240)
+                    },
+                ))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Definition;
+            }
+            if ui
+                .add(egui::Button::new(egui::RichText::new("✕").size(10.0)).frame(false))
+                .on_hover_text("Close definition")
+                .clicked()
+            {
+                *definition_close = true;
+            }
+        }
     });
 
     ui.separator();
@@ -231,6 +261,29 @@ pub(super) fn show_diag_panel(
         }
         BuildPanelTab::RequiredTools => {
             show_tools_tab(ui, tools_state, ctx);
+        }
+        BuildPanelTab::Definition => {
+            if let Some((header, code)) = definition {
+                ui.label(
+                    egui::RichText::new(header)
+                        .size(11.0)
+                        .monospace()
+                        .color(egui::Color32::from_rgb(150, 190, 240)),
+                );
+                ui.separator();
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(code).monospace().size(12.0))
+                            .selectable(true),
+                    );
+                });
+            } else {
+                ui.label(
+                    egui::RichText::new("No definition.")
+                        .color(egui::Color32::GRAY),
+                );
+            }
         }
     }
 }
