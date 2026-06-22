@@ -154,10 +154,14 @@ pub fn show_diagnostics_overlay(
             egui::Sense::hover(),
         );
 
-        // Ctrl+C while hovering copies the message (overwrites any selection the
-        // editor copied earlier this frame, so the error text wins).
+        // Ctrl+C while hovering copies the message + the error code (overwrites
+        // any selection the editor copied earlier this frame, so the error wins).
         if hover.hovered() && copy_requested {
-            ui.ctx().copy_text(diag.message.clone());
+            let text = match &diag.code {
+                Some(c) => format!("{} [{c}]", diag.message),
+                None => diag.message.clone(),
+            };
+            ui.ctx().copy_text(text);
         }
 
         let icon = match diag.severity {
