@@ -37,9 +37,10 @@ pub(super) fn show_diag_panel(
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
     selected_file: &mut ProjectFileId,
-    // `definition`: the F12 snippet (header, code); the "Definition" tab is shown
-    // only when this is Some. `definition_close`: set true when the user closes it.
-    definition: Option<(&str, &str)>,
+    // `definition`: the F12 snippet (header, code, highlight-line-index); the
+    // "Definition" tab is shown only when this is Some. `definition_close`: set
+    // true when the user closes it.
+    definition: Option<(&str, &str, usize)>,
     definition_close: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
@@ -263,7 +264,7 @@ pub(super) fn show_diag_panel(
             show_tools_tab(ui, tools_state, ctx);
         }
         BuildPanelTab::Definition => {
-            if let Some((header, code)) = definition {
+            if let Some((header, code, highlight)) = definition {
                 ui.label(
                     egui::RichText::new(header)
                         .size(11.0)
@@ -271,12 +272,34 @@ pub(super) fn show_diag_panel(
                         .color(egui::Color32::from_rgb(150, 190, 240)),
                 );
                 ui.separator();
+                // The definition line is drawn coloured with a subtle highlight
+                // band so it stands out from the surrounding (white) code.
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(code).monospace().size(12.0))
-                            .selectable(true),
-                    );
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    for (i, line) in code.lines().enumerate() {
+                        let shown = if line.is_empty() { " " } else { line };
+                        if i == highlight {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(shown)
+                                        .monospace()
+                                        .size(12.0)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(255, 214, 90))
+                                        .background_color(egui::Color32::from_rgb(64, 58, 30)),
+                                )
+                                .selectable(true),
+                            );
+                        } else {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(shown).monospace().size(12.0),
+                                )
+                                .selectable(true),
+                            );
+                        }
+                    }
                 });
             } else {
                 ui.label(

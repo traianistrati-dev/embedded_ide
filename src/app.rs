@@ -139,6 +139,9 @@ struct DefinitionView {
     header: String,
     /// The code snippet around the definition.
     code: String,
+    /// 0-based index (within `code`'s lines) of the definition line, drawn
+    /// coloured so it stands out from the rest.
+    highlight: usize,
 }
 
 // ── Persisted project state ───────────────────────────────────────────────────
@@ -187,6 +190,7 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
     Some(DefinitionView {
         header: format!("{}  (line {})", short_path(&loc.path), loc.line + 1),
         code,
+        highlight: target - from, // the def line's index within the snippet
     })
 }
 

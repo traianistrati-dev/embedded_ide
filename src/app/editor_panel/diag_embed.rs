@@ -88,7 +88,7 @@ impl AppIde {
                     let definition = self
                         .definition_view
                         .as_ref()
-                        .map(|d| (d.header.as_str(), d.code.as_str()));
+                        .map(|d| (d.header.as_str(), d.code.as_str(), d.highlight));
                     show_diag_panel(
                         ui,
                         &self.egui_ctx,
