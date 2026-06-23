@@ -19,6 +19,7 @@ mod comment;
 mod completion;
 mod context_menu;
 mod delete_line;
+mod duplicate_line;
 mod diag_embed;
 mod format;
 mod move_lines;
@@ -198,6 +199,9 @@ impl AppIde {
                     let key = i.consume_key(egui::Modifiers::CTRL, egui::Key::X);
                     had_cut || key
                 });
+                // Ctrl+D → duplicate the line(s) at the cursor / selection.
+                let mut ctrl_d_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::D));
                 // Ctrl+Shift+F → re-indent the whole file by block nesting.
                 let mut ctrl_shift_f_pressed = ui.input_mut(|i| {
                     i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::F)
@@ -276,6 +280,7 @@ impl AppIde {
                     use context_menu::EditorAction as A;
                     match menu_action {
                         Some(A::DeleteLine) => ctrl_x_pressed = true,
+                        Some(A::DuplicateLine) => ctrl_d_pressed = true,
                         Some(A::Comment) => ctrl_slash_pressed = true,
                         Some(A::MoveUp) => ctrl_up_pressed = true,
                         Some(A::MoveDown) => ctrl_down_pressed = true,
@@ -340,6 +345,8 @@ impl AppIde {
                             Some(move_lines::move_lines(&display_code, lo, hi, true))
                         } else if ctrl_x_pressed {
                             Some(delete_line::delete_lines(&display_code, lo, hi))
+                        } else if ctrl_d_pressed {
+                            Some(duplicate_line::duplicate_lines(&display_code, lo, hi))
                         } else if ctrl_shift_f_pressed {
                             let (new, c) = format::format_code(&display_code, lo);
                             Some((new, c, c))
