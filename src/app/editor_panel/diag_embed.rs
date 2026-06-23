@@ -41,6 +41,8 @@ impl AppIde {
         // before the editor is laid out. exact_size gives us full control —
         // no egui-internal default that would reset on show/hide.
         let mut def_close = false;
+        // Diagnostic-row click navigation: (rel_path, 1-based line).
+        let mut nav: Option<(String, usize)> = None;
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
@@ -108,7 +110,7 @@ impl AppIde {
                         &mut self.build_tab,
                         &mut self.selected_diagnostic,
                         &mut self.lsp_selected_diagnostic,
-                        &mut self.selected_file,
+                        &mut nav,
                         definition,
                         &mut def_close,
                     );
@@ -118,6 +120,16 @@ impl AppIde {
             self.definition_view = None;
             if self.build_tab == BuildPanelTab::Definition {
                 self.build_tab = BuildPanelTab::RustAnalyzer;
+            }
+        }
+        // A diagnostic row was clicked: open its file (incl. user `src/` files)
+        // and queue the scroll-to-line, applied once the editor shows that file.
+        if let Some((path, line)) = nav {
+            if let Some(id) =
+                crate::app::resolve_diag_file(&path, &self.project_tree.user_src_files)
+            {
+                self.selected_file = id;
+                self.pending_scroll_to_line = Some((id, line));
             }
         }
         Some(panel.response.rect.top())

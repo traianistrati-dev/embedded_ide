@@ -98,6 +98,25 @@ impl ProjectFileId {
     }
 }
 
+/// Resolve a diagnostic's project-relative path (as reported by rustc /
+/// rust-analyzer) to the editor file it should open — including user source
+/// files under `src/`. `user_files` is `(name, content)` where `name` is the
+/// path below `src/` (e.g. `pins.rs`).
+pub fn resolve_diag_file(path: &str, user_files: &[(String, String)]) -> Option<ProjectFileId> {
+    match path {
+        "src/main.rs" => Some(ProjectFileId::MainRs),
+        "build.rs" => Some(ProjectFileId::BuildRs),
+        "Cargo.toml" => Some(ProjectFileId::CargoToml),
+        "memory.x" => Some(ProjectFileId::MemoryX),
+        ".cargo/config.toml" => Some(ProjectFileId::CargoConfig),
+        ".gitignore" => Some(ProjectFileId::GitIgnore),
+        _ => user_files
+            .iter()
+            .position(|(name, _)| path == format!("src/{name}") || path == name)
+            .map(ProjectFileId::UserFile),
+    }
+}
+
 // ── Tab bar ──────────────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -321,6 +340,10 @@ pub struct AppIde {
     /// editor so the caret stays in view when it moves off-screen (e.g.
     /// Shift+Up/Down selection past the visible area).
     last_caret_idx: Option<usize>,
+    /// Pending "jump to this diagnostic": the target file and its 1-based line.
+    /// Set when a row in the Cargo Check / rust-analyzer tab is clicked; applied
+    /// once the editor is displaying that file (scrolls the line to row ~10).
+    pending_scroll_to_line: Option<(ProjectFileId, usize)>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -530,6 +553,7 @@ impl AppIde {
             completion_filtered_items: Vec::new(),
             cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
             last_caret_idx: None,
+            pending_scroll_to_line: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_prev_hash: 0,
             lsp_synced_hash: 0,

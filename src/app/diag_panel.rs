@@ -4,7 +4,7 @@
 //! dispatches to the per-tab render functions in `super::tabs`.
 
 use super::tabs::{show_cargo_tab, show_dfu_tab, show_ra_tab, show_tools_tab};
-use super::{BuildPanelTab, ProjectFileId};
+use super::BuildPanelTab;
 use crate::build::BuildState;
 use crate::dfu::{self, DfuState};
 use crate::espflash::EspFlashState;
@@ -36,7 +36,9 @@ pub(super) fn show_diag_panel(
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
-    selected_file: &mut ProjectFileId,
+    // Diagnostic-row click target: `(rel_path, 1-based line)`; the editor opens
+    // the file and scrolls to the line.
+    nav: &mut Option<(String, usize)>,
     // `definition`: the F12 snippet (header, code, highlight-line-index); the
     // "Definition" tab is shown only when this is Some. `definition_close`: set
     // true when the user closes it.
@@ -240,10 +242,10 @@ pub(super) fn show_diag_panel(
     // ── Tab content ───────────────────────────────────────────────────────────
     match tab {
         BuildPanelTab::Cargo => {
-            show_cargo_tab(ui, ctx, build_state, cargo_sel, selected_file);
+            show_cargo_tab(ui, ctx, build_state, cargo_sel, nav);
         }
         BuildPanelTab::RustAnalyzer => {
-            show_ra_tab(ui, lsp_state, lsp_sel, selected_file);
+            show_ra_tab(ui, lsp_state, lsp_sel, nav);
         }
         BuildPanelTab::Dfu => {
             show_dfu_tab(

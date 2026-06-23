@@ -3,14 +3,15 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
 use crate::build::{self, BuildState};
-use crate::app::ProjectFileId;
 
 pub fn show_cargo_tab(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
     build_state: &Arc<Mutex<BuildState>>,
     selected_diagnostic: &mut Option<usize>,
-    selected_file: &mut ProjectFileId,
+    // Set to `(rel_path, 1-based line)` when a row is expanded, so the editor
+    // opens that file and scrolls to the line.
+    nav: &mut Option<(String, usize)>,
 ) {
     let state = build_state.lock().unwrap().clone();
     let workspace = std::env::temp_dir().join("embedded_ide_0_check");
@@ -301,18 +302,13 @@ pub fn show_cargo_tab(
                 }
 
                 if resp.clicked() {
-                    *selected_diagnostic = if is_sel { None } else { Some(i) };
-
-                    // Navigate to the file if possible
-                    if let Some(file) = &diag.file {
-                        let target = match file.as_str() {
-                            "src/main.rs" => Some(ProjectFileId::MainRs),
-                            "build.rs" => Some(ProjectFileId::BuildRs),
-                            "Cargo.toml" => Some(ProjectFileId::CargoToml),
-                            _ => None,
-                        };
-                        if let Some(id) = target {
-                            *selected_file = id;
+                    let now_selected = !is_sel;
+                    *selected_diagnostic = if now_selected { Some(i) } else { None };
+                    // On expand, ask the editor to open this file and scroll to
+                    // the diagnostic line (resolved in `diag_embed`).
+                    if now_selected {
+                        if let (Some(file), Some(line)) = (&diag.file, diag.line) {
+                            *nav = Some((file.clone(), line as usize));
                         }
                     }
                 }

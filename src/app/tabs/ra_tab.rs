@@ -2,14 +2,15 @@
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
-use crate::lsp::{self, LspStatus};
-use crate::app::ProjectFileId;
+use crate::lsp;
 
 pub fn show_ra_tab(
     ui: &mut egui::Ui,
     lsp_state: &Arc<Mutex<lsp::LspState>>,
     selected: &mut Option<usize>,
-    selected_file: &mut ProjectFileId,
+    // Set to `(rel_path, 1-based line)` when a row is expanded, so the editor
+    // opens that file and scrolls to the line.
+    nav: &mut Option<(String, usize)>,
 ) {
     // Extract everything we need while holding the lock, then drop it
     // before we start drawing so there's no risk of a deadlock.
@@ -230,17 +231,12 @@ pub fn show_ra_tab(
                 }
 
                 if resp.clicked() {
-                    *selected = if is_sel { None } else { Some(i) };
-
-                    // Navigate to file
-                    let target = match path.as_str() {
-                        "src/main.rs" => Some(ProjectFileId::MainRs),
-                        "build.rs" => Some(ProjectFileId::BuildRs),
-                        "Cargo.toml" => Some(ProjectFileId::CargoToml),
-                        _ => None,
-                    };
-                    if let Some(id) = target {
-                        *selected_file = id;
+                    let now_selected = !is_sel;
+                    *selected = if now_selected { Some(i) } else { None };
+                    // On expand, ask the editor to open this file and scroll to
+                    // the diagnostic line (resolved in `diag_embed`).
+                    if now_selected {
+                        *nav = Some((path.clone(), diag.line as usize));
                     }
                 }
             }

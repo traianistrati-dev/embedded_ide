@@ -59,6 +59,11 @@ impl AppIde {
             }
         };
         let display_syntax = self.selected_file.syntax();
+        // The file `display_code` was built for. Captured before the bottom diag
+        // panel (rendered below) can switch `selected_file` on a diagnostic
+        // click, so a queued scroll-to-line only fires once the editor actually
+        // shows that file (next frame for a cross-file jump).
+        let displayed_file = self.selected_file;
 
         // ── Panel 2: Code Editor ──────────────────────────────────────────────
         let editor_width = ui.available_width() * 0.5;
@@ -248,6 +253,9 @@ impl AppIde {
                 // area extends the selection but the window doesn't follow. We
                 // drive the outer ScrollArea's offset ourselves.
                 self.scroll_caret_into_view(ui, &editor_resp, &editor_id, editor_clip);
+                // Jump to a clicked diagnostic's line (queued by the bottom
+                // panel). Runs after caret-follow so its precise offset wins.
+                self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file);
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
@@ -350,8 +358,12 @@ impl AppIde {
                 }
 
                 // ── Write user edits back ────────────────────────────────────
-                // display_code is a local clone; persist changes here.
-                if let ProjectFileId::UserFile(i) = self.selected_file {
+                // display_code is a local clone; persist changes here. Use
+                // `displayed_file` (the file this text was built for), NOT
+                // `self.selected_file`, which the bottom diag panel may have just
+                // switched to a different file on a click — writing back to that
+                // would overwrite the newly-opened file with this file's content.
+                if let ProjectFileId::UserFile(i) = displayed_file {
                     if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                         if display_code != entry.1 {
                             // In-memory only; the debounced LSP flush (3 s idle or
@@ -360,14 +372,14 @@ impl AppIde {
                             entry.1 = display_code.clone();
                         }
                     }
-                } else if self.selected_file == ProjectFileId::MainRs
+                } else if displayed_file == ProjectFileId::MainRs
                     && display_code != self.generated_code
                 {
                     self.generated_code = display_code.clone();
                 } else {
                     // Editable project config files — persist edits to the
                     // matching field (the per-frame snapshot reads them back).
-                    let slot = match self.selected_file {
+                    let slot = match displayed_file {
                         ProjectFileId::CargoToml => Some(&mut self.cargo_toml),
                         ProjectFileId::CargoConfig => Some(&mut self.cargo_config),
                         ProjectFileId::MemoryX => Some(&mut self.memory_x),
@@ -465,6 +477,50 @@ impl AppIde {
         {
             state.offset.y = (state.offset.y + delta).max(0.0);
             state.store(ui.ctx(), scroll_id);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Apply a queued "jump to diagnostic line": scroll the editor so the target
+    /// line sits on roughly the 10th row from the top. Only fires once the
+    /// editor is displaying the target file (`displayed_file`), so a cross-file
+    /// jump waits one frame for the file switch to take effect.
+    fn apply_pending_scroll(
+        &mut self,
+        ui: &egui::Ui,
+        editor_resp: &egui::text_edit::TextEditOutput,
+        editor_id: &str,
+        displayed_file: ProjectFileId,
+    ) {
+        let Some((file, line_1based)) = self.pending_scroll_to_line else {
+            return;
+        };
+        // Wait until the editor actually shows that file (display_code matches).
+        if file != displayed_file {
+            return;
+        }
+        self.pending_scroll_to_line = None;
+
+        // Put the error line on the ~10th visible row (9 lines of context above).
+        const ROWS_ABOVE: f32 = 9.0;
+        let row_h = editor_resp
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(0))
+            .height()
+            .max(1.0);
+        let line0 = line_1based.saturating_sub(1) as f32;
+        let offset_y = ((line0 - ROWS_ABOVE) * row_h).max(0.0);
+
+        let scroll_id = ui
+            .id()
+            .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+        if let Some(mut state) =
+            egui::containers::scroll_area::State::load(ui.ctx(), scroll_id)
+        {
+            state.offset.y = offset_y;
+            state.store(ui.ctx(), scroll_id);
+            // Suppress caret-follow from snapping back to the (stale) caret.
+            self.last_caret_idx = editor_resp.state.cursor.char_range().map(|r| r.primary.index);
             ui.ctx().request_repaint();
         }
     }
