@@ -317,6 +317,10 @@ pub struct AppIde {
     /// Cargo.toml dependency-completion popup (crate names + live crates.io
     /// versions). Independent of rust-analyzer.
     cargo_complete: editor_panel::cargo_complete::CargoCompleteState,
+    /// Primary caret char-index from the previous frame, used to scroll the
+    /// editor so the caret stays in view when it moves off-screen (e.g.
+    /// Shift+Up/Down selection past the visible area).
+    last_caret_idx: Option<usize>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -408,6 +412,14 @@ impl AppIde {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         cc.egui_ctx.set_fonts(fonts);
+
+        // Mouse wheel: by default egui makes Shift+wheel scroll *horizontally*,
+        // so holding Shift (e.g. while selecting) and scrolling did nothing
+        // vertically. Drop Shift as the horizontal-scroll modifier so Shift+wheel
+        // scrolls up/down like a plain wheel (used to reach off-screen text while
+        // selecting). Horizontal scrolling stays available via the scrollbar.
+        cc.egui_ctx
+            .options_mut(|o| o.input_options.horizontal_scroll_modifier = egui::Modifiers::NONE);
 
         // ── Load persisted project state ─────────────────────────────────────
         let persisted: PersistedState = cc
@@ -517,6 +529,7 @@ impl AppIde {
             completion_pending_insert: None,
             completion_filtered_items: Vec::new(),
             cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
+            last_caret_idx: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_prev_hash: 0,
             lsp_synced_hash: 0,

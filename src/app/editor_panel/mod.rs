@@ -227,7 +227,7 @@ impl AppIde {
                 };
 
                 let editor_resp = CodeEditor::default()
-                    .id_source(editor_id)
+                    .id_source(editor_id.clone())
                     .with_rows(editor_rows)
                     .with_fontsize(13.0)
                     .with_theme(ColorTheme::GRUVBOX)
@@ -238,6 +238,16 @@ impl AppIde {
                         &display_syntax,
                         &mut self.completer,
                     );
+
+                // ── Keep the caret in view when it moves off-screen ───────────
+                // egui_code_editor nests a horizontal ScrollArea *inside* the
+                // vertical one; the inner area consumes BOTH axes' scroll
+                // targets and only applies its own, so egui's own
+                // "scroll caret into view" never reaches the outer (vertical)
+                // ScrollArea. Result: Shift+Up/Down (or typing) past the visible
+                // area extends the selection but the window doesn't follow. We
+                // drive the outer ScrollArea's offset ourselves.
+                self.scroll_caret_into_view(ui, &editor_resp, &editor_id, editor_clip);
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
@@ -398,6 +408,65 @@ impl AppIde {
                 // submit). Rendered after the editor so it overlays the code.
                 self.show_rename_popup(ui);
             });
+    }
+
+    /// Scroll the editor vertically so the primary caret stays visible when it
+    /// moves off-screen (keyboard navigation / selection). Only acts when the
+    /// caret actually moved this frame, so it never fights the user scrolling
+    /// the wheel away from the caret. See the call site for why egui's built-in
+    /// caret-follow doesn't reach the editor's outer (vertical) ScrollArea.
+    fn scroll_caret_into_view(
+        &mut self,
+        ui: &egui::Ui,
+        editor_resp: &egui::text_edit::TextEditOutput,
+        editor_id: &str,
+        visible: egui::Rect,
+    ) {
+        let Some(range) = editor_resp.state.cursor.char_range() else {
+            return;
+        };
+        let primary = range.primary.index;
+        // Only follow when the caret moved (typing / arrows / selection), so the
+        // user can still freely scroll the wheel while the caret sits off-screen.
+        let moved = self.last_caret_idx != Some(primary);
+        self.last_caret_idx = Some(primary);
+        if !moved {
+            return;
+        }
+
+        // Caret rectangle in screen space (galley_pos already includes the
+        // current scroll offset).
+        let caret = editor_resp
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(primary));
+        let caret_top = editor_resp.galley_pos.y + caret.min.y;
+        let caret_bottom = editor_resp.galley_pos.y + caret.max.y;
+        let margin = caret.height().max(8.0); // keep ~one line of context
+
+        // How far (and which way) to move so the caret sits inside the band.
+        let delta = if caret_top < visible.top() + margin {
+            caret_top - (visible.top() + margin) // negative → scroll up
+        } else if caret_bottom > visible.bottom() - margin {
+            caret_bottom - (visible.bottom() - margin) // positive → scroll down
+        } else {
+            0.0
+        };
+        if delta == 0.0 {
+            return;
+        }
+
+        // The outer vertical ScrollArea egui_code_editor builds with
+        // `id_salt("{id}_outer_scroll")` on this same `ui`.
+        let scroll_id = ui
+            .id()
+            .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+        if let Some(mut state) =
+            egui::containers::scroll_area::State::load(ui.ctx(), scroll_id)
+        {
+            state.offset.y = (state.offset.y + delta).max(0.0);
+            state.store(ui.ctx(), scroll_id);
+            ui.ctx().request_repaint();
+        }
     }
 }
 
