@@ -1,146 +1,260 @@
 # Embedded IDE
 
-A desktop IDE for **bare-metal Rust** firmware development, built with [egui/eframe](https://github.com/emilk/egui). Pick a microcontroller, configure its pins and clock tree visually, and the IDE generates a complete, buildable Cargo project — then build, check, and flash it without leaving the app.
+A desktop IDE for **bare-metal Rust** firmware. Pick a microcontroller, configure
+its pins, peripherals and clock tree visually, and the IDE writes a complete,
+buildable Cargo project for you — then edit, check, and flash it without ever
+leaving the app.
 
-> Status: early development (`v0.1`). Two chip families are supported today (STM32F1, ESP32-C3); more can be added as data files or small backends.
+It is built for the workflow of small MCU projects: you spend your time deciding
+*what each pin does* and *how fast the chip runs*, and the IDE turns those
+decisions into correct HAL setup code. Your own application logic is always kept
+safe across regenerations.
+
+> Status: early development (`v0.1`). Two chip families ship today —
+> **STM32F1** (Cortex-M3) and **ESP32-C3** (RISC-V) — and more chips can be added
+> as plain data files.
 
 ---
 
-## Features
+## What you can do
 
-### Visual MCU configuration
-- **Pins tab** — a vector chip diagram with all four pin rows. Click a pin to pick its function (GPIO in/out, ADC, timer/PWM, USART, SPI, I2C, USB, CAN, SWD, MCO). A function already assigned to one pin is hidden on the others so an exclusive signal can't be assigned twice.
-- **Peripherals tab** — the inverse view: every peripheral the chip exposes, with the pins that can serve each. Pins that support several signals of one peripheral (e.g. an ESP32-C3 GPIO routable to SPI SCK/MOSI/MISO/NSS via the GPIO matrix) appear **once** with a ▾ menu, instead of repeating per signal.
-- **Clock tab** — an interactive, **data-driven clock-tree diagram**. Sources, multiplexers (trapezoid MUX + radio buttons), dividers and multipliers are evaluated live; frequencies and over-limit warnings update as you edit. The whole graph + layout is imported per chip from its `.ron`, so a new chip's clock tree is data, not code.
+- **Configure a chip visually** — assign pin functions on a chip diagram, or work
+  peripheral-by-peripheral.
+- **Drop in ready-made peripheral devices** — add a USART / SPI / I²C device and
+  the IDE auto-wires the pins and generates its init code.
+- **Design the clock tree interactively** — adjust sources, multiplexers,
+  multipliers and dividers and watch every frequency (and every over-limit
+  warning) update live.
+- **Get generated firmware** — a full `src/main.rs` plus the whole Cargo project,
+  with your code preserved.
+- **Edit with a real code editor** — rust-analyzer completion and diagnostics,
+  go-to-definition, rename, formatting, and Cargo.toml dependency completion.
+- **Build & flash** — `cargo check`/`build` and one-click flashing over SWD,
+  probe-rs, DFU, or espflash.
+- **Save & reopen projects** — round-trips the chip, every pin, the clock config,
+  and your edits.
 
-### Code generation
-- Generates `src/main.rs` from the pin + clock configuration using the chip's HAL (`stm32f1xx-hal` for STM32, `esp-hal` for ESP32-C3).
-- Generated code lives inside a `// <<< GENERATED >>> … // <<< GENERATED END >>>` block; **your code outside the markers (the `loop {}` body, helpers) is preserved** across every regeneration.
-- The clock configuration drives the real setup chain (`rcc.cfgr…freeze()` on STM32, `CpuClock::_…MHz` on ESP32-C3).
+---
 
-### Editable project files
-- The full Cargo project is generated: `Cargo.toml`, `.cargo/config.toml`, `memory.x`, `build.rs`, `.gitignore`, `src/main.rs`, plus any user source files.
-- Each config file is **editable** — its chip-derived content sits in a `<<< GENERATED >>>` block (using that file's comment syntax: `//`, `#`, or `/* */`), and anything you add outside the block is kept when the block is refreshed on a chip change.
+## Visual MCU configuration
 
-### Built-in code editor
-- Syntax-highlighted editor ([egui_code_editor](https://crates.io/crates/egui_code_editor)) with a project tree (generated files + your own modules under `src/`).
-- **rust-analyzer integration**: code completion (`.`, `::`, Ctrl+Space) and diagnostics. Edits are pushed to rust-analyzer on a short idle debounce so typing stays smooth; `cargo check` errors surface in the bottom **rust-analyzer / Cargo Check** panel.
+### Pins tab
+A vector diagram of the chip with all of its pins. Click a pin to choose what it
+does from the functions that pin actually supports. Once an exclusive signal is
+taken (say `USART1_TX`), it disappears from the other pins so it can never be
+assigned twice.
 
-### Build & flash
-- **Build / Check** — run `cargo` in a managed workspace; errors are parsed and listed with click-to-jump.
-- **Flash** — flash the board from the toolbar:
-  - **STM32** — SWD via **OpenOCD**, or `cargo run` via **probe-rs** (configured in the generated `.cargo/config.toml`). USB-DFU programmer detection is included.
+Supported pin functions:
+
+| Group | Functions |
+|-------|-----------|
+| **GPIO** | digital input, digital output |
+| **Analog** | ADC channels |
+| **Timers** | PWM output (per timer / channel) |
+| **USART** | TX, RX, CTS, RTS, CK (synchronous clock) |
+| **SPI** | NSS (chip-select), SCK, MISO, MOSI |
+| **I²C** | SCL, SDA |
+| **USB** | D−, D+ |
+| **CAN** | RX, TX |
+| **Debug** | SWDIO, SWCLK |
+| **Clock** | MCO (master clock output) |
+
+Each pin can also be given a **custom label** (e.g. `led`, `uart_dbg`) with an
+input/output direction. The label flows into the generated variable name
+(`pc13_out_led`), so your code reads the way you think about the board.
+
+### Peripherals tab
+The same configuration seen the other way around: every peripheral the chip
+exposes, listing the pins that can serve each signal. Where a single pin can be
+routed to several signals of one peripheral (for example an ESP32-C3 GPIO that
+the GPIO matrix can route to SPI SCK/MOSI/MISO/NSS), the pin shows up **once**
+with a dropdown instead of repeating — so the view stays compact.
+
+### Virtual device modules
+Instead of wiring a peripheral pin by pin, you can drop a **device** onto the
+canvas and let the IDE do the wiring:
+
+- **USART device** — configurable baud rate, parity and stop bits.
+- **SPI device** — full SCK/MOSI/MISO/NSS bus.
+- **I²C device** — with a 7-bit device address.
+
+Adding a device automatically claims a free peripheral instance and its pins,
+draws the connections, and generates the matching init code (baud-rate constants,
+bus setup, etc.). Each module can be renamed, and the name carries through to the
+generated variables. The module list lives below the chip and expands on click to
+show each device's details.
+
+---
+
+## Clock configuration
+
+The **Clock tab** is a live, interactive clock-tree diagram — not a form. The
+oscillators, multiplexers (shown as trapezoid selectors with radio buttons),
+multipliers and dividers are all editable, and the tree is re-evaluated as you
+change it:
+
+- **Live frequencies** — every node shows its current frequency, recomputed
+  instantly from the sources down to SYSCLK and the peripheral buses.
+- **Over-limit warnings** — if a setting pushes a node past the chip's allowed
+  maximum, it's flagged right on the diagram.
+- **Real codegen** — the clock you draw drives the actual setup chain in the
+  generated firmware (`rcc.cfgr…freeze()` on STM32, `CpuClock` on ESP32-C3), so
+  what you see is what the chip runs.
+- **Per-chip clock trees** — for STM32F1 that means HSI / HSE / PLL (with its
+  input mux and multiplier), the SYSCLK selector and the bus prescalers; ESP32-C3
+  ships its own graph. The whole tree, its limits and its on-screen layout come
+  from the chip's data file, so a new chip brings its own clock tree with it.
+
+---
+
+## Code generation
+
+- The IDE generates **`src/main.rs`** from your pin + clock configuration using
+  the chip's HAL (`stm32f1xx-hal` for STM32, `esp-hal` for ESP32-C3).
+- Generated code sits inside a `// <<< GENERATED >>> … // <<< GENERATED END >>>`
+  block. **Everything you write outside the markers** — your `loop {}` body,
+  helper functions, extra `use`s — **is preserved** every time the configuration
+  changes and the block is refreshed.
+- The **entire Cargo project** is produced and kept in sync: `Cargo.toml`,
+  `.cargo/config.toml`, `memory.x`, `build.rs`, `.gitignore`, `src/main.rs`, and
+  any source files you add.
+- **All config files are editable.** Their chip-derived parts live in a
+  `GENERATED` block (using each file's own comment style — `//`, `#`, `/* */`),
+  and anything you add outside is kept when the block is regenerated.
+
+---
+
+## Code editor
+
+A syntax-highlighted editor with a project tree (generated files plus your own
+modules under `src/`) and a **rust-analyzer** backend.
+
+### Language intelligence (rust-analyzer)
+- **Completion** as you type after `.` and `::`, or on demand with `Ctrl+Space`.
+- **Diagnostics** — errors and `cargo check` results in the bottom panel, with
+  click-to-jump. Inline error messages can also be shown right in the code.
+- **Go to definition** (`F12`) opens the target in a dedicated **Definition** tab,
+  with the relevant line highlighted so it stands out.
+- **Rename** (`Ctrl+R`) renames a symbol across the whole project.
+- Re-checks run on a short idle debounce (and on save), so typing stays smooth.
+
+### Editing shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+Space` | Completion — code suggestions, or in **Cargo.toml**, crate names + live versions |
+| `Ctrl+/` | Toggle line comment (`//` for Rust, `#` for TOML) |
+| `Ctrl+↑` / `Ctrl+↓` | Move the selected line(s) up / down |
+| `Ctrl+X` | Delete the line at the cursor |
+| `Ctrl+Shift+F` | Format / re-indent the file |
+| `Ctrl+R` | Rename the symbol project-wide |
+| `F12` | Go to definition (Definition tab) |
+| `Ctrl+C` | Copy — over an inline error, copies the message **with its code** (e.g. `… [E0599]`) |
+
+Hovering an inline error also shows a clickable `[E####]` link to the official
+Rust error documentation.
+
+### Right-click menu
+Right-clicking in the editor opens a context menu listing **every command above
+with its shortcut**, so you don't have to memorise them — including Delete line,
+Toggle comment, Move line up/down, Format, Rename, Go to definition, Completion,
+Copy and Select all.
+
+### Cargo.toml dependency completion
+Inside `Cargo.toml`, `Ctrl+Space` helps you add dependencies:
+
+1. It suggests a **curated list of embedded-relevant crates** (HALs, PACs,
+   `embedded-hal`, `embassy-*`, `defmt`, `heapless`, drivers, and more).
+2. After you pick a crate, it fetches that crate's **available versions live from
+   crates.io** and lets you choose one.
+
+---
+
+## Build & flash
+
+- **Check / Build** — runs `cargo` in a managed workspace; errors are parsed and
+  listed in the bottom panel with click-to-jump.
+- **Flash** — program the board straight from the toolbar:
+  - **STM32** — SWD via **OpenOCD**, or `cargo run` via **probe-rs** (already
+    wired up in the generated `.cargo/config.toml`). USB-DFU programmers are
+    detected too.
   - **ESP32-C3** — via **espflash** (`espflash flash --monitor`).
-- **Required Tools tab** — checks for the external tools each workflow needs.
+- **Required Tools tab** — checks whether the external tools each workflow needs
+  are installed, so you find out before you flash, not during.
 
-### Project management & MCU import
-- **Save / Open project** — export the generated project to a folder and reopen it later; the IDE restores the exact chip, pin state, clock config, and your edits.
-- **Import MCU** — drop a chip definition (`.ron`) into the user `mcus/` folder (or use *Import MCU…*) and it appears in the chip selector. New chips **inside an already-supported family need no recompile** — they are pure data.
+---
+
+## Project management
+
+- **Save / Open project** — export the generated project to a folder and reopen
+  it later; the IDE restores the exact chip, pin assignments, clock config, and
+  all of your edits. Saving an existing project writes back to its folder; a new
+  project asks where to put it.
+- **Import MCU** — drop a chip definition (`.ron`) into your `mcus/` folder (or
+  use *Import MCU…*) and it shows up in the chip picker. A new chip **inside an
+  already-supported family needs no rebuild** — it's pure data.
 
 ---
 
 ## Supported microcontrollers
 
-| Chip | Core | Toolchain | Notes |
-|------|------|-----------|-------|
-| STM32F103C8T6 | ARM Cortex-M3 | `stm32f1xx-hal` | full clock tree, peripherals, codegen |
-| ESP32-C3 | RISC-V 32-bit | `esp-hal` | clock graph, peripherals, codegen |
+| Chip | Core | HAL | Highlights |
+|------|------|-----|------------|
+| **STM32F103C8T6** | ARM Cortex-M3 | `stm32f1xx-hal` | full pin map, peripherals, clock tree, codegen, SWD/DFU/probe-rs flashing |
+| **ESP32-C3** | RISC-V 32-bit | `esp-hal` | pin matrix, peripherals, clock graph, codegen, espflash |
 
-Definitions live in [`assets/mcus/`](assets/mcus/) (`*.ron`). Example importable chips (incl. graph-clock demos) are in [`assets/mcus/examples/`](assets/mcus/examples/).
+More importable examples (including graph-clock demos and an STM32F103RB) ship in
+`assets/mcus/examples/`.
 
 ---
 
 ## Getting started
 
 ### Prerequisites
-- **Rust** (stable, edition 2024) — install via [rustup](https://rustup.rs/).
-- **rust-analyzer** on `PATH` — for completions and diagnostics.
-- Target toolchains for the chips you build:
+- **Rust** (stable, edition 2024) — install with [rustup](https://rustup.rs/).
+- **rust-analyzer** on your `PATH` — for completion and diagnostics.
+- Build targets for the chips you use:
   - STM32: `rustup target add thumbv7m-none-eabi`
   - ESP32-C3: `rustup target add riscv32imc-unknown-none-elf`
-- Flashing tools, as needed: [`probe-rs`](https://probe.rs/), [OpenOCD](https://openocd.org/), [`espflash`](https://github.com/esp-rs/espflash), `dfu-util`. (The **Required Tools** tab checks these for you.)
+- Flashing tools as needed: [`probe-rs`](https://probe.rs/),
+  [OpenOCD](https://openocd.org/),
+  [`espflash`](https://github.com/esp-rs/espflash), `dfu-util`. The **Required
+  Tools** tab checks these for you.
 
 ### Run the IDE
 ```bash
 cargo run            # debug
 cargo run --release  # release
 ```
-
-The app opens maximized. Pick a chip (or start with the default STM32F103C8T6), configure pins/clock, and the generated `src/main.rs` appears in the editor.
+The app opens maximized with a default STM32F103C8T6. Configure pins and the
+clock, and the generated `src/main.rs` appears in the editor.
 
 ---
 
 ## Typical workflow
 1. **Choose a chip** (or *Import MCU…* a `.ron`).
-2. **Pins / Peripherals** — assign functions.
-3. **Clock** — set the clock tree; watch frequencies + warnings update live.
-4. The editor shows the generated `main.rs`; **write your logic in the `loop {}` body** (kept across regeneration).
-5. **Build / Check** — fix errors from the bottom panel.
-6. **Flash** — program the board (SWD / espflash / probe-rs).
-7. **Save Project** — export to a folder; reopen anytime.
+2. **Pins / Peripherals** — assign functions, or drop in USART/SPI/I²C devices.
+3. **Clock** — shape the clock tree and watch frequencies + warnings update live.
+4. The editor shows the generated `main.rs`; **write your logic in the `loop {}`
+   body** — it survives every regeneration.
+5. **Check / Build** — fix anything from the bottom panel.
+6. **Flash** — program the board (SWD / probe-rs / DFU / espflash).
+7. **Save Project** — export to a folder and reopen anytime.
 
 ---
 
-## Architecture
+## Under the hood (briefly)
 
-A layered, **data-where-possible / code-where-necessary** design:
+The IDE is built with [egui/eframe](https://github.com/emilk/egui). Chip
+definitions — pin layouts, peripheral maps, clock trees and limits — are stored
+as **data** (`.ron` files), while each chip *family* has a small code backend for
+HAL-specific generation. The practical upshot: adding a new chip to an existing
+family is just data, and the clock tree you see is driven by that data, not
+hard-coded.
 
-- **Layer 1 — MCU definition (data, per chip):** [`mcu_def.rs`](src/panels/mcu_module/mcu_def.rs) `McuDefinition` (serde/RON) aggregates pin layout, project parameters (target, HAL dep, flash/RAM map, probe chip), and the clock (`ClockDef`). Bundled built-ins via `include_str!`, plus a runtime user `mcus/` scan ([`registry.rs`](src/panels/mcu_module/registry.rs)).
-- **Layer 2 — family backend (code, per family):** [`codegen/family.rs`](src/panels/mcu_module/codegen/family.rs) `FamilyBackend` captures the HAL-specific `main.rs` generation. Adding a new *family* = one new backend; new *chips* in a supported family = data only.
-- **Clock graph (data):** [`clock/graph/`](src/panels/mcu_module/clock/graph/) — a generic node-graph (`Source`/`Mux`/`Divider`/`Multiplier`/…) with a topological frequency evaluator, a per-chip diagram layout, and interactive widgets. STM32 and ESP32-C3 each ship their graph; codegen reads node states back out.
-- **App shell:** [`app.rs`](src/app.rs) + [`app/`](src/app/) — egui panels (project tree, MCU configurator, editor), the rust-analyzer client ([`lsp.rs`](src/lsp.rs)), and the build/flash drivers ([`build.rs`](src/build.rs), [`openocd.rs`](src/openocd.rs), [`espflash.rs`](src/espflash.rs), [`dfu.rs`](src/dfu.rs)).
-
-### Source layout
-```
-src/
-├── main.rs                     # eframe entry point
-├── app.rs, app/                # UI shell, panels, project I/O, dialogs
-├── editor/                     # code editor + diagnostics overlay
-├── project_tree/               # file tree state + rendering
-├── lsp.rs                      # rust-analyzer client
-├── build.rs, openocd.rs,       # build + flash drivers
-│   espflash.rs, dfu.rs
-├── required_tools.rs           # external-tool checks
-└── panels/mcu_module/
-    ├── mcu_def.rs, registry.rs # chip definitions + registry
-    ├── pins/                   # pin model + chip diagram
-    ├── clock/                  # clock model, graph, diagram
-    ├── codegen/, codegen_esp.rs# per-family code generation
-    └── project_gen.rs          # full Cargo-project file generation
-assets/mcus/                    # built-in + example chip .ron files
-```
-
-### Generated project layout (STM32)
-```
-<project>/
-├── .cargo/config.toml   # target, runner (probe-rs), linker flags
-├── src/main.rs          # generated HAL code + your loop body
-├── build.rs             # copies memory.x to OUT_DIR
-├── memory.x             # flash/RAM map for the chip
-├── Cargo.toml
-└── .gitignore
-```
-(ESP32-C3 omits `memory.x`/`build.rs` — `esp-hal` supplies them.)
-
----
-
-## Tech stack
-- **UI:** `eframe` / `egui` 0.34, `egui_code_editor`, `egui-phosphor` (icons), `rfd` (file dialogs).
-- **Data:** `serde` + `ron` (chip definitions), `serde_json` (LSP).
-- **System:** `notify` (workspace file watching), `serialport` + `rusb` (programmer/serial access).
-
-## Testing
 ```bash
-cargo test
+cargo test    # clock evaluator, codegen, pin/peripheral logic, editor helpers, …
 ```
-The suite (150+ tests) covers the clock graph evaluator and equivalence sweeps, code generation and marker-splice idempotency, pin/peripheral logic, the registry/round-trip, and the editable-config splice.
-
----
-
-## Roadmap / limitations
-- More chip families (STM32F4/F0, RP2040, nRF52…) — each needs a small codegen backend; chips within them are then data-only.
-- Inline editor diagnostics (squiggles) are currently disabled in favor of the bottom panel (they could lag behind fast edits); re-enable via `SHOW_INLINE_DIAGNOSTICS` in `app/editor_panel/completion.rs`.
-- ESP32-C3 clock codegen covers the CPU clock; APB/RTC are managed by `esp-hal`.
 
 ## License
 Not yet specified.
