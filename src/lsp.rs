@@ -66,6 +66,11 @@ pub struct LspDiagnostic {
     pub end_col:  u32,
     /// e.g. `"E0308"` or `"unused_variables"`
     pub code:     Option<String>,
+    /// LSP `source`: `"rust-analyzer"` for native (in-memory) diagnostics, or
+    /// `"rustc"` / `"clippy"` for flycheck (cargo check) ones. Flycheck positions
+    /// can't be re-mapped after an edit until the next check runs, so the inline
+    /// overlay hides them while a re-check is pending (see `flycheck_stale`).
+    pub source:   String,
 }
 
 impl LspDiagnostic {
@@ -176,6 +181,14 @@ pub struct LspState {
     /// previous text). The inline overlay hides them until RA re-publishes, so a
     /// fixed/deleted error never lingers at a stale position. Key = rel path.
     awaiting_diagnostics: std::collections::HashSet<String>,
+    /// Edit generation: bumped on every real `didChange`. Compared against
+    /// `fresh_check_gen` to know whether flycheck (cargo check) diagnostics are
+    /// stale (an edit happened since the last completed check).
+    edit_gen:        u64,
+    /// `edit_gen` captured when the current cargo-check pass began.
+    check_begin_gen: u64,
+    /// The `edit_gen` the most recently COMPLETED cargo-check reflects.
+    fresh_check_gen: u64,
     /// Workspace root URI (e.g. `file:///tmp/embedded_ide_0_check`).
     pub root_uri:    String,
     /// True while RA is running a background `cargo check` pass.
@@ -215,6 +228,9 @@ impl Default for LspState {
             sender:        None,
             open_files:    HashMap::new(),
             awaiting_diagnostics: std::collections::HashSet::new(),
+            edit_gen:          0,
+            check_begin_gen:   0,
+            fresh_check_gen:    0,
             root_uri:          String::new(),
             checking:          false,
             completion_items:  Vec::new(),
@@ -264,6 +280,17 @@ impl LspState {
         !self.awaiting_diagnostics.contains(rel_path)
     }
 
+    /// `true` when flycheck (cargo check) diagnostics may be stale: there has
+    /// been a real edit since the last COMPLETED check began, so rustc's
+    /// reported line/cols no longer match the current text (a fixed/commented
+    /// error lingers on its old line). The inline overlay hides flycheck-sourced
+    /// diagnostics while this holds; RA's own (native) diagnostics are re-mapped
+    /// on every `didChange`, so they stay visible. Cleared when the next check
+    /// completes (`$/progress` "end").
+    pub fn flycheck_stale(&self) -> bool {
+        self.fresh_check_gen < self.edit_gen
+    }
+
     /// Send `textDocument/didOpen` for `rel_path` and record the text.
     ///
     /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
@@ -302,13 +329,23 @@ impl LspState {
             return;
         }
         let file = self.open_files.get_mut(rel_path).unwrap();
-        if text == file.last_sent_code && !force { return; }
+        let changed = text != file.last_sent_code;
+        if !changed && !force { return; }
         file.last_sent_code = text.to_owned();
         file.doc_version   += 1;
         let version = file.doc_version;
-        // New text sent → current diagnostics for this file are now stale until
-        // RA re-publishes (see `diagnostics_fresh`).
-        self.awaiting_diagnostics.insert(rel_path.to_owned());
+        // A real text change makes the current diagnostics stale (their line/col
+        // now cling to shifted/removed code) until RA re-publishes — gate them
+        // out via `diagnostics_fresh`. A *forced* no-op re-send (Project Save
+        // re-verify with identical text) must NOT mark them stale: RA won't
+        // re-publish for unchanged text, so the gate would get stuck hiding
+        // perfectly valid diagnostics forever.
+        if changed {
+            self.awaiting_diagnostics.insert(rel_path.to_owned());
+            // A real edit invalidates the last cargo-check's diagnostics until a
+            // fresh check runs (see `flycheck_stale`).
+            self.edit_gen += 1;
+        }
         let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(serde_json::json!({
             "jsonrpc": "2.0",
@@ -317,6 +354,21 @@ impl LspState {
                 "textDocument": { "uri": uri, "version": version },
                 "contentChanges": [{ "text": text }],
             }
+        }).to_string());
+    }
+
+    /// Send `textDocument/didSave` for `rel_path`. With `checkOnSave: true` this
+    /// makes rust-analyzer re-run its flycheck (cargo check) so its flycheck
+    /// diagnostics refresh — without it they stay frozen at the startup check
+    /// and a fixed error lingers forever in the panel.
+    pub fn did_save(&self, rel_path: &str) {
+        if self.sender.is_none() { return; }
+        if !self.open_files.contains_key(rel_path) { return; }
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method":  "textDocument/didSave",
+            "params":  { "textDocument": { "uri": uri } }
         }).to_string());
     }
 
@@ -456,18 +508,20 @@ impl LspState {
     }
 
     pub fn total_errors(&self) -> usize {
+        let stale = self.flycheck_stale();
         self.diagnostics
             .values()
             .flat_map(|v| v.iter())
-            .filter(|d| d.severity.is_error())
+            .filter(|d| d.severity.is_error() && (d.source == "rust-analyzer" || !stale))
             .count()
     }
 
     pub fn total_warnings(&self) -> usize {
+        let stale = self.flycheck_stale();
         self.diagnostics
             .values()
             .flat_map(|v| v.iter())
-            .filter(|d| d.severity.is_warning())
+            .filter(|d| d.severity.is_warning() && (d.source == "rust-analyzer" || !stale))
             .count()
     }
 
@@ -481,6 +535,9 @@ impl LspState {
         self.sender        = None;   // write thread's Receiver will close → it exits
         self.open_files    .clear();
         self.awaiting_diagnostics.clear();
+        self.edit_gen        = 0;
+        self.check_begin_gen = 0;
+        self.fresh_check_gen = 0;
         self.root_uri      = String::new();
         self.checking      = false;
         self.completion_items.clear();
@@ -601,7 +658,10 @@ fn launch(
                     "synchronization": {
                         "dynamicRegistration": false,
                         "willSave": false,
-                        "didSave": false,
+                        // We send didSave on flush so RA's `checkOnSave` flycheck
+                        // (cargo check) re-runs and refreshes stale flycheck
+                        // diagnostics — otherwise it only ran once at startup.
+                        "didSave": true,
                     },
                     "publishDiagnostics": {
                         "relatedInformation": false,
@@ -857,8 +917,20 @@ fn handle_incoming(
             }
             if is_check {
                 match kind {
-                    "begin" => { s.checking = true;  ctx.request_repaint(); }
-                    "end"   => { s.checking = false; ctx.request_repaint(); }
+                    "begin" => {
+                        s.checking = true;
+                        // This check reflects all edits made up to now.
+                        s.check_begin_gen = s.edit_gen;
+                        ctx.request_repaint();
+                    }
+                    "end"   => {
+                        s.checking = false;
+                        // Its diagnostics are now fresh up to the gen it began at;
+                        // any edit made *during* the check keeps `flycheck_stale`
+                        // true until the next check completes.
+                        s.fresh_check_gen = s.check_begin_gen;
+                        ctx.request_repaint();
+                    }
                     _ => {}
                 }
             }
@@ -958,7 +1030,8 @@ fn parse_diag(v: &serde_json::Value) -> Option<LspDiagnostic> {
     // code may be a string like "E0308" or an integer
     let code = v["code"].as_str().map(String::from)
         .or_else(|| v["code"].as_u64().map(|n| n.to_string()));
-    Some(LspDiagnostic { severity, message, line, col, end_line, end_col, code })
+    let source = v["source"].as_str().unwrap_or("").to_owned();
+    Some(LspDiagnostic { severity, message, line, col, end_line, end_col, code, source })
 }
 
 // ── URI helpers ───────────────────────────────────────────────────────────────
@@ -1215,6 +1288,7 @@ mod diagnostic_headline_tests {
             end_line: 1,
             end_col: 1,
             code: None,
+            source: String::new(),
         }
     }
 

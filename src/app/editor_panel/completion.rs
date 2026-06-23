@@ -456,11 +456,19 @@ impl AppIde {
                 .map(|rel| {
                     let lsp = self.lsp_state.lock().unwrap();
                     // Show the diagnostics only when RA holds the CURRENT text for
-                    // this file — so stale ones (clinging to a line that was edited
-                    // away) hide the instant you type, and reappear once the edit
-                    // is synced to RA (after the 3 s idle debounce or a Project
-                    // Save, which forces a re-verify).
-                    if lsp.last_sent_matches(rel, &display_code) {
+                    // this file AND has re-published since the last edit was sent.
+                    // `last_sent_matches` hides them the instant you type (before
+                    // the flush); `diagnostics_fresh` then keeps them hidden in the
+                    // window between the flush (didChange) and RA's fresh publish —
+                    // otherwise the OLD diagnostics paint over the NEW text at
+                    // shifted line/cols (a fixed error lingering on the wrong line).
+                    if lsp.last_sent_matches(rel, &display_code) && lsp.diagnostics_fresh(rel) {
+                        // Flycheck (cargo check) diagnostics keep rustc's old
+                        // line/cols until the next check finishes, so they'd paint
+                        // on stale/commented lines after an edit. Hide them until a
+                        // fresh check completes; RA's native diagnostics are
+                        // re-mapped per edit and stay visible.
+                        let flycheck_stale = lsp.flycheck_stale();
                         diags_for_file(&lsp.diagnostics, rel)
                             .into_iter()
                             // Inline overlay shows only errors and info; warnings +
@@ -471,6 +479,7 @@ impl AppIde {
                                     lsp::DiagSeverity::Error | lsp::DiagSeverity::Info
                                 )
                             })
+                            .filter(|d| d.source == "rust-analyzer" || !flycheck_stale)
                             .collect()
                     } else {
                         Vec::new()

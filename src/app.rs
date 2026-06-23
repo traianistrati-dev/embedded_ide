@@ -857,6 +857,15 @@ impl AppIde {
         for (rel, content) in &self.project_tree.user_src_files {
             lsp.did_change(&format!("src/{rel}"), content, force);
         }
+        // Trigger RA's `checkOnSave` flycheck so its cargo-check diagnostics
+        // re-run against the just-flushed text (otherwise they stay frozen at
+        // the startup check and fixed errors linger). One didSave re-checks the
+        // whole workspace; RA coalesces, and flush is already debounced (3 s idle
+        // / Project Save).
+        lsp.did_save("src/main.rs");
+        for (rel, _) in &self.project_tree.user_src_files {
+            lsp.did_save(&format!("src/{rel}"));
+        }
     }
 }
 
