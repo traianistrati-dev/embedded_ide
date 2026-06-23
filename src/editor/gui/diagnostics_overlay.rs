@@ -1,6 +1,7 @@
 //! Inline diagnostic visualization — wavy underlines, error messages, tooltips.
 
 use eframe::egui;
+use egui_phosphor::regular as ph;
 use crate::lsp::LspDiagnostic;
 use crate::editor::gui::text_pos::{draw_wavy_underline, lsp_line_end_char_idx, lsp_pos_to_char_idx};
 
@@ -165,10 +166,10 @@ pub fn show_diagnostics_overlay(
         }
 
         let icon = match diag.severity {
-            crate::lsp::DiagSeverity::Error => "⛔",
-            crate::lsp::DiagSeverity::Warning => "⚠",
-            crate::lsp::DiagSeverity::Info => "ℹ",
-            crate::lsp::DiagSeverity::Hint => "·",
+            crate::lsp::DiagSeverity::Error => ph::X_CIRCLE,
+            crate::lsp::DiagSeverity::Warning => ph::WARNING,
+            crate::lsp::DiagSeverity::Info => ph::INFO,
+            crate::lsp::DiagSeverity::Hint => ph::DOT_OUTLINE,
         };
         let msg = format!("{icon}  {}", diag.message);
         let code = diag.code.clone();

@@ -50,7 +50,7 @@ impl EspFlashState {
             EspFlashState::Building => "Building…",
             EspFlashState::Flashing => "Flashing (ESP)…",
             EspFlashState::ReadingInfo => "Reading chip…",
-            EspFlashState::Success => "ESP Flash OK ✔",
+            EspFlashState::Success => "ESP Flash OK",
             EspFlashState::Error(_) => "ESP Error",
         }
     }
@@ -101,7 +101,7 @@ pub fn start_flash(
             &log,
             &ctx,
             //&format!("▶ cargo build --release"),
-            &format!("▶ cargo build --release --target {target} …"),
+            &format!("> cargo build --release --target {target} …"),
         );
 
         let mut cargo_cmd = Command::new("cargo");
@@ -170,7 +170,7 @@ pub fn start_flash(
             _ => {}
         }
 
-        push_log(&log, &ctx, "✔ Build OK");
+        push_log(&log, &ctx, "[OK] Build OK");
 
         // ── Phase 2: espflash flash ────────────────────────────────────────────
         set(&state, &ctx, EspFlashState::Flashing);
@@ -203,7 +203,7 @@ pub fn start_flash(
             &format!(
                 // "▶ espflash flash --chip {chip} --port {port_display} \
                 // --ignore-app-descriptor --after hard-reset {} …",
-                "▶ espflash flash --chip {chip} --port {} --ignore-app-descriptor {}-",
+                "> espflash flash --chip {chip} --port {} --ignore-app-descriptor {}-",
                 port_display,
                 elf_path.display()
             ),
@@ -309,11 +309,11 @@ pub fn start_flash(
                 ),
             ),
             _ => {
-                push_log(&log, &ctx, "✔ ESP32 flash complete!");
+                push_log(&log, &ctx, "[OK] ESP32 flash complete!");
                 push_log(
                     &log,
                     &ctx,
-                    "  If the board does not start automatically → press the RST button.",
+                    "  If the board does not start automatically -> press the RST button.",
                 );
                 push_log(
                     &log,
@@ -347,7 +347,7 @@ pub fn read_board_info(
     ctx.request_repaint();
 
     thread::spawn(move || {
-        push_log(&log, &ctx, "▶ espflash board-info …");
+        push_log(&log, &ctx, "> espflash board-info …");
         push_log(&log, &ctx, "  (read-only — nothing is written to flash)");
 
         let mut cmd = Command::new("espflash");
@@ -402,7 +402,7 @@ pub fn read_board_info(
 
         match child.wait() {
             Ok(s) if s.success() => {
-                push_log(&log, &ctx, "✔ Chip info read OK.");
+                push_log(&log, &ctx, "[OK] Chip info read OK.");
                 set(&state, &ctx, EspFlashState::Idle);
             }
             _ => {

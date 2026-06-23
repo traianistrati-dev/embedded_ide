@@ -10,6 +10,7 @@
 pub mod diagram;
 
 use eframe::egui;
+use egui_phosphor::regular as ph;
 
 use super::compute::frequencies;
 use super::graph::layout::ValueSrc;
@@ -202,12 +203,15 @@ fn graph_info_zone(
         let c = graph_to_stm32f1(&gc.graph);
         let ws = warnings(&c, &frequencies(&c), l);
         if ws.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(90, 200, 110), "✔  Configuration is valid.");
+            ui.colored_label(
+                egui::Color32::from_rgb(90, 200, 110),
+                format!("{}  Configuration is valid.", ph::CHECK_CIRCLE),
+            );
         } else {
             for w in ws {
                 let (color, icon) = match w.severity {
-                    Severity::Error => (egui::Color32::from_rgb(230, 90, 80), "✖"),
-                    Severity::Warning => (egui::Color32::from_rgb(225, 185, 60), "⚠"),
+                    Severity::Error => (egui::Color32::from_rgb(230, 90, 80), ph::X_CIRCLE),
+                    Severity::Warning => (egui::Color32::from_rgb(225, 185, 60), ph::WARNING),
                 };
                 ui.colored_label(color, format!("{icon}  {}", w.msg));
             }
@@ -217,13 +221,13 @@ fn graph_info_zone(
         if issues.is_empty() {
             ui.colored_label(
                 egui::Color32::from_rgb(90, 200, 110),
-                "✔  All clocks within datasheet limits.",
+                format!("{}  All clocks within datasheet limits.", ph::CHECK_CIRCLE),
             );
         } else {
             for o in issues {
                 ui.colored_label(
                     egui::Color32::from_rgb(230, 90, 80),
-                    format!("✖  {} = {} exceeds {}", o.node, fmt_mhz(o.hz), fmt_mhz(o.limit)),
+                    format!("{}  {} = {} exceeds {}", ph::X_CIRCLE, o.node, fmt_mhz(o.hz), fmt_mhz(o.limit)),
                 );
             }
         }
@@ -245,7 +249,7 @@ fn graph_info_zone(
         lines.insert(0, "HSE = high-speed external · HSI = high-speed internal".to_owned());
         lines.insert(1, "LSE = low-speed external · LSI = low-speed internal".to_owned());
         lines.push(format!(
-            "USB needs HSE+PLL with USBCLK = {} MHz · ADC 1 µs needs PCLK2 ∈ {{14,28,56}}",
+            "USB needs HSE+PLL with USBCLK = {} MHz · ADC 1 µs needs PCLK2 in {{14,28,56}}",
             mhz_num(l.usbclk_hz)
         ));
     }

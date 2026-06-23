@@ -49,7 +49,7 @@ impl ToolStatus {
         match self {
             ToolStatus::Unknown    => "—",
             ToolStatus::Checking   => "Checking…",
-            ToolStatus::Ok(_)      => "OK ✔",
+            ToolStatus::Ok(_)      => "OK",
             ToolStatus::Missing    => "Missing",
             ToolStatus::Installing => "Installing…",
             ToolStatus::Failed(_)  => "Failed",
@@ -267,7 +267,7 @@ pub fn start_check(idx: usize, state: Arc<Mutex<ToolsState>>, ctx: egui::Context
         {
             let mut s = state.lock().unwrap();
             let name = s.tools[idx].name; // &'static str — copy out before mut borrow
-            s.push_log(format!("[check] {} → {}", name, result.label()));
+            s.push_log(format!("[check] {} -> {}", name, result.label()));
             s.tools[idx].status = result;
         }
         ctx.request_repaint();
@@ -279,7 +279,7 @@ pub fn start_check_all(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) {
     let count = state.lock().unwrap().tools.len();
     thread::spawn(move || {
         {
-            state.lock().unwrap().push_log("▶ Checking all tools…");
+            state.lock().unwrap().push_log("> Checking all tools…");
         }
         ctx.request_repaint();
 
@@ -305,14 +305,14 @@ pub fn start_check_all(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) {
             {
                 let mut s = state.lock().unwrap();
                 let name = s.tools[idx].name; // &'static str — copy out before mut borrow
-                s.push_log(format!("  {} → {}", name, result.label()));
+                s.push_log(format!("  {} -> {}", name, result.label()));
                 s.tools[idx].status = result;
             }
             ctx.request_repaint();
         }
 
         {
-            state.lock().unwrap().push_log("✔ Check complete");
+            state.lock().unwrap().push_log("[OK] Check complete");
         }
         ctx.request_repaint();
     });
@@ -341,7 +341,7 @@ pub fn start_install_missing(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) 
     let count = state.lock().unwrap().tools.len();
     thread::spawn(move || {
         {
-            state.lock().unwrap().push_log("▶ Installing missing tools…");
+            state.lock().unwrap().push_log("> Installing missing tools…");
         }
         ctx.request_repaint();
 
@@ -368,7 +368,7 @@ pub fn start_install_missing(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) 
             state.lock().unwrap().push_log("  (nothing to install)");
         }
         {
-            state.lock().unwrap().push_log("✔ Install pass complete");
+            state.lock().unwrap().push_log("[OK] Install pass complete");
         }
         ctx.request_repaint();
     });
@@ -439,7 +439,7 @@ fn do_install_blocking(idx: usize, state: &Arc<Mutex<ToolsState>>, ctx: &egui::C
         state
             .lock()
             .unwrap()
-            .push_log(format!("▶ Installing {name}…"));
+            .push_log(format!("> Installing {name}…"));
     }
     ctx.request_repaint();
 
@@ -457,7 +457,7 @@ fn do_install_blocking(idx: usize, state: &Arc<Mutex<ToolsState>>, ctx: &egui::C
     let result = match c.output() {
         Err(e) => {
             let msg = format!("Cannot run `{cmd}`: {e}");
-            state.lock().unwrap().push_log(format!("  ✘ {msg}"));
+            state.lock().unwrap().push_log(format!("  [X] {msg}"));
             ctx.request_repaint();
             ToolStatus::Failed(msg)
         }
@@ -480,14 +480,14 @@ fn do_install_blocking(idx: usize, state: &Arc<Mutex<ToolsState>>, ctx: &egui::C
 
             if !out.status.success() {
                 let msg = format!("{cmd} exited with {}", out.status);
-                state.lock().unwrap().push_log(format!("  ✘ {msg}"));
+                state.lock().unwrap().push_log(format!("  [X] {msg}"));
                 ctx.request_repaint();
                 ToolStatus::Failed(msg)
             } else {
                 state
                     .lock()
                     .unwrap()
-                    .push_log(format!("  ✔ {name} installed OK"));
+                    .push_log(format!("  [OK] {name} installed OK"));
                 ctx.request_repaint();
 
                 // Re-check to confirm installation and capture the version string

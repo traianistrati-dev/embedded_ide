@@ -226,7 +226,7 @@ pub(super) fn show_diag_panel(
                 *tab = BuildPanelTab::Definition;
             }
             if ui
-                .add(egui::Button::new(egui::RichText::new("✕").size(10.0)).frame(false))
+                .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
                 .on_hover_text("Close definition")
                 .clicked()
             {

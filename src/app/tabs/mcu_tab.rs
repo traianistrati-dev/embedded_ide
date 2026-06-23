@@ -11,6 +11,7 @@ use crate::panels::mcu_module::Mcu;
 use crate::panels::mcu_module::Pin;
 use crate::panels::mcu_module::PinFunction;
 use eframe::egui;
+use egui_phosphor::regular as ph;
 
 /// One signal a pin can take inside a category (e.g. "SPI2  SCK").
 struct PinOption {
@@ -77,7 +78,7 @@ pub fn show_peripherals_tab(
         ui.label(
             egui::RichText::new(
                 "Every peripheral this chip can use, with the pins that can serve it. \
-                 Click a pin to assign it; pins with several roles open a ▾ menu. \
+                 Click a pin to assign it; pins with several roles open a dropdown menu. \
                  This is the inverse of the Pins tab.",
             )
             .size(11.0)
@@ -284,15 +285,19 @@ fn pin_chip(
 
     // Multiple roles — one chip with a ▾ menu, so the pin is listed once.
     let label = match assigned {
-        Some(o) => format!("{base} · {} ▾", o.label),
-        None => format!("{base} ▾"),
+        Some(o) => format!("{base} · {} {}", o.label, ph::CARET_DOWN),
+        None => format!("{base} {}", ph::CARET_DOWN),
     };
     let title = egui::RichText::new(label).size(11.0).color(text_col);
     let button = egui::Button::new(title).fill(chip_fill(color, assigned.is_some()));
     egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
         ui.set_min_width(150.0);
         for opt in &pe.options {
-            let mark = if opt.assigned { "✓ " } else { "    " };
+            let mark = if opt.assigned {
+                format!("{} ", ph::CHECK)
+            } else {
+                "    ".to_string()
+            };
             let col = if opt.assigned {
                 color
             } else {

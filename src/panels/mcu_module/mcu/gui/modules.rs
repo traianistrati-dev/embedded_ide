@@ -10,6 +10,7 @@ use crate::panels::mcu_module::modules::{
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
+use egui_phosphor::regular as ph;
 use std::collections::HashMap;
 
 const BOX_W: f32 = 170.0;
@@ -503,7 +504,7 @@ pub fn module_config_ui(
             }
 
             for (sig, pin) in &conn_rows {
-                ui.label(format!("{sig} → pin"));
+                ui.label(format!("{sig} {} pin", ph::ARROW_RIGHT));
                 ui.label(pin);
                 ui.end_row();
             }

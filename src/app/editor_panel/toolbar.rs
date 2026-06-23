@@ -383,7 +383,7 @@ impl AppIde {
                              • espflash in PATH  (cargo install espflash)\n\
                              • ESP32-C3 connected via USB\n\
                              • ESP32-C3 in download mode:\n\
-                                 hold BOOT → press RESET → release BOOT\n\
+                                 hold BOOT -> press RESET -> release BOOT\n\
                              • Target installed:\n\
                                  rustup target add riscv32imc-unknown-none-elf",
                         );

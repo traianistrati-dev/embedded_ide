@@ -908,7 +908,8 @@ impl eframe::App for AppIde {
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("saved")
                                 .to_string();
-                            self.export_msg = format!("✔  {name}");
+                            self.export_msg =
+                                format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
                             self.export_flash = 180;
                             self.project_name = Some(name);
                             // A new project now has a home — subsequent saves
@@ -916,7 +917,8 @@ impl eframe::App for AppIde {
                             self.project_dir = Some(dest);
                         }
                         Err(e) => {
-                            self.export_msg = format!("✗  {e}");
+                            self.export_msg =
+                                format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
                             self.export_flash = 180;
                         }
                     }

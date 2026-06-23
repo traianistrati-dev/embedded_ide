@@ -56,7 +56,7 @@ impl DfuState {
             DfuState::NoDevice => "No DFU device",
             DfuState::Building => "Building…",
             DfuState::Flashing => "Flashing…",
-            DfuState::Success => "Flash OK ✔",
+            DfuState::Success => "Flash OK",
             DfuState::Error(_) => "Error",
         }
     }
@@ -145,7 +145,7 @@ pub fn detect_dfu(
     {
         let mut log = dfu_log.lock().unwrap();
         log.clear();
-        log.push("▶ Scanning USB …".to_string());
+        log.push("> Scanning USB …".to_string());
     }
     ctx.request_repaint();
 
@@ -182,7 +182,7 @@ pub fn detect_dfu(
             // DFU-specific result
             match &dfu_result {
                 DfuState::DeviceFound(desc) => {
-                    log.push(format!("✔ DFU bootloader: {desc}"));
+                    log.push(format!("[OK] DFU bootloader: {desc}"));
                 }
                 DfuState::NoDevice => {
                     log.push("  No DFU bootloader found.".to_string());
@@ -191,7 +191,7 @@ pub fn detect_dfu(
                     log.push("    2. Device appears as VID 0483:DF11".to_string());
                 }
                 DfuState::Error(e) => {
-                    log.push(format!("✗ dfu-util: {}", e.lines().next().unwrap_or(e)));
+                    log.push(format!("[X] dfu-util: {}", e.lines().next().unwrap_or(e)));
                     log.push("  Install: winget install dfu-util".to_string());
                     log.push(
                         "  WinUSB driver: install via Zadig for 'STM32 BOOTLOADER'".to_string(),
@@ -286,7 +286,7 @@ pub fn start_flash(
         push_log(
             &dfu_log,
             &ctx,
-            &format!("▶ cargo build --release --target {target} …"),
+            &format!("> cargo build --release --target {target} …"),
         );
 
         if !run_cargo_build(&project_dir, &target, &dfu_log, &ctx) {
@@ -301,14 +301,14 @@ pub fn start_flash(
                 push_log(
                     &dfu_log,
                     &ctx,
-                    "⚠ Stale linker-script cache (device.x missing) — \
+                    "[!] Stale linker-script cache (device.x missing) - \
                      running `cargo clean` and retrying…",
                 );
                 cargo_clean(&project_dir);
                 push_log(
                     &dfu_log,
                     &ctx,
-                    &format!("▶ cargo build --release --target {target} … (retry)"),
+                    &format!("> cargo build --release --target {target} … (retry)"),
                 );
                 if !run_cargo_build(&project_dir, &target, &dfu_log, &ctx) {
                     set(
@@ -338,7 +338,7 @@ pub fn start_flash(
             }
         }
 
-        push_log(&dfu_log, &ctx, "✔ Build OK");
+        push_log(&dfu_log, &ctx, "[OK] Build OK");
 
         // ── Phase 2: ELF → BIN ────────────────────────────────────────────────
         // The Cargo.toml template names the binary "{pkg_name}-project"
@@ -350,12 +350,12 @@ pub fn start_flash(
             .join(&bin_name);
         let bin = project_dir.join("firmware.bin");
 
-        push_log(&dfu_log, &ctx, "▶ Converting ELF → BIN …");
+        push_log(&dfu_log, &ctx, "> Converting ELF -> BIN …");
         if let Err(e) = objcopy(&elf, &bin, &dfu_log, &ctx) {
             set(&state, &ctx, DfuState::Error(e));
             return;
         }
-        push_log(&dfu_log, &ctx, "✔ firmware.bin ready");
+        push_log(&dfu_log, &ctx, "[OK] firmware.bin ready");
 
         // ── Phase 3: dfu-util flash ───────────────────────────────────────────
         set(&state, &ctx, DfuState::Flashing);
@@ -364,7 +364,7 @@ pub fn start_flash(
         push_log(
             &dfu_log,
             &ctx,
-            &format!("▶ dfu-util -a 0 -s {addr_spec} -D firmware.bin"),
+            &format!("> dfu-util -a 0 -s {addr_spec} -D firmware.bin"),
         );
 
         let child = Command::new("dfu-util")
@@ -438,7 +438,7 @@ pub fn start_flash(
                 ),
             ),
             _ => {
-                push_log(&dfu_log, &ctx, "✔ Flash complete!");
+                push_log(&dfu_log, &ctx, "[OK] Flash complete!");
                 set(&state, &ctx, DfuState::Success);
             }
         }
@@ -466,7 +466,7 @@ fn objcopy(
     // 1. llvm-objcopy (fastest, often available via rustup llvm-tools-preview)
     push_log(log, ctx, "  Trying llvm-objcopy …");
     if try_cmd("llvm-objcopy", &["-O", "binary", elf_s, bin_s], None) && bin.exists() {
-        push_log(log, ctx, "  ✔ llvm-objcopy succeeded");
+        push_log(log, ctx, "  [OK] llvm-objcopy succeeded");
         return Ok(());
     }
 
@@ -478,7 +478,7 @@ fn objcopy(
         None,
     ) && bin.exists()
     {
-        push_log(log, ctx, "  ✔ arm-none-eabi-objcopy succeeded");
+        push_log(log, ctx, "  [OK] arm-none-eabi-objcopy succeeded");
         return Ok(());
     }
 
@@ -490,11 +490,11 @@ fn objcopy(
         elf.parent(), // run from project dir so cargo finds Cargo.toml
     ) && bin.exists()
     {
-        push_log(log, ctx, "  ✔ cargo objcopy succeeded");
+        push_log(log, ctx, "  [OK] cargo objcopy succeeded");
         return Ok(());
     }
 
-    Err("Could not convert ELF → BIN. Install one of:\n\
+    Err("Could not convert ELF -> BIN. Install one of:\n\
          • llvm-objcopy  — rustup component add llvm-tools-preview\n\
          • arm-none-eabi-objcopy  — ARM GNU Toolchain\n\
          • cargo-binutils  — cargo install cargo-binutils"

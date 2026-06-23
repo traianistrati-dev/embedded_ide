@@ -239,7 +239,7 @@ fn run_check(dir: &Path, target: &str) -> BuildState {
             return BuildState::Failed(
                 "[DISK_FULL] The build target/ directory has run out of disk space.\n\n\
                  ESP32 / RISC-V builds generate several GB of LLVM artefacts the first time.\n\
-                 → Click  \"Clean target/\"  to delete cached build artefacts and free space,\n\
+                 -> Click  \"Clean target/\"  to delete cached build artefacts and free space,\n\
                    then press Build again (crates stay cached in ~/.cargo; only rebuilt files\n\
                    are re-compiled).\n\n\
                  Path: <TEMP>\\embedded_ide_0_check\\target\\"

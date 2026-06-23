@@ -173,7 +173,7 @@ pub fn show_dfu_tab(
 
     // ── Config row — adaptive: ESP32 / SWD (OpenOCD) / DFU ───────────────────
     ui.horizontal(|ui| {
-        let build_done = log.iter().any(|l| l.contains("✔ Build OK"));
+        let build_done = log.iter().any(|l| l.contains("[OK] Build OK"));
 
         // Helper: render a phase indicator icon + label
         let phase_widget = |ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32| {
@@ -203,7 +203,7 @@ pub fn show_dfu_tab(
             };
             phase_widget(ui, b_icon, "Build", b_col);
             ui.label(
-                egui::RichText::new("→")
+                egui::RichText::new(ph::ARROW_RIGHT)
                     .size(11.0)
                     .color(egui::Color32::from_gray(70)),
             );
@@ -281,7 +281,7 @@ pub fn show_dfu_tab(
             };
             phase_widget(ui, b_icon, "Build", b_col);
             ui.label(
-                egui::RichText::new("→")
+                egui::RichText::new(ph::ARROW_RIGHT)
                     .size(11.0)
                     .color(egui::Color32::from_gray(70)),
             );
@@ -333,7 +333,7 @@ pub fn show_dfu_tab(
             ui.separator();
 
             // DFU phases: Build → Objcopy → Flash
-            let objcopy_done = log.iter().any(|l| l.contains("✔ firmware.bin ready"));
+            let objcopy_done = log.iter().any(|l| l.contains("[OK] firmware.bin ready"));
 
             let (b_icon, b_col) = match &state {
                 DfuState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
@@ -345,7 +345,7 @@ pub fn show_dfu_tab(
             };
             phase_widget(ui, b_icon, "Build", b_col);
             ui.label(
-                egui::RichText::new("→")
+                egui::RichText::new(ph::ARROW_RIGHT)
                     .size(11.0)
                     .color(egui::Color32::from_gray(70)),
             );
@@ -365,7 +365,7 @@ pub fn show_dfu_tab(
             };
             phase_widget(ui, o_icon, "Objcopy", o_col);
             ui.label(
-                egui::RichText::new("→")
+                egui::RichText::new(ph::ARROW_RIGHT)
                     .size(11.0)
                     .color(egui::Color32::from_gray(70)),
             );
@@ -486,7 +486,7 @@ pub fn show_dfu_tab(
             }
 
             ui.label(
-                egui::RichText::new("← verify connectivity without flashing")
+                egui::RichText::new(format!("{} verify connectivity without flashing", ph::ARROW_LEFT))
                     .size(10.0)
                     .color(egui::Color32::from_gray(100))
                     .italics(),
@@ -630,9 +630,9 @@ pub fn show_dfu_tab(
                 // Warnings start with "warning" at column 0.
                 // Using starts_with() avoids false positives from crate names.
                 let trimmed = line.trim_start();
-                let color = if line.starts_with("✔") {
+                let color = if line.starts_with("[OK]") {
                     egui::Color32::from_rgb(80, 200, 100) // green  — success
-                } else if line.starts_with("▶") {
+                } else if line.starts_with(">") {
                     egui::Color32::from_rgb(100, 180, 255) // blue   — command header
                 } else if trimmed.starts_with("error[") || trimmed.starts_with("error:") {
                     egui::Color32::from_rgb(220, 100, 80) // red    — real compile error

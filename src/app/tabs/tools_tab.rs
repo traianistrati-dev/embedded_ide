@@ -214,11 +214,11 @@ pub fn show_tools_tab(
                 return;
             }
             for line in &log {
-                let color = if line.starts_with("  ✔") || line.starts_with("✔") {
+                let color = if line.starts_with("  [OK]") || line.starts_with("[OK]") {
                     egui::Color32::from_rgb(80, 200, 100)
-                } else if line.starts_with("  ✘") {
+                } else if line.starts_with("  [X]") || line.starts_with("[X]") {
                     egui::Color32::from_rgb(220, 80, 70)
-                } else if line.starts_with("▶") {
+                } else if line.starts_with(">") {
                     egui::Color32::from_rgb(100, 180, 255)
                 } else {
                     egui::Color32::from_rgb(175, 180, 192)

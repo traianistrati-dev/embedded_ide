@@ -41,7 +41,7 @@ pub fn stm32f1_presets() -> Vec<ClockPreset> {
             },
         },
         ClockPreset {
-            name: "HSI→PLL 64 MHz".to_owned(),
+            name: "HSI->PLL 64 MHz".to_owned(),
             description: "No crystal. HSI/2 ×16 = 64 MHz (footnote-1 max). No USB.".to_owned(),
             config: Stm32f1Clock {
                 hse_enabled: false,

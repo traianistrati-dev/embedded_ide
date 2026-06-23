@@ -42,8 +42,8 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
 
     item(ui, ph::SCISSORS, "Delete line", "Ctrl+X", EditorAction::DeleteLine);
     item(ui, ph::CODE, "Toggle comment", "Ctrl+/", EditorAction::Comment);
-    item(ui, ph::ARROW_UP, "Move line up", "Ctrl+↑", EditorAction::MoveUp);
-    item(ui, ph::ARROW_DOWN, "Move line down", "Ctrl+↓", EditorAction::MoveDown);
+    item(ui, ph::ARROW_UP, "Move line up", "Ctrl+Up", EditorAction::MoveUp);
+    item(ui, ph::ARROW_DOWN, "Move line down", "Ctrl+Down", EditorAction::MoveDown);
 
     if is_rs {
         ui.separator();

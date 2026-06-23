@@ -36,7 +36,7 @@ impl PinFunction {
                      Converts an analog voltage (0–VDDA) to a 12-bit digital value."
                 ),
                 specs: vec![
-                    ("Resolution".into(), "12-bit  →  0 – 4095 counts".into()),
+                    ("Resolution".into(), "12-bit  ->  0 - 4095 counts".into()),
                     ("Reference voltage".into(), "VDDA (typ. 3.3 V)".into()),
                     ("External channels".into(), "10 channels  (IN0 – IN9)".into()),
                     ("Conversion speed".into(), "Up to 1 MSPS (1 MHz)".into()),
@@ -212,7 +212,7 @@ fn spi_common_specs(n: u8) -> Vec<(String, String)> {
         ("Max speed".into(), max_speed.into()),
         ("Data frame".into(), "8-bit or 16-bit".into()),
         ("Clock polarity".into(), "CPOL 0 or 1".into()),
-        ("Clock phase".into(), "CPHA 0 or 1  →  4 SPI modes".into()),
+        ("Clock phase".into(), "CPHA 0 or 1  ->  4 SPI modes".into()),
         ("NSS management".into(), "Hardware or software".into()),
         ("DMA".into(), "Supported on TX and RX".into()),
     ]

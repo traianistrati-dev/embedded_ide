@@ -44,7 +44,7 @@ impl OpenOcdState {
             OpenOcdState::Idle => "—",
             OpenOcdState::Building => "Building…",
             OpenOcdState::Flashing => "Flashing (SWD)…",
-            OpenOcdState::Success => "SWD Flash OK ✔",
+            OpenOcdState::Success => "SWD Flash OK",
             OpenOcdState::Error(_) => "SWD Error",
         }
     }
@@ -136,7 +136,7 @@ pub fn start_flash(
         push_log(
             &log,
             &ctx,
-            &format!("▶ cargo build --release --target {target} …"),
+            &format!("> cargo build --release --target {target} …"),
         );
 
         if !run_cargo_build(&project_dir, &target, &log, &ctx) {
@@ -151,14 +151,14 @@ pub fn start_flash(
                 push_log(
                     &log,
                     &ctx,
-                    "⚠ Stale linker-script cache (device.x missing) — \
+                    "[!] Stale linker-script cache (device.x missing) - \
                      running `cargo clean` and retrying…",
                 );
                 cargo_clean(&project_dir);
                 push_log(
                     &log,
                     &ctx,
-                    &format!("▶ cargo build --release --target {target} … (retry)"),
+                    &format!("> cargo build --release --target {target} … (retry)"),
                 );
                 if !run_cargo_build(&project_dir, &target, &log, &ctx) {
                     set(
@@ -188,7 +188,7 @@ pub fn start_flash(
             }
         }
 
-        push_log(&log, &ctx, "✔ Build OK");
+        push_log(&log, &ctx, "[OK] Build OK");
 
         // ── Phase 2: openocd flash ─────────────────────────────────────────────
         set(&state, &ctx, OpenOcdState::Flashing);
@@ -228,7 +228,7 @@ pub fn start_flash(
             &log,
             &ctx,
             &format!(
-                "▶ openocd -f {interface_cfg}{sel_note} -f {target_cfg} -c \"program … verify reset exit\""
+                "> openocd -f {interface_cfg}{sel_note} -f {target_cfg} -c \"program … verify reset exit\""
             ),
         );
 
@@ -311,7 +311,7 @@ pub fn start_flash(
                 ),
             ),
             _ => {
-                push_log(&log, &ctx, "✔ SWD flash complete!");
+                push_log(&log, &ctx, "[OK] SWD flash complete!");
                 set(&state, &ctx, OpenOcdState::Success);
             }
         }
@@ -340,7 +340,12 @@ fn run_cargo_build(
 ) -> bool {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_dir)
-        .args(["build", "--release", "--verbose", "--target", target])
+        .args([
+            "build",
+            "--release", //, "--verbose"
+            "--target",
+            target,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
