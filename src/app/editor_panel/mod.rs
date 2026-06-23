@@ -17,6 +17,7 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 pub(crate) mod cargo_complete;
 mod comment;
 mod completion;
+mod context_menu;
 mod delete_line;
 mod diag_embed;
 mod format;
@@ -163,16 +164,18 @@ impl AppIde {
                 }
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
-                let ctrl_space_pressed =
+                // These flags are `mut` so the right-click context menu (handled
+                // after the editor renders) can drive the exact same code paths.
+                let mut ctrl_space_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
                 // Ctrl+/ → toggle line comments on the selection (consumed before
                 // the editor so `/` is never typed into the text).
-                let ctrl_slash_pressed =
+                let mut ctrl_slash_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
                 // Ctrl+Up / Ctrl+Down → move the selected lines up / down.
-                let ctrl_up_pressed =
+                let mut ctrl_up_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
-                let ctrl_down_pressed =
+                let mut ctrl_down_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
                 // Ctrl+C state (peeked, not consumed — the editor still copies any
                 // selection). When the pointer is over a diagnostic, the overlay
@@ -184,21 +187,21 @@ impl AppIde {
                 // `Key::X` — so consuming the key alone leaves the editor's native
                 // cut (which only removes the selection) running. Remove the Cut
                 // event too, then we handle the whole-line delete ourselves.
-                let ctrl_x_pressed = ui.input_mut(|i| {
+                let mut ctrl_x_pressed = ui.input_mut(|i| {
                     let had_cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
                     i.events.retain(|e| !matches!(e, egui::Event::Cut));
                     let key = i.consume_key(egui::Modifiers::CTRL, egui::Key::X);
                     had_cut || key
                 });
                 // Ctrl+Shift+F → re-indent the whole file by block nesting.
-                let ctrl_shift_f_pressed = ui.input_mut(|i| {
+                let mut ctrl_shift_f_pressed = ui.input_mut(|i| {
                     i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::F)
                 });
                 // Ctrl+R → rename the symbol at the cursor project-wide.
-                let ctrl_r_pressed =
+                let mut ctrl_r_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R));
                 // F12 → show the definition of the symbol at the cursor.
-                let f12_pressed =
+                let mut f12_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
 
                 // Size the editor to fill the height left over after the
@@ -223,7 +226,7 @@ impl AppIde {
                     r
                 };
 
-                let mut editor_resp = CodeEditor::default()
+                let editor_resp = CodeEditor::default()
                     .id_source(editor_id)
                     .with_rows(editor_rows)
                     .with_fontsize(13.0)
@@ -235,6 +238,60 @@ impl AppIde {
                         &display_syntax,
                         &mut self.completer,
                     );
+
+                // ── Right-click context menu ──────────────────────────────────
+                // Lists every editor command with its shortcut. A click drives
+                // the same flags the keyboard shortcut sets (so both share one
+                // code path); Copy / Select-All are applied directly. The menu
+                // acts on the current caret (right-click doesn't move it), which
+                // matches the "…where the cursor is" shortcut semantics.
+                let is_rs = matches!(
+                    self.selected_file,
+                    ProjectFileId::MainRs | ProjectFileId::UserFile(_)
+                );
+                let is_cargo = self.selected_file == ProjectFileId::CargoToml;
+                let mut menu_action: Option<context_menu::EditorAction> = None;
+                editor_resp.response.context_menu(|ui| {
+                    menu_action = context_menu::editor_menu(ui, is_rs, is_cargo);
+                });
+                {
+                    use context_menu::EditorAction as A;
+                    match menu_action {
+                        Some(A::DeleteLine) => ctrl_x_pressed = true,
+                        Some(A::Comment) => ctrl_slash_pressed = true,
+                        Some(A::MoveUp) => ctrl_up_pressed = true,
+                        Some(A::MoveDown) => ctrl_down_pressed = true,
+                        Some(A::Format) => ctrl_shift_f_pressed = true,
+                        Some(A::Rename) => ctrl_r_pressed = true,
+                        Some(A::GoToDef) => f12_pressed = true,
+                        Some(A::Completion) => ctrl_space_pressed = true,
+                        Some(A::Copy) => {
+                            if let Some(r) = editor_resp.state.cursor.char_range() {
+                                let lo = r.primary.index.min(r.secondary.index);
+                                let hi = r.primary.index.max(r.secondary.index);
+                                let chars: Vec<char> = display_code.chars().collect();
+                                let text = if lo != hi {
+                                    chars[lo..hi.min(chars.len())].iter().collect::<String>()
+                                } else {
+                                    current_line(&chars, lo)
+                                };
+                                if !text.is_empty() {
+                                    ui.ctx().copy_text(text);
+                                }
+                            }
+                        }
+                        Some(A::SelectAll) => {
+                            let len = display_code.chars().count();
+                            let mut st = editor_resp.state.clone();
+                            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(len),
+                            )));
+                            st.store(ui.ctx(), editor_resp.response.id);
+                        }
+                        None => {}
+                    }
+                }
 
                 // ── Editor line operations on the selection ───────────────────
                 // Ctrl+/ toggles line comments (`//` for .rs, `#` for TOML /
@@ -342,4 +399,21 @@ impl AppIde {
                 self.show_rename_popup(ui);
             });
     }
+}
+
+/// The text of the line containing char index `idx` (no trailing newline).
+/// Used by the context-menu "Copy" when there is no selection.
+fn current_line(chars: &[char], idx: usize) -> String {
+    let idx = idx.min(chars.len());
+    let start = chars[..idx]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let end = chars[idx..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map(|p| idx + p)
+        .unwrap_or(chars.len());
+    chars[start..end].iter().collect()
 }
