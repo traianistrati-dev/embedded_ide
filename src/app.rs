@@ -169,10 +169,6 @@ struct DefinitionView {
 
 const STORAGE_KEY: &str = "embedded_ide_project_v1";
 
-/// How long editing must pause before rust-analyzer is asked to re-verify
-/// (diagnostics / cargo-check). A Project Save flushes immediately regardless.
-const LSP_IDLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(3);
-
 /// Byte offset in `text` of the 0-based LSP position `(line, character)`.
 /// Character is treated as a char count (correct for ASCII identifiers), clamped
 /// to the line's end.
@@ -350,16 +346,9 @@ pub struct AppIde {
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
-    /// LSP edit-debounce: RA only re-verifies (didChange + workspace disk write)
-    /// 3 s after editing stops, or on an explicit Project Save — NOT on every
-    /// keystroke. `lsp_prev_hash` detects a change this frame (resets the idle
-    /// timer); `lsp_synced_hash` is what RA last received (so we know if there
-    /// is anything to flush). See `init_frame`.
-    lsp_prev_hash: u64,
-    lsp_synced_hash: u64,
-    /// When the LSP-relevant content (main.rs + user files) last changed.
-    lsp_last_edit: Option<std::time::Instant>,
-    /// Set by a Project Save to flush pending changes to RA immediately.
+    /// Set by a Project Save (Ctrl+S / Save button / project reload). RA
+    /// re-verifies (didChange + workspace disk write + didSave) ONLY when this is
+    /// set — never while typing, so editing stays light. See `init_frame`.
     lsp_flush_requested: bool,
     // ── Rename symbol (Ctrl+R → textDocument/rename) ─────────────────────────
     /// While `true`, the rename input popup is shown.
@@ -559,9 +548,6 @@ impl AppIde {
             pending_scroll_to_line: None,
             highlighted_error_line: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
-            lsp_prev_hash: 0,
-            lsp_synced_hash: 0,
-            lsp_last_edit: None,
             lsp_flush_requested: false,
             rename_active: false,
             rename_input: String::new(),
@@ -739,32 +725,15 @@ impl AppIde {
                 }
             }
             LspStatus::Ready => {
-                // Debounced verification: push edits to rust-analyzer (and the
-                // workspace on disk for cargo-check) ONLY 3 s after editing stops
-                // or on an explicit Project Save — never on every keystroke.
-                let cur_hash = self.lsp_content_hash();
-                if cur_hash != self.lsp_prev_hash {
-                    // Content changed this frame → reset the idle timer.
-                    self.lsp_prev_hash = cur_hash;
-                    self.lsp_last_edit = Some(std::time::Instant::now());
-                }
-                let dirty = cur_hash != self.lsp_synced_hash;
-                let idle_done = self
-                    .lsp_last_edit
-                    .map(|t| t.elapsed() >= LSP_IDLE_DEBOUNCE)
-                    .unwrap_or(true);
-                // Flush (→ RA re-verifies) on a Project Save unconditionally, or
-                // 3 s after editing stops. A Save re-writes the workspace + re-sends
-                // the document even when unchanged, so verification always restarts.
-                let force = self.lsp_flush_requested;
-                if force || (dirty && idle_done) {
-                    self.flush_lsp_to_workspace(force);
-                    self.lsp_synced_hash = cur_hash;
+                // RA re-verifies ONLY on an explicit Project Save (Ctrl+S / Save
+                // button / project reload) — never while typing, so editing stays
+                // light. The Save re-syncs every file to RA and re-runs its checks
+                // (didChange + workspace disk write + didSave). Completions still
+                // sync their own text on demand (see completion.rs), so they work
+                // on the current text between saves.
+                if self.lsp_flush_requested {
+                    self.flush_lsp_to_workspace(true);
                     self.lsp_flush_requested = false;
-                } else if dirty {
-                    // Still typing — wake up after the debounce so the flush
-                    // fires even with no further input events.
-                    self.egui_ctx.request_repaint_after(LSP_IDLE_DEBOUNCE);
                 }
             }
             _ => {}
@@ -818,26 +787,13 @@ impl AppIde {
         }
     }
 
-    /// Hash of the LSP-relevant content (main.rs + every user source file), used
-    /// to detect edits between frames without sending anything to RA.
-    fn lsp_content_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.generated_code.hash(&mut h);
-        for (rel, content) in &self.project_tree.user_src_files {
-            rel.hash(&mut h);
-            content.hash(&mut h);
-        }
-        h.finish()
-    }
-
     /// Single point where rust-analyzer is asked to re-verify: writes main.rs +
     /// every user source file to the LSP workspace (so cargo-check/flycheck sees
-    /// them) and pushes `didChange` (so RA's in-memory analysis updates). Called
-    /// only from the debounced path — never on every keystroke.
+    /// them), pushes `didChange` (RA's in-memory analysis) and `didSave` (RA's
+    /// flycheck). Called **only on a Project Save** — never while typing.
     ///
-    /// `force` (a Project Save) re-sends every document even if unchanged, so RA
-    /// re-runs its analysis/flycheck — i.e. Save restarts verification.
+    /// `force` re-sends every document even if unchanged, so RA re-runs its
+    /// analysis/flycheck — i.e. Save always restarts verification.
     fn flush_lsp_to_workspace(&mut self, force: bool) {
         let workspace = std::env::temp_dir().join("embedded_ide_0_check");
         let write = |rel: &str, content: &str| {
@@ -997,8 +953,8 @@ impl eframe::App for AppIde {
         }
 
         // A Project Save (or a tree change that rewrote the workspace) flushes
-        // pending edits to rust-analyzer next frame, so RA re-verifies on save —
-        // outside the 3 s idle debounce.
+        // pending edits to rust-analyzer next frame — the ONLY moment RA
+        // re-verifies (no typing-time evaluation, so editing stays light).
         if save_project_clicked || save_project_needed {
             self.lsp_flush_requested = true;
         }

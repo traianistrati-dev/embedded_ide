@@ -316,6 +316,20 @@ impl AppIde {
                     }
                 }
 
+                // Ctrl+X cuts (not just deletes) the line(s): copy them to the
+                // clipboard first so they can be pasted, then the line op below
+                // removes them. (The native Cut event was already stripped above.)
+                if ctrl_x_pressed {
+                    if let Some(r) = editor_resp.state.cursor.char_range() {
+                        let lo = r.primary.index.min(r.secondary.index);
+                        let hi = r.primary.index.max(r.secondary.index);
+                        let cut = delete_line::cut_text(&display_code, lo, hi);
+                        if !cut.is_empty() {
+                            ui.ctx().copy_text(cut);
+                        }
+                    }
+                }
+
                 // ── Editor line operations on the selection ───────────────────
                 // Ctrl+/ toggles line comments (`//` for .rs, `#` for TOML /
                 // .gitignore); Ctrl+Up / Ctrl+Down move the selected lines;

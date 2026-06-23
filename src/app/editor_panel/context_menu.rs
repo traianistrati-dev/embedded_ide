@@ -41,7 +41,7 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
             }
         };
 
-    item(ui, ph::SCISSORS, "Delete line", "Ctrl+X", EditorAction::DeleteLine);
+    item(ui, ph::SCISSORS, "Cut line", "Ctrl+X", EditorAction::DeleteLine);
     item(ui, ph::COPY_SIMPLE, "Duplicate line", "Ctrl+D", EditorAction::DuplicateLine);
     item(ui, ph::CODE, "Toggle comment", "Ctrl+/", EditorAction::Comment);
     item(ui, ph::ARROW_UP, "Move line up", "Ctrl+Up", EditorAction::MoveUp);

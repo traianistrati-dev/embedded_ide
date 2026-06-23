@@ -1,12 +1,11 @@
-//! `Ctrl+X` — delete the line(s) where the cursor / selection is.
+//! `Ctrl+X` — cut the line(s) where the cursor / selection is: copy them to the
+//! clipboard (see `cut_text`) and remove them (see `delete_lines`).
 
-/// Delete the lines spanned by the selection `[sel_lo, sel_hi]` (char indices
-/// into `text`). With no selection it's just the cursor's line. Returns the new
-/// text and the collapsed cursor position (start of the line that takes the
-/// deleted line's place, or the end of the text when the last line was removed).
-/// The returned range is collapsed (`lo == hi`) so it fits the editor's
-/// line-operation pipeline.
-pub fn delete_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usize, usize) {
+/// The lines spanned by the selection `[sel_lo, sel_hi]` (char indices into
+/// `text`), their index range `first..=last`, and whether `text` ended with a
+/// structural trailing newline. Shared by `delete_lines` and `cut_text` so the
+/// cut clipboard text always matches exactly what gets removed.
+fn spanned(text: &str, sel_lo: usize, sel_hi: usize) -> (Vec<String>, usize, usize, bool) {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let lo = sel_lo.min(n).min(sel_hi.min(n));
@@ -14,7 +13,7 @@ pub fn delete_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usize,
     // A non-empty selection ending at a line start shouldn't pull in that line.
     let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' { hi - 1 } else { hi };
 
-    // A trailing '\n' is structural; operate on the lines before it and re-add.
+    // A trailing '\n' is structural; operate on the lines before it.
     let had_trailing = chars.last() == Some(&'\n');
     let body_len = if had_trailing { n - 1 } else { n };
 
@@ -41,6 +40,17 @@ pub fn delete_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usize,
         .iter()
         .map(|&(s, e)| chars[s..e].iter().collect())
         .collect();
+    (lines, first, last, had_trailing)
+}
+
+/// Delete the lines spanned by the selection `[sel_lo, sel_hi]` (char indices
+/// into `text`). With no selection it's just the cursor's line. Returns the new
+/// text and the collapsed cursor position (start of the line that takes the
+/// deleted line's place, or the end of the text when the last line was removed).
+/// The returned range is collapsed (`lo == hi`) so it fits the editor's
+/// line-operation pipeline.
+pub fn delete_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usize, usize) {
+    let (lines, first, last, had_trailing) = spanned(text, sel_lo, sel_hi);
 
     // Keep everything except [first..=last].
     let mut kept: Vec<String> = Vec::with_capacity(lines.len());
@@ -60,6 +70,16 @@ pub fn delete_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usize,
         new_text.chars().count()
     };
     (new_text, cursor, cursor)
+}
+
+/// The text `delete_lines` removes for the same selection — the full line(s)
+/// with a trailing newline, so a later paste re-inserts them as whole lines.
+/// Makes Ctrl+X a *cut* (to the clipboard) rather than a plain delete.
+pub fn cut_text(text: &str, sel_lo: usize, sel_hi: usize) -> String {
+    let (lines, first, last, _had_trailing) = spanned(text, sel_lo, sel_hi);
+    let mut s = lines[first..=last].join("\n");
+    s.push('\n');
+    s
 }
 
 #[cfg(test)]
@@ -107,5 +127,19 @@ mod tests {
     fn preserves_no_trailing_newline() {
         let (out, _, _) = delete_lines("a\nb", 0, 0); // delete "a"
         assert_eq!(out, "b");
+    }
+
+    #[test]
+    fn cut_text_single_line_has_trailing_newline() {
+        assert_eq!(cut_text("a\nb\nc\n", 2, 2), "b\n"); // cursor on "b"
+        assert_eq!(cut_text("abc", 1, 1), "abc\n"); // no trailing newline in src
+    }
+
+    #[test]
+    fn cut_text_multi_line_selection() {
+        let src = "a\nb\nc\nd\n";
+        let lo = src.find("b").unwrap();
+        let hi = src.find("c").unwrap() + 1;
+        assert_eq!(cut_text(src, lo, hi), "b\nc\n");
     }
 }
