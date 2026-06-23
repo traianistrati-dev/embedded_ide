@@ -130,6 +130,7 @@ impl AppIde {
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line));
+                self.highlighted_error_line = Some((id, line));
             }
         }
         Some(panel.response.rect.top())

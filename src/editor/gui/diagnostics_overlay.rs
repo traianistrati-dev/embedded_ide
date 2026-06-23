@@ -1,9 +1,11 @@
 //! Inline diagnostic visualization — wavy underlines, error messages, tooltips.
 
+use crate::editor::gui::text_pos::{
+    draw_wavy_underline, lsp_line_end_char_idx, lsp_pos_to_char_idx,
+};
+use crate::lsp::LspDiagnostic;
 use eframe::egui;
 use egui_phosphor::regular as ph;
-use crate::lsp::LspDiagnostic;
-use crate::editor::gui::text_pos::{draw_wavy_underline, lsp_line_end_char_idx, lsp_pos_to_char_idx};
 
 /// Draw inline diagnostics (wavy underlines, inline messages, hover tooltips)
 /// for the currently visible code in the editor.
@@ -30,6 +32,9 @@ pub fn show_diagnostics_overlay(
     // `copy_requested`: true when Ctrl+C was pressed this frame — the hovered
     // diagnostic copies its message to the clipboard.
     copy_requested: bool,
+    // `highlight_line`: 1-based line of the diagnostic the user clicked in the
+    // bottom panel — drawn with a translucent dark-red band.
+    highlight_line: Option<u32>,
 ) {
     if diags.is_empty() {
         return;
@@ -42,12 +47,34 @@ pub fn show_diagnostics_overlay(
     let clip = text_clip_rect;
     let painter = ui.painter().with_clip_rect(clip);
 
+    // ── Clicked-diagnostic line highlight (translucent dark-red band) ─────
+    if let Some(line) = highlight_line {
+        let ci = lsp_pos_to_char_idx(display_code, line, 1).min(total_chars);
+        let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
+        let y_top = gp.y + loc.min.y;
+        let y_bot = gp.y + loc.max.y;
+        if y_bot >= clip.top() && y_top <= clip.bottom() {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(clip.left(), y_top),
+                    egui::pos2(clip.right(), y_bot),
+                ),
+                0.0,
+                // darkred (139,0,0) at ~0.1 alpha (26/255).
+                egui::Color32::from_rgba_unmultiplied(255, 0, 100, 26),
+            );
+        }
+    }
+
+    // Lines that already drew an inline message — a line can carry several
+    // diagnostics, but a second message would overlap the first, so show one.
+    let mut msg_lines: Vec<u32> = Vec::new();
+
     // ── Per-diagnostic: underline + inline message + tooltip ──────────────
     for (di, diag) in diags.iter().enumerate() {
-        let start_ci = lsp_pos_to_char_idx(&display_code, diag.line, diag.col)
-            .min(total_chars);
-        let end_ci_raw = lsp_pos_to_char_idx(&display_code, diag.end_line, diag.end_col)
-            .min(total_chars);
+        let start_ci = lsp_pos_to_char_idx(&display_code, diag.line, diag.col).min(total_chars);
+        let end_ci_raw =
+            lsp_pos_to_char_idx(&display_code, diag.end_line, diag.end_col).min(total_chars);
         let end_ci = if end_ci_raw <= start_ci {
             (start_ci + 1).min(total_chars)
         } else {
@@ -121,12 +148,12 @@ pub fn show_diagnostics_overlay(
         draw_wavy_underline(&painter, sx, ex, sy_bot, ul_color);
 
         // ── Inline message at end of line ─────────────────────────────────
-        let eol_ci = lsp_line_end_char_idx(&display_code, diag.line)
-            .min(total_chars);
-        let loc_eol = galley
-            .pos_from_cursor(egui::text::CCursor::new(eol_ci));
+        let eol_ci = lsp_line_end_char_idx(&display_code, diag.line).min(total_chars);
+        let loc_eol = galley.pos_from_cursor(egui::text::CCursor::new(eol_ci));
         let same_row_eol = (loc_s.min.y - loc_eol.min.y).abs() < line_h * 0.5;
-        if same_row_eol {
+        // Only one inline message per line (a second would overlap the first).
+        if same_row_eol && !msg_lines.contains(&diag.line) {
+            msg_lines.push(diag.line);
             let msg_x = gp.x + loc_eol.min.x + 16.0;
             // First line only, then cap length — a multi-line message rendered
             // raw would draw extra rows and overlap the code below it.

@@ -404,6 +404,12 @@ impl AppIde {
                         ctrl_space_pressed,
                     );
                 } else {
+                    // Highlight the clicked diagnostic's line, but only while the
+                    // editor is showing the file that error belongs to.
+                    let highlight_line: Option<u32> = match self.highlighted_error_line {
+                        Some((f, line)) if f == displayed_file => Some(line as u32),
+                        _ => None,
+                    };
                     self.handle_editor_completion(
                         ui,
                         &editor_resp,
@@ -414,6 +420,7 @@ impl AppIde {
                         copy_requested,
                         ctrl_r_pressed,
                         f12_pressed,
+                        highlight_line,
                     );
                 }
                 // Rename input popup (shown while active; sends the request on

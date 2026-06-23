@@ -344,6 +344,9 @@ pub struct AppIde {
     /// Set when a row in the Cargo Check / rust-analyzer tab is clicked; applied
     /// once the editor is displaying that file (scrolls the line to row ~10).
     pending_scroll_to_line: Option<(ProjectFileId, usize)>,
+    /// The file + 1-based line of the last-clicked diagnostic. Highlighted with a
+    /// translucent dark-red band in the editor until another diagnostic is clicked.
+    highlighted_error_line: Option<(ProjectFileId, usize)>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -554,6 +557,7 @@ impl AppIde {
             cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
             last_caret_idx: None,
             pending_scroll_to_line: None,
+            highlighted_error_line: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_prev_hash: 0,
             lsp_synced_hash: 0,
