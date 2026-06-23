@@ -16,6 +16,7 @@ ron              = "0.8"
 notify           = "6"
 serialport = "4"
 rusb = "0.9"
+ureq = "2"
 
 
 [dev-dependencies]

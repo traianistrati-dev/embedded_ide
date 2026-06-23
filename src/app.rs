@@ -314,6 +314,9 @@ pub struct AppIde {
     /// Key handlers (Tab / Enter / Arrow) use this so they always operate
     /// on the same slice the user sees, not the full unfiltered LSP list.
     completion_filtered_items: Vec<lsp::CompletionItem>,
+    /// Cargo.toml dependency-completion popup (crate names + live crates.io
+    /// versions). Independent of rust-analyzer.
+    cargo_complete: editor_panel::cargo_complete::CargoCompleteState,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -513,6 +516,7 @@ impl AppIde {
             completion_trigger_idx: 0,
             completion_pending_insert: None,
             completion_filtered_items: Vec::new(),
+            cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_prev_hash: 0,
             lsp_synced_hash: 0,

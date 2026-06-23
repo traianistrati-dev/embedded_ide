@@ -14,6 +14,7 @@ use crate::panels::mcu_module::project_gen::ProjectFiles;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme};
 
+pub(crate) mod cargo_complete;
 mod comment;
 mod completion;
 mod delete_line;
@@ -134,6 +135,31 @@ impl AppIde {
                             }
                         });
                     }
+                }
+                // ── Cargo.toml completion popup: navigation / accept keys ────
+                // Same key set as the LSP popup; consumed before the editor so
+                // Enter/Tab don't reach the TextEdit. Accept is deferred through
+                // `cargo_complete.pending` (the same path mouse clicks use).
+                if self.cargo_complete.open && !self.cargo_complete.items.is_empty() {
+                    let count = self.cargo_complete.items.len();
+                    ui.input_mut(|inp| {
+                        if inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                            self.cargo_complete.open = false;
+                        } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                            self.cargo_complete.sel =
+                                (self.cargo_complete.sel + 1).min(count.saturating_sub(1));
+                        } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                            self.cargo_complete.sel = self.cargo_complete.sel.saturating_sub(1);
+                        } else if inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                            || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                        {
+                            let sel = self.cargo_complete.sel.min(count.saturating_sub(1));
+                            if let Some(item) = self.cargo_complete.items.get(sel) {
+                                self.cargo_complete.pending = Some(item.action.clone());
+                            }
+                            self.cargo_complete.open = false;
+                        }
+                    });
                 }
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
@@ -289,17 +315,28 @@ impl AppIde {
                     }
                 }
 
-                self.handle_editor_completion(
-                    ui,
-                    &editor_resp,
-                    editor_clip,
-                    display_code,
-                    lsp_accepted,
-                    ctrl_space_pressed,
-                    copy_requested,
-                    ctrl_r_pressed,
-                    f12_pressed,
-                );
+                if self.selected_file == ProjectFileId::CargoToml {
+                    // Cargo.toml gets crate-name + crates.io-version completion
+                    // instead of the rust-analyzer driver.
+                    self.handle_cargo_completion(
+                        ui,
+                        &editor_resp,
+                        &mut display_code,
+                        ctrl_space_pressed,
+                    );
+                } else {
+                    self.handle_editor_completion(
+                        ui,
+                        &editor_resp,
+                        editor_clip,
+                        display_code,
+                        lsp_accepted,
+                        ctrl_space_pressed,
+                        copy_requested,
+                        ctrl_r_pressed,
+                        f12_pressed,
+                    );
+                }
                 // Rename input popup (shown while active; sends the request on
                 // submit). Rendered after the editor so it overlays the code.
                 self.show_rename_popup(ui);
