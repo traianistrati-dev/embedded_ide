@@ -931,6 +931,27 @@ impl eframe::App for AppIde {
         // Detect Ctrl+S for Save/Export project
         let ctrl_s_pressed = ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::S));
 
+        // ── Bottom status bar ─────────────────────────────────────────────────
+        // A persistent full-width strip for long-running activity (Saving /
+        // Building / Flashing / Checking) and the last save result — with room
+        // for future statuses. Declared before the side panels so it claims the
+        // bottom edge across the whole window.
+        let status = self.activity_status();
+        egui::Panel::bottom("status_bar")
+            .exact_size(24.0)
+            .show_inside(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(8.0);
+                    if let Some((spinner, text, color)) = &status {
+                        if *spinner {
+                            ui.add(egui::Spinner::new().size(13.0));
+                            ui.add_space(5.0);
+                        }
+                        ui.label(egui::RichText::new(text).size(11.0).color(*color));
+                    }
+                });
+            });
+
         // Build project files snapshot (used by both tree and editor panels)
         // Snapshot from the live editable state (main.rs + the five editable
         // config files), so the tree/editor show current edits — not a fresh

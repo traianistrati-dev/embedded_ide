@@ -20,11 +20,11 @@ pub(super) struct ProjectPanelSignals {
 }
 
 impl AppIde {
-    /// The current long-running activity for the header status indicator:
+    /// The current long-running activity for the bottom status bar:
     /// `(show_spinner, label, colour)`, or `None` when idle. Priority: save >
     /// build > flash > rust-analyzer; otherwise the last save result (✓ / ✗)
-    /// while it's still flashing.
-    fn activity_status(&self) -> Option<(bool, String, egui::Color32)> {
+    /// while it's still flashing. Rendered in the bottom bar (see `app::ui`).
+    pub(super) fn activity_status(&self) -> Option<(bool, String, egui::Color32)> {
         let amber = egui::Color32::from_rgb(220, 180, 70);
         let blue = egui::Color32::from_rgb(100, 170, 240);
 
@@ -83,11 +83,6 @@ impl AppIde {
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
 
-        // Current long-running activity (save / build / flash / RA) for the
-        // header status indicator — computed before the panel so the render
-        // closure can borrow `self` for the tree without a conflict.
-        let status = self.activity_status();
-
         egui::Panel::left("project_tree")
             .resizable(true)
             .default_size(200.0)
@@ -95,15 +90,6 @@ impl AppIde {
                 // ── Panel header row ──────────────────────────────────────────
                 ui.horizontal(|ui| {
                     ui.heading("Project");
-                    // Activity status: a spinner + label for an in-progress
-                    // operation (Saving / Building / Flashing / Checking), or the
-                    // last save result (✓ / ✗) for a few seconds.
-                    if let Some((spinner, text, color)) = &status {
-                        if *spinner {
-                            ui.add(egui::Spinner::new().size(13.0));
-                        }
-                        ui.label(egui::RichText::new(text).size(11.0).color(*color));
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn = |ui: &mut egui::Ui, icon: &str, label: &str, tip: &str| {
                             ui.add(egui::Button::new(
