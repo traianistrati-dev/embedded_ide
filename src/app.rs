@@ -228,12 +228,20 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
     })
 }
 
-/// Shorten a definition path for the tab header: the `src/…` tail when present,
-/// else the bare file name.
+/// Shorten a definition path for the tab header so it's clear which crate it
+/// comes from: the crate dir (the segment just before `/src/`) + the `src/…`
+/// tail, e.g. `stm32f1xx-hal-0.10.0/src/gpio.rs` instead of a bare `src/gpio.rs`.
+/// Falls back to the bare file name when there's no `/src/`.
 fn short_path(path: &str) -> String {
     let norm = path.replace('\\', "/");
     if let Some(i) = norm.rfind("/src/") {
-        norm[i + 1..].to_string()
+        let crate_dir = norm[..i].rsplit('/').next().unwrap_or("");
+        let tail = &norm[i + 1..]; // "src/…"
+        if crate_dir.is_empty() {
+            tail.to_string()
+        } else {
+            format!("{crate_dir}/{tail}")
+        }
     } else {
         norm.rsplit('/').next().unwrap_or(&norm).to_string()
     }
@@ -1096,10 +1104,19 @@ mod rename_apply_tests {
     }
 
     #[test]
-    fn short_path_keeps_src_tail_or_filename() {
+    fn short_path_keeps_crate_dir_and_src_tail_or_filename() {
         use super::short_path;
-        assert_eq!(short_path("C:/x/proj/src/pins/utils/i2c1.rs"), "src/pins/utils/i2c1.rs");
-        assert_eq!(short_path(r"C:\x\proj\src\main.rs"), "src/main.rs");
-        assert_eq!(short_path("/home/u/.cargo/.../esp-hal/lib.rs"), "lib.rs");
+        // The crate dir (segment before `/src/`) is kept so the crate is clear.
+        assert_eq!(
+            short_path("/home/u/.cargo/registry/src/index-abc/stm32f1xx-hal-0.10.0/src/gpio.rs"),
+            "stm32f1xx-hal-0.10.0/src/gpio.rs"
+        );
+        assert_eq!(
+            short_path("C:/x/proj/src/pins/utils/i2c1.rs"),
+            "proj/src/pins/utils/i2c1.rs"
+        );
+        assert_eq!(short_path(r"C:\x\proj\src\main.rs"), "proj/src/main.rs");
+        // No `/src/` → bare file name.
+        assert_eq!(short_path("/home/u/.cargo/esp-hal/lib.rs"), "lib.rs");
     }
 }

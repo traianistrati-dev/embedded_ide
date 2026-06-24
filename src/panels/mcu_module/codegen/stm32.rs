@@ -135,7 +135,6 @@ pub fn clock_setup_chain(clock: &ClockConfig) -> String {
     s
 }
 
-
 // ── Generated section builder ─────────────────────────────────────────────────
 
 pub fn make_generated_section(
@@ -314,10 +313,13 @@ pub fn make_generated_section(
         let rx_v = rx
             .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_rx{n}"));
-        let sfx = usart.get(&n).map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
+        let sfx = usart
+            .get(&n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    let (mut _tx{n}{sfx}, mut _rx{n}{sfx}) = \
-             init_usart{n}(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
+             pins::configs::usart1::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n" //init_usart{n}(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
         ));
     }
 
@@ -344,7 +346,10 @@ pub fn make_generated_section(
         let mosi_v = mosi
             .map(|(p, m)| binding_of(p, m))
             .unwrap_or_else(|| format!("_mosi{n}"));
-        let sfx = spi.get(&n).map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
+        let sfx = spi
+            .get(&n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    let _spi{n}{sfx} = \
              init_spi{n}(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks);\n"
@@ -362,9 +367,18 @@ pub fn make_generated_section(
             continue;
         }
         header!();
-        let scl_v = { let (p, m) = scl.unwrap(); binding_of(p, m) };
-        let sda_v = { let (p, m) = sda.unwrap(); binding_of(p, m) };
-        let sfx = i2c.get(&n).map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
+        let scl_v = {
+            let (p, m) = scl.unwrap();
+            binding_of(p, m)
+        };
+        let sda_v = {
+            let (p, m) = sda.unwrap();
+            binding_of(p, m)
+        };
+        let sfx = i2c
+            .get(&n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    let _i2c{n}{sfx} = \
              init_i2c{n}(dp.I2C{n}, ({scl_v}, {sda_v}), &mut afio, &clocks);\n"
