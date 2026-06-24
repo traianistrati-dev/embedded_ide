@@ -32,9 +32,10 @@ pub fn show_diagnostics_overlay(
     // `copy_requested`: true when Ctrl+C was pressed this frame — the hovered
     // diagnostic copies its message to the clipboard.
     copy_requested: bool,
-    // `highlight_line`: 1-based line of the diagnostic the user clicked in the
-    // bottom panel — drawn with a translucent dark-red band.
-    highlight_line: Option<u32>,
+    // `highlight`: (1-based line, band colour) of the diagnostic the user clicked
+    // in the bottom panel — drawn as a translucent band (colour keyed by
+    // severity: error red / warning yellow / info blue).
+    highlight: Option<(u32, egui::Color32)>,
     // `def_line`: 1-based line of the F12 go-to-definition target (when it's in
     // this project file) — drawn with a translucent yellow band, like the
     // Definition tab.
@@ -70,9 +71,9 @@ pub fn show_diagnostics_overlay(
     if let Some(line) = def_line {
         band(line, egui::Color32::from_rgba_unmultiplied(255, 214, 90, 32));
     }
-    // Clicked-diagnostic line — translucent band.
-    if let Some(line) = highlight_line {
-        band(line, egui::Color32::from_rgba_unmultiplied(255, 0, 100, 26));
+    // Clicked-diagnostic line — translucent band, colour keyed by severity.
+    if let Some((line, color)) = highlight {
+        band(line, color);
     }
 
     if diags.is_empty() {

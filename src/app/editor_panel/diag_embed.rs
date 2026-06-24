@@ -41,8 +41,8 @@ impl AppIde {
         // before the editor is laid out. exact_size gives us full control —
         // no egui-internal default that would reset on show/hide.
         let mut def_close = false;
-        // Diagnostic-row click navigation: (rel_path, 1-based line).
-        let mut nav: Option<(String, usize)> = None;
+        // Diagnostic-row click navigation: (rel_path, 1-based line, band colour).
+        let mut nav: Option<(String, usize, egui::Color32)> = None;
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
@@ -125,13 +125,13 @@ impl AppIde {
         }
         // A diagnostic row was clicked: open its file (incl. user `src/` files)
         // and queue the scroll-to-line, applied once the editor shows that file.
-        if let Some((path, line)) = nav {
+        if let Some((path, line, color)) = nav {
             if let Some(id) =
                 crate::app::resolve_diag_file(&path, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line));
-                self.highlighted_error_line = Some((id, line));
+                self.highlighted_error_line = Some((id, line, color));
             }
         }
         Some(panel.response.rect.top())

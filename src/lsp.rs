@@ -29,7 +29,7 @@ use std::{
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagSeverity {
     Error,
     Warning,

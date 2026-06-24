@@ -36,9 +36,9 @@ pub(super) fn show_diag_panel(
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
-    // Diagnostic-row click target: `(rel_path, 1-based line)`; the editor opens
-    // the file and scrolls to the line.
-    nav: &mut Option<(String, usize)>,
+    // Diagnostic-row click target: `(rel_path, 1-based line, band colour)`; the
+    // editor opens the file, scrolls to the line, and tints it.
+    nav: &mut Option<(String, usize, egui::Color32)>,
     // `definition`: the F12 snippet (header, code, highlight-line-index); the
     // "Definition" tab is shown only when this is Some. `definition_close`: set
     // true when the user closes it.

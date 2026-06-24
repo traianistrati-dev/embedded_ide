@@ -41,8 +41,9 @@ impl AppIde {
         copy_requested: bool,
         ctrl_r_pressed: bool,
         f12_pressed: bool,
-        // 1-based line of the clicked diagnostic to highlight (red), if in this file.
-        highlight_line: Option<u32>,
+        // (1-based line, band colour) of the clicked diagnostic to highlight, if
+        // in this file (colour keyed by severity).
+        highlight: Option<(u32, egui::Color32)>,
         // 1-based line of the F12 definition to highlight (yellow), if in this file.
         def_line: Option<u32>,
     ) {
@@ -506,7 +507,7 @@ impl AppIde {
                 &diags,
                 &display_code,
                 copy_requested,
-                highlight_line,
+                highlight,
                 def_line,
             );
         }

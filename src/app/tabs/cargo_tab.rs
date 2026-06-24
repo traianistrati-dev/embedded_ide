@@ -9,9 +9,9 @@ pub fn show_cargo_tab(
     ctx: &egui::Context,
     build_state: &Arc<Mutex<BuildState>>,
     selected_diagnostic: &mut Option<usize>,
-    // Set to `(rel_path, 1-based line)` when a row is expanded, so the editor
-    // opens that file and scrolls to the line.
-    nav: &mut Option<(String, usize)>,
+    // Set to `(rel_path, 1-based line, highlight-band colour)` when a row is
+    // expanded, so the editor opens that file, scrolls to the line, and tints it.
+    nav: &mut Option<(String, usize, egui::Color32)>,
 ) {
     let state = build_state.lock().unwrap().clone();
     let workspace = std::env::temp_dir().join("embedded_ide_0_check");
@@ -308,7 +308,13 @@ pub fn show_cargo_tab(
                     // the diagnostic line (resolved in `diag_embed`).
                     if now_selected {
                         if let (Some(file), Some(line)) = (&diag.file, diag.line) {
-                            *nav = Some((file.clone(), line as usize));
+                            let sev = if diag.is_error() {
+                                crate::lsp::DiagSeverity::Error
+                            } else {
+                                crate::lsp::DiagSeverity::Warning
+                            };
+                            let color = crate::app::diag_highlight_color(sev);
+                            *nav = Some((file.clone(), line as usize, color));
                         }
                     }
                 }

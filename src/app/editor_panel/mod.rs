@@ -425,13 +425,16 @@ impl AppIde {
                         ctrl_space_pressed,
                     );
                 } else {
-                    // Highlight the clicked diagnostic's line (red) and the F12
-                    // definition line (yellow), but only while the editor shows
-                    // the file each belongs to.
-                    let highlight_line: Option<u32> = match self.highlighted_error_line {
-                        Some((f, line)) if f == displayed_file => Some(line as u32),
-                        _ => None,
-                    };
+                    // Highlight the clicked diagnostic's line (colour keyed by
+                    // severity) and the F12 definition line (yellow), but only
+                    // while the editor shows the file each belongs to.
+                    let highlight: Option<(u32, egui::Color32)> =
+                        match self.highlighted_error_line {
+                            Some((f, line, color)) if f == displayed_file => {
+                                Some((line as u32, color))
+                            }
+                            _ => None,
+                        };
                     let def_line: Option<u32> = match self.highlighted_def_line {
                         Some((f, line)) if f == displayed_file => Some(line as u32),
                         _ => None,
@@ -446,7 +449,7 @@ impl AppIde {
                         copy_requested,
                         ctrl_r_pressed,
                         f12_pressed,
-                        highlight_line,
+                        highlight,
                         def_line,
                     );
                 }

@@ -98,6 +98,19 @@ impl ProjectFileId {
     }
 }
 
+/// Translucent band colour for a clicked diagnostic's line in the editor, keyed
+/// by severity — same alpha (26 ≈ 0.1) as the error red. Error → red,
+/// Warning → yellow, Info / Hint → blue.
+pub fn diag_highlight_color(sev: lsp::DiagSeverity) -> egui::Color32 {
+    match sev {
+        lsp::DiagSeverity::Error => egui::Color32::from_rgba_unmultiplied(255, 0, 100, 26),
+        lsp::DiagSeverity::Warning => egui::Color32::from_rgba_unmultiplied(255, 210, 0, 26),
+        lsp::DiagSeverity::Info | lsp::DiagSeverity::Hint => {
+            egui::Color32::from_rgba_unmultiplied(60, 150, 255, 26)
+        }
+    }
+}
+
 /// Resolve a diagnostic's project-relative path (as reported by rustc /
 /// rust-analyzer) to the editor file it should open — including user source
 /// files under `src/`. `user_files` is `(name, content)` where `name` is the
@@ -374,9 +387,10 @@ pub struct AppIde {
     /// Set when a row in the Cargo Check / rust-analyzer tab is clicked; applied
     /// once the editor is displaying that file (scrolls the line to row ~10).
     pending_scroll_to_line: Option<(ProjectFileId, usize)>,
-    /// The file + 1-based line of the last-clicked diagnostic. Highlighted with a
-    /// translucent dark-red band in the editor until another diagnostic is clicked.
-    highlighted_error_line: Option<(ProjectFileId, usize)>,
+    /// The file + 1-based line + band colour of the last-clicked diagnostic.
+    /// Highlighted with a translucent band (colour keyed by severity, see
+    /// `diag_highlight_color`) in the editor until another diagnostic is clicked.
+    highlighted_error_line: Option<(ProjectFileId, usize, egui::Color32)>,
     /// The file + 1-based line of the last F12 go-to-definition that landed in a
     /// project file. Highlighted with a translucent yellow band (like the
     /// Definition tab) until the next F12.

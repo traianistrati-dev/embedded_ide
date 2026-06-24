@@ -8,9 +8,9 @@ pub fn show_ra_tab(
     ui: &mut egui::Ui,
     lsp_state: &Arc<Mutex<lsp::LspState>>,
     selected: &mut Option<usize>,
-    // Set to `(rel_path, 1-based line)` when a row is expanded, so the editor
-    // opens that file and scrolls to the line.
-    nav: &mut Option<(String, usize)>,
+    // Set to `(rel_path, 1-based line, highlight-band colour)` when a row is
+    // expanded, so the editor opens that file, scrolls to the line, and tints it.
+    nav: &mut Option<(String, usize, egui::Color32)>,
 ) {
     // Extract everything we need while holding the lock, then drop it
     // before we start drawing so there's no risk of a deadlock.
@@ -242,7 +242,8 @@ pub fn show_ra_tab(
                     // On expand, ask the editor to open this file and scroll to
                     // the diagnostic line (resolved in `diag_embed`).
                     if now_selected {
-                        *nav = Some((path.clone(), diag.line as usize));
+                        let color = crate::app::diag_highlight_color(diag.severity);
+                        *nav = Some((path.clone(), diag.line as usize, color));
                     }
                 }
             }
