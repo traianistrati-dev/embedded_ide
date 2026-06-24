@@ -190,6 +190,26 @@ fn lsp_pos_to_byte(text: &str, line: u32, character: u32) -> usize {
     text.len()
 }
 
+/// If a definition's absolute path points to a file in the *current project*
+/// (under the LSP workspace `…/embedded_ide_0_check/`), return its editor file
+/// id — so F12 can open it editable in the main editor instead of the read-only
+/// snippet tab. `None` for external files (crates / std), which keep the snippet.
+fn project_file_for_def(
+    abs_path: &str,
+    user_files: &[(String, String)],
+) -> Option<ProjectFileId> {
+    let ws = std::env::temp_dir().join("embedded_ide_0_check");
+    let ws_str = ws.to_string_lossy().replace('\\', "/");
+    let p = abs_path.replace('\\', "/");
+    let prefix = format!("{ws_str}/");
+    // Case-insensitive prefix (Windows drive-letter / temp-dir case can differ).
+    let head = p.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(&prefix) {
+        return None;
+    }
+    resolve_diag_file(&p[prefix.len()..], user_files)
+}
+
 /// Read the file a definition points to and build the snippet shown in the
 /// "Definition" tab (a window of lines around the target). `None` if unreadable.
 fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
@@ -281,6 +301,13 @@ pub struct AppIde {
     export_flash: u8,
     /// Last export result message
     export_msg: String,
+    /// In-flight async project save: `None` until the worker finishes, then
+    /// `Some(Ok(name))` / `Some(Err(msg))`. `Some(handle)` ⇒ a save is running
+    /// (UI stays responsive; the header shows a "Saving…" spinner).
+    #[allow(clippy::type_complexity)]
+    save_in_progress: Option<Arc<Mutex<Option<Result<String, String>>>>>,
+    /// Destination folder of the running save — becomes `project_dir` on success.
+    save_dest: Option<std::path::PathBuf>,
     // ── Build ────────────────────────────────────────────────────────────────
     /// egui context stored for cross-thread repaint requests
     egui_ctx: egui::Context,
@@ -343,6 +370,10 @@ pub struct AppIde {
     /// The file + 1-based line of the last-clicked diagnostic. Highlighted with a
     /// translucent dark-red band in the editor until another diagnostic is clicked.
     highlighted_error_line: Option<(ProjectFileId, usize)>,
+    /// The file + 1-based line of the last F12 go-to-definition that landed in a
+    /// project file. Highlighted with a translucent yellow band (like the
+    /// Definition tab) until the next F12.
+    highlighted_def_line: Option<(ProjectFileId, usize)>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -520,6 +551,8 @@ impl AppIde {
             copy_flash: 0,
             export_flash: 0,
             export_msg: String::new(),
+            save_in_progress: None,
+            save_dest: None,
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             selected_diagnostic: None,
@@ -547,6 +580,7 @@ impl AppIde {
             last_caret_idx: None,
             pending_scroll_to_line: None,
             highlighted_error_line: None,
+            highlighted_def_line: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             rename_active: false,
@@ -751,14 +785,33 @@ impl AppIde {
             }
         }
 
-        // ── Show a completed F12 go-to-definition in the Definition tab ───────
+        // ── Handle a completed F12 go-to-definition ──────────────────────────
+        // A definition in the CURRENT project opens editable in the main editor
+        // (navigate + scroll the line into view). A definition in another file
+        // (crate / std) is shown read-only in the Definition tab snippet.
         if self.definition_in_flight {
             let result = self.lsp_state.lock().unwrap().take_definition_result();
             if let Some(loc) = result {
                 self.definition_in_flight = false;
-                if let Some(loc) = loc.and_then(|l| build_definition_view(&l)) {
-                    self.definition_view = Some(loc);
-                    self.build_tab = BuildPanelTab::Definition;
+                if let Some(loc) = loc {
+                    if let Some(id) =
+                        project_file_for_def(&loc.path, &self.project_tree.user_src_files)
+                    {
+                        // Editable: open the file, scroll to the definition, and
+                        // mark the def line with a yellow band (like the Def tab).
+                        self.selected_file = id;
+                        self.pending_scroll_to_line = Some((id, loc.line as usize + 1));
+                        self.highlighted_def_line = Some((id, loc.line as usize + 1));
+                        // Not an error — clear any error tint and the snippet tab.
+                        self.definition_view = None;
+                        if self.build_tab == BuildPanelTab::Definition {
+                            self.build_tab = BuildPanelTab::RustAnalyzer;
+                        }
+                    } else if let Some(view) = build_definition_view(&loc) {
+                        // External file → read-only snippet in the Definition tab.
+                        self.definition_view = Some(view);
+                        self.build_tab = BuildPanelTab::Definition;
+                    }
                 }
                 self.egui_ctx.request_repaint();
             }
@@ -893,41 +946,72 @@ impl eframe::App for AppIde {
         //     save straight to that path, no dialog.
         //   • New project (`project_dir` is None): ask once where to save, then
         //     remember the chosen folder so later saves go there directly.
-        if save_project_clicked {
-            if self.selected_build_cfg().is_some() {
-                let dest: Option<std::path::PathBuf> = match &self.project_dir {
-                    Some(dir) => Some(dir.clone()),
-                    None => rfd::FileDialog::new()
-                        .set_title("Choose folder to save the new project")
-                        .pick_folder(),
-                };
-                if let Some(dest) = dest {
-                    match project_gen::write_project(
-                        &dest,
-                        &self.current_project_files(),
-                        &self.project_tree.user_src_files,
-                        &self.mcu_config_text(),
-                    ) {
-                        Ok(()) => {
-                            let name = dest
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("saved")
-                                .to_string();
-                            self.export_msg =
-                                format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
-                            self.export_flash = 180;
-                            self.project_name = Some(name);
-                            // A new project now has a home — subsequent saves
-                            // write here without prompting.
-                            self.project_dir = Some(dest);
-                        }
-                        Err(e) => {
-                            self.export_msg =
-                                format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
-                            self.export_flash = 180;
-                        }
-                    }
+        // Ignore a fresh Save while one is still running (button left enabled,
+        // but the click is a no-op until the worker finishes).
+        if save_project_clicked
+            && self.save_in_progress.is_none()
+            && self.selected_build_cfg().is_some()
+        {
+            let dest: Option<std::path::PathBuf> = match &self.project_dir {
+                Some(dir) => Some(dir.clone()),
+                None => rfd::FileDialog::new()
+                    .set_title("Choose folder to save the new project")
+                    .pick_folder(),
+            };
+            if let Some(dest) = dest {
+                // Run the disk write on a worker thread so the UI stays responsive
+                // (the header shows a "Saving…" spinner until it completes).
+                let files = self.current_project_files();
+                let user_files = self.project_tree.user_src_files.clone();
+                let mcu_cfg = self.mcu_config_text();
+                let shared: Arc<Mutex<Option<Result<String, String>>>> =
+                    Arc::new(Mutex::new(None));
+                let out = Arc::clone(&shared);
+                let ctx = self.egui_ctx.clone();
+                let dest_thread = dest.clone();
+                std::thread::spawn(move || {
+                    let res = project_gen::write_project(
+                        &dest_thread,
+                        &files,
+                        &user_files,
+                        &mcu_cfg,
+                    )
+                    .map(|()| {
+                        dest_thread
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("saved")
+                            .to_string()
+                    })
+                    .map_err(|e| e.to_string());
+                    *out.lock().unwrap() = Some(res);
+                    ctx.request_repaint();
+                });
+                self.save_in_progress = Some(shared);
+                self.save_dest = Some(dest);
+            }
+        }
+
+        // Apply a finished async save (set the result message / project home).
+        let save_finished = self
+            .save_in_progress
+            .as_ref()
+            .and_then(|s| s.lock().unwrap().take());
+        if let Some(res) = save_finished {
+            self.save_in_progress = None;
+            match res {
+                Ok(name) => {
+                    self.export_msg =
+                        format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
+                    self.export_flash = 180;
+                    self.project_name = Some(name);
+                    // A new project now has a home — later saves go here.
+                    self.project_dir = self.save_dest.take();
+                }
+                Err(e) => {
+                    self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
+                    self.export_flash = 180;
+                    self.save_dest = None;
                 }
             }
         }

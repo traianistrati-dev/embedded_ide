@@ -41,8 +41,10 @@ impl AppIde {
         copy_requested: bool,
         ctrl_r_pressed: bool,
         f12_pressed: bool,
-        // 1-based line of the clicked diagnostic to highlight, if it's in this file.
+        // 1-based line of the clicked diagnostic to highlight (red), if in this file.
         highlight_line: Option<u32>,
+        // 1-based line of the F12 definition to highlight (yellow), if in this file.
+        def_line: Option<u32>,
     ) {
         // ── LSP completion: post-editor apply + trigger + popup ───────
         let cursor_char_idx = editor_resp
@@ -505,6 +507,7 @@ impl AppIde {
                 &display_code,
                 copy_requested,
                 highlight_line,
+                def_line,
             );
         }
     }

@@ -20,6 +20,53 @@ pub(super) struct ProjectPanelSignals {
 }
 
 impl AppIde {
+    /// The current long-running activity for the header status indicator:
+    /// `(show_spinner, label, colour)`, or `None` when idle. Priority: save >
+    /// build > flash > rust-analyzer; otherwise the last save result (✓ / ✗)
+    /// while it's still flashing.
+    fn activity_status(&self) -> Option<(bool, String, egui::Color32)> {
+        let amber = egui::Color32::from_rgb(220, 180, 70);
+        let blue = egui::Color32::from_rgb(100, 170, 240);
+
+        if self.save_in_progress.is_some() {
+            return Some((true, "Saving…".to_owned(), amber));
+        }
+        if matches!(
+            *self.build_state.lock().unwrap(),
+            crate::build::BuildState::Building
+        ) {
+            return Some((true, "Building…".to_owned(), blue));
+        }
+        let dfu_busy = self.dfu_state.lock().unwrap().is_busy();
+        let ocd_busy = self.openocd_state.lock().unwrap().is_busy();
+        let esp_busy = self.espflash_state.lock().unwrap().is_busy();
+        if dfu_busy || ocd_busy || esp_busy {
+            return Some((true, "Flashing…".to_owned(), blue));
+        }
+        {
+            let lsp = self.lsp_state.lock().unwrap();
+            match lsp.status {
+                crate::lsp::LspStatus::Starting | crate::lsp::LspStatus::Indexing => {
+                    return Some((true, "Indexing…".to_owned(), amber));
+                }
+                crate::lsp::LspStatus::Ready if lsp.checking => {
+                    return Some((true, "Checking…".to_owned(), amber));
+                }
+                _ => {}
+            }
+        }
+        if self.export_flash > 0 && !self.export_msg.is_empty() {
+            let ok = !self.export_msg.starts_with(ph::X_CIRCLE);
+            let color = if ok {
+                egui::Color32::from_rgb(90, 200, 120)
+            } else {
+                egui::Color32::from_rgb(220, 90, 80)
+            };
+            return Some((false, self.export_msg.clone(), color));
+        }
+        None
+    }
+
     /// Render the left Project panel and return which toolbar buttons were hit.
     ///
     /// `ctrl_s_pressed` seeds `save_clicked` so the Ctrl+S shortcut behaves
@@ -36,6 +83,11 @@ impl AppIde {
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
 
+        // Current long-running activity (save / build / flash / RA) for the
+        // header status indicator — computed before the panel so the render
+        // closure can borrow `self` for the tree without a conflict.
+        let status = self.activity_status();
+
         egui::Panel::left("project_tree")
             .resizable(true)
             .default_size(200.0)
@@ -43,6 +95,15 @@ impl AppIde {
                 // ── Panel header row ──────────────────────────────────────────
                 ui.horizontal(|ui| {
                     ui.heading("Project");
+                    // Activity status: a spinner + label for an in-progress
+                    // operation (Saving / Building / Flashing / Checking), or the
+                    // last save result (✓ / ✗) for a few seconds.
+                    if let Some((spinner, text, color)) = &status {
+                        if *spinner {
+                            ui.add(egui::Spinner::new().size(13.0));
+                        }
+                        ui.label(egui::RichText::new(text).size(11.0).color(*color));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let btn = |ui: &mut egui::Ui, icon: &str, label: &str, tip: &str| {
                             ui.add(egui::Button::new(

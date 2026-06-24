@@ -35,20 +35,22 @@ pub fn show_diagnostics_overlay(
     // `highlight_line`: 1-based line of the diagnostic the user clicked in the
     // bottom panel — drawn with a translucent dark-red band.
     highlight_line: Option<u32>,
+    // `def_line`: 1-based line of the F12 go-to-definition target (when it's in
+    // this project file) — drawn with a translucent yellow band, like the
+    // Definition tab.
+    def_line: Option<u32>,
 ) {
-    if diags.is_empty() {
-        return;
-    }
-
     let total_chars = display_code.chars().count();
 
-    // Painter clipped to editor bounds
+    // Painter clipped to editor bounds.
     let gp = galley_pos;
     let clip = text_clip_rect;
     let painter = ui.painter().with_clip_rect(clip);
 
-    // ── Clicked-diagnostic line highlight (translucent dark-red band) ─────
-    if let Some(line) = highlight_line {
+    // ── Full-width line-highlight bands ───────────────────────────────────
+    // Drawn before the diagnostics (so squiggles/messages render on top) AND
+    // before the empty-diags return below (the def target may be a clean file).
+    let band = |line: u32, color: egui::Color32| {
         let ci = lsp_pos_to_char_idx(display_code, line, 1).min(total_chars);
         let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
         let y_top = gp.y + loc.min.y;
@@ -60,10 +62,21 @@ pub fn show_diagnostics_overlay(
                     egui::pos2(clip.right(), y_bot),
                 ),
                 0.0,
-                // darkred (139,0,0) at ~0.1 alpha (26/255).
-                egui::Color32::from_rgba_unmultiplied(255, 0, 100, 26),
+                color,
             );
         }
+    };
+    // F12 definition line — translucent yellow (matches the Definition tab).
+    if let Some(line) = def_line {
+        band(line, egui::Color32::from_rgba_unmultiplied(255, 214, 90, 32));
+    }
+    // Clicked-diagnostic line — translucent band.
+    if let Some(line) = highlight_line {
+        band(line, egui::Color32::from_rgba_unmultiplied(255, 0, 100, 26));
+    }
+
+    if diags.is_empty() {
+        return;
     }
 
     // Lines that already drew an inline message — a line can carry several
