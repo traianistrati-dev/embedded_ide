@@ -210,22 +210,21 @@ fn project_file_for_def(
     resolve_diag_file(&p[prefix.len()..], user_files)
 }
 
-/// Read the file a definition points to and build the snippet shown in the
-/// "Definition" tab (a window of lines around the target). `None` if unreadable.
+/// Read the file a definition points to and build the view shown in the
+/// "Definition" tab. The WHOLE file is included (so the user can scroll above
+/// and below the target); the tab scrolls the target near the top on open.
+/// `None` if unreadable.
 fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
     let content = std::fs::read_to_string(&loc.path).ok()?;
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
+    let line_count = content.lines().count();
+    if line_count == 0 {
         return None;
     }
-    let target = (loc.line as usize).min(lines.len() - 1);
-    let from = target.saturating_sub(2); // a little context above
-    let to = (target + 150).min(lines.len());
-    let code = lines[from..to].join("\n");
+    let target = (loc.line as usize).min(line_count - 1);
     Some(DefinitionView {
         header: format!("{}  (line {})", short_path(&loc.path), loc.line + 1),
-        code,
-        highlight: target - from, // the def line's index within the snippet
+        code: content, // full file
+        highlight: target, // the def line's index in the file (0-based)
     })
 }
 
@@ -399,6 +398,9 @@ pub struct AppIde {
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
+    /// One-shot: scroll the Definition tab to the highlighted line on the first
+    /// render after a new F12 snippet loads (then the user scrolls freely).
+    def_scroll_pending: bool,
     /// The fetched definition snippet — its presence shows the "Definition" tab.
     definition_view: Option<DefinitionView>,
     /// Which tab is active in the bottom diagnostics panel
@@ -592,6 +594,7 @@ impl AppIde {
             rename_in_flight: false,
             rename_focus: false,
             definition_in_flight: false,
+            def_scroll_pending: false,
             definition_view: None,
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
@@ -808,9 +811,11 @@ impl AppIde {
                             self.build_tab = BuildPanelTab::RustAnalyzer;
                         }
                     } else if let Some(view) = build_definition_view(&loc) {
-                        // External file → read-only snippet in the Definition tab.
+                        // External file → read-only snippet in the Definition tab,
+                        // scrolled to the target line on open.
                         self.definition_view = Some(view);
                         self.build_tab = BuildPanelTab::Definition;
+                        self.def_scroll_pending = true;
                     }
                 }
                 self.egui_ctx.request_repaint();

@@ -113,6 +113,7 @@ impl AppIde {
                         &mut nav,
                         definition,
                         &mut def_close,
+                        &mut self.def_scroll_pending,
                     );
                 });
         // Closing the Definition tab clears the snippet and switches away.

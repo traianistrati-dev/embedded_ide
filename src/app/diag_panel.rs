@@ -44,6 +44,9 @@ pub(super) fn show_diag_panel(
     // true when the user closes it.
     definition: Option<(&str, &str, usize)>,
     definition_close: &mut bool,
+    // One-shot flag: scroll the Definition view to the highlighted line on the
+    // first render after a new F12 snippet loads.
+    def_scroll_pending: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -274,13 +277,37 @@ pub(super) fn show_diag_panel(
                         .color(egui::Color32::from_rgb(150, 190, 240)),
                 );
                 ui.separator();
-                // The definition line is drawn coloured with a subtle highlight
-                // band so it stands out from the surrounding (white) code.
-                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                // The whole file is shown (so the user can scroll above and
+                // below the target). Rows are virtualized (`show_rows` renders
+                // only the visible ones), and the target line is scrolled near
+                // the top once on open. The def line is drawn coloured so it
+                // stands out from the surrounding (white) code.
+                let lines: Vec<&str> = code.lines().collect();
+                // Height of one monospace-12 line (matches the rows below).
+                let row_h = ui
+                    .painter()
+                    .layout_no_wrap(
+                        "X".to_owned(),
+                        egui::FontId::monospace(12.0),
+                        egui::Color32::WHITE,
+                    )
+                    .size()
+                    .y;
+                // Match the spacing show_rows will use, so its offset math lines
+                // up with the rendered rows.
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let pitch = row_h + ui.spacing().item_spacing.y;
+                let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+                if *def_scroll_pending {
+                    // Target near the top (2 lines of context above), then free.
+                    let off = highlight.saturating_sub(2) as f32 * pitch;
+                    area = area.vertical_scroll_offset(off);
+                    *def_scroll_pending = false;
+                }
+                area.show_rows(ui, row_h, lines.len(), |ui, range| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    for (i, line) in code.lines().enumerate() {
-                        let shown = if line.is_empty() { " " } else { line };
+                    for i in range {
+                        let shown = if lines[i].is_empty() { " " } else { lines[i] };
                         if i == highlight {
                             ui.add(
                                 egui::Label::new(
