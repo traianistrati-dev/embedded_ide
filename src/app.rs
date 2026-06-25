@@ -417,6 +417,9 @@ pub struct AppIde {
     rename_in_flight: bool,
     /// Request keyboard focus for the rename input on the frame it opens.
     rename_focus: bool,
+    // ── Find / Replace (Ctrl+F / Ctrl+H / Ctrl+Shift+F / Ctrl+Shift+H) ───────
+    /// Search bar state: mode, query/replacement text, results, match cursor.
+    find: editor_panel::find_replace::FindReplace,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -615,6 +618,7 @@ impl AppIde {
             rename_popup_pos: egui::Pos2::ZERO,
             rename_in_flight: false,
             rename_focus: false,
+            find: editor_panel::find_replace::FindReplace::default(),
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,

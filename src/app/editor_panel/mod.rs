@@ -21,6 +21,7 @@ mod context_menu;
 mod delete_line;
 mod duplicate_line;
 mod diag_embed;
+pub(crate) mod find_replace;
 mod format;
 mod move_lines;
 mod rename;
@@ -202,9 +203,10 @@ impl AppIde {
                 // Ctrl+D → duplicate the line(s) at the cursor / selection.
                 let mut ctrl_d_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::D));
-                // Ctrl+Shift+F → re-indent the whole file by block nesting.
-                let mut ctrl_shift_f_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::F)
+                // Shift+Alt+F → re-indent the whole file by block nesting.
+                // (Moved off Ctrl+Shift+F, which now opens project-wide search.)
+                let mut format_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::F)
                 });
                 // Ctrl+R → rename the symbol at the cursor project-wide.
                 let mut ctrl_r_pressed =
@@ -212,6 +214,28 @@ impl AppIde {
                 // F12 → show the definition of the symbol at the cursor.
                 let mut f12_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
+
+                // Find / Replace bar shortcuts (consumed before the editor so the
+                // keys never reach the TextEdit). Shift variants are checked first
+                // so Ctrl+Shift+F isn't swallowed by the plain Ctrl+F branch.
+                ui.input_mut(|i| {
+                    use find_replace::FindMode as M;
+                    let ctrl = egui::Modifiers::CTRL;
+                    let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+                    if i.consume_key(ctrl_shift, egui::Key::F) {
+                        self.find.open_with(M::FindProject);
+                    } else if i.consume_key(ctrl_shift, egui::Key::H) {
+                        self.find.open_with(M::ReplaceProject);
+                    } else if i.consume_key(ctrl, egui::Key::F) {
+                        self.find.open_with(M::FindFile);
+                    } else if i.consume_key(ctrl, egui::Key::H) {
+                        self.find.open_with(M::ReplaceFile);
+                    }
+                });
+
+                // Find / Replace bar, drawn above the editor when open. Renders
+                // before the editor-height calc so the editor sizes below it.
+                self.show_find_replace_bar(ui, &mut display_code, displayed_file);
 
                 // Size the editor to fill the height left over after the
                 // (resizable) diagnostics panel, so dragging that panel's handle
@@ -289,6 +313,9 @@ impl AppIde {
                 // `display_code` still matches the galley the editor just built —
                 // and before the diagnostics overlay so squiggles render on top.
                 Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
+                // Highlight all occurrences of the active find query (current one
+                // in amber), so matches show even when the find field has focus.
+                self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
@@ -313,10 +340,20 @@ impl AppIde {
                         Some(A::Comment) => ctrl_slash_pressed = true,
                         Some(A::MoveUp) => ctrl_up_pressed = true,
                         Some(A::MoveDown) => ctrl_down_pressed = true,
-                        Some(A::Format) => ctrl_shift_f_pressed = true,
+                        Some(A::Format) => format_pressed = true,
                         Some(A::Rename) => ctrl_r_pressed = true,
                         Some(A::GoToDef) => f12_pressed = true,
                         Some(A::Completion) => ctrl_space_pressed = true,
+                        Some(A::Find) => self.find.open_with(find_replace::FindMode::FindFile),
+                        Some(A::Replace) => {
+                            self.find.open_with(find_replace::FindMode::ReplaceFile)
+                        }
+                        Some(A::FindInProject) => {
+                            self.find.open_with(find_replace::FindMode::FindProject)
+                        }
+                        Some(A::ReplaceInProject) => {
+                            self.find.open_with(find_replace::FindMode::ReplaceProject)
+                        }
                         Some(A::Copy) => {
                             if let Some(r) = editor_resp.state.cursor.char_range() {
                                 let lo = r.primary.index.min(r.secondary.index);
@@ -390,7 +427,7 @@ impl AppIde {
                             Some(delete_line::delete_lines(&display_code, lo, hi))
                         } else if ctrl_d_pressed {
                             Some(duplicate_line::duplicate_lines(&display_code, lo, hi))
-                        } else if ctrl_shift_f_pressed {
+                        } else if format_pressed {
                             let (new, c) = format::format_code(&display_code, lo);
                             Some((new, c, c))
                         } else {
@@ -405,6 +442,21 @@ impl AppIde {
                         egui::text::CCursor::new(new_hi),
                     )));
                     st.store(ui.ctx(), editor_resp.response.id);
+                }
+
+                // ── Select the current Find match ─────────────────────────────
+                // The find bar (drawn above the editor) records the match's char
+                // range; apply it to the editor's cursor here, now that we have
+                // `editor_resp`. Takes effect next frame (scroll was already queued
+                // via `pending_scroll_to_line`).
+                if let Some((s, e)) = self.find.pending_select.take() {
+                    let mut st = editor_resp.state.clone();
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(s),
+                        egui::text::CCursor::new(e),
+                    )));
+                    st.store(ui.ctx(), editor_resp.response.id);
+                    ui.ctx().request_repaint();
                 }
 
                 // ── Write user edits back ────────────────────────────────────

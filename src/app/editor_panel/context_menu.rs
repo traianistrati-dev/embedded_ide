@@ -19,6 +19,10 @@ pub(super) enum EditorAction {
     Rename,
     GoToDef,
     Completion,
+    Find,
+    Replace,
+    FindInProject,
+    ReplaceInProject,
     Copy,
     SelectAll,
 }
@@ -47,9 +51,15 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
     item(ui, ph::ARROW_UP, "Move line up", "Ctrl+Up", EditorAction::MoveUp);
     item(ui, ph::ARROW_DOWN, "Move line down", "Ctrl+Down", EditorAction::MoveDown);
 
+    ui.separator();
+    item(ui, ph::MAGNIFYING_GLASS, "Find", "Ctrl+F", EditorAction::Find);
+    item(ui, ph::ARROWS_LEFT_RIGHT, "Replace", "Ctrl+H", EditorAction::Replace);
+    item(ui, ph::MAGNIFYING_GLASS_PLUS, "Find in project", "Ctrl+Shift+F", EditorAction::FindInProject);
+    item(ui, ph::ARROWS_CLOCKWISE, "Replace in project", "Ctrl+Shift+H", EditorAction::ReplaceInProject);
+
     if is_rs {
         ui.separator();
-        item(ui, ph::TEXT_INDENT, "Format code", "Ctrl+Shift+F", EditorAction::Format);
+        item(ui, ph::TEXT_INDENT, "Format code", "Shift+Alt+F", EditorAction::Format);
         item(ui, ph::PENCIL_SIMPLE, "Rename symbol", "Ctrl+R", EditorAction::Rename);
         item(ui, ph::ARROW_SQUARE_OUT, "Go to definition", "F12", EditorAction::GoToDef);
     }
