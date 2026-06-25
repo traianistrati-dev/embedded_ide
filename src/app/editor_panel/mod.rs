@@ -189,13 +189,23 @@ impl AppIde {
                 // overwrites the clipboard with the error message instead.
                 let copy_requested =
                     ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-                // Ctrl+Shift+X → cut the whole line(s) at the cursor/selection.
-                // Plain Ctrl+X keeps egui's native behaviour (cut the *selection*),
-                // so we must NOT touch its `Event::Cut`. Ctrl+Shift+X isn't a
-                // clipboard binding, so it arrives as a plain `Key::X` press with
-                // no `Event::Cut` — consume the key and do the whole-line cut.
+                // Ctrl+Shift+X → cut the whole line(s) at the cursor/selection;
+                // plain Ctrl+X keeps egui's native cut-the-*selection* behaviour.
+                // egui maps BOTH to `Event::Cut` (Shift is ignored for the cut
+                // shortcut) and may not deliver a `Key::X` at all — so distinguish
+                // by the live Shift state: Shift held → strip the `Event::Cut` so
+                // the native selection-cut doesn't fire, and do the whole-line cut
+                // ourselves; no Shift → leave the native cut alone. The `consume_key`
+                // is a fallback for platforms that send the key instead of a Cut.
                 let mut cut_line_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::X)
+                    let cut_event = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
+                    let line = cut_event && i.modifiers.shift;
+                    if line {
+                        i.events.retain(|e| !matches!(e, egui::Event::Cut));
+                    }
+                    let key =
+                        i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::X);
+                    line || key
                 });
                 // Ctrl+D → duplicate the line(s) at the cursor / selection.
                 let mut ctrl_d_pressed =
