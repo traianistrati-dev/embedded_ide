@@ -202,8 +202,18 @@ impl AppIde {
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::D));
                 // Shift+Alt+F → re-indent the whole file by block nesting.
                 // (Moved off Ctrl+Shift+F, which now opens project-wide search.)
+                // Unlike the Ctrl-based shortcuts, Alt+Shift doesn't suppress the
+                // character event, so egui also delivers `Event::Text("F")` — strip
+                // it too, or the formatter would type an "F" into the code.
                 let mut format_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::F)
+                    let pressed =
+                        i.consume_key(egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::F);
+                    if pressed {
+                        i.events.retain(
+                            |e| !matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case("f")),
+                        );
+                    }
+                    pressed
                 });
                 // Ctrl+R → rename the symbol at the cursor project-wide.
                 let mut ctrl_r_pressed =
