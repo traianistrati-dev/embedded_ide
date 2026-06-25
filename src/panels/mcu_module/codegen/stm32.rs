@@ -187,12 +187,9 @@ pub fn make_generated_section(
     let has_timer = configured
         .iter()
         .any(|(p, _)| matches!(p.selected_function, PinFunction::TimerPwm { .. }));
-    let has_can = configured.iter().any(|(p, _)| {
-        matches!(
-            p.selected_function,
-            PinFunction::CanRx | PinFunction::CanTx
-        )
-    });
+    let has_can = configured
+        .iter()
+        .any(|(p, _)| matches!(p.selected_function, PinFunction::CanRx | PinFunction::CanTx));
     // CAN's `assign_pins` needs AFIO too (it may remap the pins).
     let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can;
     let has_periph_fns = has_serial || has_spi || has_i2c || has_adc || has_can;
@@ -220,20 +217,20 @@ pub fn make_generated_section(
         use_items.push("rcc::Clocks".into());
     }
     if has_serial {
-        use_items.push("serial::{self, Config, Serial}".into());
+        // use_items.push("serial::{self, Config, Serial}".into());
     }
     if has_spi {
-        let remaps = spi_instances
-            .iter()
-            .map(|n| format!("Spi{n}NoRemap"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        use_items.push(format!(
-            "spi::{{self, Mode, Phase, Polarity, Spi, {remaps}}}"
-        ));
+        // let remaps = spi_instances
+        //     .iter()
+        //     .map(|n| format!("Spi{n}NoRemap"))
+        //     .collect::<Vec<_>>()
+        //     .join(", ");
+        // use_items.push(format!(
+        //     "spi::{{self, Mode, Phase, Polarity, Spi, {remaps}}}"
+        // ));
     }
     if has_i2c {
-        use_items.push("i2c::{self, BlockingI2c, Mode as I2cMode}".into());
+        //  use_items.push("i2c::{self, BlockingI2c, Mode as I2cMode}".into());
     }
     if has_adc {
         use_items.push("adc".into());
@@ -588,7 +585,10 @@ pub fn config_files(
     // CAN — single instance on STM32F1; the bit-timing register depends on the
     // APB1 (PCLK1) clock, so the clock config is read here.
     if has(PinFunction::CanRx) || has(PinFunction::CanTx) {
-        out.push(("can1.rs".to_string(), can_config_file(can.get(&1), pclk1_of(clock))));
+        out.push((
+            "can1.rs".to_string(),
+            can_config_file(can.get(&1), pclk1_of(clock)),
+        ));
     }
     out
 }
