@@ -745,6 +745,19 @@ impl AppIde {
             }
         }
 
+        // Regenerate the per-peripheral init modules (src/pins/configs/) and the
+        // pins/ module files from the current pin + Virtual-Module config. Both
+        // are no-ops when nothing changed (splice preserves user edits). Configs
+        // first so `sync_pin_files` can declare `pub mod configs;` in pins/mod.rs.
+        let regen = self
+            .mcu
+            .as_ref()
+            .map(|m| (m.all_pin_functions(), m.config_files()));
+        if let Some((all_pins, config_files)) = regen {
+            self.project_tree.sync_config_files(&config_files);
+            self.project_tree.sync_pin_files(&all_pins);
+        }
+
         // Tick flash counters down
         if self.copy_flash > 0 {
             self.copy_flash -= 1;

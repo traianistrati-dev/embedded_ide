@@ -29,6 +29,12 @@ pub trait FamilyBackend {
     /// Re-splice only the generated section of an existing `main.rs`,
     /// preserving user-editable code outside the markers.
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String;
+
+    /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
+    /// generated_body)`. Default: none (families without separate config files).
+    fn config_files(&self, _mcu: &Mcu) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// All four sides of the chip, in the canonical order codegen expects
@@ -56,8 +62,9 @@ impl FamilyBackend for Stm32f1Backend {
             header = stm32::invariant_header(&mcu.name, &mcu.id),
             tail = USER_TAIL,
         );
-        // Peripheral init helpers live after `fn main`, in the editable region.
-        stm32::ensure_helper_defs(base, &all, &usart, &spi, &i2c)
+        // Only the ADC init helper lives after `fn main`; USART/SPI/I2C init are
+        // in `src/pins/configs/`.
+        stm32::ensure_helper_defs(base, &all)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
@@ -68,8 +75,16 @@ impl FamilyBackend for Stm32f1Backend {
         let new_section =
             stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c);
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
-        // Add helpers for newly-selected peripherals; preserve user-edited ones.
-        stm32::ensure_helper_defs(spliced, &all, &usart, &spi, &i2c)
+        // Add the ADC helper if newly needed; preserve user-edited ones.
+        stm32::ensure_helper_defs(spliced, &all)
+    }
+
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        let all = pins_of(mcu);
+        let usart = modules::usart_configs(&mcu.modules);
+        let spi = modules::spi_configs(&mcu.modules);
+        let i2c = modules::i2c_configs(&mcu.modules);
+        stm32::config_files(&all, &usart, &spi, &i2c)
     }
 }
 

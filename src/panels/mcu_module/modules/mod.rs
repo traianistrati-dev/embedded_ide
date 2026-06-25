@@ -130,30 +130,35 @@ mod tests {
         );
     }
 
-    /// The config constant lives in the regenerated GEN block, so editing the
-    /// module config updates the constant value on the next regeneration.
+    /// The config constants live in `src/pins/configs/usart1.rs` and track the
+    /// module config — editing the baud rate updates the `BAUDRATE` constant.
     #[test]
     fn const_updates_with_module_config() {
         let mut mcu = create_stm32f103c8tx();
         mcu.add_module(ModuleKind::GenericInterfaceUsart);
-        let code = mcu.fresh_main_rs();
-        assert!(
-            code.contains("const USART1_BAUDRATE: u32 = 115200;"),
-            "default:\n{code}"
-        );
+        let body = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "usart1.rs")
+            .unwrap()
+            .1;
+        assert!(body.contains("const BAUDRATE: u32 = 115200;"), "default:\n{body}");
 
         if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
             cfg.baud_rate = 9600;
         }
-        let code = mcu.update_main_rs(&code);
-        assert!(
-            code.contains("const USART1_BAUDRATE: u32 = 9600;"),
-            "updated:\n{code}"
-        );
-        assert!(!code.contains("115200"), "old value gone");
+        let body = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "usart1.rs")
+            .unwrap()
+            .1;
+        assert!(body.contains("const BAUDRATE: u32 = 9600;"), "updated:\n{body}");
+        assert!(!body.contains("115200"), "old value gone");
     }
 
-    /// The module's USART config drives the generated `init_usartN` helper.
+    /// The module's USART config drives the `src/pins/configs/usart1.rs` module;
+    /// main.rs just calls `pins::configs::usart1::init(...)`.
     #[test]
     fn module_config_drives_stm32_usart_init() {
         let mut mcu = create_stm32f103c8tx();
@@ -163,19 +168,19 @@ mod tests {
             cfg.parity = Parity::Even;
             cfg.stop_bits = StopBits::Two;
         }
+        let body = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "usart1.rs")
+            .unwrap()
+            .1;
+        assert!(body.contains("const BAUDRATE: u32 = 9600;"), "baud:\n{body}");
+        assert!(body.contains("const PARITY: char = 'E';"), "parity");
+        assert!(body.contains("const STOP_BITS: u8 = 2;"), "stop bits");
         let code = mcu.fresh_main_rs();
         assert!(
-            code.contains("const USART1_BAUDRATE: u32 = 9600;"),
-            "baud constant:\n{code}"
-        );
-        assert!(
-            code.contains(".baudrate(USART1_BAUDRATE.bps())"),
-            "init references the constant"
-        );
-        assert!(code.contains(".parity_even()"), "parity in init");
-        assert!(
-            code.contains("serial::StopBits::STOP2"),
-            "stop bits in init"
+            code.contains("pins::configs::usart1::init("),
+            "main.rs init call:\n{code}"
         );
     }
 
@@ -267,19 +272,20 @@ mod tests {
         );
     }
 
-    /// The config constant is emitted once and not duplicated on regeneration.
+    /// The config constant lives in the config file (once), not in main.rs.
     #[test]
     fn config_constant_not_duplicated_on_regen() {
         let mut mcu = create_stm32f103c8tx();
         mcu.add_module(ModuleKind::GenericInterfaceUsart);
-        let code = mcu.fresh_main_rs();
-        assert_eq!(code.matches("const USART1_BAUDRATE").count(), 1);
-        let again = mcu.update_main_rs(&code);
-        assert_eq!(
-            again.matches("const USART1_BAUDRATE").count(),
-            1,
-            "constant must not be duplicated on regen"
-        );
+        let body = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "usart1.rs")
+            .unwrap()
+            .1;
+        assert_eq!(body.matches("const BAUDRATE").count(), 1);
+        // main.rs no longer carries the peripheral constants.
+        assert!(!mcu.fresh_main_rs().contains("const BAUDRATE"));
     }
 
     /// A module's custom label is appended to its generated handle variable(s)
@@ -384,23 +390,17 @@ mod tests {
             cfg.mode = 3;
             cfg.clock_hz = 4_000_000;
         }
-        let code = mcu.fresh_main_rs();
-        assert!(
-            code.contains("Polarity::IdleHigh"),
-            "mode 3 polarity:\n{code}"
-        );
-        assert!(
-            code.contains("Phase::CaptureOnSecondTransition"),
-            "mode 3 phase"
-        );
-        assert!(
-            code.contains("const SPI1_CLOCK_KHZ: u32 = 4000;"),
-            "spi clock const"
-        );
-        assert!(
-            code.contains("SPI1_CLOCK_KHZ.kHz()"),
-            "init references the constant"
-        );
+        let body = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "spi1.rs")
+            .unwrap()
+            .1;
+        assert!(body.contains("const SPI_MODE: u8 = 3;"), "mode const:\n{body}");
+        assert!(body.contains("const CLOCK_KHZ: u32 = 4000;"), "clock const");
+        assert!(body.contains("CLOCK_KHZ.kHz()"), "init references the constant");
+        // main.rs calls the config module.
+        assert!(mcu.fresh_main_rs().contains("pins::configs::spi1::init("));
     }
 
     #[test]
@@ -410,16 +410,15 @@ mod tests {
         if let ModuleConfig::I2c(cfg) = &mut mcu.modules[0].config {
             cfg.clock_hz = 400_000;
         }
-        let code = mcu.fresh_main_rs();
-        assert!(code.contains("I2cMode::Fast"), "fast mode:\n{code}");
-        assert!(
-            code.contains("const I2C1_CLOCK_KHZ: u32 = 400;"),
-            "i2c clock const"
-        );
-        assert!(
-            code.contains("I2C1_CLOCK_KHZ.kHz()"),
-            "init references the constant"
-        );
+        let body = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "i2c1.rs")
+            .unwrap()
+            .1;
+        assert!(body.contains("const CLOCK_KHZ: u32 = 400;"), "clock const:\n{body}");
+        assert!(body.contains("I2cMode::Fast"), "fast branch present");
+        assert!(mcu.fresh_main_rs().contains("pins::configs::i2c1::init("));
     }
 
     /// Assigning a peripheral signal pin (as the Peripherals tab does) auto-adds

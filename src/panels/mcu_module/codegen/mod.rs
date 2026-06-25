@@ -47,6 +47,14 @@ impl Mcu {
         common::ensure_module_models(code, &self.modules)
     }
 
+    /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
+    /// generated_body)`. Empty for families without separate config files.
+    pub fn config_files(&self) -> Vec<(String, String)> {
+        family::backend_for(&self.family)
+            .map(|b| b.config_files(self))
+            .unwrap_or_default()
+    }
+
     /// Kept for any remaining call sites — delegates to `fresh_main_rs`.
     #[allow(dead_code)]
     pub fn generate_code(&self) -> String {
@@ -408,18 +416,31 @@ mod tests {
         mcu.apply_pin_function(42, PinFunction::I2cScl(1));
         mcu.apply_pin_function(43, PinFunction::I2cSda(1));
 
+        // Init now lives in `src/pins/configs/`; main.rs only calls into it.
         let mut code = mcu.fresh_main_rs();
-        assert_contains_substring(&code, "fn init_spi1<PINS>(");
-        assert_contains_substring(&code, "fn init_i2c1<PINS>(");
+        assert_contains_substring(&code, "pins::configs::spi1::init(");
+        assert_contains_substring(&code, "pins::configs::i2c1::init(");
 
-        // Re-run the per-frame regeneration many times.
+        // Re-run the per-frame regeneration many times — the calls aren't
+        // duplicated in main.rs and each config file has one `pub fn init`.
         for _ in 0..10 {
             code = mcu.update_main_rs(&code);
         }
-        assert_eq!(code.matches("fn init_spi1<").count(), 1, "SPI helper duplicated");
-        assert_eq!(code.matches("fn init_i2c1<").count(), 1, "I2C helper duplicated");
-        // And the section header is added exactly once.
-        assert_eq!(code.matches("Peripheral init helpers").count(), 1);
+        assert_eq!(
+            code.matches("pins::configs::spi1::init(").count(),
+            1,
+            "SPI call duplicated"
+        );
+        assert_eq!(
+            code.matches("pins::configs::i2c1::init(").count(),
+            1,
+            "I2C call duplicated"
+        );
+        let cfgs = mcu.config_files();
+        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
+        let i2c1 = &cfgs.iter().find(|(n, _)| n == "i2c1.rs").unwrap().1;
+        assert_eq!(spi1.matches("pub fn init").count(), 1);
+        assert_eq!(i2c1.matches("pub fn init").count(), 1);
     }
 
     #[test]

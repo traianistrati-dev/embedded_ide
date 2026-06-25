@@ -181,11 +181,20 @@ impl ProjectTreeState {
             }
         }
 
-        // 5. Rebuild mod.rs (preserve custom code outside GENERATED section)
-        let generated_section: String = configured
+        // 5. Rebuild mod.rs (preserve custom code outside GENERATED section).
+        // Also declare `pub mod configs;` when per-peripheral init modules exist
+        // under `pins/configs/` (synced separately by `sync_config_files`).
+        let has_configs = self
+            .user_src_files
+            .iter()
+            .any(|(p, _)| p.starts_with("pins/configs/"));
+        let mut generated_section: String = configured
             .iter()
             .map(|(slug, ..)| format!("pub mod {slug};\n"))
             .collect();
+        if has_configs {
+            generated_section.push_str("pub mod configs;\n");
+        }
 
         let generated_with_markers = format!(
             "// <<< GENERATED>>>\n{}\n// <<< GENERATED END >>>\n",
@@ -226,6 +235,88 @@ impl ProjectTreeState {
         }
     }
 
+    /// Sync the per-peripheral init modules under `src/pins/configs/` from the
+    /// codegen output `files = (file_name, generated_body)` (one per configured
+    /// USART/SPI/I2C). Mirrors [`sync_pin_files`]: registers the folder, ensures
+    /// `configs/mod.rs`, drops orphaned files, splices each file's GENERATED
+    /// block (preserving user code outside it), and rebuilds `configs/mod.rs`
+    /// with `pub mod <periph>;`. When `files` is empty the whole subtree is
+    /// dropped. Call this BEFORE `sync_pin_files` so the latter can add
+    /// `pub mod configs;` to `pins/mod.rs`.
+    pub fn sync_config_files(&mut self, files: &[(String, String)]) {
+        const DIR: &str = "pins/configs";
+        const MOD_PATH: &str = "pins/configs/mod.rs";
+        const GEN_BEGIN: &str = "// <<< GENERATED>>>";
+        const GEN_END: &str = "// <<< GENERATED END >>>";
+
+        if files.is_empty() {
+            // No configured peripherals → drop the entire configs/ subtree.
+            self.user_src_files
+                .retain(|(p, _)| !p.starts_with("pins/configs/"));
+            self.user_src_folders.retain(|f| f != DIR);
+            return;
+        }
+
+        // 1. Register the folder.
+        if !self.user_src_folders.iter().any(|f| f == DIR) {
+            self.user_src_folders.push(DIR.to_string());
+        }
+        // 2. Ensure configs/mod.rs exists.
+        if !self.user_src_files.iter().any(|(p, _)| p == MOD_PATH) {
+            self.user_src_files.push((MOD_PATH.to_string(), String::new()));
+        }
+
+        // Active module stems (file names without `.rs`).
+        let active: Vec<String> = files
+            .iter()
+            .map(|(name, _)| name.trim_end_matches(".rs").to_string())
+            .collect();
+
+        // 3. Drop config files no longer configured.
+        self.user_src_files.retain(|(path, _)| {
+            let Some(rest) = path.strip_prefix("pins/configs/") else {
+                return true;
+            };
+            rest == "mod.rs" || active.iter().any(|a| a == rest.trim_end_matches(".rs"))
+        });
+
+        // 4. Create / update each config file. The codegen `body` already wraps
+        //    ONLY the constants in `// <<< GENERATED>>>` markers; everything below
+        //    (use block + get_config/init) is editable. On update we re-splice
+        //    just that constants block, so the user's edits to the rest survive.
+        for (name, body) in files {
+            let file_path = format!("pins/configs/{name}");
+            if let Some((_, content)) =
+                self.user_src_files.iter_mut().find(|(p, _)| p == &file_path)
+            {
+                if let Some(block) = extract_gen_block(body) {
+                    let existing = content.clone();
+                    let updated = splice_pin_file(&existing, &block);
+                    if *content != updated {
+                        *content = updated;
+                    }
+                }
+            } else {
+                // New file: write the full generated content (consts + editable
+                // remainder).
+                self.user_src_files.push((file_path, body.clone()));
+            }
+        }
+
+        // 5. Rebuild configs/mod.rs (`pub mod usart1;` …), preserving user code.
+        let gen_section: String = active.iter().map(|s| format!("pub mod {s};\n")).collect();
+        let wrapped_mod = format!("{GEN_BEGIN}\n{}\n{GEN_END}\n", gen_section.trim());
+        if let Some((_, mod_content)) =
+            self.user_src_files.iter_mut().find(|(p, _)| p == MOD_PATH)
+        {
+            let existing = mod_content.clone();
+            let updated = splice_pin_file(&existing, &wrapped_mod);
+            if *mod_content != updated {
+                *mod_content = updated;
+            }
+        }
+    }
+
     /// Initialize the pins/ scaffold (folder + empty mod.rs).
     pub fn init_pins_scaffold(&mut self) {
         let folder = "pins".to_string();
@@ -241,6 +332,17 @@ impl ProjectTreeState {
 
 /// Replace the GENERATED section in a pin file while preserving user code.
 /// If no markers exist, wraps the new content and appends any existing code.
+/// The `// <<< GENERATED>>> … // <<< GENERATED END >>>` block of `content`
+/// (markers included), or `None` when absent. Used to splice just the constants
+/// block of a config file, leaving the editable remainder untouched.
+fn extract_gen_block(content: &str) -> Option<String> {
+    const GEN_BEGIN: &str = "// <<< GENERATED>>>";
+    const GEN_END: &str = "// <<< GENERATED END >>>";
+    let begin = content.find(GEN_BEGIN)?;
+    let end = content.find(GEN_END)? + GEN_END.len();
+    Some(content[begin..end].to_string())
+}
+
 fn splice_pin_file(existing: &str, new_generated: &str) -> String {
     const GEN_BEGIN: &str = "// <<< GENERATED>>>";
     const GEN_END: &str = "// <<< GENERATED END >>>";
@@ -853,5 +955,32 @@ mod tests {
             "ADC pin should have function label comment on PinType: {}",
             entry.1
         );
+    }
+
+    /// A config file's constants (inside the GENERATED block) regenerate on a
+    /// config change, but the editable remainder (use block + init fns the user
+    /// may have edited) is preserved.
+    #[test]
+    fn config_file_constants_regenerate_body_preserved() {
+        let mut state = ProjectTreeState::new();
+        let path = "pins/configs/usart1.rs";
+        let v1 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
+        state.sync_config_files(&[("usart1.rs".to_string(), v1.to_string())]);
+        assert!(state.user_src_files.iter().any(|(p, _)| p == path));
+
+        // User edits the EDITABLE part (below the markers).
+        {
+            let f = state.user_src_files.iter_mut().find(|(p, _)| p == path).unwrap();
+            f.1 = f.1.replace("/* orig */", "/* MY EDIT */");
+        }
+
+        // Regenerate with a new baud rate (only the constants block changes).
+        let v2 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 9600;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
+        state.sync_config_files(&[("usart1.rs".to_string(), v2.to_string())]);
+
+        let body = &state.user_src_files.iter().find(|(p, _)| p == path).unwrap().1;
+        assert!(body.contains("const BAUDRATE: u32 = 9600;"), "const updated:\n{body}");
+        assert!(!body.contains("115200"), "old const gone");
+        assert!(body.contains("/* MY EDIT */"), "user body edit preserved:\n{body}");
     }
 }

@@ -319,7 +319,7 @@ pub fn make_generated_section(
             .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    let (mut _tx{n}{sfx}, mut _rx{n}{sfx}) = \
-             pins::configs::usart1::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n" //init_usart{n}(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
+             pins::configs::usart{n}::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
         ));
     }
 
@@ -352,7 +352,7 @@ pub fn make_generated_section(
             .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    let _spi{n}{sfx} = \
-             init_spi{n}(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks);\n"
+             pins::configs::spi{n}::init(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks);\n"
         ));
     }
 
@@ -381,7 +381,7 @@ pub fn make_generated_section(
             .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    let _i2c{n}{sfx} = \
-             init_i2c{n}(dp.I2C{n}, ({scl_v}, {sda_v}), &mut afio, &clocks);\n"
+             pins::configs::i2c{n}::init(dp.I2C{n}, ({scl_v}, {sda_v}), &mut afio, &clocks);\n"
         ));
     }
 
@@ -451,28 +451,19 @@ pub fn make_generated_section(
     // ── Clock setup chain (from the Clock tab config) ────────────────────────
     let clock_chain = clock_setup_chain(clock);
 
-    // ── Peripheral config constants (from the Virtual Modules) ───────────────
-    // Generated here, INSIDE the GEN block, so they're regenerated every frame
-    // and track the module config live; the editable init helpers reference them
-    // by name (USART{n}_BAUDRATE, SPI{n}_CLOCK_KHZ, I2C{n}_CLOCK_KHZ).
-    let const_block = {
-        let consts = module_constants(all_pins, usart, spi, i2c);
-        if consts.is_empty() {
-            String::new()
-        } else {
-            let lines: String = consts.iter().map(|(_, l)| format!("{l}\n")).collect();
-            format!("\n// ── Peripheral config constants (from Virtual Modules) ──\n{lines}")
-        }
-    };
+    // Peripheral config constants now live in the per-peripheral modules under
+    // `src/pins/configs/` (e.g. `pins::configs::usart1`), seeded from the wired
+    // Virtual Module — no longer emitted in main.rs.
 
     // ── Put it all together ──────────────────────────────────────────────────
-    // Helper fns are appended after `fn main` by `ensure_helper_defs`.
+    // Only the ADC init helper is appended after `fn main` (by
+    // `ensure_helper_defs`); USART/SPI/I2C init live in `src/pins/configs/`.
     format!(
         "{GEN_BEGIN}\n\
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
          }};\n\
-         {const_block}\n\
+         \n\
          #[entry]\n\
          fn main() -> ! {{\n\
              let dp = pac::Peripherals::take().unwrap();\n\n\
@@ -506,210 +497,26 @@ fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
     )
 }
 
-// ── Editable peripheral init helpers (placed after `fn main`) ─────────────────
+// ── Editable peripheral init helper (ADC only — placed after `fn main`) ───────
 
-/// Peripheral init helper functions needed for the configured peripherals.
-/// Each entry is `(fn_name, full_definition)`. These live in the user-editable
-/// region **after `fn main`** (added additively by [`ensure_helper_defs`]) so
-/// the user can customise them (baud rate, SPI mode, ADC sample time…) without
-/// regeneration clobbering their edits. The generated `fn_calls` inside `main`
-/// reference them by name; their imports come from the generated `use` block.
-/// The `Config` builder expression for a USART helper — the baud rate comes from
-/// the generated `USART{n}_BAUDRATE` constant; parity/stop from the module config.
-fn usart_config_expr(cfg: Option<&UsartModuleConfig>, n: u8) -> String {
-    let mut s = format!("Config::default().baudrate(USART{n}_BAUDRATE.bps())");
-    if let Some(c) = cfg {
-        match c.parity {
-            Parity::None => {}
-            Parity::Even => s.push_str(".parity_even()"),
-            Parity::Odd => s.push_str(".parity_odd()"),
-        }
-        if c.stop_bits == StopBits::Two {
-            s.push_str(".stopbits(serial::StopBits::STOP2)");
-        }
-    }
-    s
-}
+/// Peripheral init helper(s) that stay inline in `main.rs` — only the ADC one
+/// now (it has no Virtual-Module config and takes `Clocks` by value). Each entry
+/// is `(fn_name, full_definition)`, added additively by [`ensure_helper_defs`]
+/// to the user-editable region after `fn main`. USART/SPI/I2C init moved to the
+/// per-peripheral modules under `src/pins/configs/` (see `config_files`).
 
-/// SPI `Mode {…}` block (from the module's mode) + clock expression (the
-/// generated `SPI{n}_CLOCK_KHZ` constant) for an init helper.
-fn spi_mode_freq_expr(cfg: Option<&SpiModuleConfig>, n: u8) -> (String, String) {
-    let mode = cfg.map(|c| c.mode).unwrap_or(0);
-    let (pol, ph) = match mode {
-        1 => ("IdleLow", "CaptureOnSecondTransition"),
-        2 => ("IdleHigh", "CaptureOnFirstTransition"),
-        3 => ("IdleHigh", "CaptureOnSecondTransition"),
-        _ => ("IdleLow", "CaptureOnFirstTransition"),
-    };
-    let block = format!(
-        "Mode {{\n            polarity: Polarity::{pol},\n            phase: Phase::{ph},\n        }}"
-    );
-    (block, format!("SPI{n}_CLOCK_KHZ.kHz()"))
-}
-
-/// I2C `Mode` expression for an init helper — frequency from the generated
-/// `I2C{n}_CLOCK_KHZ` constant; Standard (≤100 kHz) / Fast (>100 kHz) from config.
-fn i2c_mode_expr(cfg: Option<&I2cModuleConfig>, n: u8) -> String {
-    let hz = cfg.map(|c| c.clock_hz).unwrap_or(100_000);
-    let freq = format!("I2C{n}_CLOCK_KHZ.kHz()");
-    if hz <= 100_000 {
-        format!("I2cMode::Standard {{ frequency: {freq} }}")
-    } else {
-        format!("I2cMode::Fast {{ frequency: {freq}, duty_cycle: i2c::DutyCycle::Ratio2to1 }}")
-    }
-}
-
-/// The module-level config constants for the configured peripherals (seeded from
-/// the module config, default otherwise). Each is `(name, full `const …;` line)`,
-/// appended to the editable region by [`ensure_helper_defs`] and referenced by
-/// the init helpers (so the user has one named place to tune each value).
-fn module_constants(
-    all_pins: &[&Pin],
-    usart: &BTreeMap<u8, UsartModuleConfig>,
-    spi: &BTreeMap<u8, SpiModuleConfig>,
-    i2c: &BTreeMap<u8, I2cModuleConfig>,
-) -> Vec<(String, String)> {
+pub fn helper_defs(all_pins: &[&Pin]) -> Vec<(String, String)> {
     let funcs: Vec<&PinFunction> = all_pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
         .map(|p| &p.selected_function)
         .collect();
-    let has = |want: PinFunction| funcs.iter().any(|f| **f == want);
-
-    let mut out: Vec<(String, String)> = Vec::new();
-    for n in 1u8..=3 {
-        if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
-            let baud = usart.get(&n).map(|c| c.baud_rate).unwrap_or(115_200);
-            out.push((
-                format!("USART{n}_BAUDRATE"),
-                format!("const USART{n}_BAUDRATE: u32 = {baud};"),
-            ));
-        }
-    }
-    for n in 1u8..=2 {
-        if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
-            let khz = spi.get(&n).map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
-            out.push((
-                format!("SPI{n}_CLOCK_KHZ"),
-                format!("const SPI{n}_CLOCK_KHZ: u32 = {khz};"),
-            ));
-        }
-    }
-    for n in 1u8..=2 {
-        if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
-            let khz = i2c.get(&n).map(|c| c.clock_hz).unwrap_or(100_000) / 1_000;
-            out.push((
-                format!("I2C{n}_CLOCK_KHZ"),
-                format!("const I2C{n}_CLOCK_KHZ: u32 = {khz};"),
-            ));
-        }
-    }
-    out
-}
-
-pub fn helper_defs(
-    all_pins: &[&Pin],
-    usart: &BTreeMap<u8, UsartModuleConfig>,
-    spi: &BTreeMap<u8, SpiModuleConfig>,
-    i2c: &BTreeMap<u8, I2cModuleConfig>,
-) -> Vec<(String, String)> {
-    let funcs: Vec<&PinFunction> = all_pins
-        .iter()
-        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
-        .map(|p| &p.selected_function)
-        .collect();
-    let has = |want: PinFunction| funcs.iter().any(|f| **f == want);
 
     let mut defs: Vec<(String, String)> = Vec::new();
 
-    for n in 1u8..=3 {
-        if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
-            // Baud/parity/stop come from a wired GI_USART module when present,
-            // else the 115200 8N1 default.
-            let cfg_expr = usart_config_expr(usart.get(&n), n);
-            defs.push((
-                format!("init_usart{n}"),
-                format!(
-                    "fn init_usart{n}(
-    usart:  pac::USART{n},
-    pins:   impl serial::Pins<pac::USART{n}>,
-    afio:   &mut afio::Parts,
-    clocks: &Clocks,
-) -> (serial::Tx<pac::USART{n}>, serial::Rx<pac::USART{n}>) {{
-    Serial::new(
-        usart,
-        pins,
-        &mut afio.mapr,
-        {cfg_expr},
-        clocks,
-    )
-    .split()
-}}"
-                ),
-            ));
-        }
-    }
-
-    for n in 1u8..=2 {
-        if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
-            let remap = format!("Spi{n}NoRemap");
-            let (mode_block, freq) = spi_mode_freq_expr(spi.get(&n), n);
-            defs.push((
-                format!("init_spi{n}"),
-                format!(
-                    "fn init_spi{n}<PINS>(
-    spi:    pac::SPI{n},
-    pins:   PINS,
-    afio:   &mut afio::Parts,
-    clocks: &Clocks,
-) -> Spi<pac::SPI{n}, {remap}, PINS>
-where
-    PINS: spi::Pins<{remap}>,
-{{
-    Spi::spi{n}(
-        spi,
-        pins,
-        &mut afio.mapr,
-        {mode_block},
-        {freq},
-        clocks,
-    )
-}}"
-                ),
-            ));
-        }
-    }
-
-    for n in 1u8..=2 {
-        if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
-            let mode = i2c_mode_expr(i2c.get(&n), n);
-            defs.push((
-                format!("init_i2c{n}"),
-                format!(
-                    "fn init_i2c{n}<PINS>(
-    i2c:    pac::I2C{n},
-    pins:   PINS,
-    afio:   &mut afio::Parts,
-    clocks: &Clocks,
-) -> BlockingI2c<pac::I2C{n}, PINS>
-where
-    PINS: i2c::Pins<pac::I2C{n}>,
-{{
-    BlockingI2c::i2c{n}(
-        i2c,
-        pins,
-        &mut afio.mapr,
-        {mode},
-        clocks,
-        1000, 10, 1000, 1000,
-    )
-}}"
-                ),
-            ));
-        }
-    }
-
-    // ADC — `Adc::adc1` takes `Clocks` BY VALUE (Clocks is Copy), not `&Clocks`.
+    // USART / SPI / I2C init now live in `src/pins/configs/` (see `config_files`).
+    // Only the ADC helper stays inline here — `Adc::adc1` takes `Clocks` BY VALUE
+    // (Clocks is Copy), not `&Clocks`, and ADC has no Virtual-Module config.
     if funcs
         .iter()
         .any(|f| matches!(f, PinFunction::AdcChannel { .. }))
@@ -726,18 +533,213 @@ where
     defs
 }
 
-/// Append any **missing** helper functions to `file`, after `fn main`, in the
-/// user-editable region. Helpers already present (matched by `fn <name>(`) are
-/// left untouched so user edits survive every regeneration — only brand-new
-/// ones are appended. A section header is inserted once.
-pub fn ensure_helper_defs(
-    mut file: String,
+// ── Per-peripheral config files (src/pins/configs/) ───────────────────────────
+
+/// The body of each `src/pins/configs/<periph>.rs` init module: config
+/// constants (seeded from the wired Virtual Module) + a `use` block + a config
+/// helper + `pub fn init`. Returns `(file_name, generated_body)` per configured
+/// USART/SPI/I2C. `project_tree::sync_config_files` wraps the body in GENERATED
+/// markers and splices it (so user code outside the markers survives). main.rs
+/// calls `pins::configs::<periph>::init(...)`.
+pub fn config_files(
     all_pins: &[&Pin],
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
-) -> String {
-    let defs = helper_defs(all_pins, usart, spi, i2c);
+) -> Vec<(String, String)> {
+    let funcs: Vec<&PinFunction> = all_pins
+        .iter()
+        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+        .map(|p| &p.selected_function)
+        .collect();
+    let has = |want: PinFunction| funcs.iter().any(|f| **f == want);
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    for n in 1u8..=3 {
+        if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
+            out.push((format!("usart{n}.rs"), usart_config_file(n, usart.get(&n))));
+        }
+    }
+    for n in 1u8..=2 {
+        if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
+            out.push((format!("spi{n}.rs"), spi_config_file(n, spi.get(&n))));
+        }
+    }
+    for n in 1u8..=2 {
+        if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
+            out.push((format!("i2c{n}.rs"), i2c_config_file(n, i2c.get(&n))));
+        }
+    }
+    out
+}
+
+const USART_TMPL: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const BAUDRATE: u32 = {BAUD};
+const DATA_BITS: u8 = {DATA}; // 8, 9
+const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+const STOP_BITS: u8 = {STOP}; // 1, 2
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    rcc::Clocks,
+    serial::{self, Config, Serial, StopBits},
+};
+
+fn get_config() -> serial::Config {
+    let mut config = Config::default().baudrate(BAUDRATE.bps());
+
+    if DATA_BITS == 8 {
+        config = config.wordlength_8bits();
+    } else if DATA_BITS == 9 {
+        config = config.wordlength_9bits();
+    }
+
+    if PARITY == 'N' {
+        config = config.parity_none();
+    } else if PARITY == 'O' {
+        config = config.parity_odd();
+    } else if PARITY == 'E' {
+        config = config.parity_even();
+    }
+
+    if STOP_BITS == 1 {
+        config = config.stopbits(StopBits::STOP1);
+    } else if STOP_BITS == 2 {
+        config = config.stopbits(StopBits::STOP2);
+    }
+
+    config
+}
+
+pub fn init(
+    usart: pac::USART{N},
+    pins: impl serial::Pins<pac::USART{N}>,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+) -> (serial::Tx<pac::USART{N}>, serial::Rx<pac::USART{N}>) {
+    Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()
+}
+"#;
+
+fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
+    let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
+    let data = cfg.map(|c| c.data_bits).unwrap_or(8);
+    let parity = match cfg.map(|c| c.parity) {
+        Some(Parity::Odd) => 'O',
+        Some(Parity::Even) => 'E',
+        _ => 'N',
+    };
+    let stop = match cfg.map(|c| c.stop_bits) {
+        Some(StopBits::Two) => 2,
+        _ => 1,
+    };
+    USART_TMPL
+        .replace("{N}", &n.to_string())
+        .replace("{BAUD}", &baud.to_string())
+        .replace("{DATA}", &data.to_string())
+        .replace("{PARITY}", &parity.to_string())
+        .replace("{STOP}", &stop.to_string())
+}
+
+const SPI_TMPL: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+const CLOCK_KHZ: u32 = {KHZ};
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    rcc::Clocks,
+    spi::{self, Mode, Phase, Polarity, Spi, Spi{N}NoRemap},
+};
+
+fn get_mode() -> Mode {
+    match SPI_MODE {
+        1 => Mode { polarity: Polarity::IdleLow, phase: Phase::CaptureOnSecondTransition },
+        2 => Mode { polarity: Polarity::IdleHigh, phase: Phase::CaptureOnFirstTransition },
+        3 => Mode { polarity: Polarity::IdleHigh, phase: Phase::CaptureOnSecondTransition },
+        _ => Mode { polarity: Polarity::IdleLow, phase: Phase::CaptureOnFirstTransition },
+    }
+}
+
+pub fn init<PINS>(
+    spi: pac::SPI{N},
+    pins: PINS,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+) -> Spi<pac::SPI{N}, Spi{N}NoRemap, PINS>
+where
+    PINS: spi::Pins<Spi{N}NoRemap>,
+{
+    Spi::spi{N}(spi, pins, &mut afio.mapr, get_mode(), CLOCK_KHZ.kHz(), clocks)
+}
+"#;
+
+fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>) -> String {
+    let mode = cfg.map(|c| c.mode).unwrap_or(0);
+    let khz = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
+    SPI_TMPL
+        .replace("{N}", &n.to_string())
+        .replace("{MODE}", &mode.to_string())
+        .replace("{KHZ}", &khz.to_string())
+}
+
+const I2C_TMPL: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    rcc::Clocks,
+    i2c::{self, BlockingI2c, Mode as I2cMode},
+};
+
+fn get_mode() -> I2cMode {
+    if CLOCK_KHZ <= 100 {
+        I2cMode::Standard { frequency: CLOCK_KHZ.kHz() }
+    } else {
+        I2cMode::Fast { frequency: CLOCK_KHZ.kHz(), duty_cycle: i2c::DutyCycle::Ratio2to1 }
+    }
+}
+
+pub fn init<PINS>(
+    i2c: pac::I2C{N},
+    pins: PINS,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+) -> BlockingI2c<pac::I2C{N}, PINS>
+where
+    PINS: i2c::Pins<pac::I2C{N}>,
+{
+    BlockingI2c::i2c{N}(i2c, pins, &mut afio.mapr, get_mode(), *clocks, 1000, 10, 1000, 1000)
+}
+"#;
+
+fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
+    let khz = cfg.map(|c| c.clock_hz).unwrap_or(100_000) / 1_000;
+    I2C_TMPL
+        .replace("{N}", &n.to_string())
+        .replace("{KHZ}", &khz.to_string())
+}
+
+/// Append any **missing** helper functions to `file`, after `fn main`, in the
+/// user-editable region. Helpers already present (matched by `fn <name>(`) are
+/// left untouched so user edits survive every regeneration — only brand-new
+/// ones are appended. A section header is inserted once.
+pub fn ensure_helper_defs(mut file: String, all_pins: &[&Pin]) -> String {
+    let defs = helper_defs(all_pins);
     // A helper is "present" if its `fn <name>` is followed by either `(` (plain
     // fns like `init_adc1`) or `<` (generic fns like `init_spi1<PINS>` /
     // `init_i2c1<PINS>`). Checking only `(` missed the generic ones, so they
