@@ -235,18 +235,41 @@ impl AppIde {
                     r
                 };
 
-                let editor_resp = CodeEditor::default()
-                    .id_source(editor_id.clone())
-                    .with_rows(editor_rows)
-                    .with_fontsize(13.0)
-                    .with_theme(ColorTheme::GRUVBOX)
-                    .with_numlines(true)
-                    .show_with_completer(
+                // Rust files (main.rs / user src / build.rs / memory.x) use our
+                // lifetime-aware renderer so `'a` doesn't spill the string colour;
+                // the `#`-comment config files (Cargo.toml/.cargo/config/.gitignore)
+                // keep the stock CodeEditor. Both return a `TextEditOutput`.
+                let is_rust_file = !matches!(
+                    self.selected_file,
+                    ProjectFileId::CargoToml
+                        | ProjectFileId::CargoConfig
+                        | ProjectFileId::GitIgnore
+                );
+                let editor_resp = if is_rust_file {
+                    crate::editor::gui::code_editor::show_rust_with_completer(
                         ui,
                         &mut display_code,
+                        &ColorTheme::GRUVBOX,
+                        13.0,
+                        editor_rows,
                         &display_syntax,
+                        &editor_id,
                         &mut self.completer,
-                    );
+                    )
+                } else {
+                    CodeEditor::default()
+                        .id_source(editor_id.clone())
+                        .with_rows(editor_rows)
+                        .with_fontsize(13.0)
+                        .with_theme(ColorTheme::GRUVBOX)
+                        .with_numlines(true)
+                        .show_with_completer(
+                            ui,
+                            &mut display_code,
+                            &display_syntax,
+                            &mut self.completer,
+                        )
+                };
 
                 // ── Keep the caret in view when it moves off-screen ───────────
                 // egui_code_editor nests a horizontal ScrollArea *inside* the

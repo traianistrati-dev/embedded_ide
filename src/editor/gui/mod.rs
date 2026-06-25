@@ -1,5 +1,6 @@
 //! Editor GUI components — status bar, diagnostics overlay, text-position helpers.
 
+pub mod code_editor;
 pub mod status_bar;
 pub mod diagnostics_overlay;
 pub mod text_pos;
