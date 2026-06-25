@@ -754,6 +754,13 @@ impl AppIde {
             .as_ref()
             .map(|m| (m.all_pin_functions(), m.config_files()));
         if let Some((all_pins, config_files)) = regen {
+            // CAN init pulls in the external `bxcan`/`nb` crates — add or drop
+            // them in Cargo.toml based on whether codegen emitted `can1.rs`.
+            let needs_can = config_files.iter().any(|(name, _)| name == "can1.rs");
+            let new_toml = project_gen::ensure_can_deps(&self.cargo_toml, needs_can);
+            if new_toml != self.cargo_toml {
+                self.cargo_toml = new_toml;
+            }
             self.project_tree.sync_config_files(&config_files);
             self.project_tree.sync_pin_files(&all_pins);
         }

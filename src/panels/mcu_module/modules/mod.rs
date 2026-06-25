@@ -12,8 +12,8 @@ pub mod model;
 pub mod persist;
 
 pub use model::{
-    Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity, SpiModuleConfig,
-    StopBits, UsartModuleConfig, VirtualModule, module_signal_of,
+    CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity,
+    SpiModuleConfig, StopBits, UsartModuleConfig, VirtualModule, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -46,6 +46,17 @@ pub fn i2c_configs(modules: &[VirtualModule]) -> BTreeMap<u8, I2cModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::I2c(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// CAN module configs keyed by peripheral instance (bit rate for codegen).
+pub fn can_configs(modules: &[VirtualModule]) -> BTreeMap<u8, CanModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Can(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

@@ -16,6 +16,8 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "GI_I2C".
     GenericInterfaceI2c,
+    /// Generic device on a CAN bus (RX/TX) — "GI_CAN".
+    GenericInterfaceCan,
 }
 
 impl ModuleKind {
@@ -25,6 +27,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceUsart => "GI_USART",
             ModuleKind::GenericInterfaceSpi => "GI_SPI",
             ModuleKind::GenericInterfaceI2c => "GI_I2C",
+            ModuleKind::GenericInterfaceCan => "GI_CAN",
         }
     }
 
@@ -36,6 +39,7 @@ impl ModuleKind {
             }
             ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceCan => ModuleConfig::Can(CanModuleConfig::new(instance)),
         }
     }
 }
@@ -55,6 +59,10 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::SpiNss(n) => (GenericInterfaceSpi, *n, Nss),
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
+        // CAN has a single instance on STM32F1 (CAN1) and pin functions without
+        // an index, so the instance is fixed at 1.
+        PinFunction::CanRx => (GenericInterfaceCan, 1, CanRx),
+        PinFunction::CanTx => (GenericInterfaceCan, 1, CanTx),
         _ => return None,
     })
 }
@@ -73,6 +81,9 @@ pub enum ModuleSignal {
     // I2C
     Scl,
     Sda,
+    // CAN
+    CanRx,
+    CanTx,
 }
 
 impl ModuleSignal {
@@ -86,6 +97,8 @@ impl ModuleSignal {
             ModuleSignal::Nss => "NSS",
             ModuleSignal::Scl => "SCL",
             ModuleSignal::Sda => "SDA",
+            ModuleSignal::CanRx => "RX",
+            ModuleSignal::CanTx => "TX",
         }
     }
 
@@ -100,6 +113,9 @@ impl ModuleSignal {
             ModuleSignal::Nss => PinFunction::SpiNss(instance),
             ModuleSignal::Scl => PinFunction::I2cScl(instance),
             ModuleSignal::Sda => PinFunction::I2cSda(instance),
+            // CAN pin functions carry no instance (single CAN on STM32F1).
+            ModuleSignal::CanRx => PinFunction::CanRx,
+            ModuleSignal::CanTx => PinFunction::CanTx,
         }
     }
 }
@@ -216,12 +232,39 @@ impl I2cModuleConfig {
     }
 }
 
+/// CAN device settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanModuleConfig {
+    pub instance: u8,
+    /// Bus bit rate in bits/s (e.g. 125000 / 250000 / 500000 / 1000000).
+    pub bitrate: u32,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_canN` handle (e.g. `_can1_obd`).
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl CanModuleConfig {
+    /// Defaults: 500 kbit/s.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            bitrate: 500_000,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+}
+
 /// Per-kind configuration payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleConfig {
     Usart(UsartModuleConfig),
     Spi(SpiModuleConfig),
     I2c(I2cModuleConfig),
+    Can(CanModuleConfig),
 }
 
 impl ModuleConfig {
@@ -231,6 +274,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => c.instance,
             ModuleConfig::Spi(c) => c.instance,
             ModuleConfig::I2c(c) => c.instance,
+            ModuleConfig::Can(c) => c.instance,
         }
     }
 
@@ -239,6 +283,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &c.rx_model,
             ModuleConfig::Spi(c) => &c.rx_model,
             ModuleConfig::I2c(c) => &c.rx_model,
+            ModuleConfig::Can(c) => &c.rx_model,
         }
     }
 
@@ -247,6 +292,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &c.tx_model,
             ModuleConfig::Spi(c) => &c.tx_model,
             ModuleConfig::I2c(c) => &c.tx_model,
+            ModuleConfig::Can(c) => &c.tx_model,
         }
     }
 
@@ -255,6 +301,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &mut c.rx_model,
             ModuleConfig::Spi(c) => &mut c.rx_model,
             ModuleConfig::I2c(c) => &mut c.rx_model,
+            ModuleConfig::Can(c) => &mut c.rx_model,
         }
     }
 
@@ -263,6 +310,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &mut c.tx_model,
             ModuleConfig::Spi(c) => &mut c.tx_model,
             ModuleConfig::I2c(c) => &mut c.tx_model,
+            ModuleConfig::Can(c) => &mut c.tx_model,
         }
     }
 
@@ -272,6 +320,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &c.custom_label,
             ModuleConfig::Spi(c) => &c.custom_label,
             ModuleConfig::I2c(c) => &c.custom_label,
+            ModuleConfig::Can(c) => &c.custom_label,
         }
     }
 
@@ -280,6 +329,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) => &mut c.custom_label,
             ModuleConfig::Spi(c) => &mut c.custom_label,
             ModuleConfig::I2c(c) => &mut c.custom_label,
+            ModuleConfig::Can(c) => &mut c.custom_label,
         }
     }
 
@@ -291,6 +341,9 @@ impl ModuleConfig {
                 format!("SPI{}  ·  mode {}  ·  {}", c.instance, c.mode, hz_label(c.clock_hz))
             }
             ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
+            ModuleConfig::Can(c) => {
+                format!("CAN{}  ·  {} kbit", c.instance, c.bitrate / 1_000)
+            }
         }
     }
 }

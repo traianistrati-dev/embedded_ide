@@ -3,7 +3,7 @@
 use super::super::clock::frequencies;
 use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
 use super::super::modules::{
-    I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
+    CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
 };
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
@@ -144,6 +144,7 @@ pub fn make_generated_section(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    can: &BTreeMap<u8, CanModuleConfig>,
 ) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
@@ -186,8 +187,15 @@ pub fn make_generated_section(
     let has_timer = configured
         .iter()
         .any(|(p, _)| matches!(p.selected_function, PinFunction::TimerPwm { .. }));
-    let needs_afio = has_serial || has_spi || has_i2c || has_timer;
-    let has_periph_fns = has_serial || has_spi || has_i2c || has_adc;
+    let has_can = configured.iter().any(|(p, _)| {
+        matches!(
+            p.selected_function,
+            PinFunction::CanRx | PinFunction::CanTx
+        )
+    });
+    // CAN's `assign_pins` needs AFIO too (it may remap the pins).
+    let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can;
+    let has_periph_fns = has_serial || has_spi || has_i2c || has_adc || has_can;
 
     // ── SPI instances ────────────────────────────────────────────────────────
     let mut spi_instances: BTreeSet<u8> = BTreeSet::new();
@@ -422,9 +430,14 @@ pub fn make_generated_section(
         let tx_v = can_tx_pin
             .map(|(p, m)| binding_of(p, m))
             .unwrap_or("_can_tx".into());
-        fn_calls.push_str("    // ── CAN ──\n");
+        let sfx = can
+            .get(&1)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        // `assign_pins` (and bxcan) expect the pins as `(TX, RX)`.
         fn_calls.push_str(&format!(
-            "    // let _can = Can::new(dp.CAN1, ({rx_v}, {tx_v})); // needs bxcan crate\n"
+            "    let mut _can{sfx} = \
+             pins::configs::can1::init(dp.CAN1, ({tx_v}, {rx_v}), &mut afio);\n"
         ));
     }
 
@@ -546,6 +559,8 @@ pub fn config_files(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    can: &BTreeMap<u8, CanModuleConfig>,
+    clock: &ClockConfig,
 ) -> Vec<(String, String)> {
     let funcs: Vec<&PinFunction> = all_pins
         .iter()
@@ -570,7 +585,101 @@ pub fn config_files(
             out.push((format!("i2c{n}.rs"), i2c_config_file(n, i2c.get(&n))));
         }
     }
+    // CAN — single instance on STM32F1; the bit-timing register depends on the
+    // APB1 (PCLK1) clock, so the clock config is read here.
+    if has(PinFunction::CanRx) || has(PinFunction::CanTx) {
+        out.push(("can1.rs".to_string(), can_config_file(can.get(&1), pclk1_of(clock))));
+    }
     out
+}
+
+/// APB1 (PCLK1) frequency in Hz from the clock config — needed for the CAN bit
+/// timing. Mirrors [`clock_setup_chain`]'s graph→typed→frequencies path.
+fn pclk1_of(clock: &ClockConfig) -> u32 {
+    let c: Stm32f1Clock = match clock {
+        ClockConfig::Graph(gc) => {
+            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.graph)
+        }
+        ClockConfig::None => Stm32f1Clock::default(),
+    };
+    frequencies(&c).pclk1
+}
+
+/// STM32 `CAN_BTR` register value for `bitrate` at `pclk1`, aiming for a ~87.5%
+/// sample point. Searches total time-quanta 8..=20 for an exact prescaler.
+/// Returns 0 when none fits (so the user notices and fixes the bit timing).
+fn can_btr(bitrate: u32, pclk1: u32) -> u32 {
+    if bitrate == 0 || pclk1 == 0 {
+        return 0;
+    }
+    for ntq in (8u32..=20).rev() {
+        let denom = bitrate * ntq;
+        if pclk1 % denom != 0 {
+            continue;
+        }
+        let brp = pclk1 / denom;
+        if !(1..=1024).contains(&brp) {
+            continue;
+        }
+        // total = 1 (sync) + ts1 + ts2 = ntq; sample point ≈ ts1/ntq.
+        let ts1 = ((ntq * 7) / 8).clamp(2, 16);
+        let ts2 = (ntq - 1).saturating_sub(ts1);
+        if !(1..=8).contains(&ts2) {
+            continue;
+        }
+        let sjw = 1u32;
+        return ((sjw - 1) << 24) | ((ts2 - 1) << 20) | ((ts1 - 1) << 16) | (brp - 1);
+    }
+    0
+}
+
+const CAN_TMPL: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const BITRATE: u32 = {BITRATE}; // bits/s
+// CAN_BTR register value, computed from BITRATE and the APB1 clock ({PCLK1} Hz).
+const BTR: u32 = {BTR};
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+// CAN on STM32F1 needs the `bxcan` + `nb` crates (auto-added to Cargo.toml when a
+// CAN module is present). Verify the bit timing / filters for your bus.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    can::Can,
+};
+
+pub fn init<PINS>(
+    can: pac::CAN1,
+    pins: PINS,
+    afio: &mut afio::Parts,
+) -> bxcan::Can<Can<pac::CAN1>>
+where
+    PINS: stm32f1xx_hal::can::Pins<Instance = pac::CAN1>,
+{
+    let mut hal_can = Can::new(can);
+    hal_can.assign_pins(pins, &mut afio.mapr);
+
+    let mut bx = bxcan::Can::builder(hal_can)
+        .set_bit_timing(BTR)
+        .leave_disabled();
+
+    // Accept every frame by default — tighten the filter for your application.
+    bx.modify_filters().enable_bank(0, bxcan::filter::Mask32::accept_all());
+
+    nb::block!(bx.enable_non_blocking()).ok();
+    bx
+}
+"#;
+
+fn can_config_file(cfg: Option<&CanModuleConfig>, pclk1: u32) -> String {
+    let bitrate = cfg.map(|c| c.bitrate).unwrap_or(500_000);
+    let btr = can_btr(bitrate, pclk1);
+    CAN_TMPL
+        .replace("{BITRATE}", &bitrate.to_string())
+        .replace("{PCLK1}", &pclk1.to_string())
+        .replace("{BTR}", &format!("0x{btr:08X}"))
 }
 
 const USART_TMPL: &str = r#"// <<< GENERATED>>>

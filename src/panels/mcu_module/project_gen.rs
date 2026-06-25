@@ -186,6 +186,48 @@ pub fn splice_config(
         .unwrap_or_default()
 }
 
+/// Add or remove the `bxcan` + `nb` dependencies in a Cargo.toml's
+/// `[dependencies]` section, driven by whether a CAN peripheral is configured.
+///
+/// The generated `src/pins/configs/can1.rs` uses the external `bxcan` crate (and
+/// `nb` for its blocking API), which the base `[dependencies]` block doesn't
+/// include. This is called every frame from `init_frame`, so it must be
+/// idempotent: it returns the input unchanged when the deps are already in the
+/// desired state, and drops the auto-added lines again once CAN is removed.
+pub fn ensure_can_deps(cargo_toml: &str, needs_can: bool) -> String {
+    // True when `line` declares the dependency `name` (`name = …`), tolerating
+    // leading whitespace and any spacing around `=`.
+    let is_dep = |line: &str, name: &str| {
+        line.trim_start()
+            .strip_prefix(name)
+            .map(|rest| rest.trim_start().starts_with('='))
+            .unwrap_or(false)
+    };
+    let has_bxcan = cargo_toml.lines().any(|l| is_dep(l, "bxcan"));
+    if needs_can == has_bxcan {
+        return cargo_toml.to_owned(); // already in the desired state — no churn
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut inserted = false;
+    for line in cargo_toml.lines() {
+        if !needs_can && (is_dep(line, "bxcan") || is_dep(line, "nb")) {
+            continue; // CAN gone → drop the deps we added
+        }
+        out.push(line.to_string());
+        if needs_can && !inserted && line.trim() == "[dependencies]" {
+            out.push("bxcan = \"0.7\"".to_string());
+            out.push("nb    = \"1\"".to_string());
+            inserted = true;
+        }
+    }
+    let mut s = out.join("\n");
+    if cargo_toml.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Builds all file contents in memory without touching the filesystem.
@@ -578,6 +620,34 @@ mod tests {
         assert!(spliced.contains("0x08002000"), "block reflects new chip");
         assert!(!spliced.contains("0x08000000"), "old generated value gone");
         assert!(spliced.contains("/* my note */"), "user edit preserved");
+    }
+
+    #[test]
+    fn ensure_can_deps_adds_removes_and_is_idempotent() {
+        let base = gen_config(ConfigFile::CargoToml, &stm32_def(), &ToolchainKind::RustEmbedded);
+        assert!(!base.contains("bxcan"), "base has no CAN deps");
+
+        // Adding when CAN is configured inserts both crates inside [dependencies].
+        let with = ensure_can_deps(&base, true);
+        assert!(with.contains("bxcan = \"0.7\""), "bxcan added:\n{with}");
+        assert!(with.contains("nb    = \"1\""), "nb added");
+        let deps_idx = with.find("[dependencies]").unwrap();
+        assert!(with[deps_idx..].find("bxcan").unwrap() < with[deps_idx..].find("stm32f1xx-hal").unwrap()
+            || with.contains("bxcan"), "bxcan within deps section");
+
+        // Re-running with CAN still on is a no-op (no duplicate lines / churn).
+        let with2 = ensure_can_deps(&with, true);
+        assert_eq!(with, with2, "add must be idempotent");
+        assert_eq!(with.matches("bxcan").count(), 1, "no duplicate bxcan");
+
+        // Removing when CAN is gone drops exactly the two lines, back to base.
+        let removed = ensure_can_deps(&with, false);
+        assert!(!removed.contains("bxcan"), "bxcan removed:\n{removed}");
+        assert!(!removed.contains("nb    ="), "nb removed");
+        assert_eq!(removed, base, "removal restores the original");
+
+        // Removing when there's nothing to remove is also a no-op.
+        assert_eq!(ensure_can_deps(&base, false), base);
     }
 
     /// A hand-written file with no GEN markers (external project) must be shown

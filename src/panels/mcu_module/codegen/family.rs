@@ -56,7 +56,9 @@ impl FamilyBackend for Stm32f1Backend {
         let usart = modules::usart_configs(&mcu.modules);
         let spi = modules::spi_configs(&mcu.modules);
         let i2c = modules::i2c_configs(&mcu.modules);
-        let gen_ = stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c);
+        let can = modules::can_configs(&mcu.modules);
+        let gen_ =
+            stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can);
         let base = format!(
             "{header}{gen_}\n{tail}",
             header = stm32::invariant_header(&mcu.name, &mcu.id),
@@ -72,8 +74,9 @@ impl FamilyBackend for Stm32f1Backend {
         let usart = modules::usart_configs(&mcu.modules);
         let spi = modules::spi_configs(&mcu.modules);
         let i2c = modules::i2c_configs(&mcu.modules);
+        let can = modules::can_configs(&mcu.modules);
         let new_section =
-            stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c);
+            stm32::make_generated_section(&mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can);
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Add the ADC helper if newly needed; preserve user-edited ones.
         stm32::ensure_helper_defs(spliced, &all)
@@ -84,7 +87,8 @@ impl FamilyBackend for Stm32f1Backend {
         let usart = modules::usart_configs(&mcu.modules);
         let spi = modules::spi_configs(&mcu.modules);
         let i2c = modules::i2c_configs(&mcu.modules);
-        stm32::config_files(&all, &usart, &spi, &i2c)
+        let can = modules::can_configs(&mcu.modules);
+        stm32::config_files(&all, &usart, &spi, &i2c, &can, &mcu.clock)
     }
 }
 

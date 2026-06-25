@@ -17,7 +17,8 @@ pub fn show_dfu_tab(
     openocd_state: &Arc<Mutex<OpenOcdState>>,
     openocd_target_cfg: &mut String,
     espflash_state: &Arc<Mutex<EspFlashState>>,
-    espflash_port: &mut String,
+    //espflash_port: &mut String,
+    _: &mut String,
     toolchain: &ToolchainKind,
 ) {
     let state = dfu_state.lock().unwrap().clone();
@@ -133,7 +134,7 @@ pub fn show_dfu_tab(
                         );
                         ui.add_enabled(
                             is_compatible,
-                            egui::SelectableLabel::new(
+                            egui::Button::selectable(
                                 dfu_sel_programmer == key,
                                 egui::RichText::new(format!(
                                     "{}  [{}] {}; {}",
@@ -486,10 +487,13 @@ pub fn show_dfu_tab(
             }
 
             ui.label(
-                egui::RichText::new(format!("{} verify connectivity without flashing", ph::ARROW_LEFT))
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(100))
-                    .italics(),
+                egui::RichText::new(format!(
+                    "{} verify connectivity without flashing",
+                    ph::ARROW_LEFT
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_gray(100))
+                .italics(),
             );
         });
     }

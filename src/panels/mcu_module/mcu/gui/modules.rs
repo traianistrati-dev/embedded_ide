@@ -95,6 +95,7 @@ fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceUsart => PinFunction::UsartTx(instance),
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
+        ModuleKind::GenericInterfaceCan => PinFunction::CanTx,
     };
     f.color()
 }
@@ -192,6 +193,7 @@ fn handle_preview(m: &VirtualModule) -> String {
         ModuleKind::GenericInterfaceUsart => format!("_tx{n}{sfx}, _rx{n}{sfx}"),
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
+        ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
     }
 }
 
@@ -499,6 +501,21 @@ pub fn module_config_ui(
                     ui.end_row();
                     ui.label("Address (7-bit)");
                     ui.add(egui::DragValue::new(&mut cfg.address).range(0..=127).hexadecimal(2, false, true));
+                    ui.end_row();
+                }
+                ModuleConfig::Can(cfg) => {
+                    ui.label("Bit rate");
+                    egui::ComboBox::from_id_salt("canbr")
+                        .selected_text(format!("{} kbit", cfg.bitrate / 1_000))
+                        .show_ui(ui, |ui| {
+                            for br in [125_000u32, 250_000, 500_000, 1_000_000] {
+                                ui.selectable_value(
+                                    &mut cfg.bitrate,
+                                    br,
+                                    format!("{} kbit", br / 1_000),
+                                );
+                            }
+                        });
                     ui.end_row();
                 }
             }

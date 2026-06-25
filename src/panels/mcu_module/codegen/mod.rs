@@ -444,6 +444,41 @@ mod tests {
     }
 
     #[test]
+    fn test_can_emits_config_file_and_call() {
+        use super::super::mock_mcu;
+
+        // CAN1 on PA11 (RX, pin 32) + PA12 (TX, pin 33). Codegen must emit a
+        // `can1.rs` config module and a single call into it from main.rs, with
+        // pins ordered (TX, RX) as bxcan/assign_pins expect.
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(32, PinFunction::CanRx);
+        mcu.apply_pin_function(33, PinFunction::CanTx);
+
+        let mut code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "pins::configs::can1::init(dp.CAN1,");
+        assert_contains_substring(&code, "&mut afio);");
+        // CAN needs AFIO constrained.
+        assert_contains_substring(&code, "let mut afio = dp.AFIO.constrain();");
+
+        // The call isn't duplicated across repeated per-frame regeneration.
+        for _ in 0..10 {
+            code = mcu.update_main_rs(&code);
+        }
+        assert_eq!(
+            code.matches("pins::configs::can1::init(").count(),
+            1,
+            "CAN call duplicated"
+        );
+
+        // The config file carries the GENERATED constants + one editable `init`.
+        let cfgs = mcu.config_files();
+        let can1 = &cfgs.iter().find(|(n, _)| n == "can1.rs").unwrap().1;
+        assert_contains_substring(can1, "const BITRATE: u32 =");
+        assert_contains_substring(can1, "const BTR: u32 =");
+        assert_eq!(can1.matches("pub fn init").count(), 1);
+    }
+
+    #[test]
     fn test_user_edited_helper_is_preserved() {
         use super::super::mock_mcu;
 

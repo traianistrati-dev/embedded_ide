@@ -112,6 +112,10 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceI2c,
                                         "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
                                     ),
+                                    (
+                                        ModuleKind::GenericInterfaceCan,
+                                        "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
+                                    ),
                                 ] {
                                     if ui
                                         .button(format!("{} {}", ph::PLUS, kind.short()))
