@@ -261,6 +261,12 @@ impl AppIde {
                 // panel). Runs after caret-follow so its precise offset wins.
                 self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file);
 
+                // Highlight every occurrence of the word the user selected
+                // (double-click / Ctrl+Shift+Left/Right). Painted here — while
+                // `display_code` still matches the galley the editor just built —
+                // and before the diagnostics overlay so squiggles render on top.
+                Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
+
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
                 // the same flags the keyboard shortcut sets (so both share one
@@ -559,6 +565,85 @@ impl AppIde {
             // Suppress caret-follow from snapping back to the (stale) caret.
             self.last_caret_idx = editor_resp.state.cursor.char_range().map(|r| r.primary.index);
             ui.ctx().request_repaint();
+        }
+    }
+
+    /// Paint a translucent cyan band over every occurrence of the identifier the
+    /// user currently has selected — the classic "highlight all references of the
+    /// symbol under the cursor" behaviour. A selection appears on a double-click
+    /// (selects the word) or Ctrl+Shift+Left/Right (extends by word).
+    ///
+    /// Only a single whole identifier counts as a "variable": an empty / multi-
+    /// token / non-identifier selection paints nothing. Matches are whole-word
+    /// (so selecting `x` doesn't light up the `x` inside `max`).
+    fn highlight_selected_word(
+        editor_resp: &egui::text_edit::TextEditOutput,
+        display_code: &str,
+        clip: egui::Rect,
+        ui: &egui::Ui,
+    ) {
+        let Some(range) = editor_resp.state.cursor.char_range() else {
+            return;
+        };
+        let lo = range.primary.index.min(range.secondary.index);
+        let hi = range.primary.index.max(range.secondary.index);
+        if lo == hi {
+            return; // no selection — nothing to highlight
+        }
+
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        let chars: Vec<char> = display_code.chars().collect();
+        if hi > chars.len() {
+            return;
+        }
+        let target = &chars[lo..hi];
+        // Reject anything that isn't one identifier token (whitespace, symbols,
+        // multi-word selections, or a leading digit → not a variable name).
+        if target.iter().any(|&c| !is_ident(c)) || target[0].is_ascii_digit() {
+            return;
+        }
+
+        // RGB (52, 232, 235) at 20% opacity → alpha ≈ 0.20 × 255 = 51, so the
+        // code stays readable through the band (like the diagnostic tints).
+        let color = egui::Color32::from_rgba_unmultiplied(52, 232, 235, 51);
+        let gp = editor_resp.galley_pos;
+        let galley = &editor_resp.galley;
+        let painter = ui.painter().with_clip_rect(clip);
+
+        let wl = hi - lo;
+        let n = chars.len();
+        let mut i = 0;
+        while i + wl <= n {
+            if &chars[i..i + wl] == target
+                && (i == 0 || !is_ident(chars[i - 1]))
+                && (i + wl == n || !is_ident(chars[i + wl]))
+            {
+                // Map the match's char range to a screen rect via the galley.
+                let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(i));
+                let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(i + wl));
+                let y_top = gp.y + loc_s.min.y;
+                let y_bot = gp.y + loc_s.max.y;
+                // A whole identifier never wraps, but guard anyway: if start/end
+                // land on different rows, extend to the line end.
+                let same_row = (loc_s.min.y - loc_e.min.y).abs() < (y_bot - y_top).max(1.0) * 0.5;
+                let x_l = gp.x + loc_s.min.x;
+                let x_r = if same_row {
+                    gp.x + loc_e.min.x
+                } else {
+                    gp.x + galley.rect.width()
+                };
+                // Skip occurrences scrolled out of the visible editor region.
+                if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(x_l, y_top), egui::pos2(x_r, y_bot)),
+                        2.0,
+                        color,
+                    );
+                }
+                i += wl; // jump past this match
+            } else {
+                i += 1;
+            }
         }
     }
 }
