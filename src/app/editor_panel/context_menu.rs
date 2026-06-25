@@ -10,6 +10,7 @@ use egui_phosphor::regular as ph;
 /// A command chosen from the editor right-click menu.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum EditorAction {
+    Cut,
     DeleteLine,
     DuplicateLine,
     Comment,
@@ -45,7 +46,8 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
             }
         };
 
-    item(ui, ph::SCISSORS, "Cut line", "Ctrl+X", EditorAction::DeleteLine);
+    item(ui, ph::SCISSORS, "Cut", "Ctrl+X", EditorAction::Cut);
+    item(ui, ph::SCISSORS, "Cut line", "Ctrl+Shift+X", EditorAction::DeleteLine);
     item(ui, ph::COPY_SIMPLE, "Duplicate line", "Ctrl+D", EditorAction::DuplicateLine);
     item(ui, ph::CODE, "Toggle comment", "Ctrl+/", EditorAction::Comment);
     item(ui, ph::ARROW_UP, "Move line up", "Ctrl+Up", EditorAction::MoveUp);

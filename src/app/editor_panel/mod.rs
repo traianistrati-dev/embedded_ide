@@ -189,16 +189,13 @@ impl AppIde {
                 // overwrites the clipboard with the error message instead.
                 let copy_requested =
                     ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-                // Ctrl+X → delete the line(s) where the cursor / selection is.
-                // egui (via winit) turns Ctrl+X into an `Event::Cut`, not a
-                // `Key::X` — so consuming the key alone leaves the editor's native
-                // cut (which only removes the selection) running. Remove the Cut
-                // event too, then we handle the whole-line delete ourselves.
-                let mut ctrl_x_pressed = ui.input_mut(|i| {
-                    let had_cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
-                    i.events.retain(|e| !matches!(e, egui::Event::Cut));
-                    let key = i.consume_key(egui::Modifiers::CTRL, egui::Key::X);
-                    had_cut || key
+                // Ctrl+Shift+X → cut the whole line(s) at the cursor/selection.
+                // Plain Ctrl+X keeps egui's native behaviour (cut the *selection*),
+                // so we must NOT touch its `Event::Cut`. Ctrl+Shift+X isn't a
+                // clipboard binding, so it arrives as a plain `Key::X` press with
+                // no `Event::Cut` — consume the key and do the whole-line cut.
+                let mut cut_line_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::X)
                 });
                 // Ctrl+D → duplicate the line(s) at the cursor / selection.
                 let mut ctrl_d_pressed =
@@ -335,7 +332,7 @@ impl AppIde {
                 {
                     use context_menu::EditorAction as A;
                     match menu_action {
-                        Some(A::DeleteLine) => ctrl_x_pressed = true,
+                        Some(A::DeleteLine) => cut_line_pressed = true,
                         Some(A::DuplicateLine) => ctrl_d_pressed = true,
                         Some(A::Comment) => ctrl_slash_pressed = true,
                         Some(A::MoveUp) => ctrl_up_pressed = true,
@@ -353,6 +350,28 @@ impl AppIde {
                         }
                         Some(A::ReplaceInProject) => {
                             self.find.open_with(find_replace::FindMode::ReplaceProject)
+                        }
+                        Some(A::Cut) => {
+                            // Cut the selection (mirrors the native Ctrl+X): copy
+                            // it, remove it, collapse the cursor to the cut point.
+                            if let Some(r) = editor_resp.state.cursor.char_range() {
+                                let lo = r.primary.index.min(r.secondary.index);
+                                let hi = r.primary.index.max(r.secondary.index);
+                                if lo != hi {
+                                    let chars: Vec<char> = display_code.chars().collect();
+                                    let hi = hi.min(chars.len());
+                                    ui.ctx().copy_text(chars[lo..hi].iter().collect::<String>());
+                                    let mut new: String = chars[..lo].iter().collect();
+                                    new.extend(&chars[hi..]);
+                                    display_code = new;
+                                    let mut st = editor_resp.state.clone();
+                                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                        egui::text::CCursor::new(lo),
+                                        egui::text::CCursor::new(lo),
+                                    )));
+                                    st.store(ui.ctx(), editor_resp.response.id);
+                                }
+                            }
                         }
                         Some(A::Copy) => {
                             if let Some(r) = editor_resp.state.cursor.char_range() {
@@ -382,10 +401,10 @@ impl AppIde {
                     }
                 }
 
-                // Ctrl+X cuts (not just deletes) the line(s): copy them to the
-                // clipboard first so they can be pasted, then the line op below
-                // removes them. (The native Cut event was already stripped above.)
-                if ctrl_x_pressed {
+                // Ctrl+Shift+X cuts (not just deletes) the line(s): copy them to
+                // the clipboard first so they can be pasted, then the line op below
+                // removes them.
+                if cut_line_pressed {
                     if let Some(r) = editor_resp.state.cursor.char_range() {
                         let lo = r.primary.index.min(r.secondary.index);
                         let hi = r.primary.index.max(r.secondary.index);
@@ -423,7 +442,7 @@ impl AppIde {
                             Some(move_lines::move_lines(&display_code, lo, hi, false))
                         } else if ctrl_down_pressed {
                             Some(move_lines::move_lines(&display_code, lo, hi, true))
-                        } else if ctrl_x_pressed {
+                        } else if cut_line_pressed {
                             Some(delete_line::delete_lines(&display_code, lo, hi))
                         } else if ctrl_d_pressed {
                             Some(duplicate_line::duplicate_lines(&display_code, lo, hi))
