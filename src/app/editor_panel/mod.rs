@@ -14,6 +14,7 @@ use crate::panels::mcu_module::project_gen::ProjectFiles;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme};
 
+mod brace_block;
 pub(crate) mod cargo_complete;
 mod comment;
 mod completion;
@@ -333,6 +334,15 @@ impl AppIde {
                 // Highlight all occurrences of the active find query (current one
                 // in amber), so matches show even when the find field has focus.
                 self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
+                // When a `{`/`}` is selected, darken the whole block and let
+                // Ctrl+C copy it.
+                self.highlight_brace_block(
+                    &editor_resp,
+                    &display_code,
+                    editor_clip,
+                    ui,
+                    copy_requested,
+                );
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
