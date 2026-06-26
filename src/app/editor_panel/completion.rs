@@ -223,23 +223,20 @@ impl AppIde {
             let all_items = self.lsp_state.lock().unwrap().completion_items.clone();
 
             if !all_items.is_empty() {
-                // ── Live prefix filtering ────────────────────────────────
-                // Compute what the user has typed since the trigger point.
+                // ── Prefix-first ordering ────────────────────────────────
+                // The identifier word ending at the cursor (e.g. the "n" typed
+                // before pressing Ctrl+Space). `lsp_word_start` stops at `.` / `:`
+                // / whitespace, so a `.`/`::` trigger keeps only the part after the
+                // separator. Using the whole word (not just text typed after the
+                // trigger) is what lets the list lead with what's already typed.
                 let prefix = cursor_char_idx
                     .map(|cur| {
-                        lsp_completion_prefix(&display_code, self.completion_trigger_idx, cur)
+                        let word_start = lsp_word_start(&display_code, cur);
+                        lsp_completion_prefix(&display_code, word_start, cur)
                     })
                     .unwrap_or_default();
 
-                let filtered: Vec<lsp::CompletionItem> = if prefix.is_empty() {
-                    all_items
-                } else {
-                    let pl = prefix.to_lowercase();
-                    all_items
-                        .into_iter()
-                        .filter(|it| it.label.to_lowercase().starts_with(&pl))
-                        .collect()
-                };
+                let filtered = order_by_prefix(all_items, &prefix);
 
                 // Persist filtered list so next frame's key handlers see
                 // exactly the same items the user sees right now.
@@ -511,5 +508,58 @@ impl AppIde {
                 def_line,
             );
         }
+    }
+}
+
+/// Order completion items so those whose label starts with `prefix` (case-
+/// insensitive) come first, keeping each group in the server's original order,
+/// then the rest — so the popup leads with what the user has already typed.
+/// An empty prefix returns the list unchanged (the server's relevance order).
+fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::CompletionItem> {
+    if prefix.is_empty() {
+        return items;
+    }
+    let pl = prefix.to_lowercase();
+    let (mut starts, rest): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|it| it.label.to_lowercase().starts_with(&pl));
+    starts.extend(rest);
+    starts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order_by_prefix;
+    use crate::lsp::CompletionItem;
+
+    fn items(labels: &[&str]) -> Vec<CompletionItem> {
+        labels
+            .iter()
+            .map(|l| CompletionItem {
+                label: (*l).to_string(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn labels(items: Vec<CompletionItem>) -> Vec<String> {
+        items.into_iter().map(|i| i.label).collect()
+    }
+
+    #[test]
+    fn prefix_matches_lead_then_the_rest() {
+        // RA's order mixes matches and non-matches; "n" items should bubble up
+        // first (in their original order), the rest follow (in their order).
+        let got = order_by_prefix(items(&["len", "new", "abs", "next", "map"]), "n");
+        assert_eq!(labels(got), ["new", "next", "len", "abs", "map"]);
+    }
+
+    #[test]
+    fn case_insensitive_and_empty_prefix_unchanged() {
+        let got = order_by_prefix(items(&["Node", "abs", "new"]), "n");
+        assert_eq!(labels(got), ["Node", "new", "abs"]);
+        // Empty prefix preserves the server's order.
+        let got = order_by_prefix(items(&["b", "a", "c"]), "");
+        assert_eq!(labels(got), ["b", "a", "c"]);
     }
 }

@@ -318,6 +318,10 @@ impl AppIde {
                         | ProjectFileId::CargoConfig
                         | ProjectFileId::GitIgnore
                 );
+                // While our LSP completion popup is open (or Ctrl+Space was just
+                // pressed to open it), hide the crate's built-in keyword popup so
+                // the two don't overlap — the LSP popup is the one that wins.
+                let suppress_keyword_completer = self.completion_open || ctrl_space_pressed;
                 let editor_resp = if is_rust_file {
                     crate::editor::gui::code_editor::show_rust_with_completer(
                         ui,
@@ -328,6 +332,7 @@ impl AppIde {
                         &display_syntax,
                         &editor_id,
                         &mut self.completer,
+                        suppress_keyword_completer,
                     )
                 } else {
                     CodeEditor::default()

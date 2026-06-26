@@ -334,6 +334,10 @@ fn show_rust_editor(
 
 /// Rust editor + keyword auto-completer — the drop-in replacement for
 /// `CodeEditor::show_with_completer` used for `.rs` files.
+///
+/// `suppress_keyword_completer` hides the crate's built-in keyword popup (and its
+/// key handling) for this frame — set while our LSP completion popup is open so
+/// the two don't stack on top of each other (the LSP popup wins).
 #[allow(clippy::too_many_arguments)]
 pub fn show_rust_with_completer(
     ui: &mut egui::Ui,
@@ -344,11 +348,16 @@ pub fn show_rust_with_completer(
     syntax: &Syntax,
     id: &str,
     completer: &mut Completer,
+    suppress_keyword_completer: bool,
 ) -> TextEditOutput {
-    completer.handle_input(ui.ctx());
+    if !suppress_keyword_completer {
+        completer.handle_input(ui.ctx());
+    }
     let mut out = show_rust_editor(ui, text, theme, fontsize, rows, syntax, id);
     completer.text_edit_id = Some(out.response.id);
-    completer.show(syntax, theme, fontsize, &mut out);
+    if !suppress_keyword_completer {
+        completer.show(syntax, theme, fontsize, &mut out);
+    }
     out
 }
 
