@@ -99,12 +99,14 @@ impl Mcu {
         use crate::panels::mcu_module::modules::ModuleSignal::*;
         use crate::panels::mcu_module::modules::{autowire, ModuleKind};
 
-        // CAN is single-instance on STM32F1 and its pin functions carry no
-        // index, so the instance-exclusion guard below can't stop a 2nd GI_CAN
-        // from grabbing the alternate RX/TX pins — refuse it here.
-        if kind == ModuleKind::GenericInterfaceCan
-            && self.modules.iter().any(|m| m.kind == kind)
-        {
+        // CAN and USB are single-instance on STM32F1 and their pin functions
+        // carry no index, so the instance-exclusion guard below can't stop a 2nd
+        // module from grabbing the alternate pins — refuse it here.
+        let single_instance = matches!(
+            kind,
+            ModuleKind::GenericInterfaceCan | ModuleKind::GenericInterfaceUsb
+        );
+        if single_instance && self.modules.iter().any(|m| m.kind == kind) {
             return false;
         }
 
@@ -113,6 +115,7 @@ impl Mcu {
             ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso][..], &[Nss][..]),
             ModuleKind::GenericInterfaceI2c => (&[Scl, Sda][..], &[][..]),
             ModuleKind::GenericInterfaceCan => (&[CanRx, CanTx][..], &[][..]),
+            ModuleKind::GenericInterfaceUsb => (&[UsbDm, UsbDp][..], &[][..]),
         };
 
         // Pins already wired to an existing module are off-limits.

@@ -18,6 +18,8 @@ pub enum ModuleKind {
     GenericInterfaceI2c,
     /// Generic device on a CAN bus (RX/TX) — "GI_CAN".
     GenericInterfaceCan,
+    /// USB full-speed device (D-/D+) — "GI_USB".
+    GenericInterfaceUsb,
 }
 
 impl ModuleKind {
@@ -28,6 +30,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSpi => "GI_SPI",
             ModuleKind::GenericInterfaceI2c => "GI_I2C",
             ModuleKind::GenericInterfaceCan => "GI_CAN",
+            ModuleKind::GenericInterfaceUsb => "GI_USB",
         }
     }
 
@@ -40,6 +43,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceCan => ModuleConfig::Can(CanModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceUsb => ModuleConfig::Usb(UsbModuleConfig::new(instance)),
         }
     }
 }
@@ -63,6 +67,9 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         // an index, so the instance is fixed at 1.
         PinFunction::CanRx => (GenericInterfaceCan, 1, CanRx),
         PinFunction::CanTx => (GenericInterfaceCan, 1, CanTx),
+        // USB is single-instance on STM32F1 and its pin functions carry no index.
+        PinFunction::UsbDm => (GenericInterfaceUsb, 1, UsbDm),
+        PinFunction::UsbDp => (GenericInterfaceUsb, 1, UsbDp),
         _ => return None,
     })
 }
@@ -84,6 +91,9 @@ pub enum ModuleSignal {
     // CAN
     CanRx,
     CanTx,
+    // USB
+    UsbDm,
+    UsbDp,
 }
 
 impl ModuleSignal {
@@ -99,6 +109,8 @@ impl ModuleSignal {
             ModuleSignal::Sda => "SDA",
             ModuleSignal::CanRx => "RX",
             ModuleSignal::CanTx => "TX",
+            ModuleSignal::UsbDm => "D-",
+            ModuleSignal::UsbDp => "D+",
         }
     }
 
@@ -116,6 +128,9 @@ impl ModuleSignal {
             // CAN pin functions carry no instance (single CAN on STM32F1).
             ModuleSignal::CanRx => PinFunction::CanRx,
             ModuleSignal::CanTx => PinFunction::CanTx,
+            // USB pin functions carry no instance (single USB FS on STM32F1).
+            ModuleSignal::UsbDm => PinFunction::UsbDm,
+            ModuleSignal::UsbDp => PinFunction::UsbDp,
         }
     }
 }
@@ -258,6 +273,39 @@ impl CanModuleConfig {
     }
 }
 
+/// USB full-speed device settings (CDC ACM serial) + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsbModuleConfig {
+    /// Single USB FS instance on STM32F1 — always 1.
+    pub instance: u8,
+    /// USB Vendor ID reported to the host.
+    pub vid: u16,
+    /// USB Product ID reported to the host.
+    pub pid: u16,
+    /// Product string shown to the host.
+    pub product: String,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated handles (e.g. `usb_dev_logger`).
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl UsbModuleConfig {
+    /// Defaults: the pid.codes test VID:PID (0x16c0:0x27dd), CDC serial.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            vid: 0x16c0,
+            pid: 0x27dd,
+            product: "Serial port".to_owned(),
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+}
+
 /// Per-kind configuration payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleConfig {
@@ -265,6 +313,7 @@ pub enum ModuleConfig {
     Spi(SpiModuleConfig),
     I2c(I2cModuleConfig),
     Can(CanModuleConfig),
+    Usb(UsbModuleConfig),
 }
 
 impl ModuleConfig {
@@ -275,6 +324,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => c.instance,
             ModuleConfig::I2c(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
+            ModuleConfig::Usb(c) => c.instance,
         }
     }
 
@@ -284,6 +334,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => &c.rx_model,
             ModuleConfig::I2c(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
+            ModuleConfig::Usb(c) => &c.rx_model,
         }
     }
 
@@ -293,6 +344,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => &c.tx_model,
             ModuleConfig::I2c(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
+            ModuleConfig::Usb(c) => &c.tx_model,
         }
     }
 
@@ -302,6 +354,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => &mut c.rx_model,
             ModuleConfig::I2c(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
+            ModuleConfig::Usb(c) => &mut c.rx_model,
         }
     }
 
@@ -311,6 +364,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => &mut c.tx_model,
             ModuleConfig::I2c(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
+            ModuleConfig::Usb(c) => &mut c.tx_model,
         }
     }
 
@@ -321,6 +375,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => &c.custom_label,
             ModuleConfig::I2c(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
+            ModuleConfig::Usb(c) => &c.custom_label,
         }
     }
 
@@ -330,6 +385,7 @@ impl ModuleConfig {
             ModuleConfig::Spi(c) => &mut c.custom_label,
             ModuleConfig::I2c(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
+            ModuleConfig::Usb(c) => &mut c.custom_label,
         }
     }
 
@@ -344,6 +400,7 @@ impl ModuleConfig {
             ModuleConfig::Can(c) => {
                 format!("CAN{}  ·  {} kbit", c.instance, c.bitrate / 1_000)
             }
+            ModuleConfig::Usb(c) => format!("USB CDC  ·  {:04x}:{:04x}", c.vid, c.pid),
         }
     }
 }

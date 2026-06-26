@@ -116,6 +116,10 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceCan,
                                         "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
                                     ),
+                                    (
+                                        ModuleKind::GenericInterfaceUsb,
+                                        "Add a virtual USB device and auto-wire it to the USB D-/D+ pins (PA11/PA12)",
+                                    ),
                                 ] {
                                     if ui
                                         .button(format!("{} {}", ph::PLUS, kind.short()))

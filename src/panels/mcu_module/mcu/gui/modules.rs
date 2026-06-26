@@ -96,6 +96,7 @@ fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceCan => PinFunction::CanTx,
+        ModuleKind::GenericInterfaceUsb => PinFunction::UsbDp,
     };
     f.color()
 }
@@ -194,6 +195,7 @@ fn handle_preview(m: &VirtualModule) -> String {
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
+        ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
     }
 }
 
@@ -516,6 +518,21 @@ pub fn module_config_ui(
                                 );
                             }
                         });
+                    ui.end_row();
+                }
+                ModuleConfig::Usb(cfg) => {
+                    ui.label("Product");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut cfg.product)
+                            .desired_width(140.0)
+                            .hint_text("device name shown to host"),
+                    );
+                    ui.end_row();
+                    ui.label("Vendor ID");
+                    ui.add(egui::DragValue::new(&mut cfg.vid).hexadecimal(4, false, true));
+                    ui.end_row();
+                    ui.label("Product ID");
+                    ui.add(egui::DragValue::new(&mut cfg.pid).hexadecimal(4, false, true));
                     ui.end_row();
                 }
             }

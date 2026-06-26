@@ -228,6 +228,71 @@ pub fn ensure_can_deps(cargo_toml: &str, needs_can: bool) -> String {
     s
 }
 
+/// Add or remove the `usb-device` + `usbd-serial` dependencies AND the
+/// `stm32-usbd` feature on the `stm32f1xx-hal` line, driven by whether a USB
+/// peripheral is configured. Like [`ensure_can_deps`], idempotent and called
+/// every frame — the generated USB CDC init needs both crates and the HAL
+/// feature (which exposes `stm32f1xx_hal::usb`).
+pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool) -> String {
+    let is_dep = |line: &str, name: &str| {
+        line.trim_start()
+            .strip_prefix(name)
+            .map(|rest| rest.trim_start().starts_with('='))
+            .unwrap_or(false)
+    };
+    let is_hal = |line: &str| line.trim_start().starts_with("stm32f1xx-hal");
+    let has_usb_dep = cargo_toml.lines().any(|l| is_dep(l, "usb-device"));
+    let has_feature = cargo_toml.lines().any(|l| is_hal(l) && l.contains("\"stm32-usbd\""));
+    if needs_usb == has_usb_dep && needs_usb == has_feature {
+        return cargo_toml.to_owned(); // already in the desired state
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut inserted = false;
+    for line in cargo_toml.lines() {
+        if !needs_usb && (is_dep(line, "usb-device") || is_dep(line, "usbd-serial")) {
+            continue; // USB gone → drop the deps we added
+        }
+        // Toggle the `stm32-usbd` HAL feature inside the `features = [ … ]` array.
+        if is_hal(line) && line.contains("features = [") {
+            out.push(toggle_hal_feature(line, "stm32-usbd", needs_usb));
+            continue;
+        }
+        out.push(line.to_string());
+        if needs_usb && !inserted && line.trim() == "[dependencies]" {
+            // Versions matched to stm32f1xx-hal 0.10's `usb` module (stm32-usbd),
+            // which targets usb-device 0.2 / usbd-serial 0.1 (`.product()` API).
+            out.push("usb-device  = \"0.2\"".to_string());
+            out.push("usbd-serial = \"0.1\"".to_string());
+            inserted = true;
+        }
+    }
+    let mut s = out.join("\n");
+    if cargo_toml.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+/// Add or remove `"feature"` inside the `features = [ … ]` array of a single
+/// dependency `line`, idempotently.
+fn toggle_hal_feature(line: &str, feature: &str, add: bool) -> String {
+    let quoted = format!("\"{feature}\"");
+    let present = line.contains(&quoted);
+    if add == present {
+        return line.to_string();
+    }
+    if add {
+        // Insert right after the opening bracket: `features = [` → `… ["feat", `.
+        line.replacen("features = [", &format!("features = [{quoted}, "), 1)
+    } else {
+        // Remove the entry plus its trailing or leading separator.
+        line.replace(&format!("{quoted}, "), "")
+            .replace(&format!(", {quoted}"), "")
+            .replace(&quoted, "")
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Builds all file contents in memory without touching the filesystem.
@@ -648,6 +713,28 @@ mod tests {
 
         // Removing when there's nothing to remove is also a no-op.
         assert_eq!(ensure_can_deps(&base, false), base);
+    }
+
+    #[test]
+    fn ensure_usb_deps_adds_removes_deps_and_hal_feature() {
+        // A Cargo.toml whose HAL line carries a features array (as generated).
+        let base = "[dependencies]\n\
+                    stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"rt\"] }\n";
+
+        let with = ensure_usb_deps(base, true);
+        assert!(with.contains("usb-device  = \"0.2\""), "usb-device added:\n{with}");
+        assert!(with.contains("usbd-serial = \"0.1\""), "usbd-serial added");
+        assert!(with.contains("\"stm32-usbd\""), "stm32-usbd feature added");
+        // Idempotent.
+        assert_eq!(ensure_usb_deps(&with, true), with, "add must be idempotent");
+        assert_eq!(with.matches("\"stm32-usbd\"").count(), 1, "feature not duplicated");
+
+        // Removing restores the original (deps + feature gone).
+        let removed = ensure_usb_deps(&with, false);
+        assert!(!removed.contains("usb-device"), "usb-device removed:\n{removed}");
+        assert!(!removed.contains("stm32-usbd"), "feature removed");
+        assert_eq!(removed, base, "removal restores the original");
+        assert_eq!(ensure_usb_deps(base, false), base, "no-op when nothing to remove");
     }
 
     /// A hand-written file with no GEN markers (external project) must be shown

@@ -4,6 +4,7 @@ use super::super::clock::frequencies;
 use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
 use super::super::modules::{
     CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
+    UsbModuleConfig,
 };
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
@@ -145,6 +146,7 @@ pub fn make_generated_section(
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
+    usb: &BTreeMap<u8, UsbModuleConfig>,
 ) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
@@ -190,6 +192,9 @@ pub fn make_generated_section(
     let has_can = configured
         .iter()
         .any(|(p, _)| matches!(p.selected_function, PinFunction::CanRx | PinFunction::CanTx));
+    let has_usb = configured
+        .iter()
+        .any(|(p, _)| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp));
     // CAN's `assign_pins` needs AFIO too (it may remap the pins).
     let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can;
     let has_periph_fns = has_serial || has_spi || has_i2c || has_adc || has_can;
@@ -238,12 +243,23 @@ pub fn make_generated_section(
     if has_timer {
         use_items.push("timer::Timer".into());
     }
+    if has_usb {
+        use_items.push("usb::{Peripheral, UsbBus}".into());
+    }
 
     let use_block = use_items
         .iter()
         .map(|s| format!("    {s},"))
         .collect::<Vec<_>>()
         .join("\n");
+
+    // USB needs top-level `use`s from the external usb-device / usbd-serial
+    // crates (auto-added to Cargo.toml) — these can't live in the HAL `use {}`.
+    let extra_uses = if has_usb {
+        "use usb_device::prelude::*;\nuse usbd_serial::{SerialPort, USB_CLASS_CDC};\n"
+    } else {
+        ""
+    };
 
     // ── Pin declaration lines ────────────────────────────────────────────────
     let mut port_groups: BTreeMap<char, Vec<String>> = BTreeMap::new();
@@ -438,6 +454,41 @@ pub fn make_generated_section(
         ));
     }
 
+    // ── USB (CDC ACM serial) — full init in main's scope (option A) ───────────
+    // USB needs `usb_dev`/`serial` to live where the user's loop polls them, and
+    // its bus allocator borrows them, so it can't go in a `pins::configs` init().
+    // Pins PA11(D-)/PA12(D+) are emitted as comments (not generic bindings), so
+    // this block owns their configuration.
+    if has_usb {
+        header!();
+        let cfg = usb.get(&1);
+        let vid = cfg.map(|c| c.vid).unwrap_or(0x16c0);
+        let pid = cfg.map(|c| c.pid).unwrap_or(0x27dd);
+        let product = cfg.map(|c| c.product.as_str()).unwrap_or("Serial port");
+        let sfx = cfg.map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
+        fn_calls.push_str(&format!(
+            "    // ── USB (CDC ACM serial) ──\n\
+             // Needs the `usb-device` + `usbd-serial` crates and the HAL `stm32-usbd`\n\
+             // feature (auto-added to Cargo.toml). Poll in your loop:\n\
+             //     if usb_dev{sfx}.poll(&mut [&mut serial{sfx}]) {{ /* read/write serial */ }}\n\
+             // Pull D+ low briefly so the host re-enumerates after a reset.\n\
+             let mut usb_dp = gpioa.pa12.into_push_pull_output(&mut gpioa.crh);\n\
+             usb_dp.set_low();\n\
+             cortex_m::asm::delay(clocks.sysclk().raw() / 100);\n\
+             let usb_periph = Peripheral {{\n\
+                 usb: dp.USB,\n\
+                 pin_dm: gpioa.pa11,\n\
+                 pin_dp: usb_dp.into_floating_input(&mut gpioa.crh),\n\
+             }};\n\
+             let usb_bus = UsbBus::new(usb_periph);\n\
+             let mut serial{sfx} = SerialPort::new(&usb_bus);\n\
+             let mut usb_dev{sfx} = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x{vid:04x}, 0x{pid:04x}))\n\
+                 .product(\"{product}\")\n\
+                 .device_class(USB_CLASS_CDC)\n\
+                 .build();\n"
+        ));
+    }
+
     if any_call {
         fn_calls.push('\n');
     }
@@ -473,6 +524,7 @@ pub fn make_generated_section(
          use stm32f1xx_hal::{{\n\
          {use_block}\n\
          }};\n\
+         {extra_uses}\
          \n\
          #[entry]\n\
          fn main() -> ! {{\n\

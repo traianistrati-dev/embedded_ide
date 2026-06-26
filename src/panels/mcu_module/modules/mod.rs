@@ -13,7 +13,7 @@ pub mod persist;
 
 pub use model::{
     CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity,
-    SpiModuleConfig, StopBits, UsartModuleConfig, VirtualModule, module_signal_of,
+    SpiModuleConfig, StopBits, UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -57,6 +57,17 @@ pub fn can_configs(modules: &[VirtualModule]) -> BTreeMap<u8, CanModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Can(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// USB module configs keyed by instance (VID/PID/product for codegen).
+pub fn usb_configs(modules: &[VirtualModule]) -> BTreeMap<u8, UsbModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Usb(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }
@@ -372,6 +383,26 @@ mod tests {
         // A 3rd add fails — the F103 has only SPI1/SPI2.
         assert!(!mcu.add_module(ModuleKind::GenericInterfaceSpi));
         assert_eq!(mcu.modules.len(), 2);
+    }
+
+    /// GI_USB auto-wires to the USB D-/D+ pins (PA11/PA12) and is single-instance.
+    #[test]
+    fn add_usb_module_wires_pins_and_is_single_instance() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsb));
+        assert_eq!(mcu.modules.len(), 1);
+
+        let m = &mcu.modules[0];
+        assert_eq!(m.kind, ModuleKind::GenericInterfaceUsb);
+        let dm = m.pin_for(ModuleSignal::UsbDm).unwrap();
+        let dp = m.pin_for(ModuleSignal::UsbDp).unwrap();
+        assert_ne!(dm, dp);
+        assert_eq!(mcu.find_pin(dm).unwrap().selected_function, PinFunction::UsbDm);
+        assert_eq!(mcu.find_pin(dp).unwrap().selected_function, PinFunction::UsbDp);
+
+        // Single USB FS peripheral — a 2nd add is refused.
+        assert!(!mcu.add_module(ModuleKind::GenericInterfaceUsb));
+        assert_eq!(mcu.modules.len(), 1);
     }
 
     #[test]

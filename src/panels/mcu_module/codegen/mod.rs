@@ -479,6 +479,37 @@ mod tests {
     }
 
     #[test]
+    fn test_usb_emits_cdc_serial_init_and_uses() {
+        use super::super::mock_mcu;
+
+        // USB on PA11 (D-, pin 32) + PA12 (D+, pin 33). Codegen must emit the
+        // CDC serial setup in main + the external-crate `use`s.
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(32, PinFunction::UsbDm);
+        mcu.apply_pin_function(33, PinFunction::UsbDp);
+
+        let mut code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "use usb_device::prelude::*;");
+        assert_contains_substring(&code, "use usbd_serial::{SerialPort, USB_CLASS_CDC};");
+        assert_contains_substring(&code, "let usb_bus = UsbBus::new(usb_periph);");
+        assert_contains_substring(&code, "UsbVidPid(0x16c0, 0x27dd)");
+        assert_contains_substring(&code, ".device_class(USB_CLASS_CDC)");
+        // D+ reset trick + HAL usb import present.
+        assert_contains_substring(&code, "usb_dp.set_low();");
+        assert_contains_substring(&code, "usb::{Peripheral, UsbBus}");
+
+        // The block isn't duplicated across repeated per-frame regeneration.
+        for _ in 0..10 {
+            code = mcu.update_main_rs(&code);
+        }
+        assert_eq!(
+            code.matches("let usb_bus = UsbBus::new").count(),
+            1,
+            "USB init duplicated"
+        );
+    }
+
+    #[test]
     fn test_user_edited_helper_is_preserved() {
         use super::super::mock_mcu;
 
