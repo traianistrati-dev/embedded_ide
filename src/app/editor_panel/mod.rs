@@ -28,6 +28,12 @@ mod move_lines;
 mod rename;
 mod toolbar;
 
+/// Default code-editor font size (points); the zoom baseline (Ctrl+0 resets to it).
+pub(crate) const DEFAULT_EDITOR_FONT_SIZE: f32 = 13.0;
+/// Zoom clamp range for the editor font.
+const MIN_EDITOR_FONT_SIZE: f32 = 7.0;
+const MAX_EDITOR_FONT_SIZE: f32 = 40.0;
+
 impl AppIde {
     /// Render the central-left code editor panel (toolbar + editor + diagnostics).
     pub(super) fn show_editor_panel(
@@ -251,6 +257,25 @@ impl AppIde {
                     }
                 });
 
+                // Ctrl + `+` / `-` / `0` → zoom the editor text in / out / reset.
+                // (egui's global keyboard zoom is disabled in `app::new`, so these
+                // reach us here.) `consume_key` matches Shift loosely, so Ctrl++
+                // (= Ctrl+Shift+=) is caught by the `Plus` arm.
+                ui.input_mut(|i| {
+                    let cmd = egui::Modifiers::COMMAND;
+                    if i.consume_key(cmd, egui::Key::Num0) {
+                        self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE;
+                    } else if i.consume_key(cmd, egui::Key::Plus)
+                        || i.consume_key(cmd, egui::Key::Equals)
+                    {
+                        self.editor_font_size =
+                            (self.editor_font_size + 1.0).min(MAX_EDITOR_FONT_SIZE);
+                    } else if i.consume_key(cmd, egui::Key::Minus) {
+                        self.editor_font_size =
+                            (self.editor_font_size - 1.0).max(MIN_EDITOR_FONT_SIZE);
+                    }
+                });
+
                 // Find / Replace bar, drawn above the editor when open. Renders
                 // before the editor-height calc so the editor sizes below it.
                 self.show_find_replace_bar(ui, &mut display_code, displayed_file);
@@ -260,7 +285,13 @@ impl AppIde {
                 // grows/shrinks the code area in lock-step.  `available_height`
                 // here is already the space remaining below the toolbar and
                 // above the bottom diagnostics panel.
-                let row_h = ui.text_style_height(&egui::TextStyle::Monospace).max(1.0);
+                // The (zoomable) editor font, captured before the mutable
+                // `self.completer` borrow below. `row_h` tracks it so the min-row
+                // estimate stays right as the user zooms.
+                let font_size = self.editor_font_size;
+                let row_h = ui
+                    .fonts_mut(|f| f.row_height(&egui::FontId::monospace(font_size)))
+                    .max(1.0);
                 let editor_rows =
                     (((ui.available_height() - 10.0) / row_h).floor() as usize).max(3);
 
@@ -292,7 +323,7 @@ impl AppIde {
                         ui,
                         &mut display_code,
                         &ColorTheme::GRUVBOX,
-                        13.0,
+                        font_size,
                         editor_rows,
                         &display_syntax,
                         &editor_id,
@@ -302,7 +333,7 @@ impl AppIde {
                     CodeEditor::default()
                         .id_source(editor_id.clone())
                         .with_rows(editor_rows)
-                        .with_fontsize(13.0)
+                        .with_fontsize(font_size)
                         .with_theme(ColorTheme::GRUVBOX)
                         .with_numlines(true)
                         .show_with_completer(
@@ -427,6 +458,15 @@ impl AppIde {
                             )));
                             st.store(ui.ctx(), editor_resp.response.id);
                         }
+                        Some(A::ZoomIn) => {
+                            self.editor_font_size =
+                                (self.editor_font_size + 1.0).min(MAX_EDITOR_FONT_SIZE)
+                        }
+                        Some(A::ZoomOut) => {
+                            self.editor_font_size =
+                                (self.editor_font_size - 1.0).max(MIN_EDITOR_FONT_SIZE)
+                        }
+                        Some(A::ZoomReset) => self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE,
                         None => {}
                     }
                 }

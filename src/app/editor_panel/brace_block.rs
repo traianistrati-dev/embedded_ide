@@ -112,7 +112,9 @@ fn brace_pairs(chars: &[char]) -> HashMap<usize, usize> {
                 }
                 continue;
             }
-            let next_ident = chars.get(i + 1).is_some_and(|&c| c.is_alphabetic() || c == '_');
+            let next_ident = chars
+                .get(i + 1)
+                .is_some_and(|&c| c.is_alphabetic() || c == '_');
             if next_ident && chars.get(i + 2) != Some(&'\'') {
                 i += 1;
                 while i < n && is_ident(chars[i]) {
@@ -224,7 +226,7 @@ impl AppIde {
 
         // Dark band over [open, close]. Semi-transparent so the code stays
         // readable through it (the overlay is drawn on top of the text).
-        let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150);
+        let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50);
         let gp = editor_resp.galley_pos;
         let galley = &editor_resp.galley;
         let painter = ui.painter().with_clip_rect(clip);

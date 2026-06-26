@@ -420,6 +420,8 @@ pub struct AppIde {
     // ── Find / Replace (Ctrl+F / Ctrl+H / Ctrl+Shift+F / Ctrl+Shift+H) ───────
     /// Search bar state: mode, query/replacement text, results, match cursor.
     find: editor_panel::find_replace::FindReplace,
+    /// Code-editor font size in points, zoomed with Ctrl + `+`/`-`/`0`.
+    editor_font_size: f32,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -491,8 +493,12 @@ impl AppIde {
         // vertically. Drop Shift as the horizontal-scroll modifier so Shift+wheel
         // scrolls up/down like a plain wheel (used to reach off-screen text while
         // selecting). Horizontal scrolling stays available via the scrollbar.
-        cc.egui_ctx
-            .options_mut(|o| o.input_options.horizontal_scroll_modifier = egui::Modifiers::NONE);
+        cc.egui_ctx.options_mut(|o| {
+            o.input_options.horizontal_scroll_modifier = egui::Modifiers::NONE;
+            // Repurpose Ctrl + `+`/`-`/`0` to zoom the CODE EDITOR text (handled in
+            // the editor panel) instead of egui's global UI zoom.
+            o.zoom_with_keyboard = false;
+        });
 
         // ── Load persisted project state ─────────────────────────────────────
         let persisted: PersistedState = cc
@@ -619,6 +625,7 @@ impl AppIde {
             rename_in_flight: false,
             rename_focus: false,
             find: editor_panel::find_replace::FindReplace::default(),
+            editor_font_size: editor_panel::DEFAULT_EDITOR_FONT_SIZE,
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,

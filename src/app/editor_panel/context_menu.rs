@@ -26,6 +26,9 @@ pub(super) enum EditorAction {
     ReplaceInProject,
     Copy,
     SelectAll,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 /// Render the editor context menu. `is_rs` enables the rust-analyzer-backed
@@ -74,6 +77,11 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
     ui.separator();
     item(ui, ph::COPY, "Copy", "Ctrl+C", EditorAction::Copy);
     item(ui, ph::SELECTION_ALL, "Select all", "Ctrl+A", EditorAction::SelectAll);
+
+    ui.separator();
+    item(ui, ph::MAGNIFYING_GLASS_PLUS, "Zoom in", "Ctrl++", EditorAction::ZoomIn);
+    item(ui, ph::MAGNIFYING_GLASS_MINUS, "Zoom out", "Ctrl+-", EditorAction::ZoomOut);
+    item(ui, ph::ARROW_COUNTER_CLOCKWISE, "Reset zoom", "Ctrl+0", EditorAction::ZoomReset);
 
     chosen
 }
