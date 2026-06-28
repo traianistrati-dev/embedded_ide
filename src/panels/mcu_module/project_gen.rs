@@ -36,6 +36,7 @@ use std::{fs, io, path::Path};
 
 /// All generated file contents for one project snapshot.
 /// Cheap to build (pure string formatting); regenerated every UI frame.
+#[derive(Clone)]
 pub struct ProjectFiles {
     pub main_rs: String,
     pub cargo_toml: String,
@@ -82,9 +83,15 @@ impl Cmt {
     /// The user-editable tail invitation placed below the block on first build.
     fn tail(self) -> &'static str {
         match self {
-            Cmt::Slash => "// Add your own code below — preserved when the block above is refreshed.\n",
-            Cmt::Hash => "# Add your own entries below — preserved when the block above is refreshed.\n",
-            Cmt::Block => "/* Add your own entries below — preserved when the block above is refreshed. */\n",
+            Cmt::Slash => {
+                "// Add your own code below — preserved when the block above is refreshed.\n"
+            }
+            Cmt::Hash => {
+                "# Add your own entries below — preserved when the block above is refreshed.\n"
+            }
+            Cmt::Block => {
+                "/* Add your own entries below — preserved when the block above is refreshed. */\n"
+            }
         }
     }
 }
@@ -242,7 +249,9 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool) -> String {
     };
     let is_hal = |line: &str| line.trim_start().starts_with("stm32f1xx-hal");
     let has_usb_dep = cargo_toml.lines().any(|l| is_dep(l, "usb-device"));
-    let has_feature = cargo_toml.lines().any(|l| is_hal(l) && l.contains("\"stm32-usbd\""));
+    let has_feature = cargo_toml
+        .lines()
+        .any(|l| is_hal(l) && l.contains("\"stm32-usbd\""));
     if needs_usb == has_usb_dep && needs_usb == has_feature {
         return cargo_toml.to_owned(); // already in the desired state
     }
@@ -632,19 +641,37 @@ mod tests {
 
     #[test]
     fn cargo_toml_has_hash_markers_and_user_tail() {
-        let f = gen_config(ConfigFile::CargoToml, &stm32_def(), &ToolchainKind::RustEmbedded);
+        let f = gen_config(
+            ConfigFile::CargoToml,
+            &stm32_def(),
+            &ToolchainKind::RustEmbedded,
+        );
         assert!(f.contains("# <<< GENERATED"), "begin marker:\n{f}");
         assert!(f.contains("# <<< GENERATED END >>>"), "end marker");
         assert!(f.contains("stm32f1xx-hal"), "generated body present");
-        assert!(f.contains("Add your own entries below"), "user tail present");
+        assert!(
+            f.contains("Add your own entries below"),
+            "user tail present"
+        );
     }
 
     #[test]
     fn memory_x_uses_block_comments_build_rs_uses_slashes() {
-        let mx = gen_config(ConfigFile::MemoryX, &stm32_def(), &ToolchainKind::RustEmbedded);
-        assert!(mx.starts_with("/* <<< GENERATED"), "ld block comment:\n{mx}");
+        let mx = gen_config(
+            ConfigFile::MemoryX,
+            &stm32_def(),
+            &ToolchainKind::RustEmbedded,
+        );
+        assert!(
+            mx.starts_with("/* <<< GENERATED"),
+            "ld block comment:\n{mx}"
+        );
         assert!(mx.contains("0x08000000"), "flash origin in body");
-        let br = gen_config(ConfigFile::BuildRs, &stm32_def(), &ToolchainKind::RustEmbedded);
+        let br = gen_config(
+            ConfigFile::BuildRs,
+            &stm32_def(),
+            &ToolchainKind::RustEmbedded,
+        );
         assert!(br.contains("// <<< GENERATED"), "rust line comment:\n{br}");
     }
 
@@ -689,7 +716,11 @@ mod tests {
 
     #[test]
     fn ensure_can_deps_adds_removes_and_is_idempotent() {
-        let base = gen_config(ConfigFile::CargoToml, &stm32_def(), &ToolchainKind::RustEmbedded);
+        let base = gen_config(
+            ConfigFile::CargoToml,
+            &stm32_def(),
+            &ToolchainKind::RustEmbedded,
+        );
         assert!(!base.contains("bxcan"), "base has no CAN deps");
 
         // Adding when CAN is configured inserts both crates inside [dependencies].
@@ -697,8 +728,12 @@ mod tests {
         assert!(with.contains("bxcan = \"0.7\""), "bxcan added:\n{with}");
         assert!(with.contains("nb    = \"1\""), "nb added");
         let deps_idx = with.find("[dependencies]").unwrap();
-        assert!(with[deps_idx..].find("bxcan").unwrap() < with[deps_idx..].find("stm32f1xx-hal").unwrap()
-            || with.contains("bxcan"), "bxcan within deps section");
+        assert!(
+            with[deps_idx..].find("bxcan").unwrap()
+                < with[deps_idx..].find("stm32f1xx-hal").unwrap()
+                || with.contains("bxcan"),
+            "bxcan within deps section"
+        );
 
         // Re-running with CAN still on is a no-op (no duplicate lines / churn).
         let with2 = ensure_can_deps(&with, true);
@@ -722,19 +757,33 @@ mod tests {
                     stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"rt\"] }\n";
 
         let with = ensure_usb_deps(base, true);
-        assert!(with.contains("usb-device  = \"0.2\""), "usb-device added:\n{with}");
+        assert!(
+            with.contains("usb-device  = \"0.2\""),
+            "usb-device added:\n{with}"
+        );
         assert!(with.contains("usbd-serial = \"0.1\""), "usbd-serial added");
         assert!(with.contains("\"stm32-usbd\""), "stm32-usbd feature added");
         // Idempotent.
         assert_eq!(ensure_usb_deps(&with, true), with, "add must be idempotent");
-        assert_eq!(with.matches("\"stm32-usbd\"").count(), 1, "feature not duplicated");
+        assert_eq!(
+            with.matches("\"stm32-usbd\"").count(),
+            1,
+            "feature not duplicated"
+        );
 
         // Removing restores the original (deps + feature gone).
         let removed = ensure_usb_deps(&with, false);
-        assert!(!removed.contains("usb-device"), "usb-device removed:\n{removed}");
+        assert!(
+            !removed.contains("usb-device"),
+            "usb-device removed:\n{removed}"
+        );
         assert!(!removed.contains("stm32-usbd"), "feature removed");
         assert_eq!(removed, base, "removal restores the original");
-        assert_eq!(ensure_usb_deps(base, false), base, "no-op when nothing to remove");
+        assert_eq!(
+            ensure_usb_deps(base, false),
+            base,
+            "no-op when nothing to remove"
+        );
     }
 
     /// A hand-written file with no GEN markers (external project) must be shown

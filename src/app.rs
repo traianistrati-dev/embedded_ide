@@ -209,10 +209,7 @@ fn lsp_pos_to_byte(text: &str, line: u32, character: u32) -> usize {
 /// (under the LSP workspace `…/embedded_ide_0_check/`), return its editor file
 /// id — so F12 can open it editable in the main editor instead of the read-only
 /// snippet tab. `None` for external files (crates / std), which keep the snippet.
-fn project_file_for_def(
-    abs_path: &str,
-    user_files: &[(String, String)],
-) -> Option<ProjectFileId> {
+fn project_file_for_def(abs_path: &str, user_files: &[(String, String)]) -> Option<ProjectFileId> {
     let ws = std::env::temp_dir().join("embedded_ide_0_check");
     let ws_str = ws.to_string_lossy().replace('\\', "/");
     let p = abs_path.replace('\\', "/");
@@ -238,7 +235,7 @@ fn build_definition_view(loc: &lsp::DefinitionLoc) -> Option<DefinitionView> {
     let target = (loc.line as usize).min(line_count - 1);
     Some(DefinitionView {
         header: format!("{}  (line {})", short_path(&loc.path), loc.line + 1),
-        code: content, // full file
+        code: content,     // full file
         highlight: target, // the def line's index in the file (0-based)
     })
 }
@@ -265,9 +262,7 @@ fn short_path(path: &str) -> String {
 /// Apply LSP text edits to `text`. Edits are non-overlapping; applying them
 /// back-to-front (by start position) keeps earlier offsets valid.
 fn apply_text_edits(text: &str, mut edits: Vec<lsp::RenameEdit>) -> String {
-    edits.sort_by(|a, b| {
-        (b.start_line, b.start_char).cmp(&(a.start_line, a.start_char))
-    });
+    edits.sort_by(|a, b| (b.start_line, b.start_char).cmp(&(a.start_line, a.start_char)));
     let mut s = text.to_owned();
     for e in edits {
         let start = lsp_pos_to_byte(&s, e.start_line, e.start_char);
@@ -724,16 +719,17 @@ impl AppIde {
         // Return cached version if available and up-to-date
         if let Some(ref cached) = self.cached_project_files {
             // Check if cache is still valid by comparing with current state
-            if cached.main_rs == self.generated_code &&
-               cached.cargo_toml == self.cargo_toml &&
-               cached.cargo_config == self.cargo_config &&
-               cached.memory_x == self.memory_x &&
-               cached.build_rs == self.build_rs &&
-               cached.gitignore == self.gitignore {
+            if cached.main_rs == self.generated_code
+                && cached.cargo_toml == self.cargo_toml
+                && cached.cargo_config == self.cargo_config
+                && cached.memory_x == self.memory_x
+                && cached.build_rs == self.build_rs
+                && cached.gitignore == self.gitignore
+            {
                 return cached.clone();
             }
         }
-        
+
         // Create new ProjectFiles and cache it
         let files = ProjectFiles {
             main_rs: self.generated_code.clone(),
@@ -751,11 +747,13 @@ impl AppIde {
         self.cached_project_files = None;
     }
 
-
     /// The `mcu.config` text for the live MCU (virtual modules + clock), written
     /// alongside the project by `write_project`. Empty when no chip is selected.
     fn mcu_config_text(&self) -> String {
-        self.mcu.as_ref().map(|m| m.mcu_config_text()).unwrap_or_default()
+        self.mcu
+            .as_ref()
+            .map(|m| m.mcu_config_text())
+            .unwrap_or_default()
     }
 
     /// Regenerate every editable config file fresh from the selected chip,
@@ -778,16 +776,16 @@ impl AppIde {
     /// Calculate a hash of the MCU state (pins + clock + modules) for change detection
     fn calculate_mcu_state_hash(&self, mcu: &Mcu) -> u64 {
         let mut hasher = DefaultHasher::new();
-        
+
         // Hash all pins
         for pin in mcu.iter_all_pins() {
             pin.selected_function.hash(&mut hasher);
             pin.custom_label.hash(&mut hasher);
         }
-        
+
         // Hash clock config
         format!("{:?}", mcu.clock).hash(&mut hasher);
-        
+
         // Hash modules
         for module in &mcu.modules {
             module.id.hash(&mut hasher);
@@ -795,10 +793,9 @@ impl AppIde {
             module.name.hash(&mut hasher);
             format!("{:?}{:?}", module.pos.0, module.pos.1).hash(&mut hasher);
         }
-        
+
         hasher.finish()
     }
-
 
     fn init_frame(&mut self, _ui: &mut egui::Ui) {
         // ── Poll filesystem watcher events ────────────────────────────────────
@@ -814,7 +811,7 @@ impl AppIde {
                 if updated != self.generated_code {
                     self.generated_code = updated;
                     self.mcu_state_hash = current_hash;
-                    self.cached_project_files = None;  // Invalidate cache
+                    self.cached_project_files = None; // Invalidate cache
                 }
             }
         }
@@ -960,8 +957,11 @@ impl AppIde {
             if rel == "src/main.rs" {
                 self.generated_code = apply_text_edits(&self.generated_code, es);
             } else if let Some(sub) = rel.strip_prefix("src/") {
-                if let Some(entry) =
-                    self.project_tree.user_src_files.iter_mut().find(|(p, _)| p == sub)
+                if let Some(entry) = self
+                    .project_tree
+                    .user_src_files
+                    .iter_mut()
+                    .find(|(p, _)| p == sub)
                 {
                     entry.1 = apply_text_edits(&entry.1, es);
                 }
@@ -1114,26 +1114,21 @@ impl eframe::App for AppIde {
                 let files = self.current_project_files();
                 let user_files = self.project_tree.user_src_files.clone();
                 let mcu_cfg = self.mcu_config_text();
-                let shared: Arc<Mutex<Option<Result<String, String>>>> =
-                    Arc::new(Mutex::new(None));
+                let shared: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
                 let out = Arc::clone(&shared);
                 let ctx = self.egui_ctx.clone();
                 let dest_thread = dest.clone();
                 std::thread::spawn(move || {
-                    let res = project_gen::write_project(
-                        &dest_thread,
-                        &files,
-                        &user_files,
-                        &mcu_cfg,
-                    )
-                    .map(|()| {
-                        dest_thread
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("saved")
-                            .to_string()
-                    })
-                    .map_err(|e| e.to_string());
+                    let res =
+                        project_gen::write_project(&dest_thread, &files, &user_files, &mcu_cfg)
+                            .map(|()| {
+                                dest_thread
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("saved")
+                                    .to_string()
+                            })
+                            .map_err(|e| e.to_string());
                     *out.lock().unwrap() = Some(res);
                     ctx.request_repaint();
                 });
@@ -1151,8 +1146,7 @@ impl eframe::App for AppIde {
             self.save_in_progress = None;
             match res {
                 Ok(name) => {
-                    self.export_msg =
-                        format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
+                    self.export_msg = format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
                     self.export_flash = 180;
                     self.project_name = Some(name);
                     // A new project now has a home — later saves go here.
