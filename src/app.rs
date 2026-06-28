@@ -13,6 +13,8 @@ use eframe::egui;
 use egui_code_editor::{Completer, Syntax};
 use notify::Watcher as _;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 // ── Module structure ──────────────────────────────────────────────────────────
@@ -303,6 +305,9 @@ pub struct AppIde {
     mcu: Option<Mcu>,
     /// Generated Rust HAL code — rebuilt each frame from pin state
     generated_code: String,
+    /// Hash of the MCU state (pins + clock + modules) used to detect changes
+    /// and avoid unnecessary code regeneration.
+    mcu_state_hash: u64,
     /// Editable project config files. Each holds the current content (a
     /// `<<< GENERATED >>>` block the IDE refreshes on chip change, plus whatever
     /// the user adds outside it). `memory_x`/`build_rs` are empty for ESP.
@@ -311,6 +316,8 @@ pub struct AppIde {
     memory_x: String,
     build_rs: String,
     gitignore: String,
+    /// Cached project files to avoid repeated cloning
+    cached_project_files: Option<ProjectFiles>,
     /// Active tab in the MCU configurator
     active_tab: McuTab,
     /// Currently selected file in the project tree
@@ -573,11 +580,13 @@ impl AppIde {
             mcu_registry,
             selected_mcu_id,
             generated_code,
+            mcu_state_hash: 0,
             cargo_toml: init_files.cargo_toml,
             cargo_config: init_files.cargo_config,
             memory_x: init_files.memory_x,
             build_rs: init_files.build_rs,
             gitignore: init_files.gitignore,
+            cached_project_files: None,
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
             selected_file: ProjectFileId::MainRs,
@@ -707,20 +716,41 @@ impl AppIde {
         self.selected_def()
             .map(|d| (d.project.clone(), d.toolchain.clone()))
     }
-
+    /// The live project files: generated `main.rs` plus the five editable config
     /// The live project files: generated `main.rs` plus the five editable config
     /// files (with their current user edits). This — not a fresh regeneration —
     /// is what the editor shows and what `write_project` persists.
     fn current_project_files(&self) -> ProjectFiles {
-        ProjectFiles {
+        // Return cached version if available and up-to-date
+        if let Some(ref cached) = self.cached_project_files {
+            // Check if cache is still valid by comparing with current state
+            if cached.main_rs == self.generated_code &&
+               cached.cargo_toml == self.cargo_toml &&
+               cached.cargo_config == self.cargo_config &&
+               cached.memory_x == self.memory_x &&
+               cached.build_rs == self.build_rs &&
+               cached.gitignore == self.gitignore {
+                return cached.clone();
+            }
+        }
+        
+        // Create new ProjectFiles and cache it
+        let files = ProjectFiles {
             main_rs: self.generated_code.clone(),
             cargo_toml: self.cargo_toml.clone(),
             cargo_config: self.cargo_config.clone(),
             memory_x: self.memory_x.clone(),
             build_rs: self.build_rs.clone(),
             gitignore: self.gitignore.clone(),
-        }
+        };
+        files
     }
+
+    /// Update the cached project files (call this after modifying any config file)
+    fn invalidate_project_files_cache(&mut self) {
+        self.cached_project_files = None;
+    }
+
 
     /// The `mcu.config` text for the live MCU (virtual modules + clock), written
     /// alongside the project by `write_project`. Empty when no chip is selected.
@@ -740,19 +770,52 @@ impl AppIde {
             self.memory_x = f.memory_x;
             self.build_rs = f.build_rs;
             self.gitignore = f.gitignore;
+            self.invalidate_project_files_cache();
         }
     }
 
     // ── Frame initialization (frame state, LSP, MCU synchronization) ───────────
+    /// Calculate a hash of the MCU state (pins + clock + modules) for change detection
+    fn calculate_mcu_state_hash(&self, mcu: &Mcu) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        
+        // Hash all pins
+        for pin in mcu.iter_all_pins() {
+            pin.selected_function.hash(&mut hasher);
+            pin.custom_label.hash(&mut hasher);
+        }
+        
+        // Hash clock config
+        format!("{:?}", mcu.clock).hash(&mut hasher);
+        
+        // Hash modules
+        for module in &mcu.modules {
+            module.id.hash(&mut hasher);
+            module.kind.hash(&mut hasher);
+            module.name.hash(&mut hasher);
+            format!("{:?}{:?}", module.pos.0, module.pos.1).hash(&mut hasher);
+        }
+        
+        hasher.finish()
+    }
+
+
     fn init_frame(&mut self, _ui: &mut egui::Ui) {
         // ── Poll filesystem watcher events ────────────────────────────────────
         self.poll_fs_events();
 
         // ── Update generated section when pin config changes ─────────────────
         if let Some(mcu) = &self.mcu {
-            let updated = mcu.update_main_rs(&self.generated_code);
-            if updated != self.generated_code {
-                self.generated_code = updated;
+            // Calculate hash of current MCU state
+            let current_hash = self.calculate_mcu_state_hash(mcu);
+            // Only regenerate if state changed
+            if current_hash != self.mcu_state_hash {
+                let updated = mcu.update_main_rs(&self.generated_code);
+                if updated != self.generated_code {
+                    self.generated_code = updated;
+                    self.mcu_state_hash = current_hash;
+                    self.cached_project_files = None;  // Invalidate cache
+                }
             }
         }
 
@@ -778,6 +841,7 @@ impl AppIde {
             let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb);
             if new_toml != self.cargo_toml {
                 self.cargo_toml = new_toml;
+                self.invalidate_project_files_cache();
             }
             self.project_tree.sync_config_files(&config_files);
             self.project_tree.sync_pin_files(&all_pins);
