@@ -370,15 +370,30 @@ impl AppIde {
                 // Highlight all occurrences of the active find query (current one
                 // in amber), so matches show even when the find field has focus.
                 self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
-                // When a `{`/`}` is selected, darken the whole block and let
-                // Ctrl+C copy it.
-                self.highlight_brace_block(
+                // Selecting a definition NAME (double-click / Shift-select) or
+                // triple-clicking a `{`/`}` highlights the WHOLE definition in
+                // white and copies it on Ctrl+C. When it owns the frame, skip the
+                // single-block highlight (otherwise the trailing `}` of the full
+                // selection would also trigger it).
+                let full_def = self.highlight_full_definition(
                     &editor_resp,
                     &display_code,
+                    displayed_file,
                     editor_clip,
                     ui,
                     copy_requested,
                 );
+                // When a `{`/`}` is selected, darken the whole block and let
+                // Ctrl+C copy it.
+                if !full_def {
+                    self.highlight_brace_block(
+                        &editor_resp,
+                        &display_code,
+                        editor_clip,
+                        ui,
+                        copy_requested,
+                    );
+                }
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives

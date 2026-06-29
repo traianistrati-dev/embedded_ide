@@ -424,6 +424,9 @@ pub struct AppIde {
     find: editor_panel::find_replace::FindReplace,
     /// Code-editor font size in points, zoomed with Ctrl + `+`/`-`/`0`.
     editor_font_size: f32,
+    /// Full-definition highlight set by a triple-click on a `{`/`}` — `(file,
+    /// start, close)` inclusive char range, kept until the selection changes.
+    full_block_selection: Option<(ProjectFileId, usize, usize)>,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -630,6 +633,7 @@ impl AppIde {
             rename_focus: false,
             find: editor_panel::find_replace::FindReplace::default(),
             editor_font_size: editor_panel::DEFAULT_EDITOR_FONT_SIZE,
+            full_block_selection: None,
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,

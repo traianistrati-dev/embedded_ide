@@ -5,7 +5,7 @@
 //! Brace matching skips braces inside strings, char literals, and `//` / `/* */`
 //! comments — so the `{}` in `format!("{}", x)` never throws the pairing off.
 
-use crate::app::AppIde;
+use crate::app::{AppIde, ProjectFileId};
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -50,6 +50,85 @@ fn raw_string_end(chars: &[char], p: usize) -> Option<usize> {
     Some(chars.len())
 }
 
+/// If a comment / string / raw string / char literal / lifetime starts at `i`,
+/// return the index just past it; otherwise `None`. Lets brace scanning skip
+/// over non-code so braces inside `"{}"`, `// }`, `'{'`, etc. never count.
+fn skip_token(chars: &[char], i: usize) -> Option<usize> {
+    let n = chars.len();
+    let c = chars[i];
+    // Line comment.
+    if c == '/' && chars.get(i + 1) == Some(&'/') {
+        let mut j = i;
+        while j < n && chars[j] != '\n' {
+            j += 1;
+        }
+        return Some(j);
+    }
+    // Block comment.
+    if c == '/' && chars.get(i + 1) == Some(&'*') {
+        let mut j = i + 2;
+        while j < n && !(chars[j - 1] == '*' && chars[j] == '/') {
+            j += 1;
+        }
+        if j < n {
+            j += 1;
+        }
+        return Some(j);
+    }
+    // Raw string.
+    if let Some(end) = raw_string_end(chars, i) {
+        return Some(end);
+    }
+    // String / byte string.
+    if c == '"' || (c == 'b' && chars.get(i + 1) == Some(&'"')) {
+        let mut j = if c == 'b' { i + 1 } else { i };
+        j += 1;
+        while j < n {
+            match chars[j] {
+                '\\' => j += 2,
+                '"' => {
+                    j += 1;
+                    break;
+                }
+                _ => j += 1,
+            }
+        }
+        return Some(j);
+    }
+    // Char literal vs lifetime.
+    if c == '\'' {
+        if chars.get(i + 1) == Some(&'\\') {
+            let mut j = i + 2;
+            while j < n && chars[j] != '\'' {
+                j += 1;
+            }
+            if j < n {
+                j += 1;
+            }
+            return Some(j);
+        }
+        let next_ident = chars
+            .get(i + 1)
+            .is_some_and(|&c| c.is_alphabetic() || c == '_');
+        if next_ident && chars.get(i + 2) != Some(&'\'') {
+            let mut j = i + 1;
+            while j < n && is_ident(chars[j]) {
+                j += 1;
+            }
+            return Some(j); // lifetime — no braces inside
+        }
+        let mut j = i + 1;
+        if j < n {
+            j += 1; // the char
+        }
+        if j < n && chars[j] == '\'' {
+            j += 1; // closing quote
+        }
+        return Some(j);
+    }
+    None
+}
+
 /// Map every matched `{`/`}` to its partner (both directions), ignoring braces
 /// in strings / char literals / comments. Unbalanced braces are simply omitted.
 fn brace_pairs(chars: &[char]) -> HashMap<usize, usize> {
@@ -58,83 +137,13 @@ fn brace_pairs(chars: &[char]) -> HashMap<usize, usize> {
     let mut pairs = HashMap::new();
     let mut i = 0;
     while i < n {
-        let c = chars[i];
-        // Line comment.
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            while i < n && chars[i] != '\n' {
-                i += 1;
-            }
+        if let Some(j) = skip_token(chars, i) {
+            i = j;
             continue;
         }
-        // Block comment.
-        if c == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i < n && !(chars[i - 1] == '*' && chars[i] == '/') {
-                i += 1;
-            }
-            if i < n {
-                i += 1;
-            }
-            continue;
-        }
-        // Raw string.
-        if let Some(end) = raw_string_end(chars, i) {
-            i = end;
-            continue;
-        }
-        // String / byte string.
-        if c == '"' || (c == 'b' && chars.get(i + 1) == Some(&'"')) {
-            if c == 'b' {
-                i += 1;
-            }
-            i += 1;
-            while i < n {
-                match chars[i] {
-                    '\\' => i += 2,
-                    '"' => {
-                        i += 1;
-                        break;
-                    }
-                    _ => i += 1,
-                }
-            }
-            continue;
-        }
-        // Char literal vs lifetime.
-        if c == '\'' {
-            if chars.get(i + 1) == Some(&'\\') {
-                i += 2;
-                while i < n && chars[i] != '\'' {
-                    i += 1;
-                }
-                if i < n {
-                    i += 1;
-                }
-                continue;
-            }
-            let next_ident = chars
-                .get(i + 1)
-                .is_some_and(|&c| c.is_alphabetic() || c == '_');
-            if next_ident && chars.get(i + 2) != Some(&'\'') {
-                i += 1;
-                while i < n && is_ident(chars[i]) {
-                    i += 1;
-                }
-                continue; // lifetime — no braces inside
-            }
-            i += 1;
-            if i < n {
-                i += 1;
-            }
-            if i < n && chars[i] == '\'' {
-                i += 1;
-            }
-            continue;
-        }
-
-        if c == '{' {
+        if chars[i] == '{' {
             stack.push(i);
-        } else if c == '}' {
+        } else if chars[i] == '}' {
             if let Some(open) = stack.pop() {
                 pairs.insert(open, i);
                 pairs.insert(i, open);
@@ -165,8 +174,110 @@ fn block_for(chars: &[char], lo: usize, hi: usize) -> Option<(usize, usize)> {
 }
 
 /// `&str` wrapper around [`block_for`] for tests.
+#[cfg(test)]
 pub(super) fn brace_block(text: &str, lo: usize, hi: usize) -> Option<(usize, usize)> {
     block_for(&text.chars().collect::<Vec<_>>(), lo, hi)
+}
+
+// ── Full-definition selection (fn / struct / enum / if / while / match / …) ────
+
+/// Index of the next body-opening `{` at/after `from`, scanning over non-code.
+/// `None` if a `;` or `}` (statement / block end) comes first — i.e. there's no
+/// block (a `;`-terminated item like `struct S;` or `fn f();`).
+fn next_block_open(chars: &[char], from: usize) -> Option<usize> {
+    let n = chars.len();
+    let mut i = from;
+    while i < n {
+        if let Some(j) = skip_token(chars, i) {
+            i = j;
+            continue;
+        }
+        match chars[i] {
+            '{' => return Some(i),
+            ';' | '}' => return None,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Start of the header that precedes the body `{` at `open`: scan back to the
+/// previous statement / block boundary (`;` `{` `}`) and skip forward over the
+/// whitespace, so the result is the first non-blank char of the construct
+/// (its keyword / attribute / doc comment). Clamps to the start of file.
+fn header_start(chars: &[char], open: usize) -> usize {
+    let mut h = open;
+    while h > 0 {
+        match chars[h - 1] {
+            ';' | '{' | '}' => break,
+            _ => h -= 1,
+        }
+    }
+    while h < open && chars[h].is_whitespace() {
+        h += 1;
+    }
+    h
+}
+
+/// The whole definition `(start, close)` (inclusive char indices) whose body
+/// brace is `brace_idx` — used for a triple-click on a `{`/`}`.
+fn full_def_from_brace(chars: &[char], brace_idx: usize) -> Option<(usize, usize)> {
+    let other = *brace_pairs(chars).get(&brace_idx)?;
+    let open = brace_idx.min(other);
+    let close = brace_idx.max(other);
+    Some((header_start(chars, open), close))
+}
+
+/// True when `[lo, hi)` is exactly one identifier word.
+fn is_word_selection(chars: &[char], lo: usize, hi: usize) -> bool {
+    lo < hi
+        && chars[lo..hi].iter().all(|&c| is_ident(c))
+        && !chars[lo].is_ascii_digit()
+        && (lo == 0 || !is_ident(chars[lo - 1]))
+        && chars.get(hi).is_none_or(|&c| !is_ident(c))
+}
+
+/// True when the word starting at `lo` is the NAME in a block-bodied definition
+/// (`fn`/`struct`/`enum`/`trait`/`impl`/`mod`/`union` immediately before it).
+fn preceded_by_def_keyword(chars: &[char], lo: usize) -> bool {
+    let mut i = lo;
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    let end = i;
+    while i > 0 && is_ident(chars[i - 1]) {
+        i -= 1;
+    }
+    let kw: String = chars[i..end].iter().collect();
+    matches!(
+        kw.as_str(),
+        "fn" | "struct" | "enum" | "trait" | "impl" | "mod" | "union"
+    )
+}
+
+/// The whole definition `(start, close)` when `[lo, hi)` selects a definition
+/// NAME (e.g. double-click / Shift-select the `foo` in `fn foo(..) { .. }`).
+/// `None` when it isn't a definition name or has no `{ }` body.
+fn full_def_from_name(chars: &[char], lo: usize, hi: usize) -> Option<(usize, usize)> {
+    if !is_word_selection(chars, lo, hi) || !preceded_by_def_keyword(chars, lo) {
+        return None;
+    }
+    let open = next_block_open(chars, hi)?;
+    let other = *brace_pairs(chars).get(&open)?;
+    let close = open.max(other);
+    Some((header_start(chars, open), close))
+}
+
+/// `&str` test wrapper: full definition for a NAME selection `[lo, hi)`.
+#[cfg(test)]
+pub(super) fn full_def_name(text: &str, lo: usize, hi: usize) -> Option<(usize, usize)> {
+    full_def_from_name(&text.chars().collect::<Vec<_>>(), lo, hi)
+}
+
+/// `&str` test wrapper: full definition for a brace at `brace_idx`.
+#[cfg(test)]
+pub(super) fn full_def_brace(text: &str, brace_idx: usize) -> Option<(usize, usize)> {
+    full_def_from_brace(&text.chars().collect::<Vec<_>>(), brace_idx)
 }
 
 /// Paint one same-row segment `[s, e)` of the block band.
@@ -194,6 +305,31 @@ fn paint_segment(
         0.0,
         color,
     );
+}
+
+/// Paint a translucent band over the inclusive char range `[open, close]`,
+/// one rectangle per line (split at `\n`).
+fn paint_band(
+    painter: &egui::Painter,
+    galley: &egui::text::Galley,
+    gp: egui::Pos2,
+    clip: egui::Rect,
+    chars: &[char],
+    open: usize,
+    close: usize,
+    color: egui::Color32,
+) {
+    let end = (close + 1).min(chars.len());
+    let mut seg_start = open;
+    let mut i = open;
+    while i < end {
+        if chars[i] == '\n' {
+            paint_segment(painter, galley, gp, clip, color, seg_start, i);
+            seg_start = i + 1;
+        }
+        i += 1;
+    }
+    paint_segment(painter, galley, gp, clip, color, seg_start, end);
 }
 
 impl AppIde {
@@ -227,27 +363,162 @@ impl AppIde {
         // Dark band over [open, close]. Semi-transparent so the code stays
         // readable through it (the overlay is drawn on top of the text).
         let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50);
-        let gp = editor_resp.galley_pos;
-        let galley = &editor_resp.galley;
         let painter = ui.painter().with_clip_rect(clip);
+        paint_band(
+            &painter,
+            &editor_resp.galley,
+            editor_resp.galley_pos,
+            clip,
+            &chars,
+            open,
+            close,
+            color,
+        );
+    }
 
-        let end = (close + 1).min(chars.len());
-        let mut seg_start = open;
-        let mut i = open;
-        while i < end {
-            if chars[i] == '\n' {
-                paint_segment(&painter, galley, gp, clip, color, seg_start, i);
-                seg_start = i + 1;
+    /// Highlight the WHOLE definition (fn / struct / enum / if / while / match /
+    /// …) with a translucent white band (RGBA 255,255,255,50) and copy it on
+    /// Ctrl+C. Triggers when the selection is a definition NAME (double-click /
+    /// Shift-select) or on a triple-click on a `{`/`}`. Returns `true` when it
+    /// owns this frame (so the caller skips the brace-block highlight).
+    pub(super) fn highlight_full_definition(
+        &mut self,
+        editor_resp: &egui::text_edit::TextEditOutput,
+        display_code: &str,
+        displayed_file: ProjectFileId,
+        clip: egui::Rect,
+        ui: &egui::Ui,
+        copy_requested: bool,
+    ) -> bool {
+        let chars: Vec<char> = display_code.chars().collect();
+        let (lo, hi) = match editor_resp.state.cursor.char_range() {
+            Some(r) => (
+                r.primary.index.min(r.secondary.index),
+                r.primary.index.max(r.secondary.index),
+            ),
+            None => (0, 0),
+        };
+        let white = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50);
+        let paint = |start: usize, close: usize| {
+            let painter = ui.painter().with_clip_rect(clip);
+            paint_band(
+                &painter,
+                &editor_resp.galley,
+                editor_resp.galley_pos,
+                clip,
+                &chars,
+                start,
+                close,
+                white,
+            );
+        };
+        let copy = |start: usize, close: usize| {
+            if copy_requested && close < chars.len() {
+                ui.ctx()
+                    .copy_text(chars[start..=close].iter().collect::<String>());
             }
-            i += 1;
+        };
+
+        // 1. Triple-click on a brace → select the whole construct. egui set the
+        //    selection to the clicked line; find the (matched) brace on it.
+        if editor_resp.response.triple_clicked() {
+            let pairs = brace_pairs(&chars);
+            if let Some(b) = (lo..hi).find(|i| pairs.contains_key(i)) {
+                if let Some((start, close)) = full_def_from_brace(&chars, b) {
+                    self.full_block_selection = Some((displayed_file, start, close));
+                    // Make the whole construct the editor selection (so it's
+                    // visibly selected and Ctrl+C copies it).
+                    let mut st = editor_resp.state.clone();
+                    let end = (close + 1).min(chars.len());
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(start),
+                        egui::text::CCursor::new(end),
+                    )));
+                    st.store(ui.ctx(), editor_resp.response.id);
+                    paint(start, close);
+                    return true;
+                }
+            }
         }
-        paint_segment(&painter, galley, gp, clip, color, seg_start, end);
+
+        // 2. A persisted triple-click selection — keep highlighting while the
+        //    editor selection still matches it; clear once the user moves on.
+        if let Some((f, start, close)) = self.full_block_selection {
+            if f == displayed_file {
+                if lo == start && hi == (close + 1).min(chars.len()) {
+                    copy(start, close);
+                    paint(start, close);
+                    return true;
+                }
+                self.full_block_selection = None; // selection diverged
+            }
+        }
+
+        // 3. Selecting a definition NAME → whole definition.
+        if let Some((start, close)) = full_def_from_name(&chars, lo, hi) {
+            copy(start, close);
+            paint(start, close);
+            return true;
+        }
+
+        false
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::brace_block;
+    use super::{brace_block, full_def_brace, full_def_name};
+
+    #[test]
+    fn full_def_from_function_name() {
+        let src = "fn foo() {\n    a;\n}";
+        let name = src.find("foo").unwrap();
+        let close = src.rfind('}').unwrap();
+        // Double-click / Shift-select `foo` → whole `fn foo() { … }`.
+        assert_eq!(full_def_name(src, name, name + 3), Some((0, close)));
+    }
+
+    #[test]
+    fn full_def_from_struct_name_includes_attrs() {
+        // The header scan reaches back to the previous boundary (the `;`), so a
+        // leading attribute / doc line is part of the definition.
+        let src = "let x = 1;\n#[derive(Clone)]\nstruct S {\n    a: u8,\n}";
+        let start = src.find("#[derive").unwrap();
+        let name = src.find("S {").unwrap();
+        let close = src.rfind('}').unwrap();
+        assert_eq!(full_def_name(src, name, name + 1), Some((start, close)));
+    }
+
+    #[test]
+    fn name_without_def_keyword_or_block_is_none() {
+        // `Point` in a struct literal is not a definition name.
+        let src = "let p = Point { x: 1 };";
+        let pt = src.find("Point").unwrap();
+        assert_eq!(full_def_name(src, pt, pt + 5), None);
+        // `foo` of a bodyless decl (`fn foo();`) has no block.
+        let src2 = "trait T { fn foo(); }";
+        let foo = src2.find("foo").unwrap();
+        assert_eq!(full_def_name(src2, foo, foo + 3), None);
+    }
+
+    #[test]
+    fn triple_click_brace_spans_whole_construct() {
+        // A triple-click on either brace of an `if { … }` selects the whole `if`.
+        let src = "if x > 0 {\n    a;\n}";
+        let open = src.find('{').unwrap();
+        let close = src.rfind('}').unwrap();
+        assert_eq!(full_def_brace(src, open), Some((0, close)));
+        assert_eq!(full_def_brace(src, close), Some((0, close)));
+    }
+
+    #[test]
+    fn triple_click_inner_brace_spans_inner_construct() {
+        let src = "fn f() {\n    while y {\n        z;\n    }\n}";
+        let inner_open = src.find("{\n        z").unwrap();
+        let inner_close = src[inner_open..].find('}').unwrap() + inner_open;
+        let while_kw = src.find("while").unwrap();
+        assert_eq!(full_def_brace(src, inner_open), Some((while_kw, inner_close)));
+    }
 
     #[test]
     fn selecting_open_brace_spans_block() {
