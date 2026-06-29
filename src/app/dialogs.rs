@@ -202,6 +202,9 @@ impl AppIde {
                         // Pre-populate the pins/ scaffold so the tree shows
                         // the folder immediately, before any pin is configured.
                         self.project_tree.init_pins_scaffold();
+                        // New project = fresh deps → drop the stale workspace lock
+                        // so the next check re-resolves (saves otherwise keep it).
+                        self.reset_workspace_lock();
                         *save_project_needed = true;
                     }
                     ui.add_space(8.0);

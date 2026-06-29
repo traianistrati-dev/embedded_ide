@@ -985,6 +985,15 @@ impl AppIde {
     ///
     /// `force` re-sends every document even if unchanged, so RA re-runs its
     /// analysis/flycheck — i.e. Save always restarts verification.
+    /// Delete the temp check-workspace's `Cargo.lock` so the next `cargo check`
+    /// re-resolves dependencies. Called ONLY when the chip/toolchain changes or a
+    /// project is opened (the deps differ then); saves keep the lock so checks
+    /// stay fast. The user's own project `Cargo.lock` is left untouched.
+    fn reset_workspace_lock(&self) {
+        let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+        let _ = std::fs::remove_file(workspace.join("Cargo.lock"));
+    }
+
     fn flush_lsp_to_workspace(&mut self, force: bool) {
         let workspace = std::env::temp_dir().join("embedded_ide_0_check");
         let write = |rel: &str, content: &str| {
@@ -1004,15 +1013,10 @@ impl AppIde {
         for (rel, content) in &self.project_tree.user_src_files {
             lsp.did_change(&format!("src/{rel}"), content, force);
         }
-        // Trigger RA's `checkOnSave` flycheck so its cargo-check diagnostics
-        // re-run against the just-flushed text (otherwise they stay frozen at
-        // the startup check and fixed errors linger). One didSave re-checks the
-        // whole workspace; RA coalesces, and flush is already debounced (3 s idle
-        // / Project Save).
-        lsp.did_save("src/main.rs");
-        for (rel, _) in &self.project_tree.user_src_files {
-            lsp.did_save(&format!("src/{rel}"));
-        }
+        // NOTE: no `did_save` here on purpose. `did_save` triggers RA's
+        // cargo-check flycheck, which made saving slow. With `checkOnSave` off,
+        // saving only refreshes RA's fast in-memory diagnostics (above); a full
+        // `cargo check` is run on demand by the Build button.
     }
 }
 

@@ -354,15 +354,10 @@ pub fn write_project(
         .collect();
     remove_stale_rs(&dest.join("src"), &dest.join("src"), &expected_in_src);
 
-    // ── Remove stale Cargo.lock ───────────────────────────────────────────────
-    // If the workspace was previously used for a different chip (e.g. STM32),
-    // Cargo.lock pins the old dependency versions.  Even though Cargo.toml is
-    // rewritten correctly, cargo honours the lock-file and may resolve esp-hal
-    // to a version that predates the `#[esp_hal::main]` proc macro.
-    // Deleting the lock-file forces a fresh dependency resolution each time the
-    // project is written.  Cargo's on-disk package cache means this does NOT
-    // re-download crates — only re-solves the version graph.
-    let _ = fs::remove_file(dest.join("Cargo.lock"));
+    // NOTE: Cargo.lock is intentionally NOT deleted here. Re-resolving the
+    // dependency graph on every save made saving slow (cargo re-solves the
+    // version graph before each check). The lock is reset only when the
+    // chip/toolchain changes — see `AppIde::reset_workspace_lock`.
 
     // Files common to all toolchains
     fs::write(dest.join("Cargo.toml"), &files.cargo_toml)?;

@@ -75,10 +75,15 @@ impl AppIde {
         let displayed_file = self.selected_file;
 
         // ── Panel 2: Code Editor ──────────────────────────────────────────────
-        let editor_width = ui.available_width() * 0.5;
+        // Cap the width so the editor can never fully cover the MCU Configurator
+        // (the central panel) — a too-wide persisted/dragged width used to hide
+        // it entirely. Always leave ≥30% for the MCU panel.
+        let avail = ui.available_width();
         egui::Panel::left("code_editor")
             .resizable(true)
-            .default_size(editor_width)
+            .default_size(avail * 0.5)
+            .min_width(220.0)
+            .max_width(avail * 0.7)
             .show_inside(ui, |ui| {
                 // Header row
                 self.show_editor_toolbar(ui, &display_code, &project_files);

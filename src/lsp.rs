@@ -682,18 +682,13 @@ fn launch(
                 "window": { "workDoneProgress": true },
             },
             "initializationOptions": {
-                // Enable cargo check so ALL compilation errors are reported —
-                // not just those from RA's in-memory analysis.  Without this,
-                // errors like undefined variables, missing semicolons, and wrong
-                // function names in embedded code are not detected because RA's
-                // analysis can't fully resolve esp-hal types until crates are
-                // indexed.  cargo check catches everything the compiler sees.
-                //
-                // RA debounces the check (default ~1 s after last edit) so it
-                // does not run on every keystroke.  The "checking…" progress
-                // notification is tracked in handle_incoming() to update the
-                // status indicator in the editor header.
-                "checkOnSave":  true,
+                // cargo-check-on-save is DISABLED: it made saving slow (a full
+                // `cargo check` ran on every Project Save). Instead, live inline
+                // diagnostics come from RA's own in-memory analysis (which catches
+                // most errors), and a full `cargo check` runs ON DEMAND via the
+                // Build button (results shown in the "Cargo Check" tab). See
+                // `AppIde::flush_lsp_to_workspace`.
+                "checkOnSave":  false,
 
                 // Proc-macro expansion is disabled.
                 //

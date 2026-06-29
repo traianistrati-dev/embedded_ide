@@ -11,8 +11,9 @@
 use eframe::egui;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Cap on the retained RX byte buffer (older bytes are dropped).
 const RX_CAP: usize = 64_000;
@@ -22,8 +23,6 @@ const RX_CAP: usize = 64_000;
 pub struct SerialState {
     /// Raw received bytes (capped to the last [`RX_CAP`]).
     pub rx: Vec<u8>,
-    /// Set by the UI to ask the reader thread to exit.
-    pub stop: bool,
     /// `true` while a reader thread is alive and the port is open.
     pub connected: bool,
     /// Last open / read / write error, shown in the UI.
@@ -36,6 +35,10 @@ pub struct SerialMonitor {
     pub state: Arc<Mutex<SerialState>>,
     /// Write half of the open port (`try_clone`d from the reader's handle).
     writer: Option<Box<dyn serialport::SerialPort>>,
+    /// Per-connection stop flag for the reader thread. A fresh one is made each
+    /// `connect` so a quick disconnect→reconnect can't leave the old thread
+    /// running (the old flag stays `true`).
+    stop: Option<Arc<AtomicBool>>,
     /// Selected port name (e.g. `COM4` / `/dev/ttyUSB0`).
     pub port: String,
     /// Selected baud rate.
@@ -68,6 +71,7 @@ impl Default for SerialMonitor {
         Self {
             state: Arc::new(Mutex::new(SerialState::default())),
             writer: None,
+            stop: None,
             port: String::new(),
             baud: 115_200,
             hex: false,
@@ -107,9 +111,12 @@ impl SerialMonitor {
         if self.port.is_empty() || self.is_connected() {
             return;
         }
+        // Make sure any previous reader is signalled to stop (defensive).
+        if let Some(s) = self.stop.take() {
+            s.store(true, Ordering::Relaxed);
+        }
         {
             let mut s = self.state.lock().unwrap();
-            s.stop = false;
             s.error = None;
             s.connected = false;
         }
@@ -121,7 +128,9 @@ impl SerialMonitor {
                 Ok(reader) => {
                     self.writer = Some(port);
                     self.state.lock().unwrap().connected = true;
-                    spawn_reader(reader, Arc::clone(&self.state), ctx.clone());
+                    let stop = Arc::new(AtomicBool::new(false));
+                    self.stop = Some(Arc::clone(&stop));
+                    spawn_reader(reader, Arc::clone(&self.state), stop, ctx.clone());
                 }
                 Err(e) => self.state.lock().unwrap().error = Some(e.to_string()),
             },
@@ -131,10 +140,10 @@ impl SerialMonitor {
 
     /// Stop the reader thread and release the port.
     pub fn disconnect(&mut self) {
-        let mut s = self.state.lock().unwrap();
-        s.stop = true;
-        s.connected = false;
-        drop(s);
+        if let Some(s) = self.stop.take() {
+            s.store(true, Ordering::Relaxed);
+        }
+        self.state.lock().unwrap().connected = false;
         self.writer = None;
     }
 
@@ -153,20 +162,28 @@ impl SerialMonitor {
 }
 
 /// Background loop: read bytes into the shared buffer until asked to stop or the
-/// port errors. The short read timeout lets it notice `stop` promptly.
+/// port errors. The short read timeout lets it notice `stop` promptly. Repaints
+/// are throttled (~30 fps) so a continuously-streaming device doesn't pin the UI
+/// at max frame-rate and starve the rest of the app.
 fn spawn_reader(
     mut port: Box<dyn serialport::SerialPort>,
     state: Arc<Mutex<SerialState>>,
+    stop: Arc<AtomicBool>,
     ctx: egui::Context,
 ) {
+    const REPAINT_EVERY: Duration = Duration::from_millis(33);
     std::thread::spawn(move || {
         let mut buf = [0u8; 1024];
+        let mut last_repaint = Instant::now() - REPAINT_EVERY;
         loop {
-            if state.lock().unwrap().stop {
+            if stop.load(Ordering::Relaxed) {
                 break;
             }
             match port.read(&mut buf) {
-                Ok(0) => {}
+                Ok(0) => {
+                    // No data but not a timeout — avoid a busy-spin.
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 Ok(n) => {
                     let mut s = state.lock().unwrap();
                     s.rx.extend_from_slice(&buf[..n]);
@@ -175,7 +192,13 @@ fn spawn_reader(
                         s.rx.drain(..excess);
                     }
                     drop(s);
-                    ctx.request_repaint();
+                    // Coalesce repaints: at most one ~every 33 ms while streaming.
+                    if last_repaint.elapsed() >= REPAINT_EVERY {
+                        ctx.request_repaint();
+                        last_repaint = Instant::now();
+                    } else {
+                        ctx.request_repaint_after(REPAINT_EVERY);
+                    }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(e) => {

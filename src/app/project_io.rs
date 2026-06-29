@@ -69,6 +69,9 @@ impl AppIde {
                 self.lsp_selected_diagnostic = None;
             }
         }
+        // Opening a project replaces the workspace deps → drop the stale lock so
+        // the first check re-resolves for this project (later saves keep it).
+        self.reset_workspace_lock();
 
         // ── Restore pin state from src/main.rs ───────────────────────────────
         // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
