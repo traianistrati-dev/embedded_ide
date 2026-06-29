@@ -5,7 +5,10 @@
 //! (USB-UART bridge / on-board VCP), so data can be seen without an external
 //! terminal. See [`crate::serial::SerialMonitor`].
 
-use crate::serial::{byte_color, hex_layout_job, render_rx_text, seq_color, seq_counts, SerialMonitor};
+use crate::serial::{
+    byte_color, hex_layout_job, hex_search_job, parse_hex_search, render_rx_text, seq_color,
+    seq_counts, SerialMonitor, SEARCH_HIT, SEARCH_HIT2,
+};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
@@ -80,6 +83,23 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             )
             .on_hover_text("Bytes per repeating sequence: each group of N bytes\nis coloured as a unit (same sequence → same colour).");
         });
+        // Two hex search fields → highlight matches in yellow / blue, grey rest.
+        ui.add_enabled_ui(serial.hex, |ui| {
+            ui.colored_label(SEARCH_HIT, "Find:");
+            ui.add(
+                egui::TextEdit::singleline(&mut serial.search)
+                    .hint_text("hex e.g. 0D 0A")
+                    .desired_width(110.0),
+            )
+            .on_hover_text("Highlight this hex sequence in yellow (rest greyed).");
+            ui.colored_label(SEARCH_HIT2, "Find:");
+            ui.add(
+                egui::TextEdit::singleline(&mut serial.search2)
+                    .hint_text("hex e.g. 4F 4E")
+                    .desired_width(110.0),
+            )
+            .on_hover_text("Highlight this hex sequence in blue (rest greyed).");
+        });
         ui.checkbox(&mut serial.autoscroll, "Autoscroll");
         if ui.button(format!("{} Clear", ph::BROOM)).clicked() {
             serial.clear_rx();
@@ -104,18 +124,33 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     serial.tx_height = serial.tx_height.clamp(MIN_TX, max_tx);
     let rx_height = (section_h - serial.tx_height - HANDLE_H).max(40.0);
 
-    // Build the display under one lock. Hex mode → a per-sequence coloured job +
-    // a unique-sequences legend; text mode → plain decoded text.
+    // Build the display under one lock. Search mode → yellow/grey highlight (no
+    // legend); hex mode → per-sequence colours + unique-sequences legend; text
+    // mode → plain decoded text.
     let hex = serial.hex;
     let seq_len = serial.seq_len.max(1);
+    let search_a = parse_hex_search(&serial.search);
+    let search_b = parse_hex_search(&serial.search2);
+    let searching = hex && (!search_a.is_empty() || !search_b.is_empty());
+    let mut patterns: Vec<(&[u8], egui::Color32)> = Vec::new();
+    if !search_a.is_empty() {
+        patterns.push((&search_a, SEARCH_HIT));
+    }
+    if !search_b.is_empty() {
+        patterns.push((&search_b, SEARCH_HIT2));
+    }
     let (hex_job, text_display, counts) = {
         let st = serial.state.lock().unwrap();
         if hex {
-            (
-                Some(hex_layout_job(&st.rx, 12.0, seq_len)),
-                String::new(),
-                seq_counts(&st.rx, seq_len),
-            )
+            // Search highlight (yellow/blue) when a Find field is filled, else
+            // the per-sequence colouring. The unique-sequence legend is always
+            // computed so it stays visible even while searching.
+            let job = if searching {
+                hex_search_job(&st.rx, 12.0, &patterns)
+            } else {
+                hex_layout_job(&st.rx, 12.0, seq_len)
+            };
+            (Some(job), String::new(), seq_counts(&st.rx, seq_len))
         } else {
             (None, render_rx_text(&st.rx), Vec::new())
         }

@@ -46,6 +46,9 @@ pub struct SerialMonitor {
     pub seq_len: usize,
     /// Width (px) of the unique-sequences legend (draggable divider).
     pub legend_w: f32,
+    /// Hex byte sequences to search/highlight in the RX view (yellow / blue).
+    pub search: String,
+    pub search2: String,
     /// Keep the RX view pinned to the newest data.
     pub autoscroll: bool,
     /// Append `\r\n` to each sent line.
@@ -68,6 +71,8 @@ impl Default for SerialMonitor {
             hex: false,
             seq_len: 1,
             legend_w: 160.0,
+            search: String::new(),
+            search2: String::new(),
             autoscroll: true,
             append_crlf: true,
             tx_input: String::new(),
@@ -261,6 +266,69 @@ pub fn hex_layout_job(bytes: &[u8], fontsize: f32, seq_len: usize) -> egui::text
     job
 }
 
+/// Colours of the two searched sequences (yellow / blue) and the rest (grey).
+pub const SEARCH_HIT: egui::Color32 = egui::Color32::from_rgb(255, 230, 0);
+pub const SEARCH_HIT2: egui::Color32 = egui::Color32::from_rgb(0, 200, 250);
+pub const SEARCH_MISS: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
+
+/// Parse a user-typed hex search string into bytes: hex digits are kept (spaces
+/// / other chars ignored) and grouped into pairs; a trailing lone digit is
+/// dropped. `"0D 0A"` / `"0d0a"` → `[0x0D, 0x0A]`.
+pub fn parse_hex_search(s: &str) -> Vec<u8> {
+    let digits: Vec<u8> = s.bytes().filter(|b| b.is_ascii_hexdigit()).collect();
+    digits
+        .chunks_exact(2)
+        .filter_map(|p| {
+            let hi = (p[0] as char).to_digit(16)?;
+            let lo = (p[1] as char).to_digit(16)?;
+            Some((hi * 16 + lo) as u8)
+        })
+        .collect()
+}
+
+/// Hex `LayoutJob` in *search* mode: bytes belonging to an occurrence of any
+/// `(pattern, colour)` are coloured with that colour, everything else grey
+/// ([`SEARCH_MISS`]). Later patterns win on overlap. Tail only; overlapping
+/// matches of a pattern are all highlighted.
+pub fn hex_search_job(
+    bytes: &[u8],
+    fontsize: f32,
+    patterns: &[(&[u8], egui::Color32)],
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::FontId::monospace(fontsize);
+    let mut job = LayoutJob::default();
+    let n = bytes.len();
+    let start = n.saturating_sub(4 * 1024);
+    let tail = &bytes[start..];
+    let m = tail.len();
+
+    let mut colors = vec![SEARCH_MISS; m];
+    for (pattern, col) in patterns {
+        let plen = pattern.len();
+        if plen == 0 || plen > m {
+            continue;
+        }
+        let mut i = 0;
+        while i + plen <= m {
+            if &tail[i..i + plen] == *pattern {
+                for c in colors.iter_mut().skip(i).take(plen) {
+                    *c = *col;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    for (i, &b) in tail.iter().enumerate() {
+        job.append(&format!("{b:02X} "), 0.0, TextFormat::simple(font.clone(), colors[i]));
+        if (start + i + 1) % 16 == 0 {
+            job.append("\n", 0.0, TextFormat::simple(font.clone(), SEARCH_MISS));
+        }
+    }
+    job
+}
+
 #[cfg(test)]
 mod tests {
     use super::{byte_color, render_rx_text, seq_color, seq_counts};
@@ -281,6 +349,36 @@ mod tests {
         assert_ne!(seq_color(b"ON"), seq_color(b"NO"));
         // Single-byte sequence matches byte_color.
         assert_eq!(seq_color(&[0x4E]), byte_color(0x4E));
+    }
+
+    #[test]
+    fn parse_hex_search_groups_pairs() {
+        use super::parse_hex_search;
+        assert_eq!(parse_hex_search("0D 0A"), vec![0x0D, 0x0A]);
+        assert_eq!(parse_hex_search("4f4e"), vec![0x4F, 0x4E]);
+        assert_eq!(parse_hex_search("  "), Vec::<u8>::new());
+        assert_eq!(parse_hex_search("4"), Vec::<u8>::new()); // lone digit dropped
+    }
+
+    #[test]
+    fn hex_search_colors_two_patterns_rest_grey() {
+        use super::{hex_search_job, SEARCH_HIT, SEARCH_HIT2, SEARCH_MISS};
+        // 01 0D 0A 02: pattern A = 0D 0A (yellow), pattern B = 01 (blue).
+        let job = hex_search_job(
+            &[0x01, 0x0D, 0x0A, 0x02],
+            12.0,
+            &[(&[0x0D, 0x0A], SEARCH_HIT), (&[0x01], SEARCH_HIT2)],
+        );
+        let colors: Vec<_> = job
+            .sections
+            .iter()
+            .map(|s| (job.text[s.byte_range.clone()].trim().to_string(), s.format.color))
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+        assert_eq!(colors[0], ("01".into(), SEARCH_HIT2)); // blue
+        assert_eq!(colors[1], ("0D".into(), SEARCH_HIT)); // yellow
+        assert_eq!(colors[2], ("0A".into(), SEARCH_HIT)); // yellow
+        assert_eq!(colors[3], ("02".into(), SEARCH_MISS)); // grey
     }
 
     #[test]
