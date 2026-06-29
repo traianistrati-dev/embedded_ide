@@ -82,6 +82,13 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                     .speed(0.1),
             )
             .on_hover_text("Bytes per repeating sequence: each group of N bytes\nis coloured as a unit (same sequence → same colour).");
+            ui.label("Row:");
+            ui.add(
+                egui::DragValue::new(&mut serial.row_bytes)
+                    .range(1..=64)
+                    .speed(0.2),
+            )
+            .on_hover_text("Bytes shown per line in the hex view.");
         });
         // Two hex search fields → highlight matches in yellow / blue, grey rest.
         ui.add_enabled_ui(serial.hex, |ui| {
@@ -146,9 +153,9 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             // the per-sequence colouring. The unique-sequence legend is always
             // computed so it stays visible even while searching.
             let job = if searching {
-                hex_search_job(&st.rx, 12.0, &patterns)
+                hex_search_job(&st.rx, 12.0, &patterns, serial.row_bytes)
             } else {
-                hex_layout_job(&st.rx, 12.0, seq_len)
+                hex_layout_job(&st.rx, 12.0, seq_len, serial.row_bytes)
             };
             (Some(job), String::new(), seq_counts(&st.rx, seq_len))
         } else {

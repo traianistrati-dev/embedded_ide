@@ -44,6 +44,8 @@ pub struct SerialMonitor {
     pub hex: bool,
     /// Number of bytes per repeating sequence to colour / list (hex mode).
     pub seq_len: usize,
+    /// Bytes shown per line in the hex view.
+    pub row_bytes: usize,
     /// Width (px) of the unique-sequences legend (draggable divider).
     pub legend_w: f32,
     /// Hex byte sequences to search/highlight in the RX view (yellow / blue).
@@ -70,6 +72,7 @@ impl Default for SerialMonitor {
             baud: 115_200,
             hex: false,
             seq_len: 1,
+            row_bytes: 16,
             legend_w: 160.0,
             search: String::new(),
             search2: String::new(),
@@ -237,9 +240,15 @@ pub fn seq_counts(bytes: &[u8], seq_len: usize) -> Vec<(Vec<u8>, u32)> {
 /// `seq_len`-byte sequences (from offset 0) and every byte of a group is
 /// coloured by [`seq_color`] of that group, so repeated sequences share a
 /// colour. Only the tail is built so layout stays cheap.
-pub fn hex_layout_job(bytes: &[u8], fontsize: f32, seq_len: usize) -> egui::text::LayoutJob {
+pub fn hex_layout_job(
+    bytes: &[u8],
+    fontsize: f32,
+    seq_len: usize,
+    row_bytes: usize,
+) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
     let seq_len = seq_len.max(1);
+    let row_bytes = row_bytes.max(1);
     let font = egui::FontId::monospace(fontsize);
     let mut job = LayoutJob::default();
     let n = bytes.len();
@@ -259,7 +268,7 @@ pub fn hex_layout_job(bytes: &[u8], fontsize: f32, seq_len: usize) -> egui::text
             0.0,
             TextFormat::simple(font.clone(), cur_color),
         );
-        if (i + 1) % 16 == 0 {
+        if (i + 1) % row_bytes == 0 {
             job.append("\n", 0.0, TextFormat::simple(font.clone(), egui::Color32::GRAY));
         }
     }
@@ -294,8 +303,10 @@ pub fn hex_search_job(
     bytes: &[u8],
     fontsize: f32,
     patterns: &[(&[u8], egui::Color32)],
+    row_bytes: usize,
 ) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
+    let row_bytes = row_bytes.max(1);
     let font = egui::FontId::monospace(fontsize);
     let mut job = LayoutJob::default();
     let n = bytes.len();
@@ -322,7 +333,7 @@ pub fn hex_search_job(
 
     for (i, &b) in tail.iter().enumerate() {
         job.append(&format!("{b:02X} "), 0.0, TextFormat::simple(font.clone(), colors[i]));
-        if (start + i + 1) % 16 == 0 {
+        if (start + i + 1) % row_bytes == 0 {
             job.append("\n", 0.0, TextFormat::simple(font.clone(), SEARCH_MISS));
         }
     }
@@ -368,6 +379,7 @@ mod tests {
             &[0x01, 0x0D, 0x0A, 0x02],
             12.0,
             &[(&[0x0D, 0x0A], SEARCH_HIT), (&[0x01], SEARCH_HIT2)],
+            16,
         );
         let colors: Vec<_> = job
             .sections
