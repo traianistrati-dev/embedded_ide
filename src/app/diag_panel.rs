@@ -3,7 +3,7 @@
 //! Orchestrator only: renders the tab-header buttons (with status badges) and
 //! dispatches to the per-tab render functions in `super::tabs`.
 
-use super::tabs::{show_cargo_tab, show_dfu_tab, show_ra_tab, show_tools_tab};
+use super::tabs::{show_cargo_tab, show_dfu_tab, show_ra_tab, show_serial_tab, show_tools_tab};
 use super::BuildPanelTab;
 use crate::build::BuildState;
 use crate::dfu::{self, DfuState};
@@ -12,6 +12,7 @@ use crate::lsp::{self, LspStatus};
 use crate::openocd::OpenOcdState;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::required_tools;
+use crate::serial::SerialMonitor;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::collections::HashMap;
@@ -32,6 +33,7 @@ pub(super) fn show_diag_panel(
     espflash_state: &Arc<Mutex<EspFlashState>>,
     espflash_port: &mut String,
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
+    serial: &mut SerialMonitor,
     toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
@@ -182,6 +184,33 @@ pub(super) fn show_diag_panel(
 
         ui.separator();
 
+        // Serial monitor tab button
+        {
+            let active = *tab == BuildPanelTab::Serial;
+            let (badge, col) = if serial.is_connected() {
+                (
+                    format!(" {}", ph::PLUGS_CONNECTED),
+                    egui::Color32::from_rgb(80, 200, 100),
+                )
+            } else {
+                (String::new(), egui::Color32::DARK_GRAY)
+            };
+            let label = format!("{} Serial{badge}", ph::TERMINAL);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Serial;
+            }
+        }
+
+        ui.separator();
+
         // Required Tools tab button
         {
             let ts = tools_state.lock().unwrap();
@@ -264,6 +293,9 @@ pub(super) fn show_diag_panel(
                 espflash_port,
                 toolchain,
             );
+        }
+        BuildPanelTab::Serial => {
+            show_serial_tab(ui, serial, ctx);
         }
         BuildPanelTab::RequiredTools => {
             show_tools_tab(ui, tools_state, ctx);

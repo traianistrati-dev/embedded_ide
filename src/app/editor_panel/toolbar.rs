@@ -51,6 +51,39 @@ impl AppIde {
 
                 ui.add_space(4.0);
 
+                // ── Serial monitor button — opens the bottom "Serial" tab ──
+                let serial_on = self.serial.is_connected();
+                let serial_btn = ui.add(egui::Button::new(
+                    egui::RichText::new(format!("{} Serial", ph::TERMINAL))
+                        .size(11.0)
+                        .color(if serial_on {
+                            egui::Color32::from_rgb(80, 200, 100)
+                        } else {
+                            egui::Color32::from_rgb(150, 180, 220)
+                        }),
+                ));
+                if serial_btn.clicked() {
+                    self.build_tab = BuildPanelTab::Serial;
+                    self.serial.refresh_ports();
+                    // Seed the baud from the first GI_USART module (when idle).
+                    let module_baud = self.mcu.as_ref().and_then(|mcu| {
+                        mcu.modules.iter().find_map(|m| match &m.config {
+                            crate::panels::mcu_module::modules::ModuleConfig::Usart(c) => {
+                                Some(c.baud_rate)
+                            }
+                            _ => None,
+                        })
+                    });
+                    if !serial_on {
+                        if let Some(b) = module_baud {
+                            self.serial.baud = b;
+                        }
+                    }
+                }
+                serial_btn.on_hover_text("Open the serial monitor (USART/UART console)");
+
+                ui.add_space(4.0);
+
                 // ── Build button ──────────────────────────────────────
                 let build_guard = self.build_state.lock().unwrap();
                 let is_building = build_guard.is_building();

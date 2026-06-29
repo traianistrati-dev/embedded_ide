@@ -161,6 +161,8 @@ enum BuildPanelTab {
     RustAnalyzer,
     Cargo,
     Dfu,
+    /// Built-in USART/UART serial console.
+    Serial,
     RequiredTools,
     /// F12 "Go to definition" result. Only selectable while `definition_view` is
     /// set (the tab is hidden otherwise).
@@ -427,6 +429,8 @@ pub struct AppIde {
     /// Full-definition highlight set by a triple-click on a `{`/`}` — `(file,
     /// start, close)` inclusive char range, kept until the selection changes.
     full_block_selection: Option<(ProjectFileId, usize, usize)>,
+    // ── Serial monitor (built-in USART/UART console) ─────────────────────────
+    serial: crate::serial::SerialMonitor,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -634,6 +638,7 @@ impl AppIde {
             find: editor_panel::find_replace::FindReplace::default(),
             editor_font_size: editor_panel::DEFAULT_EDITOR_FONT_SIZE,
             full_block_selection: None,
+            serial: crate::serial::SerialMonitor::default(),
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,

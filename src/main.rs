@@ -11,6 +11,7 @@ pub mod openocd;
 pub mod panels;
 pub mod project_tree;
 pub mod required_tools;
+pub mod serial;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

@@ -25,7 +25,12 @@ impl AppIde {
             || !matches!(*self.openocd_state.lock().unwrap(), OpenOcdState::Idle)
             || !matches!(*self.espflash_state.lock().unwrap(), EspFlashState::Idle)
             || !self.dfu_log.lock().unwrap().is_empty();
-        let show_panel = cargo_has || lsp_active || dfu_active || self.definition_view.is_some();
+        // The Serial tab is opened from the toolbar (`build_tab == Serial`) and
+        // stays available while a port is connected.
+        let serial_active =
+            self.build_tab == BuildPanelTab::Serial || self.serial.is_connected();
+        let show_panel =
+            cargo_has || lsp_active || dfu_active || serial_active || self.definition_view.is_some();
 
         if !show_panel {
             return None;
@@ -106,6 +111,7 @@ impl AppIde {
                         &self.espflash_state,
                         &mut self.espflash_port,
                         &self.tools_state,
+                        &mut self.serial,
                         &toolchain,
                         &mut self.build_tab,
                         &mut self.selected_diagnostic,
