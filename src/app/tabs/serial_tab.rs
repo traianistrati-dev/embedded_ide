@@ -6,8 +6,8 @@
 //! terminal. See [`crate::serial::SerialMonitor`].
 
 use crate::serial::{
-    byte_color, hex_layout_job, hex_search_job, parse_hex_search, render_rx_text, seq_color,
-    seq_counts, SerialMonitor, SEARCH_HIT, SEARCH_HIT2,
+    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, hex_layout_job, hex_search_job,
+    parse_hex_search, render_rx_text, seq_color, seq_counts,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -194,8 +194,11 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             ui.painter()
                 .vline(cx, div_rect.y_range(), egui::Stroke::new(1.5, div_color));
             for dy in [-6.0_f32, 0.0, 6.0] {
-                ui.painter()
-                    .circle_filled(egui::pos2(cx, div_rect.center().y + dy), 1.5, div_color);
+                ui.painter().circle_filled(
+                    egui::pos2(cx, div_rect.center().y + dy),
+                    1.5,
+                    div_color,
+                );
             }
             if div.dragged() {
                 // Drag left → legend grows; right → shrinks.
@@ -217,11 +220,17 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                         } else {
                             format!("Unique {seq_len}-byte seq")
                         };
-                        ui.label(egui::RichText::new(title).size(10.0).color(egui::Color32::GRAY));
+                        ui.label(
+                            egui::RichText::new(title)
+                                .size(10.0)
+                                .color(egui::Color32::GRAY),
+                        );
                         for (seq, count) in counts.iter().take(96) {
                             ui.horizontal(|ui| {
-                                let (rect, _) = ui
-                                    .allocate_exact_size(egui::vec2(11.0, 11.0), egui::Sense::hover());
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(11.0, 11.0),
+                                    egui::Sense::hover(),
+                                );
                                 ui.painter().rect_filled(rect, 2.0, seq_color(seq));
                                 let hex: String = seq
                                     .iter()
@@ -264,8 +273,10 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     }
 
     // ── Drag handle — resize the send area up / down ────────────────────────────
-    let (handle_rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), HANDLE_H), egui::Sense::hover());
+    let (handle_rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), HANDLE_H),
+        egui::Sense::hover(),
+    );
     let drag = ui.interact(
         handle_rect,
         ui.id().with("serial_tx_resize"),
@@ -278,11 +289,17 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         egui::Color32::from_gray(70)
     };
     let mid_y = handle_rect.center().y;
-    ui.painter()
-        .hline(handle_rect.x_range(), mid_y, egui::Stroke::new(1.5, line_color));
+    ui.painter().hline(
+        handle_rect.x_range(),
+        mid_y,
+        egui::Stroke::new(1.5, line_color),
+    );
     for dx in [-6.0_f32, 0.0, 6.0] {
-        ui.painter()
-            .circle_filled(egui::pos2(handle_rect.center().x + dx, mid_y), 1.5, line_color);
+        ui.painter().circle_filled(
+            egui::pos2(handle_rect.center().x + dx, mid_y),
+            1.5,
+            line_color,
+        );
     }
     if drag.dragged() {
         // Dragging up (negative delta) grows the send area.
@@ -295,7 +312,10 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.checkbox(&mut serial.append_crlf, "CR+LF");
         if ui
-            .add_enabled(connected, egui::Button::new(format!("{} Send", ph::PAPER_PLANE_RIGHT)))
+            .add_enabled(
+                connected,
+                egui::Button::new(format!("{} Send", ph::PAPER_PLANE_RIGHT)),
+            )
             .clicked()
         {
             do_send = true;
@@ -313,10 +333,18 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                     } else {
                         egui::Color32::LIGHT_GRAY
                     };
-                    job.append(&c.to_string(), 0.0, egui::text::TextFormat::simple(font.clone(), col));
+                    job.append(
+                        &c.to_string(),
+                        0.0,
+                        egui::text::TextFormat::simple(font.clone(), col),
+                    );
                 }
             } else {
-                job.append(s, 0.0, egui::text::TextFormat::simple(font.clone(), egui::Color32::from_gray(220)));
+                job.append(
+                    s,
+                    0.0,
+                    egui::text::TextFormat::simple(font.clone(), egui::Color32::from_gray(220)),
+                );
             }
             job.wrap.max_width = wrap;
             ui.fonts_mut(|f| f.layout_job(job))
@@ -329,19 +357,31 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 .layouter(&mut tx_layouter),
         );
         // Ctrl+Enter sends; plain Enter inserts a newline (multi-line composing).
-        if resp.has_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command)
+        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command)
         {
             do_send = true;
         }
     });
 
     if do_send && connected && !serial.tx_input.trim_end_matches(['\r', '\n']).is_empty() {
-        let mut bytes = serial.tx_input.clone().into_bytes();
-        if serial.append_crlf {
-            bytes.extend_from_slice(b"\r\n");
+        for line in serial.tx_input.clone().lines() {
+            let line = line.trim();
+
+            if line.is_empty() {
+                continue;
+            }
+            let mut bytes = hex_string_to_bytes(line).unwrap_or_default();
+            if serial.append_crlf {
+                bytes.extend_from_slice(b"\r\n");
+            }
+            serial.send(&bytes);
+            // serial.tx_input.clear();
         }
-        serial.send(&bytes);
-        serial.tx_input.clear();
     }
+}
+
+fn hex_string_to_bytes(s: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
+    s.split_whitespace()
+        .map(|x| u8::from_str_radix(x, 16))
+        .collect()
 }
