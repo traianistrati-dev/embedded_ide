@@ -197,6 +197,18 @@ pub fn show_cargo_tab(
         return;
     };
 
+    render_diagnostics(ui, result, selected_diagnostic, nav);
+}
+
+/// Render a `cargo check`/`clippy` diagnostics list (clickable rows → navigate)
+/// plus the rendered detail of the selected one. Shared by the Cargo Check and
+/// Clippy tabs.
+pub(crate) fn render_diagnostics(
+    ui: &mut egui::Ui,
+    result: &build::BuildResult,
+    selected_diagnostic: &mut Option<usize>,
+    nav: &mut Option<(String, usize, egui::Color32)>,
+) {
     if result.diagnostics.is_empty() {
         return;
     }

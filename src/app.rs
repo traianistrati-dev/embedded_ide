@@ -163,6 +163,8 @@ enum BuildPanelTab {
     Dfu,
     /// Built-in USART/UART serial console.
     Serial,
+    /// `cargo clippy` improvement suggestions.
+    Clippy,
     RequiredTools,
     /// F12 "Go to definition" result. Only selectable while `definition_view` is
     /// set (the tab is hidden otherwise).
@@ -339,6 +341,10 @@ pub struct AppIde {
     build_state: Arc<Mutex<BuildState>>,
     /// Index of the diagnostic currently expanded in the cargo build panel
     selected_diagnostic: Option<usize>,
+    /// Shared state written by the background `cargo clippy` thread (reuses
+    /// BuildState) + the expanded-suggestion index for the Clippy tab.
+    clippy_state: Arc<Mutex<BuildState>>,
+    clippy_sel: Option<usize>,
     /// Shared state for USB DFU detection and flashing
     dfu_state: Arc<Mutex<DfuState>>,
     /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
@@ -599,6 +605,8 @@ impl AppIde {
             save_dest: None,
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
+            clippy_state: Arc::new(Mutex::new(BuildState::Idle)),
+            clippy_sel: None,
             selected_diagnostic: None,
             dfu_state,
             dfu_log,
@@ -754,6 +762,60 @@ impl AppIde {
     /// Update the cached project files (call this after modifying any config file)
     fn invalidate_project_files_cache(&mut self) {
         self.cached_project_files = None;
+    }
+
+    /// Apply clippy's machine-applicable [`SpanEdit`](crate::build::SpanEdit)s to
+    /// the in-memory source. Edits are grouped per file and applied back-to-front
+    /// (so earlier byte offsets stay valid), skipping any that overlap an
+    /// already-applied edit or land off a UTF-8 char boundary. `src/main.rs`
+    /// targets the generated buffer; `src/<rel>` targets the matching user source
+    /// file. Returns how many edits were applied.
+    ///
+    /// Note: a fix inside main.rs's GENERATED block survives until the MCU config
+    /// changes (which regenerates that block) — clippy fixes almost always land in
+    /// user code, so this is an accepted limitation.
+    fn apply_source_edits(&mut self, edits: &[crate::build::SpanEdit]) -> usize {
+        use std::collections::HashMap;
+        let mut by_file: HashMap<&str, Vec<&crate::build::SpanEdit>> = HashMap::new();
+        for e in edits {
+            by_file.entry(e.file.as_str()).or_default().push(e);
+        }
+        let mut applied = 0usize;
+        for (file, mut group) in by_file {
+            let rel = file.strip_prefix("src/").unwrap_or(file);
+            let target: Option<&mut String> = if rel == "main.rs" {
+                Some(&mut self.generated_code)
+            } else {
+                self.project_tree
+                    .user_src_files
+                    .iter_mut()
+                    .find(|(p, _)| p == rel)
+                    .map(|(_, c)| c)
+            };
+            let Some(buf) = target else { continue };
+            // Apply largest-offset edit first; track the start of the last applied
+            // edit so a later (smaller-offset) one that overlaps it is skipped.
+            group.sort_by(|a, b| b.start.cmp(&a.start));
+            let mut last_start = buf.len() + 1;
+            for e in group {
+                if e.start > e.end || e.end > buf.len() {
+                    continue;
+                }
+                if e.end > last_start {
+                    continue; // overlaps an already-applied edit
+                }
+                if !buf.is_char_boundary(e.start) || !buf.is_char_boundary(e.end) {
+                    continue;
+                }
+                buf.replace_range(e.start..e.end, &e.replacement);
+                last_start = e.start;
+                applied += 1;
+            }
+        }
+        if applied > 0 {
+            self.invalidate_project_files_cache();
+        }
+        applied
     }
 
     /// The `mcu.config` text for the live MCU (virtual modules + clock), written

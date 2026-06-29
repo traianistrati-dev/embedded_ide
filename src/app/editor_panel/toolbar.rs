@@ -84,6 +84,25 @@ impl AppIde {
 
                 ui.add_space(4.0);
 
+                // ── Clippy button — opens the bottom "Clippy" tab ──
+                let clippy_running = self.clippy_state.lock().unwrap().is_building();
+                let clippy_btn = ui.add(egui::Button::new(
+                    egui::RichText::new(format!("{} Clippy", ph::SPARKLE))
+                        .size(11.0)
+                        .color(if clippy_running {
+                            egui::Color32::from_rgb(180, 180, 180)
+                        } else {
+                            egui::Color32::from_rgb(150, 200, 120)
+                        }),
+                ));
+                if clippy_btn.clicked() {
+                    self.build_tab = BuildPanelTab::Clippy;
+                }
+                clippy_btn
+                    .on_hover_text("Open the Clippy tab (code-improvement suggestions)");
+
+                ui.add_space(4.0);
+
                 // ── Build button ──────────────────────────────────────
                 let build_guard = self.build_state.lock().unwrap();
                 let is_building = build_guard.is_building();
@@ -126,7 +145,10 @@ impl AppIde {
                     ui.label(egui::RichText::new(badge).size(11.0).color(color));
                 }
 
-                let build_enabled = !is_building && project_files.is_some();
+                // Serialized with Clippy: don't allow a Build while clippy runs
+                // (they share the same target/ directory).
+                let clippy_running = self.clippy_state.lock().unwrap().is_building();
+                let build_enabled = !is_building && !clippy_running && project_files.is_some();
                 let build_btn = ui.add_enabled(
                     build_enabled,
                     egui::Button::new(egui::RichText::new(&build_label).size(11.0).color(

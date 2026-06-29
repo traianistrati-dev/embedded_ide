@@ -18,7 +18,14 @@ impl AppIde {
     /// Returns the panel's top Y (= the bottom edge of the editor region above
     /// it), or `None` when the panel isn't shown — used to clip the inline
     /// diagnostic overlay so it can't bleed into this panel.
-    pub(super) fn show_editor_diag_panel(&mut self, ui: &mut egui::Ui) -> Option<f32> {
+    /// `source_rewritten` is set to `true` when a Clippy "Fix" / "Apply all"
+    /// applied edits to a source buffer (`generated_code` or a user file), so the
+    /// caller can refresh its editor working-copy and avoid reverting them.
+    pub(super) fn show_editor_diag_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        source_rewritten: &mut bool,
+    ) -> Option<f32> {
         let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
         let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
         let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)
@@ -29,8 +36,15 @@ impl AppIde {
         // stays available while a port is connected.
         let serial_active =
             self.build_tab == BuildPanelTab::Serial || self.serial.is_connected();
-        let show_panel =
-            cargo_has || lsp_active || dfu_active || serial_active || self.definition_view.is_some();
+        // The Clippy tab stays available while selected or while a run is going.
+        let clippy_active = self.build_tab == BuildPanelTab::Clippy
+            || matches!(*self.clippy_state.lock().unwrap(), BuildState::Building);
+        let show_panel = cargo_has
+            || lsp_active
+            || dfu_active
+            || serial_active
+            || clippy_active
+            || self.definition_view.is_some();
 
         if !show_panel {
             return None;
@@ -48,6 +62,11 @@ impl AppIde {
         let mut def_close = false;
         // Diagnostic-row click navigation: (rel_path, 1-based line, band colour).
         let mut nav: Option<(String, usize, egui::Color32)> = None;
+        // Set by the Clippy tab's "Run clippy" button.
+        let mut clippy_run = false;
+        // Set by the Clippy tab's per-row "Fix" / "Apply all" buttons.
+        let mut clippy_apply_one: Option<usize> = None;
+        let mut clippy_apply_all = false;
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
@@ -112,6 +131,11 @@ impl AppIde {
                         &mut self.espflash_port,
                         &self.tools_state,
                         &mut self.serial,
+                        &self.clippy_state,
+                        &mut self.clippy_sel,
+                        &mut clippy_run,
+                        &mut clippy_apply_one,
+                        &mut clippy_apply_all,
                         &toolchain,
                         &mut self.build_tab,
                         &mut self.selected_diagnostic,
@@ -122,6 +146,44 @@ impl AppIde {
                         &mut self.def_scroll_pending,
                     );
                 });
+        // "Run clippy" was clicked: write the project to the workspace and start
+        // `cargo clippy` on a worker thread (serialized with Build).
+        if clippy_run {
+            self.start_clippy_run();
+        }
+
+        // "Fix" / "Apply all" was clicked: collect the relevant machine-applicable
+        // span edits from the current clippy results and splice them into the
+        // in-memory source.
+        if clippy_apply_all || clippy_apply_one.is_some() {
+            let edits: Vec<crate::build::SpanEdit> = {
+                let cs = self.clippy_state.lock().unwrap();
+                match &*cs {
+                    BuildState::Done(r) if clippy_apply_all => {
+                        r.diagnostics.iter().flat_map(|d| d.fixes.clone()).collect()
+                    }
+                    BuildState::Done(r) => clippy_apply_one
+                        .and_then(|i| r.diagnostics.get(i))
+                        .map(|d| d.fixes.clone())
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                }
+            };
+            if !edits.is_empty() && self.apply_source_edits(&edits) > 0 {
+                // Tell the editor to refresh its working copy from the rewritten
+                // source, otherwise its stale clone is written back and reverts us.
+                *source_rewritten = true;
+                // The applied edits shift every later byte offset, so the current
+                // results are now stale. Re-run clippy automatically so the list
+                // refreshes with valid offsets (no need to press "Run clippy"
+                // again). If a run can't be started, just clear the stale list.
+                if !self.start_clippy_run() {
+                    *self.clippy_state.lock().unwrap() = BuildState::Idle;
+                    self.clippy_sel = None;
+                }
+            }
+        }
+
         // Closing the Definition tab clears the snippet and switches away.
         if def_close {
             self.definition_view = None;
@@ -141,5 +203,34 @@ impl AppIde {
             }
         }
         Some(panel.response.rect.top())
+    }
+
+    /// Write the current project to the temp workspace and start `cargo clippy`
+    /// on a worker thread. Returns `false` when there's no buildable chip config
+    /// or the workspace write failed (so the caller can fall back). Clears the
+    /// selected-row index since fresh results invalidate it.
+    fn start_clippy_run(&mut self) -> bool {
+        let Some((project, _tc)) = self.selected_build_cfg() else {
+            return false;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        if crate::panels::mcu_module::project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+        )
+        .is_err()
+        {
+            return false;
+        }
+        self.clippy_sel = None;
+        crate::build::start_clippy(
+            build_dir,
+            project.target.clone(),
+            std::sync::Arc::clone(&self.clippy_state),
+            self.egui_ctx.clone(),
+        );
+        true
     }
 }

@@ -1,0 +1,300 @@
+//! Clippy tab — runs `cargo clippy` on demand and lists its improvement
+//! suggestions. Each row is clickable (→ navigate to the code) and, when clippy
+//! offers a machine-applicable fix, carries a "Fix" button; an "Apply all"
+//! button applies every fix at once. Serialized with Build (the "Run clippy"
+//! button is disabled while a Cargo Check build runs, and vice-versa).
+
+use crate::build::BuildState;
+use eframe::egui;
+use egui_phosphor::regular as ph;
+use std::sync::{Arc, Mutex};
+
+/// Out-params: `run_clicked` = press "Run clippy"; `apply_one` = apply the
+/// suggestion on diagnostic index N; `apply_all` = apply every suggestion. The
+/// caller (`diag_embed`) performs the run / edits. `build_busy` greys the run
+/// button while a Cargo Check build is going.
+#[allow(clippy::too_many_arguments)]
+pub fn show_clippy_tab(
+    ui: &mut egui::Ui,
+    clippy_state: &Arc<Mutex<BuildState>>,
+    build_busy: bool,
+    selected: &mut Option<usize>,
+    nav: &mut Option<(String, usize, egui::Color32)>,
+    run_clicked: &mut bool,
+    apply_one: &mut Option<usize>,
+    apply_all: &mut bool,
+) {
+    let state = clippy_state.lock().unwrap().clone();
+    let clippy_busy = state.is_building();
+    let any_fix = matches!(&state, BuildState::Done(r) if r.diagnostics.iter().any(|d| d.has_fix()));
+
+    // ── Control + status row ────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        let enabled = !clippy_busy && !build_busy;
+        let run = ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Run clippy", ph::SPARKLE))
+                        .size(11.0)
+                        .color(if enabled {
+                            egui::Color32::from_rgb(150, 200, 120)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                ),
+            )
+            .on_hover_text(
+                "Run `cargo clippy` for improvement suggestions.\n\
+                 Disabled while a Build (cargo check) is running.",
+            );
+        if run.clicked() {
+            *run_clicked = true;
+        }
+
+        // Apply-all — only when clippy offers machine-applicable fixes.
+        if any_fix
+            && ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{} Apply all", ph::MAGIC_WAND))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(120, 190, 230)),
+                ))
+                .on_hover_text("Apply every machine-applicable clippy suggestion.")
+                .clicked()
+        {
+            *apply_all = true;
+        }
+
+        let (icon, text, color) = match &state {
+            BuildState::Idle => (
+                ph::LIGHTBULB,
+                "Run clippy for code-improvement suggestions".to_owned(),
+                egui::Color32::GRAY,
+            ),
+            BuildState::Building => (
+                ph::HAMMER,
+                "Running clippy…".to_owned(),
+                egui::Color32::from_rgb(180, 180, 180),
+            ),
+            BuildState::Failed(msg) => {
+                let first = msg.lines().next().unwrap_or(msg);
+                let first = first.strip_prefix("[CLIPPY_MISSING] ").unwrap_or(first);
+                (
+                    ph::X_CIRCLE,
+                    format!("clippy failed: {first}"),
+                    egui::Color32::from_rgb(230, 90, 80),
+                )
+            }
+            BuildState::Done(r) if !r.diagnostics.is_empty() => (
+                ph::WARNING,
+                format!(
+                    "{} suggestion{}",
+                    r.diagnostics.len(),
+                    if r.diagnostics.len() == 1 { "" } else { "s" }
+                ),
+                egui::Color32::from_rgb(230, 190, 50),
+            ),
+            BuildState::Done(_) => (
+                ph::CHECK_CIRCLE,
+                "No suggestions — clean".to_owned(),
+                egui::Color32::from_rgb(80, 200, 100),
+            ),
+        };
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(icon).size(13.0).color(color));
+        ui.label(egui::RichText::new(text).size(12.0).color(color));
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{} Clear", ph::X))
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                ))
+                .clicked()
+            {
+                *clippy_state.lock().unwrap() = BuildState::Idle;
+                *selected = None;
+            }
+        });
+    });
+
+    let result = match &state {
+        BuildState::Failed(msg) => {
+            ui.separator();
+            let display = msg.strip_prefix("[CLIPPY_MISSING] ").unwrap_or(msg);
+            egui::ScrollArea::vertical()
+                .id_salt("clippy_failed_scroll")
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(display)
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(230, 150, 90)),
+                        )
+                        .wrap(),
+                    );
+                });
+            return;
+        }
+        BuildState::Done(r) if !r.diagnostics.is_empty() => r,
+        _ => return,
+    };
+
+    ui.separator();
+
+    // ── Suggestion list: [Fix] + colourised row (→ navigate) ────────────────────
+    // Each row mirrors the rust-analyzer tab's colour scheme: severity icon,
+    // file:line (blue), [lint] code (olive), message — painted segment by segment
+    // so each keeps its own colour. A per-row "Fix" widget sits to the left.
+    let sel = *selected;
+    let list_height = if sel.is_some() {
+        ui.available_height() * 0.45
+    } else {
+        ui.available_height()
+    };
+    egui::ScrollArea::vertical()
+        .id_salt("clippy_list")
+        .max_height(list_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for (i, diag) in result.diagnostics.iter().enumerate() {
+                let is_sel = sel == Some(i);
+                ui.horizontal(|ui| {
+                    // Fixed-width "Fix column" so the colourised text below lines
+                    // up across every row, whether or not the lint has a fix.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(52.0, 18.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            // Per-row "Fix" — only when clippy offers a
+                            // machine-applicable replacement for this lint.
+                            if diag.has_fix()
+                                && ui
+                                    .add(egui::Button::new(
+                                        egui::RichText::new(format!("{} Fix", ph::MAGIC_WAND))
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(130, 200, 140)),
+                                    ))
+                                    .on_hover_text("Apply this suggestion")
+                                    .clicked()
+                            {
+                                *apply_one = Some(i);
+                            }
+                        },
+                    );
+
+                    let (level_icon, level_color) = if diag.is_error() {
+                        (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+                    } else {
+                        (ph::WARNING, egui::Color32::from_rgb(210, 170, 40))
+                    };
+                    let location = match (diag.file.as_deref(), diag.line) {
+                        (Some(f), Some(l)) => format!("{f}:{l}"),
+                        (Some(f), None) => f.to_owned(),
+                        _ => String::new(),
+                    };
+                    let row_bg = if is_sel {
+                        egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 18.0),
+                        egui::Sense::click(),
+                    );
+                    if ui.is_rect_visible(rect) {
+                        let painter = ui.painter();
+                        painter.rect_filled(rect, 2.0, row_bg);
+                        let cy = rect.center().y;
+                        let mut x = rect.left() + 4.0;
+
+                        let r = painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            level_icon,
+                            egui::FontId::proportional(11.0),
+                            level_color,
+                        );
+                        x = r.right() + 4.0;
+
+                        if !location.is_empty() {
+                            let r = painter.text(
+                                egui::pos2(x, cy),
+                                egui::Align2::LEFT_CENTER,
+                                &location,
+                                egui::FontId::monospace(10.5),
+                                egui::Color32::from_rgb(120, 160, 200),
+                            );
+                            x = r.right() + 6.0;
+                        }
+
+                        if let Some(code) = &diag.code {
+                            let r = painter.text(
+                                egui::pos2(x, cy),
+                                egui::Align2::LEFT_CENTER,
+                                format!("[{code}]"),
+                                egui::FontId::monospace(10.0),
+                                egui::Color32::from_rgb(150, 130, 80),
+                            );
+                            x = r.right() + 6.0;
+                        }
+
+                        let msg_color = if is_sel {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(210, 210, 220)
+                        };
+                        painter.text(
+                            egui::pos2(x, cy),
+                            egui::Align2::LEFT_CENTER,
+                            &diag.message,
+                            egui::FontId::proportional(11.0),
+                            msg_color,
+                        );
+                    }
+
+                    if resp.clicked() {
+                        let now = !is_sel;
+                        *selected = if now { Some(i) } else { None };
+                        if now {
+                            if let (Some(file), Some(line)) = (&diag.file, diag.line) {
+                                let sev = if diag.is_error() {
+                                    crate::lsp::DiagSeverity::Error
+                                } else {
+                                    crate::lsp::DiagSeverity::Warning
+                                };
+                                *nav = Some((
+                                    file.clone(),
+                                    line as usize,
+                                    crate::app::diag_highlight_color(sev),
+                                ));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+    // ── Detail of the selected suggestion ───────────────────────────────────────
+    if let Some(idx) = sel {
+        if let Some(diag) = result.diagnostics.get(idx) {
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("clippy_detail")
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&diag.rendered)
+                                .size(11.0)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(220, 215, 200)),
+                        )
+                        .wrap(),
+                    );
+                });
+        }
+    }
+}

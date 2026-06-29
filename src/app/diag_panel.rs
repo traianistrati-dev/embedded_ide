@@ -3,7 +3,9 @@
 //! Orchestrator only: renders the tab-header buttons (with status badges) and
 //! dispatches to the per-tab render functions in `super::tabs`.
 
-use super::tabs::{show_cargo_tab, show_dfu_tab, show_ra_tab, show_serial_tab, show_tools_tab};
+use super::tabs::{
+    show_cargo_tab, show_clippy_tab, show_dfu_tab, show_ra_tab, show_serial_tab, show_tools_tab,
+};
 use super::BuildPanelTab;
 use crate::build::BuildState;
 use crate::dfu::{self, DfuState};
@@ -34,6 +36,14 @@ pub(super) fn show_diag_panel(
     espflash_port: &mut String,
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
     serial: &mut SerialMonitor,
+    clippy_state: &Arc<Mutex<BuildState>>,
+    clippy_sel: &mut Option<usize>,
+    // Set true when the user presses "Run clippy" (the caller starts the run).
+    clippy_run: &mut bool,
+    // Set to `Some(i)` to apply diagnostic `i`'s fix; `clippy_apply_all` applies
+    // every machine-applicable suggestion. The caller performs the edits.
+    clippy_apply_one: &mut Option<usize>,
+    clippy_apply_all: &mut bool,
     toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
@@ -125,6 +135,43 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::RustAnalyzer;
+            }
+        }
+
+        ui.separator();
+
+        // Clippy tab button
+        {
+            let active = *tab == BuildPanelTab::Clippy;
+            let cs = clippy_state.lock().unwrap();
+            let (badge, col) = match &*cs {
+                BuildState::Building => (" …".to_owned(), egui::Color32::GRAY),
+                BuildState::Done(r) if !r.diagnostics.is_empty() => (
+                    format!(" {} {}", r.diagnostics.len(), ph::LIGHTBULB),
+                    egui::Color32::from_rgb(210, 170, 40),
+                ),
+                BuildState::Done(_) => (
+                    format!(" {}", ph::CHECK_CIRCLE),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                BuildState::Failed(_) => (
+                    format!(" {}", ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                BuildState::Idle => (String::new(), egui::Color32::DARK_GRAY),
+            };
+            drop(cs);
+            let label = format!("{} Clippy{badge}", ph::SPARKLE);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Clippy;
             }
         }
 
@@ -296,6 +343,19 @@ pub(super) fn show_diag_panel(
         }
         BuildPanelTab::Serial => {
             show_serial_tab(ui, serial, ctx);
+        }
+        BuildPanelTab::Clippy => {
+            let build_busy = build_state.lock().unwrap().is_building();
+            show_clippy_tab(
+                ui,
+                clippy_state,
+                build_busy,
+                clippy_sel,
+                nav,
+                clippy_run,
+                clippy_apply_one,
+                clippy_apply_all,
+            );
         }
         BuildPanelTab::RequiredTools => {
             show_tools_tab(ui, tools_state, ctx);

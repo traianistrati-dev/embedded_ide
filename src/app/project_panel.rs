@@ -37,6 +37,12 @@ impl AppIde {
         ) {
             return Some((true, "Building…".to_owned(), blue));
         }
+        if matches!(
+            *self.clippy_state.lock().unwrap(),
+            crate::build::BuildState::Building
+        ) {
+            return Some((true, "Running clippy…".to_owned(), amber));
+        }
         let dfu_busy = self.dfu_state.lock().unwrap().is_busy();
         let ocd_busy = self.openocd_state.lock().unwrap().is_busy();
         let esp_busy = self.espflash_state.lock().unwrap().is_busy();

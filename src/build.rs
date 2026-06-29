@@ -19,6 +19,17 @@ use std::{
 
 // ── Diagnostic ────────────────────────────────────────────────────────────────
 
+/// A single machine-applicable source edit suggested by clippy: replace the byte
+/// range `[start, end)` of `file` with `replacement`.
+#[derive(Clone, Debug)]
+pub struct SpanEdit {
+    /// Relative path, e.g. `"src/main.rs"`.
+    pub file: String,
+    pub start: usize,
+    pub end: usize,
+    pub replacement: String,
+}
+
 /// One compiler message (error or warning).
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
@@ -34,6 +45,8 @@ pub struct Diagnostic {
     pub col: Option<u32>,
     /// Rustc error code, e.g. `"E0308"`
     pub code: Option<String>,
+    /// Machine-applicable source edits (clippy auto-fix). Empty when none.
+    pub fixes: Vec<SpanEdit>,
 }
 
 impl Diagnostic {
@@ -42,6 +55,10 @@ impl Diagnostic {
     }
     pub fn is_warning(&self) -> bool {
         self.level == "warning"
+    }
+    /// True when clippy offers an auto-applicable fix for this lint.
+    pub fn has_fix(&self) -> bool {
+        !self.fixes.is_empty()
     }
 }
 
@@ -129,7 +146,26 @@ pub fn start_build(
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let next = run_check(&project_dir, &target);
+        let next = run_cargo(&project_dir, &target, "check");
+        *state.lock().unwrap() = next;
+        ctx.request_repaint();
+    });
+}
+
+/// Marks state as `Building`, then spawns a thread running `cargo clippy` — same
+/// machinery as [`start_build`] but with clippy's extra improvement lints. Reuses
+/// [`BuildState`]/[`BuildResult`] so the results render like a Cargo Check.
+pub fn start_clippy(
+    project_dir: PathBuf,
+    target: String,
+    state: Arc<Mutex<BuildState>>,
+    ctx: eframe::egui::Context,
+) {
+    *state.lock().unwrap() = BuildState::Building;
+    ctx.request_repaint();
+
+    thread::spawn(move || {
+        let next = run_cargo(&project_dir, &target, "clippy");
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -161,8 +197,9 @@ pub fn start_clean(
 
 // ── Internal ──────────────────────────────────────────────────────────────────
 
-/// Ensure the rustup target is installed, then run `cargo check`.
-fn run_check(dir: &Path, target: &str) -> BuildState {
+/// Ensure the rustup target is installed, then run `cargo <subcommand>` (either
+/// `"check"` or `"clippy"`) and parse its JSON diagnostics.
+fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
     // ── Step 1: install target if needed ────────────────────────────────────
     // `rustup target add` is idempotent — exits 0 immediately when already
     // installed, so the overhead on subsequent builds is negligible.
@@ -174,10 +211,10 @@ fn run_check(dir: &Path, target: &str) -> BuildState {
         ));
     }
 
-    // ── Step 2: cargo check ──────────────────────────────────────────────────
+    // ── Step 2: cargo check / clippy ─────────────────────────────────────────
     let mut child = match Command::new("cargo")
         .current_dir(dir)
-        .args(["check", "--message-format=json", "--color=never"])
+        .args([subcommand, "--message-format=json", "--color=never"])
         .stdout(Stdio::piped())
         // Capture stderr so we can detect disk-full and other fatal OS errors.
         // Without this, cargo crashes silently (no build-finished JSON) and the
@@ -230,6 +267,20 @@ fn run_check(dir: &Path, target: &str) -> BuildState {
     let stderr_text = stderr_thread.join().unwrap_or_default();
 
     if !saw_build_finished {
+        // clippy not installed → cargo prints "no such command" / "not provided".
+        if subcommand == "clippy"
+            && (stderr_text.contains("no such command")
+                || stderr_text.contains("not provided")
+                || stderr_text.contains("clippy-driver")
+                || stderr_text.contains("is not installed"))
+        {
+            return BuildState::Failed(
+                "[CLIPPY_MISSING] Clippy isn't installed for this toolchain.\n\n\
+                 Install it with:\n  rustup component add clippy\n\n\
+                 Then press \"Run clippy\" again."
+                    .to_string(),
+            );
+        }
         // cargo exited without emitting build-finished — check why.
         let is_disk_full = stderr_text.contains("not enough space")
             || stderr_text.contains("There is not enough space")
@@ -294,7 +345,9 @@ fn parse_diagnostic(msg: &serde_json::Value) -> Option<Diagnostic> {
 
     let (file, line, col) = match span {
         Some(s) => (
-            s["file_name"].as_str().map(String::from),
+            // rustc reports OS-native paths (backslashes on Windows); normalise to
+            // forward slashes so `resolve_diag_file` / `apply_source_edits` match.
+            s["file_name"].as_str().map(|f| f.replace('\\', "/")),
             s["line_start"].as_u64().map(|n| n as u32),
             s["column_start"].as_u64().map(|n| n as u32),
         ),
@@ -309,5 +362,45 @@ fn parse_diagnostic(msg: &serde_json::Value) -> Option<Diagnostic> {
         line,
         col,
         code,
+        fixes: extract_fixes(msg),
     })
+}
+
+/// Collect clippy's machine-applicable source edits from a message's spans and
+/// its `children` (the "help" sub-diagnostics carry the suggestions). Only
+/// `MachineApplicable` replacements are taken — safe to auto-apply.
+fn extract_fixes(msg: &serde_json::Value) -> Vec<SpanEdit> {
+    let mut out = Vec::new();
+    let mut scan = |spans: &serde_json::Value| {
+        if let Some(arr) = spans.as_array() {
+            for s in arr {
+                let Some(repl) = s["suggested_replacement"].as_str() else {
+                    continue;
+                };
+                if s["suggestion_applicability"].as_str() != Some("MachineApplicable") {
+                    continue;
+                }
+                if let (Some(file), Some(start), Some(end)) = (
+                    s["file_name"].as_str(),
+                    s["byte_start"].as_u64(),
+                    s["byte_end"].as_u64(),
+                ) {
+                    out.push(SpanEdit {
+                        // Normalise OS-native separators (see `parse_diagnostic`).
+                        file: file.replace('\\', "/"),
+                        start: start as usize,
+                        end: end as usize,
+                        replacement: repl.to_string(),
+                    });
+                }
+            }
+        }
+    };
+    scan(&msg["spans"]);
+    if let Some(children) = msg["children"].as_array() {
+        for c in children {
+            scan(&c["spans"]);
+        }
+    }
+    out
 }

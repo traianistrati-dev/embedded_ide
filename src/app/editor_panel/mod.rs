@@ -93,7 +93,23 @@ impl AppIde {
                 // ── Diagnostics panel (bottom, manually resizable) ────
                 // Its top Y bounds the editor region below, so the inline
                 // diagnostic overlay can be clipped to what's actually visible.
-                let diag_panel_top = self.show_editor_diag_panel(ui);
+                // `source_rewritten` is set when a Clippy "Fix"/"Apply all"
+                // rewrote a source buffer in-place — we then refresh display_code
+                // (captured above, before the panel ran) so the editor shows the
+                // change and the write-back below doesn't revert it.
+                let mut source_rewritten = false;
+                let diag_panel_top = self.show_editor_diag_panel(ui, &mut source_rewritten);
+                if source_rewritten {
+                    match displayed_file {
+                        ProjectFileId::MainRs => display_code = self.generated_code.clone(),
+                        ProjectFileId::UserFile(i) => {
+                            if let Some((_, c)) = self.project_tree.user_src_files.get(i) {
+                                display_code = c.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
 
                 // Use a unique id per file so egui's TextEditState (galley,
                 // cursor, undo stack) is never shared between files.
