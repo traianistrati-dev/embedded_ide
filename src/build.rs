@@ -387,45 +387,89 @@ fn parse_diagnostic(msg: &serde_json::Value) -> Option<Diagnostic> {
     })
 }
 
-/// For naming-convention lints (`non_camel_case_types`, `non_snake_case`,
-/// `non_upper_case_globals`) rustc suggests an identifier rename (marked
-/// `MaybeIncorrect`, so `extract_fixes` skips it). Capture the identifier's
-/// location + the suggested new name so the Clippy tab can offer a project-wide
+/// Detect an identifier-rename suggestion (naming-convention lints like
+/// `non_camel_case_types`, `non_snake_case`, `non_upper_case_globals`,
+/// `clippy::upper_case_acronyms`, …) so the Clippy tab can offer a project-wide
 /// rename (RA `textDocument/rename`) instead of an unsafe single-site splice.
+///
+/// Heuristic (no hard-coded lint list, so future naming lints are covered too): a
+/// span qualifies when it is `MaybeIncorrect` (the `MachineApplicable` ones are
+/// real splices handled by `extract_fixes`) **and** both the original text and the
+/// suggested replacement are a single valid Rust identifier that differ. The
+/// original is read from the span's own `text` highlight — `foo()` → `bar` is
+/// rejected because `foo()` isn't an identifier, guarding against treating an
+/// arbitrary replacement as a rename.
 fn extract_rename(msg: &serde_json::Value) -> Option<RenameFix> {
-    let code = msg["code"]["code"].as_str()?;
-    if !matches!(
-        code,
-        "non_camel_case_types" | "non_snake_case" | "non_upper_case_globals"
-    ) {
-        return None;
-    }
-    // Primary span → the identifier to rename.
-    let spans = msg["spans"].as_array()?;
-    let span = spans
-        .iter()
-        .find(|s| s["is_primary"].as_bool() == Some(true))
-        .or_else(|| spans.first())?;
-    let file = span["file_name"].as_str()?.replace('\\', "/");
-    let line = span["line_start"].as_u64()? as u32;
-    let col = span["column_start"].as_u64()? as u32;
-    let byte = span["byte_start"].as_u64()? as usize;
-    // The suggested new name lives in a child "help" span's replacement.
-    let new_name = msg["children"].as_array()?.iter().find_map(|c| {
-        c["spans"].as_array()?.iter().find_map(|s| {
-            s["suggested_replacement"]
-                .as_str()
-                .filter(|r| !r.is_empty())
-                .map(String::from)
+    let consider = |s: &serde_json::Value| -> Option<RenameFix> {
+        let new_name = s["suggested_replacement"].as_str()?;
+        if new_name.is_empty() || !is_rust_ident(new_name) {
+            return None;
+        }
+        // MachineApplicable spans are plain splices (handled by extract_fixes).
+        if s["suggestion_applicability"].as_str() != Some("MaybeIncorrect") {
+            return None;
+        }
+        let original = span_highlighted_text(s);
+        if !is_rust_ident(&original) || original == new_name {
+            return None;
+        }
+        Some(RenameFix {
+            file: s["file_name"].as_str()?.replace('\\', "/"),
+            byte: s["byte_start"].as_u64()? as usize,
+            line: s["line_start"].as_u64()? as u32,
+            col: s["column_start"].as_u64()? as u32,
+            new_name: new_name.to_string(),
         })
-    })?;
-    Some(RenameFix {
-        file,
-        byte,
-        line,
-        col,
-        new_name,
-    })
+    };
+    // The rename suggestion lives in a child "help" span; fall back to top spans.
+    if let Some(children) = msg["children"].as_array() {
+        for c in children {
+            if let Some(arr) = c["spans"].as_array() {
+                for s in arr {
+                    if let Some(rn) = consider(s) {
+                        return Some(rn);
+                    }
+                }
+            }
+        }
+    }
+    msg["spans"].as_array()?.iter().find_map(consider)
+}
+
+/// `true` when `s` is a single valid Rust identifier (ASCII ident; rejects empty,
+/// leading digit, paths, calls, whitespace, etc.).
+fn is_rust_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The substring a diagnostic span highlights — its `text[]` entries spliced by
+/// the per-line `highlight_start`/`highlight_end` (1-based char columns). This is
+/// the original source the suggestion replaces (e.g. the identifier being
+/// renamed), recovered without reading the file.
+fn span_highlighted_text(s: &serde_json::Value) -> String {
+    let Some(lines) = s["text"].as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (i, ln) in lines.iter().enumerate() {
+        let text = ln["text"].as_str().unwrap_or("");
+        let hs = ln["highlight_start"].as_u64().unwrap_or(1) as usize;
+        let he = ln["highlight_end"].as_u64().unwrap_or(1) as usize;
+        // Columns are 1-based char indices; slice on char boundaries.
+        let chars: Vec<char> = text.chars().collect();
+        let lo = hs.saturating_sub(1).min(chars.len());
+        let hi = he.saturating_sub(1).min(chars.len()).max(lo);
+        if i > 0 {
+            out.push('\n');
+        }
+        out.extend(&chars[lo..hi]);
+    }
+    out
 }
 
 /// Collect clippy's machine-applicable source edits from a message's spans and
@@ -471,9 +515,28 @@ fn extract_fixes(msg: &serde_json::Value) -> Vec<SpanEdit> {
 mod tests {
     use super::*;
 
-    /// A `non_camel_case_types` message (as rustc emits on Windows, with
-    /// backslash paths) → a `RenameFix` with normalised path, 1-based coords and
-    /// the suggested new name.
+    /// Build a child "help" span carrying a rename suggestion: `orig` is the
+    /// indented identifier line, highlighted over the identifier itself.
+    fn rename_child(file: &str, orig_ident: &str, new_name: &str, app: &str) -> serde_json::Value {
+        let line = format!("    {orig_ident} = 0x00,");
+        let hs = 5; // 1-based column of the first ident char (after 4 spaces)
+        let he = hs + orig_ident.chars().count();
+        serde_json::json!({
+            "level": "help",
+            "message": "rename suggestion",
+            "spans": [{
+                "file_name": file,
+                "is_primary": true,
+                "line_start": 11, "column_start": 5, "byte_start": 127, "byte_end": 132,
+                "suggested_replacement": new_name,
+                "suggestion_applicability": app,
+                "text": [{ "text": line, "highlight_start": hs, "highlight_end": he }]
+            }]
+        })
+    }
+
+    /// A `non_camel_case_types` message (Windows backslash path) → a `RenameFix`
+    /// with normalised path, 1-based coords and the suggested new name.
     #[test]
     fn extract_rename_picks_up_naming_lint() {
         let msg = serde_json::json!({
@@ -483,31 +546,62 @@ mod tests {
             "spans": [{
                 "file_name": "src\\pins\\utils\\mw_radar_mmwave.rs",
                 "is_primary": true,
-                "line_start": 54, "column_start": 5, "byte_start": 1234, "byte_end": 1251,
+                "line_start": 11, "column_start": 5, "byte_start": 127, "byte_end": 132,
                 "suggested_replacement": serde_json::Value::Null
             }],
-            "children": [{
-                "level": "help",
-                "message": "convert the identifier to upper camel case",
-                "spans": [{
-                    "file_name": "src\\pins\\utils\\mw_radar_mmwave.rs",
-                    "is_primary": true,
-                    "byte_start": 1234, "byte_end": 1251,
-                    "suggested_replacement": "HoldThreshold15",
-                    "suggestion_applicability": "MaybeIncorrect"
-                }]
-            }]
+            "children": [rename_child(
+                "src\\pins\\utils\\mw_radar_mmwave.rs",
+                "HOLD_THRESHOLD_15",
+                "HoldThreshold15",
+                "MaybeIncorrect",
+            )]
         });
         let rn = extract_rename(&msg).expect("naming lint yields a rename");
         assert_eq!(rn.file, "src/pins/utils/mw_radar_mmwave.rs");
-        assert_eq!((rn.line, rn.col), (54, 5));
-        assert_eq!(rn.byte, 1234);
+        assert_eq!((rn.line, rn.col), (11, 5));
+        assert_eq!(rn.byte, 127);
         assert_eq!(rn.new_name, "HoldThreshold15");
         // It is NOT a machine-applicable splice (MaybeIncorrect), so no SpanEdit.
         assert!(extract_fixes(&msg).is_empty());
     }
 
-    /// A non-naming lint never produces a rename.
+    /// The heuristic also catches `clippy::upper_case_acronyms` (DELAY → Delay)
+    /// without any hard-coded lint list.
+    #[test]
+    fn extract_rename_catches_upper_case_acronyms() {
+        let msg = serde_json::json!({
+            "level": "warning",
+            "message": "name `DELAY` contains a capitalized acronym",
+            "code": { "code": "clippy::upper_case_acronyms" },
+            "spans": [{ "file_name": "src/foo.rs", "is_primary": true,
+                        "line_start": 11, "column_start": 5, "byte_start": 127, "byte_end": 132,
+                        "suggested_replacement": serde_json::Value::Null }],
+            "children": [rename_child("src/foo.rs", "DELAY", "Delay", "MaybeIncorrect")]
+        });
+        let rn = extract_rename(&msg).expect("acronym lint yields a rename");
+        assert_eq!(rn.new_name, "Delay");
+        assert_eq!(rn.file, "src/foo.rs");
+    }
+
+    /// Guard: a `MaybeIncorrect` suggestion whose original text isn't a bare
+    /// identifier (e.g. `foo()` → `bar`) must NOT be treated as a rename.
+    #[test]
+    fn extract_rename_rejects_non_identifier_original() {
+        let mut child = rename_child("src/foo.rs", "x", "bar", "MaybeIncorrect");
+        // Overwrite the highlighted original to `foo()` (a call, not an ident).
+        child["spans"][0]["text"][0]["text"] = serde_json::json!("    foo() ;");
+        child["spans"][0]["text"][0]["highlight_start"] = serde_json::json!(5);
+        child["spans"][0]["text"][0]["highlight_end"] = serde_json::json!(10);
+        let msg = serde_json::json!({
+            "level": "warning",
+            "code": { "code": "clippy::some_lint" },
+            "spans": [],
+            "children": [child]
+        });
+        assert!(extract_rename(&msg).is_none());
+    }
+
+    /// A non-naming lint (unused_imports) never produces a rename.
     #[test]
     fn extract_rename_ignores_other_lints() {
         let msg = serde_json::json!({
