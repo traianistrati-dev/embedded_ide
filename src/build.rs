@@ -30,6 +30,24 @@ pub struct SpanEdit {
     pub replacement: String,
 }
 
+/// An identifier-rename suggestion (naming-convention lints like
+/// `non_camel_case_types`). rustc marks these `MaybeIncorrect` for a plain splice
+/// because only renaming *every* reference is correct — so the Clippy tab applies
+/// it via rust-analyzer's project-wide rename (`textDocument/rename`), the same
+/// path as Ctrl+R, rather than a raw byte splice.
+#[derive(Clone, Debug)]
+pub struct RenameFix {
+    /// Relative path of the identifier's definition, e.g. `"src/pins/foo.rs"`.
+    pub file: String,
+    /// Byte offset of the identifier (for the GENERATED-block lock check).
+    pub byte: usize,
+    /// 1-based line / column of the identifier (rustc coords; LSP wants -1).
+    pub line: u32,
+    pub col: u32,
+    /// The suggested new name, e.g. `"HoldThreshold15"`.
+    pub new_name: String,
+}
+
 /// One compiler message (error or warning).
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
@@ -47,6 +65,8 @@ pub struct Diagnostic {
     pub code: Option<String>,
     /// Machine-applicable source edits (clippy auto-fix). Empty when none.
     pub fixes: Vec<SpanEdit>,
+    /// A project-wide rename suggestion (naming-convention lint), applied via RA.
+    pub rename: Option<RenameFix>,
 }
 
 impl Diagnostic {
@@ -56,7 +76,7 @@ impl Diagnostic {
     pub fn is_warning(&self) -> bool {
         self.level == "warning"
     }
-    /// True when clippy offers an auto-applicable fix for this lint.
+    /// True when clippy offers a machine-applicable (raw-splice) fix for this lint.
     pub fn has_fix(&self) -> bool {
         !self.fixes.is_empty()
     }
@@ -363,6 +383,48 @@ fn parse_diagnostic(msg: &serde_json::Value) -> Option<Diagnostic> {
         col,
         code,
         fixes: extract_fixes(msg),
+        rename: extract_rename(msg),
+    })
+}
+
+/// For naming-convention lints (`non_camel_case_types`, `non_snake_case`,
+/// `non_upper_case_globals`) rustc suggests an identifier rename (marked
+/// `MaybeIncorrect`, so `extract_fixes` skips it). Capture the identifier's
+/// location + the suggested new name so the Clippy tab can offer a project-wide
+/// rename (RA `textDocument/rename`) instead of an unsafe single-site splice.
+fn extract_rename(msg: &serde_json::Value) -> Option<RenameFix> {
+    let code = msg["code"]["code"].as_str()?;
+    if !matches!(
+        code,
+        "non_camel_case_types" | "non_snake_case" | "non_upper_case_globals"
+    ) {
+        return None;
+    }
+    // Primary span → the identifier to rename.
+    let spans = msg["spans"].as_array()?;
+    let span = spans
+        .iter()
+        .find(|s| s["is_primary"].as_bool() == Some(true))
+        .or_else(|| spans.first())?;
+    let file = span["file_name"].as_str()?.replace('\\', "/");
+    let line = span["line_start"].as_u64()? as u32;
+    let col = span["column_start"].as_u64()? as u32;
+    let byte = span["byte_start"].as_u64()? as usize;
+    // The suggested new name lives in a child "help" span's replacement.
+    let new_name = msg["children"].as_array()?.iter().find_map(|c| {
+        c["spans"].as_array()?.iter().find_map(|s| {
+            s["suggested_replacement"]
+                .as_str()
+                .filter(|r| !r.is_empty())
+                .map(String::from)
+        })
+    })?;
+    Some(RenameFix {
+        file,
+        byte,
+        line,
+        col,
+        new_name,
     })
 }
 
@@ -403,4 +465,58 @@ fn extract_fixes(msg: &serde_json::Value) -> Vec<SpanEdit> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `non_camel_case_types` message (as rustc emits on Windows, with
+    /// backslash paths) → a `RenameFix` with normalised path, 1-based coords and
+    /// the suggested new name.
+    #[test]
+    fn extract_rename_picks_up_naming_lint() {
+        let msg = serde_json::json!({
+            "level": "warning",
+            "message": "variant `HOLD_THRESHOLD_15` should have an upper camel case name",
+            "code": { "code": "non_camel_case_types" },
+            "spans": [{
+                "file_name": "src\\pins\\utils\\mw_radar_mmwave.rs",
+                "is_primary": true,
+                "line_start": 54, "column_start": 5, "byte_start": 1234, "byte_end": 1251,
+                "suggested_replacement": serde_json::Value::Null
+            }],
+            "children": [{
+                "level": "help",
+                "message": "convert the identifier to upper camel case",
+                "spans": [{
+                    "file_name": "src\\pins\\utils\\mw_radar_mmwave.rs",
+                    "is_primary": true,
+                    "byte_start": 1234, "byte_end": 1251,
+                    "suggested_replacement": "HoldThreshold15",
+                    "suggestion_applicability": "MaybeIncorrect"
+                }]
+            }]
+        });
+        let rn = extract_rename(&msg).expect("naming lint yields a rename");
+        assert_eq!(rn.file, "src/pins/utils/mw_radar_mmwave.rs");
+        assert_eq!((rn.line, rn.col), (54, 5));
+        assert_eq!(rn.byte, 1234);
+        assert_eq!(rn.new_name, "HoldThreshold15");
+        // It is NOT a machine-applicable splice (MaybeIncorrect), so no SpanEdit.
+        assert!(extract_fixes(&msg).is_empty());
+    }
+
+    /// A non-naming lint never produces a rename.
+    #[test]
+    fn extract_rename_ignores_other_lints() {
+        let msg = serde_json::json!({
+            "level": "warning",
+            "code": { "code": "unused_imports" },
+            "spans": [{ "file_name": "src/main.rs", "is_primary": true,
+                        "line_start": 1, "column_start": 1, "byte_start": 0, "byte_end": 5 }],
+            "children": []
+        });
+        assert!(extract_rename(&msg).is_none());
+    }
 }

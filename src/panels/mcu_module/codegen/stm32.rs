@@ -215,12 +215,12 @@ pub fn make_generated_section(
 
     // ── HAL use block ────────────────────────────────────────────────────────
     let mut use_items: Vec<String> = vec!["pac".into(), "prelude::*".into()];
-    if has_periph_fns || needs_afio {
-        if needs_afio {
-            use_items.push("afio".into());
-        }
-        use_items.push("rcc::Clocks".into());
-    }
+    // if has_periph_fns || needs_afio {
+    //     if needs_afio {
+    //         use_items.push("afio".into());
+    //     }
+    //     use_items.push("rcc::Clocks".into());
+    // }
     if has_serial {
         // use_items.push("serial::{self, Config, Serial}".into());
     }
@@ -465,7 +465,9 @@ pub fn make_generated_section(
         let vid = cfg.map(|c| c.vid).unwrap_or(0x16c0);
         let pid = cfg.map(|c| c.pid).unwrap_or(0x27dd);
         let product = cfg.map(|c| c.product.as_str()).unwrap_or("Serial port");
-        let sfx = cfg.map(|c| module_label_sfx(&c.custom_label)).unwrap_or_default();
+        let sfx = cfg
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
         fn_calls.push_str(&format!(
             "    // ── USB (CDC ACM serial) ──\n\
              // Needs the `usb-device` + `usbd-serial` crates and the HAL `stm32-usbd`\n\
@@ -504,7 +506,7 @@ pub fn make_generated_section(
         .join("\n");
 
     let afio_line = if needs_afio {
-        "    let mut afio = dp.AFIO.constrain();\n"
+        "let mut afio = dp.AFIO.constrain();\n"
     } else {
         ""
     };

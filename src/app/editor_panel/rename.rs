@@ -123,7 +123,7 @@ impl AppIde {
 
     /// Current in-memory content of a workspace-relative file (`src/main.rs` or a
     /// user source file under `src/`).
-    fn file_content_for(&self, rel: &str) -> String {
+    pub(super) fn file_content_for(&self, rel: &str) -> String {
         if rel == "src/main.rs" {
             self.generated_code.clone()
         } else if let Some(sub) = rel.strip_prefix("src/") {

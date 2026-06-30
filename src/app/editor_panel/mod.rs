@@ -685,7 +685,13 @@ impl AppIde {
         let Some(range) = editor_resp.state.cursor.char_range() else {
             return;
         };
-        let primary = range.primary.index;
+        // Clamp to the galley: a stale cursor (e.g. left past the end of a file
+        // that just shrank from a Clippy "Fix") would otherwise make
+        // `pos_from_cursor` index out of bounds and panic.
+        let primary = range
+            .primary
+            .index
+            .min(editor_resp.galley.text().chars().count());
         // Only follow when the caret moved (typing / arrows / selection), so the
         // user can still freely scroll the wheel while the caret sits off-screen.
         let moved = self.last_caret_idx != Some(primary);

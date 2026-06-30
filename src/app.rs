@@ -132,6 +132,68 @@ pub fn resolve_diag_file(path: &str, user_files: &[(String, String)]) -> Option<
     }
 }
 
+/// Byte ranges of main.rs's GENERATED blocks (`GEN_BEGIN` marker → end of the
+/// `GEN_END` marker line). The code inside is owned by the MCU Configurator and
+/// regenerated on config changes, so a Clippy auto-fix landing there must be
+/// blocked (it would be reverted). A fix span `[s, e)` is "locked" when it
+/// overlaps any returned range: `s < range.1 && e > range.0`.
+pub fn generated_byte_ranges(code: &str) -> Vec<(usize, usize)> {
+    use crate::panels::mcu_module::codegen::common::{GEN_BEGIN, GEN_END};
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(rel_b) = code[from..].find(GEN_BEGIN) {
+        let b = from + rel_b;
+        let after_begin = b + GEN_BEGIN.len();
+        match code[after_begin..].find(GEN_END) {
+            Some(rel_e) => {
+                let end = after_begin + rel_e + GEN_END.len();
+                ranges.push((b, end));
+                from = end;
+            }
+            None => {
+                // Unterminated block — lock to end of file.
+                ranges.push((b, code.len()));
+                break;
+            }
+        }
+    }
+    ranges
+}
+
+/// Splice `edits` into `buf` (one file's content), largest-offset first so that
+/// earlier byte offsets stay valid as the text changes. An edit is skipped when
+/// its span is reversed, out of bounds, off a UTF-8 char boundary, overlaps an
+/// already-applied edit, or overlaps any `locked` byte range (main.rs's
+/// GENERATED block). Returns how many edits were applied.
+pub fn apply_edits_to_buffer(
+    buf: &mut String,
+    edits: &[&crate::build::SpanEdit],
+    locked: &[(usize, usize)],
+) -> usize {
+    let mut sorted: Vec<&crate::build::SpanEdit> = edits.to_vec();
+    sorted.sort_by(|a, b| b.start.cmp(&a.start));
+    let mut applied = 0usize;
+    let mut last_start = buf.len() + 1;
+    for e in sorted {
+        if e.start > e.end || e.end > buf.len() {
+            continue;
+        }
+        if e.end > last_start {
+            continue; // overlaps an already-applied (later) edit
+        }
+        if !buf.is_char_boundary(e.start) || !buf.is_char_boundary(e.end) {
+            continue;
+        }
+        if locked.iter().any(|&(b, end)| e.start < end && e.end > b) {
+            continue; // inside the GENERATED block — never edit
+        }
+        buf.replace_range(e.start..e.end, &e.replacement);
+        last_start = e.start;
+        applied += 1;
+    }
+    applied
+}
+
 // ── Tab bar ──────────────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -425,6 +487,9 @@ pub struct AppIde {
     rename_popup_pos: egui::Pos2,
     /// `true` after a rename request was sent, until RA's edits are applied.
     rename_in_flight: bool,
+    /// `true` when the in-flight rename came from a Clippy "Rename" button — once
+    /// RA's edits land, clippy is re-run so its (now-stale) list refreshes.
+    clippy_rename_pending: bool,
     /// Request keyboard focus for the rename input on the frame it opens.
     rename_focus: bool,
     // ── Find / Replace (Ctrl+F / Ctrl+H / Ctrl+Shift+F / Ctrl+Shift+H) ───────
@@ -642,6 +707,7 @@ impl AppIde {
             rename_char: 0,
             rename_popup_pos: egui::Pos2::ZERO,
             rename_in_flight: false,
+            clippy_rename_pending: false,
             rename_focus: false,
             find: editor_panel::find_replace::FindReplace::default(),
             editor_font_size: editor_panel::DEFAULT_EDITOR_FONT_SIZE,
@@ -771,19 +837,23 @@ impl AppIde {
     /// targets the generated buffer; `src/<rel>` targets the matching user source
     /// file. Returns how many edits were applied.
     ///
-    /// Note: a fix inside main.rs's GENERATED block survives until the MCU config
-    /// changes (which regenerates that block) — clippy fixes almost always land in
-    /// user code, so this is an accepted limitation.
+    /// Edits inside main.rs's GENERATED block are **never** applied: that code is
+    /// owned by the MCU Configurator and regenerated on the next config change, so
+    /// a hand-applied fix there would be silently reverted (and editing it while
+    /// the editor shows it risks a cursor/offset mismatch). The Clippy tab also
+    /// disables the "Fix" button for those rows — this is the matching guard.
     fn apply_source_edits(&mut self, edits: &[crate::build::SpanEdit]) -> usize {
         use std::collections::HashMap;
+        let gen_ranges = generated_byte_ranges(&self.generated_code);
         let mut by_file: HashMap<&str, Vec<&crate::build::SpanEdit>> = HashMap::new();
         for e in edits {
             by_file.entry(e.file.as_str()).or_default().push(e);
         }
         let mut applied = 0usize;
-        for (file, mut group) in by_file {
+        for (file, group) in by_file {
             let rel = file.strip_prefix("src/").unwrap_or(file);
-            let target: Option<&mut String> = if rel == "main.rs" {
+            let is_main = rel == "main.rs";
+            let target: Option<&mut String> = if is_main {
                 Some(&mut self.generated_code)
             } else {
                 self.project_tree
@@ -793,24 +863,9 @@ impl AppIde {
                     .map(|(_, c)| c)
             };
             let Some(buf) = target else { continue };
-            // Apply largest-offset edit first; track the start of the last applied
-            // edit so a later (smaller-offset) one that overlaps it is skipped.
-            group.sort_by(|a, b| b.start.cmp(&a.start));
-            let mut last_start = buf.len() + 1;
-            for e in group {
-                if e.start > e.end || e.end > buf.len() {
-                    continue;
-                }
-                if e.end > last_start {
-                    continue; // overlaps an already-applied edit
-                }
-                if !buf.is_char_boundary(e.start) || !buf.is_char_boundary(e.end) {
-                    continue;
-                }
-                buf.replace_range(e.start..e.end, &e.replacement);
-                last_start = e.start;
-                applied += 1;
-            }
+            // main.rs's GENERATED block is off-limits; user files have no lock.
+            let locked: &[(usize, usize)] = if is_main { &gen_ranges } else { &[] };
+            applied += apply_edits_to_buffer(buf, &group, locked);
         }
         if applied > 0 {
             self.invalidate_project_files_cache();
@@ -975,6 +1030,12 @@ impl AppIde {
                 self.rename_in_flight = false;
                 if !edits.is_empty() {
                     self.apply_rename_edits(edits);
+                }
+                // A rename triggered from the Clippy tab: now that the cross-file
+                // edits are in, re-run clippy so its list reflects the new code.
+                if self.clippy_rename_pending {
+                    self.clippy_rename_pending = false;
+                    self.start_clippy_run();
                 }
                 self.egui_ctx.request_repaint();
             }
@@ -1324,5 +1385,84 @@ mod rename_apply_tests {
         assert_eq!(short_path(r"C:\x\proj\src\main.rs"), "proj/src/main.rs");
         // No `/src/` → bare file name.
         assert_eq!(short_path("/home/u/.cargo/esp-hal/lib.rs"), "lib.rs");
+    }
+
+    #[test]
+    fn generated_byte_ranges_finds_blocks_and_locks_fixes() {
+        use super::generated_byte_ranges;
+        use crate::panels::mcu_module::codegen::common::{GEN_BEGIN, GEN_END};
+
+        let code = format!("use foo;\n{GEN_BEGIN}\nlet x = 1;\n{GEN_END}\nloop {{}}\n");
+        let ranges = generated_byte_ranges(&code);
+        assert_eq!(ranges.len(), 1, "one generated block");
+        let (b, e) = ranges[0];
+        // The block spans from GEN_BEGIN to the end of the GEN_END marker.
+        assert_eq!(&code[b..b + GEN_BEGIN.len()], GEN_BEGIN);
+        assert_eq!(&code[e - GEN_END.len()..e], GEN_END);
+
+        // A fix on `let x = 1;` (inside the block) is locked; one on `use foo;`
+        // (before it) and `loop {}` (after it) is not.
+        let inside = code.find("let x").unwrap();
+        let before = code.find("use foo").unwrap();
+        let after = code.find("loop").unwrap();
+        let overlaps = |s: usize, end: usize| ranges.iter().any(|&(b, e)| s < e && end > b);
+        assert!(overlaps(inside, inside + 5));
+        assert!(!overlaps(before, before + 3));
+        assert!(!overlaps(after, after + 4));
+    }
+
+    #[test]
+    fn generated_byte_ranges_handles_none_and_multiple() {
+        use super::generated_byte_ranges;
+        use crate::panels::mcu_module::codegen::common::{GEN_BEGIN, GEN_END};
+
+        assert!(generated_byte_ranges("no markers here").is_empty());
+        let two = format!("{GEN_BEGIN}\na\n{GEN_END}\nmid\n{GEN_BEGIN}\nb\n{GEN_END}\n");
+        assert_eq!(generated_byte_ranges(&two).len(), 2);
+    }
+
+    fn span_edit(start: usize, end: usize, repl: &str) -> crate::build::SpanEdit {
+        crate::build::SpanEdit {
+            file: "src/main.rs".into(),
+            start,
+            end,
+            replacement: repl.into(),
+        }
+    }
+
+    #[test]
+    fn apply_edits_to_buffer_applies_all_unlocked_back_to_front() {
+        use super::apply_edits_to_buffer;
+        // Two unused imports on consecutive lines (Apply-all collects both).
+        let mut buf = "use a;\nuse b;\nfn main() {}".to_string();
+        let edits = [span_edit(0, 7, ""), span_edit(7, 14, "")]; // remove each "use …;\n"
+        let refs: Vec<&_> = edits.iter().collect();
+        let n = apply_edits_to_buffer(&mut buf, &refs, &[]);
+        assert_eq!(n, 2);
+        assert_eq!(buf, "fn main() {}");
+    }
+
+    #[test]
+    fn apply_edits_to_buffer_skips_locked_applies_rest() {
+        use super::apply_edits_to_buffer;
+        // "AAAA BBBB CCCC": remove AAAA (locked) + BBBB (free). Only BBBB goes.
+        let mut buf = "AAAA BBBB CCCC".to_string();
+        let edits = [span_edit(0, 4, ""), span_edit(5, 9, "")];
+        let refs: Vec<&_> = edits.iter().collect();
+        let n = apply_edits_to_buffer(&mut buf, &refs, &[(0, 4)]);
+        assert_eq!(n, 1, "the locked AAAA edit is skipped");
+        assert_eq!(buf, "AAAA  CCCC");
+    }
+
+    #[test]
+    fn apply_edits_to_buffer_dedups_overlapping() {
+        use super::apply_edits_to_buffer;
+        let mut buf = "hello world".to_string();
+        // Two edits over the same span (duplicate suggestion) → applied once.
+        let edits = [span_edit(0, 5, "hi"), span_edit(0, 5, "hi")];
+        let refs: Vec<&_> = edits.iter().collect();
+        let n = apply_edits_to_buffer(&mut buf, &refs, &[]);
+        assert_eq!(n, 1);
+        assert_eq!(buf, "hi world");
     }
 }

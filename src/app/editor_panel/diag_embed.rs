@@ -64,9 +64,13 @@ impl AppIde {
         let mut nav: Option<(String, usize, egui::Color32)> = None;
         // Set by the Clippy tab's "Run clippy" button.
         let mut clippy_run = false;
-        // Set by the Clippy tab's per-row "Fix" / "Apply all" buttons.
+        // Set by the Clippy tab's per-row "Fix" / "Apply all" / "Rename" buttons.
         let mut clippy_apply_one: Option<usize> = None;
         let mut clippy_apply_all = false;
+        let mut clippy_apply_rename: Option<usize> = None;
+        // Byte ranges of main.rs's GENERATED block — the Clippy tab disables "Fix"
+        // for suggestions whose edit lands inside (owned by the MCU Configurator).
+        let clippy_gen_ranges = crate::app::generated_byte_ranges(&self.generated_code);
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
@@ -136,6 +140,8 @@ impl AppIde {
                         &mut clippy_run,
                         &mut clippy_apply_one,
                         &mut clippy_apply_all,
+                        &mut clippy_apply_rename,
+                        &clippy_gen_ranges,
                         &toolchain,
                         &mut self.build_tab,
                         &mut self.selected_diagnostic,
@@ -184,6 +190,42 @@ impl AppIde {
             }
         }
 
+        // "Rename" was clicked on a naming-convention lint: drive rust-analyzer's
+        // project-wide rename (same path as Ctrl+R), so every reference is updated.
+        if let Some(idx) = clippy_apply_rename {
+            let rename = {
+                let cs = self.clippy_state.lock().unwrap();
+                match &*cs {
+                    BuildState::Done(r) => r.diagnostics.get(idx).and_then(|d| d.rename.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(rn) = rename {
+                // Sync the file holding the symbol to RA, then request the rename.
+                // The cross-file edits land in `init_frame::apply_rename_edits`.
+                let content = self.file_content_for(&rn.file);
+                {
+                    let mut lsp = self.lsp_state.lock().unwrap();
+                    lsp.did_change(&rn.file, &content, false);
+                    // rustc coords are 1-based; LSP wants 0-based.
+                    lsp.request_rename(
+                        &rn.file,
+                        rn.line.saturating_sub(1),
+                        rn.col.saturating_sub(1),
+                        &rn.new_name,
+                    );
+                }
+                self.rename_in_flight = true;
+                // Re-run clippy once the rename has been applied (the rename shifts
+                // offsets across files, invalidating the current results).
+                self.clippy_rename_pending = true;
+                // Clear the now-stale list so no further Fix uses bad offsets.
+                *self.clippy_state.lock().unwrap() = BuildState::Idle;
+                self.clippy_sel = None;
+                self.egui_ctx.request_repaint();
+            }
+        }
+
         // Closing the Definition tab clears the snippet and switches away.
         if def_close {
             self.definition_view = None;
@@ -209,7 +251,7 @@ impl AppIde {
     /// on a worker thread. Returns `false` when there's no buildable chip config
     /// or the workspace write failed (so the caller can fall back). Clears the
     /// selected-row index since fresh results invalidate it.
-    fn start_clippy_run(&mut self) -> bool {
+    pub(crate) fn start_clippy_run(&mut self) -> bool {
         let Some((project, _tc)) = self.selected_build_cfg() else {
             return false;
         };

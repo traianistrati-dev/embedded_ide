@@ -57,8 +57,11 @@ impl AppIde {
         // Apply accepted completion: replace [word_start..cursor] with insert_text
         if let Some(insert_text) = lsp_accepted {
             if let Some(cur_idx) = cursor_char_idx {
-                let word_start = lsp_word_start(&display_code, cur_idx);
                 let chars: Vec<char> = display_code.chars().collect();
+                // Clamp against a stale cursor (text may have shrunk since the
+                // cursor was recorded) so the slices below can't panic.
+                let cur_idx = cur_idx.min(chars.len());
+                let word_start = lsp_word_start(&display_code, cur_idx).min(cur_idx);
                 let before: String = chars[..word_start].iter().collect();
                 let after: String = chars[cur_idx..].iter().collect();
                 display_code = format!("{}{}{}", before, insert_text, after);

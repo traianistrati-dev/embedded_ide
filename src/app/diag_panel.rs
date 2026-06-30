@@ -44,6 +44,10 @@ pub(super) fn show_diag_panel(
     // every machine-applicable suggestion. The caller performs the edits.
     clippy_apply_one: &mut Option<usize>,
     clippy_apply_all: &mut bool,
+    // Set to `Some(i)` to project-wide-rename diagnostic `i`'s symbol (RA rename).
+    clippy_apply_rename: &mut Option<usize>,
+    // Byte ranges of main.rs's GENERATED block — "Fix" is disabled for fixes there.
+    clippy_gen_ranges: &[(usize, usize)],
     toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
     cargo_sel: &mut Option<usize>,
@@ -355,6 +359,8 @@ pub(super) fn show_diag_panel(
                 clippy_run,
                 clippy_apply_one,
                 clippy_apply_all,
+                clippy_apply_rename,
+                clippy_gen_ranges,
             );
         }
         BuildPanelTab::RequiredTools => {

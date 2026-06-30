@@ -9,6 +9,14 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
 
+/// True when a fix span `[start, end)` in `file` lands inside main.rs's GENERATED
+/// block (`gen_ranges`) — that code is owned by the MCU Configurator, so the fix
+/// can't be applied (it would be reverted) and its button is disabled.
+fn fix_locked(file: &str, start: usize, end: usize, gen_ranges: &[(usize, usize)]) -> bool {
+    let rel = file.strip_prefix("src/").unwrap_or(file);
+    rel == "main.rs" && gen_ranges.iter().any(|&(b, e)| start < e && end > b)
+}
+
 /// Out-params: `run_clicked` = press "Run clippy"; `apply_one` = apply the
 /// suggestion on diagnostic index N; `apply_all` = apply every suggestion. The
 /// caller (`diag_embed`) performs the run / edits. `build_busy` greys the run
@@ -23,10 +31,21 @@ pub fn show_clippy_tab(
     run_clicked: &mut bool,
     apply_one: &mut Option<usize>,
     apply_all: &mut bool,
+    // Set to `Some(i)` to project-wide-rename diagnostic `i`'s symbol (RA rename).
+    apply_rename: &mut Option<usize>,
+    // Byte ranges of main.rs's GENERATED block. A fix whose span lands inside one
+    // is "locked" — its "Fix" button is shown but disabled (the MCU Configurator
+    // owns that code and would overwrite a hand-applied fix).
+    gen_ranges: &[(usize, usize)],
 ) {
     let state = clippy_state.lock().unwrap().clone();
     let clippy_busy = state.is_building();
-    let any_fix = matches!(&state, BuildState::Done(r) if r.diagnostics.iter().any(|d| d.has_fix()));
+    // "Apply all" only counts fixes that are actually applicable — a fix inside
+    // main.rs's GENERATED block is locked and would be skipped, so it mustn't make
+    // the button appear (it would then do nothing).
+    let any_fix = matches!(&state, BuildState::Done(r) if r.diagnostics.iter().any(|d| {
+        d.fixes.iter().any(|e| !fix_locked(&e.file, e.start, e.end, gen_ranges))
+    }));
 
     // ── Control + status row ────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -163,25 +182,68 @@ pub fn show_clippy_tab(
             for (i, diag) in result.diagnostics.iter().enumerate() {
                 let is_sel = sel == Some(i);
                 ui.horizontal(|ui| {
-                    // Fixed-width "Fix column" so the colourised text below lines
-                    // up across every row, whether or not the lint has a fix.
+                    // Fixed-width action column so the colourised text below lines
+                    // up across every row. A fix is "locked" when it touches
+                    // main.rs's GENERATED block: that code is owned by the MCU
+                    // Configurator, so the button is shown but disabled (applying it
+                    // would be reverted / unsafe).
+                    let locked = diag
+                        .fixes
+                        .iter()
+                        .any(|e| fix_locked(&e.file, e.start, e.end, gen_ranges))
+                        || diag
+                            .rename
+                            .as_ref()
+                            .is_some_and(|r| fix_locked(&r.file, r.byte, r.byte + 1, gen_ranges));
                     ui.allocate_ui_with_layout(
-                        egui::vec2(52.0, 18.0),
+                        egui::vec2(64.0, 18.0),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            // Per-row "Fix" — only when clippy offers a
-                            // machine-applicable replacement for this lint.
-                            if diag.has_fix()
-                                && ui
-                                    .add(egui::Button::new(
-                                        egui::RichText::new(format!("{} Fix", ph::MAGIC_WAND))
-                                            .size(10.0)
-                                            .color(egui::Color32::from_rgb(130, 200, 140)),
-                                    ))
-                                    .on_hover_text("Apply this suggestion")
-                                    .clicked()
-                            {
-                                *apply_one = Some(i);
+                            // Machine-applicable splice → "Fix" (wand); otherwise a
+                            // naming-convention rename → "Rename" (project-wide, RA).
+                            if diag.has_fix() {
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(format!("{} Fix", ph::MAGIC_WAND))
+                                        .size(10.0)
+                                        .color(if locked {
+                                            egui::Color32::from_gray(110)
+                                        } else {
+                                            egui::Color32::from_rgb(130, 200, 140)
+                                        }),
+                                );
+                                let resp = ui.add_enabled(!locked, btn).on_hover_text(if locked {
+                                    "Autogenerated code — edit it via the MCU Configurator, \
+                                     not here"
+                                } else {
+                                    "Apply this suggestion"
+                                });
+                                if resp.clicked() {
+                                    *apply_one = Some(i);
+                                }
+                            } else if let Some(rn) = &diag.rename {
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(format!("{} Rename", ph::NOTE_PENCIL))
+                                        .size(10.0)
+                                        .color(if locked {
+                                            egui::Color32::from_gray(110)
+                                        } else {
+                                            egui::Color32::from_rgb(150, 180, 230)
+                                        }),
+                                );
+                                let tip = if locked {
+                                    "Autogenerated code — edit it via the MCU Configurator, \
+                                     not here"
+                                        .to_owned()
+                                } else {
+                                    format!(
+                                        "Rename to `{}` everywhere (project-wide, like Ctrl+R)",
+                                        rn.new_name
+                                    )
+                                };
+                                let resp = ui.add_enabled(!locked, btn).on_hover_text(tip);
+                                if resp.clicked() {
+                                    *apply_rename = Some(i);
+                                }
                             }
                         },
                     );
