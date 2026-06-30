@@ -158,31 +158,21 @@ impl AppIde {
             self.start_clippy_run();
         }
 
-        // "Fix" / "Apply all" was clicked: collect the relevant machine-applicable
-        // span edits from the current clippy results and splice them into the
-        // in-memory source.
-        if clippy_apply_all || clippy_apply_one.is_some() {
+        // Single "Fix" — splice this diagnostic's machine-applicable edits.
+        if let Some(idx) = clippy_apply_one {
             let edits: Vec<crate::build::SpanEdit> = {
                 let cs = self.clippy_state.lock().unwrap();
                 match &*cs {
-                    BuildState::Done(r) if clippy_apply_all => {
-                        r.diagnostics.iter().flat_map(|d| d.fixes.clone()).collect()
+                    BuildState::Done(r) => {
+                        r.diagnostics.get(idx).map(|d| d.fixes.clone()).unwrap_or_default()
                     }
-                    BuildState::Done(r) => clippy_apply_one
-                        .and_then(|i| r.diagnostics.get(i))
-                        .map(|d| d.fixes.clone())
-                        .unwrap_or_default(),
                     _ => Vec::new(),
                 }
             };
             if !edits.is_empty() && self.apply_source_edits(&edits) > 0 {
-                // Tell the editor to refresh its working copy from the rewritten
-                // source, otherwise its stale clone is written back and reverts us.
+                // Refresh the editor's working copy so the write-back doesn't revert
+                // it, then re-run clippy so the (now-stale) offsets refresh.
                 *source_rewritten = true;
-                // The applied edits shift every later byte offset, so the current
-                // results are now stale. Re-run clippy automatically so the list
-                // refreshes with valid offsets (no need to press "Run clippy"
-                // again). If a run can't be started, just clear the stale list.
                 if !self.start_clippy_run() {
                     *self.clippy_state.lock().unwrap() = BuildState::Idle;
                     self.clippy_sel = None;
@@ -190,8 +180,8 @@ impl AppIde {
             }
         }
 
-        // "Rename" was clicked on a naming-convention lint: drive rust-analyzer's
-        // project-wide rename (same path as Ctrl+R), so every reference is updated.
+        // Single "Rename" — enqueue one project-wide rename (RA `textDocument/
+        // rename`, same path as Ctrl+R) and start it.
         if let Some(idx) = clippy_apply_rename {
             let rename = {
                 let cs = self.clippy_state.lock().unwrap();
@@ -201,28 +191,56 @@ impl AppIde {
                 }
             };
             if let Some(rn) = rename {
-                // Sync the file holding the symbol to RA, then request the rename.
-                // The cross-file edits land in `init_frame::apply_rename_edits`.
-                let content = self.file_content_for(&rn.file);
-                {
-                    let mut lsp = self.lsp_state.lock().unwrap();
-                    lsp.did_change(&rn.file, &content, false);
-                    // rustc coords are 1-based; LSP wants 0-based.
-                    lsp.request_rename(
-                        &rn.file,
-                        rn.line.saturating_sub(1),
-                        rn.col.saturating_sub(1),
-                        &rn.new_name,
-                    );
-                }
-                self.rename_in_flight = true;
-                // Re-run clippy once the rename has been applied (the rename shifts
-                // offsets across files, invalidating the current results).
-                self.clippy_rename_pending = true;
-                // Clear the now-stale list so no further Fix uses bad offsets.
+                self.clippy_rename_queue.push_back(rn);
+                self.clippy_rename_pending = true; // re-run clippy when the queue drains
                 *self.clippy_state.lock().unwrap() = BuildState::Idle;
                 self.clippy_sel = None;
-                self.egui_ctx.request_repaint();
+                self.start_next_queued_rename();
+            }
+        }
+
+        // "Apply all" — apply every unlocked machine-applicable splice in one shot,
+        // then queue every unlocked rename to run one-by-one. A final clippy re-run
+        // (clippy_rename_pending) refreshes the list once the whole batch is in.
+        if clippy_apply_all {
+            let (edits, renames): (Vec<crate::build::SpanEdit>, Vec<crate::build::RenameFix>) = {
+                let cs = self.clippy_state.lock().unwrap();
+                match &*cs {
+                    BuildState::Done(r) => (
+                        r.diagnostics.iter().flat_map(|d| d.fixes.clone()).collect(),
+                        r.diagnostics
+                            .iter()
+                            .filter_map(|d| d.rename.clone())
+                            .filter(|rn| {
+                                // Skip renames inside main.rs's GENERATED block.
+                                let rel = rn.file.strip_prefix("src/").unwrap_or(&rn.file);
+                                !(rel == "main.rs"
+                                    && clippy_gen_ranges
+                                        .iter()
+                                        .any(|&(b, e)| rn.byte < e && rn.byte + 1 > b))
+                            })
+                            .collect(),
+                    ),
+                    _ => (Vec::new(), Vec::new()),
+                }
+            };
+            // Splices first (locked ones are skipped inside apply_source_edits).
+            let spliced = !edits.is_empty() && self.apply_source_edits(&edits) > 0;
+            if spliced {
+                *source_rewritten = true;
+            }
+            for rn in renames {
+                self.clippy_rename_queue.push_back(rn);
+            }
+            if spliced || !self.clippy_rename_queue.is_empty() {
+                self.clippy_rename_pending = true;
+                *self.clippy_state.lock().unwrap() = BuildState::Idle;
+                self.clippy_sel = None;
+                // Drive the rename batch; with no renames, just re-run clippy now.
+                if !self.start_next_queued_rename() {
+                    self.clippy_rename_pending = false;
+                    self.start_clippy_run();
+                }
             }
         }
 
@@ -275,4 +293,53 @@ impl AppIde {
         );
         true
     }
+
+    /// Fire the next queued rename whose recorded position still matches its
+    /// `old_name` (a prior splice/rename in the same batch may have shifted it).
+    /// Stale entries are skipped — they resurface on the batch's final clippy
+    /// re-run. Returns `true` when a rename was actually started (the caller then
+    /// waits for its edits before continuing the batch).
+    pub(crate) fn start_next_queued_rename(&mut self) -> bool {
+        while let Some(rn) = self.clippy_rename_queue.pop_front() {
+            let content = self.file_content_for(&rn.file);
+            if ident_at_position(&content, rn.line, rn.col) != rn.old_name {
+                continue; // moved since clippy ran — re-run will resurface it
+            }
+            {
+                let mut lsp = self.lsp_state.lock().unwrap();
+                lsp.did_change(&rn.file, &content, false);
+                // rustc coords are 1-based; LSP wants 0-based.
+                lsp.request_rename(
+                    &rn.file,
+                    rn.line.saturating_sub(1),
+                    rn.col.saturating_sub(1),
+                    &rn.new_name,
+                );
+            }
+            self.rename_in_flight = true;
+            self.egui_ctx.request_repaint();
+            return true;
+        }
+        false
+    }
+}
+
+/// The identifier starting at 1-based (`line`, `col`) in `content`, or `""` when
+/// the position isn't on an identifier. Used to verify a queued rename is still
+/// pointing at the symbol it was computed for.
+fn ident_at_position(content: &str, line: u32, col: u32) -> String {
+    let Some(text) = content.lines().nth(line.saturating_sub(1) as usize) else {
+        return String::new();
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let start = col.saturating_sub(1) as usize;
+    let is_id = |c: char| c.is_alphanumeric() || c == '_';
+    if start >= chars.len() || !is_id(chars[start]) {
+        return String::new();
+    }
+    let mut end = start;
+    while end < chars.len() && is_id(chars[end]) {
+        end += 1;
+    }
+    chars[start..end].iter().collect()
 }

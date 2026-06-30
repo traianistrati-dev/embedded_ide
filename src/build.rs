@@ -44,6 +44,9 @@ pub struct RenameFix {
     /// 1-based line / column of the identifier (rustc coords; LSP wants -1).
     pub line: u32,
     pub col: u32,
+    /// The current identifier, e.g. `"HOLD_THRESHOLD_15"` — used to verify a
+    /// queued rename's position is still valid before firing it (Apply-all).
+    pub old_name: String,
     /// The suggested new name, e.g. `"HoldThreshold15"`.
     pub new_name: String,
 }
@@ -418,6 +421,7 @@ fn extract_rename(msg: &serde_json::Value) -> Option<RenameFix> {
             byte: s["byte_start"].as_u64()? as usize,
             line: s["line_start"].as_u64()? as u32,
             col: s["column_start"].as_u64()? as u32,
+            old_name: original,
             new_name: new_name.to_string(),
         })
     };
@@ -560,6 +564,7 @@ mod tests {
         assert_eq!(rn.file, "src/pins/utils/mw_radar_mmwave.rs");
         assert_eq!((rn.line, rn.col), (11, 5));
         assert_eq!(rn.byte, 127);
+        assert_eq!(rn.old_name, "HOLD_THRESHOLD_15");
         assert_eq!(rn.new_name, "HoldThreshold15");
         // It is NOT a machine-applicable splice (MaybeIncorrect), so no SpanEdit.
         assert!(extract_fixes(&msg).is_empty());

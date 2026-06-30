@@ -40,11 +40,13 @@ pub fn show_clippy_tab(
 ) {
     let state = clippy_state.lock().unwrap().clone();
     let clippy_busy = state.is_building();
-    // "Apply all" only counts fixes that are actually applicable — a fix inside
-    // main.rs's GENERATED block is locked and would be skipped, so it mustn't make
-    // the button appear (it would then do nothing).
-    let any_fix = matches!(&state, BuildState::Done(r) if r.diagnostics.iter().any(|d| {
+    // "Apply all" runs every actionable suggestion — splice "Fix"es AND project-
+    // wide "Rename"s. It only counts ones that are actually applicable (a fix/
+    // rename locked inside main.rs's GENERATED block is skipped), so the button
+    // never appears when it would do nothing.
+    let any_action = matches!(&state, BuildState::Done(r) if r.diagnostics.iter().any(|d| {
         d.fixes.iter().any(|e| !fix_locked(&e.file, e.start, e.end, gen_ranges))
+            || d.rename.as_ref().is_some_and(|rn| !fix_locked(&rn.file, rn.byte, rn.byte + 1, gen_ranges))
     }));
 
     // ── Control + status row ────────────────────────────────────────────────────
@@ -71,15 +73,16 @@ pub fn show_clippy_tab(
             *run_clicked = true;
         }
 
-        // Apply-all — only when clippy offers machine-applicable fixes.
-        if any_fix
+        // Apply-all — every actionable suggestion: splice fixes + project-wide
+        // renames (run one-by-one). Shown only when something can be applied.
+        if any_action
             && ui
                 .add(egui::Button::new(
                     egui::RichText::new(format!("{} Apply all", ph::MAGIC_WAND))
                         .size(11.0)
                         .color(egui::Color32::from_rgb(120, 190, 230)),
                 ))
-                .on_hover_text("Apply every machine-applicable clippy suggestion.")
+                .on_hover_text("Apply every fix and rename clippy suggests (renames run one-by-one).")
                 .clicked()
         {
             *apply_all = true;
@@ -179,7 +182,17 @@ pub fn show_clippy_tab(
         .max_height(list_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for (i, diag) in result.diagnostics.iter().enumerate() {
+            // Rows that have an action button (Fix or Rename) come first; pure-
+            // advice rows (dead_code, too_many_arguments, …) sink to the bottom.
+            // Sort an index list (stable → keeps file:line order within a group) so
+            // selection / apply still use the real diagnostic index.
+            let mut order: Vec<usize> = (0..result.diagnostics.len()).collect();
+            order.sort_by_key(|&i| {
+                let d = &result.diagnostics[i];
+                !(d.has_fix() || d.rename.is_some()) // has-button (false) sorts first
+            });
+            for i in order {
+                let diag = &result.diagnostics[i];
                 let is_sel = sel == Some(i);
                 ui.horizontal(|ui| {
                     // Fixed-width action column so the colourised text below lines

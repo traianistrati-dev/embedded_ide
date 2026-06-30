@@ -490,6 +490,11 @@ pub struct AppIde {
     /// `true` when the in-flight rename came from a Clippy "Rename" button — once
     /// RA's edits land, clippy is re-run so its (now-stale) list refreshes.
     clippy_rename_pending: bool,
+    /// Remaining renames to apply one-by-one (Clippy "Apply all" batches them, and
+    /// a single "Rename" enqueues one). Each is fired only after the previous one's
+    /// edits land; a queued entry is skipped if its position no longer matches its
+    /// `old_name` (a prior edit shifted it — it'll resurface on the final re-run).
+    clippy_rename_queue: std::collections::VecDeque<crate::build::RenameFix>,
     /// Request keyboard focus for the rename input on the frame it opens.
     rename_focus: bool,
     // ── Find / Replace (Ctrl+F / Ctrl+H / Ctrl+Shift+F / Ctrl+Shift+H) ───────
@@ -708,6 +713,7 @@ impl AppIde {
             rename_popup_pos: egui::Pos2::ZERO,
             rename_in_flight: false,
             clippy_rename_pending: false,
+            clippy_rename_queue: std::collections::VecDeque::new(),
             rename_focus: false,
             find: editor_panel::find_replace::FindReplace::default(),
             editor_font_size: editor_panel::DEFAULT_EDITOR_FONT_SIZE,
@@ -1031,9 +1037,11 @@ impl AppIde {
                 if !edits.is_empty() {
                     self.apply_rename_edits(edits);
                 }
-                // A rename triggered from the Clippy tab: now that the cross-file
-                // edits are in, re-run clippy so its list reflects the new code.
-                if self.clippy_rename_pending {
+                // Continue an "Apply all" / queued batch: fire the next rename. When
+                // the queue is drained, re-run clippy once so the list reflects all
+                // the renamed code (clippy_rename_pending was set when the batch
+                // started).
+                if !self.start_next_queued_rename() && self.clippy_rename_pending {
                     self.clippy_rename_pending = false;
                     self.start_clippy_run();
                 }
