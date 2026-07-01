@@ -25,13 +25,15 @@ pub fn show_ra_tab(
         // re-check is pending (`flycheck_stale`), drop flycheck (cargo check)
         // diagnostics: rustc's line/cols are stale and the error may already be
         // fixed — they'd otherwise linger here until the next check finishes.
-        // RA's own (native) diagnostics re-map per edit, so keep them.
+        // RA's own (native) diagnostics re-map per edit, so keep them — this
+        // ALSO includes numbered hard errors (`E0425`, …), which RA computes
+        // natively regardless of `source == "rustc"` (see `is_rustc_error_code`).
         let stale = lsp.flycheck_stale();
         let mut flat: Vec<(String, lsp::LspDiagnostic)> = lsp
             .diagnostics
             .iter()
             .flat_map(|(path, diags)| diags.iter().map(move |d| (path.clone(), d.clone())))
-            .filter(|(_, d)| d.source == "rust-analyzer" || !stale)
+            .filter(|(_, d)| d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
             .collect();
         // Errors first, then warnings
         flat.sort_by_key(|(_, d)| (d.severity != lsp::DiagSeverity::Error, d.line));

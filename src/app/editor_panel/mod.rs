@@ -25,6 +25,7 @@ mod diag_embed;
 pub(crate) mod find_replace;
 mod format;
 mod move_lines;
+mod multi_cursor;
 mod rename;
 mod toolbar;
 pub(crate) mod usages;
@@ -208,6 +209,23 @@ impl AppIde {
                 // the editor so `/` is never typed into the text).
                 let mut ctrl_slash_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
+                // Ctrl+Shift+Up / Down → multi-cursor add/undo (see
+                // `multi_cursor` module docs). Consumed BEFORE Ctrl+Up/Down
+                // below: `consume_key` is lenient about Shift (see that
+                // comment), so checking the Shift variant first stops the
+                // plain Ctrl+Up/Down (move line) shortcut from also matching
+                // the same key-down event.
+                let mc_up_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::ArrowUp)
+                });
+                let mc_down_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::ArrowDown)
+                });
+                // Escape → clear every extra multi-cursor caret. Peeked (not
+                // consumed) so it doesn't steal Escape from the completion
+                // popup / cargo-complete popup, which run earlier in the frame
+                // and may already have consumed it for themselves this press.
+                let mc_escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 // Ctrl+Up / Ctrl+Down → move the selected lines up / down.
                 let mut ctrl_up_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
@@ -362,6 +380,13 @@ impl AppIde {
                     _ => Vec::new(),
                 };
 
+                // Snapshot right before the editor mutates `display_code`, so
+                // the multi-cursor replay below can diff exactly what the
+                // editor itself changed this frame (typing / backspace / paste)
+                // — not any earlier same-frame mutation like the find/replace
+                // bar's own edits, above.
+                let text_before_typing = display_code.clone();
+
                 let editor_resp = if is_rust_file {
                     crate::editor::gui::code_editor::show_rust_with_completer(
                         ui,
@@ -447,6 +472,48 @@ impl AppIde {
                         rel,
                     );
                 }
+
+                // ── Multi-cursor (Ctrl+Shift+Up/Down) ─────────────────────────
+                // Add/remove an extra caret, then replay this frame's text edit
+                // (if any) at every one of them — mutates `display_code` further.
+                // When it does, the line-op shortcuts below are skipped for this
+                // frame: they assume a single cursor/selection, and `editor_resp`
+                // still reflects positions from BEFORE this replay.
+                let mc_shift = self.handle_multi_cursor(
+                    &mut display_code,
+                    &text_before_typing,
+                    &editor_resp,
+                    displayed_file,
+                    mc_up_pressed,
+                    mc_down_pressed,
+                    mc_escape_pressed,
+                );
+                let mc_replayed = mc_shift.is_some();
+                // The primary caret's own edit already landed correctly, but an
+                // extra caret ABOVE it (the only place Ctrl+Shift+Up ever adds
+                // one) may have changed the buffer's length before it — shift
+                // egui's stored cursor to match, or it visibly drifts the next
+                // time something is typed. Applies from next frame (this
+                // frame's caret was already painted using the un-shifted
+                // position — a one-frame lag, same as `apply_pending_scroll`
+                // elsewhere in this file).
+                if let Some(shift) = mc_shift.filter(|&s| s != 0) {
+                    if let Some(r) = editor_resp.state.cursor.char_range() {
+                        let new_idx = (r.primary.index as isize + shift).max(0) as usize;
+                        let mut st = editor_resp.state.clone();
+                        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(new_idx),
+                        )));
+                        st.store(ui.ctx(), editor_resp.response.id);
+                    }
+                }
+                self.paint_extra_cursors(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &editor_resp.galley,
+                    &display_code,
+                );
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
@@ -546,8 +613,10 @@ impl AppIde {
 
                 // Ctrl+Shift+X cuts (not just deletes) the line(s): copy them to
                 // the clipboard first so they can be pasted, then the line op below
-                // removes them.
-                if cut_line_pressed {
+                // removes them. Skipped when multi-cursor already replayed this
+                // frame's edit — `editor_resp`'s positions are stale relative to
+                // the just-mutated `display_code` (see `mc_replayed` above).
+                if cut_line_pressed && !mc_replayed {
                     if let Some(r) = editor_resp.state.cursor.char_range() {
                         let lo = r.primary.index.min(r.secondary.index);
                         let hi = r.primary.index.max(r.secondary.index);
@@ -567,11 +636,11 @@ impl AppIde {
                 // Applied before the write-back below so the new text persists;
                 // the cursor is stored (on a clone — `store()` consumes the state,
                 // which handle_editor_completion still reads) for the next frame.
-                let line_op: Option<(String, usize, usize)> = editor_resp
-                    .state
-                    .cursor
-                    .char_range()
-                    .and_then(|r| {
+                // Skipped entirely when `mc_replayed` (see above).
+                let line_op: Option<(String, usize, usize)> = if mc_replayed {
+                    None
+                } else {
+                    editor_resp.state.cursor.char_range().and_then(|r| {
                         let lo = r.primary.index.min(r.secondary.index);
                         let hi = r.primary.index.max(r.secondary.index);
                         if ctrl_slash_pressed {
@@ -595,7 +664,8 @@ impl AppIde {
                         } else {
                             None
                         }
-                    });
+                    })
+                };
                 if let Some((new_code, new_lo, new_hi)) = line_op {
                     display_code = new_code;
                     let mut st = editor_resp.state.clone();

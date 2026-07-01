@@ -86,6 +86,32 @@ impl LspDiagnostic {
     pub fn has_more_lines(&self) -> bool {
         self.message.lines().skip(1).any(|l| !l.trim().is_empty())
     }
+
+    /// `true` for a numbered rustc compiler-error code (`E0425`, `E0308`, …) —
+    /// as opposed to a named lint (`unused_variables`, `dead_code`, …).
+    ///
+    /// Both are reported with `source == "rustc"` over LSP, but they come from
+    /// different places: a numbered error is a type/name-resolution "hard
+    /// error" rust-analyzer's own in-memory analyzer computes and re-publishes
+    /// on every edit — confirmed empirically (`rust-analyzer diagnostics
+    /// --disable-build-scripts`, no cargo-check involved, finds `E0425`
+    /// instantly even in a nested-module project). A named lint like
+    /// `unused_variables`/`dead_code` genuinely requires an actual `cargo
+    /// check`/`cargo clippy` pass (confirmed the same way: zero native
+    /// diagnostics for those with `checkOnSave` off) — see
+    /// `editor_panel::usages`'s doc comment for that investigation.
+    ///
+    /// `flycheck_stale()` exists to hide *genuinely* flycheck-sourced
+    /// diagnostics once an edit shifts their line/col — but it must NOT also
+    /// hide numbered hard errors, since those are live and always current.
+    /// Same code-shape check already used for `rustc_error_doc_url` in the
+    /// inline diagnostics overlay.
+    pub fn is_rustc_error_code(&self) -> bool {
+        self.code
+            .as_deref()
+            .and_then(|c| c.strip_prefix('E'))
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+    }
 }
 
 /// A single item returned by a `textDocument/completion` response.
@@ -644,7 +670,9 @@ impl LspState {
         self.diagnostics
             .values()
             .flat_map(|v| v.iter())
-            .filter(|d| d.severity.is_error() && (d.source == "rust-analyzer" || !stale))
+            .filter(|d| {
+                d.severity.is_error() && (d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
+            })
             .count()
     }
 
@@ -653,7 +681,9 @@ impl LspState {
         self.diagnostics
             .values()
             .flat_map(|v| v.iter())
-            .filter(|d| d.severity.is_warning() && (d.source == "rust-analyzer" || !stale))
+            .filter(|d| {
+                d.severity.is_warning() && (d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
+            })
             .count()
     }
 
@@ -1550,5 +1580,34 @@ mod diagnostic_headline_tests {
         let d = diag("cannot find value `foo`\n\n  ");
         assert_eq!(d.headline(), "cannot find value `foo`");
         assert!(!d.has_more_lines(), "blank trailing lines aren't 'more'");
+    }
+
+    fn diag_with_code(code: Option<&str>) -> LspDiagnostic {
+        let mut d = diag("x");
+        d.code = code.map(String::from);
+        d
+    }
+
+    #[test]
+    fn numbered_compiler_codes_are_rustc_error_codes() {
+        assert!(diag_with_code(Some("E0425")).is_rustc_error_code());
+        assert!(diag_with_code(Some("E0308")).is_rustc_error_code());
+    }
+
+    #[test]
+    fn named_lints_are_not_rustc_error_codes() {
+        // These require an actual cargo-check/clippy pass (confirmed empirically
+        // — see `is_rustc_error_code`'s doc comment) and must stay gated by
+        // `flycheck_stale`, unlike numbered hard errors.
+        assert!(!diag_with_code(Some("unused_variables")).is_rustc_error_code());
+        assert!(!diag_with_code(Some("dead_code")).is_rustc_error_code());
+        assert!(!diag_with_code(Some("clippy::needless_return")).is_rustc_error_code());
+    }
+
+    #[test]
+    fn missing_or_malformed_code_is_not_a_rustc_error_code() {
+        assert!(!diag_with_code(None).is_rustc_error_code());
+        assert!(!diag_with_code(Some("E")).is_rustc_error_code(), "no digits after E");
+        assert!(!diag_with_code(Some("E12a4")).is_rustc_error_code(), "non-digit in the code");
     }
 }

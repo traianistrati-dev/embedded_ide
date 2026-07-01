@@ -470,7 +470,10 @@ impl AppIde {
                         // line/cols until the next check finishes, so they'd paint
                         // on stale/commented lines after an edit. Hide them until a
                         // fresh check completes; RA's native diagnostics are
-                        // re-mapped per edit and stay visible.
+                        // re-mapped per edit and stay visible — this ALSO includes
+                        // numbered hard errors (`E0425`, …), which RA computes
+                        // natively regardless of `source == "rustc"` (see
+                        // `LspDiagnostic::is_rustc_error_code`).
                         let flycheck_stale = lsp.flycheck_stale();
                         diags_for_file(&lsp.diagnostics, rel)
                             .into_iter()
@@ -482,7 +485,9 @@ impl AppIde {
                                     lsp::DiagSeverity::Error | lsp::DiagSeverity::Info
                                 )
                             })
-                            .filter(|d| d.source == "rust-analyzer" || !flycheck_stale)
+                            .filter(|d| {
+                                d.source == "rust-analyzer" || d.is_rustc_error_code() || !flycheck_stale
+                            })
                             .collect()
                     } else {
                         Vec::new()

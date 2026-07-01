@@ -477,6 +477,17 @@ pub struct AppIde {
     /// compile, see `editor_panel::usages`) tell whether a diagnostic still
     /// matches the live text or has gone stale from a later edit.
     build_text_snapshot: HashMap<String, String>,
+    /// Extra caret positions for Ctrl+Shift+Up/Down multi-cursor editing (char
+    /// indices into the displayed file, in the order they were added — last
+    /// added is popped first by Ctrl+Shift+Down). See `editor_panel::multi_cursor`.
+    extra_cursors: Vec<usize>,
+    /// Which file `extra_cursors` belongs to — cleared on a file switch so
+    /// stale positions never leak into an unrelated file.
+    extra_cursors_file: Option<ProjectFileId>,
+    /// The primary caret's char index at the end of the previous frame — lets
+    /// multi-cursor replay tell a Backspace (deletes BEFORE the cursor) apart
+    /// from a Delete-key press (deletes AFTER it).
+    mc_prev_primary_idx: Option<usize>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -715,6 +726,9 @@ impl AppIde {
             highlighted_def_line: None,
             usages: editor_panel::usages::UsagesState::default(),
             build_text_snapshot: HashMap::new(),
+            extra_cursors: Vec::new(),
+            extra_cursors_file: None,
+            mc_prev_primary_idx: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             rename_active: false,
