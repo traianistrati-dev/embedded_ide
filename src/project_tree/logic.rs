@@ -1,7 +1,7 @@
 //! Project tree logic — file operations, directory scanning, filesystem watching.
 
-use std::path::Path;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+use std::path::Path;
 
 /// State for the project tree (files and folders in src/).
 #[derive(Debug, Clone)]
@@ -91,7 +91,8 @@ impl ProjectTreeState {
                 }
                 FsEventKind::Rename { old_rel, new_rel } => {
                     // File rename
-                    if let Some((p, _)) = self.user_src_files.iter_mut().find(|(p, _)| p == &old_rel)
+                    if let Some((p, _)) =
+                        self.user_src_files.iter_mut().find(|(p, _)| p == &old_rel)
                     {
                         *p = new_rel.clone();
                     }
@@ -117,17 +118,18 @@ impl ProjectTreeState {
         const MOD_PATH: &str = "pins/mod.rs";
 
         // Build the authoritative set of configured pins
-        let configured: Vec<(String, usize, &str, &PinFunction)> = all_pins
-            .iter()
-            .filter(|(_, _, f)| *f != PinFunction::Unset)
-            .map(|(num, name, func)| {
-                // Suffix the file/module name with the selected function type
-                // (e.g. `pin2_pc13_out`). Changing a pin's function renames its
-                // file accordingly — the old file is dropped in step 3.
-                let slug = format!("pin{}_{}_{}", num, name.to_lowercase(), func.file_token());
-                (slug, *num, name.as_str(), func)
-            })
-            .collect();
+        let configured: Vec<(String, usize, &str, &PinFunction)> = Vec::new();
+        // all_pins
+        // .iter()
+        // .filter(|(_, _, f)| *f != PinFunction::Unset)
+        // .map(|(num, name, func)| {
+        //     // Suffix the file/module name with the selected function type
+        //     // (e.g. `pin2_pc13_out`). Changing a pin's function renames its
+        //     // file accordingly — the old file is dropped in step 3.
+        //     let slug = format!("pin{}_{}_{}", num, name.to_lowercase(), func.file_token());
+        //     (slug, *num, name.as_str(), func)
+        // })
+        // .collect();
 
         let active_slugs: Vec<&str> = configured.iter().map(|(s, ..)| s.as_str()).collect();
 
@@ -138,12 +140,9 @@ impl ProjectTreeState {
         }
 
         // 2. Ensure pins/mod.rs exists
-        if !self
-            .user_src_files
-            .iter()
-            .any(|(p, _)| p == MOD_PATH)
-        {
-            self.user_src_files.push((MOD_PATH.to_string(), String::new()));
+        if !self.user_src_files.iter().any(|(p, _)| p == MOD_PATH) {
+            self.user_src_files
+                .push((MOD_PATH.to_string(), String::new()));
         }
 
         // 3. Drop pin files that are no longer configured
@@ -170,7 +169,11 @@ impl ProjectTreeState {
                 generated_content
             );
 
-            if let Some((_, file_content)) = self.user_src_files.iter_mut().find(|(p, _)| p == &file_path) {
+            if let Some((_, file_content)) = self
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == &file_path)
+            {
                 // Update existing file: preserve user code, update only GENERATED section
                 let existing = file_content.clone();
                 let updated = splice_pin_file(&existing, &wrapped_content);
@@ -201,10 +204,7 @@ impl ProjectTreeState {
             generated_section.trim()
         );
 
-        if let Some((_, mod_content)) = self
-            .user_src_files
-            .iter_mut()
-            .find(|(p, _)| p == MOD_PATH)
+        if let Some((_, mod_content)) = self.user_src_files.iter_mut().find(|(p, _)| p == MOD_PATH)
         {
             let existing = mod_content.as_str();
             if let (Some(begin_pos), Some(end_pos)) = (
@@ -263,7 +263,8 @@ impl ProjectTreeState {
         }
         // 2. Ensure configs/mod.rs exists.
         if !self.user_src_files.iter().any(|(p, _)| p == MOD_PATH) {
-            self.user_src_files.push((MOD_PATH.to_string(), String::new()));
+            self.user_src_files
+                .push((MOD_PATH.to_string(), String::new()));
         }
 
         // Active module stems (file names without `.rs`).
@@ -286,8 +287,10 @@ impl ProjectTreeState {
         //    just that constants block, so the user's edits to the rest survive.
         for (name, body) in files {
             let file_path = format!("pins/configs/{name}");
-            if let Some((_, content)) =
-                self.user_src_files.iter_mut().find(|(p, _)| p == &file_path)
+            if let Some((_, content)) = self
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == &file_path)
             {
                 if let Some(block) = extract_gen_block(body) {
                     let existing = content.clone();
@@ -306,8 +309,7 @@ impl ProjectTreeState {
         // 5. Rebuild configs/mod.rs (`pub mod usart1;` …), preserving user code.
         let gen_section: String = active.iter().map(|s| format!("pub mod {s};\n")).collect();
         let wrapped_mod = format!("{GEN_BEGIN}\n{}\n{GEN_END}\n", gen_section.trim());
-        if let Some((_, mod_content)) =
-            self.user_src_files.iter_mut().find(|(p, _)| p == MOD_PATH)
+        if let Some((_, mod_content)) = self.user_src_files.iter_mut().find(|(p, _)| p == MOD_PATH)
         {
             let existing = mod_content.clone();
             let updated = splice_pin_file(&existing, &wrapped_mod);
@@ -360,12 +362,7 @@ fn splice_pin_file(existing: &str, new_generated: &str) -> String {
         } else if after.is_empty() {
             format!("{}\n\n{}", before, new_generated.trim())
         } else {
-            format!(
-                "{}\n\n{}\n\n{}",
-                before,
-                new_generated.trim(),
-                after
-            )
+            format!("{}\n\n{}\n\n{}", before, new_generated.trim(), after)
         }
     } else {
         // No markers found: wrap and append existing code
@@ -762,8 +759,19 @@ mod tests {
         let pins = vec![
             (2usize, "PC13".to_string(), PinFunction::GpioOutput),
             (10usize, "PA0".to_string(), PinFunction::GpioInput),
-            (11usize, "PA1".to_string(), PinFunction::AdcChannel { adc: 1, channel: 1 }),
-            (30usize, "PA9".to_string(), PinFunction::TimerPwm { timer: 1, channel: 2 }),
+            (
+                11usize,
+                "PA1".to_string(),
+                PinFunction::AdcChannel { adc: 1, channel: 1 },
+            ),
+            (
+                30usize,
+                "PA9".to_string(),
+                PinFunction::TimerPwm {
+                    timer: 1,
+                    channel: 2,
+                },
+            ),
         ];
         state.sync_pin_files(&pins);
 
@@ -794,9 +802,7 @@ mod tests {
         state
             .user_src_files
             .push(("pins/pin2_pa1_out.rs".to_string(), "".to_string()));
-        state
-            .user_src_folders
-            .push("pins".to_string());
+        state.user_src_folders.push("pins".to_string());
         state
             .user_src_files
             .push(("pins/mod.rs".to_string(), "".to_string()));
@@ -906,7 +912,11 @@ mod tests {
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"));
 
         // Change to ADC (Analog) — the file renames to the new type suffix.
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::AdcChannel { adc: 1, channel: 0 })];
+        let pins = vec![(
+            1usize,
+            "PA0".to_string(),
+            PinFunction::AdcChannel { adc: 1, channel: 0 },
+        )];
         state.sync_pin_files(&pins);
 
         assert_file_not_exists(&state, "pins/pin1_pa0_out.rs");
@@ -917,7 +927,10 @@ mod tests {
             .unwrap();
         // After function change, the file should be regenerated with new type
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Analog>;"));
-        assert!(!entry.1.contains("Output"), "Old Output type should be removed");
+        assert!(
+            !entry.1.contains("Output"),
+            "Old Output type should be removed"
+        );
     }
 
     #[test]
@@ -941,7 +954,11 @@ mod tests {
         );
 
         // Change to ADC with function label
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::AdcChannel { adc: 1, channel: 0 })];
+        let pins = vec![(
+            1usize,
+            "PA0".to_string(),
+            PinFunction::AdcChannel { adc: 1, channel: 0 },
+        )];
         state.sync_pin_files(&pins);
 
         let entry = state
@@ -951,7 +968,9 @@ mod tests {
             .unwrap();
         // ADC should have a comment with the function label on PinType line
         assert!(
-            entry.1.contains("pub type PinType = Pin<'A', 0, Analog>; // ADC1  IN0"),
+            entry
+                .1
+                .contains("pub type PinType = Pin<'A', 0, Analog>; // ADC1  IN0"),
             "ADC pin should have function label comment on PinType: {}",
             entry.1
         );
@@ -970,7 +989,11 @@ mod tests {
 
         // User edits the EDITABLE part (below the markers).
         {
-            let f = state.user_src_files.iter_mut().find(|(p, _)| p == path).unwrap();
+            let f = state
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == path)
+                .unwrap();
             f.1 = f.1.replace("/* orig */", "/* MY EDIT */");
         }
 
@@ -978,9 +1001,20 @@ mod tests {
         let v2 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 9600;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
         state.sync_config_files(&[("usart1.rs".to_string(), v2.to_string())]);
 
-        let body = &state.user_src_files.iter().find(|(p, _)| p == path).unwrap().1;
-        assert!(body.contains("const BAUDRATE: u32 = 9600;"), "const updated:\n{body}");
+        let body = &state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == path)
+            .unwrap()
+            .1;
+        assert!(
+            body.contains("const BAUDRATE: u32 = 9600;"),
+            "const updated:\n{body}"
+        );
         assert!(!body.contains("115200"), "old const gone");
-        assert!(body.contains("/* MY EDIT */"), "user body edit preserved:\n{body}");
+        assert!(
+            body.contains("/* MY EDIT */"),
+            "user body edit preserved:\n{body}"
+        );
     }
 }
