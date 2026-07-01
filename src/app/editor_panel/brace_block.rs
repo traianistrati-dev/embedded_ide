@@ -228,9 +228,12 @@ fn full_def_from_brace(chars: &[char], brace_idx: usize) -> Option<(usize, usize
     Some((header_start(chars, open), close))
 }
 
-/// True when `[lo, hi)` is exactly one identifier word.
+/// True when `[lo, hi)` is exactly one identifier word. `false` (not a panic) for
+/// an out-of-bounds range — defends against a stale cursor outliving an edit that
+/// shrank the text.
 fn is_word_selection(chars: &[char], lo: usize, hi: usize) -> bool {
     lo < hi
+        && hi <= chars.len()
         && chars[lo..hi].iter().all(|&c| is_ident(c))
         && !chars[lo].is_ascii_digit()
         && (lo == 0 || !is_ident(chars[lo - 1]))
@@ -391,10 +394,13 @@ impl AppIde {
         copy_requested: bool,
     ) -> bool {
         let chars: Vec<char> = display_code.chars().collect();
+        // Clamp to the current text: a stale cursor (recorded before an edit that
+        // just shrank the file — e.g. a Clippy "Fix" mid-frame) would otherwise
+        // index past the end and panic in `is_word_selection`'s `chars[lo..hi]`.
         let (lo, hi) = match editor_resp.state.cursor.char_range() {
             Some(r) => (
-                r.primary.index.min(r.secondary.index),
-                r.primary.index.max(r.secondary.index),
+                r.primary.index.min(r.secondary.index).min(chars.len()),
+                r.primary.index.max(r.secondary.index).min(chars.len()),
             ),
             None => (0, 0),
         };
