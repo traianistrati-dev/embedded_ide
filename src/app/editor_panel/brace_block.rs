@@ -311,8 +311,9 @@ fn paint_segment(
 }
 
 /// Paint a translucent band over the inclusive char range `[open, close]`,
-/// one rectangle per line (split at `\n`).
-fn paint_band(
+/// one rectangle per line (split at `\n`). `pub(super)` so sibling overlay
+/// modules (e.g. `usages`) can reuse the same multi-line band technique.
+pub(super) fn paint_band(
     painter: &egui::Painter,
     galley: &egui::text::Galley,
     gp: egui::Pos2,

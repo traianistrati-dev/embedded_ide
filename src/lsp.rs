@@ -127,6 +127,43 @@ pub struct DefinitionLoc {
     pub character: u32,
 }
 
+/// One item from `textDocument/documentSymbol` (fn/struct/enum/const/static/
+/// trait/method/field/…) in a file — used to fade never-referenced items and
+/// offer a "references" list on the rest. Positions are 0-based LSP (line,
+/// UTF-16 character), like the rest of this module.
+#[derive(Clone, Debug)]
+pub struct SymbolInfo {
+    pub name: String,
+    /// LSP `SymbolKind` (6=Method, 8=Field, 9=Constructor, 10=Enum, 11=Interface
+    /// [trait], 12=Function, 13=Variable [static], 14=Constant, 22=EnumMember,
+    /// 23=Struct); see [`is_trackable_symbol_kind`].
+    pub kind: u8,
+    /// The whole item's span — used to fade it when unused.
+    pub start_line: u32,
+    pub start_char: u32,
+    pub end_line: u32,
+    pub end_char: u32,
+    /// The name's own position — used as the query point for `references`.
+    pub sel_line: u32,
+    pub sel_char: u32,
+}
+
+/// `true` for the `SymbolKind`s worth tracking (fn/method/struct/enum/const/
+/// static/trait/field/…) — containers like Module/Namespace/File are excluded
+/// (we still recurse INTO them, just don't fade/count them as items themselves).
+pub fn is_trackable_symbol_kind(kind: u8) -> bool {
+    matches!(kind, 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 22 | 23)
+}
+
+/// One usage site from `textDocument/references`.
+#[derive(Clone, Debug)]
+pub struct ReferenceLoc {
+    /// Absolute filesystem path (decoded from the `file://` URI), like `DefinitionLoc`.
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LspStatus {
     #[default]
@@ -217,6 +254,20 @@ pub struct LspState {
     pub definition_response_received: bool,
     /// The definition target from the last F12, if any.
     pub definition_result:  Option<DefinitionLoc>,
+    /// The request id of the pending `textDocument/documentSymbol`, if any.
+    symbols_req_id:         Option<u64>,
+    /// The rel_path the pending/last `symbols_result` was requested for.
+    symbols_for_file:       String,
+    /// Set when a documentSymbol response arrives; consumed by the app.
+    pub symbols_response_received: bool,
+    pub symbols_result:     Vec<SymbolInfo>,
+    /// In-flight `textDocument/references` requests: request id → the caller's
+    /// own index for that symbol (its position in the app's item list) — lets
+    /// many reference lookups run concurrently for one file (one per symbol),
+    /// unlike the single-slot `_req_id` fields above.
+    references_pending:     HashMap<u64, usize>,
+    /// Completed reference results, keyed by that same index; drained by the app.
+    pub references_results: HashMap<usize, Vec<ReferenceLoc>>,
 }
 
 impl Default for LspState {
@@ -244,6 +295,12 @@ impl Default for LspState {
             definition_req_id:  None,
             definition_response_received: false,
             definition_result:  None,
+            symbols_req_id:     None,
+            symbols_for_file:   String::new(),
+            symbols_response_received: false,
+            symbols_result:     Vec::new(),
+            references_pending: HashMap::new(),
+            references_results: HashMap::new(),
         }
     }
 }
@@ -491,6 +548,81 @@ impl LspState {
         }
     }
 
+    /// Request every fn/struct/enum/const/… defined in `rel_path`
+    /// (`textDocument/documentSymbol`). Result arrives async; poll
+    /// [`take_document_symbols_result`].
+    pub fn request_document_symbols(&mut self, rel_path: &str) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.symbols_req_id = Some(id);
+        self.symbols_for_file = rel_path.to_owned();
+        self.symbols_response_received = false;
+        self.symbols_result.clear();
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/documentSymbol",
+                "params": { "textDocument": { "uri": uri } }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the documentSymbol result once ready: `(rel_path it was requested
+    /// for, the flattened item list)` — the caller checks the path in case it
+    /// switched files while the request was in flight.
+    pub fn take_document_symbols_result(&mut self) -> Option<(String, Vec<SymbolInfo>)> {
+        if self.symbols_response_received {
+            self.symbols_response_received = false;
+            Some((
+                self.symbols_for_file.clone(),
+                std::mem::take(&mut self.symbols_result),
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Request every usage site of the symbol at `(line, character)` in
+    /// `rel_path` (`textDocument/references`, declaration excluded). `local_idx`
+    /// is an opaque caller-assigned key (e.g. the symbol's index in the app's own
+    /// list) used to match this specific result when it arrives — lets many
+    /// reference lookups for one file's symbols run concurrently. Poll
+    /// [`take_reference_results`].
+    pub fn request_references(&mut self, rel_path: &str, line: u32, character: u32, local_idx: usize) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.references_pending.insert(id, local_idx);
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                    "context": { "includeDeclaration": false }
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Drain every reference lookup that has completed since the last call,
+    /// keyed by the `local_idx` passed to [`request_references`].
+    pub fn take_reference_results(&mut self) -> HashMap<usize, Vec<ReferenceLoc>> {
+        std::mem::take(&mut self.references_results)
+    }
+
     // ── Diagnostic helpers ────────────────────────────────────────────────────
 
     pub fn error_count_for(&self, path: &str) -> usize {
@@ -548,6 +680,12 @@ impl LspState {
         self.definition_req_id = None;
         self.definition_response_received = false;
         self.definition_result = None;
+        self.symbols_req_id = None;
+        self.symbols_for_file.clear();
+        self.symbols_response_received = false;
+        self.symbols_result.clear();
+        self.references_pending.clear();
+        self.references_results.clear();
     }
 }
 
@@ -677,6 +815,14 @@ fn launch(
                             "valueSet": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25]
                         },
                         "contextSupport": true,
+                    },
+                    // Ask RA for the rich, nested `DocumentSymbol[]` shape (with a
+                    // separate `range` for the whole item + `selectionRange` for just
+                    // the name, and `children` for nested items) instead of the older
+                    // flat `SymbolInformation[]` — used to find every fn/struct/enum/
+                    // const/… so we can fade unused ones and offer a references list.
+                    "documentSymbol": {
+                        "hierarchicalDocumentSymbolSupport": true,
                     },
                 },
                 "window": { "workDoneProgress": true },
@@ -955,6 +1101,15 @@ fn handle_incoming(
                     s.definition_result = parse_definition(&msg["result"]);
                     s.definition_response_received = true;
                     ctx.request_repaint();
+                } else if s.symbols_req_id == Some(req_id) {
+                    s.symbols_req_id = None;
+                    s.symbols_result = parse_document_symbols(&msg["result"]);
+                    s.symbols_response_received = true;
+                    ctx.request_repaint();
+                } else if let Some(local_idx) = s.references_pending.remove(&req_id) {
+                    s.references_results
+                        .insert(local_idx, parse_references(&msg["result"]));
+                    ctx.request_repaint();
                 } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
                     s.completion_response_received = true;
@@ -998,6 +1153,14 @@ fn handle_incoming(
                 } else if s.definition_req_id == Some(req_id) {
                     s.definition_req_id = None;
                     s.definition_response_received = true; // no result, stop waiting
+                    ctx.request_repaint();
+                } else if s.symbols_req_id == Some(req_id) {
+                    s.symbols_req_id = None;
+                    s.symbols_response_received = true; // empty result, stop waiting
+                    ctx.request_repaint();
+                } else if let Some(local_idx) = s.references_pending.remove(&req_id) {
+                    // Treat as "0 references" rather than leaving it pending forever.
+                    s.references_results.insert(local_idx, Vec::new());
                     ctx.request_repaint();
                 } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
@@ -1147,6 +1310,87 @@ fn parse_definition(result: &serde_json::Value) -> Option<DefinitionLoc> {
         line: range["start"]["line"].as_u64()? as u32,
         character: range["start"]["character"].as_u64().unwrap_or(0) as u32,
     })
+}
+
+/// Recursively flatten a `textDocument/documentSymbol` response into every
+/// trackable named item (fn/struct/enum/const/static/trait/method/field/…,
+/// see [`is_trackable_symbol_kind`]), descending into `children` so items
+/// nested in a `mod`/`impl`/`trait` body are covered too. Handles both the
+/// modern hierarchical `DocumentSymbol[]` shape (has `range` + `selectionRange`
+/// + optional `children`) and the older flat `SymbolInformation[]` shape (just
+/// `location.range`, used as both spans) some servers fall back to.
+fn parse_document_symbols(result: &serde_json::Value) -> Vec<SymbolInfo> {
+    fn walk(node: &serde_json::Value, out: &mut Vec<SymbolInfo>) {
+        let name = node["name"].as_str().unwrap_or("").to_owned();
+        let kind = node["kind"].as_u64().unwrap_or(0) as u8;
+
+        if let (Some(range), Some(sel)) = (node.get("range"), node.get("selectionRange")) {
+            if !name.is_empty() && is_trackable_symbol_kind(kind) {
+                if let Some(info) = symbol_from_ranges(name, kind, range, sel) {
+                    out.push(info);
+                }
+            }
+            if let Some(children) = node["children"].as_array() {
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        } else if let Some(loc) = node.get("location") {
+            // Flat SymbolInformation — no separate selection span or children.
+            if !name.is_empty() && is_trackable_symbol_kind(kind) {
+                let r = &loc["range"];
+                if let Some(info) = symbol_from_ranges(name, kind, r, r) {
+                    out.push(info);
+                }
+            }
+        }
+    }
+
+    fn symbol_from_ranges(
+        name: String,
+        kind: u8,
+        range: &serde_json::Value,
+        sel: &serde_json::Value,
+    ) -> Option<SymbolInfo> {
+        Some(SymbolInfo {
+            name,
+            kind,
+            start_line: range["start"]["line"].as_u64()? as u32,
+            start_char: range["start"]["character"].as_u64()? as u32,
+            end_line: range["end"]["line"].as_u64()? as u32,
+            end_char: range["end"]["character"].as_u64()? as u32,
+            sel_line: sel["start"]["line"].as_u64()? as u32,
+            sel_char: sel["start"]["character"].as_u64()? as u32,
+        })
+    }
+
+    let mut out = Vec::new();
+    if let Some(arr) = result.as_array() {
+        for node in arr {
+            walk(node, &mut out);
+        }
+    }
+    out
+}
+
+/// Parse a `textDocument/references` result (`Location[]`) into usage sites.
+fn parse_references(result: &serde_json::Value) -> Vec<ReferenceLoc> {
+    result
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|loc| {
+                    let uri = loc["uri"].as_str()?;
+                    let r = &loc["range"];
+                    Some(ReferenceLoc {
+                        path: uri_to_path(uri),
+                        line: r["start"]["line"].as_u64()? as u32,
+                        character: r["start"]["character"].as_u64().unwrap_or(0) as u32,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Decode a `file://` URI to a filesystem path (with minimal `%XX` decoding).

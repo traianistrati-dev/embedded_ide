@@ -172,6 +172,10 @@ impl AppIde {
                             Ok(()) => {
                                 self.selected_diagnostic = None;
                                 self.build_tab = BuildPanelTab::Cargo;
+                                // Snapshot the compiled text so the "unused local
+                                // variable" fade can tell later whether this run's
+                                // diagnostics still match the live file.
+                                self.snapshot_build_text();
                                 build::start_build(
                                     build_dir,
                                     project.target.clone(),

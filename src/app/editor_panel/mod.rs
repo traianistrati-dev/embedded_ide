@@ -27,6 +27,7 @@ mod format;
 mod move_lines;
 mod rename;
 mod toolbar;
+pub(crate) mod usages;
 
 /// Default code-editor font size (points); the zoom baseline (Ctrl+0 resets to it).
 pub(crate) const DEFAULT_EDITOR_FONT_SIZE: f32 = 13.0;
@@ -343,6 +344,24 @@ impl AppIde {
                 // pressed to open it), hide the crate's built-in keyword popup so
                 // the two don't overlap — the LSP popup is the one that wins.
                 let suppress_keyword_completer = self.completion_open || ctrl_space_pressed;
+
+                // ── Live "usages" analysis (fade unused fn/struct/enum/const/…,
+                // offer a references popup on the rest) — RA `documentSymbol` +
+                // `references`, debounced, kept fresh only for the exact text
+                // shown below. `usages_rel_path` is also reused after the editor
+                // to place the "N refs" pill overlay.
+                let usages_rel_path = crate::editor::gui::text_pos::selected_file_rel_path(
+                    &self.selected_file,
+                    &self.project_tree.user_src_files,
+                );
+                let dead_ranges: Vec<(usize, usize)> = match &usages_rel_path {
+                    Some(rel) if is_rust_file => {
+                        self.tick_usages(rel, &display_code);
+                        self.usages_dead_ranges(rel, &display_code)
+                    }
+                    _ => Vec::new(),
+                };
+
                 let editor_resp = if is_rust_file {
                     crate::editor::gui::code_editor::show_rust_with_completer(
                         ui,
@@ -354,6 +373,7 @@ impl AppIde {
                         &editor_id,
                         &mut self.completer,
                         suppress_keyword_completer,
+                        &dead_ranges,
                     )
                 } else {
                     CodeEditor::default()
@@ -413,6 +433,18 @@ impl AppIde {
                         editor_clip,
                         ui,
                         copy_requested,
+                    );
+                }
+                // "N refs" indicator + popup on every used item (unused ones were
+                // already faded by the highlighter, above, via `dead_ranges`).
+                if let Some(rel) = &usages_rel_path {
+                    self.show_usages_overlay(
+                        ui,
+                        editor_resp.galley_pos,
+                        editor_clip,
+                        &editor_resp.galley,
+                        &display_code,
+                        rel,
                     );
                 }
 

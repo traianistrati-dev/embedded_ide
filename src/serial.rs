@@ -81,7 +81,7 @@ impl Default for SerialMonitor {
             search: String::new(),
             search2: String::new(),
             autoscroll: true,
-            append_crlf: true,
+            append_crlf: false,
             tx_input: String::new(),
             tx_height: 30.0,
             ports: Vec::new(),
@@ -292,7 +292,11 @@ pub fn hex_layout_job(
             TextFormat::simple(font.clone(), cur_color),
         );
         if (i + 1) % row_bytes == 0 {
-            job.append("\n", 0.0, TextFormat::simple(font.clone(), egui::Color32::GRAY));
+            job.append(
+                "\n",
+                0.0,
+                TextFormat::simple(font.clone(), egui::Color32::GRAY),
+            );
         }
     }
     job
@@ -355,7 +359,11 @@ pub fn hex_search_job(
     }
 
     for (i, &b) in tail.iter().enumerate() {
-        job.append(&format!("{b:02X} "), 0.0, TextFormat::simple(font.clone(), colors[i]));
+        job.append(
+            &format!("{b:02X} "),
+            0.0,
+            TextFormat::simple(font.clone(), colors[i]),
+        );
         if (start + i + 1) % row_bytes == 0 {
             job.append("\n", 0.0, TextFormat::simple(font.clone(), SEARCH_MISS));
         }
@@ -396,7 +404,7 @@ mod tests {
 
     #[test]
     fn hex_search_colors_two_patterns_rest_grey() {
-        use super::{hex_search_job, SEARCH_HIT, SEARCH_HIT2, SEARCH_MISS};
+        use super::{SEARCH_HIT, SEARCH_HIT2, SEARCH_MISS, hex_search_job};
         // 01 0D 0A 02: pattern A = 0D 0A (yellow), pattern B = 01 (blue).
         let job = hex_search_job(
             &[0x01, 0x0D, 0x0A, 0x02],
@@ -407,7 +415,12 @@ mod tests {
         let colors: Vec<_> = job
             .sections
             .iter()
-            .map(|s| (job.text[s.byte_range.clone()].trim().to_string(), s.format.color))
+            .map(|s| {
+                (
+                    job.text[s.byte_range.clone()].trim().to_string(),
+                    s.format.color,
+                )
+            })
             .filter(|(t, _)| !t.is_empty())
             .collect();
         assert_eq!(colors[0], ("01".into(), SEARCH_HIT2)); // blue

@@ -467,6 +467,16 @@ pub struct AppIde {
     /// project file. Highlighted with a translucent yellow band (like the
     /// Definition tab) until the next F12.
     highlighted_def_line: Option<(ProjectFileId, usize)>,
+    /// Live "usages" analysis (fn/struct/enum/const/… fade-if-unused + a
+    /// "references" popup) for whichever `.rs` file is currently displayed. See
+    /// `editor_panel::usages`.
+    usages: editor_panel::usages::UsagesState,
+    /// Every `.rs` file's content (`"src/main.rs"` / `"src/{rel}"` → text) at
+    /// the moment the last Cargo Check / Clippy run was kicked off — lets the
+    /// "unused local variable" fade (which can only come from an on-demand
+    /// compile, see `editor_panel::usages`) tell whether a diagnostic still
+    /// matches the live text or has gone stale from a later edit.
+    build_text_snapshot: HashMap<String, String>,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -703,6 +713,8 @@ impl AppIde {
             pending_scroll_to_line: None,
             highlighted_error_line: None,
             highlighted_def_line: None,
+            usages: editor_panel::usages::UsagesState::default(),
+            build_text_snapshot: HashMap::new(),
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             rename_active: false,

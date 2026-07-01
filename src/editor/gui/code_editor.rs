@@ -68,11 +68,25 @@ fn raw_string_end(chars: &[char], p: usize) -> Option<usize> {
     Some(chars.len()) // unterminated → colour to EOF
 }
 
+/// Blend a colour 55% toward neutral gray, for tokens inside a "dead" (never-
+/// referenced) span — same technique as a disabled UI control, so unused code
+/// reads as visually de-emphasised without losing its shape/structure.
+fn fade(color: egui::Color32) -> egui::Color32 {
+    const GRAY: (u8, u8, u8) = (120, 120, 120);
+    let mix = |a: u8, b: u8| ((a as u16 + b as u16 * 2) / 3) as u8;
+    egui::Color32::from_rgb(mix(color.r(), GRAY.0), mix(color.g(), GRAY.1), mix(color.b(), GRAY.2))
+}
+
 /// Build a syntax-highlighted `LayoutJob` for Rust source. Mirrors the colours of
 /// `egui_code_editor`'s built-in highlighter (keyword / type / special sets come
 /// from the same `Syntax`, colours from the same `ColorTheme`) but is lifetime-
 /// aware: a `'a` / `'static` lifetime is its own blue span instead of a runaway
 /// char-literal string. Char literals (`'x'`, `'\n'`) keep the string colour.
+///
+/// `dead_ranges` are char-index `[start, end)` spans (e.g. a never-referenced
+/// fn/struct/enum/const, from `AppIde`'s usages analysis) whose tokens are
+/// rendered in a de-emphasised (faded toward gray) colour instead of their
+/// normal syntax colour.
 ///
 /// The job text equals the source exactly (every char appended in order), which
 /// egui requires for correct cursor / selection mapping.
@@ -81,14 +95,22 @@ fn rust_layout_job(
     theme: &ColorTheme,
     fontsize: f32,
     syntax: &Syntax,
+    dead_ranges: &[(usize, usize)],
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let font = egui::FontId::monospace(fontsize);
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
 
-    let push = |job: &mut egui::text::LayoutJob, s: &str, color: egui::Color32| {
+    // A token starting at char index `at` is "dead" when it falls inside any of
+    // `dead_ranges` — checked once per token (using its start index) since a
+    // token never straddles a dead-range boundary in practice (fn/struct/etc.
+    // spans start/end at statement boundaries).
+    let in_dead = |at: usize| dead_ranges.iter().any(|&(s, e)| at >= s && at < e);
+
+    let push = |job: &mut egui::text::LayoutJob, s: &str, color: egui::Color32, dead: bool| {
         if !s.is_empty() {
+            let color = if dead { fade(color) } else { color };
             job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
         }
     };
@@ -104,7 +126,7 @@ fn rust_layout_job(
             while p < n && chars[p].is_whitespace() {
                 p += 1;
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Whitespace(' ')));
+            push(&mut job, &slice(&chars, s, p), col(TokenType::Whitespace(' ')), in_dead(s));
             continue;
         }
         // ── Line comment `// …` ──
@@ -113,7 +135,7 @@ fn rust_layout_job(
             while p < n && chars[p] != '\n' {
                 p += 1;
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Comment(false)));
+            push(&mut job, &slice(&chars, s, p), col(TokenType::Comment(false)), in_dead(s));
             continue;
         }
         // ── Block comment `/* … */` ──
@@ -126,12 +148,12 @@ fn rust_layout_job(
             if p < n {
                 p += 1; // include the closing '/'
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Comment(true)));
+            push(&mut job, &slice(&chars, s, p), col(TokenType::Comment(true)), in_dead(s));
             continue;
         }
         // ── Raw string `r"…"` / `r#"…"#` / `br#"…"#` ──
         if let Some(end) = raw_string_end(&chars, p) {
-            push(&mut job, &slice(&chars, p, end), col(TokenType::Str('"')));
+            push(&mut job, &slice(&chars, p, end), col(TokenType::Str('"')), in_dead(p));
             p = end;
             continue;
         }
@@ -152,7 +174,7 @@ fn rust_layout_job(
                     _ => p += 1,
                 }
             }
-            push(&mut job, &slice(&chars, s, p.min(n)), col(TokenType::Str('"')));
+            push(&mut job, &slice(&chars, s, p.min(n)), col(TokenType::Str('"')), in_dead(s));
             continue;
         }
         // ── Char literal vs lifetime (both start with `'`) ──
@@ -167,7 +189,7 @@ fn rust_layout_job(
                 if p < n {
                     p += 1;
                 }
-                push(&mut job, &slice(&chars, s, p), col(TokenType::Str('\'')));
+                push(&mut job, &slice(&chars, s, p), col(TokenType::Str('\'')), in_dead(s));
                 continue;
             }
             // Lifetime: `'` + identifier, and NOT a single-char literal `'x'`
@@ -179,7 +201,7 @@ fn rust_layout_job(
                 while p < n && is_ident(chars[p]) {
                     p += 1;
                 }
-                push(&mut job, &slice(&chars, s, p), LIFETIME_COLOR);
+                push(&mut job, &slice(&chars, s, p), LIFETIME_COLOR, in_dead(s));
                 continue;
             }
             // Plain char literal `'x'`.
@@ -191,7 +213,7 @@ fn rust_layout_job(
             if p < n && chars[p] == '\'' {
                 p += 1; // closing quote
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Str('\'')));
+            push(&mut job, &slice(&chars, s, p), col(TokenType::Str('\'')), in_dead(s));
             continue;
         }
         // ── Number ──
@@ -212,7 +234,7 @@ fn rust_layout_job(
                     p += 1;
                 }
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Numeric(false)));
+            push(&mut job, &slice(&chars, s, p), col(TokenType::Numeric(false)), in_dead(s));
             continue;
         }
         // ── Identifier / keyword / type / special / function ──
@@ -233,13 +255,13 @@ fn rust_layout_job(
             } else {
                 TokenType::Literal
             };
-            push(&mut job, &word, col(ty));
+            push(&mut job, &word, col(ty), in_dead(s));
             continue;
         }
         // ── Punctuation / anything else (one char) ──
         let s = p;
         p += 1;
-        push(&mut job, &slice(&chars, s, p), col(TokenType::Punctuation(c)));
+        push(&mut job, &slice(&chars, s, p), col(TokenType::Punctuation(c)), in_dead(s));
     }
     job
 }
@@ -299,6 +321,7 @@ fn show_rust_editor(
     rows: usize,
     syntax: &Syntax,
     id: &str,
+    dead_ranges: &[(usize, usize)],
 ) -> TextEditOutput {
     let mut out: Option<TextEditOutput> = None;
     let code_editor = |ui: &mut egui::Ui| {
@@ -311,7 +334,8 @@ fn show_rust_editor(
                     .show(h, |ui| {
                         let mut layouter =
                             |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-                                let job = rust_layout_job(buf.as_str(), theme, fontsize, syntax);
+                                let job =
+                                    rust_layout_job(buf.as_str(), theme, fontsize, syntax, dead_ranges);
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
                         let output = egui::TextEdit::multiline(text)
@@ -349,11 +373,12 @@ pub fn show_rust_with_completer(
     id: &str,
     completer: &mut Completer,
     suppress_keyword_completer: bool,
+    dead_ranges: &[(usize, usize)],
 ) -> TextEditOutput {
     if !suppress_keyword_completer {
         completer.handle_input(ui.ctx());
     }
-    let mut out = show_rust_editor(ui, text, theme, fontsize, rows, syntax, id);
+    let mut out = show_rust_editor(ui, text, theme, fontsize, rows, syntax, id, dead_ranges);
     completer.text_edit_id = Some(out.response.id);
     if !suppress_keyword_completer {
         completer.show(syntax, theme, fontsize, &mut out);
@@ -368,7 +393,7 @@ mod tests {
     /// Collect (segment_text, is_lifetime_blue) from a highlighted job so tests
     /// can assert which spans were coloured as lifetimes without a real UI.
     fn spans(src: &str) -> Vec<(String, bool)> {
-        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust());
+        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[]);
         job.sections
             .iter()
             .map(|s| {
@@ -380,8 +405,34 @@ mod tests {
 
     /// The job text must reproduce the source exactly (egui relies on it).
     fn assert_roundtrip(src: &str) {
-        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust());
+        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[]);
         assert_eq!(job.text, src, "layout job text must equal source");
+    }
+
+    /// A dead range dims a token's colour without changing the job's text.
+    #[test]
+    fn dead_range_fades_color_without_changing_text() {
+        let src = "fn dead() {}\nfn used() {}";
+        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[(0, 12)]);
+        assert_eq!(job.text, src, "dead ranges must not change the rendered text");
+        // The "dead" token (first `fn`, inside [0,12)) must not use the normal
+        // keyword colour; the "used" token (after the dead range) must.
+        let normal_kw = ColorTheme::GRUVBOX.type_color(TokenType::Keyword);
+        let mut saw_dead_fn = false;
+        let mut saw_live_fn = false;
+        for s in &job.sections {
+            let txt = &job.text[s.byte_range.clone()];
+            if txt == "fn" {
+                if s.byte_range.start < 12 {
+                    assert_ne!(s.format.color, normal_kw, "dead `fn` must be faded");
+                    saw_dead_fn = true;
+                } else {
+                    assert_eq!(s.format.color, normal_kw, "live `fn` keeps its colour");
+                    saw_live_fn = true;
+                }
+            }
+        }
+        assert!(saw_dead_fn && saw_live_fn, "both `fn` tokens must be found");
     }
 
     #[test]

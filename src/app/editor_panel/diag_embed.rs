@@ -285,6 +285,9 @@ impl AppIde {
             return false;
         }
         self.clippy_sel = None;
+        // Snapshot the compiled text so the "unused local variable" fade can
+        // tell later whether this run's diagnostics still match the live file.
+        self.snapshot_build_text();
         crate::build::start_clippy(
             build_dir,
             project.target.clone(),
