@@ -62,6 +62,15 @@ pub struct SerialMonitor {
     pub tx_input: String,
     /// Height (px) of the resizable send area (dragged via its handle).
     pub tx_height: f32,
+    /// Pause (ms) inserted between each line when sending a multi-line block —
+    /// for command sequences where the device needs time before the next one.
+    pub line_delay_ms: u64,
+    /// Lines still waiting to be sent (front = next), each already fully encoded
+    /// (hex parsed + optional CR+LF). Drained one-per-`line_delay_ms` by
+    /// [`pump_tx_queue`], so the UI never blocks while pacing a sequence.
+    tx_queue: std::collections::VecDeque<Vec<u8>>,
+    /// When the next queued line is due to go out.
+    tx_next_at: Option<Instant>,
     /// Cached list of available ports (refreshed on demand).
     pub ports: Vec<String>,
 }
@@ -84,6 +93,9 @@ impl Default for SerialMonitor {
             append_crlf: false,
             tx_input: String::new(),
             tx_height: 30.0,
+            line_delay_ms: 100,
+            tx_queue: std::collections::VecDeque::new(),
+            tx_next_at: None,
             ports: Vec::new(),
         }
     }
@@ -145,6 +157,9 @@ impl SerialMonitor {
         }
         self.state.lock().unwrap().connected = false;
         self.writer = None;
+        // Drop any not-yet-sent queued lines (the port is gone).
+        self.tx_queue.clear();
+        self.tx_next_at = None;
     }
 
     /// Send raw bytes on the open port (no-op when disconnected).
@@ -154,6 +169,37 @@ impl SerialMonitor {
                 self.state.lock().unwrap().error = Some(e.to_string());
             }
         }
+    }
+
+    /// Queue `lines` to be sent one at a time, `line_delay_ms` apart (the first
+    /// goes out on the next [`pump_tx_queue`]). Replaces any pending queue.
+    pub fn queue_lines(&mut self, lines: Vec<Vec<u8>>) {
+        self.tx_queue = lines.into();
+        self.tx_next_at = if self.tx_queue.is_empty() {
+            None
+        } else {
+            Some(Instant::now()) // first line is due immediately
+        };
+    }
+
+    /// Send every queued line whose delay has elapsed (all of them at once when
+    /// `line_delay_ms == 0`, so a zero gap is truly back-to-back). Returns the
+    /// time until the next not-yet-due line (so the caller can
+    /// `request_repaint_after` it), or `None` when the queue is empty. Call once
+    /// per frame.
+    pub fn pump_tx_queue(&mut self) -> Option<Duration> {
+        while self.tx_next_at.is_some_and(|at| Instant::now() >= at) {
+            if let Some(bytes) = self.tx_queue.pop_front() {
+                self.send(&bytes);
+            }
+            self.tx_next_at = if self.tx_queue.is_empty() {
+                None
+            } else {
+                Some(Instant::now() + Duration::from_millis(self.line_delay_ms))
+            };
+        }
+        self.tx_next_at
+            .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
     pub fn clear_rx(&mut self) {

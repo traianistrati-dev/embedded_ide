@@ -318,6 +318,16 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     let mut do_send = false;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.checkbox(&mut serial.append_crlf, "CR+LF");
+        // Per-line pause (ms) for multi-line command sequences that need the
+        // device to settle before the next one. 0 = send back-to-back.
+        ui.add(
+            egui::DragValue::new(&mut serial.line_delay_ms)
+                .range(0..=60_000)
+                .speed(10.0)
+                .suffix(" ms"),
+        )
+        .on_hover_text("Pause between each line when sending a multi-line block");
+        ui.label("line gap");
         if ui
             .add_enabled(
                 connected,
@@ -371,19 +381,30 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     });
 
     if do_send && connected && !serial.tx_input.trim_end_matches(['\r', '\n']).is_empty() {
-        for line in serial.tx_input.clone().lines() {
-            let line = line.trim();
+        // Encode each non-empty line, then queue them so they go out one at a
+        // time with the configured `line_gap` pause — non-blocking (paced by
+        // `pump_tx_queue` below), so the UI stays responsive during the sequence.
+        let lines: Vec<Vec<u8>> = serial
+            .tx_input
+            .clone()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let mut bytes = hex_string_to_bytes(line).unwrap_or_default();
+                if serial.append_crlf {
+                    bytes.extend_from_slice(b"\r\n");
+                }
+                bytes
+            })
+            .collect();
+        serial.queue_lines(lines);
+    }
 
-            if line.is_empty() {
-                continue;
-            }
-            let mut bytes = hex_string_to_bytes(line).unwrap_or_default();
-            if serial.append_crlf {
-                bytes.extend_from_slice(b"\r\n");
-            }
-            serial.send(&bytes);
-            // serial.tx_input.clear();
-        }
+    // Pace the pending TX queue (if any); schedule a repaint when the next line
+    // is due so the pause elapses even while the app is otherwise idle.
+    if let Some(due_in) = serial.pump_tx_queue() {
+        ctx.request_repaint_after(due_in);
     }
 }
 
