@@ -1170,10 +1170,15 @@ impl AppIde {
         for (rel, content) in &self.project_tree.user_src_files {
             lsp.did_change(&format!("src/{rel}"), content, force);
         }
-        // NOTE: no `did_save` here on purpose. `did_save` triggers RA's
-        // cargo-check flycheck, which made saving slow. With `checkOnSave` off,
-        // saving only refreshes RA's fast in-memory diagnostics (above); a full
-        // `cargo check` is run on demand by the Build button.
+        // Trigger RA's `checkOnSave` flycheck (cargo check) so real compiler
+        // errors — E0425 "cannot find value", type mismatches, unused vars, … —
+        // refresh inline against the just-flushed text. RA's native pass alone
+        // does NOT publish these for nested user files, so this is what makes
+        // inline errors work at all. It runs asynchronously in RA (never blocks
+        // this save) and is a fast incremental check now that Cargo.lock is kept
+        // (see `reset_workspace_lock`). One `did_save` re-checks the whole
+        // workspace; RA coalesces, and flush is already debounced (Project Save).
+        lsp.did_save("src/main.rs");
     }
 }
 

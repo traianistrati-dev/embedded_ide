@@ -858,13 +858,21 @@ fn launch(
                 "window": { "workDoneProgress": true },
             },
             "initializationOptions": {
-                // cargo-check-on-save is DISABLED: it made saving slow (a full
-                // `cargo check` ran on every Project Save). Instead, live inline
-                // diagnostics come from RA's own in-memory analysis (which catches
-                // most errors), and a full `cargo check` runs ON DEMAND via the
-                // Build button (results shown in the "Cargo Check" tab). See
+                // cargo-check-on-save is ENABLED so real compiler errors
+                // (E0425 "cannot find value", type mismatches, …) show up inline
+                // after a Project Save. RA's *native* pass alone does NOT
+                // reliably publish these for nested user files, so without
+                // flycheck the editor showed no inline errors at all.
+                //
+                // The save-slowness this once caused was NOT flycheck itself but
+                // (a) a leaked serial-reader thread and (b) deleting Cargo.lock on
+                // every save, which forced a full dependency re-resolve before
+                // each check — both since fixed (Cargo.lock is now kept; see
+                // `AppIde::reset_workspace_lock`), so flycheck is a fast
+                // *incremental* check that runs asynchronously in RA (it never
+                // blocks the app's save). Triggered by the `did_save` sent from
                 // `AppIde::flush_lsp_to_workspace`.
-                "checkOnSave":  false,
+                "checkOnSave":  true,
 
                 // Proc-macro expansion is disabled.
                 //
