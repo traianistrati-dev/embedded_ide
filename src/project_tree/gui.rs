@@ -35,6 +35,23 @@ fn base_name(path: &str) -> &str {
 /// what makes a quick click/drag gesture NOT start a move.
 const DRAG_HOLD_SECS: f64 = 0.4;
 
+/// Hover affordance for an interactive tree row (file / folder header): a
+/// subtle tint over the row plus the pointing-hand cursor — makes it visible
+/// WHERE a click / right-click menu / hold-to-drag actually works. The cursor
+/// then progresses hand → grab (while the button is held, see the call sites)
+/// → grabbing/no-drop (once the drag arms; set by the payload block at the end
+/// of the tree, which runs last and therefore wins).
+fn row_hover_feedback(ui: &egui::Ui, rect: egui::Rect, contains_pointer: bool) {
+    if contains_pointer {
+        ui.painter().rect_filled(
+            rect.expand2(egui::vec2(2.0, 0.0)),
+            3.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+}
+
 /// Long-press-to-drag gate, fully stateless: `true` once the PRIMARY button has
 /// been held on `resp` for ≥ [`DRAG_HOLD_SECS`] (press-start time comes from
 /// egui's own pointer state — no temp-memory bookkeeping that could go stale).
@@ -514,45 +531,6 @@ pub fn show_project_tree(
     show_tree_notice(ui);
     ui.add_space(2.0);
 
-    // While a tree item is being dragged (payload armed via the hold gate), give
-    // the cursor the drag icon — `Grabbing`, or `NoDrop` when the item is
-    // auto-generated (can't be moved) — and float a name preview by the pointer.
-    // Drawn ONCE here (payload-driven) rather than per-widget: the payload
-    // outlives egui's press-on-widget tracking once the pointer moves away from
-    // the source row, so a per-widget preview would vanish mid-drag.
-    if let Some(payload) = egui::DragAndDrop::payload::<DraggedItem>(ui.ctx()) {
-        let blocked = match &*payload {
-            DraggedItem::File(idx) => user_src_files
-                .get(*idx)
-                .is_some_and(|(p, _)| generated_file_reason(p).is_some()),
-            DraggedItem::Folder(p) => generated_folder_reason(p).is_some(),
-        };
-        ui.ctx().set_cursor_icon(if blocked {
-            egui::CursorIcon::NoDrop
-        } else {
-            egui::CursorIcon::Grabbing
-        });
-        let label = match &*payload {
-            DraggedItem::File(idx) => user_src_files
-                .get(*idx)
-                .map(|(p, _)| format!("{} {}", ph::FILE, base_name(p))),
-            DraggedItem::Folder(p) => Some(format!("{} {}/", ph::FOLDER, base_name(p))),
-        };
-        if let (Some(label), Some(pos)) = (label, ui.ctx().pointer_interact_pos()) {
-            egui::Area::new(egui::Id::new("__tree_drag_preview__"))
-                .fixed_pos(pos + egui::vec2(12.0, 4.0))
-                .order(egui::Order::Tooltip)
-                .interactable(false)
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        // `.extend()`: never wrap — near the panel edge the name
-                        // otherwise breaks into a one-char-per-line column.
-                        ui.add(egui::Label::new(egui::RichText::new(label).size(11.0)).extend());
-                    });
-                });
-        }
-    }
-
     // Collected during the tree render below; an item dragged onto a folder sets
     // `(dragged_item, target_folder_rel_to_src)` — applied after the tree closure
     // so it doesn't clash with the `&mut` borrows used for rendering.
@@ -677,6 +655,14 @@ pub fn show_project_tree(
         }
     });
 
+    // Hover: tint + pointing hand — the src/ header is a drop target and hosts
+    // the New File / New Folder context menu.
+    row_hover_feedback(
+        ui,
+        src_ch.header_response.rect,
+        src_ch.header_response.contains_pointer(),
+    );
+
     // Dropping a dragged item on the `src/` header moves it to the src/ root.
     if src_ch.header_response.dnd_hover_payload::<DraggedItem>().is_some() {
         ui.painter().rect_stroke(
@@ -764,6 +750,47 @@ pub fn show_project_tree(
             build_result,
             lsp_state,
         );
+    }
+
+    // While a tree item is being dragged (payload armed via the hold gate), give
+    // the cursor the drag icon — `Grabbing`, or `NoDrop` when the item is
+    // auto-generated (can't be moved) — and float a name preview by the pointer.
+    // Drawn ONCE, payload-driven (a per-widget preview would vanish once the
+    // pointer leaves the source row), and at the END of the tree: egui's
+    // last-write-wins cursor means running after every row overrides any hover
+    // cursor a row set (a selectable Label's I-beam used to mask this for files).
+    // Reading the payload here also picks up same-frame arming (no 1-frame lag).
+    if let Some(payload) = egui::DragAndDrop::payload::<DraggedItem>(ui.ctx()) {
+        let blocked = match &*payload {
+            DraggedItem::File(idx) => user_src_files
+                .get(*idx)
+                .is_some_and(|(p, _)| generated_file_reason(p).is_some()),
+            DraggedItem::Folder(p) => generated_folder_reason(p).is_some(),
+        };
+        ui.ctx().set_cursor_icon(if blocked {
+            egui::CursorIcon::NoDrop
+        } else {
+            egui::CursorIcon::Grabbing
+        });
+        let label = match &*payload {
+            DraggedItem::File(idx) => user_src_files
+                .get(*idx)
+                .map(|(p, _)| format!("{} {}", ph::FILE, base_name(p))),
+            DraggedItem::Folder(p) => Some(format!("{} {}/", ph::FOLDER, base_name(p))),
+        };
+        if let (Some(label), Some(pos)) = (label, ui.ctx().pointer_interact_pos()) {
+            egui::Area::new(egui::Id::new("__tree_drag_preview__"))
+                .fixed_pos(pos + egui::vec2(12.0, 4.0))
+                .order(egui::Order::Tooltip)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        // `.extend()`: never wrap — near the panel edge the name
+                        // otherwise breaks into a one-char-per-line column.
+                        ui.add(egui::Label::new(egui::RichText::new(label).size(11.0)).extend());
+                    });
+                });
+        }
     }
 }
 
@@ -980,6 +1007,22 @@ fn render_tree_node(
                         );
                     }
 
+                    // Hover: tint the header + pointing hand (click toggles,
+                    // right-click menu, hold-to-drag all work here); grab while
+                    // the button is held (pre-arm feedback). The end-of-tree
+                    // payload block upgrades to grabbing/no-drop once armed.
+                    row_hover_feedback(
+                        ui,
+                        ch.header_response.rect,
+                        ch.header_response.contains_pointer(),
+                    );
+                    if !editing
+                        && ch.header_response.is_pointer_button_down_on()
+                        && ui.input(|i| i.pointer.primary_down())
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
+
                     // Drop TARGET: dragging an item onto this folder header moves
                     // it here. Highlight the header while an item hovers over it.
                     if ch.header_response.dnd_hover_payload::<DraggedItem>().is_some() {
@@ -1103,11 +1146,14 @@ fn file_row(
     // Fixed project files have no Rename/Delete menu — mark them dark-red + bold.
     let fixed = egui::Color32::from_rgb(100, 50, 50);
 
-    ui.horizontal(|ui| {
+    let row = ui.horizontal(|ui| {
         ui.add_space(indent);
         let is_sel = *selected == id;
         let color = if is_sel { hi } else { fixed };
         ui.label(egui::RichText::new(ph::FILE).size(11.5).color(color));
+        // `selectable(false)`: keeps the label from forcing the text (I-beam)
+        // hover cursor, which would override the drag cursor while an item is
+        // dragged across this row (see `user_file_row`).
         let resp = ui.add(
             egui::Label::new(
                 egui::RichText::new(name)
@@ -1116,6 +1162,7 @@ fn file_row(
                     .strong()
                     .color(color),
             )
+            .selectable(false)
             .sense(egui::Sense::click()),
         );
         if resp.clicked() {
@@ -1133,6 +1180,8 @@ fn file_row(
             }
         }
     });
+    // Hover: tint + pointing hand (the row is clickable).
+    row_hover_feedback(ui, row.response.rect, row.response.contains_pointer());
 }
 
 fn user_file_row(
@@ -1173,7 +1222,7 @@ fn user_file_row(
         return;
     }
 
-    ui.horizontal(|ui| {
+    let row = ui.horizontal(|ui| {
         ui.add_space(indent);
         let is_sel = *selected == id;
         let color = if is_sel { hi } else { normal };
@@ -1182,7 +1231,10 @@ fn user_file_row(
         // arms only via the hold gate (`drag_armed`) — hold the primary button
         // still ~0.4s, then drag; the payload is set directly (no drag sense, so
         // nothing competes with clicks). The floating preview + drag cursor are
-        // drawn globally at the top of the tree while a payload exists.
+        // drawn globally at the end of the tree while a payload exists.
+        // `selectable(false)`: a selectable Label sets the text (I-beam) hover
+        // cursor AFTER our global drag-cursor call, overriding it — which is why
+        // files showed no drag cursor while folder headers (plain buttons) did.
         let resp = ui.add(
             egui::Label::new(
                 egui::RichText::new(name)
@@ -1190,8 +1242,13 @@ fn user_file_row(
                     .monospace()
                     .color(color),
             )
+            .selectable(false)
             .sense(egui::Sense::click()),
         );
+        // Holding the primary button on the row (pre-arm) — reported to the
+        // caller so the cursor can show "grab" while the 0.4s hold elapses.
+        let held =
+            resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down());
         if drag_armed(ui, &resp) {
             egui::DragAndDrop::set_payload(ui.ctx(), DraggedItem::File(idx));
         }
@@ -1222,5 +1279,13 @@ fn user_file_row(
                 ui.close();
             }
         });
+        held
     });
+    // Hover: tint the whole row + pointing-hand cursor (click / menu / drag all
+    // work here); while the button is held, grab — then the end-of-tree payload
+    // block upgrades it to grabbing/no-drop once the drag arms.
+    row_hover_feedback(ui, row.response.rect, row.response.contains_pointer());
+    if row.inner {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
 }
