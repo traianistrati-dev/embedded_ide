@@ -14,16 +14,30 @@ enum TreeNode {
     Folder(BTreeMap<String, TreeNode>),
 }
 
-/// Drag-and-drop payload: the `user_src_files` index of the file being dragged
-/// onto a folder (drop target). `Send + Sync + 'static` as egui requires.
+/// Drag-and-drop payload: the tree item being dragged onto a folder (drop
+/// target). `Send + Sync + 'static` as egui requires.
 #[derive(Clone)]
-struct DraggedFile {
-    idx: usize,
+enum DraggedItem {
+    /// A user file, by its `user_src_files` index.
+    File(usize),
+    /// A folder, by its `src/`-relative path (moves with all its contents).
+    Folder(String),
 }
 
 /// The last path segment of a `src/`-relative path (the bare file/folder name).
 fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+/// If `path` is an auto-generated folder that must NOT be moved, return a short
+/// explanation; otherwise `None`. `pins/` and `pins/configs/` are recreated
+/// every frame by the pin/peripheral sync, so moving them breaks codegen.
+fn generated_folder_reason(path: &str) -> Option<&'static str> {
+    match path {
+        "pins" => Some("the `pins/` folder is auto-generated from your pin configuration"),
+        "pins/configs" => Some("`pins/configs/` is auto-generated from the Virtual Modules (USART/SPI/I2C)"),
+        _ => None,
+    }
 }
 
 /// If `path` (relative to `src/`) is an auto-generated file that must NOT be
@@ -89,11 +103,44 @@ fn show_tree_notice(ui: &mut egui::Ui) {
         .request_repaint_after(std::time::Duration::from_millis(250));
 }
 
-/// Move user file `idx` into `target_folder` (`""` = src/ root), with all the
-/// guards: refuse to move an auto-generated file (with an explanatory notice),
-/// refuse to drop into the auto-managed `pins/configs/`, no-op when already
-/// there, and refuse on a name collision. Renames on disk (live workspace) and
-/// updates the in-memory path.
+/// Apply a drag-drop move of `item` into `target_folder` (`""` = src/ root),
+/// dispatching to the file or folder mover. Shared guard: refuse dropping into
+/// the auto-managed `pins/configs/` (files there are pruned by the sync).
+fn apply_move(
+    ui: &egui::Ui,
+    item: &DraggedItem,
+    target_folder: &str,
+    user_src_files: &mut Vec<(String, String)>,
+    user_src_folders: &mut Vec<String>,
+    workspace_dir: &std::path::Path,
+    save_needed: &mut bool,
+) {
+    if target_folder == "pins/configs" || target_folder.starts_with("pins/configs/") {
+        set_tree_notice(
+            ui.ctx(),
+            "Can't move into `pins/configs/` — it's auto-managed by the MCU Configurator.".to_string(),
+        );
+        return;
+    }
+    match item {
+        DraggedItem::File(idx) => {
+            apply_file_move(ui, *idx, target_folder, user_src_files, workspace_dir, save_needed)
+        }
+        DraggedItem::Folder(src) => apply_folder_move(
+            ui,
+            src,
+            target_folder,
+            user_src_files,
+            user_src_folders,
+            workspace_dir,
+            save_needed,
+        ),
+    }
+}
+
+/// Move user file `idx` into `target_folder`: refuse auto-generated files (with
+/// notice), no-op when already there, refuse on name collision. Renames on disk
+/// and updates the in-memory path.
 fn apply_file_move(
     ui: &egui::Ui,
     idx: usize,
@@ -110,13 +157,6 @@ fn apply_file_move(
 
     if let Some(reason) = generated_file_reason(&old_path) {
         set_tree_notice(ui.ctx(), format!("Can't move `{fname}` — {reason}."));
-        return;
-    }
-    if target_folder == "pins/configs" || target_folder.starts_with("pins/configs/") {
-        set_tree_notice(
-            ui.ctx(),
-            "Can't move files into `pins/configs/` — it's auto-managed by the MCU Configurator.".to_string(),
-        );
         return;
     }
 
@@ -144,6 +184,184 @@ fn apply_file_move(
     let _ = std::fs::rename(&old_dest, &new_dest);
     user_src_files[idx].0 = new_path;
     *save_needed = true;
+}
+
+/// Move folder `src` (and everything under it) into `target_folder`: refuse
+/// auto-generated folders, refuse moving a folder into itself/a descendant,
+/// no-op when already there, refuse on collision. Renames on disk and rewrites
+/// every affected folder + file path (mirrors the folder-rename logic).
+fn apply_folder_move(
+    ui: &egui::Ui,
+    src: &str,
+    target_folder: &str,
+    user_src_files: &mut [(String, String)],
+    user_src_folders: &mut [String],
+    workspace_dir: &std::path::Path,
+    save_needed: &mut bool,
+) {
+    let name = base_name(src).to_string();
+
+    if let Some(reason) = generated_folder_reason(src) {
+        set_tree_notice(ui.ctx(), format!("Can't move `{name}/` — {reason}."));
+        return;
+    }
+    // Can't drop a folder into itself or one of its own descendants.
+    if target_folder == src || target_folder.starts_with(&format!("{src}/")) {
+        set_tree_notice(ui.ctx(), "Can't move a folder into itself.".to_string());
+        return;
+    }
+
+    let new_path = if target_folder.is_empty() {
+        name.clone()
+    } else {
+        format!("{target_folder}/{name}")
+    };
+    if new_path == *src {
+        return; // already in that folder
+    }
+    let collides = user_src_folders.iter().any(|f| f == &new_path)
+        || user_src_files.iter().any(|(p, _)| p == &new_path);
+    if collides {
+        set_tree_notice(
+            ui.ctx(),
+            format!("`{name}/` already exists in that folder — rename one first."),
+        );
+        return;
+    }
+
+    let old_dest = workspace_dir.join("src").join(src);
+    let new_dest = workspace_dir.join("src").join(&new_path);
+    if let Some(parent) = new_dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(&old_dest, &new_dest);
+
+    let old_prefix = format!("{src}/");
+    for f in user_src_folders.iter_mut() {
+        if *f == src {
+            *f = new_path.clone();
+        } else if let Some(rest) = f.strip_prefix(&old_prefix) {
+            *f = format!("{new_path}/{rest}");
+        }
+    }
+    for (p, _) in user_src_files.iter_mut() {
+        if let Some(rest) = p.strip_prefix(&old_prefix) {
+            *p = format!("{new_path}/{rest}");
+        }
+    }
+    *save_needed = true;
+}
+
+/// egui id for "focus the inline new-item input on its first frame" (file / folder).
+fn inline_focus_id(is_folder: bool) -> egui::Id {
+    egui::Id::new(if is_folder {
+        "__inline_new_folder_focus__"
+    } else {
+        "__inline_new_file_focus__"
+    })
+}
+
+/// Arm the inline new-item input for `parent` (`""` = src/ root): set the
+/// pending name + parent state and request focus next frame. Called from the
+/// "New File" / "New Folder" context-menu entries.
+fn begin_inline_new(
+    ui: &egui::Ui,
+    is_folder: bool,
+    parent: &str,
+    name_state: &mut Option<String>,
+    parent_state: &mut Option<String>,
+) {
+    *name_state = Some(String::new());
+    *parent_state = Some(parent.to_string());
+    ui.memory_mut(|m| m.data.insert_temp(inline_focus_id(is_folder), true));
+}
+
+/// Render the inline "new file / new folder" name input as a tree row (at
+/// `indent`) while its pending state targets `parent`. Enter creates the item
+/// (in memory + on disk) and clears the state; Esc / focus-loss cancels. Only
+/// one input is active at a time (single `name_state` Option). No-op when the
+/// pending state doesn't target this `parent`.
+#[allow(clippy::too_many_arguments)]
+fn inline_new_item(
+    ui: &mut egui::Ui,
+    indent: f32,
+    parent: &str,
+    is_folder: bool,
+    name_state: &mut Option<String>,
+    parent_state: &mut Option<String>,
+    user_src_files: &mut Vec<(String, String)>,
+    user_src_folders: &mut Vec<String>,
+    selected: &mut ProjectFileId,
+    workspace_dir: &std::path::Path,
+    save_needed: &mut bool,
+) {
+    if parent_state.as_deref() != Some(parent) || name_state.is_none() {
+        return;
+    }
+    let mut create = false;
+    let mut cancel = false;
+    let focus_id = inline_focus_id(is_folder);
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let icon = if is_folder { ph::FOLDER } else { ph::FILE };
+        ui.label(
+            egui::RichText::new(icon)
+                .size(11.5)
+                .color(egui::Color32::from_rgb(150, 180, 240)),
+        );
+        if let Some(name) = name_state.as_mut() {
+            let resp = ui.add(
+                egui::TextEdit::singleline(name)
+                    .desired_width(ui.available_width())
+                    .hint_text(if is_folder { "new folder" } else { "new_file.rs" }),
+            );
+            if ui.memory(|m| m.data.get_temp::<bool>(focus_id).unwrap_or(true)) {
+                resp.request_focus();
+                ui.memory_mut(|m| m.data.insert_temp(focus_id, false));
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                create = true;
+            } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) || resp.lost_focus() {
+                cancel = true;
+            }
+        }
+    });
+
+    if create {
+        if let Some(name) = name_state.take() {
+            let clean = name.trim().to_string();
+            if !clean.is_empty() {
+                let full = if parent.is_empty() {
+                    clean.clone()
+                } else {
+                    format!("{parent}/{clean}")
+                };
+                let collides = user_src_folders.iter().any(|f| f == &full)
+                    || user_src_files.iter().any(|(p, _)| p == &full);
+                if collides {
+                    set_tree_notice(ui.ctx(), format!("`{clean}` already exists here."));
+                } else if is_folder {
+                    let dest = workspace_dir.join("src").join(&full);
+                    let _ = std::fs::create_dir_all(&dest);
+                    user_src_folders.push(full);
+                    *save_needed = true;
+                } else {
+                    let dest = workspace_dir.join("src").join(&full);
+                    if let Some(p) = dest.parent() {
+                        let _ = std::fs::create_dir_all(p);
+                    }
+                    let _ = std::fs::write(&dest, "// New file\n");
+                    user_src_files.push((full, "// New file\n".to_string()));
+                    *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
+                    *save_needed = true;
+                }
+            }
+        }
+        *parent_state = None;
+    } else if cancel {
+        *name_state = None;
+        *parent_state = None;
+    }
 }
 
 /// Build a hierarchical tree from user_src_files and user_src_folders.
@@ -252,10 +470,26 @@ pub fn show_project_tree(
     show_tree_notice(ui);
     ui.add_space(2.0);
 
-    // Collected during the tree render below; a file dragged onto a folder sets
-    // `(file_idx, target_folder_rel_to_src)` — applied after the tree closure so
-    // it doesn't clash with the `&mut user_src_files` borrow used for rendering.
-    let mut move_request: Option<(usize, String)> = None;
+    // While a tree item is being dragged, give the cursor the drag icon —
+    // `Grabbing`, or `NoDrop` when the item is auto-generated (can't be moved).
+    if let Some(payload) = egui::DragAndDrop::payload::<DraggedItem>(ui.ctx()) {
+        let blocked = match &*payload {
+            DraggedItem::File(idx) => user_src_files
+                .get(*idx)
+                .is_some_and(|(p, _)| generated_file_reason(p).is_some()),
+            DraggedItem::Folder(p) => generated_folder_reason(p).is_some(),
+        };
+        ui.ctx().set_cursor_icon(if blocked {
+            egui::CursorIcon::NoDrop
+        } else {
+            egui::CursorIcon::Grabbing
+        });
+    }
+
+    // Collected during the tree render below; an item dragged onto a folder sets
+    // `(dragged_item, target_folder_rel_to_src)` — applied after the tree closure
+    // so it doesn't clash with the `&mut` borrows used for rendering.
+    let mut move_request: Option<(DraggedItem, String)> = None;
 
     // .cargo/  — fixed folder, no context menu → dark-red + bold.
     egui::CollapsingHeader::new(
@@ -296,6 +530,17 @@ pub fn show_project_tree(
             selected,
             build_result,
             lsp_state,
+        );
+
+        // Inline "new file / new folder" input at the src/ root ("" parent),
+        // rendered right under main.rs where the item will be added.
+        inline_new_item(
+            ui, 8.0, "", false, new_src_name, new_file_parent_folder,
+            user_src_files, user_src_folders, selected, workspace_dir, save_needed,
+        );
+        inline_new_item(
+            ui, 8.0, "", true, new_src_folder_name, new_folder_parent_folder,
+            user_src_files, user_src_folders, selected, workspace_dir, save_needed,
         );
 
         // Build hierarchical tree from files and folders
@@ -365,8 +610,8 @@ pub fn show_project_tree(
         }
     });
 
-    // Dropping a dragged file on the `src/` header moves it to the src/ root.
-    if src_ch.header_response.dnd_hover_payload::<DraggedFile>().is_some() {
+    // Dropping a dragged item on the `src/` header moves it to the src/ root.
+    if src_ch.header_response.dnd_hover_payload::<DraggedItem>().is_some() {
         ui.painter().rect_stroke(
             src_ch.header_response.rect,
             3.0,
@@ -374,13 +619,21 @@ pub fn show_project_tree(
             egui::StrokeKind::Inside,
         );
     }
-    if let Some(p) = src_ch.header_response.dnd_release_payload::<DraggedFile>() {
-        move_request = Some((p.idx, String::new()));
+    if let Some(p) = src_ch.header_response.dnd_release_payload::<DraggedItem>() {
+        move_request = Some(((*p).clone(), String::new()));
     }
 
-    // Apply a drag-drop move now that the tree closure's borrow has ended.
-    if let Some((idx, target)) = move_request.take() {
-        apply_file_move(ui, idx, &target, user_src_files, workspace_dir, save_needed);
+    // Apply a drag-drop move now that the tree closure's borrows have ended.
+    if let Some((item, target)) = move_request.take() {
+        apply_move(
+            ui,
+            &item,
+            &target,
+            user_src_files,
+            user_src_folders,
+            workspace_dir,
+            save_needed,
+        );
     }
 
     src_ch.header_response.context_menu(|ui| {
@@ -388,16 +641,18 @@ pub fn show_project_tree(
             .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
             .clicked()
         {
-            *new_src_name = Some(String::new());
-            *new_file_parent_folder = Some(String::new()); // empty = root of src/
+            begin_inline_new(ui, false, "", new_src_name, new_file_parent_folder);
+            *new_src_folder_name = None;
+            *new_folder_parent_folder = None;
             ui.close();
         }
         if ui
             .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
             .clicked()
         {
-            *new_src_folder_name = Some(String::new());
-            *new_folder_parent_folder = Some(String::new()); // empty = root of src/
+            begin_inline_new(ui, true, "", new_src_folder_name, new_folder_parent_folder);
+            *new_src_name = None;
+            *new_file_parent_folder = None;
             ui.close();
         }
     });
@@ -466,9 +721,18 @@ fn render_tree_node(
     new_file_parent_folder: &mut Option<String>,
     new_folder_parent_folder: &mut Option<String>,
     parent_path: &str,
-    move_request: &mut Option<(usize, String)>,
+    move_request: &mut Option<(DraggedItem, String)>,
 ) {
     let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
+    // While any inline edit is active (new file/folder input or a rename), don't
+    // arm the folder drag-source overlay: its `Sense::drag()` interaction on the
+    // header steals the pointer/focus from the just-opened input, so the input
+    // flickers open and immediately cancels (reported as "it tries to move the
+    // folder"). Dragging isn't meaningful mid-edit anyway.
+    let editing = new_src_name.is_some()
+        || new_src_folder_name.is_some()
+        || renaming_file.is_some()
+        || renaming_folder.is_some();
 
     for (name, node) in tree {
         match node {
@@ -572,7 +836,38 @@ fn render_tree_node(
                     )
                     .default_open(true)
                     .show(ui, |ui| {
-                        if children.is_empty() {
+                        // Inline "new file / new folder" input as the first child
+                        // of this folder (shown right where the item is added).
+                        inline_new_item(
+                            ui,
+                            indent + 8.0,
+                            &folder_path,
+                            false,
+                            new_src_name,
+                            new_file_parent_folder,
+                            user_src_files,
+                            user_src_folders,
+                            selected,
+                            workspace_dir,
+                            save_needed,
+                        );
+                        inline_new_item(
+                            ui,
+                            indent + 8.0,
+                            &folder_path,
+                            true,
+                            new_src_folder_name,
+                            new_folder_parent_folder,
+                            user_src_files,
+                            user_src_folders,
+                            selected,
+                            workspace_dir,
+                            save_needed,
+                        );
+                        if children.is_empty()
+                            && new_file_parent_folder.as_deref() != Some(folder_path.as_str())
+                            && new_folder_parent_folder.as_deref() != Some(folder_path.as_str())
+                        {
                             ui.label(
                                 egui::RichText::new("  (empty)")
                                     .size(10.0)
@@ -602,9 +897,42 @@ fn render_tree_node(
                         );
                     });
 
-                    // Drop target: dragging a file onto this folder header moves
-                    // it here. Highlight the header while a file hovers over it.
-                    if ch.header_response.dnd_hover_payload::<DraggedFile>().is_some() {
+                    // Drag SOURCE: a separate drag-sensing overlay on the header
+                    // rect so the whole folder can be moved. `Sense::drag()` only
+                    // (not click) so a plain click still toggles the collapsing
+                    // header underneath; only a press-and-move starts a drag.
+                    // Skipped while editing (see `editing` above).
+                    if !editing {
+                        let folder_drag = ui.interact(
+                            ch.header_response.rect,
+                            ch.header_response.id.with("__folder_drag__"),
+                            egui::Sense::drag(),
+                        );
+                        folder_drag.dnd_set_drag_payload(DraggedItem::Folder(folder_path.clone()));
+                        if folder_drag.dragged() {
+                            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                                egui::Area::new(egui::Id::new("__tree_drag_preview__"))
+                                    .fixed_pos(pos + egui::vec2(12.0, 4.0))
+                                    .order(egui::Order::Tooltip)
+                                    .interactable(false)
+                                    .show(ui.ctx(), |ui| {
+                                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} {name}/",
+                                                    ph::FOLDER
+                                                ))
+                                                .size(11.0),
+                                            );
+                                        });
+                                    });
+                            }
+                        }
+                    }
+
+                    // Drop TARGET: dragging an item onto this folder header moves
+                    // it here. Highlight the header while an item hovers over it.
+                    if ch.header_response.dnd_hover_payload::<DraggedItem>().is_some() {
                         ui.painter().rect_stroke(
                             ch.header_response.rect,
                             3.0,
@@ -612,8 +940,8 @@ fn render_tree_node(
                             egui::StrokeKind::Inside,
                         );
                     }
-                    if let Some(p) = ch.header_response.dnd_release_payload::<DraggedFile>() {
-                        *move_request = Some((p.idx, folder_path.clone()));
+                    if let Some(p) = ch.header_response.dnd_release_payload::<DraggedItem>() {
+                        *move_request = Some(((*p).clone(), folder_path.clone()));
                     }
 
                     ch.header_response.context_menu(|ui| {
@@ -624,8 +952,16 @@ fn render_tree_node(
                             )
                             .clicked()
                         {
-                            *new_src_name = Some(String::new());
-                            *new_file_parent_folder = Some(folder_path.clone());
+                            begin_inline_new(
+                                ui,
+                                false,
+                                &folder_path,
+                                new_src_name,
+                                new_file_parent_folder,
+                            );
+                            // Cancel any pending folder input so only one shows.
+                            *new_src_folder_name = None;
+                            *new_folder_parent_folder = None;
                             ui.close();
                         }
                         if ui
@@ -635,8 +971,15 @@ fn render_tree_node(
                             )
                             .clicked()
                         {
-                            *new_src_folder_name = Some(String::new());
-                            *new_folder_parent_folder = Some(folder_path.clone());
+                            begin_inline_new(
+                                ui,
+                                true,
+                                &folder_path,
+                                new_src_folder_name,
+                                new_folder_parent_folder,
+                            );
+                            *new_src_name = None;
+                            *new_file_parent_folder = None;
                             ui.close();
                         }
                         ui.separator();
@@ -796,9 +1139,8 @@ fn user_file_row(
             )
             .sense(egui::Sense::click_and_drag()),
         );
-        resp.dnd_set_drag_payload(DraggedFile { idx });
+        resp.dnd_set_drag_payload(DraggedItem::File(idx));
         if resp.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             // Floating preview following the cursor (the response-based DnD API
             // doesn't paint one itself, unlike `dnd_drag_source`).
             if let Some(pos) = ui.ctx().pointer_interact_pos() {

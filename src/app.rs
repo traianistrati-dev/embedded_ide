@@ -1335,10 +1335,10 @@ impl eframe::App for AppIde {
             }
         }
 
-        // ── Modal dialogs: New Project / New File / New Folder ─────
+        // ── Modal dialog: New Project ─────────────────────────────
+        // (New File / New Folder are now inline inputs rendered in the project
+        // tree at the target folder — see `project_tree::gui::inline_new_item`.)
         self.show_new_project_dialog(ui, &mut save_project_needed);
-        self.show_new_file_dialog(ui, &mut save_project_needed);
-        self.show_new_folder_dialog(ui, &mut save_project_needed);
 
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).
