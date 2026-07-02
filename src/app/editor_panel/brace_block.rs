@@ -259,8 +259,8 @@ fn preceded_by_def_keyword(chars: &[char], lo: usize) -> bool {
 }
 
 /// The whole definition `(start, close)` when `[lo, hi)` selects a definition
-/// NAME (e.g. double-click / Shift-select the `foo` in `fn foo(..) { .. }`).
-/// `None` when it isn't a definition name or has no `{ }` body.
+/// NAME (the `foo` in `fn foo(..) { .. }`). `None` when it isn't a definition
+/// name or has no `{ }` body.
 fn full_def_from_name(chars: &[char], lo: usize, hi: usize) -> Option<(usize, usize)> {
     if !is_word_selection(chars, lo, hi) || !preceded_by_def_keyword(chars, lo) {
         return None;
@@ -271,10 +271,43 @@ fn full_def_from_name(chars: &[char], lo: usize, hi: usize) -> Option<(usize, us
     Some((header_start(chars, open), close))
 }
 
+/// The whole definition `(start, close)` when the char range `[lo, hi)` — a
+/// triple-click's whole-line selection — CONTAINS a definition header: the
+/// first word preceded by `fn`/`struct`/`enum`/… whose construct has a `{ }`
+/// body. Covers headers whose opening `{` sits on a LATER line (multi-line
+/// signatures), which the brace-on-line path can't reach.
+fn full_def_from_line(chars: &[char], lo: usize, hi: usize) -> Option<(usize, usize)> {
+    let hi = hi.min(chars.len());
+    let mut i = lo.min(hi);
+    while i < hi {
+        if is_ident(chars[i]) && (i == 0 || !is_ident(chars[i - 1])) {
+            let mut j = i;
+            while j < chars.len() && is_ident(chars[j]) {
+                j += 1;
+            }
+            // `full_def_from_name` itself rejects words not preceded by a def
+            // keyword, so just probe every word on the line.
+            if let Some(def) = full_def_from_name(chars, i, j) {
+                return Some(def);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// `&str` test wrapper: full definition for a NAME selection `[lo, hi)`.
 #[cfg(test)]
 pub(super) fn full_def_name(text: &str, lo: usize, hi: usize) -> Option<(usize, usize)> {
     full_def_from_name(&text.chars().collect::<Vec<_>>(), lo, hi)
+}
+
+/// `&str` test wrapper: full definition for a line selection `[lo, hi)`.
+#[cfg(test)]
+pub(super) fn full_def_line(text: &str, lo: usize, hi: usize) -> Option<(usize, usize)> {
+    full_def_from_line(&text.chars().collect::<Vec<_>>(), lo, hi)
 }
 
 /// `&str` test wrapper: full definition for a brace at `brace_idx`.
@@ -382,9 +415,11 @@ impl AppIde {
 
     /// Highlight the WHOLE definition (fn / struct / enum / if / while / match /
     /// …) with a translucent white band (RGBA 255,255,255,50) and copy it on
-    /// Ctrl+C. Triggers when the selection is a definition NAME (double-click /
-    /// Shift-select) or on a triple-click on a `{`/`}`. Returns `true` when it
-    /// owns this frame (so the caller skips the brace-block highlight).
+    /// Ctrl+C. Triggers ONLY on a TRIPLE-click — on a `{`/`}`, on any line
+    /// holding a brace of the construct, or on the definition's header line
+    /// (its `fn`/`struct`/… name). Double-click stays plain word-select.
+    /// Returns `true` when it owns this frame (so the caller skips the
+    /// brace-block highlight).
     pub(super) fn highlight_full_definition(
         &mut self,
         editor_resp: &egui::text_edit::TextEditOutput,
@@ -426,25 +461,31 @@ impl AppIde {
             }
         };
 
-        // 1. Triple-click on a brace → select the whole construct. egui set the
-        //    selection to the clicked line; find the (matched) brace on it.
+        // 1. Triple-click → select the whole construct. egui set the selection
+        //    to the clicked line; find a (matched) brace on it, or — for headers
+        //    whose `{` sits on a later line (multi-line signatures) — a
+        //    definition name on it. (Moved off double-click by request:
+        //    double-click keeps egui's plain word-select + the cyan
+        //    word-occurrence highlight; triple-click selects the definition.)
         if editor_resp.response.triple_clicked() {
             let pairs = brace_pairs(&chars);
-            if let Some(b) = (lo..hi).find(|i| pairs.contains_key(i)) {
-                if let Some((start, close)) = full_def_from_brace(&chars, b) {
-                    self.full_block_selection = Some((displayed_file, start, close));
-                    // Make the whole construct the editor selection (so it's
-                    // visibly selected and Ctrl+C copies it).
-                    let mut st = editor_resp.state.clone();
-                    let end = (close + 1).min(chars.len());
-                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(start),
-                        egui::text::CCursor::new(end),
-                    )));
-                    st.store(ui.ctx(), editor_resp.response.id);
-                    paint(start, close);
-                    return true;
-                }
+            let def = (lo..hi)
+                .find(|i| pairs.contains_key(i))
+                .and_then(|b| full_def_from_brace(&chars, b))
+                .or_else(|| full_def_from_line(&chars, lo, hi));
+            if let Some((start, close)) = def {
+                self.full_block_selection = Some((displayed_file, start, close));
+                // Make the whole construct the editor selection (so it's
+                // visibly selected and Ctrl+C copies it).
+                let mut st = editor_resp.state.clone();
+                let end = (close + 1).min(chars.len());
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(start),
+                    egui::text::CCursor::new(end),
+                )));
+                st.store(ui.ctx(), editor_resp.response.id);
+                paint(start, close);
+                return true;
             }
         }
 
@@ -461,20 +502,34 @@ impl AppIde {
             }
         }
 
-        // 3. Selecting a definition NAME → whole definition.
-        if let Some((start, close)) = full_def_from_name(&chars, lo, hi) {
-            copy(start, close);
-            paint(start, close);
-            return true;
-        }
-
         false
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{brace_block, full_def_brace, full_def_name};
+    use super::{brace_block, full_def_brace, full_def_line, full_def_name};
+
+    #[test]
+    fn triple_click_header_line_selects_whole_definition() {
+        // Triple-click selects the whole first line — even without a `{` on it
+        // (multi-line signature), the definition resolves via its name.
+        let src = "pub fn foo(\n    x: u8,\n) {\n    body();\n}";
+        let line_end = src.find('\n').unwrap() + 1;
+        let close = src.rfind('}').unwrap();
+        assert_eq!(full_def_line(src, 0, line_end), Some((0, close)));
+    }
+
+    #[test]
+    fn triple_click_plain_line_selects_nothing() {
+        // A body line with no definition keyword resolves to no definition.
+        let src = "fn f() {\n    let x = 1;\n}";
+        let lo = src.find("    let").unwrap();
+        let hi = src.find("1;").unwrap() + 2;
+        assert_eq!(full_def_line(src, lo, hi), None);
+        // A bodyless item (`struct S;`) doesn't resolve either.
+        assert_eq!(full_def_line("struct S;", 0, 9), None);
+    }
 
     #[test]
     fn full_def_from_function_name() {

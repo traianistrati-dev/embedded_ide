@@ -29,6 +29,30 @@ fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// How long the primary button must be held STILL on an item before its drag
+/// arms (the payload is set). Holding still is required because moving the
+/// pointer early cancels egui's press-on-widget tracking — which is exactly
+/// what makes a quick click/drag gesture NOT start a move.
+const DRAG_HOLD_SECS: f64 = 0.4;
+
+/// Long-press-to-drag gate, fully stateless: `true` once the PRIMARY button has
+/// been held on `resp` for ≥ [`DRAG_HOLD_SECS`] (press-start time comes from
+/// egui's own pointer state — no temp-memory bookkeeping that could go stale).
+/// A normal click, a right-click (secondary → `primary_down()` is false), or a
+/// context-menu interaction never arms, so dragging can't hijack those — the
+/// caller only sets the DnD payload when this returns `true`.
+fn drag_armed(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    if !resp.is_pointer_button_down_on() {
+        return false;
+    }
+    ui.input(|i| {
+        i.pointer.primary_down()
+            && i.pointer
+                .press_start_time()
+                .is_some_and(|t| i.time - t >= DRAG_HOLD_SECS)
+    })
+}
+
 /// If `path` is an auto-generated folder that must NOT be moved, return a short
 /// explanation; otherwise `None`. `pins/` and `pins/configs/` are recreated
 /// every frame by the pin/peripheral sync, so moving them breaks codegen.
@@ -205,9 +229,14 @@ fn apply_folder_move(
         set_tree_notice(ui.ctx(), format!("Can't move `{name}/` — {reason}."));
         return;
     }
-    // Can't drop a folder into itself or one of its own descendants.
-    if target_folder == src || target_folder.starts_with(&format!("{src}/")) {
-        set_tree_notice(ui.ctx(), "Can't move a folder into itself.".to_string());
+    // Released over its own header (e.g. an in-place hold that never left the
+    // row) — just a no-op, not worth a warning banner.
+    if target_folder == src {
+        return;
+    }
+    // Can't drop a folder into one of its own descendants.
+    if target_folder.starts_with(&format!("{src}/")) {
+        set_tree_notice(ui.ctx(), "Can't move a folder into its own subfolder.".to_string());
         return;
     }
 
@@ -301,6 +330,12 @@ fn inline_new_item(
     let mut create = false;
     let mut cancel = false;
     let focus_id = inline_focus_id(is_folder);
+    // Only treat a focus-loss as "cancel" AFTER the input has actually held
+    // keyboard focus for a frame — on the frame it appears (before
+    // `request_focus` takes effect) a stray interaction elsewhere would fire
+    // `lost_focus()` and instantly close it (the "flickers open then vanishes"
+    // bug).
+    let had_focus_id = focus_id.with("had_focus");
     ui.horizontal(|ui| {
         ui.add_space(indent);
         let icon = if is_folder { ph::FOLDER } else { ph::FILE };
@@ -319,9 +354,16 @@ fn inline_new_item(
                 resp.request_focus();
                 ui.memory_mut(|m| m.data.insert_temp(focus_id, false));
             }
+            let had_focus =
+                ui.memory(|m| m.data.get_temp::<bool>(had_focus_id).unwrap_or(false));
+            if resp.has_focus() {
+                ui.memory_mut(|m| m.data.insert_temp(had_focus_id, true));
+            }
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 create = true;
-            } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) || resp.lost_focus() {
+            } else if ui.input(|i| i.key_pressed(egui::Key::Escape))
+                || (had_focus && resp.lost_focus())
+            {
                 cancel = true;
             }
         }
@@ -358,9 +400,11 @@ fn inline_new_item(
             }
         }
         *parent_state = None;
+        ui.memory_mut(|m| m.data.remove::<bool>(had_focus_id));
     } else if cancel {
         *name_state = None;
         *parent_state = None;
+        ui.memory_mut(|m| m.data.remove::<bool>(had_focus_id));
     }
 }
 
@@ -470,8 +514,12 @@ pub fn show_project_tree(
     show_tree_notice(ui);
     ui.add_space(2.0);
 
-    // While a tree item is being dragged, give the cursor the drag icon —
-    // `Grabbing`, or `NoDrop` when the item is auto-generated (can't be moved).
+    // While a tree item is being dragged (payload armed via the hold gate), give
+    // the cursor the drag icon — `Grabbing`, or `NoDrop` when the item is
+    // auto-generated (can't be moved) — and float a name preview by the pointer.
+    // Drawn ONCE here (payload-driven) rather than per-widget: the payload
+    // outlives egui's press-on-widget tracking once the pointer moves away from
+    // the source row, so a per-widget preview would vanish mid-drag.
     if let Some(payload) = egui::DragAndDrop::payload::<DraggedItem>(ui.ctx()) {
         let blocked = match &*payload {
             DraggedItem::File(idx) => user_src_files
@@ -484,6 +532,25 @@ pub fn show_project_tree(
         } else {
             egui::CursorIcon::Grabbing
         });
+        let label = match &*payload {
+            DraggedItem::File(idx) => user_src_files
+                .get(*idx)
+                .map(|(p, _)| format!("{} {}", ph::FILE, base_name(p))),
+            DraggedItem::Folder(p) => Some(format!("{} {}/", ph::FOLDER, base_name(p))),
+        };
+        if let (Some(label), Some(pos)) = (label, ui.ctx().pointer_interact_pos()) {
+            egui::Area::new(egui::Id::new("__tree_drag_preview__"))
+                .fixed_pos(pos + egui::vec2(12.0, 4.0))
+                .order(egui::Order::Tooltip)
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        // `.extend()`: never wrap — near the panel edge the name
+                        // otherwise breaks into a one-char-per-line column.
+                        ui.add(egui::Label::new(egui::RichText::new(label).size(11.0)).extend());
+                    });
+                });
+        }
     }
 
     // Collected during the tree render below; an item dragged onto a folder sets
@@ -897,37 +964,20 @@ fn render_tree_node(
                         );
                     });
 
-                    // Drag SOURCE: a separate drag-sensing overlay on the header
-                    // rect so the whole folder can be moved. `Sense::drag()` only
-                    // (not click) so a plain click still toggles the collapsing
-                    // header underneath; only a press-and-move starts a drag.
-                    // Skipped while editing (see `editing` above).
-                    if !editing {
-                        let folder_drag = ui.interact(
-                            ch.header_response.rect,
-                            ch.header_response.id.with("__folder_drag__"),
-                            egui::Sense::drag(),
+                    // Drag SOURCE: hold the primary button STILL on the header
+                    // for ~0.4s to arm a move of the whole folder, then drag to a
+                    // target. The payload is set directly on the header response —
+                    // NO separate `ui.interact` overlay: an overlay competed with
+                    // the header for pointer interactions, which broke the
+                    // right-click context menu (New/Rename/Delete) and stole focus
+                    // from the inline new-item input. A plain click (short) still
+                    // toggles the header; a right-click (secondary) never arms.
+                    // Skipped while an inline edit is open (see `editing` above).
+                    if !editing && drag_armed(ui, &ch.header_response) {
+                        egui::DragAndDrop::set_payload(
+                            ui.ctx(),
+                            DraggedItem::Folder(folder_path.clone()),
                         );
-                        folder_drag.dnd_set_drag_payload(DraggedItem::Folder(folder_path.clone()));
-                        if folder_drag.dragged() {
-                            if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                                egui::Area::new(egui::Id::new("__tree_drag_preview__"))
-                                    .fixed_pos(pos + egui::vec2(12.0, 4.0))
-                                    .order(egui::Order::Tooltip)
-                                    .interactable(false)
-                                    .show(ui.ctx(), |ui| {
-                                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!(
-                                                    "{} {name}/",
-                                                    ph::FOLDER
-                                                ))
-                                                .size(11.0),
-                                            );
-                                        });
-                                    });
-                            }
-                        }
                     }
 
                     // Drop TARGET: dragging an item onto this folder header moves
@@ -1128,8 +1178,11 @@ fn user_file_row(
         let is_sel = *selected == id;
         let color = if is_sel { hi } else { normal };
         ui.label(egui::RichText::new(ph::FILE).size(11.5).color(color));
-        // `click_and_drag`: a plain click still selects (below); a drag makes the
-        // row a drag source so it can be dropped onto a folder to move it.
+        // Plain click sense: click selects, right-click opens the menu. A move
+        // arms only via the hold gate (`drag_armed`) — hold the primary button
+        // still ~0.4s, then drag; the payload is set directly (no drag sense, so
+        // nothing competes with clicks). The floating preview + drag cursor are
+        // drawn globally at the top of the tree while a payload exists.
         let resp = ui.add(
             egui::Label::new(
                 egui::RichText::new(name)
@@ -1137,25 +1190,10 @@ fn user_file_row(
                     .monospace()
                     .color(color),
             )
-            .sense(egui::Sense::click_and_drag()),
+            .sense(egui::Sense::click()),
         );
-        resp.dnd_set_drag_payload(DraggedItem::File(idx));
-        if resp.dragged() {
-            // Floating preview following the cursor (the response-based DnD API
-            // doesn't paint one itself, unlike `dnd_drag_source`).
-            if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                egui::Area::new(egui::Id::new("__tree_drag_preview__"))
-                    .fixed_pos(pos + egui::vec2(12.0, 4.0))
-                    .order(egui::Order::Tooltip)
-                    .interactable(false)
-                    .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{} {name}", ph::FILE)).size(11.0),
-                            );
-                        });
-                    });
-            }
+        if drag_armed(ui, &resp) {
+            egui::DragAndDrop::set_payload(ui.ctx(), DraggedItem::File(idx));
         }
         if resp.clicked() {
             *selected = id;

@@ -23,7 +23,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
@@ -57,20 +57,20 @@ impl DiagSeverity {
 #[derive(Clone, Debug)]
 pub struct LspDiagnostic {
     pub severity: DiagSeverity,
-    pub message:  String,
+    pub message: String,
     /// 1-based line number (converted from LSP 0-based)
-    pub line:     u32,
+    pub line: u32,
     /// 1-based column
-    pub col:      u32,
+    pub col: u32,
     pub end_line: u32,
-    pub end_col:  u32,
+    pub end_col: u32,
     /// e.g. `"E0308"` or `"unused_variables"`
-    pub code:     Option<String>,
+    pub code: Option<String>,
     /// LSP `source`: `"rust-analyzer"` for native (in-memory) diagnostics, or
     /// `"rustc"` / `"clippy"` for flycheck (cargo check) ones. Flycheck positions
     /// can't be re-mapped after an edit until the next check runs, so the inline
     /// overlay hides them while a re-check is pending (see `flycheck_stale`).
-    pub source:   String,
+    pub source: String,
 }
 
 impl LspDiagnostic {
@@ -117,11 +117,11 @@ impl LspDiagnostic {
 /// A single item returned by a `textDocument/completion` response.
 #[derive(Clone, Debug, Default)]
 pub struct CompletionItem {
-    pub label:       String,
+    pub label: String,
     /// LSP CompletionItemKind (1=Text, 2=Method, 3=Function, 5=Field, 6=Variable, …)
-    pub kind:        u8,
+    pub kind: u8,
     /// Short type / signature string shown inline next to the label
-    pub detail:      String,
+    pub detail: String,
     /// Text actually inserted when the item is accepted
     /// (falls back to `label` when the server doesn't send `insertText`)
     pub insert_text: String,
@@ -208,11 +208,11 @@ impl LspStatus {
     }
     pub fn label(&self) -> &str {
         match self {
-            Self::Stopped     => "Stopped",
-            Self::Starting    => "Starting…",
-            Self::Indexing    => "Indexing…",
-            Self::Ready       => "Ready",
-            Self::Failed(_)   => "Failed",
+            Self::Stopped => "Stopped",
+            Self::Starting => "Starting…",
+            Self::Indexing => "Indexing…",
+            Self::Ready => "Ready",
+            Self::Failed(_) => "Failed",
         }
     }
 }
@@ -222,7 +222,7 @@ impl LspStatus {
 /// Tracks the LSP state for one open file.
 struct OpenFileState {
     /// LSP document version (incremented on every `textDocument/didChange`).
-    doc_version:    u64,
+    doc_version: u64,
     /// The text last sent to RA so no-op frames are skipped.
     last_sent_code: String,
 }
@@ -230,15 +230,15 @@ struct OpenFileState {
 // ── LspState ──────────────────────────────────────────────────────────────────
 
 pub struct LspState {
-    pub status:      LspStatus,
+    pub status: LspStatus,
     /// Diagnostics keyed by relative path, e.g. `"src/main.rs"`.
     pub diagnostics: HashMap<String, Vec<LspDiagnostic>>,
     /// Incremented on every `start()` so stale threads know to bail out.
-    pub generation:  u64,
+    pub generation: u64,
     /// Channel to the write thread; `None` while stopped.
-    sender:          Option<mpsc::Sender<String>>,
+    sender: Option<mpsc::Sender<String>>,
     /// Per-file open state.  Key = relative path, e.g. `"src/main.rs"`.
-    open_files:      HashMap<String, OpenFileState>,
+    open_files: HashMap<String, OpenFileState>,
     /// Files for which a `didChange` was sent but no `publishDiagnostics` has
     /// arrived since — their current diagnostics are stale (computed for the
     /// previous text). The inline overlay hides them until RA re-publishes, so a
@@ -247,51 +247,51 @@ pub struct LspState {
     /// Edit generation: bumped on every real `didChange`. Compared against
     /// `fresh_check_gen` to know whether flycheck (cargo check) diagnostics are
     /// stale (an edit happened since the last completed check).
-    edit_gen:        u64,
+    edit_gen: u64,
     /// `edit_gen` captured when the current cargo-check pass began.
     check_begin_gen: u64,
     /// The `edit_gen` the most recently COMPLETED cargo-check reflects.
     fresh_check_gen: u64,
     /// Workspace root URI (e.g. `file:///tmp/embedded_ide_0_check`).
-    pub root_uri:    String,
+    pub root_uri: String,
     /// True while RA is running a background `cargo check` pass.
     /// Set to `true` on `$/progress begin` for check tokens; cleared on `end`.
     pub checking: bool,
     /// Most recent completion items from rust-analyzer.
-    pub completion_items:  Vec<CompletionItem>,
+    pub completion_items: Vec<CompletionItem>,
     /// Set to `true` when a completion response (success OR error) arrives.
     pub completion_response_received: bool,
     /// The request id of the pending completion request, if any.
-    completion_req_id:     Option<u64>,
+    completion_req_id: Option<u64>,
     /// Counter for outgoing requests (starts at 1; incremented before each send → first = 2).
-    next_req_id:           u64,
+    next_req_id: u64,
     /// When the last completion request was sent (for spinner timeout).
     pub completion_request_sent_at: Option<std::time::Instant>,
     /// The request id of the pending `textDocument/rename`, if any.
-    rename_req_id:          Option<u64>,
+    rename_req_id: Option<u64>,
     /// Set when a rename response (success OR error) arrives; the app then
     /// applies `rename_edits` and clears this.
     pub rename_response_received: bool,
     /// The edits returned by the last rename (empty on error / no-op).
-    pub rename_edits:       Vec<RenameEdit>,
+    pub rename_edits: Vec<RenameEdit>,
     /// The request id of the pending `textDocument/definition`, if any.
-    definition_req_id:      Option<u64>,
+    definition_req_id: Option<u64>,
     /// Set when a definition response arrives; consumed by the app.
     pub definition_response_received: bool,
     /// The definition target from the last F12, if any.
-    pub definition_result:  Option<DefinitionLoc>,
+    pub definition_result: Option<DefinitionLoc>,
     /// The request id of the pending `textDocument/documentSymbol`, if any.
-    symbols_req_id:         Option<u64>,
+    symbols_req_id: Option<u64>,
     /// The rel_path the pending/last `symbols_result` was requested for.
-    symbols_for_file:       String,
+    symbols_for_file: String,
     /// Set when a documentSymbol response arrives; consumed by the app.
     pub symbols_response_received: bool,
-    pub symbols_result:     Vec<SymbolInfo>,
+    pub symbols_result: Vec<SymbolInfo>,
     /// In-flight `textDocument/references` requests: request id → the caller's
     /// own index for that symbol (its position in the app's item list) — lets
     /// many reference lookups run concurrently for one file (one per symbol),
     /// unlike the single-slot `_req_id` fields above.
-    references_pending:     HashMap<u64, usize>,
+    references_pending: HashMap<u64, usize>,
     /// Completed reference results, keyed by that same index; drained by the app.
     pub references_results: HashMap<usize, Vec<ReferenceLoc>>,
 }
@@ -299,32 +299,32 @@ pub struct LspState {
 impl Default for LspState {
     fn default() -> Self {
         Self {
-            status:        LspStatus::Stopped,
-            diagnostics:   HashMap::new(),
-            generation:    0,
-            sender:        None,
-            open_files:    HashMap::new(),
+            status: LspStatus::Stopped,
+            diagnostics: HashMap::new(),
+            generation: 0,
+            sender: None,
+            open_files: HashMap::new(),
             awaiting_diagnostics: std::collections::HashSet::new(),
-            edit_gen:          0,
-            check_begin_gen:   0,
-            fresh_check_gen:    0,
-            root_uri:          String::new(),
-            checking:          false,
-            completion_items:  Vec::new(),
+            edit_gen: 0,
+            check_begin_gen: 0,
+            fresh_check_gen: 0,
+            root_uri: String::new(),
+            checking: false,
+            completion_items: Vec::new(),
             completion_response_received: false,
             completion_req_id: None,
-            next_req_id:       1,
+            next_req_id: 1,
             completion_request_sent_at: None,
-            rename_req_id:      None,
+            rename_req_id: None,
             rename_response_received: false,
-            rename_edits:       Vec::new(),
-            definition_req_id:  None,
+            rename_edits: Vec::new(),
+            definition_req_id: None,
             definition_response_received: false,
-            definition_result:  None,
-            symbols_req_id:     None,
-            symbols_for_file:   String::new(),
+            definition_result: None,
+            symbols_req_id: None,
+            symbols_for_file: String::new(),
             symbols_response_received: false,
-            symbols_result:     Vec::new(),
+            symbols_result: Vec::new(),
             references_pending: HashMap::new(),
             references_results: HashMap::new(),
         }
@@ -378,24 +378,32 @@ impl LspState {
     ///
     /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
     pub fn did_open(&mut self, rel_path: &str, text: &str) {
-        if self.sender.is_none() { return; }
-        self.open_files.insert(rel_path.to_owned(), OpenFileState {
-            doc_version:    1,
-            last_sent_code: text.to_owned(),
-        });
+        if self.sender.is_none() {
+            return;
+        }
+        self.open_files.insert(
+            rel_path.to_owned(),
+            OpenFileState {
+                doc_version: 1,
+                last_sent_code: text.to_owned(),
+            },
+        );
         let uri = format!("{}/{}", self.root_uri, rel_path);
-        self.send_raw(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method":  "textDocument/didOpen",
-            "params": {
-                "textDocument": {
-                    "uri":        uri,
-                    "languageId": "rust",
-                    "version":    1,
-                    "text":       text,
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method":  "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri":        uri,
+                        "languageId": "rust",
+                        "version":    1,
+                        "text":       text,
+                    }
                 }
-            }
-        }).to_string());
+            })
+            .to_string(),
+        );
     }
 
     /// Send `textDocument/didChange` for `rel_path` when the text has changed.
@@ -405,7 +413,9 @@ impl LspState {
     /// so rust-analyzer re-runs its analysis — used by Project Save to restart
     /// verification. `rel_path` is relative to the workspace root.
     pub fn did_change(&mut self, rel_path: &str, text: &str, force: bool) {
-        if self.sender.is_none() { return; }
+        if self.sender.is_none() {
+            return;
+        }
         // Auto-open the file on first access.
         if !self.open_files.contains_key(rel_path) {
             self.did_open(rel_path, text);
@@ -413,9 +423,11 @@ impl LspState {
         }
         let file = self.open_files.get_mut(rel_path).unwrap();
         let changed = text != file.last_sent_code;
-        if !changed && !force { return; }
+        if !changed && !force {
+            return;
+        }
         file.last_sent_code = text.to_owned();
-        file.doc_version   += 1;
+        file.doc_version += 1;
         let version = file.doc_version;
         // A real text change makes the current diagnostics stale (their line/col
         // now cling to shifted/removed code) until RA re-publishes — gate them
@@ -430,14 +442,17 @@ impl LspState {
             self.edit_gen += 1;
         }
         let uri = format!("{}/{}", self.root_uri, rel_path);
-        self.send_raw(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method":  "textDocument/didChange",
-            "params": {
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": text }],
-            }
-        }).to_string());
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method":  "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "text": text }],
+                }
+            })
+            .to_string(),
+        );
     }
 
     /// Send `textDocument/didSave` for `rel_path`. With `checkOnSave: true` this
@@ -445,14 +460,21 @@ impl LspState {
     /// diagnostics refresh — without it they stay frozen at the startup check
     /// and a fixed error lingers forever in the panel.
     pub fn did_save(&self, rel_path: &str) {
-        if self.sender.is_none() { return; }
-        if !self.open_files.contains_key(rel_path) { return; }
+        if self.sender.is_none() {
+            return;
+        }
+        if !self.open_files.contains_key(rel_path) {
+            return;
+        }
         let uri = format!("{}/{}", self.root_uri, rel_path);
-        self.send_raw(serde_json::json!({
-            "jsonrpc": "2.0",
-            "method":  "textDocument/didSave",
-            "params":  { "textDocument": { "uri": uri } }
-        }).to_string());
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method":  "textDocument/didSave",
+                "params":  { "textDocument": { "uri": uri } }
+            })
+            .to_string(),
+        );
     }
 
     /// Request completions at the given cursor position in `rel_path`.
@@ -462,12 +484,14 @@ impl LspState {
     /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
     pub fn request_completion(
         &mut self,
-        rel_path:     &str,
-        line:         u32,
-        character:    u32,
+        rel_path: &str,
+        line: u32,
+        character: u32,
         trigger_char: Option<char>,
     ) {
-        if self.sender.is_none() { return; }
+        if self.sender.is_none() {
+            return;
+        }
         self.next_req_id += 1;
         let id = self.next_req_id;
         self.completion_req_id = Some(id);
@@ -488,12 +512,15 @@ impl LspState {
         if let Some(c) = trigger_char {
             params["context"]["triggerCharacter"] = serde_json::json!(c.to_string());
         }
-        self.send_raw(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id":      id,
-            "method":  "textDocument/completion",
-            "params":  params
-        }).to_string());
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/completion",
+                "params":  params
+            })
+            .to_string(),
+        );
     }
 
     /// Request a project-wide rename of the symbol at `(line, character)` in
@@ -620,7 +647,13 @@ impl LspState {
     /// list) used to match this specific result when it arrives — lets many
     /// reference lookups for one file's symbols run concurrently. Poll
     /// [`take_reference_results`].
-    pub fn request_references(&mut self, rel_path: &str, line: u32, character: u32, local_idx: usize) {
+    pub fn request_references(
+        &mut self,
+        rel_path: &str,
+        line: u32,
+        character: u32,
+        local_idx: usize,
+    ) {
         if self.sender.is_none() {
             return;
         }
@@ -671,7 +704,8 @@ impl LspState {
             .values()
             .flat_map(|v| v.iter())
             .filter(|d| {
-                d.severity.is_error() && (d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
+                d.severity.is_error()
+                    && (d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
             })
             .count()
     }
@@ -682,7 +716,8 @@ impl LspState {
             .values()
             .flat_map(|v| v.iter())
             .filter(|d| {
-                d.severity.is_warning() && (d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
+                d.severity.is_warning()
+                    && (d.source == "rust-analyzer" || d.is_rustc_error_code() || !stale)
             })
             .count()
     }
@@ -691,17 +726,17 @@ impl LspState {
     /// Incrementing `generation` makes stale background threads bail out
     /// silently without corrupting the fresh state.
     pub fn reset(&mut self) {
-        self.generation   += 1;
-        self.status        = LspStatus::Stopped;
-        self.diagnostics   .clear();
-        self.sender        = None;   // write thread's Receiver will close → it exits
-        self.open_files    .clear();
+        self.generation += 1;
+        self.status = LspStatus::Stopped;
+        self.diagnostics.clear();
+        self.sender = None; // write thread's Receiver will close → it exits
+        self.open_files.clear();
         self.awaiting_diagnostics.clear();
-        self.edit_gen        = 0;
+        self.edit_gen = 0;
         self.check_begin_gen = 0;
         self.fresh_check_gen = 0;
-        self.root_uri      = String::new();
-        self.checking      = false;
+        self.root_uri = String::new();
+        self.checking = false;
         self.completion_items.clear();
         self.completion_req_id = None;
         self.rename_req_id = None;
@@ -726,21 +761,17 @@ impl LspState {
 /// The workspace files (Cargo.toml, src/main.rs, …) must already exist on disk.
 /// Call `lsp_state.lock().unwrap().did_open(text)` once the status reaches
 /// `LspStatus::Indexing`, then `did_change(text)` on every code update.
-pub fn start(
-    workspace_dir: &Path,
-    state: Arc<Mutex<LspState>>,
-    ctx: eframe::egui::Context,
-) {
+pub fn start(workspace_dir: &Path, state: Arc<Mutex<LspState>>, ctx: eframe::egui::Context) {
     let workspace_dir = workspace_dir.to_path_buf();
     let root_uri = path_to_uri(&workspace_dir);
 
     {
         let mut s = state.lock().unwrap();
-        s.generation   += 1;
-        s.status        = LspStatus::Starting;
-        s.diagnostics   .clear();
-        s.root_uri      = root_uri.clone();
-        s.open_files    .clear();
+        s.generation += 1;
+        s.status = LspStatus::Starting;
+        s.diagnostics.clear();
+        s.root_uri = root_uri.clone();
+        s.open_files.clear();
         // Drop any old sender — signals the old write thread to exit.
         s.sender = None;
     }
@@ -784,7 +815,7 @@ fn launch(
         }
     };
 
-    let stdin  = child.stdin .take().expect("piped stdin");
+    let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
 
     // Channel: any thread with a Sender → write thread → RA stdin
@@ -927,7 +958,7 @@ fn launch(
     loop {
         match read_lsp(&mut reader) {
             Some(msg) => handle_incoming(msg, &state, &ctx, &tx_read, &root_uri, my_gen),
-            None      => break, // EOF — RA exited
+            None => break, // EOF — RA exited
         }
     }
 
@@ -983,7 +1014,11 @@ fn read_lsp<R: BufRead>(reader: &mut R) -> Option<serde_json::Value> {
 fn lsp_log(line: &str) {
     use std::io::Write;
     let path = std::env::temp_dir().join("embedded_ide_lsp.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -991,12 +1026,12 @@ fn lsp_log(line: &str) {
 fn lsp_log(_: &str) {}
 
 fn handle_incoming(
-    msg:      serde_json::Value,
-    state:    &Arc<Mutex<LspState>>,
-    ctx:      &eframe::egui::Context,
-    tx:       &mpsc::Sender<String>,
+    msg: serde_json::Value,
+    state: &Arc<Mutex<LspState>>,
+    ctx: &eframe::egui::Context,
+    tx: &mpsc::Sender<String>,
     root_uri: &str,
-    my_gen:   u64,
+    my_gen: u64,
 ) {
     // Guard: if generation advanced we are a stale thread — stop processing.
     if state.lock().unwrap().generation != my_gen {
@@ -1008,9 +1043,9 @@ fn handle_incoming(
     // Log all response messages (no "method") for debugging.
     #[cfg(debug_assertions)]
     if method.is_empty() {
-        let id  = &msg["id"];
+        let id = &msg["id"];
         let has_result = msg.get("result").is_some();
-        let has_error  = msg.get("error").is_some();
+        let has_error = msg.get("error").is_some();
         let preview = if has_result {
             let r = msg["result"].to_string();
             format!("result={}", &r[..r.len().min(200)])
@@ -1025,12 +1060,10 @@ fn handle_incoming(
     match method {
         // ── Initialize response ───────────────────────────────────────────────
         "" if msg.get("id") == Some(&serde_json::Value::Number(1.into()))
-           && msg.get("result").is_some() =>
+            && msg.get("result").is_some() =>
         {
             // Confirm handshake.
-            let _ = tx.send(
-                r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#.to_owned(),
-            );
+            let _ = tx.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#.to_owned());
             let mut s = state.lock().unwrap();
             if s.generation == my_gen {
                 s.status = LspStatus::Indexing;
@@ -1040,8 +1073,8 @@ fn handle_incoming(
 
         // ── Diagnostics ───────────────────────────────────────────────────────
         "textDocument/publishDiagnostics" => {
-            let params   = &msg["params"];
-            let uri      = params["uri"].as_str().unwrap_or("");
+            let params = &msg["params"];
+            let uri = params["uri"].as_str().unwrap_or("");
             let rel_path = uri_to_rel(uri, root_uri);
 
             let diags: Vec<LspDiagnostic> = params["diagnostics"]
@@ -1076,19 +1109,20 @@ fn handle_incoming(
         //   2. cargo check — token contains "cargo" or "check";
         //                    "begin" → checking=true, "end" → checking=false
         "$/progress" => {
-            let kind  = msg["params"]["value"]["kind"].as_str().unwrap_or("");
+            let kind = msg["params"]["value"]["kind"].as_str().unwrap_or("");
             let token_raw = msg["params"]["token"].as_str().unwrap_or("");
             // RA may use numeric tokens — convert to string for matching
-            let token_num = msg["params"]["token"].as_u64()
-                .map(|n| n.to_string());
+            let token_num = msg["params"]["token"].as_u64().map(|n| n.to_string());
             let token = token_num.as_deref().unwrap_or(token_raw);
 
             let is_indexing = token.contains("rust") || token.contains("index");
-            let is_check    = token.contains("cargo") || token.contains("check")
-                           || token.contains("flycheck");
+            let is_check =
+                token.contains("cargo") || token.contains("check") || token.contains("flycheck");
 
             let mut s = state.lock().unwrap();
-            if s.generation != my_gen { return; }
+            if s.generation != my_gen {
+                return;
+            }
 
             if is_indexing && kind == "end" && s.status == LspStatus::Indexing {
                 s.status = LspStatus::Ready;
@@ -1102,7 +1136,7 @@ fn handle_incoming(
                         s.check_begin_gen = s.edit_gen;
                         ctx.request_repaint();
                     }
-                    "end"   => {
+                    "end" => {
                         s.checking = false;
                         // Its diagnostics are now fresh up to the gen it began at;
                         // any edit made *during* the check keeps `flycheck_stale`
@@ -1119,8 +1153,8 @@ fn handle_incoming(
         // Any response (method == "") whose id is not 1 (initialize) and that
         // carries a "result" field is treated as a completion response.
         "" if msg.get("result").is_some()
-           && msg.get("id").is_some()
-           && msg["id"].as_u64().map_or(false, |n| n != 1) =>
+            && msg.get("id").is_some()
+            && msg["id"].as_u64().map_or(false, |n| n != 1) =>
         {
             if let Some(req_id) = msg["id"].as_u64() {
                 let mut s = state.lock().unwrap();
@@ -1154,9 +1188,7 @@ fn handle_incoming(
                     let result = &msg["result"];
                     // CompletionList { items: [...] }  OR  [...] directly
                     // `result` may also be JSON null — treat as empty list.
-                    let items_arr = result["items"]
-                        .as_array()
-                        .or_else(|| result.as_array());
+                    let items_arr = result["items"].as_array().or_else(|| result.as_array());
                     s.completion_items = items_arr
                         .map(|arr| {
                             arr.iter()
@@ -1175,8 +1207,8 @@ fn handle_incoming(
         // (e.g. the file won't compile, or the request was cancelled).
         // We must handle this or the spinner runs forever.
         "" if msg.get("error").is_some()
-           && msg.get("id").is_some()
-           && msg["id"].as_u64().map_or(false, |n| n != 1) =>
+            && msg.get("id").is_some()
+            && msg["id"].as_u64().map_or(false, |n| n != 1) =>
         {
             if let Some(req_id) = msg["id"].as_u64() {
                 let mut s = state.lock().unwrap();
@@ -1215,19 +1247,30 @@ fn handle_incoming(
 }
 
 fn parse_diag(v: &serde_json::Value) -> Option<LspDiagnostic> {
-    let message  = v["message"].as_str()?.to_owned();
+    let message = v["message"].as_str()?.to_owned();
     let severity = DiagSeverity::from_lsp(v["severity"].as_u64().unwrap_or(1));
-    let start    = &v["range"]["start"];
-    let end_v    = &v["range"]["end"];
-    let line     = start["line"]      .as_u64().unwrap_or(0) as u32 + 1;
-    let col      = start["character"] .as_u64().unwrap_or(0) as u32 + 1;
-    let end_line = end_v["line"]      .as_u64().unwrap_or(0) as u32 + 1;
-    let end_col  = end_v["character"] .as_u64().unwrap_or(0) as u32 + 1;
+    let start = &v["range"]["start"];
+    let end_v = &v["range"]["end"];
+    let line = start["line"].as_u64().unwrap_or(0) as u32 + 1;
+    let col = start["character"].as_u64().unwrap_or(0) as u32 + 1;
+    let end_line = end_v["line"].as_u64().unwrap_or(0) as u32 + 1;
+    let end_col = end_v["character"].as_u64().unwrap_or(0) as u32 + 1;
     // code may be a string like "E0308" or an integer
-    let code = v["code"].as_str().map(String::from)
+    let code = v["code"]
+        .as_str()
+        .map(String::from)
         .or_else(|| v["code"].as_u64().map(|n| n.to_string()));
     let source = v["source"].as_str().unwrap_or("").to_owned();
-    Some(LspDiagnostic { severity, message, line, col, end_line, end_col, code, source })
+    Some(LspDiagnostic {
+        severity,
+        message,
+        line,
+        col,
+        end_line,
+        end_col,
+        code,
+        source,
+    })
 }
 
 // ── URI helpers ───────────────────────────────────────────────────────────────
@@ -1249,7 +1292,7 @@ pub fn path_to_uri(path: &Path) -> String {
         // Strip the Windows extended-length path prefix \\?\ if present,
         // then normalise backslashes to forward slashes.
         // Result: file:///C:/Users/foo/bar
-        let stripped   = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
         let normalised = stripped.replace('\\', "/");
         format!("file:///{normalised}")
     }
@@ -1496,12 +1539,12 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
             // labelDetails.detail is typically the short type suffix (e.g. "(…) -> T")
             // labelDetails.description is typically the full qualified path
             let ld_detail = v["labelDetails"]["detail"].as_str().unwrap_or("");
-            let ld_desc   = v["labelDetails"]["description"].as_str().unwrap_or("");
+            let ld_desc = v["labelDetails"]["description"].as_str().unwrap_or("");
             match (ld_detail.is_empty(), ld_desc.is_empty()) {
                 (false, false) => format!("{ld_detail}  {ld_desc}"),
-                (false, true)  => ld_detail.to_owned(),
-                (true,  false) => ld_desc.to_owned(),
-                (true,  true)  => String::new(),
+                (false, true) => ld_detail.to_owned(),
+                (true, false) => ld_desc.to_owned(),
+                (true, true) => String::new(),
             }
         }
     };
@@ -1526,7 +1569,13 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
         strip_md_fences(&raw)
     };
 
-    Some(CompletionItem { label, kind, detail, insert_text, documentation })
+    Some(CompletionItem {
+        label,
+        kind,
+        detail,
+        insert_text,
+        documentation,
+    })
 }
 
 /// Remove ` ```lang … ``` ` fences from a markdown string so it reads as
@@ -1541,11 +1590,15 @@ fn strip_md_fences(s: &str) -> String {
             continue; // skip the fence line itself
         }
         if !in_fence {
-            if !out.is_empty() { out.push('\n'); }
+            if !out.is_empty() {
+                out.push('\n');
+            }
             out.push_str(line);
         } else {
             // Inside a code fence: keep the code but strip leading indent.
-            if !out.is_empty() { out.push('\n'); }
+            if !out.is_empty() {
+                out.push('\n');
+            }
             out.push_str(trimmed);
         }
     }
@@ -1615,7 +1668,13 @@ mod diagnostic_headline_tests {
     #[test]
     fn missing_or_malformed_code_is_not_a_rustc_error_code() {
         assert!(!diag_with_code(None).is_rustc_error_code());
-        assert!(!diag_with_code(Some("E")).is_rustc_error_code(), "no digits after E");
-        assert!(!diag_with_code(Some("E12a4")).is_rustc_error_code(), "non-digit in the code");
+        assert!(
+            !diag_with_code(Some("E")).is_rustc_error_code(),
+            "no digits after E"
+        );
+        assert!(
+            !diag_with_code(Some("E12a4")).is_rustc_error_code(),
+            "non-digit in the code"
+        );
     }
 }
