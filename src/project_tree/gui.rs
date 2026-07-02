@@ -14,6 +14,138 @@ enum TreeNode {
     Folder(BTreeMap<String, TreeNode>),
 }
 
+/// Drag-and-drop payload: the `user_src_files` index of the file being dragged
+/// onto a folder (drop target). `Send + Sync + 'static` as egui requires.
+#[derive(Clone)]
+struct DraggedFile {
+    idx: usize,
+}
+
+/// The last path segment of a `src/`-relative path (the bare file/folder name).
+fn base_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// If `path` (relative to `src/`) is an auto-generated file that must NOT be
+/// moved, return a short human explanation; otherwise `None`. These are rebuilt
+/// each frame from the MCU / pin configuration (see
+/// `ProjectTreeState::sync_pin_files` / `sync_config_files`), so moving one
+/// would be silently undone or would break the generated module tree.
+fn generated_file_reason(path: &str) -> Option<&'static str> {
+    if path == "pins/mod.rs" || path == "pins/configs/mod.rs" {
+        return Some("it's an auto-generated module file (rebuilt from your pin / peripheral configuration)");
+    }
+    if path.starts_with("pins/configs/") {
+        return Some("it's an auto-generated peripheral init file — edit it via the MCU Configurator (Virtual Modules)");
+    }
+    // Generated pin files sit directly under pins/ as `pin<…>.rs`.
+    if let Some(fname) = path.strip_prefix("pins/") {
+        if !fname.contains('/') && fname.starts_with("pin") && fname.ends_with(".rs") {
+            return Some("it's an auto-generated pin file (rebuilt from your pin configuration)");
+        }
+    }
+    None
+}
+
+const TREE_NOTICE_ID: &str = "__tree_move_notice__";
+
+/// Show a transient amber banner (`msg`) at the top of the tree for a few
+/// seconds — used to explain why a drag-drop move was refused. Stored in egui
+/// temp memory (with an expiry time) so it survives across frames without a
+/// dedicated state field.
+fn set_tree_notice(ctx: &egui::Context, msg: String) {
+    let expiry = ctx.input(|i| i.time) + 6.0;
+    ctx.memory_mut(|m| m.data.insert_temp(egui::Id::new(TREE_NOTICE_ID), (msg, expiry)));
+}
+
+fn show_tree_notice(ui: &mut egui::Ui) {
+    let id = egui::Id::new(TREE_NOTICE_ID);
+    let Some((msg, expiry)) = ui.memory(|m| m.data.get_temp::<(String, f64)>(id)) else {
+        return;
+    };
+    if ui.input(|i| i.time) >= expiry {
+        ui.memory_mut(|m| m.data.remove::<(String, f64)>(id));
+        return;
+    }
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(70, 45, 20))
+        .inner_margin(egui::Margin::same(5))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(ph::WARNING)
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(240, 190, 90)),
+                );
+                ui.label(
+                    egui::RichText::new(msg)
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(235, 215, 165)),
+                );
+            });
+        });
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(250));
+}
+
+/// Move user file `idx` into `target_folder` (`""` = src/ root), with all the
+/// guards: refuse to move an auto-generated file (with an explanatory notice),
+/// refuse to drop into the auto-managed `pins/configs/`, no-op when already
+/// there, and refuse on a name collision. Renames on disk (live workspace) and
+/// updates the in-memory path.
+fn apply_file_move(
+    ui: &egui::Ui,
+    idx: usize,
+    target_folder: &str,
+    user_src_files: &mut [(String, String)],
+    workspace_dir: &std::path::Path,
+    save_needed: &mut bool,
+) {
+    let Some((old_path, _)) = user_src_files.get(idx) else {
+        return;
+    };
+    let old_path = old_path.clone();
+    let fname = base_name(&old_path).to_string();
+
+    if let Some(reason) = generated_file_reason(&old_path) {
+        set_tree_notice(ui.ctx(), format!("Can't move `{fname}` — {reason}."));
+        return;
+    }
+    if target_folder == "pins/configs" || target_folder.starts_with("pins/configs/") {
+        set_tree_notice(
+            ui.ctx(),
+            "Can't move files into `pins/configs/` — it's auto-managed by the MCU Configurator.".to_string(),
+        );
+        return;
+    }
+
+    let new_path = if target_folder.is_empty() {
+        fname.clone()
+    } else {
+        format!("{target_folder}/{fname}")
+    };
+    if new_path == old_path {
+        return; // dropped into its current folder — nothing to do
+    }
+    if user_src_files.iter().any(|(p, _)| p == &new_path) {
+        set_tree_notice(
+            ui.ctx(),
+            format!("`{fname}` already exists in that folder — rename one first."),
+        );
+        return;
+    }
+
+    let old_dest = workspace_dir.join("src").join(&old_path);
+    let new_dest = workspace_dir.join("src").join(&new_path);
+    if let Some(parent) = new_dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(&old_dest, &new_dest);
+    user_src_files[idx].0 = new_path;
+    *save_needed = true;
+}
+
 /// Build a hierarchical tree from user_src_files and user_src_folders.
 fn build_tree(
     user_src_files: &[(String, String)],
@@ -116,7 +248,14 @@ pub fn show_project_tree(
             .strong()
             .color(egui::Color32::LIGHT_YELLOW),
     );
+    // Transient "can't move" banner from a refused drag-drop (auto-cleared).
+    show_tree_notice(ui);
     ui.add_space(2.0);
+
+    // Collected during the tree render below; a file dragged onto a folder sets
+    // `(file_idx, target_folder_rel_to_src)` — applied after the tree closure so
+    // it doesn't clash with the `&mut user_src_files` borrow used for rendering.
+    let mut move_request: Option<(usize, String)> = None;
 
     // .cargo/  — fixed folder, no context menu → dark-red + bold.
     egui::CollapsingHeader::new(
@@ -187,6 +326,7 @@ pub fn show_project_tree(
             new_file_parent_folder,
             new_folder_parent_folder,
             "", // parent path at root is empty (relative to src/)
+            &mut move_request,
         );
 
         // Apply file deletion
@@ -224,6 +364,24 @@ pub fn show_project_tree(
             *renaming_file = None;
         }
     });
+
+    // Dropping a dragged file on the `src/` header moves it to the src/ root.
+    if src_ch.header_response.dnd_hover_payload::<DraggedFile>().is_some() {
+        ui.painter().rect_stroke(
+            src_ch.header_response.rect,
+            3.0,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 170, 240)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(p) = src_ch.header_response.dnd_release_payload::<DraggedFile>() {
+        move_request = Some((p.idx, String::new()));
+    }
+
+    // Apply a drag-drop move now that the tree closure's borrow has ended.
+    if let Some((idx, target)) = move_request.take() {
+        apply_file_move(ui, idx, &target, user_src_files, workspace_dir, save_needed);
+    }
 
     src_ch.header_response.context_menu(|ui| {
         if ui
@@ -308,6 +466,7 @@ fn render_tree_node(
     new_file_parent_folder: &mut Option<String>,
     new_folder_parent_folder: &mut Option<String>,
     parent_path: &str,
+    move_request: &mut Option<(usize, String)>,
 ) {
     let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
 
@@ -439,8 +598,23 @@ fn render_tree_node(
                             new_file_parent_folder,
                             new_folder_parent_folder,
                             &folder_path,
+                            move_request,
                         );
                     });
+
+                    // Drop target: dragging a file onto this folder header moves
+                    // it here. Highlight the header while a file hovers over it.
+                    if ch.header_response.dnd_hover_payload::<DraggedFile>().is_some() {
+                        ui.painter().rect_stroke(
+                            ch.header_response.rect,
+                            3.0,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 170, 240)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    if let Some(p) = ch.header_response.dnd_release_payload::<DraggedFile>() {
+                        *move_request = Some((p.idx, folder_path.clone()));
+                    }
 
                     ch.header_response.context_menu(|ui| {
                         if ui
@@ -611,6 +785,8 @@ fn user_file_row(
         let is_sel = *selected == id;
         let color = if is_sel { hi } else { normal };
         ui.label(egui::RichText::new(ph::FILE).size(11.5).color(color));
+        // `click_and_drag`: a plain click still selects (below); a drag makes the
+        // row a drag source so it can be dropped onto a folder to move it.
         let resp = ui.add(
             egui::Label::new(
                 egui::RichText::new(name)
@@ -618,8 +794,27 @@ fn user_file_row(
                     .monospace()
                     .color(color),
             )
-            .sense(egui::Sense::click()),
+            .sense(egui::Sense::click_and_drag()),
         );
+        resp.dnd_set_drag_payload(DraggedFile { idx });
+        if resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            // Floating preview following the cursor (the response-based DnD API
+            // doesn't paint one itself, unlike `dnd_drag_source`).
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                egui::Area::new(egui::Id::new("__tree_drag_preview__"))
+                    .fixed_pos(pos + egui::vec2(12.0, 4.0))
+                    .order(egui::Order::Tooltip)
+                    .interactable(false)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} {name}", ph::FILE)).size(11.0),
+                            );
+                        });
+                    });
+            }
+        }
         if resp.clicked() {
             *selected = id;
         }
