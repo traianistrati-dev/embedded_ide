@@ -17,6 +17,23 @@ use std::{
     thread,
 };
 
+/// Apply `CREATE_NO_WINDOW` (Windows) to a command so spawning it does NOT flash
+/// a console window. On a GUI/`windows_subsystem = "windows"` build every child
+/// console process (cargo, rustup, rust-analyzer, …) otherwise pops a console
+/// window that steals focus for a frame and vanishes — with flycheck firing on
+/// every save that reads as the whole app "flickering" and the taskbar spawning
+/// ghost instances. No-op on non-Windows. Returns the same `&mut Command` so it
+/// chains inline: `no_window(Command::new("cargo")).args(...)`.
+pub fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 // ── Diagnostic ────────────────────────────────────────────────────────────────
 
 /// A single machine-applicable source edit suggested by clippy: replace the byte
@@ -207,7 +224,7 @@ pub fn start_clean(
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let _ = Command::new("cargo")
+        let _ = no_window(&mut Command::new("cargo"))
             .current_dir(&workspace_dir)
             .args(["clean"])
             .stdout(Stdio::null())
@@ -235,7 +252,7 @@ fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
     }
 
     // ── Step 2: cargo check / clippy ─────────────────────────────────────────
-    let mut child = match Command::new("cargo")
+    let mut child = match no_window(&mut Command::new("cargo"))
         .current_dir(dir)
         .args([subcommand, "--message-format=json", "--color=never"])
         .stdout(Stdio::piped())
@@ -330,7 +347,7 @@ fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
 /// Run `rustup target add <target>`, returning an error only if rustup itself
 /// couldn't be launched (target already installed → exit 0, not an error).
 fn ensure_target(target: &str) -> std::io::Result<()> {
-    let status = Command::new("rustup")
+    let status = no_window(&mut Command::new("rustup"))
         .args(["target", "add", target])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

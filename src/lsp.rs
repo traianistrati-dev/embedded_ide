@@ -820,7 +820,7 @@ fn launch(
     // Snapshot our generation so we can detect restarts.
     let my_gen = state.lock().unwrap().generation;
 
-    let mut child = match Command::new("rust-analyzer")
+    let mut child = match crate::build::no_window(&mut Command::new("rust-analyzer"))
         .current_dir(&workspace_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

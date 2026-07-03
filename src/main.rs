@@ -1,3 +1,10 @@
+// Release builds are a GUI app: no attached console window. (Debug keeps the
+// console so `println!` logging stays visible.) Every child process we spawn
+// is given CREATE_NO_WINDOW (see `build::no_window`) so none of them flash a
+// console either — without both halves, spawning cargo / rust-analyzer / rustup
+// popped ghost windows that stole focus and made the app appear to flicker.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use eframe::egui;
 pub mod app;
 use app::AppIde;
