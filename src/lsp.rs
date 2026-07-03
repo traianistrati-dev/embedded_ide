@@ -294,6 +294,12 @@ pub struct LspState {
     references_pending: HashMap<u64, usize>,
     /// Completed reference results, keyed by that same index; drained by the app.
     pub references_results: HashMap<usize, Vec<ReferenceLoc>>,
+    /// The running rust-analyzer process. Held so it can be KILLED on restart /
+    /// app exit — dropping a `std::process::Child` only detaches it (it does NOT
+    /// terminate the process), which used to leave orphaned rust-analyzer
+    /// instances accumulating across restarts, each still watching and
+    /// re-analyzing the workspace on every file write.
+    child: Option<std::process::Child>,
 }
 
 impl Default for LspState {
@@ -327,6 +333,7 @@ impl Default for LspState {
             symbols_result: Vec::new(),
             references_pending: HashMap::new(),
             references_results: HashMap::new(),
+            child: None,
         }
     }
 }
@@ -722,10 +729,26 @@ impl LspState {
             .count()
     }
 
+    /// Terminate the rust-analyzer child process: a best-effort polite LSP
+    /// `exit` notification, then a guaranteed `kill()` + reap. Called on every
+    /// restart (`reset`) and on app exit (`AppIde::on_exit`) — without this the
+    /// process outlives us (dropping a `Child` only detaches) and keeps
+    /// watching + re-analyzing the workspace forever.
+    pub fn kill_child(&mut self) {
+        // Best effort — the write thread may or may not deliver this before the
+        // kill lands; the kill below is the guarantee.
+        self.send_raw(r#"{"jsonrpc":"2.0","method":"exit"}"#.to_owned());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
     /// Stop any running session and reset to `Stopped`.
     /// Incrementing `generation` makes stale background threads bail out
     /// silently without corrupting the fresh state.
     pub fn reset(&mut self) {
+        self.kill_child();
         self.generation += 1;
         self.status = LspStatus::Stopped;
         self.diagnostics.clear();
@@ -767,6 +790,10 @@ pub fn start(workspace_dir: &Path, state: Arc<Mutex<LspState>>, ctx: eframe::egu
 
     {
         let mut s = state.lock().unwrap();
+        // Kill any previous rust-analyzer FIRST — otherwise it lingers as an
+        // orphan, still watching + re-analyzing this same workspace on every
+        // file write (a main driver of the everything-gets-slower degradation).
+        s.kill_child();
         s.generation += 1;
         s.status = LspStatus::Starting;
         s.diagnostics.clear();
@@ -821,15 +848,20 @@ fn launch(
     // Channel: any thread with a Sender → write thread → RA stdin
     let (tx, rx) = mpsc::channel::<String>();
 
-    // Store sender in LspState (only if our generation is still current).
+    // Store sender + child in LspState (only if our generation is still
+    // current). The child handle lives in the shared state so `kill_child`
+    // (restart / app exit) can actually terminate the process.
     {
         let mut s = state.lock().unwrap();
         if s.generation != my_gen {
-            // Already restarted — bail out silently.
-            drop(child);
+            // Already restarted — this just-spawned RA is already stale; kill
+            // it rather than leaking it as an orphan.
+            let _ = child.kill();
+            let _ = child.wait();
             return;
         }
         s.sender = Some(tx.clone());
+        s.child = Some(child);
     }
 
     // ── Write thread ──────────────────────────────────────────────────────────
@@ -944,8 +976,17 @@ fn launch(
                 // Let RA read the target from .cargo/config.toml.
                 // For ESP32-C3 this is riscv32imc-unknown-none-elf, which ensures
                 // that cfg(target_arch = "riscv32") items in esp-hal are visible.
+                //
+                // `targetDir: true` → RA runs its cargo (flycheck checkOnSave +
+                // build-script probing) in its OWN `target/rust-analyzer/`
+                // directory instead of the shared `target/`. Without this, every
+                // Save's flycheck held the cargo target-dir file lock, so the
+                // Build / Clippy / Flash cargo invocations silently BLOCKED
+                // waiting for it — a main driver of the "everything gets slower
+                // after a save" degradation. Costs some extra disk space.
                 "cargo": {
                     "noDefaultFeatures": false,
+                    "targetDir": true,
                 },
             },
         }
@@ -964,12 +1005,18 @@ fn launch(
 
     // RA exited (or we got EOF).
     let mut s = state.lock().unwrap();
-    if s.generation == my_gen && s.status.is_active() {
-        s.status = LspStatus::Failed("rust-analyzer exited unexpectedly.".into());
-        ctx.request_repaint();
+    if s.generation == my_gen {
+        if s.status.is_active() {
+            s.status = LspStatus::Failed("rust-analyzer exited unexpectedly.".into());
+            ctx.request_repaint();
+        }
+        // Reap OUR exited child (releases the process handle). If the
+        // generation moved on, `state.child` already belongs to the NEW RA —
+        // leave it alone (ours was killed+reaped by `kill_child`).
+        if let Some(mut child) = s.child.take() {
+            let _ = child.wait();
+        }
     }
-    // Let child reap itself — drop will send SIGTERM on some OSes.
-    drop(child);
 }
 
 // ── LSP framing ───────────────────────────────────────────────────────────────

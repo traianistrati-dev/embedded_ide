@@ -1158,6 +1158,11 @@ impl AppIde {
             if let Some(parent) = dest.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
+            // Skip identical content — keeps mtimes stable so cargo / RA don't
+            // re-process unchanged files (see `project_gen::write_if_changed`).
+            if std::fs::read(&dest).is_ok_and(|d| d == content.as_bytes()) {
+                return;
+            }
             let _ = std::fs::write(&dest, content.as_bytes());
         };
         write("main.rs", &self.generated_code);
@@ -1199,6 +1204,16 @@ impl eframe::App for AppIde {
                     .map(String::from),
             },
         );
+    }
+
+    // ── App exit: terminate rust-analyzer ─────────────────────────────────────
+    // Nothing else kills the RA child when the app closes (dropping a
+    // `std::process::Child` only detaches it), so every app restart used to
+    // leave an orphaned rust-analyzer + proc-macro server behind — each still
+    // watching and re-analyzing the workspace on every file write, compounding
+    // the "everything gets slower" degradation across restarts.
+    fn on_exit(&mut self) {
+        self.lsp_state.lock().unwrap().kill_child();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

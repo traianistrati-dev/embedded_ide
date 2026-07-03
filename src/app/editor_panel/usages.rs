@@ -25,8 +25,16 @@ use eframe::egui;
 use std::time::{Duration, Instant};
 
 /// How long the displayed file's text must sit unchanged before a fresh
-/// documentSymbol/references pass is (re)requested.
-const DEBOUNCE: Duration = Duration::from_millis(1200);
+/// documentSymbol/references pass is (re)requested. Raised from 1.2s: each
+/// pass costs one whole-crate find-all-references per symbol (serialized, see
+/// `pump_references`), so re-running it on every brief typing pause piled load
+/// onto rust-analyzer.
+const DEBOUNCE: Duration = Duration::from_millis(2500);
+
+/// Key-space stride separating reference-request generations: the request key
+/// is `refs_run * STRIDE + item_index`, so a late response from a superseded
+/// run can be recognised and discarded instead of landing on the wrong item.
+const REFS_RUN_STRIDE: usize = 100_000;
 
 /// One usage site: an absolute filesystem path + 0-based LSP position.
 #[derive(Clone, Debug)]
@@ -39,6 +47,9 @@ struct UsageRef {
 #[derive(Clone, Debug)]
 struct UsageItem {
     name: String,
+    /// LSP `SymbolKind` — part of the identity key for carrying a previous
+    /// run's references over to the new run (instant fade/pill continuity).
+    kind: u8,
     // Whole-item span (0-based LSP) — the "fade" range when unused.
     start_line: u32,
     start_char: u32,
@@ -77,6 +88,33 @@ pub struct UsagesState {
     last_change_at: Option<Instant>,
     /// Index into `items` whose "references" popup is open, if any.
     open_popup: Option<usize>,
+    /// Item indices whose `references` still need fetching, drained ONE AT A
+    /// TIME by [`pump_references`]. Firing all of them at once (the old
+    /// behaviour) meant N concurrent whole-crate find-all-references queries
+    /// per settle (~40 for a big file) — rust-analyzer's queue backed up more
+    /// and more over a session, degrading everything LSP-based.
+    refs_queue: std::collections::VecDeque<usize>,
+    /// Generation counter for reference requests (see [`REFS_RUN_STRIDE`]).
+    refs_run: u64,
+    /// `true` while one reference request is in flight (next is sent on reply).
+    refs_inflight: bool,
+}
+
+/// Send the next queued reference lookup, if none is in flight — one at a time
+/// so rust-analyzer is never flooded. Free function (not a method) so callers
+/// can hold the `lsp_state` lock and borrow `usages` mutably at the same time.
+fn pump_references(usages: &mut UsagesState, lsp: &mut crate::lsp::LspState) {
+    if usages.refs_inflight {
+        return;
+    }
+    while let Some(idx) = usages.refs_queue.pop_front() {
+        if let Some(item) = usages.items.get(idx) {
+            let key = usages.refs_run as usize * REFS_RUN_STRIDE + idx;
+            lsp.request_references(&usages.rel_path, item.sel_line, item.sel_char, key);
+            usages.refs_inflight = true;
+            return;
+        }
+    }
 }
 
 /// Naming-convention / attribute markers of items invoked from OUTSIDE the
@@ -221,6 +259,14 @@ impl AppIde {
         if let Some((file, syms)) = symbols {
             if file == self.usages.rel_path {
                 let text = self.usages.pending_text.take().unwrap_or_default();
+                // Carry the previous run's resolved references over by (name,
+                // kind) so the fade/pill stays continuous while the serialized
+                // refresh below re-verifies each item one by one.
+                let cache: std::collections::HashMap<(String, u8), Vec<UsageRef>> =
+                    std::mem::take(&mut self.usages.items)
+                        .into_iter()
+                        .filter_map(|it| Some(((it.name, it.kind), it.references?)))
+                        .collect();
                 self.usages.items = syms
                     .into_iter()
                     // Entry points / externally-invoked items (`fn main`, an
@@ -230,23 +276,28 @@ impl AppIde {
                     // shown as "dead code".
                     .filter(|s| !is_externally_invoked(&s.name, s.start_line, &text))
                     .map(|s| UsageItem {
+                        references: cache.get(&(s.name.clone(), s.kind)).cloned(),
                         name: s.name,
+                        kind: s.kind,
                         start_line: s.start_line,
                         start_char: s.start_char,
                         end_line: s.end_line,
                         end_char: s.end_char,
                         sel_line: s.sel_line,
                         sel_char: s.sel_char,
-                        references: None,
                     })
                     .collect();
                 self.usages.computed_for_text = text;
                 self.usages.open_popup = None;
-
+                // Refresh every item's references — SERIALIZED (one in-flight
+                // request; the next goes out when the reply lands), never the
+                // old fire-all-at-once flood. A fresh run supersedes any
+                // still-queued indices from the previous one.
+                self.usages.refs_run += 1;
+                self.usages.refs_queue = (0..self.usages.items.len()).collect();
+                self.usages.refs_inflight = false;
                 let mut lsp = self.lsp_state.lock().unwrap();
-                for (i, item) in self.usages.items.iter().enumerate() {
-                    lsp.request_references(&self.usages.rel_path, item.sel_line, item.sel_char, i);
-                }
+                pump_references(&mut self.usages, &mut lsp);
             }
             // A response for a file we've since navigated away from — drop it;
             // `take_document_symbols_result` already removed it from `lsp_state`.
@@ -256,14 +307,25 @@ impl AppIde {
             let mut lsp = self.lsp_state.lock().unwrap();
             lsp.take_reference_results()
         };
-        for (idx, locs) in refs {
-            if let Some(item) = self.usages.items.get_mut(idx) {
-                item.references = Some(
-                    locs.into_iter()
-                        .map(|r| UsageRef { path: r.path, line: r.line })
-                        .collect(),
-                );
+        if !refs.is_empty() {
+            for (key, locs) in refs {
+                // Any reply frees the in-flight slot; only replies from the
+                // CURRENT run are applied (a superseded run's key would land on
+                // the wrong item).
+                self.usages.refs_inflight = false;
+                if key / REFS_RUN_STRIDE == self.usages.refs_run as usize {
+                    let idx = key % REFS_RUN_STRIDE;
+                    if let Some(item) = self.usages.items.get_mut(idx) {
+                        item.references = Some(
+                            locs.into_iter()
+                                .map(|r| UsageRef { path: r.path, line: r.line })
+                                .collect(),
+                        );
+                    }
+                }
             }
+            let mut lsp = self.lsp_state.lock().unwrap();
+            pump_references(&mut self.usages, &mut lsp);
         }
     }
 

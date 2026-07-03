@@ -359,11 +359,16 @@ pub fn write_project(
     // version graph before each check). The lock is reset only when the
     // chip/toolchain changes — see `AppIde::reset_workspace_lock`.
 
-    // Files common to all toolchains
-    fs::write(dest.join("Cargo.toml"), &files.cargo_toml)?;
-    fs::write(dest.join(".cargo").join("config.toml"), &files.cargo_config)?;
-    fs::write(dest.join("src").join("main.rs"), &files.main_rs)?;
-    fs::write(dest.join(".gitignore"), &files.gitignore)?;
+    // Files common to all toolchains. Written ONLY when changed (see
+    // `write_if_changed`) so unchanged files keep their mtimes and neither
+    // cargo nor rust-analyzer re-processes them.
+    write_if_changed(&dest.join("Cargo.toml"), files.cargo_toml.as_bytes())?;
+    write_if_changed(
+        &dest.join(".cargo").join("config.toml"),
+        files.cargo_config.as_bytes(),
+    )?;
+    write_if_changed(&dest.join("src").join("main.rs"), files.main_rs.as_bytes())?;
+    write_if_changed(&dest.join(".gitignore"), files.gitignore.as_bytes())?;
 
     // memory.x + build.rs — only for RustEmbedded (STM32/ARM).
     //
@@ -374,15 +379,16 @@ pub fn write_project(
     // previous build or toolchain switch), it shadows esp-hal's file, causing
     // either "IROM already defined" (if -Tmemory.x is also present) or
     // missing regions (if the stale file is incomplete).
-    // → Always delete stale copies first, then only write for RustEmbedded.
-    let _ = fs::remove_file(dest.join("memory.x"));
-    let _ = fs::remove_file(dest.join("build.rs"));
-
-    // fs::write(dest.join("build.rs"), &files.build_rs)?;
-
-    if !files.memory_x.is_empty() {
-        fs::write(dest.join("memory.x"), &files.memory_x)?;
-        fs::write(dest.join("build.rs"), &files.build_rs)?;
+    // → Delete stale copies for ESP; write-if-changed for RustEmbedded.
+    //   (The old remove-then-rewrite bumped build.rs's mtime on EVERY call,
+    //   which made cargo RE-RUN the build script — and therefore re-check the
+    //   whole crate — on every Save/Build/Clippy.)
+    if files.memory_x.is_empty() {
+        let _ = fs::remove_file(dest.join("memory.x"));
+        let _ = fs::remove_file(dest.join("build.rs"));
+    } else {
+        write_if_changed(&dest.join("memory.x"), files.memory_x.as_bytes())?;
+        write_if_changed(&dest.join("build.rs"), files.build_rs.as_bytes())?;
     }
 
     // User source files (same for all toolchains)
@@ -391,7 +397,7 @@ pub fn write_project(
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(full, content)?;
+        write_if_changed(&full, content.as_bytes())?;
     }
 
     // mcu.config — virtual modules + clock state, persisted out-of-source at the
@@ -401,11 +407,25 @@ pub fn write_project(
     if mcu_config.trim().is_empty() {
         let _ = fs::remove_file(&mcu_config_path);
     } else {
-        fs::write(&mcu_config_path, mcu_config)?;
+        write_if_changed(&mcu_config_path, mcu_config.as_bytes())?;
     }
 
-    println!("project_gen write_project()");
     Ok(())
+}
+
+/// Write `content` to `path` ONLY when it differs from what's already on disk.
+/// Keeping unchanged files' mtimes stable is critical: a changed mtime makes
+/// cargo re-fingerprint the file (and for `build.rs`, re-run the build script →
+/// re-check the whole crate) and makes rust-analyzer's VFS re-read and
+/// re-analyze it — so blindly rewriting every file on every Save/Build/Clippy
+/// was a main driver of the "everything gets slower over a session" problem.
+fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
+    if let Ok(existing) = fs::read(path) {
+        if existing == content {
+            return Ok(());
+        }
+    }
+    fs::write(path, content)
 }
 
 /// Walks `dir` recursively and removes every `.rs` file whose path relative to
