@@ -39,11 +39,15 @@ impl AppIde {
         // The Clippy tab stays available while selected or while a run is going.
         let clippy_active = self.build_tab == BuildPanelTab::Clippy
             || matches!(*self.clippy_state.lock().unwrap(), BuildState::Building);
+        // The Terminal tab stays available while selected or while a command runs.
+        let terminal_active =
+            self.build_tab == BuildPanelTab::Terminal || self.terminal.is_running();
         let show_panel = cargo_has
             || lsp_active
             || dfu_active
             || serial_active
             || clippy_active
+            || terminal_active
             || self.definition_view.is_some();
 
         if !show_panel {
@@ -135,6 +139,7 @@ impl AppIde {
                         &mut self.espflash_port,
                         &self.tools_state,
                         &mut self.serial,
+                        &mut self.terminal,
                         &self.clippy_state,
                         &mut self.clippy_sel,
                         &mut clippy_run,

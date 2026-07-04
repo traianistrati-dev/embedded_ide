@@ -4,10 +4,12 @@
 //! dispatches to the per-tab render functions in `super::tabs`.
 
 use super::tabs::{
-    show_cargo_tab, show_clippy_tab, show_dfu_tab, show_ra_tab, show_serial_tab, show_tools_tab,
+    show_cargo_tab, show_clippy_tab, show_dfu_tab, show_ra_tab, show_serial_tab, show_terminal_tab,
+    show_tools_tab,
 };
 use super::BuildPanelTab;
 use crate::build::BuildState;
+use crate::terminal::TerminalConsole;
 use crate::dfu::{self, DfuState};
 use crate::espflash::EspFlashState;
 use crate::lsp::{self, LspStatus};
@@ -36,6 +38,7 @@ pub(super) fn show_diag_panel(
     espflash_port: &mut String,
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
     serial: &mut SerialMonitor,
+    terminal: &mut TerminalConsole,
     clippy_state: &Arc<Mutex<BuildState>>,
     clippy_sel: &mut Option<usize>,
     // Set true when the user presses "Run clippy" (the caller starts the run).
@@ -176,6 +179,30 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Clippy;
+            }
+        }
+
+        // Terminal tab button (streaming command console).
+        {
+            let active = *tab == BuildPanelTab::Terminal;
+            let running = terminal.is_running();
+            let badge = if running { " …".to_owned() } else { String::new() };
+            let col = if running {
+                egui::Color32::GRAY
+            } else {
+                egui::Color32::from_rgb(150, 180, 210)
+            };
+            let label = format!("{} Terminal{badge}", ph::TERMINAL_WINDOW);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Terminal;
             }
         }
 
@@ -347,6 +374,9 @@ pub(super) fn show_diag_panel(
         }
         BuildPanelTab::Serial => {
             show_serial_tab(ui, serial, ctx);
+        }
+        BuildPanelTab::Terminal => {
+            show_terminal_tab(ui, terminal, ctx);
         }
         BuildPanelTab::Clippy => {
             let build_busy = build_state.lock().unwrap().is_building();

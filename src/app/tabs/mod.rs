@@ -6,6 +6,7 @@ pub mod ra_tab;
 pub mod clippy_tab;
 pub mod dfu_tab;
 pub mod serial_tab;
+pub mod terminal_tab;
 pub mod tools_tab;
 
 // Re-export all tab functions for convenience
@@ -15,4 +16,5 @@ pub use clippy_tab::show_clippy_tab;
 pub use ra_tab::show_ra_tab;
 pub use dfu_tab::show_dfu_tab;
 pub use serial_tab::show_serial_tab;
+pub use terminal_tab::show_terminal_tab;
 pub use tools_tab::show_tools_tab;

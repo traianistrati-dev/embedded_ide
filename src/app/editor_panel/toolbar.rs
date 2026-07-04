@@ -84,6 +84,27 @@ impl AppIde {
 
                 ui.add_space(4.0);
 
+                // ── Terminal button — opens the bottom "Terminal" tab ──
+                let term_on = self.terminal.is_running();
+                let term_btn = ui.add(egui::Button::new(
+                    egui::RichText::new(format!("{} Terminal", ph::TERMINAL_WINDOW))
+                        .size(11.0)
+                        .color(if term_on {
+                            egui::Color32::from_rgb(220, 180, 60)
+                        } else {
+                            egui::Color32::from_rgb(150, 180, 210)
+                        }),
+                ));
+                if term_btn.clicked() {
+                    self.build_tab = BuildPanelTab::Terminal;
+                }
+                term_btn.on_hover_text(
+                    "Open the terminal — run any command (PowerShell) in the project \
+                     workspace, with live output",
+                );
+
+                ui.add_space(4.0);
+
                 // ── Clippy button — opens the bottom "Clippy" tab ──
                 let clippy_running = self.clippy_state.lock().unwrap().is_building();
                 let clippy_btn = ui.add(egui::Button::new(

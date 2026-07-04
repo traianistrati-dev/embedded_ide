@@ -19,6 +19,7 @@ pub mod panels;
 pub mod project_tree;
 pub mod required_tools;
 pub mod serial;
+pub mod terminal;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
