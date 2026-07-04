@@ -7,6 +7,7 @@
 
 use eframe::egui;
 pub mod app;
+pub mod activity;
 use app::AppIde;
 
 pub mod build;

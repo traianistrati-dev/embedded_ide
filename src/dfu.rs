@@ -265,6 +265,7 @@ fn run_detect() -> DfuState {
 ///
 /// `state` is updated at every phase so the UI can show progress.
 /// `dfu_log` receives each output line as it arrives for the DFU panel.
+#[allow(clippy::too_many_arguments)]
 pub fn start_flash(
     project_dir: PathBuf,
     target: String,
@@ -273,6 +274,7 @@ pub fn start_flash(
     state: Arc<Mutex<DfuState>>,
     dfu_log: Arc<Mutex<Vec<String>>>,
     ctx: eframe::egui::Context,
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -282,6 +284,10 @@ pub fn start_flash(
     ctx.request_repaint();
 
     thread::spawn(move || {
+        // Timing breakdown for the Activity tab — commits on drop, so every
+        // early-return path below still logs the phases it reached.
+        let mut act = crate::activity::Committing::new("Flash (DFU)", activity);
+
         // ── Phase 1: cargo build --release (with auto-clean retry) ───────────
         push_log(
             &dfu_log,
@@ -289,7 +295,15 @@ pub fn start_flash(
             &format!("> cargo build --release --target {target} …"),
         );
 
-        if !run_cargo_build(&project_dir, &target, &dfu_log, &ctx) {
+        let t_build = std::time::Instant::now();
+        let built = run_cargo_build(&project_dir, &target, &dfu_log, &ctx);
+        act.rec().cmd_phase(
+            "cargo build --release",
+            format!("cargo build --release --target {target}"),
+            t_build.elapsed(),
+            if built { Some(0) } else { Some(1) },
+        );
+        if !built {
             // If the failure is a stale device.x cache, auto-clean and retry once.
             let is_device_x = dfu_log
                 .lock()
@@ -351,7 +365,15 @@ pub fn start_flash(
         let bin = project_dir.join("firmware.bin");
 
         push_log(&dfu_log, &ctx, "> Converting ELF -> BIN …");
-        if let Err(e) = objcopy(&elf, &bin, &dfu_log, &ctx) {
+        let t_obj = std::time::Instant::now();
+        let obj = objcopy(&elf, &bin, &dfu_log, &ctx);
+        act.rec().cmd_phase(
+            "objcopy (ELF → firmware.bin)",
+            "objcopy -O binary <elf> firmware.bin",
+            t_obj.elapsed(),
+            if obj.is_ok() { Some(0) } else { Some(1) },
+        );
+        if let Err(e) = obj {
             set(&state, &ctx, DfuState::Error(e));
             return;
         }
@@ -367,6 +389,7 @@ pub fn start_flash(
             &format!("> dfu-util -a 0 -s {addr_spec} -D firmware.bin"),
         );
 
+        let t_flash = std::time::Instant::now();
         let child = Command::new("dfu-util")
             .args([
                 "-a",
@@ -383,6 +406,12 @@ pub fn start_flash(
         let mut child = match child {
             Ok(c) => c,
             Err(e) => {
+                act.rec().cmd_phase(
+                    "dfu-util (flash)",
+                    format!("dfu-util -a 0 -s {addr_spec} -D firmware.bin"),
+                    t_flash.elapsed(),
+                    None,
+                );
                 set(
                     &state,
                     &ctx,
@@ -419,7 +448,14 @@ pub fn start_flash(
             let _ = h.join();
         }
 
-        match child.wait() {
+        let flash_status = child.wait();
+        act.rec().cmd_phase(
+            "dfu-util (flash)",
+            format!("dfu-util -a 0 -s {addr_spec} -D firmware.bin"),
+            t_flash.elapsed(),
+            flash_status.as_ref().ok().and_then(|s| s.code()),
+        );
+        match flash_status {
             Err(e) => set(
                 &state,
                 &ctx,

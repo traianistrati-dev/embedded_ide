@@ -4,10 +4,11 @@
 //! dispatches to the per-tab render functions in `super::tabs`.
 
 use super::tabs::{
-    show_cargo_tab, show_clippy_tab, show_dfu_tab, show_ra_tab, show_serial_tab, show_terminal_tab,
-    show_tools_tab,
+    show_activity_tab, show_cargo_tab, show_clippy_tab, show_dfu_tab, show_ra_tab, show_serial_tab,
+    show_terminal_tab, show_tools_tab,
 };
 use super::BuildPanelTab;
+use crate::activity::ActivityLog;
 use crate::build::BuildState;
 use crate::terminal::TerminalConsole;
 use crate::dfu::{self, DfuState};
@@ -39,6 +40,7 @@ pub(super) fn show_diag_panel(
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
     serial: &mut SerialMonitor,
     terminal: &mut TerminalConsole,
+    activity: &Arc<Mutex<ActivityLog>>,
     clippy_state: &Arc<Mutex<BuildState>>,
     clippy_sel: &mut Option<usize>,
     // Set true when the user presses "Run clippy" (the caller starts the run).
@@ -203,6 +205,25 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Terminal;
+            }
+        }
+
+        // Activity tab button (timing breakdown).
+        {
+            let active = *tab == BuildPanelTab::Activity;
+            let n = activity.lock().unwrap().actions.len();
+            let badge = if n > 0 { format!(" {n}") } else { String::new() };
+            let label = format!("{} Activity{badge}", ph::TIMER);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(160, 185, 215)
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Activity;
             }
         }
 
@@ -377,6 +398,9 @@ pub(super) fn show_diag_panel(
         }
         BuildPanelTab::Terminal => {
             show_terminal_tab(ui, terminal, ctx);
+        }
+        BuildPanelTab::Activity => {
+            show_activity_tab(ui, activity);
         }
         BuildPanelTab::Clippy => {
             let build_busy = build_state.lock().unwrap().is_building();

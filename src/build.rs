@@ -181,12 +181,13 @@ pub fn start_build(
     target: String,
     state: Arc<Mutex<BuildState>>,
     ctx: eframe::egui::Context,
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
     *state.lock().unwrap() = BuildState::Building;
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let next = run_cargo(&project_dir, &target, "check");
+        let next = run_cargo(&project_dir, &target, "check", &activity);
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -200,12 +201,13 @@ pub fn start_clippy(
     target: String,
     state: Arc<Mutex<BuildState>>,
     ctx: eframe::egui::Context,
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
     *state.lock().unwrap() = BuildState::Building;
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let next = run_cargo(&project_dir, &target, "clippy");
+        let next = run_cargo(&project_dir, &target, "clippy", &activity);
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -239,11 +241,28 @@ pub fn start_clean(
 
 /// Ensure the rustup target is installed, then run `cargo <subcommand>` (either
 /// `"check"` or `"clippy"`) and parse its JSON diagnostics.
-fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
+fn run_cargo(
+    dir: &Path,
+    target: &str,
+    subcommand: &str,
+    activity: &Arc<Mutex<crate::activity::ActivityLog>>,
+) -> BuildState {
+    let kind = if subcommand == "clippy" { "Clippy" } else { "Build (cargo check)" };
+    let mut rec = crate::activity::Recorder::new(kind);
+
     // ── Step 1: install target if needed ────────────────────────────────────
     // `rustup target add` is idempotent — exits 0 immediately when already
     // installed, so the overhead on subsequent builds is negligible.
-    if let Err(e) = ensure_target(target) {
+    let t = std::time::Instant::now();
+    let ensured = ensure_target(target);
+    rec.cmd_phase(
+        "rustup target add",
+        format!("rustup target add {target}"),
+        t.elapsed(),
+        ensured.as_ref().ok().map(|_| 0),
+    );
+    if let Err(e) = ensured {
+        activity.lock().unwrap().push(rec.finish());
         return BuildState::Failed(format!(
             "Could not install target `{target}` via rustup: {e}\n\n\
              Make sure `rustup` is in PATH or install the target manually:\n\
@@ -252,6 +271,8 @@ fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
     }
 
     // ── Step 2: cargo check / clippy ─────────────────────────────────────────
+    let cargo_started = std::time::Instant::now();
+    let cargo_cmd = format!("cargo {subcommand} --message-format=json --color=never");
     let mut child = match no_window(&mut Command::new("cargo"))
         .current_dir(dir)
         .args([subcommand, "--message-format=json", "--color=never"])
@@ -264,11 +285,13 @@ fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
     {
         Ok(c) => c,
         Err(e) => {
+            rec.cmd_phase(kind, cargo_cmd, cargo_started.elapsed(), None);
+            activity.lock().unwrap().push(rec.finish());
             return BuildState::Failed(format!(
                 "Could not launch `cargo`: {e}\n\n\
                  Make sure the Rust toolchain is installed and `cargo` is in PATH.\n\
                  Install from https://rustup.rs"
-            ))
+            ));
         }
     };
 
@@ -303,7 +326,9 @@ fn run_cargo(dir: &Path, target: &str, subcommand: &str) -> BuildState {
         }
     }
 
-    let _ = child.wait();
+    let exit = child.wait().ok().and_then(|s| s.code());
+    rec.cmd_phase(kind, cargo_cmd, cargo_started.elapsed(), exit);
+    activity.lock().unwrap().push(rec.finish());
     let stderr_text = stderr_thread.join().unwrap_or_default();
 
     if !saw_build_finished {

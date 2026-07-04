@@ -42,12 +42,15 @@ impl AppIde {
         // The Terminal tab stays available while selected or while a command runs.
         let terminal_active =
             self.build_tab == BuildPanelTab::Terminal || self.terminal.is_running();
+        // The Activity tab is shown while selected (its content persists).
+        let activity_active = self.build_tab == BuildPanelTab::Activity;
         let show_panel = cargo_has
             || lsp_active
             || dfu_active
             || serial_active
             || clippy_active
             || terminal_active
+            || activity_active
             || self.definition_view.is_some();
 
         if !show_panel {
@@ -140,6 +143,7 @@ impl AppIde {
                         &self.tools_state,
                         &mut self.serial,
                         &mut self.terminal,
+                        &self.activity,
                         &self.clippy_state,
                         &mut self.clippy_sel,
                         &mut clippy_run,
@@ -298,6 +302,7 @@ impl AppIde {
             project.target.clone(),
             std::sync::Arc::clone(&self.clippy_state),
             self.egui_ctx.clone(),
+            std::sync::Arc::clone(&self.activity),
         );
         true
     }

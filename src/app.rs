@@ -229,6 +229,8 @@ enum BuildPanelTab {
     Clippy,
     /// Built-in command console (streaming `powershell` runner).
     Terminal,
+    /// Per-action timing breakdown (Save / Build / Flash / Clippy).
+    Activity,
     RequiredTools,
     /// F12 "Go to definition" result. Only selectable while `definition_view` is
     /// set (the tab is hidden otherwise).
@@ -532,6 +534,8 @@ pub struct AppIde {
     serial: crate::serial::SerialMonitor,
     // ── Terminal (built-in streaming command console) ────────────────────────
     terminal: crate::terminal::TerminalConsole,
+    // ── Activity log (per-Save/Build/Flash timing breakdown) ─────────────────
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -750,6 +754,7 @@ impl AppIde {
             full_block_selection: None,
             serial: crate::serial::SerialMonitor::default(),
             terminal: crate::terminal::TerminalConsole::default(),
+            activity: Arc::new(Mutex::new(crate::activity::ActivityLog::default())),
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,
@@ -1157,6 +1162,7 @@ impl AppIde {
     }
 
     fn flush_lsp_to_workspace(&mut self, force: bool) {
+        let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
         let workspace = std::env::temp_dir().join("embedded_ide_0_check");
         let write = |rel: &str, content: &str| {
             let dest = workspace.join("src").join(rel);
@@ -1170,16 +1176,20 @@ impl AppIde {
             }
             let _ = std::fs::write(&dest, content.as_bytes());
         };
-        write("main.rs", &self.generated_code);
-        for (rel, content) in &self.project_tree.user_src_files {
-            write(rel, content);
-        }
+        rec.phase("write files to RA workspace", || {
+            write("main.rs", &self.generated_code);
+            for (rel, content) in &self.project_tree.user_src_files {
+                write(rel, content);
+            }
+        });
 
         let mut lsp = self.lsp_state.lock().unwrap();
-        lsp.did_change("src/main.rs", &self.generated_code, force);
-        for (rel, content) in &self.project_tree.user_src_files {
-            lsp.did_change(&format!("src/{rel}"), content, force);
-        }
+        rec.phase("did_change (sync text to RA)", || {
+            lsp.did_change("src/main.rs", &self.generated_code, force);
+            for (rel, content) in &self.project_tree.user_src_files {
+                lsp.did_change(&format!("src/{rel}"), content, force);
+            }
+        });
         // Trigger RA's `checkOnSave` flycheck (cargo check) so real compiler
         // errors — E0425 "cannot find value", type mismatches, unused vars, … —
         // refresh inline against the just-flushed text. RA's native pass alone
@@ -1188,7 +1198,12 @@ impl AppIde {
         // this save) and is a fast incremental check now that Cargo.lock is kept
         // (see `reset_workspace_lock`). One `did_save` re-checks the whole
         // workspace; RA coalesces, and flush is already debounced (Project Save).
-        lsp.did_save("src/main.rs");
+        rec.phase("did_save (trigger RA flycheck)", || {
+            lsp.did_save("src/main.rs");
+        });
+        drop(lsp);
+        rec.mark("RA flycheck (cargo check) now runs async in rust-analyzer");
+        self.activity.lock().unwrap().push(rec.finish());
     }
 }
 
@@ -1313,17 +1328,22 @@ impl eframe::App for AppIde {
                 let out = Arc::clone(&shared);
                 let ctx = self.egui_ctx.clone();
                 let dest_thread = dest.clone();
+                let activity = Arc::clone(&self.activity);
                 std::thread::spawn(move || {
-                    let res =
-                        project_gen::write_project(&dest_thread, &files, &user_files, &mcu_cfg)
-                            .map(|()| {
-                                dest_thread
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("saved")
-                                    .to_string()
-                            })
-                            .map_err(|e| e.to_string());
+                    let mut rec = crate::activity::Recorder::new("Save (project)");
+                    let res = rec
+                        .phase("write_project", || {
+                            project_gen::write_project(&dest_thread, &files, &user_files, &mcu_cfg)
+                        })
+                        .map(|()| {
+                            dest_thread
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("saved")
+                                .to_string()
+                        })
+                        .map_err(|e| e.to_string());
+                    activity.lock().unwrap().push(rec.finish());
                     *out.lock().unwrap() = Some(res);
                     ctx.request_repaint();
                 });

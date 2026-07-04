@@ -105,6 +105,22 @@ impl AppIde {
 
                 ui.add_space(4.0);
 
+                // ── Activity button — opens the bottom "Activity" (timing) tab ──
+                let activity_btn = ui.add(egui::Button::new(
+                    egui::RichText::new(format!("{} Activity", ph::TIMER))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(160, 185, 215)),
+                ));
+                if activity_btn.clicked() {
+                    self.build_tab = BuildPanelTab::Activity;
+                }
+                activity_btn.on_hover_text(
+                    "Open the Activity tab — per-Save/Build/Flash timing breakdown \
+                     (see where the time goes)",
+                );
+
+                ui.add_space(4.0);
+
                 // ── Clippy button — opens the bottom "Clippy" tab ──
                 let clippy_running = self.clippy_state.lock().unwrap().is_building();
                 let clippy_btn = ui.add(egui::Button::new(
@@ -202,6 +218,7 @@ impl AppIde {
                                     project.target.clone(),
                                     Arc::clone(&self.build_state),
                                     self.egui_ctx.clone(),
+                                    Arc::clone(&self.activity),
                                 );
                             }
                             Err(e) => {
@@ -333,6 +350,7 @@ impl AppIde {
                                         Arc::clone(&self.dfu_state),
                                         Arc::clone(&self.dfu_log),
                                         self.egui_ctx.clone(),
+                                        Arc::clone(&self.activity),
                                     );
                                 }
                             }
