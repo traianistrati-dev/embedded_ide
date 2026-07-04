@@ -20,6 +20,10 @@ impl AppIde {
         // Load files and folders via ProjectTreeState
         self.project_tree = ProjectTreeState::load_from_dir(root);
 
+        // The RA workspace content is about to change wholesale — drop the
+        // flush hash cache so the first flush re-writes every file.
+        self.flushed_hashes.clear();
+
         self.selected_file = ProjectFileId::MainRs;
         self.renaming_file = None;
         self.renaming_folder = None;

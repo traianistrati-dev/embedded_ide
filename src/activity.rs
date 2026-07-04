@@ -101,6 +101,17 @@ impl Recorder {
         });
     }
 
+    /// Record a pre-measured in-process phase (when the work can't be wrapped in
+    /// a closure — e.g. it needs disjoint mutable borrows of the caller).
+    pub fn add(&mut self, label: impl Into<String>, dur: Duration) {
+        self.phases.push(Phase {
+            label: label.into(),
+            dur,
+            cmd: None,
+            exit: None,
+        });
+    }
+
     /// A zero-duration marker phase (e.g. "RA flycheck triggered").
     pub fn mark(&mut self, label: impl Into<String>) {
         self.phases.push(Phase {

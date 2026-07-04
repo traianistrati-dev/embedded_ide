@@ -22,6 +22,7 @@ mod context_menu;
 mod delete_line;
 mod duplicate_line;
 mod diag_embed;
+pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
 mod format;
 mod move_lines;
@@ -226,6 +227,15 @@ impl AppIde {
                 // popup / cargo-complete popup, which run earlier in the frame
                 // and may already have consumed it for themselves this press.
                 let mc_escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                // Ctrl+Shift+Tab / Ctrl+Tab → MRU file switching (VS Code style:
+                // hold Ctrl to walk the history, release to commit). Consumed
+                // BEFORE the editor so Tab never inserts indentation. The Shift
+                // variant must be checked first (consume_key is Shift-lenient).
+                let mut cycle_prev_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Tab)
+                });
+                let mut cycle_next_pressed = !cycle_prev_pressed
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab));
                 // Ctrl+Up / Ctrl+Down → move the selected lines up / down.
                 let mut ctrl_up_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
@@ -538,6 +548,8 @@ impl AppIde {
                         Some(A::Comment) => ctrl_slash_pressed = true,
                         Some(A::MoveUp) => ctrl_up_pressed = true,
                         Some(A::MoveDown) => ctrl_down_pressed = true,
+                        Some(A::NextFile) => cycle_next_pressed = true,
+                        Some(A::PrevFile) => cycle_prev_pressed = true,
                         Some(A::Format) => format_pressed = true,
                         Some(A::Rename) => ctrl_r_pressed = true,
                         Some(A::GoToDef) => f12_pressed = true,
@@ -608,6 +620,50 @@ impl AppIde {
                         }
                         Some(A::ZoomReset) => self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE,
                         None => {}
+                    }
+                }
+
+                // ── MRU file switching (Ctrl+Tab / Ctrl+Shift+Tab) ────────────
+                // Runs after the context-menu mapping so both paths land here.
+                // Switching mid-frame is safe: the write-back below persists to
+                // the captured `displayed_file`, and the editor shows the new
+                // file next frame (same as tree-click / diagnostics nav).
+                if cycle_next_pressed || cycle_prev_pressed {
+                    // Drop stale entries first (deleted files, toolchain-hidden
+                    // fixed files) so session indices stay valid throughout.
+                    let rust_embedded = matches!(
+                        self.selected_toolchain(),
+                        Some(crate::panels::mcu_module::mcu_catalog::ToolchainKind::RustEmbedded)
+                    );
+                    let user_files = &self.project_tree.user_src_files;
+                    self.file_cycle.purge(|e| match e {
+                        file_cycle::HistEntry::User(p) => {
+                            user_files.iter().any(|(q, _)| q == p)
+                        }
+                        file_cycle::HistEntry::Fixed(
+                            ProjectFileId::MemoryX | ProjectFileId::BuildRs,
+                        ) => rust_embedded,
+                        file_cycle::HistEntry::Fixed(_) => true,
+                    });
+                    if let Some(entry) = self.file_cycle.begin_or_step(cycle_next_pressed) {
+                        if let Some(id) = entry.to_id(&self.project_tree.user_src_files) {
+                            self.selected_file = id;
+                            // Don't re-note during the session — promotion
+                            // happens once, on commit (Ctrl release).
+                            self.last_selected_file = id;
+                        }
+                    }
+                }
+                // Commit the session once Ctrl is released; keep repainting
+                // while it's open so the release is noticed promptly and the
+                // overlay below stays live.
+                if self.file_cycle.is_cycling() {
+                    if !ui.input(|i| i.modifiers.ctrl) {
+                        self.file_cycle.commit();
+                    } else {
+                        show_file_cycle_overlay(ui.ctx(), &self.file_cycle);
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(50));
                     }
                 }
 
@@ -959,6 +1015,42 @@ impl AppIde {
             }
         }
     }
+}
+
+/// Floating "recent files" list shown while a Ctrl+Tab cycling session is
+/// active (Ctrl held): the MRU history with the current target highlighted —
+/// without it the user can't see what they're cycling through.
+fn show_file_cycle_overlay(ctx: &egui::Context, fc: &file_cycle::FileCycle) {
+    use egui_phosphor::regular as ph;
+    let (entries, cursor) = fc.view();
+    egui::Area::new(egui::Id::new("__file_cycle_overlay__"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0))
+        .order(egui::Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Recent files — Tab: next · Shift+Tab: back · release Ctrl: open")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140)),
+                );
+                ui.separator();
+                for (i, e) in entries.iter().take(10).enumerate() {
+                    let current = cursor == Some(i);
+                    let marker = if current { ph::ARROW_RIGHT } else { " " };
+                    ui.label(
+                        egui::RichText::new(format!("{marker}  {}", e.label()))
+                            .size(11.5)
+                            .monospace()
+                            .color(if current {
+                                egui::Color32::from_rgb(120, 190, 255)
+                            } else {
+                                egui::Color32::from_gray(190)
+                            }),
+                    );
+                }
+            });
+        });
 }
 
 /// The text of the line containing char index `idx` (no trailing newline).

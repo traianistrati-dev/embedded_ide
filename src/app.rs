@@ -536,6 +536,20 @@ pub struct AppIde {
     terminal: crate::terminal::TerminalConsole,
     // ── Activity log (per-Save/Build/Flash timing breakdown) ─────────────────
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
+    /// MRU file-switch history + active Ctrl+Tab cycling session
+    /// (see `editor_panel::file_cycle`).
+    file_cycle: editor_panel::file_cycle::FileCycle,
+    /// `selected_file` as of the previous frame — the change detector that
+    /// feeds `file_cycle` regardless of what caused the switch (tree click,
+    /// F12, diagnostics nav, …).
+    last_selected_file: ProjectFileId,
+    /// Hash of the content last written to each file in the RA workspace
+    /// (`src/<rel>` → content hash). Lets `flush_lsp_to_workspace` skip the
+    /// per-file disk `fs::read` for unchanged files — those reads contended with
+    /// rust-analyzer's flycheck reading the same files and grew over a session
+    /// (observed as the "write files to RA workspace" phase climbing to 100ms+).
+    /// The IDE is the only writer of that workspace, so the cache is authoritative.
+    flushed_hashes: std::collections::HashMap<String, u64>,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -755,6 +769,9 @@ impl AppIde {
             serial: crate::serial::SerialMonitor::default(),
             terminal: crate::terminal::TerminalConsole::default(),
             activity: Arc::new(Mutex::new(crate::activity::ActivityLog::default())),
+            flushed_hashes: std::collections::HashMap::new(),
+            file_cycle: editor_panel::file_cycle::FileCycle::default(),
+            last_selected_file: ProjectFileId::MainRs,
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,
@@ -969,6 +986,31 @@ impl AppIde {
         // ── Poll filesystem watcher events ────────────────────────────────────
         self.poll_fs_events();
 
+        // ── MRU file history (Ctrl+Tab switching) ─────────────────────────────
+        // One central change detector: whatever switched `selected_file` (tree
+        // click, F12, diagnostics nav, …), promote the new file to the front of
+        // the MRU — except while a Ctrl+Tab cycling session drives the switches
+        // itself (the promotion happens on commit instead).
+        use editor_panel::file_cycle::HistEntry;
+        if self.file_cycle.is_empty() {
+            // Seed with the file shown at startup.
+            if let Some(e) =
+                HistEntry::from_id(self.selected_file, &self.project_tree.user_src_files)
+            {
+                self.file_cycle.note_open(e);
+            }
+        }
+        if self.selected_file != self.last_selected_file {
+            if !self.file_cycle.is_cycling() {
+                if let Some(e) =
+                    HistEntry::from_id(self.selected_file, &self.project_tree.user_src_files)
+                {
+                    self.file_cycle.note_open(e);
+                }
+            }
+            self.last_selected_file = self.selected_file;
+        }
+
         // ── Update generated section when pin config changes ─────────────────
         if let Some(mcu) = &self.mcu {
             // Calculate hash of current MCU state
@@ -1161,27 +1203,85 @@ impl AppIde {
         let _ = std::fs::remove_file(workspace.join("Cargo.lock"));
     }
 
+    /// Content hash used by [`AppIde::flushed_hashes`] (SipHash via `DefaultHasher`).
+    fn content_hash(content: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut h);
+        h.finish()
+    }
+
+    /// Write one file into the RA workspace, skipping disk I/O when possible.
+    /// `cache` maps `rel` → the hash of the content we last wrote there. Since
+    /// the IDE is the only writer of this workspace, the cache is authoritative:
+    /// a hash match means the disk already has this content (no read, no write);
+    /// a known-stale entry means we can write directly WITHOUT a compare read;
+    /// only a brand-new path falls back to a disk read (to avoid a needless
+    /// mtime bump if it already matches, e.g. a reopened project).
+    /// Returns `true` if it actually wrote to disk (for the Activity diagnostic).
+    fn write_workspace_file(
+        cache: &mut std::collections::HashMap<String, u64>,
+        workspace: &std::path::Path,
+        rel: &str,
+        content: &str,
+    ) -> bool {
+        let hash = Self::content_hash(content);
+        match cache.get(rel) {
+            Some(&h) if h == hash => return false, // unchanged since last flush
+            Some(_) => {}                          // known-stale → write directly
+            None => {
+                let dest = workspace.join("src").join(rel);
+                if std::fs::read(&dest).is_ok_and(|d| d == content.as_bytes()) {
+                    cache.insert(rel.to_string(), hash);
+                    return false;
+                }
+            }
+        }
+        let dest = workspace.join("src").join(rel);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&dest, content.as_bytes()).is_ok() {
+            cache.insert(rel.to_string(), hash);
+        }
+        true
+    }
+
     fn flush_lsp_to_workspace(&mut self, force: bool) {
         let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
         let workspace = std::env::temp_dir().join("embedded_ide_0_check");
-        let write = |rel: &str, content: &str| {
-            let dest = workspace.join("src").join(rel);
-            if let Some(parent) = dest.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        let t_write = std::time::Instant::now();
+        // Diagnostic: count how many files actually hit disk vs were cache-skipped,
+        // and which single file was slowest — so the Activity tab shows whether
+        // the cost is writes, reads, or one specific file (contention).
+        let mut wrote = 0usize;
+        let mut slowest = (String::new(), std::time::Duration::ZERO);
+        let mut one = |cache: &mut std::collections::HashMap<String, u64>,
+                       rel: &str,
+                       content: &str| {
+            let t = std::time::Instant::now();
+            // Disjoint field borrows (edition 2024): `flushed_hashes` (mut) +
+            // `generated_code` / `project_tree` (shared).
+            let w = Self::write_workspace_file(cache, &workspace, rel, content);
+            let d = t.elapsed();
+            if w {
+                wrote += 1;
             }
-            // Skip identical content — keeps mtimes stable so cargo / RA don't
-            // re-process unchanged files (see `project_gen::write_if_changed`).
-            if std::fs::read(&dest).is_ok_and(|d| d == content.as_bytes()) {
-                return;
+            if d > slowest.1 {
+                slowest = (rel.to_string(), d);
             }
-            let _ = std::fs::write(&dest, content.as_bytes());
         };
-        rec.phase("write files to RA workspace", || {
-            write("main.rs", &self.generated_code);
-            for (rel, content) in &self.project_tree.user_src_files {
-                write(rel, content);
-            }
-        });
+        one(&mut self.flushed_hashes, "main.rs", &self.generated_code);
+        for (rel, content) in &self.project_tree.user_src_files {
+            one(&mut self.flushed_hashes, rel, content);
+        }
+        let total = self.project_tree.user_src_files.len() + 1;
+        rec.add("write files to RA workspace", t_write.elapsed());
+        rec.mark(format!(
+            "wrote {wrote}/{total} to disk · slowest: {} {}",
+            if slowest.0.is_empty() { "—" } else { &slowest.0 },
+            crate::activity::fmt_dur(slowest.1),
+        ));
 
         let mut lsp = self.lsp_state.lock().unwrap();
         rec.phase("did_change (sync text to RA)", || {
@@ -1407,6 +1507,37 @@ impl eframe::App for AppIde {
 
         // ── Panel 3: MCU Configurator ─────
         self.show_mcu_panel(ui);
+    }
+}
+
+#[cfg(test)]
+mod flush_cache_tests {
+    use super::AppIde;
+    use std::collections::HashMap;
+
+    #[test]
+    fn write_workspace_file_caches_and_writes() {
+        let dir = std::env::temp_dir().join(format!("eide_flush_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache: HashMap<String, u64> = HashMap::new();
+
+        // 1. First write for a new path → file created, hash cached.
+        AppIde::write_workspace_file(&mut cache, &dir, "foo/bar.rs", "hello");
+        let dest = dir.join("src").join("foo").join("bar.rs");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
+        assert!(cache.contains_key("foo/bar.rs"));
+
+        // 2. Same content again → cache hit; even if we corrupt the file on disk,
+        //    the cached hash means we skip writing (proving no disk touch).
+        std::fs::write(&dest, "CORRUPTED").unwrap();
+        AppIde::write_workspace_file(&mut cache, &dir, "foo/bar.rs", "hello");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "CORRUPTED"); // untouched
+
+        // 3. Changed content (cache has a stale entry) → written directly.
+        AppIde::write_workspace_file(&mut cache, &dir, "foo/bar.rs", "world");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "world");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -29,6 +29,10 @@ pub(super) enum EditorAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Switch to the next file in the MRU history (Ctrl+Tab).
+    NextFile,
+    /// Switch to the previous file in the MRU history (Ctrl+Shift+Tab).
+    PrevFile,
 }
 
 /// Render the editor context menu. `is_rs` enables the rust-analyzer-backed
@@ -55,6 +59,10 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
     item(ui, ph::CODE, "Toggle comment", "Ctrl+/", EditorAction::Comment);
     item(ui, ph::ARROW_UP, "Move line up", "Ctrl+Up", EditorAction::MoveUp);
     item(ui, ph::ARROW_DOWN, "Move line down", "Ctrl+Down", EditorAction::MoveDown);
+
+    ui.separator();
+    item(ui, ph::ARROW_RIGHT, "Next file (recent)", "Ctrl+Tab", EditorAction::NextFile);
+    item(ui, ph::ARROW_LEFT, "Previous file (recent)", "Ctrl+Shift+Tab", EditorAction::PrevFile);
 
     ui.separator();
     item(ui, ph::MAGNIFYING_GLASS, "Find", "Ctrl+F", EditorAction::Find);
