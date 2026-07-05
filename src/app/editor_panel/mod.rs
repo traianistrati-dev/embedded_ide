@@ -295,6 +295,13 @@ impl AppIde {
                 // plain F12 so the Ctrl variant never falls through.
                 let mut ctrl_f12_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F12));
+                // Ctrl+[ / Ctrl+] → select the innermost `{ … }` block around
+                // the caret and copy it (refactored off the old implicit
+                // trigger — selecting a `{`/`}` — which hijacked Ctrl+C).
+                let mut select_block_pressed = ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL, egui::Key::OpenBracket)
+                        || i.consume_key(egui::Modifiers::CTRL, egui::Key::CloseBracket)
+                });
                 // F12 → show the definition of the symbol at the cursor.
                 let mut f12_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
@@ -462,12 +469,12 @@ impl AppIde {
                 // Highlight all occurrences of the active find query (current one
                 // in amber), so matches show even when the find field has focus.
                 self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
-                // Selecting a definition NAME (double-click / Shift-select) or
-                // triple-clicking a `{`/`}` highlights the WHOLE definition in
-                // white and copies it on Ctrl+C. When it owns the frame, skip the
-                // single-block highlight (otherwise the trailing `}` of the full
-                // selection would also trigger it).
-                let full_def = self.highlight_full_definition(
+                // Triple-clicking a `{`/`}` or a definition's header line
+                // highlights the WHOLE definition in white and copies it on
+                // Ctrl+C. (The single-block highlight moved off "selecting a
+                // brace" to the explicit Ctrl+[ / Ctrl+] shortcut, applied
+                // after the context menu below.)
+                self.highlight_full_definition(
                     &editor_resp,
                     &display_code,
                     displayed_file,
@@ -475,17 +482,6 @@ impl AppIde {
                     ui,
                     copy_requested,
                 );
-                // When a `{`/`}` is selected, darken the whole block and let
-                // Ctrl+C copy it.
-                if !full_def {
-                    self.highlight_brace_block(
-                        &editor_resp,
-                        &display_code,
-                        editor_clip,
-                        ui,
-                        copy_requested,
-                    );
-                }
                 // "N refs" indicator + popup on every used item (unused ones were
                 // already faded by the highlighter, above, via `dead_ranges`).
                 if let Some(rel) = &usages_rel_path {
@@ -571,6 +567,7 @@ impl AppIde {
                         Some(A::Rename) => ctrl_r_pressed = true,
                         Some(A::GoToDef) => f12_pressed = true,
                         Some(A::GoToImpl) => ctrl_f12_pressed = true,
+                        Some(A::SelectBlock) => select_block_pressed = true,
                         Some(A::Completion) => ctrl_space_pressed = true,
                         Some(A::Find) => self.find.open_with(find_replace::FindMode::FindFile),
                         Some(A::Replace) => {
@@ -639,6 +636,12 @@ impl AppIde {
                         Some(A::ZoomReset) => self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE,
                         None => {}
                     }
+                }
+
+                // ── Ctrl+[ / Ctrl+] — select + copy the block at the caret ────
+                // After the context-menu mapping so both paths land here.
+                if select_block_pressed {
+                    self.select_brace_block(ui, &editor_resp, &display_code);
                 }
 
                 // ── MRU file switching (Ctrl+Tab / Ctrl+Shift+Tab) ────────────

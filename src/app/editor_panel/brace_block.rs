@@ -1,6 +1,8 @@
-//! Brace-block selection: when the user selects a `{` or `}`, highlight the
-//! whole `{ … }` block (braces included) with a dark band so it's clearly marked
-//! as selected, and copy the block on Ctrl+C.
+//! Brace-block selection: **Ctrl+[ / Ctrl+]** selects the innermost `{ … }`
+//! block around the caret (braces included) and copies it to the clipboard.
+//! (Refactored 2026-07-05 off the old implicit trigger — selecting a `{`/`}`
+//! character — which fired, and hijacked Ctrl+C, on any accidental brace
+//! selection.) Triple-click full-definition selection lives here too.
 //!
 //! Brace matching skips braces inside strings, char literals, and `//` / `/* */`
 //! comments — so the `{}` in `format!("{}", x)` never throws the pairing off.
@@ -154,29 +156,33 @@ fn brace_pairs(chars: &[char]) -> HashMap<usize, usize> {
     pairs
 }
 
-/// The matched block `(open, close)` (inclusive char indices) when the selection
-/// `[lo, hi)` is *on* a brace — i.e. its first or last char is `{`/`}`. `None`
-/// for an empty selection or one not touching a brace.
-fn block_for(chars: &[char], lo: usize, hi: usize) -> Option<(usize, usize)> {
-    if lo == hi {
-        return None; // only on a real selection
+/// The matched `{ … }` block `(open, close)` (inclusive char indices) for a
+/// caret at `caret`: a brace directly at (or just before) the caret wins;
+/// otherwise the innermost matched pair CONTAINING the caret. `None` when the
+/// caret sits outside every block.
+fn block_at_caret(chars: &[char], caret: usize) -> Option<(usize, usize)> {
+    let pairs = brace_pairs(chars);
+    // A brace the caret touches wins — matches the old "on the brace" feel.
+    for idx in [caret, caret.wrapping_sub(1)] {
+        if idx < chars.len() && matches!(chars[idx], '{' | '}') {
+            if let Some(&other) = pairs.get(&idx) {
+                return Some((idx.min(other), idx.max(other)));
+            }
+        }
     }
-    let is_brace = |c: char| c == '{' || c == '}';
-    let idx = if chars.get(lo).is_some_and(|&c| is_brace(c)) {
-        lo
-    } else if hi > 0 && chars.get(hi - 1).is_some_and(|&c| is_brace(c)) {
-        hi - 1
-    } else {
-        return None;
-    };
-    let other = *brace_pairs(chars).get(&idx)?;
-    Some((idx.min(other), idx.max(other)))
+    // Otherwise: the innermost enclosing pair = the one opening latest before
+    // the caret. (`pairs` maps both directions; `o < c` walks each pair once.)
+    pairs
+        .iter()
+        .filter(|&(&o, &c)| o < c && o < caret && caret <= c)
+        .max_by_key(|&(&o, _)| o)
+        .map(|(&o, &c)| (o, c))
 }
 
-/// `&str` wrapper around [`block_for`] for tests.
+/// `&str` wrapper around [`block_at_caret`] for tests.
 #[cfg(test)]
-pub(super) fn brace_block(text: &str, lo: usize, hi: usize) -> Option<(usize, usize)> {
-    block_for(&text.chars().collect::<Vec<_>>(), lo, hi)
+pub(super) fn brace_block_at(text: &str, caret: usize) -> Option<(usize, usize)> {
+    block_at_caret(&text.chars().collect::<Vec<_>>(), caret)
 }
 
 // ── Full-definition selection (fn / struct / enum / if / while / match / …) ────
@@ -370,47 +376,33 @@ pub(super) fn paint_band(
 }
 
 impl AppIde {
-    /// When a brace is selected, darken its whole `{ … }` block (braces included)
-    /// and, on Ctrl+C, copy the block text (overriding the native selection copy).
-    /// Painted after the editor, like the find / word-occurrence overlays.
-    pub(super) fn highlight_brace_block(
+    /// Ctrl+[ / Ctrl+]: select the innermost `{ … }` block around the caret
+    /// (braces included) and copy it to the clipboard. The selection is stored
+    /// for next frame (the widget already rendered), the copy happens now.
+    pub(super) fn select_brace_block(
         &self,
+        ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
         display_code: &str,
-        clip: egui::Rect,
-        ui: &egui::Ui,
-        copy_requested: bool,
     ) {
         let Some(range) = editor_resp.state.cursor.char_range() else {
             return;
         };
-        let lo = range.primary.index.min(range.secondary.index);
-        let hi = range.primary.index.max(range.secondary.index);
         let chars: Vec<char> = display_code.chars().collect();
-        let Some((open, close)) = block_for(&chars, lo, hi) else {
+        let caret = range.primary.index.min(chars.len());
+        let Some((open, close)) = block_at_caret(&chars, caret) else {
             return;
         };
 
-        // Ctrl+C copies the whole block (not just the selected brace).
-        if copy_requested && close < chars.len() {
-            ui.ctx()
-                .copy_text(chars[open..=close].iter().collect::<String>());
-        }
-
-        // Dark band over [open, close]. Semi-transparent so the code stays
-        // readable through it (the overlay is drawn on top of the text).
-        let color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50);
-        let painter = ui.painter().with_clip_rect(clip);
-        paint_band(
-            &painter,
-            &editor_resp.galley,
-            editor_resp.galley_pos,
-            clip,
-            &chars,
-            open,
-            close,
-            color,
-        );
+        let end = (close + 1).min(chars.len());
+        let mut st = editor_resp.state.clone();
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(open),
+            egui::text::CCursor::new(end),
+        )));
+        st.store(ui.ctx(), editor_resp.response.id);
+        ui.ctx()
+            .copy_text(chars[open..end].iter().collect::<String>());
     }
 
     /// Highlight the WHOLE definition (fn / struct / enum / if / while / match /
@@ -508,7 +500,7 @@ impl AppIde {
 
 #[cfg(test)]
 mod tests {
-    use super::{brace_block, full_def_brace, full_def_line, full_def_name};
+    use super::{brace_block_at, full_def_brace, full_def_line, full_def_name};
 
     #[test]
     fn triple_click_header_line_selects_whole_definition() {
@@ -583,47 +575,48 @@ mod tests {
     }
 
     #[test]
-    fn selecting_open_brace_spans_block() {
+    fn caret_on_a_brace_spans_its_block() {
         let src = "fn f() { a; }";
         let open = src.find('{').unwrap(); // char idx == byte idx (ASCII)
         let close = src.find('}').unwrap();
-        // Selection = exactly the `{`.
-        assert_eq!(brace_block(src, open, open + 1), Some((open, close)));
-        // Selection = exactly the `}`.
-        assert_eq!(brace_block(src, close, close + 1), Some((open, close)));
+        // Caret right before the `{`, right after it, and on the `}`.
+        assert_eq!(brace_block_at(src, open), Some((open, close)));
+        assert_eq!(brace_block_at(src, open + 1), Some((open, close)));
+        assert_eq!(brace_block_at(src, close), Some((open, close)));
     }
 
     #[test]
-    fn nested_blocks_match_innermost_selected_brace() {
+    fn caret_inside_nested_block_picks_innermost() {
         let src = "a { b { c } d }";
         let inner_open = src.find("{ c").unwrap();
         let inner_close = src.find('}').unwrap();
-        assert_eq!(
-            brace_block(src, inner_open, inner_open + 1),
-            Some((inner_open, inner_close))
-        );
         let outer_open = src.find('{').unwrap();
         let outer_close = src.rfind('}').unwrap();
-        assert_eq!(
-            brace_block(src, outer_open, outer_open + 1),
-            Some((outer_open, outer_close))
-        );
+        // Caret on `c` → the inner pair.
+        let on_c = src.find('c').unwrap();
+        assert_eq!(brace_block_at(src, on_c), Some((inner_open, inner_close)));
+        // Caret on `d` (between the blocks) → the outer pair.
+        let on_d = src.find('d').unwrap();
+        assert_eq!(brace_block_at(src, on_d), Some((outer_open, outer_close)));
     }
 
     #[test]
     fn braces_in_strings_and_comments_are_ignored() {
         // The `{` in the format string and the `}` in the comment must not pair.
         let src = "{ println!(\"{}\", x); // }\n}";
-        let open = 0;
         let close = src.rfind('}').unwrap();
-        assert_eq!(brace_block(src, open, open + 1), Some((open, close)));
+        // Caret on the real opening brace…
+        assert_eq!(brace_block_at(src, 0), Some((0, close)));
+        // …and on code inside — same (only) real pair, not the string's `{}`.
+        let on_x = src.find(", x").unwrap();
+        assert_eq!(brace_block_at(src, on_x), Some((0, close)));
     }
 
     #[test]
-    fn no_selection_or_non_brace_returns_none() {
+    fn caret_outside_any_block_returns_none() {
         let src = "fn f() { a; }";
-        let open = src.find('{').unwrap();
-        assert_eq!(brace_block(src, open, open), None); // empty selection
-        assert_eq!(brace_block(src, 0, 2), None); // "fn" — no brace
+        assert_eq!(brace_block_at(src, 0), None); // on `fn`, before any block
+        assert_eq!(brace_block_at("no braces at all", 5), None);
+        assert_eq!(brace_block_at("", 0), None);
     }
 }

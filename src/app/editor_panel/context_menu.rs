@@ -27,6 +27,8 @@ pub(super) enum EditorAction {
     ReplaceInProject,
     Copy,
     SelectAll,
+    /// Select + copy the innermost `{ … }` block around the caret (Ctrl+[).
+    SelectBlock,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -86,6 +88,7 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
 
     ui.separator();
     item(ui, ph::COPY, "Copy", "Ctrl+C", EditorAction::Copy);
+    item(ui, ph::BRACKETS_CURLY, "Select & copy block", "Ctrl+[", EditorAction::SelectBlock);
     item(ui, ph::SELECTION_ALL, "Select all", "Ctrl+A", EditorAction::SelectAll);
 
     ui.separator();
