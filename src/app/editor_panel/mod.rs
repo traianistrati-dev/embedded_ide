@@ -381,7 +381,13 @@ impl AppIde {
                 // While our LSP completion popup is open (or Ctrl+Space was just
                 // pressed to open it), hide the crate's built-in keyword popup so
                 // the two don't overlap — the LSP popup is the one that wins.
-                let suppress_keyword_completer = self.completion_open || ctrl_space_pressed;
+                // On top of that, the keyword popup is DISABLED outright (user
+                // request 2026-07-05: no auto-popup while typing; completion is
+                // on-demand via Ctrl+Space / `.` / `::`). Flip the const to
+                // bring the auto keyword popup back — nothing was removed.
+                const KEYWORD_COMPLETER_ENABLED: bool = false;
+                let suppress_keyword_completer =
+                    !KEYWORD_COMPLETER_ENABLED || self.completion_open || ctrl_space_pressed;
 
                 // ── Live "usages" analysis (fade unused fn/struct/enum/const/…,
                 // offer a references popup on the rest) — RA `documentSymbol` +
