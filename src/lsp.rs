@@ -175,6 +175,11 @@ pub struct SymbolInfo {
     /// The name's own position — used as the query point for `references`.
     pub sel_line: u32,
     pub sel_char: u32,
+    /// True when the symbol sits inside an `impl Trait for Type` block.
+    /// `references` on such members misses calls dispatched through a generic
+    /// trait bound (those bind to the TRAIT's declaration), so an empty result
+    /// here doesn't mean "unused" — these items must never be faded.
+    pub in_trait_impl: bool,
 }
 
 /// `true` for the `SymbolKind`s worth tracking (fn/method/struct/enum/const/
@@ -279,6 +284,10 @@ pub struct LspState {
     pub rename_edits: Vec<RenameEdit>,
     /// The request id of the pending `textDocument/definition`, if any.
     definition_req_id: Option<u64>,
+    /// The request id of the pending `textDocument/implementation` (Ctrl+F12),
+    /// if any. Its response funnels into the SAME `definition_result` slot, so
+    /// the whole F12 navigation pipeline downstream serves both.
+    implementation_req_id: Option<u64>,
     /// Set when a definition response arrives; consumed by the app.
     pub definition_response_received: bool,
     /// The definition target from the last F12, if any.
@@ -328,6 +337,7 @@ impl Default for LspState {
             rename_response_received: false,
             rename_edits: Vec::new(),
             definition_req_id: None,
+            implementation_req_id: None,
             definition_response_received: false,
             definition_result: None,
             symbols_req_id: None,
@@ -600,6 +610,35 @@ impl LspState {
         );
     }
 
+    /// Request the implementation(s) of the symbol at `(line, character)` —
+    /// `textDocument/implementation` (Ctrl+F12). Where F12 on a trait method
+    /// lands on the trait's declaration, this resolves the `impl … for …`
+    /// sites instead (the first one, when several exist). Shares the
+    /// definition result slot: poll [`take_definition_result`].
+    pub fn request_implementation(&mut self, rel_path: &str, line: u32, character: u32) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.implementation_req_id = Some(id);
+        self.definition_response_received = false;
+        self.definition_result = None;
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/implementation",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                }
+            })
+            .to_string(),
+        );
+    }
+
     /// Take the definition result once RA responded. `Some(Some(loc))` = found,
     /// `Some(None)` = no definition (stop waiting), `None` = not ready yet.
     pub fn take_definition_result(&mut self) -> Option<Option<DefinitionLoc>> {
@@ -769,6 +808,7 @@ impl LspState {
         self.rename_response_received = false;
         self.rename_edits.clear();
         self.definition_req_id = None;
+        self.implementation_req_id = None;
         self.definition_response_received = false;
         self.definition_result = None;
         self.symbols_req_id = None;
@@ -1228,6 +1268,13 @@ fn handle_incoming(
                     s.definition_result = parse_definition(&msg["result"]);
                     s.definition_response_received = true;
                     ctx.request_repaint();
+                } else if s.implementation_req_id == Some(req_id) {
+                    // Same Location | Location[] | LocationLink[] shapes as a
+                    // definition response — funneled into the same slot.
+                    s.implementation_req_id = None;
+                    s.definition_result = parse_definition(&msg["result"]);
+                    s.definition_response_received = true;
+                    ctx.request_repaint();
                 } else if s.symbols_req_id == Some(req_id) {
                     s.symbols_req_id = None;
                     s.symbols_result = parse_document_symbols(&msg["result"]);
@@ -1277,6 +1324,10 @@ fn handle_incoming(
                     ctx.request_repaint();
                 } else if s.definition_req_id == Some(req_id) {
                     s.definition_req_id = None;
+                    s.definition_response_received = true; // no result, stop waiting
+                    ctx.request_repaint();
+                } else if s.implementation_req_id == Some(req_id) {
+                    s.implementation_req_id = None;
                     s.definition_response_received = true; // no result, stop waiting
                     ctx.request_repaint();
                 } else if s.symbols_req_id == Some(req_id) {
@@ -1456,26 +1507,33 @@ fn parse_definition(result: &serde_json::Value) -> Option<DefinitionLoc> {
 /// + optional `children`) and the older flat `SymbolInformation[]` shape (just
 /// `location.range`, used as both spans) some servers fall back to.
 fn parse_document_symbols(result: &serde_json::Value) -> Vec<SymbolInfo> {
-    fn walk(node: &serde_json::Value, out: &mut Vec<SymbolInfo>) {
+    /// rust-analyzer names trait-impl block symbols `impl Trait for Type`
+    /// (inherent impls are just `impl Type` — no ` for `).
+    fn is_trait_impl_symbol(name: &str) -> bool {
+        name.starts_with("impl") && name.contains(" for ")
+    }
+
+    fn walk(node: &serde_json::Value, out: &mut Vec<SymbolInfo>, in_trait_impl: bool) {
         let name = node["name"].as_str().unwrap_or("").to_owned();
         let kind = node["kind"].as_u64().unwrap_or(0) as u8;
+        let child_in_trait_impl = in_trait_impl || is_trait_impl_symbol(&name);
 
         if let (Some(range), Some(sel)) = (node.get("range"), node.get("selectionRange")) {
             if !name.is_empty() && is_trackable_symbol_kind(kind) {
-                if let Some(info) = symbol_from_ranges(name, kind, range, sel) {
+                if let Some(info) = symbol_from_ranges(name, kind, range, sel, in_trait_impl) {
                     out.push(info);
                 }
             }
             if let Some(children) = node["children"].as_array() {
                 for c in children {
-                    walk(c, out);
+                    walk(c, out, child_in_trait_impl);
                 }
             }
         } else if let Some(loc) = node.get("location") {
             // Flat SymbolInformation — no separate selection span or children.
             if !name.is_empty() && is_trackable_symbol_kind(kind) {
                 let r = &loc["range"];
-                if let Some(info) = symbol_from_ranges(name, kind, r, r) {
+                if let Some(info) = symbol_from_ranges(name, kind, r, r, in_trait_impl) {
                     out.push(info);
                 }
             }
@@ -1487,6 +1545,7 @@ fn parse_document_symbols(result: &serde_json::Value) -> Vec<SymbolInfo> {
         kind: u8,
         range: &serde_json::Value,
         sel: &serde_json::Value,
+        in_trait_impl: bool,
     ) -> Option<SymbolInfo> {
         Some(SymbolInfo {
             name,
@@ -1497,13 +1556,14 @@ fn parse_document_symbols(result: &serde_json::Value) -> Vec<SymbolInfo> {
             end_char: range["end"]["character"].as_u64()? as u32,
             sel_line: sel["start"]["line"].as_u64()? as u32,
             sel_char: sel["start"]["character"].as_u64()? as u32,
+            in_trait_impl,
         })
     }
 
     let mut out = Vec::new();
     if let Some(arr) = result.as_array() {
         for node in arr {
-            walk(node, &mut out);
+            walk(node, &mut out, false);
         }
     }
     out
@@ -1742,6 +1802,64 @@ mod diagnostic_headline_tests {
             !diag_with_code(Some("E12a4")).is_rustc_error_code(),
             "non-digit in the code"
         );
+    }
+}
+
+#[cfg(test)]
+mod document_symbol_tests {
+    use super::parse_document_symbols;
+
+    fn range(l0: u64, c0: u64, l1: u64, c1: u64) -> serde_json::Value {
+        serde_json::json!({ "start": { "line": l0, "character": c0 },
+                            "end":   { "line": l1, "character": c1 } })
+    }
+
+    fn sym(name: &str, kind: u64, children: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "kind": kind,
+            "range": range(0, 0, 9, 0),
+            "selectionRange": range(0, 3, 0, 8),
+            "children": children,
+        })
+    }
+
+    /// Members of `impl Trait for Type` blocks are flagged (they must never be
+    /// faded as unused — generic dispatch references bind to the trait), while
+    /// trait declarations and inherent-impl methods are not.
+    #[test]
+    fn trait_impl_members_are_flagged() {
+        let result = serde_json::json!([
+            // The user's exact shape: trait in one file's symbols…
+            sym("ParserResult", 11, serde_json::json!([
+                sym("new_parser", 12, serde_json::json!([])),
+            ])),
+            // …its implementation (impl block = kind 19 Object, not tracked
+            // itself; its children are).
+            sym(
+                "impl ParserResult<PAYLOAD_LEN, HAS_CMD_ID, RESERVED_LEN, HmmdFrame> for HmmdFrame",
+                19,
+                serde_json::json!([
+                    sym("new_parser", 12, serde_json::json!([])),
+                    sym("decode", 12, serde_json::json!([])),
+                ]),
+            ),
+            // Inherent impl — members keep normal unused-fading behaviour.
+            sym("impl HmmdFrame", 19, serde_json::json!([
+                sym("helper", 12, serde_json::json!([])),
+            ])),
+        ]);
+
+        let syms = parse_document_symbols(&result);
+        let flag = |name: &str, expect: bool, nth: usize| {
+            let s = syms.iter().filter(|s| s.name == name).nth(nth).unwrap();
+            assert_eq!(s.in_trait_impl, expect, "{name} #{nth}");
+        };
+        flag("ParserResult", false, 0); // the trait itself
+        flag("new_parser", false, 0); // trait's own declaration
+        flag("new_parser", true, 1); // impl-for member
+        flag("decode", true, 0); // impl-for member
+        flag("helper", false, 0); // inherent impl member
     }
 }
 

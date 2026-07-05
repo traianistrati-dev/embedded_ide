@@ -19,6 +19,7 @@ pub(super) enum EditorAction {
     Format,
     Rename,
     GoToDef,
+    GoToImpl,
     Completion,
     Find,
     Replace,
@@ -75,6 +76,7 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
         item(ui, ph::TEXT_INDENT, "Format code", "Shift+Alt+F", EditorAction::Format);
         item(ui, ph::PENCIL_SIMPLE, "Rename symbol", "Ctrl+R", EditorAction::Rename);
         item(ui, ph::ARROW_SQUARE_OUT, "Go to definition", "F12", EditorAction::GoToDef);
+        item(ui, ph::PUZZLE_PIECE, "Go to implementation", "Ctrl+F12", EditorAction::GoToImpl);
     }
     if is_rs || is_cargo {
         ui.separator();

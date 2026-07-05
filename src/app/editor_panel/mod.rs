@@ -289,6 +289,12 @@ impl AppIde {
                 // Ctrl+R → rename the symbol at the cursor project-wide.
                 let mut ctrl_r_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R));
+                // Ctrl+F12 → go to the IMPLEMENTATION of the symbol at the
+                // cursor (the `impl … for …` site, where plain F12 on a trait
+                // method lands on the trait's declaration). Consumed before
+                // plain F12 so the Ctrl variant never falls through.
+                let mut ctrl_f12_pressed =
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F12));
                 // F12 → show the definition of the symbol at the cursor.
                 let mut f12_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
@@ -558,6 +564,7 @@ impl AppIde {
                         Some(A::Format) => format_pressed = true,
                         Some(A::Rename) => ctrl_r_pressed = true,
                         Some(A::GoToDef) => f12_pressed = true,
+                        Some(A::GoToImpl) => ctrl_f12_pressed = true,
                         Some(A::Completion) => ctrl_space_pressed = true,
                         Some(A::Find) => self.find.open_with(find_replace::FindMode::FindFile),
                         Some(A::Replace) => {
@@ -823,6 +830,7 @@ impl AppIde {
                         copy_requested,
                         ctrl_r_pressed,
                         f12_pressed,
+                        ctrl_f12_pressed,
                         highlight,
                         def_line,
                     );

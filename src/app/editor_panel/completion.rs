@@ -41,6 +41,7 @@ impl AppIde {
         copy_requested: bool,
         ctrl_r_pressed: bool,
         f12_pressed: bool,
+        ctrl_f12_pressed: bool,
         // (1-based line, band colour) of the clicked diagnostic to highlight, if
         // in this file (colour keyed by severity).
         highlight: Option<(u32, egui::Color32)>,
@@ -264,13 +265,20 @@ impl AppIde {
             }
         }
 
-        // ── F12 go to definition: request; result shown in the Definition tab ──
-        if f12_pressed && lsp_file_tracked {
+        // ── F12 / Ctrl+F12: go to definition / implementation ─────────────────
+        // Both funnel through the same result slot and navigation pipeline;
+        // Ctrl+F12 resolves the `impl … for …` site where F12 on a trait
+        // method would land on the trait's declaration.
+        if (f12_pressed || ctrl_f12_pressed) && lsp_file_tracked {
             if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
                 let (line, col) = lsp_cursor_pos(&display_code, idx);
                 let mut lsp = self.lsp_state.lock().unwrap();
                 lsp.did_change(&rel, &display_code, false);
-                lsp.request_definition(&rel, line, col);
+                if ctrl_f12_pressed {
+                    lsp.request_implementation(&rel, line, col);
+                } else {
+                    lsp.request_definition(&rel, line, col);
+                }
                 drop(lsp);
                 self.definition_in_flight = true;
             }

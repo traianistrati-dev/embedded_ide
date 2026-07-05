@@ -59,6 +59,11 @@ struct UsageItem {
     // query point.
     sel_line: u32,
     sel_char: u32,
+    /// Inside an `impl Trait for Type` block. `references` misses calls
+    /// dispatched through a generic trait bound (they bind to the TRAIT's
+    /// declaration), so an empty result must NOT fade these — the impl may
+    /// well be the live implementation behind every one of those calls.
+    in_trait_impl: bool,
     /// `None` while the reference lookup for this item hasn't resolved yet
     /// (nothing is drawn for it until it does).
     references: Option<Vec<UsageRef>>,
@@ -285,6 +290,7 @@ impl AppIde {
                         end_char: s.end_char,
                         sel_line: s.sel_line,
                         sel_char: s.sel_char,
+                        in_trait_impl: s.in_trait_impl,
                     })
                     .collect();
                 self.usages.computed_for_text = text;
@@ -354,6 +360,12 @@ impl AppIde {
             ranges.extend(self.usages.items.iter().filter_map(|item| {
                 let refs = item.references.as_ref()?;
                 if !refs.is_empty() {
+                    return None;
+                }
+                // Trait-impl members: zero references only means "no DIRECT
+                // call" — generic trait-bound dispatch binds to the trait's
+                // declaration, so these are very often live. Never fade them.
+                if item.in_trait_impl {
                     return None;
                 }
                 let start =
