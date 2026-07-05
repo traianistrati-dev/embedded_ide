@@ -10,6 +10,7 @@
 
 use super::AppIde;
 use super::ProjectFileId;
+use crate::lsp;
 use crate::panels::mcu_module::project_gen::ProjectFiles;
 use eframe::egui;
 use egui_code_editor::{CodeEditor, ColorTheme};
@@ -22,12 +23,14 @@ mod context_menu;
 mod delete_line;
 mod duplicate_line;
 mod diag_embed;
+mod let_annotation;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
 mod format;
 mod move_lines;
 mod multi_cursor;
 mod rename;
+mod snippet;
 mod toolbar;
 pub(crate) mod usages;
 
@@ -143,7 +146,8 @@ impl AppIde {
                 // Mouse clicks on popup items set `completion_pending_insert` last
                 // frame; apply them here so the same accept path is used for both
                 // keyboard and mouse.
-                let mut lsp_accepted: Option<String> = self.completion_pending_insert.take();
+                let mut lsp_accepted: Option<lsp::CompletionItem> =
+                    self.completion_pending_insert.take();
                 if lsp_accepted.is_some() {
                     self.completion_open = false;
                 }
@@ -168,7 +172,7 @@ impl AppIde {
                                 // Use the filtered list — guaranteed same items as shown.
                                 let sel = self.completion_sel.min(count.saturating_sub(1));
                                 if let Some(item) = self.completion_filtered_items.get(sel) {
-                                    lsp_accepted = Some(item.insert_text.clone());
+                                    lsp_accepted = Some(item.clone());
                                 }
                                 self.completion_open = false;
                             }

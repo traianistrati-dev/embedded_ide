@@ -125,6 +125,9 @@ pub struct CompletionItem {
     /// Text actually inserted when the item is accepted
     /// (falls back to `label` when the server doesn't send `insertText`)
     pub insert_text: String,
+    /// True when `insert_text` is an LSP snippet (`insertTextFormat == 2`,
+    /// e.g. `foo(${1:a})$0`) — expanded on accept by `snippet::expand`.
+    pub insert_is_snippet: bool,
     /// Plain-text documentation (stripped from LSP `documentation` markdown).
     /// Shown as a tooltip when the item is hovered.
     pub documentation: String,
@@ -900,7 +903,12 @@ fn launch(
                     },
                     "completion": {
                         "completionItem": {
-                            "snippetSupport":      false,
+                            // Snippet completions (`foo(${1:a}, ${2:b})$0`) let
+                            // accepting a function insert the full call with
+                            // parameters; the editor flattens them via
+                            // `editor_panel::snippet::expand` and selects the
+                            // first argument.
+                            "snippetSupport":      true,
                             "documentationFormat": ["plaintext", "markdown"],
                             "labelDetailsSupport": true,
                         },
@@ -1596,10 +1604,20 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
         }
     };
 
-    let insert_text = v["insertText"]
+    // rust-analyzer delivers the replacement text through `textEdit.newText`
+    // (both the plain-`TextEdit` and `InsertReplaceEdit` shapes carry it);
+    // a bare `insertText` is the exception. Falling back to `label` used to be
+    // harmless when labels were plain names, but with `snippetSupport` on RA
+    // labels callables as `name(…)` — inserting THAT literally is a bug, so
+    // the fallback chain must prefer the real edit text.
+    let insert_text = v["textEdit"]["newText"]
         .as_str()
+        .or_else(|| v["insertText"].as_str())
         .map(|s| s.to_owned())
         .unwrap_or_else(|| label.clone());
+
+    // LSP InsertTextFormat: 1 = PlainText (default when absent), 2 = Snippet.
+    let insert_is_snippet = v["insertTextFormat"].as_u64() == Some(2);
 
     // `documentation` can be a plain string or { kind: "markdown", value: "..." }.
     // Strip leading `\`\`\`rust … \`\`\`` fences that rust-analyzer wraps code in.
@@ -1621,6 +1639,7 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
         kind,
         detail,
         insert_text,
+        insert_is_snippet,
         documentation,
     })
 }
@@ -1723,5 +1742,67 @@ mod diagnostic_headline_tests {
             !diag_with_code(Some("E12a4")).is_rustc_error_code(),
             "non-digit in the code"
         );
+    }
+}
+
+#[cfg(test)]
+mod completion_item_tests {
+    use super::parse_completion_item;
+
+    /// rust-analyzer's usual shape: the replacement lives in `textEdit.newText`
+    /// (no `insertText`), the label is the display form `name(…)`. The parser
+    /// must take the edit text — inserting the label is the reported bug
+    /// (`get_param_value(…)` appearing literally in code).
+    #[test]
+    fn text_edit_new_text_wins_over_label() {
+        let v = serde_json::json!({
+            "label": "get_param_value(…)",
+            "kind": 3,
+            "detail": "fn get_param_value(tx: &mut T) -> Option<u32>",
+            "insertTextFormat": 2,
+            "textEdit": {
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end":   { "line": 0, "character": 5 } },
+                "newText": "get_param_value(${1:tx})$0",
+            },
+        });
+        let item = parse_completion_item(&v).expect("parses");
+        assert_eq!(item.insert_text, "get_param_value(${1:tx})$0");
+        assert!(item.insert_is_snippet);
+    }
+
+    /// `InsertReplaceEdit` also carries `newText` at the same key.
+    #[test]
+    fn insert_replace_edit_new_text_is_read() {
+        let v = serde_json::json!({
+            "label": "foo(…)",
+            "kind": 3,
+            "textEdit": {
+                "insert":  { "start": { "line": 0, "character": 0 },
+                             "end":   { "line": 0, "character": 3 } },
+                "replace": { "start": { "line": 0, "character": 0 },
+                             "end":   { "line": 0, "character": 3 } },
+                "newText": "foo($1)$0",
+            },
+        });
+        let item = parse_completion_item(&v).expect("parses");
+        assert_eq!(item.insert_text, "foo($1)$0");
+    }
+
+    /// Fallback chain: `insertText` when no `textEdit`, label as last resort.
+    #[test]
+    fn fallback_chain_insert_text_then_label() {
+        let with_insert = serde_json::json!({
+            "label": "bar(…)",
+            "kind": 3,
+            "insertText": "bar",
+        });
+        let item = parse_completion_item(&with_insert).expect("parses");
+        assert_eq!(item.insert_text, "bar");
+        assert!(!item.insert_is_snippet, "no insertTextFormat → plain text");
+
+        let bare = serde_json::json!({ "label": "baz", "kind": 6 });
+        let item = parse_completion_item(&bare).expect("parses");
+        assert_eq!(item.insert_text, "baz");
     }
 }

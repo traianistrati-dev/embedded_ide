@@ -445,9 +445,10 @@ pub struct AppIde {
     /// Used to compute the live prefix for filtering and to close the popup
     /// when the cursor moves away.
     completion_trigger_idx: usize,
-    /// Insert text deferred from a mouse-click on a completion item.
-    /// Applied at the start of the next frame (before the editor renders).
-    completion_pending_insert: Option<String>,
+    /// Completion item deferred from a mouse-click on a popup row.
+    /// Applied at the start of the next frame (before the editor renders);
+    /// carries the whole item so snippet expansion sees `insert_is_snippet`.
+    completion_pending_insert: Option<lsp::CompletionItem>,
     /// Filtered completion list from the last rendered frame.
     /// Key handlers (Tab / Enter / Arrow) use this so they always operate
     /// on the same slice the user sees, not the full unfiltered LSP list.

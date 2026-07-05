@@ -36,7 +36,7 @@ impl AppIde {
         editor_resp: &TextEditOutput,
         editor_clip: egui::Rect,
         mut display_code: String,
-        lsp_accepted: Option<String>,
+        lsp_accepted: Option<lsp::CompletionItem>,
         ctrl_space_pressed: bool,
         copy_requested: bool,
         ctrl_r_pressed: bool,
@@ -54,17 +54,72 @@ impl AppIde {
             .char_range()
             .map(|r| r.primary.index);
 
-        // Apply accepted completion: replace [word_start..cursor] with insert_text
-        if let Some(insert_text) = lsp_accepted {
+        // Apply accepted completion: replace [word_start..cursor] with the
+        // item's text. Snippet items (functions/methods with `snippetSupport`)
+        // expand to the full call — `foo(a, b)` — and the caret selects the
+        // first parameter; plain items land the caret after the inserted text.
+        if let Some(item) = lsp_accepted {
             if let Some(cur_idx) = cursor_char_idx {
                 let chars: Vec<char> = display_code.chars().collect();
                 // Clamp against a stale cursor (text may have shrunk since the
                 // cursor was recorded) so the slices below can't panic.
                 let cur_idx = cur_idx.min(chars.len());
                 let word_start = lsp_word_start(&display_code, cur_idx).min(cur_idx);
-                let before: String = chars[..word_start].iter().collect();
+                let (mut insert_text, first_stop) = if item.insert_is_snippet {
+                    super::snippet::expand(&item.insert_text)
+                } else {
+                    (item.insert_text.clone(), None)
+                };
+
+                // `let name = ` context: a call accepted right after the `=`
+                // completes the whole statement — the binding gets the fn's
+                // return type and the line is closed:
+                //   let my_value: Option<u32> = get_param_value(tx, rx, …);
+                // Elsewhere the plain call is inserted, unchanged.
+                let mut annotation: Option<(usize, String)> = None;
+                if super::let_annotation::is_callable_kind(item.kind)
+                    && insert_text.ends_with(')')
+                {
+                    if let Some(ann_at) = super::let_annotation::let_context(&chars, word_start) {
+                        if let Some(ret) = super::let_annotation::return_type(&item.detail) {
+                            annotation = Some((ann_at, format!(": {ret}")));
+                            // Close the statement only when nothing follows on
+                            // the line (don't double up an existing `;`).
+                            let line_rest_empty = chars[cur_idx..]
+                                .iter()
+                                .take_while(|&&c| c != '\n')
+                                .all(|c| c.is_whitespace());
+                            if line_rest_empty {
+                                insert_text.push(';');
+                            }
+                        }
+                    }
+                }
+                let (ann_at, ann) = annotation.unwrap_or((word_start, String::new()));
+                let ann_len = ann.chars().count();
+
+                let before: String = chars[..ann_at].iter().collect();
+                let mid: String = chars[ann_at..word_start].iter().collect();
                 let after: String = chars[cur_idx..].iter().collect();
-                display_code = format!("{}{}{}", before, insert_text, after);
+                display_code = format!("{}{}{}{}{}", before, ann, mid, insert_text, after);
+
+                // Caret for next frame: select the first-parameter placeholder
+                // (typing replaces it), else sit right after the insert. All
+                // offsets shift by the `: Type` annotation inserted before it.
+                let end = word_start + ann_len + insert_text.chars().count();
+                let (sel_start, sel_end) = first_stop
+                    .map(|(s, e)| (word_start + ann_len + s, word_start + ann_len + e))
+                    .unwrap_or((end, end));
+                let mut st = editor_resp.state.clone();
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(sel_start),
+                    egui::text::CCursor::new(sel_end),
+                )));
+                st.store(ui.ctx(), editor_resp.response.id);
+                // Mouse accepts move focus to the popup — hand it back so the
+                // user can type the argument straight away.
+                ui.ctx().memory_mut(|m| m.request_focus(editor_resp.response.id));
+
                 // Persist the change in memory so the write-back picks it up; the
                 // debounced LSP flush (3 s idle / Project Save) handles disk + RA.
                 if let ProjectFileId::UserFile(i) = self.selected_file {
@@ -354,7 +409,7 @@ impl AppIde {
                                             // Mouse click → deferred insert.
                                             if row_resp.clicked() {
                                                 self.completion_pending_insert =
-                                                    Some(item.insert_text.clone());
+                                                    Some(item.clone());
                                                 self.completion_open = false;
                                             }
 
