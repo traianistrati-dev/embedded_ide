@@ -265,6 +265,16 @@ pub struct LspState {
     /// True while RA is running a background `cargo check` pass.
     /// Set to `true` on `$/progress begin` for check tokens; cleared on `end`.
     pub checking: bool,
+    /// When the last `didSave` went out — starts the flycheck queue-latency clock.
+    last_did_save_at: Option<std::time::Instant>,
+    /// When RA reported the current cargo-check began (`$/progress` "begin").
+    check_started_at: Option<std::time::Instant>,
+    /// Queue latency of the current check (didSave → begin), captured at begin.
+    check_queued: std::time::Duration,
+    /// Completed flycheck spans `(queued, ran)`, drained by the app into the
+    /// Activity log — the post-save "Checking…" wall time that no in-app
+    /// recorder can wrap (it runs inside rust-analyzer).
+    pub finished_checks: Vec<(std::time::Duration, std::time::Duration)>,
     /// Most recent completion items from rust-analyzer.
     pub completion_items: Vec<CompletionItem>,
     /// Set to `true` when a completion response (success OR error) arrives.
@@ -328,6 +338,10 @@ impl Default for LspState {
             fresh_check_gen: 0,
             root_uri: String::new(),
             checking: false,
+            last_did_save_at: None,
+            check_started_at: None,
+            check_queued: std::time::Duration::ZERO,
+            finished_checks: Vec::new(),
             completion_items: Vec::new(),
             completion_response_received: false,
             completion_req_id: None,
@@ -430,21 +444,22 @@ impl LspState {
     /// Auto-opens the file via `didOpen` if it hasn't been opened yet.
     ///
     /// `force` re-sends (with a bumped version) even when the text is unchanged,
-    /// so rust-analyzer re-runs its analysis — used by Project Save to restart
-    /// verification. `rel_path` is relative to the workspace root.
-    pub fn did_change(&mut self, rel_path: &str, text: &str, force: bool) {
+    /// so rust-analyzer re-runs its analysis. `rel_path` is relative to the
+    /// workspace root. Returns `true` when a message actually went out
+    /// (didOpen or didChange); `false` when the text was already in sync.
+    pub fn did_change(&mut self, rel_path: &str, text: &str, force: bool) -> bool {
         if self.sender.is_none() {
-            return;
+            return false;
         }
         // Auto-open the file on first access.
         if !self.open_files.contains_key(rel_path) {
             self.did_open(rel_path, text);
-            return;
+            return true;
         }
         let file = self.open_files.get_mut(rel_path).unwrap();
         let changed = text != file.last_sent_code;
         if !changed && !force {
-            return;
+            return false;
         }
         file.last_sent_code = text.to_owned();
         file.doc_version += 1;
@@ -473,19 +488,22 @@ impl LspState {
             })
             .to_string(),
         );
+        true
     }
 
     /// Send `textDocument/didSave` for `rel_path`. With `checkOnSave: true` this
     /// makes rust-analyzer re-run its flycheck (cargo check) so its flycheck
     /// diagnostics refresh — without it they stay frozen at the startup check
     /// and a fixed error lingers forever in the panel.
-    pub fn did_save(&self, rel_path: &str) {
+    pub fn did_save(&mut self, rel_path: &str) {
         if self.sender.is_none() {
             return;
         }
         if !self.open_files.contains_key(rel_path) {
             return;
         }
+        // Start the flycheck queue-latency clock (stopped at $/progress begin).
+        self.last_did_save_at = Some(std::time::Instant::now());
         let uri = format!("{}/{}", self.root_uri, rel_path);
         self.send_raw(
             serde_json::json!({
@@ -495,6 +513,12 @@ impl LspState {
             })
             .to_string(),
         );
+    }
+
+    /// Seconds the current cargo-check pass has been running, while `checking`.
+    /// Drives the live "Checking… Ns" status label.
+    pub fn checking_elapsed_secs(&self) -> Option<u64> {
+        self.check_started_at.map(|t| t.elapsed().as_secs())
     }
 
     /// Request completions at the given cursor position in `rel_path`.
@@ -781,6 +805,15 @@ impl LspState {
         // kill lands; the kill below is the guarantee.
         self.send_raw(r#"{"jsonrpc":"2.0","method":"exit"}"#.to_owned());
         if let Some(mut child) = self.child.take() {
+            // Kill the whole process TREE first (/T): rust-analyzer spawns
+            // helpers (proc-macro server, flycheck cargo) that survive a plain
+            // `kill()` of the parent on Windows and then linger as orphans.
+            #[cfg(windows)]
+            {
+                let _ = crate::build::no_window(&mut Command::new("taskkill"))
+                    .args(["/F", "/T", "/PID", &child.id().to_string()])
+                    .output();
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -802,6 +835,10 @@ impl LspState {
         self.fresh_check_gen = 0;
         self.root_uri = String::new();
         self.checking = false;
+        self.last_did_save_at = None;
+        self.check_started_at = None;
+        self.check_queued = std::time::Duration::ZERO;
+        self.finished_checks.clear();
         self.completion_items.clear();
         self.completion_req_id = None;
         self.rename_req_id = None;
@@ -863,6 +900,16 @@ fn launch(
     // Snapshot our generation so we can detect restarts.
     let my_gen = state.lock().unwrap().generation;
 
+    // Reap rust-analyzers orphaned by PREVIOUS sessions (crash, Task-Manager
+    // kill, anything that skipped `on_exit`). `kill_child` can only reach the
+    // current process's own child — a fresh IDE launch has no handle to
+    // yesterday's RA, which keeps watching this same workspace forever.
+    // Observed live: three orphaned RA pairs from prior sessions, each
+    // re-analyzing every Save and competing for the flycheck target-dir lock —
+    // the "save time grows past 20 s over time" degradation. Runs on this
+    // background thread (tasklist/taskkill cost ~100 ms each).
+    sweep_stale_ras(&workspace_dir);
+
     let mut child = match crate::build::no_window(&mut Command::new("rust-analyzer"))
         .current_dir(&workspace_dir)
         .stdin(Stdio::piped())
@@ -884,6 +931,10 @@ fn launch(
             return;
         }
     };
+
+    // Register the pid so the NEXT launch can reap this RA even if this
+    // process dies without running `on_exit` (see `sweep_stale_ras`).
+    register_ra_pid(&workspace_dir, child.id());
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -1067,6 +1118,77 @@ fn launch(
     }
 }
 
+// ── Stale rust-analyzer sweep (pid file) ─────────────────────────────────────
+// Every RA spawn is registered in `<workspace>/ra.pids`; every launch first
+// kills any registered pid that is STILL a live rust-analyzer. This is what
+// catches orphans across app restarts — `kill_child` covers only the clean
+// paths (in-session restart, `on_exit`), so a crash or a Task-Manager kill
+// used to leave RA pairs alive for days, all re-analyzing this workspace on
+// every Save. PID-reuse safety: a pid is killed only after `tasklist` confirms
+// its image name is still rust-analyzer.
+
+fn ra_pid_file(workspace_dir: &Path) -> PathBuf {
+    workspace_dir.join("ra.pids")
+}
+
+/// Parse the pid-file contents: one pid per line; junk lines ignored.
+fn parse_pid_lines(text: &str) -> Vec<u32> {
+    text.lines().filter_map(|l| l.trim().parse().ok()).collect()
+}
+
+/// Extract the image name from one `tasklist /FO CSV /NH` output line
+/// (`"rust-analyzer.exe","16340",…`) — `None` for the "INFO: No tasks…"
+/// message or malformed lines.
+fn tasklist_image_name(csv_line: &str) -> Option<String> {
+    let first = csv_line.split("\",\"").next()?;
+    let name = first.trim().trim_start_matches('"');
+    (!name.is_empty() && !name.starts_with("INFO:")).then(|| name.to_owned())
+}
+
+/// Kill every pid registered in the workspace pid file that is still a live
+/// rust-analyzer (`/T` takes its helper children — proc-macro server,
+/// flycheck cargo — down with it), then clear the file. Windows-only; a no-op
+/// elsewhere.
+fn sweep_stale_ras(workspace_dir: &Path) {
+    let path = ra_pid_file(workspace_dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    #[cfg(windows)]
+    for pid in parse_pid_lines(&text) {
+        let is_ra = crate::build::no_window(&mut Command::new("tasklist"))
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .ok()
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(tasklist_image_name)
+                    .any(|name| name.to_lowercase().starts_with("rust-analyzer"))
+            })
+            .unwrap_or(false);
+        if is_ra {
+            let _ = crate::build::no_window(&mut Command::new("taskkill"))
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = text;
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Append `pid` to the workspace pid file (created on first use).
+fn register_ra_pid(workspace_dir: &Path, pid: u32) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(ra_pid_file(workspace_dir))
+    {
+        let _ = writeln!(f, "{pid}");
+    }
+}
+
 // ── LSP framing ───────────────────────────────────────────────────────────────
 
 fn write_lsp(sink: &mut impl Write, json: &str) -> std::io::Result<()> {
@@ -1229,6 +1351,15 @@ fn handle_incoming(
                         s.checking = true;
                         // This check reflects all edits made up to now.
                         s.check_begin_gen = s.edit_gen;
+                        // Queue latency: how long RA sat on the didSave before
+                        // cargo actually started (a clogged RA shows up HERE,
+                        // a slow cargo shows up in the run span).
+                        s.check_queued = s
+                            .last_did_save_at
+                            .take()
+                            .map(|t| t.elapsed())
+                            .unwrap_or_default();
+                        s.check_started_at = Some(std::time::Instant::now());
                         ctx.request_repaint();
                     }
                     "end" => {
@@ -1237,6 +1368,10 @@ fn handle_incoming(
                         // any edit made *during* the check keeps `flycheck_stale`
                         // true until the next check completes.
                         s.fresh_check_gen = s.check_begin_gen;
+                        if let Some(t) = s.check_started_at.take() {
+                            let queued = s.check_queued;
+                            s.finished_checks.push((queued, t.elapsed()));
+                        }
                         ctx.request_repaint();
                     }
                     _ => {}
@@ -1802,6 +1937,34 @@ mod diagnostic_headline_tests {
             !diag_with_code(Some("E12a4")).is_rustc_error_code(),
             "non-digit in the code"
         );
+    }
+}
+
+#[cfg(test)]
+mod ra_sweep_tests {
+    use super::{parse_pid_lines, tasklist_image_name};
+
+    #[test]
+    fn pid_lines_parse_and_skip_junk() {
+        assert_eq!(parse_pid_lines("16340\n22308\n"), vec![16340, 22308]);
+        assert_eq!(parse_pid_lines("  123 \n\nnot-a-pid\n77"), vec![123, 77]);
+        assert!(parse_pid_lines("").is_empty());
+    }
+
+    #[test]
+    fn tasklist_csv_yields_image_name() {
+        let line = r#""rust-analyzer.exe","16340","Console","1","540,120 K""#;
+        assert_eq!(tasklist_image_name(line).as_deref(), Some("rust-analyzer.exe"));
+    }
+
+    #[test]
+    fn tasklist_info_line_is_rejected() {
+        // `tasklist /FI "PID eq X"` prints this when the pid no longer exists —
+        // it must NOT look like a process (or a dead pid would get "killed",
+        // i.e. taskkill run against a possibly reused pid).
+        let line = "INFO: No tasks are running which match the specified criteria.";
+        assert_eq!(tasklist_image_name(line), None);
+        assert_eq!(tasklist_image_name(""), None);
     }
 }
 

@@ -1109,7 +1109,7 @@ impl AppIde {
                 // sync their own text on demand (see completion.rs), so they work
                 // on the current text between saves.
                 if self.lsp_flush_requested {
-                    self.flush_lsp_to_workspace(true);
+                    self.flush_lsp_to_workspace();
                     self.lsp_flush_requested = false;
                 }
             }
@@ -1169,6 +1169,27 @@ impl AppIde {
                 self.egui_ctx.request_repaint();
             }
         }
+
+        // ── Commit finished RA flycheck spans to the Activity log ─────────────
+        // The post-save "Checking…" wall time lives inside rust-analyzer, so no
+        // in-app recorder can wrap it; RA's `$/progress` begin/end timestamps
+        // are collected in `finished_checks` and logged here as their own
+        // entry — THIS is the seconds-long tail a Save actually costs. The
+        // queue span separates a clogged RA (long wait before cargo starts)
+        // from a genuinely slow `cargo check` (long run).
+        let spans = {
+            let mut lsp = self.lsp_state.lock().unwrap();
+            std::mem::take(&mut lsp.finished_checks)
+        };
+        for (queued, ran) in spans {
+            let mut rec = crate::activity::Recorder::new("Check (RA flycheck)");
+            rec.add("waiting in rust-analyzer's queue (didSave → check start)", queued);
+            rec.add("cargo check run", ran);
+            self.activity
+                .lock()
+                .unwrap()
+                .push(rec.finish_with_total(queued + ran));
+        }
     }
 
     /// Apply rename edits returned by rust-analyzer to the in-memory files
@@ -1198,11 +1219,10 @@ impl AppIde {
 
     /// Single point where rust-analyzer is asked to re-verify: writes main.rs +
     /// every user source file to the LSP workspace (so cargo-check/flycheck sees
-    /// them), pushes `didChange` (RA's in-memory analysis) and `didSave` (RA's
-    /// flycheck). Called **only on a Project Save** — never while typing.
+    /// them), pushes `didChange` (RA's in-memory analysis) for the files that
+    /// actually changed and `didSave` (RA's flycheck) when anything did.
+    /// Called **only on a Project Save** — never while typing.
     ///
-    /// `force` re-sends every document even if unchanged, so RA re-runs its
-    /// analysis/flycheck — i.e. Save always restarts verification.
     /// Delete the temp check-workspace's `Cargo.lock` so the next `cargo check`
     /// re-resolves dependencies. Called ONLY when the chip/toolchain changes or a
     /// project is opened (the deps differ then); saves keep the lock so checks
@@ -1256,7 +1276,7 @@ impl AppIde {
         true
     }
 
-    fn flush_lsp_to_workspace(&mut self, force: bool) {
+    fn flush_lsp_to_workspace(&mut self) {
         let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
         let workspace = std::env::temp_dir().join("embedded_ide_0_check");
         let t_write = std::time::Instant::now();
@@ -1293,25 +1313,42 @@ impl AppIde {
         ));
 
         let mut lsp = self.lsp_state.lock().unwrap();
-        rec.phase("did_change (sync text to RA)", || {
-            lsp.did_change("src/main.rs", &self.generated_code, force);
-            for (rel, content) in &self.project_tree.user_src_files {
-                lsp.did_change(&format!("src/{rel}"), content, force);
+        let mut synced = 0usize;
+        let t_sync = std::time::Instant::now();
+        // Only files whose text differs from what RA already holds are re-sent
+        // (`force = false`). The old forced re-send of EVERY document bumped
+        // every doc version on every save, making RA re-analyse the whole
+        // project each time — load that compounded over a session into the
+        // multi-second post-save "Checking…" waits.
+        if lsp.did_change("src/main.rs", &self.generated_code, false) {
+            synced += 1;
+        }
+        for (rel, content) in &self.project_tree.user_src_files {
+            if lsp.did_change(&format!("src/{rel}"), content, false) {
+                synced += 1;
             }
-        });
+        }
+        rec.add("did_change (sync text to RA)", t_sync.elapsed());
+        rec.mark(format!("re-synced {synced}/{total} files (unchanged skipped)"));
+
         // Trigger RA's `checkOnSave` flycheck (cargo check) so real compiler
         // errors — E0425 "cannot find value", type mismatches, unused vars, … —
         // refresh inline against the just-flushed text. RA's native pass alone
         // does NOT publish these for nested user files, so this is what makes
-        // inline errors work at all. It runs asynchronously in RA (never blocks
-        // this save) and is a fast incremental check now that Cargo.lock is kept
-        // (see `reset_workspace_lock`). One `did_save` re-checks the whole
-        // workspace; RA coalesces, and flush is already debounced (Project Save).
-        rec.phase("did_save (trigger RA flycheck)", || {
-            lsp.did_save("src/main.rs");
-        });
+        // inline errors work at all. It runs asynchronously in RA; its REAL
+        // duration (queue + run) lands in the Activity log as its own
+        // "Check (RA flycheck)" entry when RA reports it done (that's the
+        // seconds-long tail a Save actually costs — see `finished_checks`).
+        // Skipped entirely when nothing changed: an idle Ctrl+S must not
+        // re-run a whole cargo check on identical code.
+        if synced > 0 || wrote > 0 {
+            rec.phase("did_save (trigger RA flycheck)", || {
+                lsp.did_save("src/main.rs");
+            });
+        } else {
+            rec.mark("nothing changed since last flush — flycheck not re-triggered");
+        }
         drop(lsp);
-        rec.mark("RA flycheck (cargo check) now runs async in rust-analyzer");
         self.activity.lock().unwrap().push(rec.finish());
     }
 }

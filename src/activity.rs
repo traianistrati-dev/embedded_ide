@@ -131,6 +131,18 @@ impl Recorder {
             at: crate::activity::since_start(),
         }
     }
+
+    /// Finalise with an explicit total — for actions whose span was measured
+    /// elsewhere and only COMMITTED here afterwards (e.g. rust-analyzer's
+    /// flycheck, timed by its `$/progress` begin/end notifications).
+    pub fn finish_with_total(self, total: Duration) -> Action {
+        Action {
+            kind: self.kind,
+            phases: self.phases,
+            total,
+            at: crate::activity::since_start(),
+        }
+    }
 }
 
 /// A [`Recorder`] that commits its action to a shared [`ActivityLog`] on drop —

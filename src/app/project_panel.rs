@@ -56,7 +56,13 @@ impl AppIde {
                     return Some((true, "Indexing…".to_owned(), amber));
                 }
                 crate::lsp::LspStatus::Ready if lsp.checking => {
-                    return Some((true, "Checking…".to_owned(), amber));
+                    // Live elapsed seconds — makes the post-save flycheck tail
+                    // (the "save takes 20s" perception) visible and measurable.
+                    let label = match lsp.checking_elapsed_secs() {
+                        Some(s) if s >= 1 => format!("Checking… {s}s"),
+                        _ => "Checking…".to_owned(),
+                    };
+                    return Some((true, label, amber));
                 }
                 _ => {}
             }
