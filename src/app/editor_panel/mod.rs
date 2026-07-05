@@ -31,6 +31,7 @@ mod move_lines;
 mod multi_cursor;
 mod rename;
 mod snippet;
+mod word_select;
 mod toolbar;
 pub(crate) mod usages;
 
@@ -465,6 +466,10 @@ impl AppIde {
                 // (double-click / Ctrl+Shift+Left/Right). Painted here — while
                 // `display_code` still matches the galley the editor just built —
                 // and before the diagnostics overlay so squiggles render on top.
+                // Double-click: replace egui's UAX#29 word selection (which
+                // glues `name:Type` into one "word" via the `:` MidLetter rule)
+                // with the plain identifier run under the pointer.
+                self.fix_double_click_selection(ui, &editor_resp, &display_code);
                 Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
                 // Highlight all occurrences of the active find query (current one
                 // in amber), so matches show even when the find field has focus.
