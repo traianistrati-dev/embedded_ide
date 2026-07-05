@@ -528,6 +528,7 @@ impl AppIde {
                     &editor_resp.galley,
                     &display_code,
                 );
+                self.paint_primary_caret(ui, &editor_resp, editor_clip);
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
@@ -895,6 +896,53 @@ impl AppIde {
             state.store(ui.ctx(), scroll_id);
             ui.ctx().request_repaint();
         }
+    }
+
+    /// Paint the primary caret ourselves, on top of the editor.
+    ///
+    /// egui's TextEdit draws its caret only while `input.focused` — the
+    /// OS-window focus flag — is true. On Windows that flag goes stale when a
+    /// `Focused(true)` event is missed (observed at app start and after
+    /// Alt+Tab): typing still works (the widget keeps egui focus) but the
+    /// caret is invisible. Painting it here, gated only on WIDGET focus, makes
+    /// it impossible to lose; when egui's own caret does draw, the two overlap
+    /// pixel-for-pixel (same galley position, same colour, same width formula
+    /// as the theme's `modify_style`).
+    fn paint_primary_caret(
+        &self,
+        ui: &egui::Ui,
+        editor_resp: &egui::text_edit::TextEditOutput,
+        clip: egui::Rect,
+    ) {
+        if !editor_resp.response.has_focus() {
+            return;
+        }
+        let Some(range) = editor_resp.state.cursor.char_range() else {
+            return;
+        };
+        // Clamp against a stale cursor index (file may have just shrunk).
+        let idx = range
+            .primary
+            .index
+            .min(editor_resp.galley.text().chars().count());
+        let loc = editor_resp
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(idx));
+        let x = editor_resp.galley_pos.x + loc.min.x;
+        let y_top = editor_resp.galley_pos.y + loc.min.y;
+        let y_bot = editor_resp.galley_pos.y + loc.max.y;
+        if y_bot < clip.top() || y_top > clip.bottom() {
+            return;
+        }
+        // Same width the editor theme gives egui's caret (`fontsize * 0.1`),
+        // same colour egui would use.
+        let stroke = egui::Stroke::new(
+            self.editor_font_size * 0.1,
+            ui.visuals().text_cursor.stroke.color,
+        );
+        ui.painter()
+            .with_clip_rect(clip)
+            .line_segment([egui::pos2(x, y_top), egui::pos2(x, y_bot)], stroke);
     }
 
     /// Apply a queued "jump to diagnostic line": scroll the editor so the target

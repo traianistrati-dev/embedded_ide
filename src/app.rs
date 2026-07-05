@@ -629,6 +629,14 @@ impl AppIde {
             o.zoom_with_keyboard = false;
         });
 
+        // Steady (non-blinking) text carets everywhere. The editor also paints
+        // its primary caret itself (`paint_primary_caret`) because egui hides
+        // the caret whenever `input.focused` is false — and that OS-window
+        // focus flag goes stale on Windows when a `Focused(true)` event is
+        // missed (app start, Alt+Tab), leaving typing functional but the caret
+        // invisible. A steady caret keeps the two paints indistinguishable.
+        cc.egui_ctx.style_mut(|s| s.visuals.text_cursor.blink = false);
+
         // ── Load persisted project state ─────────────────────────────────────
         let persisted: PersistedState = cc
             .storage
