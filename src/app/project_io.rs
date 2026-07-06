@@ -202,17 +202,26 @@ impl AppIde {
                         if rel == "main.rs" {
                             continue;
                         }
-                        // Only add if not already tracked (avoids duplicates from our own writes)
-                        if !self
-                            .project_tree
-                            .user_src_files
-                            .iter()
-                            .any(|(p, _)| p == &rel)
-                        {
-                            // Read the file content so the editor shows it correctly
-                            let content = std::fs::read_to_string(abs).unwrap_or_default();
-                            self.project_tree.user_src_files.push((rel, content));
-                        }
+                        // Directories must be tracked as FOLDERS, and unreadable
+                        // paths skipped — the old unconditional push-as-file made
+                        // a fresh folder land in `user_src_files` as a phantom
+                        // ("folder1", "") entry that then OVERWROTE the folder's
+                        // node in `build_tree` (same map key), rendering the
+                        // whole folder as one extension-less "file" until the
+                        // project was reopened.
+                        let is_dir = abs.is_dir();
+                        let content = if is_dir {
+                            None
+                        } else {
+                            std::fs::read_to_string(abs).ok()
+                        };
+                        apply_fs_create(
+                            &mut self.project_tree.user_src_files,
+                            &mut self.project_tree.user_src_folders,
+                            &rel,
+                            is_dir,
+                            content,
+                        );
                     }
                 }
                 Remove(_) => {
@@ -251,5 +260,75 @@ impl AppIde {
         if !events.is_empty() {
             self.project_tree.handle_fs_events(events);
         }
+    }
+}
+
+/// Apply one watcher CREATE event to the tree state. A directory is tracked as
+/// a FOLDER (never a file); a file needs readable `content` (`None` — deleted
+/// meanwhile, or unreadable — is skipped, NOT pushed as an empty phantom).
+/// Duplicates of already-tracked entries are ignored. Pure, so the
+/// directory-pushed-as-file regression stays covered by tests.
+pub(super) fn apply_fs_create(
+    user_src_files: &mut Vec<(String, String)>,
+    user_src_folders: &mut Vec<String>,
+    rel: &str,
+    is_dir: bool,
+    content: Option<String>,
+) {
+    if is_dir {
+        if !user_src_folders.iter().any(|f| f == rel) {
+            user_src_folders.push(rel.to_owned());
+        }
+        return;
+    }
+    let Some(content) = content else {
+        return;
+    };
+    if !user_src_files.iter().any(|(p, _)| p == rel) {
+        user_src_files.push((rel.to_owned(), content));
+    }
+}
+
+#[cfg(test)]
+mod fs_create_tests {
+    use super::apply_fs_create;
+
+    /// The reported bug: creating `folder1` fired a watcher CREATE that was
+    /// pushed into `user_src_files` — the phantom file then shadowed the
+    /// folder node in the tree (same map key), showing an extension-less
+    /// "file" instead of the folder until the project was reopened.
+    #[test]
+    fn directory_create_is_tracked_as_folder_not_file() {
+        let mut files = Vec::new();
+        let mut folders = Vec::new();
+        apply_fs_create(&mut files, &mut folders, "folder1", true, None);
+        assert!(files.is_empty(), "a directory must never become a file entry");
+        assert_eq!(folders, vec!["folder1".to_owned()]);
+        // Re-delivered event (or our own create + the watcher's) → no dupe.
+        apply_fs_create(&mut files, &mut folders, "folder1", true, None);
+        assert_eq!(folders.len(), 1);
+    }
+
+    #[test]
+    fn file_create_adds_once_with_content() {
+        let mut files = Vec::new();
+        let mut folders = Vec::new();
+        apply_fs_create(&mut files, &mut folders, "folder1/file1.rs", false, Some("// x\n".into()));
+        assert_eq!(files, vec![("folder1/file1.rs".to_owned(), "// x\n".to_owned())]);
+        // The IDE's own inline-create already tracked it → the watcher's echo
+        // must not duplicate (or overwrite newer in-memory content).
+        apply_fs_create(&mut files, &mut folders, "folder1/file1.rs", false, Some("stale".into()));
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].1, "// x\n");
+        assert!(folders.is_empty());
+    }
+
+    #[test]
+    fn unreadable_file_is_skipped_not_pushed_empty() {
+        let mut files = Vec::new();
+        let mut folders = Vec::new();
+        apply_fs_create(&mut files, &mut folders, "ghost.rs", false, None);
+        assert!(files.is_empty(), "no phantom (\"ghost.rs\", \"\") entries");
+        assert!(folders.is_empty());
     }
 }

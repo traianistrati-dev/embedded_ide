@@ -669,10 +669,21 @@ impl AppIde {
             .style_mut(|s| s.visuals.text_cursor.blink = false);
 
         // ── Load persisted project state ─────────────────────────────────────
-        let persisted: PersistedState = cc
+        let mut persisted: PersistedState = cc
             .storage
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
+        // Hygiene: earlier builds' fs watcher pushed directory-create events
+        // into `user_src_files` as phantom ("folder", "") FILE entries, and
+        // eframe persistence kept them across restarts — where they shadowed
+        // the real folder node in the tree. Drop any "file" whose path is a
+        // tracked folder.
+        {
+            let folders = persisted.user_src_folders.clone();
+            persisted
+                .user_src_files
+                .retain(|(p, _)| !folders.contains(p));
+        }
 
         // Load the MCU registry: bundled built-ins + any user `.ron` imports
         // from the per-user `mcus/` folder (Phase 5 — runtime import).
