@@ -521,6 +521,14 @@ impl LspState {
         self.check_started_at.map(|t| t.elapsed().as_secs())
     }
 
+    /// True between a `didSave` and rust-analyzer's `$/progress begin` for the
+    /// flycheck it triggers — the QUEUE phase, before `checking` turns on.
+    /// The status bar treats this as "Checking…" too: it used to be a gap with
+    /// no spinner (and thus no scheduled repaint), where the app could sleep.
+    pub fn flycheck_pending(&self) -> bool {
+        self.last_did_save_at.is_some()
+    }
+
     /// Request completions at the given cursor position in `rel_path`.
     ///
     /// `trigger_char = None`  → manual invocation (Ctrl+Space, triggerKind=1)

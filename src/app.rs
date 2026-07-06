@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 // ── Module structure ──────────────────────────────────────────────────────────
 mod tabs;
 
-mod helpers;
+pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
 mod dialogs;
@@ -344,6 +344,16 @@ fn apply_text_edits(text: &str, mut edits: Vec<lsp::RenameEdit>) -> String {
     s
 }
 
+/// Milestones of one user-perceived save (all `Instant`s; durations are
+/// computed FROM THE CLICK, so they overlap rather than add up). Finished —
+/// and logged as "Save (wall clock)" — when the flycheck the save triggered
+/// ends (diagnostics fresh), or on a 120 s timeout.
+struct SaveWall {
+    started: std::time::Instant,
+    worker_done: Option<std::time::Instant>,
+    flush_done: Option<std::time::Instant>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedState {
     /// `(path_relative_to_src, content)` for every user-created file.
@@ -389,8 +399,22 @@ pub struct AppIde {
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
     copy_flash: u8,
-    /// >0: show export status message countdown
-    export_flash: u8,
+    /// Show the export/save result message until this deadline. Time-based
+    /// (not a frame countdown): frame cadence varies from 60+ FPS to the 4 FPS
+    /// activity watchdog, so counting frames made the message's lifetime
+    /// swing from ~3 s to ~45 s.
+    export_status_until: Option<std::time::Instant>,
+    /// `Instant` of the previous `ui()` frame — measures inter-frame gaps for
+    /// the UI-stall detector (a gap while work was pending = a lost wake-up).
+    last_frame_at: Option<std::time::Instant>,
+    /// Whether the PREVIOUS frame had background activity (busy status bar).
+    /// An inter-frame gap only matters when work was pending through it.
+    was_busy_last_frame: bool,
+    /// Wall-clock envelope of the current save AS THE USER PERCEIVES IT:
+    /// click → project written → LSP flush done → diagnostics fresh. Logged
+    /// to Activity as "Save (wall clock)" so the tab has an entry matching
+    /// the felt duration, decomposed into milestones.
+    save_wall: Option<SaveWall>,
     /// Last export result message
     export_msg: String,
     /// In-flight async project save: `None` until the worker finishes, then
@@ -500,6 +524,10 @@ pub struct AppIde {
     /// re-verifies (didChange + workspace disk write + didSave) ONLY when this is
     /// set — never while typing, so editing stays light. See `init_frame`.
     lsp_flush_requested: bool,
+    /// True while a background LSP flush worker is running. Guards overlap: a
+    /// save arriving mid-flush keeps `lsp_flush_requested` set and `init_frame`
+    /// re-fires it once the worker clears this and wakes the UI.
+    lsp_flush_in_flight: Arc<std::sync::atomic::AtomicBool>,
     // ── Rename symbol (Ctrl+R → textDocument/rename) ─────────────────────────
     /// While `true`, the rename input popup is shown.
     rename_active: bool,
@@ -545,12 +573,14 @@ pub struct AppIde {
     /// F12, diagnostics nav, …).
     last_selected_file: ProjectFileId,
     /// Hash of the content last written to each file in the RA workspace
-    /// (`src/<rel>` → content hash). Lets `flush_lsp_to_workspace` skip the
-    /// per-file disk `fs::read` for unchanged files — those reads contended with
+    /// (`src/<rel>` → content hash). Lets the LSP flush skip the per-file disk
+    /// `fs::read` for unchanged files — those reads contended with
     /// rust-analyzer's flycheck reading the same files and grew over a session
     /// (observed as the "write files to RA workspace" phase climbing to 100ms+).
-    /// The IDE is the only writer of that workspace, so the cache is authoritative.
-    flushed_hashes: std::collections::HashMap<String, u64>,
+    /// The IDE is the only writer of that workspace, so the cache is
+    /// authoritative. Shared with the flush WORKER thread (`spawn_lsp_flush`);
+    /// `lsp_flush_in_flight` keeps two flushes from racing it.
+    flushed_hashes: Arc<Mutex<std::collections::HashMap<String, u64>>>,
     // ── Go to definition (F12 → textDocument/definition) ─────────────────────
     /// `true` after an F12 request, until the definition arrives.
     definition_in_flight: bool,
@@ -635,7 +665,8 @@ impl AppIde {
         // focus flag goes stale on Windows when a `Focused(true)` event is
         // missed (app start, Alt+Tab), leaving typing functional but the caret
         // invisible. A steady caret keeps the two paints indistinguishable.
-        cc.egui_ctx.style_mut(|s| s.visuals.text_cursor.blink = false);
+        cc.egui_ctx
+            .style_mut(|s| s.visuals.text_cursor.blink = false);
 
         // ── Load persisted project state ─────────────────────────────────────
         let persisted: PersistedState = cc
@@ -721,7 +752,10 @@ impl AppIde {
             active_tab: McuTab::Pins,
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
-            export_flash: 0,
+            export_status_until: None,
+            last_frame_at: None,
+            was_busy_last_frame: false,
+            save_wall: None,
             export_msg: String::new(),
             save_in_progress: None,
             save_dest: None,
@@ -762,6 +796,7 @@ impl AppIde {
             mc_prev_primary_idx: None,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
+            lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rename_active: false,
             rename_input: String::new(),
             rename_rel: String::new(),
@@ -778,7 +813,7 @@ impl AppIde {
             serial: crate::serial::SerialMonitor::default(),
             terminal: crate::terminal::TerminalConsole::default(),
             activity: Arc::new(Mutex::new(crate::activity::ActivityLog::default())),
-            flushed_hashes: std::collections::HashMap::new(),
+            flushed_hashes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             file_cycle: editor_panel::file_cycle::FileCycle::default(),
             last_selected_file: ProjectFileId::MainRs,
             definition_in_flight: false,
@@ -986,6 +1021,11 @@ impl AppIde {
             module.kind.hash(&mut hasher);
             module.name.hash(&mut hasher);
             format!("{:?}{:?}", module.pos.0, module.pos.1).hash(&mut hasher);
+            // Parameters (baud, mode, …) and pin wiring feed `config_files()`
+            // — they must bump the hash, or the hash-gated regeneration in
+            // `init_frame` would miss a module edit and keep emitting the old
+            // configs/*.rs content.
+            format!("{:?}{:?}", module.config, module.connections).hash(&mut hasher);
         }
 
         hasher.finish()
@@ -1020,16 +1060,24 @@ impl AppIde {
             self.last_selected_file = self.selected_file;
         }
 
-        // ── Update generated section when pin config changes ─────────────────
+        // ── Update generated code when the MCU state changes ─────────────────
+        // ONE hash gates BOTH main.rs regeneration AND the peripheral-config /
+        // pin-file sync below. The sync used to run UNCONDITIONALLY every
+        // frame — full codegen of every configs/*.rs plus Cargo.toml dep
+        // checks, just to no-op compare — which, under spinner-driven
+        // continuous repaint, was a big share of the per-frame CPU cost.
+        let mut mcu_changed = false;
         if let Some(mcu) = &self.mcu {
-            // Calculate hash of current MCU state
             let current_hash = self.calculate_mcu_state_hash(mcu);
-            // Only regenerate if state changed
             if current_hash != self.mcu_state_hash {
+                // Store the hash even when main.rs comes out identical —
+                // otherwise this branch (and `update_main_rs`) re-runs every
+                // frame until the NEXT state change.
+                self.mcu_state_hash = current_hash;
+                mcu_changed = true;
                 let updated = mcu.update_main_rs(&self.generated_code);
                 if updated != self.generated_code {
                     self.generated_code = updated;
-                    self.mcu_state_hash = current_hash;
                     self.cached_project_files = None; // Invalidate cache
                 }
             }
@@ -1039,10 +1087,13 @@ impl AppIde {
         // pins/ module files from the current pin + Virtual-Module config. Both
         // are no-ops when nothing changed (splice preserves user edits). Configs
         // first so `sync_pin_files` can declare `pub mod configs;` in pins/mod.rs.
-        let regen = self
-            .mcu
-            .as_ref()
-            .map(|m| (m.all_pin_functions(), m.config_files()));
+        let regen = if mcu_changed {
+            self.mcu
+                .as_ref()
+                .map(|m| (m.all_pin_functions(), m.config_files()))
+        } else {
+            None
+        };
         if let Some((all_pins, config_files)) = regen {
             use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
             // CAN init pulls in the external `bxcan`/`nb` crates — add or drop
@@ -1067,8 +1118,11 @@ impl AppIde {
         if self.copy_flash > 0 {
             self.copy_flash -= 1;
         }
-        if self.export_flash > 0 {
-            self.export_flash -= 1;
+        if self
+            .export_status_until
+            .is_some_and(|t| t <= std::time::Instant::now())
+        {
+            self.export_status_until = None;
         }
 
         // ── LSP lifecycle ─────────────────────────────────────────────────────
@@ -1108,9 +1162,18 @@ impl AppIde {
                 // (didChange + workspace disk write + didSave). Completions still
                 // sync their own text on demand (see completion.rs), so they work
                 // on the current text between saves.
-                if self.lsp_flush_requested {
-                    self.flush_lsp_to_workspace();
+                // Runs on a WORKER thread so the save frame stays short (the
+                // synchronous flush froze the UI — and the status spinner —
+                // for the whole disk-write + didChange span). While a flush is
+                // in flight the request stays set; the worker wakes the UI
+                // when done and the queued flush fires on that frame.
+                if self.lsp_flush_requested
+                    && !self
+                        .lsp_flush_in_flight
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
                     self.lsp_flush_requested = false;
+                    self.spawn_lsp_flush();
                 }
             }
             _ => {}
@@ -1183,13 +1246,75 @@ impl AppIde {
         };
         for (queued, ran) in spans {
             let mut rec = crate::activity::Recorder::new("Check (RA flycheck)");
-            rec.add("waiting in rust-analyzer's queue (didSave → check start)", queued);
+            rec.add(
+                "waiting in rust-analyzer's queue (didSave → check start)",
+                queued,
+            );
             rec.add("cargo check run", ran);
             self.activity
                 .lock()
                 .unwrap()
                 .push(rec.finish_with_total(queued + ran));
         }
+
+        self.tick_save_wall();
+    }
+
+    /// Advance the "Save (wall clock)" envelope: note when the LSP flush
+    /// finishes, and once the flycheck the save triggered is done (or nothing
+    /// triggered one, or 120 s passed) log the whole user-perceived span to
+    /// Activity — the entry that should match what the save FELT like,
+    /// decomposed into milestones.
+    fn tick_save_wall(&mut self) {
+        let Some(mut w) = self.save_wall.take() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+
+        // The LSP flush is done once its request was consumed and no worker is
+        // in flight. (`did_save` — which sets `flycheck_pending` — happens
+        // BEFORE the worker clears the in-flight flag, so the completion check
+        // below can't race past a just-triggered check.)
+        if w.flush_done.is_none()
+            && !self.lsp_flush_requested
+            && !self
+                .lsp_flush_in_flight
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            w.flush_done = Some(now);
+        }
+
+        let (checking, pending) = {
+            let lsp = self.lsp_state.lock().unwrap();
+            (lsp.checking, lsp.flycheck_pending())
+        };
+        let done = w.flush_done.is_some() && !checking && !pending;
+        let timed_out = now - w.started > std::time::Duration::from_secs(120);
+        if !(done || timed_out) {
+            self.save_wall = Some(w); // still running — keep the clock
+            return;
+        }
+
+        let mut rec = crate::activity::Recorder::new("Save (wall clock)");
+        if let Some(t) = w.worker_done {
+            rec.add("click → project written to disk", t - w.started);
+        }
+        if let Some(t) = w.flush_done {
+            rec.add("click → LSP flush finished", t - w.started);
+        }
+        if timed_out {
+            rec.mark("timed out waiting for the flycheck (rust-analyzer not Ready?)");
+        } else {
+            rec.add(
+                "click → inline diagnostics fresh (flycheck done)",
+                now - w.started,
+            );
+        }
+        rec.mark("milestones measured FROM THE CLICK — they overlap, not add up");
+        self.activity
+            .lock()
+            .unwrap()
+            .push(rec.finish_with_total(now - w.started));
     }
 
     /// Apply rename edits returned by rust-analyzer to the in-memory files
@@ -1276,80 +1401,115 @@ impl AppIde {
         true
     }
 
-    fn flush_lsp_to_workspace(&mut self) {
-        let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
-        let workspace = std::env::temp_dir().join("embedded_ide_0_check");
-        let t_write = std::time::Instant::now();
-        // Diagnostic: count how many files actually hit disk vs were cache-skipped,
-        // and which single file was slowest — so the Activity tab shows whether
-        // the cost is writes, reads, or one specific file (contention).
-        let mut wrote = 0usize;
-        let mut slowest = (String::new(), std::time::Duration::ZERO);
-        let mut one = |cache: &mut std::collections::HashMap<String, u64>,
-                       rel: &str,
-                       content: &str| {
-            let t = std::time::Instant::now();
-            // Disjoint field borrows (edition 2024): `flushed_hashes` (mut) +
-            // `generated_code` / `project_tree` (shared).
-            let w = Self::write_workspace_file(cache, &workspace, rel, content);
-            let d = t.elapsed();
-            if w {
-                wrote += 1;
-            }
-            if d > slowest.1 {
-                slowest = (rel.to_string(), d);
-            }
-        };
-        one(&mut self.flushed_hashes, "main.rs", &self.generated_code);
-        for (rel, content) in &self.project_tree.user_src_files {
-            one(&mut self.flushed_hashes, rel, content);
-        }
-        let total = self.project_tree.user_src_files.len() + 1;
-        rec.add("write files to RA workspace", t_write.elapsed());
-        rec.mark(format!(
-            "wrote {wrote}/{total} to disk · slowest: {} {}",
-            if slowest.0.is_empty() { "—" } else { &slowest.0 },
-            crate::activity::fmt_dur(slowest.1),
-        ));
+    fn spawn_lsp_flush(&mut self) {
+        self.lsp_flush_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
 
-        let mut lsp = self.lsp_state.lock().unwrap();
-        let mut synced = 0usize;
-        let t_sync = std::time::Instant::now();
-        // Only files whose text differs from what RA already holds are re-sent
-        // (`force = false`). The old forced re-send of EVERY document bumped
-        // every doc version on every save, making RA re-analyse the whole
-        // project each time — load that compounded over a session into the
-        // multi-second post-save "Checking…" waits.
-        if lsp.did_change("src/main.rs", &self.generated_code, false) {
-            synced += 1;
-        }
-        for (rel, content) in &self.project_tree.user_src_files {
-            if lsp.did_change(&format!("src/{rel}"), content, false) {
-                synced += 1;
-            }
-        }
-        rec.add("did_change (sync text to RA)", t_sync.elapsed());
-        rec.mark(format!("re-synced {synced}/{total} files (unchanged skipped)"));
+        // Same-frame snapshot of every file, so what reaches disk + RA is
+        // exactly what the user saved. "main.rs" first, in the bare-rel shape
+        // `write_workspace_file` expects (it prepends `src/`).
+        let files: Vec<(String, String)> =
+            std::iter::once(("main.rs".to_owned(), self.generated_code.clone()))
+                .chain(
+                    self.project_tree
+                        .user_src_files
+                        .iter()
+                        .map(|(rel, content)| (rel.clone(), content.clone())),
+                )
+                .collect();
 
-        // Trigger RA's `checkOnSave` flycheck (cargo check) so real compiler
-        // errors — E0425 "cannot find value", type mismatches, unused vars, … —
-        // refresh inline against the just-flushed text. RA's native pass alone
-        // does NOT publish these for nested user files, so this is what makes
-        // inline errors work at all. It runs asynchronously in RA; its REAL
-        // duration (queue + run) lands in the Activity log as its own
-        // "Check (RA flycheck)" entry when RA reports it done (that's the
-        // seconds-long tail a Save actually costs — see `finished_checks`).
-        // Skipped entirely when nothing changed: an idle Ctrl+S must not
-        // re-run a whole cargo check on identical code.
-        if synced > 0 || wrote > 0 {
-            rec.phase("did_save (trigger RA flycheck)", || {
-                lsp.did_save("src/main.rs");
-            });
-        } else {
-            rec.mark("nothing changed since last flush — flycheck not re-triggered");
-        }
-        drop(lsp);
-        self.activity.lock().unwrap().push(rec.finish());
+        let hashes = Arc::clone(&self.flushed_hashes);
+        let lsp_state = Arc::clone(&self.lsp_state);
+        let activity = Arc::clone(&self.activity);
+        let in_flight = Arc::clone(&self.lsp_flush_in_flight);
+        let ctx = self.egui_ctx.clone();
+
+        std::thread::spawn(move || {
+            let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
+            let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+
+            // ── Disk writes (hash-cached) ─────────────────────────────────
+            // Diagnostic: count how many files actually hit disk vs were
+            // cache-skipped, and which single file was slowest — so the
+            // Activity tab shows whether the cost is writes, reads, or one
+            // specific file (contention).
+            let t_write = std::time::Instant::now();
+            let mut wrote = 0usize;
+            let mut slowest = (String::new(), std::time::Duration::ZERO);
+            {
+                let mut cache = hashes.lock().unwrap();
+                for (rel, content) in &files {
+                    let t = std::time::Instant::now();
+                    if Self::write_workspace_file(&mut cache, &workspace, rel, content) {
+                        wrote += 1;
+                    }
+                    let d = t.elapsed();
+                    if d > slowest.1 {
+                        slowest = (rel.clone(), d);
+                    }
+                }
+            }
+            let total = files.len();
+            rec.add("write files to RA workspace", t_write.elapsed());
+            rec.mark(format!(
+                "wrote {wrote}/{total} to disk · slowest: {} {}",
+                if slowest.0.is_empty() {
+                    "—"
+                } else {
+                    &slowest.0
+                },
+                crate::activity::fmt_dur(slowest.1),
+            ));
+
+            // ── Sync text to RA ───────────────────────────────────────────
+            // Only files whose text differs from what RA already holds are
+            // re-sent (`force = false`). The old forced re-send of EVERY
+            // document bumped every doc version on every save, making RA
+            // re-analyse the whole project each time. One SHORT lock per file
+            // (not one big lock around the loop): the UI thread takes this
+            // mutex every frame — holding it across the whole loop would just
+            // move the freeze from "our frame" into its lock wait.
+            let t_sync = std::time::Instant::now();
+            let mut synced = 0usize;
+            for (rel, content) in &files {
+                let workspace_rel = format!("src/{rel}");
+                if lsp_state
+                    .lock()
+                    .unwrap()
+                    .did_change(&workspace_rel, content, false)
+                {
+                    synced += 1;
+                }
+            }
+            rec.add("did_change (sync text to RA)", t_sync.elapsed());
+            rec.mark(format!(
+                "re-synced {synced}/{total} files (unchanged skipped)"
+            ));
+
+            // Trigger RA's `checkOnSave` flycheck (cargo check) so real compiler
+            // errors — E0425 "cannot find value", type mismatches, unused vars, … —
+            // refresh inline against the just-flushed text. RA's native pass alone
+            // does NOT publish these for nested user files, so this is what makes
+            // inline errors work at all. It runs asynchronously in RA; its REAL
+            // duration (queue + run) lands in the Activity log as its own
+            // "Check (RA flycheck)" entry when RA reports it done (that's the
+            // seconds-long tail a Save actually costs — see `finished_checks`).
+            // Skipped entirely when nothing changed: an idle Ctrl+S must not
+            // re-run a whole cargo check on identical code.
+            if synced > 0 || wrote > 0 {
+                rec.phase("did_save (trigger RA flycheck)", || {
+                    lsp_state.lock().unwrap().did_save("src/main.rs");
+                });
+            } else {
+                rec.mark("nothing changed since last flush — flycheck not re-triggered");
+            }
+
+            activity.lock().unwrap().push(rec.finish());
+            in_flight.store(false, std::sync::atomic::Ordering::Release);
+            // Wake `init_frame`: a save made during this flush left
+            // `lsp_flush_requested` set and must fire now.
+            ctx.request_repaint();
+        });
     }
 }
 
@@ -1383,6 +1543,27 @@ impl eframe::App for AppIde {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // ── UI-stall detector ─────────────────────────────────────────────────
+        // A gap between frames while background work was pending means the
+        // event loop slept through finished work (the "one-minute save"
+        // symptom). The activity watchdog caps this at ~250 ms — an entry
+        // showing up here on a current build points at a wake-up path we
+        // haven't covered yet.
+        let now_frame = std::time::Instant::now();
+        if let (Some(prev), true) = (self.last_frame_at, self.was_busy_last_frame) {
+            let gap = now_frame - prev;
+            if gap >= std::time::Duration::from_secs(1) {
+                let mut rec = crate::activity::Recorder::new("UI stall (frames stopped)");
+                rec.add("gap between frames while work was pending", gap);
+                rec.mark("event loop slept through pending work — lost wake-up?");
+                self.activity
+                    .lock()
+                    .unwrap()
+                    .push(rec.finish_with_total(gap));
+            }
+        }
+        self.last_frame_at = Some(now_frame);
+
         // Initialize frame state (polling, LSP, MCU updates)
         self.init_frame(ui);
 
@@ -1395,6 +1576,23 @@ impl eframe::App for AppIde {
         // for future statuses. Declared before the side panels so it claims the
         // bottom edge across the whole window.
         let status = self.activity_status();
+        // Watchdog: while ANYTHING is running, keep frames coming from the UI
+        // thread itself. Cross-thread `request_repaint()` wake-ups (save
+        // worker, LSP reader) travel as winit user events stamped with the
+        // render-pass number they were issued at, and eframe DROPS them as
+        // "outdated" when two or more passes ran in between (run.rs: "Got
+        // outdated UserEvent::RequestRepaint"). A dropped LAST wake-up left
+        // the event loop asleep with finished work unprocessed until a window
+        // event — observed as a "one-minute save" that completed instantly
+        // when the window was moved/minimized (Activity meanwhile showed the
+        // true, small durations). A UI-thread `request_repaint_after` goes
+        // through the per-frame repaint-delay path, which can't be dropped.
+        if status.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        // Feed the UI-stall detector at the top of the next frame.
+        self.was_busy_last_frame = status.is_some();
         egui::Panel::bottom("status_bar")
             .exact_size(24.0)
             .show_inside(ui, |ui| {
@@ -1402,7 +1600,10 @@ impl eframe::App for AppIde {
                     ui.add_space(8.0);
                     if let Some((spinner, text, color)) = &status {
                         if *spinner {
-                            ui.add(egui::Spinner::new().size(13.0));
+                            // Throttled (~10 FPS): egui's Spinner forces a
+                            // repaint EVERY frame for its whole lifetime —
+                            // i.e. the entire Saving/Checking/Flashing span.
+                            helpers::spinner::throttled_spinner(ui, 13.0);
                             ui.add_space(5.0);
                         }
                         ui.label(egui::RichText::new(text).size(11.0).color(*color));
@@ -1495,6 +1696,12 @@ impl eframe::App for AppIde {
                 });
                 self.save_in_progress = Some(shared);
                 self.save_dest = Some(dest);
+                // Start the user-perceived save clock (see `SaveWall`).
+                self.save_wall = Some(SaveWall {
+                    started: std::time::Instant::now(),
+                    worker_done: None,
+                    flush_done: None,
+                });
             }
         }
 
@@ -1505,17 +1712,22 @@ impl eframe::App for AppIde {
             .and_then(|s| s.lock().unwrap().take());
         if let Some(res) = save_finished {
             self.save_in_progress = None;
+            if let Some(w) = &mut self.save_wall {
+                w.worker_done.get_or_insert(std::time::Instant::now());
+            }
             match res {
                 Ok(name) => {
                     self.export_msg = format!("{}  {name}", egui_phosphor::regular::CHECK_CIRCLE);
-                    self.export_flash = 180;
+                    self.export_status_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
                     self.project_name = Some(name);
                     // A new project now has a home — later saves go here.
                     self.project_dir = self.save_dest.take();
                 }
                 Err(e) => {
                     self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
-                    self.export_flash = 180;
+                    self.export_status_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
                     self.save_dest = None;
                 }
             }

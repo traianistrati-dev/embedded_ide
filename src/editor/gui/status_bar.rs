@@ -31,9 +31,12 @@ pub fn show_ra_status_bar(
         (lsp.status.clone(), lsp.checking, errs, warns)
     };
 
-    // Keep repainting while RA is busy so the spinner animates
+    // Keep the spinner animating while RA is busy — at ~10 FPS, not every
+    // frame (a per-frame request here kept the WHOLE app repainting for the
+    // full duration of indexing and of every post-save cargo check).
     if checking || matches!(ra_status, LspStatus::Starting | LspStatus::Indexing) {
-        ui.ctx().request_repaint();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
     }
 
     ui.horizontal(|ui| {
@@ -47,7 +50,7 @@ pub fn show_ra_status_bar(
                 );
             }
             LspStatus::Starting | LspStatus::Indexing => {
-                ui.spinner();
+                crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
                 ui.label(
                     egui::RichText::new(
                         if matches!(ra_status, LspStatus::Starting) {
@@ -62,7 +65,7 @@ pub fn show_ra_status_bar(
             }
             LspStatus::Ready => {
                 if checking {
-                    ui.spinner();
+                    crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
                     ui.label(
                         egui::RichText::new(" verificare cargo…")
                             .size(10.5)

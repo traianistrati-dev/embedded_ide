@@ -28,7 +28,13 @@ impl AppIde {
         let amber = egui::Color32::from_rgb(220, 180, 70);
         let blue = egui::Color32::from_rgb(100, 170, 240);
 
-        if self.save_in_progress.is_some() {
+        // The background LSP flush is part of the user's "save" — same label,
+        // so the busy chain (save worker → flush → check) has no status gap.
+        if self.save_in_progress.is_some()
+            || self
+                .lsp_flush_in_flight
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Some((true, "Saving…".to_owned(), amber));
         }
         if matches!(
@@ -55,9 +61,12 @@ impl AppIde {
                 crate::lsp::LspStatus::Starting | crate::lsp::LspStatus::Indexing => {
                     return Some((true, "Indexing…".to_owned(), amber));
                 }
-                crate::lsp::LspStatus::Ready if lsp.checking => {
+                crate::lsp::LspStatus::Ready if lsp.checking || lsp.flycheck_pending() => {
                     // Live elapsed seconds — makes the post-save flycheck tail
                     // (the "save takes 20s" perception) visible and measurable.
+                    // `flycheck_pending` covers the QUEUE phase (didSave →
+                    // cargo start), previously a status GAP with no spinner —
+                    // and therefore no scheduled repaint to keep frames coming.
                     let label = match lsp.checking_elapsed_secs() {
                         Some(s) if s >= 1 => format!("Checking… {s}s"),
                         _ => "Checking…".to_owned(),
@@ -67,7 +76,11 @@ impl AppIde {
                 _ => {}
             }
         }
-        if self.export_flash > 0 && !self.export_msg.is_empty() {
+        if self
+            .export_status_until
+            .is_some_and(|t| std::time::Instant::now() < t)
+            && !self.export_msg.is_empty()
+        {
             let ok = !self.export_msg.starts_with(ph::X_CIRCLE);
             let color = if ok {
                 egui::Color32::from_rgb(90, 200, 120)

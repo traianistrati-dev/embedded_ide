@@ -1,6 +1,7 @@
-//! Helper utilities for the IDE — theme, file row rendering.
+//! Helper utilities for the IDE — theme, file row rendering, throttled spinner.
 
 pub mod file_row;
+pub mod spinner;
 pub mod theme;
 
 pub use theme::apply_dark_theme;

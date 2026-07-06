@@ -266,6 +266,47 @@ fn rust_layout_job(
     job
 }
 
+// ── Layout-job memo ───────────────────────────────────────────────────────────
+
+thread_local! {
+    /// One-entry memo for [`rust_layout_job`]. egui's `TextEdit` calls the
+    /// layouter EVERY frame, and while any spinner is on screen the app
+    /// repaints continuously — so the whole file was re-tokenized at 60+ FPS
+    /// for the entire duration of Saving/Checking/Flashing (the dominant
+    /// per-frame CPU / energy cost). One entry suffices: a single editor is
+    /// visible; switching files or zooming recomputes once. UI-thread only.
+    static LAYOUT_MEMO: std::cell::RefCell<(u64, egui::text::LayoutJob)> =
+        std::cell::RefCell::new((0, egui::text::LayoutJob::default()));
+}
+
+/// [`rust_layout_job`] memoized on (text, font size, dead ranges, theme name).
+/// The `.rs` editor always uses the Rust `Syntax`, so it isn't part of the key.
+/// The remaining per-frame work is one job clone (memcpy) + egui's own galley
+/// cache lookup — no tokenization.
+fn cached_rust_layout_job(
+    text: &str,
+    theme: &ColorTheme,
+    fontsize: f32,
+    syntax: &Syntax,
+    dead_ranges: &[(usize, usize)],
+) -> egui::text::LayoutJob {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    fontsize.to_bits().hash(&mut h);
+    dead_ranges.hash(&mut h);
+    theme.name.hash(&mut h);
+    let key = h.finish().max(1); // 0 is the "nothing memoized yet" sentinel
+
+    LAYOUT_MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.0 != key {
+            *m = (key, rust_layout_job(text, theme, fontsize, syntax, dead_ranges));
+        }
+        m.1.clone()
+    })
+}
+
 /// The numbered-lines gutter, faithfully ported from `CodeEditor::numlines_show`
 /// (we never use the shift / only-natural options, so they're dropped).
 fn numlines_show(ui: &mut egui::Ui, text: &str, theme: &ColorTheme, fontsize: f32, rows: usize, id: &str) {
@@ -334,8 +375,9 @@ fn show_rust_editor(
                     .show(h, |ui| {
                         let mut layouter =
                             |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-                                let job =
-                                    rust_layout_job(buf.as_str(), theme, fontsize, syntax, dead_ranges);
+                                let job = cached_rust_layout_job(
+                                    buf.as_str(), theme, fontsize, syntax, dead_ranges,
+                                );
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
                         let output = egui::TextEdit::multiline(text)
@@ -389,6 +431,30 @@ pub fn show_rust_with_completer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The memo must return exactly what a direct call produces, and any input
+    /// change (text, dead ranges, font size) must recompute — never serve the
+    /// previous entry.
+    #[test]
+    fn cached_layout_job_matches_direct_and_tracks_inputs() {
+        let theme = ColorTheme::GRUVBOX;
+        let syn = Syntax::rust();
+        let src = "fn main() { let x = 1; }";
+
+        let direct = rust_layout_job(src, &theme, 13.0, &syn, &[]);
+        let cached = cached_rust_layout_job(src, &theme, 13.0, &syn, &[]);
+        let repeat = cached_rust_layout_job(src, &theme, 13.0, &syn, &[]); // memo hit
+        assert_eq!(direct, cached);
+        assert_eq!(cached, repeat);
+
+        // Changed inputs must not return the stale memo.
+        let faded = cached_rust_layout_job(src, &theme, 13.0, &syn, &[(0, 5)]);
+        assert_ne!(faded, cached, "dead range must change the job");
+        let zoomed = cached_rust_layout_job(src, &theme, 15.0, &syn, &[]);
+        assert_ne!(zoomed, cached, "font size must change the job");
+        let edited = cached_rust_layout_job("fn main() {}", &theme, 13.0, &syn, &[]);
+        assert_ne!(edited, cached, "text must change the job");
+    }
 
     /// Collect (segment_text, is_lifetime_blue) from a highlighted job so tests
     /// can assert which spans were coloured as lifetimes without a real UI.

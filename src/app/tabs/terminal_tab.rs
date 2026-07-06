@@ -42,7 +42,9 @@ pub fn show_terminal_tab(ui: &mut egui::Ui, term: &mut TerminalConsole, ctx: &eg
                 }
             });
             if running {
-                ui.add(egui::Spinner::new().size(12.0));
+                // Throttled: a long-running command otherwise keeps the whole
+                // app repainting every frame for its entire duration.
+                crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
             }
         });
     });
