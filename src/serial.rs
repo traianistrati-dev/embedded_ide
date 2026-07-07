@@ -417,9 +417,70 @@ pub fn hex_search_job(
     job
 }
 
+/// Text-view `LayoutJob`: whole lines that START (case-insensitively, after
+/// leading whitespace) with `needle` are painted [`SEARCH_HIT`] yellow; every
+/// other line keeps `default_color`. Used by Find-1 in the plain-text serial
+/// view. `needle` is assumed non-empty (the caller renders plain text when it
+/// is empty).
+pub fn text_search_job(
+    text: &str,
+    needle: &str,
+    fontsize: f32,
+    default_color: egui::Color32,
+) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let font = egui::FontId::monospace(fontsize);
+    let needle_lc = needle.to_lowercase();
+    let mut job = LayoutJob::default();
+    // `split_inclusive` keeps each line's trailing '\n', so the rendered text
+    // reproduces the input exactly.
+    for line in text.split_inclusive('\n') {
+        let hit = line.trim_start().to_lowercase().starts_with(&needle_lc);
+        let color = if hit { SEARCH_HIT } else { default_color };
+        job.append(line, 0.0, TextFormat::simple(font.clone(), color));
+    }
+    job
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{byte_color, render_rx_text, seq_color, seq_counts};
+    use super::{byte_color, render_rx_text, seq_color, seq_counts, text_search_job, SEARCH_HIT};
+    use eframe::egui;
+
+    /// Collect (line_text, is_yellow) from a text-search job.
+    fn rows(text: &str, needle: &str) -> Vec<(String, bool)> {
+        let job = text_search_job(text, needle, 12.0, egui::Color32::GRAY);
+        job.sections
+            .iter()
+            .map(|s| {
+                (
+                    job.text[s.byte_range.clone()].to_string(),
+                    s.format.color == SEARCH_HIT,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn text_search_highlights_matching_line_prefixes() {
+        let out = rows("INFO ready\nERR bad\ninfo again\n", "info");
+        // Case-insensitive prefix match on lines 1 and 3; line 2 stays default.
+        assert_eq!(out[0], ("INFO ready\n".to_owned(), true));
+        assert_eq!(out[1], ("ERR bad\n".to_owned(), false));
+        assert_eq!(out[2], ("info again\n".to_owned(), true));
+    }
+
+    #[test]
+    fn text_search_ignores_leading_whitespace_and_needs_a_prefix() {
+        // Leading spaces don't defeat the prefix match…
+        assert!(rows("   DATA=5\n", "DATA")[0].1);
+        // …but a match in the MIDDLE of the line does not highlight it.
+        assert!(!rows("x DATA y\n", "DATA")[0].1);
+        // Text reproduced exactly (concatenated sections == input).
+        let job = text_search_job("a\nb\n", "a", 12.0, egui::Color32::GRAY);
+        assert_eq!(job.text, "a\nb\n");
+    }
+
 
     #[test]
     fn text_mode_is_lossy_utf8() {

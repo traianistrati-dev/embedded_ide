@@ -285,9 +285,38 @@ impl AppIde {
             return;
         }
         let msg = self.git.commit_msg.trim().to_owned();
+        let remote = self.git.remote_url_draft.trim().to_owned();
+        // Checkbox selection: everything checked → plain `add -A`; otherwise
+        // stage only the checked changed files. All-unchecked never spawns.
+        let add_paths = if self.git.excluded.is_empty() {
+            None
+        } else {
+            let picked: Vec<String> = self
+                .git
+                .state
+                .lock()
+                .unwrap()
+                .status
+                .changes
+                .iter()
+                .map(|c| c.path.clone())
+                .filter(|p| !self.git.excluded.contains(p))
+                .collect();
+            if picked.is_empty() && matches!(op, crate::git::GitOp::Commit | crate::git::GitOp::CommitPush)
+            {
+                self.git.state.lock().unwrap().lines.push((
+                    crate::git::GitLine::Notice,
+                    "[info] niciun fișier bifat — bifează ce vrei să intre în commit".into(),
+                ));
+                return;
+            }
+            Some(picked)
+        };
         crate::git::run_op(
             op,
             msg,
+            remote,
+            add_paths,
             dir,
             self.git_disk_snapshot(),
             std::sync::Arc::clone(&self.git.state),

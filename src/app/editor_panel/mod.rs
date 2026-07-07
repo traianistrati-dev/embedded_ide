@@ -23,6 +23,7 @@ mod context_menu;
 mod delete_line;
 mod duplicate_line;
 mod diag_embed;
+pub(crate) mod diff_gutter;
 mod let_annotation;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
@@ -542,6 +543,11 @@ impl AppIde {
                     &display_code,
                 );
                 self.paint_primary_caret(ui, &editor_resp, editor_clip);
+                // Git gutter marks (live diff vs HEAD, sees unsaved edits) +
+                // click-to-revert. A revert mutates `display_code`; the
+                // write-back below persists it (same as the context-menu Cut).
+                self.tick_diff_gutter(&display_code);
+                self.paint_diff_gutter(ui, &editor_resp, editor_clip, &mut display_code);
 
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives

@@ -7,7 +7,7 @@
 
 use crate::serial::{
     SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, hex_layout_job, hex_search_job,
-    parse_hex_search, render_rx_text, seq_color, seq_counts,
+    parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -90,15 +90,20 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             )
             .on_hover_text("Bytes shown per line in the hex view.");
         });
-        // Two hex search fields → highlight matches in yellow / blue, grey rest.
+        // Search fields. Field 1 works in BOTH views: hex mode highlights the
+        // byte sequence in yellow; text mode tints whole LINES that START with
+        // the typed text. Field 2 stays hex-only.
+        ui.colored_label(SEARCH_HIT, "Find:");
+        ui.add(
+            egui::TextEdit::singleline(&mut serial.search)
+                .hint_text(if serial.hex { "hex e.g. 0D 0A" } else { "line prefix" })
+                .desired_width(110.0),
+        )
+        .on_hover_text(
+            "Hex view: highlight this hex sequence in yellow (rest greyed).\n\
+             Text view: lines STARTING with this text turn yellow.",
+        );
         ui.add_enabled_ui(serial.hex, |ui| {
-            ui.colored_label(SEARCH_HIT, "Find:");
-            ui.add(
-                egui::TextEdit::singleline(&mut serial.search)
-                    .hint_text("hex e.g. 0D 0A")
-                    .desired_width(110.0),
-            )
-            .on_hover_text("Highlight this hex sequence in yellow (rest greyed).");
             ui.colored_label(SEARCH_HIT2, "Find:");
             ui.add(
                 egui::TextEdit::singleline(&mut serial.search2)
@@ -265,17 +270,26 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 });
         });
     } else {
+        let needle = serial.search.trim().to_owned();
         egui::ScrollArea::vertical()
             .id_salt("serial_rx_text")
             .stick_to_bottom(serial.autoscroll)
             .auto_shrink([false, false])
             .max_height(rx_height)
             .show(ui, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(text_display).monospace().size(12.0))
-                        .selectable(true)
-                        .wrap(),
-                );
+                if needle.is_empty() {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text_display).monospace().size(12.0))
+                            .selectable(true)
+                            .wrap(),
+                    );
+                } else {
+                    // Find-1 in text mode: whole lines STARTING with the
+                    // needle turn yellow, the rest keep the default colour.
+                    let job =
+                        text_search_job(&text_display, &needle, 12.0, ui.visuals().text_color());
+                    ui.add(egui::Label::new(job).selectable(true).wrap());
+                }
             });
     }
 

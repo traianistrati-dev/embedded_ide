@@ -189,6 +189,8 @@ pub(super) fn show_diag_panel(
             }
         }
 
+        ui.separator();
+
         // Terminal tab button (streaming command console).
         {
             let active = *tab == BuildPanelTab::Terminal;
@@ -213,6 +215,8 @@ pub(super) fn show_diag_panel(
             }
         }
 
+        ui.separator();
+
         // Activity tab button (timing breakdown).
         {
             let active = *tab == BuildPanelTab::Activity;
@@ -231,6 +235,8 @@ pub(super) fn show_diag_panel(
                 *tab = BuildPanelTab::Activity;
             }
         }
+
+        ui.separator();
 
         // Git tab button (commit/push/pull in the project directory).
         {

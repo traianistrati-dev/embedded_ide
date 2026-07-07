@@ -17,8 +17,6 @@ pub(super) struct ProjectPanelSignals {
     pub open_clicked: bool,
     pub new_clicked: bool,
     pub save_clicked: bool,
-    /// Git action from the tree's src/ context menu (opens the Git tab too).
-    pub git_op: Option<crate::git::GitOp>,
 }
 
 impl AppIde {
@@ -112,7 +110,6 @@ impl AppIde {
         let mut open_project_clicked = false;
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
-        let mut git_op: Option<crate::git::GitOp> = None;
 
         egui::Panel::left("project_tree")
             .resizable(true)
@@ -202,7 +199,6 @@ impl AppIde {
                             &mut self.renaming_folder,
                             &workspace_dir,
                             save_project_needed,
-                            &mut git_op,
                         );
                     }
                     _ => {
@@ -222,7 +218,6 @@ impl AppIde {
             open_clicked: open_project_clicked,
             new_clicked: new_project_clicked,
             save_clicked: save_project_clicked,
-            git_op,
         }
     }
 }

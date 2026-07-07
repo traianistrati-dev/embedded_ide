@@ -520,9 +520,6 @@ pub fn show_project_tree(
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
-    // Git action chosen from the src/ header context menu; the caller opens
-    // the bottom Git tab and spawns the worker.
-    git_op: &mut Option<crate::git::GitOp>,
 ) {
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
@@ -711,21 +708,8 @@ pub fn show_project_tree(
             *new_file_parent_folder = None;
             ui.close();
         }
-        ui.separator();
-        // Git actions — all open the bottom Git tab; "Status / Commit…" just
-        // opens it (the message is typed there), Push/Pull run directly.
-        let mut git_item = |ui: &mut egui::Ui, icon: &str, label: &str, op: crate::git::GitOp| {
-            if ui
-                .button(egui::RichText::new(format!("{icon} {label}")).size(11.5))
-                .clicked()
-            {
-                *git_op = Some(op);
-                ui.close();
-            }
-        };
-        git_item(ui, ph::GIT_BRANCH, "Git: Status / Commit…", crate::git::GitOp::Refresh);
-        git_item(ui, ph::ARROW_UP, "Git: Push", crate::git::GitOp::Push);
-        git_item(ui, ph::ARROW_DOWN, "Git: Pull", crate::git::GitOp::Pull);
+        // Git actions live in the bottom "Git" tab (commit/push/pull), not
+        // here — kept out of the tree menu on purpose (moved 2026-07-07).
     });
 
     ui.add_space(2.0);

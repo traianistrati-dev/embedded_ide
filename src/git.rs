@@ -34,6 +34,9 @@ pub enum GitOp {
     Pull,
     Fetch,
     Log,
+    /// `git remote add origin <url>` — the URL comes from the tab's draft
+    /// field (like the commit message).
+    SetRemote,
 }
 
 impl GitOp {
@@ -48,6 +51,7 @@ impl GitOp {
             GitOp::Pull => "pull",
             GitOp::Fetch => "fetch",
             GitOp::Log => "log",
+            GitOp::SetRemote => "set remote",
         }
     }
 }
@@ -80,7 +84,33 @@ pub struct GitStatus {
     pub upstream: Option<String>,
     pub ahead: i64,
     pub behind: i64,
+    /// `false` while HEAD is unborn (`# branch.oid (initial)`) — pushing then
+    /// fails with "src refspec HEAD does not match any", so the Push button
+    /// stays disabled until the first commit exists.
+    pub has_commits: bool,
     pub changes: Vec<GitChange>,
+}
+
+/// One row of a parsed unified diff, ready for rendering.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DiffRow {
+    /// Hunk header (`@@ -a,b +c,d @@ …`) — rendered as a separator.
+    Hunk(String),
+    /// Context line: (old line no, new line no, text).
+    Ctx(u32, u32, String),
+    /// Removed line: (old line no, text).
+    Del(u32, String),
+    /// Added line: (new line no, text).
+    Add(u32, String),
+}
+
+/// A parsed per-file diff (disk vs HEAD) shown in the Git tab's right pane.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileDiff {
+    pub path: String,
+    pub rows: Vec<DiffRow>,
+    pub added: usize,
+    pub removed: usize,
 }
 
 /// Shared tab state, written by the worker thread.
@@ -103,6 +133,17 @@ pub struct GitState {
     pub unsaved: Vec<String>,
     /// Set when a commit succeeds; the tab consumes it to clear the message.
     pub commit_succeeded: bool,
+    /// The diff currently open in the tab's right pane (`None` → the output
+    /// scrollback shows instead). Cleared when any operation runs — a commit
+    /// or pull makes the open diff stale.
+    pub diff: Option<FileDiff>,
+    /// Bumped after every operation that can move HEAD or rewrite the worktree
+    /// (commit / pull / init) — the editor's gutter-diff baseline cache keys on
+    /// it, so marks refresh right after a commit.
+    pub op_gen: u64,
+    /// `origin`'s URL (`git remote get-url origin`), refreshed with the
+    /// status. `None` → the tab offers the "Set remote" field instead of Push.
+    pub remote_url: Option<String>,
 }
 
 impl GitState {
@@ -115,10 +156,16 @@ impl GitState {
     }
 }
 
-/// UI-side handle: shared state + the commit-message draft.
+/// UI-side handle: shared state + the commit-message and remote-URL drafts.
 pub struct GitConsole {
     pub state: Arc<Mutex<GitState>>,
     pub commit_msg: String,
+    /// Draft for the "Set remote origin" field (shown while no remote exists).
+    pub remote_url_draft: String,
+    /// Changed-file paths UNchecked in the tab — excluded from the next
+    /// commit. Stored inverted so freshly appearing changes default to
+    /// checked (commit-everything stays the no-touch default).
+    pub excluded: std::collections::HashSet<String>,
 }
 
 impl Default for GitConsole {
@@ -126,6 +173,8 @@ impl Default for GitConsole {
         Self {
             state: Arc::new(Mutex::new(GitState::default())),
             commit_msg: String::new(),
+            remote_url_draft: String::new(),
+            excluded: std::collections::HashSet::new(),
         }
     }
 }
@@ -140,7 +189,9 @@ impl GitConsole {
 pub fn parse_porcelain_v2(text: &str) -> GitStatus {
     let mut st = GitStatus::default();
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
+        if let Some(rest) = line.strip_prefix("# branch.oid ") {
+            st.has_commits = rest.trim() != "(initial)";
+        } else if let Some(rest) = line.strip_prefix("# branch.head ") {
             let name = rest.trim();
             st.branch = (name != "(detached)").then(|| name.to_owned());
         } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
@@ -185,22 +236,47 @@ pub fn parse_porcelain_v2(text: &str) -> GitStatus {
 }
 
 /// The command sequence one [`GitOp`] runs (before the always-appended status
-/// refresh). `msg` is the commit message.
-fn commands_for(op: GitOp, msg: &str) -> Vec<Vec<String>> {
+/// refresh). `msg` is the commit message, `remote` the Set-remote URL draft.
+/// `has_upstream = false` turns pushes into `push -u origin HEAD` — the first
+/// push of a branch sets its upstream, so later ones are a plain `push`.
+/// `add_paths`: `None` = stage everything (`add -A`); `Some(paths)` = stage
+/// only the CHECKED files (`add -A -- <paths>` — `-A` also stages deletions
+/// matching those paths).
+fn commands_for(
+    op: GitOp,
+    msg: &str,
+    remote: &str,
+    has_upstream: bool,
+    add_paths: &Option<Vec<String>>,
+) -> Vec<Vec<String>> {
     let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let push = if has_upstream {
+        s(&["push"])
+    } else {
+        s(&["push", "-u", "origin", "HEAD"])
+    };
+    let add = match add_paths {
+        None => s(&["add", "-A"]),
+        Some(paths) => {
+            let mut v = s(&["add", "-A", "--"]);
+            v.extend(paths.iter().cloned());
+            v
+        }
+    };
     match op {
         GitOp::Refresh => vec![],
         GitOp::Init => vec![s(&["init"])],
-        GitOp::Commit => vec![s(&["add", "-A"]), vec!["commit".into(), "-m".into(), msg.to_owned()]],
+        GitOp::Commit => vec![add, vec!["commit".into(), "-m".into(), msg.to_owned()]],
         GitOp::CommitPush => vec![
-            s(&["add", "-A"]),
+            add,
             vec!["commit".into(), "-m".into(), msg.to_owned()],
-            s(&["push"]),
+            push,
         ],
-        GitOp::Push => vec![s(&["push"])],
+        GitOp::Push => vec![push],
         GitOp::Pull => vec![s(&["pull"])],
         GitOp::Fetch => vec![s(&["fetch"])],
         GitOp::Log => vec![s(&["log", "--oneline", "--decorate", "-20"])],
+        GitOp::SetRemote => vec![vec!["remote".into(), "add".into(), "origin".into(), remote.to_owned()]],
     }
 }
 
@@ -210,6 +286,10 @@ fn run_git(dir: &Path, args: &[String]) -> std::io::Result<std::process::Output>
     crate::build::no_window(&mut cmd)
         .args(args)
         .current_dir(dir)
+        // We run with stdin closed and no console — a credential/hostkey
+        // TERMINAL prompt would hang forever. Fail fast instead; Git
+        // Credential Manager still works (it spawns its own UI window).
+        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null());
     cmd.output()
 }
@@ -230,6 +310,8 @@ fn push_output(st: &mut GitState, out: &std::process::Output) {
 pub fn run_op(
     op: GitOp,
     msg: String,
+    remote: String,
+    add_paths: Option<Vec<String>>,
     project_dir: PathBuf,
     snapshot: Vec<(String, String)>,
     state: Arc<Mutex<GitState>>,
@@ -242,13 +324,19 @@ pub fn run_op(
             return; // one op at a time
         }
         st.busy = Some(op.label());
+        // Any operation invalidates an open diff (commit/pull change HEAD or
+        // the worktree; even a refresh means the user moved on).
+        st.diff = None;
     }
 
     std::thread::spawn(move || {
         let mut rec = crate::activity::Recorder::new(format!("Git ({})", op.label()));
         let mut sequence_ok = true;
 
-        for args in commands_for(op, &msg) {
+        // First push of a branch needs `-u origin HEAD` to create its
+        // upstream; once one exists, a plain `push` suffices.
+        let has_upstream = state.lock().unwrap().status.upstream.is_some();
+        for args in commands_for(op, &msg, &remote, has_upstream, &add_paths) {
             let shown = format!("> git {}", args.join(" "));
             state.lock().unwrap().push(GitLine::Cmd, shown.clone());
             let t = std::time::Instant::now();
@@ -293,10 +381,19 @@ pub fn run_op(
         }
 
         // ── Always refresh the status + the unsaved comparison ────────────
+        // `--untracked-files=all`: by default git COLLAPSES an untracked
+        // directory into one `? dir/` entry — a fresh (never-committed)
+        // project showed a single "src/" row instead of its files (reported
+        // as "nu se văd fișierele din src").
         let t = std::time::Instant::now();
         match run_git(
             &project_dir,
-            &["status".into(), "--porcelain=v2".into(), "--branch".into()],
+            &[
+                "status".into(),
+                "--porcelain=v2".into(),
+                "--branch".into(),
+                "--untracked-files=all".into(),
+            ],
         ) {
             Ok(out) => {
                 let parsed = out
@@ -324,15 +421,265 @@ pub fn run_op(
                 st.is_repo = false;
             }
         }
+        // Which remote is configured (drives the tab's "Set remote" field).
+        let remote_url = run_git(&project_dir, &["remote".into(), "get-url".into(), "origin".into()])
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|u| !u.is_empty());
+
         let unsaved = unsaved_changes(&project_dir, &snapshot);
         {
             let mut st = state.lock().unwrap();
+            st.remote_url = remote_url;
             st.unsaved = unsaved;
             st.loaded = true;
             st.busy = None;
+            // Commit / pull / init move HEAD or rewrite the worktree — the
+            // editor's gutter-diff baseline must refetch.
+            if matches!(op, GitOp::Commit | GitOp::CommitPush | GitOp::Pull | GitOp::Init) {
+                st.op_gen += 1;
+            }
         }
         let _ = sequence_ok;
         activity.lock().unwrap().push(rec.finish());
+        ctx.request_repaint();
+    });
+}
+
+/// Parse `git diff --no-color` unified output into renderable rows. Content
+/// lines are only interpreted INSIDE a hunk (after the first `@@`), so the
+/// `---`/`+++` file headers can't masquerade as removals/additions. The
+/// `\ No newline at end of file` marker is dropped. Pure — tested below.
+pub fn parse_unified_diff(text: &str) -> (Vec<DiffRow>, usize, usize) {
+    let mut rows = Vec::new();
+    let (mut added, mut removed) = (0usize, 0usize);
+    let (mut old_no, mut new_no) = (0u32, 0u32);
+    let mut in_hunk = false;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            // `@@ -a[,b] +c[,d] @@ …` — read the two start numbers.
+            in_hunk = true;
+            for part in rest.split_whitespace() {
+                if let Some(a) = part.strip_prefix('-') {
+                    old_no = a.split(',').next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                } else if let Some(c) = part.strip_prefix('+') {
+                    new_no = c.split(',').next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                }
+            }
+            rows.push(DiffRow::Hunk(line.to_owned()));
+            continue;
+        }
+        if !in_hunk {
+            continue; // diff --git / index / --- / +++ headers
+        }
+        if let Some(t) = line.strip_prefix('+') {
+            rows.push(DiffRow::Add(new_no, t.to_owned()));
+            new_no += 1;
+            added += 1;
+        } else if let Some(t) = line.strip_prefix('-') {
+            rows.push(DiffRow::Del(old_no, t.to_owned()));
+            old_no += 1;
+            removed += 1;
+        } else if let Some(t) = line.strip_prefix(' ') {
+            rows.push(DiffRow::Ctx(old_no, new_no, t.to_owned()));
+            old_no += 1;
+            new_no += 1;
+        }
+        // `\ No newline at end of file` (and anything else) — skipped.
+    }
+    (rows, added, removed)
+}
+
+/// An all-added [`FileDiff`] for an UNTRACKED file (`git diff HEAD` doesn't
+/// show those) from its on-disk content.
+fn synthesized_added(path: &str, content: &str) -> FileDiff {
+    let rows: Vec<DiffRow> = content
+        .lines()
+        .enumerate()
+        .map(|(i, l)| DiffRow::Add(i as u32 + 1, l.to_owned()))
+        .collect();
+    let added = rows.len();
+    FileDiff { path: path.to_owned(), rows, added, removed: 0 }
+}
+
+/// Open the diff (disk vs HEAD — exactly what a commit would record) for one
+/// changed file in the tab's right pane. `untracked` files get a synthesized
+/// all-added view. Runs on a worker; called DIRECTLY by the tab (unlike
+/// [`GitOp`]s it needs no snapshot from the app).
+pub fn run_diff(
+    path: String,
+    untracked: bool,
+    project_dir: PathBuf,
+    state: Arc<Mutex<GitState>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut st = state.lock().unwrap();
+        if st.busy.is_some() {
+            return;
+        }
+        st.busy = Some("diff");
+    }
+    std::thread::spawn(move || {
+        let diff = if untracked {
+            std::fs::read_to_string(project_dir.join(&path))
+                .ok()
+                .map(|content| synthesized_added(&path, &content))
+        } else {
+            run_git(
+                &project_dir,
+                &[
+                    "diff".into(),
+                    "HEAD".into(),
+                    "--no-color".into(),
+                    "--".into(),
+                    path.clone(),
+                ],
+            )
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| {
+                let (rows, added, removed) =
+                    parse_unified_diff(&String::from_utf8_lossy(&out.stdout));
+                FileDiff { path: path.clone(), rows, added, removed }
+            })
+        };
+        let mut st = state.lock().unwrap();
+        match diff {
+            Some(d) if d.rows.is_empty() => {
+                st.push(GitLine::Notice, format!("no differences vs HEAD for {path}"));
+                st.diff = None;
+            }
+            Some(d) => st.diff = Some(d),
+            None => st.push(GitLine::Notice, format!("[error] couldn't diff {path}")),
+        }
+        st.busy = None;
+        drop(st);
+        ctx.request_repaint();
+    });
+}
+
+// ── Editor gutter diff (in-memory text vs HEAD) ──────────────────────────────
+// Unlike the tab's diff viewer (disk vs HEAD via `git diff`), the gutter marks
+// compare the LIVE editor text — including unsaved edits — so the baseline
+// comes from `git show HEAD:<path>` and the line diff runs in-process.
+
+/// One contiguous change between the HEAD baseline and the current editor
+/// text, in LINE coordinates. `new_len == 0` → pure deletion (marker between
+/// lines); `old_len == 0` → pure addition; both > 0 → modified lines.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffHunk {
+    pub old_start: usize,
+    pub old_len: usize,
+    pub new_start: usize,
+    pub new_len: usize,
+}
+
+/// Line-diff `old` → `new` into gutter hunks. Pure — tested below.
+pub fn compute_hunks(old: &str, new: &str) -> Vec<DiffHunk> {
+    use similar::DiffOp;
+    similar::TextDiff::from_lines(old, new)
+        .ops()
+        .iter()
+        .filter_map(|op| match *op {
+            DiffOp::Equal { .. } => None,
+            DiffOp::Delete { old_index, old_len, new_index } => Some(DiffHunk {
+                old_start: old_index,
+                old_len,
+                new_start: new_index,
+                new_len: 0,
+            }),
+            DiffOp::Insert { old_index, new_index, new_len } => Some(DiffHunk {
+                old_start: old_index,
+                old_len: 0,
+                new_start: new_index,
+                new_len,
+            }),
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => Some(DiffHunk {
+                old_start: old_index,
+                old_len,
+                new_start: new_index,
+                new_len,
+            }),
+        })
+        .collect()
+}
+
+/// Replace hunk `h`'s lines in `current` with the corresponding `baseline`
+/// lines — the "Revert hunk" action. Reverting a deletion (`new_len == 0`)
+/// re-inserts the removed lines. Pure — tested below.
+pub fn revert_hunk(current: &str, baseline: &str, h: &DiffHunk) -> String {
+    let cur: Vec<&str> = current.split_inclusive('\n').collect();
+    let old: Vec<&str> = baseline.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(current.len());
+    for l in cur.iter().take(h.new_start) {
+        out.push_str(l);
+    }
+    // Re-inserting after a final line that lacks its `\n` would glue the
+    // baseline lines onto it — restore the separator first.
+    if h.old_len > 0 && !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for l in old.iter().skip(h.old_start).take(h.old_len) {
+        out.push_str(l);
+    }
+    for l in cur.iter().skip(h.new_start + h.new_len) {
+        out.push_str(l);
+    }
+    out
+}
+
+/// Shared slot for the gutter's HEAD baseline, filled by [`fetch_baseline`].
+#[derive(Default)]
+pub struct BaselineFetch {
+    /// `(git path, GitState::op_gen)` this slot holds / is loading.
+    pub key: (String, u64),
+    /// The fetch finished (content may still be `None` — untracked file, no
+    /// repo, or no HEAD yet → no gutter marks).
+    pub done: bool,
+    pub content: Option<String>,
+    /// Hash of `content` (0 when `None`) — spares per-frame re-hashing.
+    pub content_hash: u64,
+}
+
+/// Fetch `git show HEAD:<path>` on a worker into `slot`. CRLF is normalised so
+/// a repo checked out/committed with CRLF doesn't flag every line as modified
+/// against the editor's LF text.
+pub fn fetch_baseline(
+    key: (String, u64),
+    project_dir: PathBuf,
+    slot: Arc<Mutex<BaselineFetch>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut s = slot.lock().unwrap();
+        s.key = key.clone();
+        s.done = false;
+        s.content = None;
+        s.content_hash = 0;
+    }
+    std::thread::spawn(move || {
+        let content = run_git(&project_dir, &["show".into(), format!("HEAD:{}", key.0)])
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"));
+        let mut s = slot.lock().unwrap();
+        if s.key == key {
+            s.content_hash = content
+                .as_ref()
+                .map(|c| {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    c.hash(&mut h);
+                    h.finish().max(1)
+                })
+                .unwrap_or(0);
+            s.content = content;
+            s.done = true;
+        }
+        drop(s);
         ctx.request_repaint();
     });
 }
@@ -411,12 +758,173 @@ mod tests {
 
     #[test]
     fn commit_sequence_is_add_commit() {
-        let cmds = commands_for(GitOp::Commit, "msg with spaces");
+        let cmds = commands_for(GitOp::Commit, "msg with spaces", "", true, &None);
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0], vec!["add", "-A"]);
         assert_eq!(cmds[1], vec!["commit", "-m", "msg with spaces"]);
         // Refresh runs no commands — only the always-on status refresh.
-        assert!(commands_for(GitOp::Refresh, "").is_empty());
+        assert!(commands_for(GitOp::Refresh, "", "", true, &None).is_empty());
+    }
+
+    #[test]
+    fn checked_files_stage_selectively() {
+        // Checkbox selection → `add -A -- <paths>` stages only those (incl.
+        // deletions matching them); everything-checked keeps plain `add -A`.
+        let picked = Some(vec!["src/main.rs".to_owned(), "Cargo.toml".to_owned()]);
+        let cmds = commands_for(GitOp::Commit, "m", "", true, &picked);
+        assert_eq!(cmds[0], vec!["add", "-A", "--", "src/main.rs", "Cargo.toml"]);
+        assert_eq!(cmds[1], vec!["commit", "-m", "m"]);
+    }
+
+    #[test]
+    fn first_push_sets_upstream_later_pushes_are_plain() {
+        // No upstream yet → the push must create it (`-u origin HEAD`).
+        assert_eq!(
+            commands_for(GitOp::Push, "", "", false, &None),
+            vec![vec!["push", "-u", "origin", "HEAD"]]
+        );
+        assert_eq!(commands_for(GitOp::Push, "", "", true, &None), vec![vec!["push"]]);
+        // Commit & Push uses the same upstream-aware push as its last step.
+        let cmds = commands_for(GitOp::CommitPush, "m", "", false, &None);
+        assert_eq!(cmds[2], vec!["push", "-u", "origin", "HEAD"]);
+    }
+
+    #[test]
+    fn set_remote_adds_origin_with_the_draft_url() {
+        assert_eq!(
+            commands_for(GitOp::SetRemote, "", "https://github.com/u/r.git", true, &None),
+            vec![vec!["remote", "add", "origin", "https://github.com/u/r.git"]]
+        );
+    }
+
+    #[test]
+    fn unborn_head_has_no_commits() {
+        // The user's exact failure: Push on a fresh repo (no commits) died
+        // with "src refspec HEAD does not match any" — the UI now disables
+        // Push until `has_commits`.
+        let st = parse_porcelain_v2("# branch.oid (initial)\n# branch.head master\n");
+        assert!(!st.has_commits);
+        let st = parse_porcelain_v2("# branch.oid 7c46695deadbeef\n# branch.head main\n");
+        assert!(st.has_commits);
+    }
+
+    #[test]
+    fn unified_diff_parses_rows_and_line_numbers() {
+        let text = "\
+diff --git a/src/main.rs b/src/main.rs
+index abc..def 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -10,3 +10,4 @@ fn main() {
+ ctx line
+-old line
++new line
++extra line
+\\ No newline at end of file
+";
+        let (rows, added, removed) = parse_unified_diff(text);
+        assert_eq!(added, 2);
+        assert_eq!(removed, 1);
+        assert_eq!(
+            rows,
+            vec![
+                DiffRow::Hunk("@@ -10,3 +10,4 @@ fn main() {".into()),
+                DiffRow::Ctx(10, 10, "ctx line".into()),
+                DiffRow::Del(11, "old line".into()),
+                DiffRow::Add(11, "new line".into()),
+                DiffRow::Add(12, "extra line".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_diff_headers_never_count_as_changes() {
+        // `---`/`+++` appear BEFORE any hunk — they must not parse as Del/Add.
+        let text = "--- a/x\n+++ b/x\n";
+        let (rows, added, removed) = parse_unified_diff(text);
+        assert!(rows.is_empty());
+        assert_eq!((added, removed), (0, 0));
+        // Empty input → empty diff.
+        assert!(parse_unified_diff("").0.is_empty());
+    }
+
+    #[test]
+    fn unified_diff_multiple_hunks_reset_numbers() {
+        let text = "\
+@@ -1,1 +1,1 @@
+-a
++A
+@@ -50,1 +50,1 @@
+ same
+";
+        let (rows, ..) = parse_unified_diff(text);
+        assert_eq!(rows[1], DiffRow::Del(1, "a".into()));
+        assert_eq!(rows[2], DiffRow::Add(1, "A".into()));
+        assert_eq!(rows[4], DiffRow::Ctx(50, 50, "same".into()));
+    }
+
+    #[test]
+    fn untracked_file_synthesizes_all_added() {
+        let d = synthesized_added("src/new.rs", "line1\nline2\n");
+        assert_eq!(d.added, 2);
+        assert_eq!(d.removed, 0);
+        assert_eq!(
+            d.rows,
+            vec![
+                DiffRow::Add(1, "line1".into()),
+                DiffRow::Add(2, "line2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn hunks_classify_add_delete_modify() {
+        let old = "a\nb\nc\nd\n";
+        let new = "a\nB\nc\nd\ne_extra\n"; // b→B modified, one line appended
+        let hunks = compute_hunks(old, new);
+        assert_eq!(
+            hunks,
+            vec![
+                // b → B: replace at old line 1 / new line 1
+                DiffHunk { old_start: 1, old_len: 1, new_start: 1, new_len: 1 },
+                // appended line after d
+                DiffHunk { old_start: 4, old_len: 0, new_start: 4, new_len: 1 },
+            ]
+        );
+        // Pure deletion → new_len == 0 marker at the boundary.
+        let hunks = compute_hunks("a\nb\nc\n", "a\nc\n");
+        assert_eq!(hunks, vec![DiffHunk { old_start: 1, old_len: 1, new_start: 1, new_len: 0 }]);
+        // Identical → no hunks.
+        assert!(compute_hunks("x\n", "x\n").is_empty());
+    }
+
+    #[test]
+    fn revert_hunk_restores_baseline_lines() {
+        let baseline = "a\nb\nc\n";
+        // Modified line: reverting the single hunk restores the baseline.
+        let current = "a\nB\nc\n";
+        let h = &compute_hunks(baseline, current)[0];
+        assert_eq!(revert_hunk(current, baseline, h), baseline);
+        // Deletion: revert re-inserts the removed line.
+        let current = "a\nc\n";
+        let h = &compute_hunks(baseline, current)[0];
+        assert_eq!(revert_hunk(current, baseline, h), baseline);
+        // Addition: revert removes the new line.
+        let current = "a\nb\nNEW\nc\n";
+        let h = &compute_hunks(baseline, current)[0];
+        assert_eq!(revert_hunk(current, baseline, h), baseline);
+    }
+
+    #[test]
+    fn revert_after_final_line_without_newline_keeps_separator() {
+        // Deletion at EOF while the current last line lacks `\n`: the re-added
+        // line must not glue onto it.
+        let baseline = "a\nb\n";
+        let current = "a"; // no trailing newline, `b` deleted
+        let hunks = compute_hunks(baseline, current);
+        let restored = revert_hunk(current, baseline, hunks.last().unwrap());
+        assert!(restored.ends_with("b\n"));
+        assert!(restored.contains("a\n"), "separator restored, not glued: {restored:?}");
     }
 
     #[test]
