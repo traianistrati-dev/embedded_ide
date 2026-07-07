@@ -4,8 +4,8 @@
 //! dispatches to the per-tab render functions in `super::tabs`.
 
 use super::tabs::{
-    show_activity_tab, show_cargo_tab, show_clippy_tab, show_dfu_tab, show_ra_tab, show_serial_tab,
-    show_terminal_tab, show_tools_tab,
+    show_activity_tab, show_cargo_tab, show_clippy_tab, show_dfu_tab, show_git_tab, show_ra_tab,
+    show_serial_tab, show_terminal_tab, show_tools_tab,
 };
 use super::BuildPanelTab;
 use crate::activity::ActivityLog;
@@ -68,6 +68,11 @@ pub(super) fn show_diag_panel(
     // One-shot flag: scroll the Definition view to the highlighted line on the
     // first render after a new F12 snippet loads.
     def_scroll_pending: &mut bool,
+    // Git tab: console state + the saved project dir; buttons set `git_op`
+    // (the `clippy_run` signal pattern — the caller spawns the worker).
+    git: &mut crate::git::GitConsole,
+    project_dir: Option<&std::path::Path>,
+    git_op: &mut Option<crate::git::GitOp>,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -224,6 +229,38 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Activity;
+            }
+        }
+
+        // Git tab button (commit/push/pull in the project directory).
+        {
+            let active = *tab == BuildPanelTab::Git;
+            let (busy, n) = {
+                let st = git.state.lock().unwrap();
+                (st.busy.is_some(), st.status.changes.len())
+            };
+            let badge = if busy {
+                " …".to_owned()
+            } else if n > 0 {
+                format!(" {n}")
+            } else {
+                String::new()
+            };
+            let col = if busy {
+                egui::Color32::from_rgb(220, 180, 70)
+            } else {
+                egui::Color32::GRAY
+            };
+            let btn = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Git{badge}", ph::GIT_BRANCH))
+                        .size(11.5)
+                        .color(col),
+                )
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Git;
             }
         }
 
@@ -401,6 +438,9 @@ pub(super) fn show_diag_panel(
         }
         BuildPanelTab::Activity => {
             show_activity_tab(ui, activity);
+        }
+        BuildPanelTab::Git => {
+            show_git_tab(ui, git, project_dir, git_op);
         }
         BuildPanelTab::Clippy => {
             let build_busy = build_state.lock().unwrap().is_building();

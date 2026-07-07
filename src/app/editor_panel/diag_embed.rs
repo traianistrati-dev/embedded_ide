@@ -44,6 +44,8 @@ impl AppIde {
             self.build_tab == BuildPanelTab::Terminal || self.terminal.is_running();
         // The Activity tab is shown while selected (its content persists).
         let activity_active = self.build_tab == BuildPanelTab::Activity;
+        // The Git tab stays available while selected or while an op runs.
+        let git_active = self.build_tab == BuildPanelTab::Git || self.git.is_busy();
         let show_panel = cargo_has
             || lsp_active
             || dfu_active
@@ -51,6 +53,7 @@ impl AppIde {
             || clippy_active
             || terminal_active
             || activity_active
+            || git_active
             || self.definition_view.is_some();
 
         if !show_panel {
@@ -78,6 +81,9 @@ impl AppIde {
         // Byte ranges of main.rs's GENERATED block — the Clippy tab disables "Fix"
         // for suggestions whose edit lands inside (owned by the MCU Configurator).
         let clippy_gen_ranges = crate::app::generated_byte_ranges(&self.generated_code);
+        // Set by the Git tab's buttons; the caller spawns the worker below.
+        let mut git_op: Option<crate::git::GitOp> = None;
+        let project_dir = self.project_dir.clone();
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
@@ -159,8 +165,15 @@ impl AppIde {
                         definition,
                         &mut def_close,
                         &mut self.def_scroll_pending,
+                        &mut self.git,
+                        project_dir.as_deref(),
+                        &mut git_op,
                     );
                 });
+        // A Git tab button was clicked: spawn the worker (guards inside).
+        if let Some(op) = git_op {
+            self.run_git_op(op);
+        }
         // "Run clippy" was clicked: write the project to the workspace and start
         // `cargo clippy` on a worker thread (serialized with Build).
         if clippy_run {

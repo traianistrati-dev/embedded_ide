@@ -9,6 +9,7 @@ pub mod serial_tab;
 pub mod terminal_tab;
 pub mod activity_tab;
 pub mod tools_tab;
+pub mod git_tab;
 
 // Re-export all tab functions for convenience
 pub use mcu_tab::show_peripherals_tab;
@@ -20,3 +21,4 @@ pub use serial_tab::show_serial_tab;
 pub use terminal_tab::show_terminal_tab;
 pub use activity_tab::show_activity_tab;
 pub use tools_tab::show_tools_tab;
+pub use git_tab::show_git_tab;

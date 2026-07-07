@@ -231,6 +231,8 @@ enum BuildPanelTab {
     Terminal,
     /// Per-action timing breakdown (Save / Build / Flash / Clippy).
     Activity,
+    /// Git status / commit / push / pull in the project directory.
+    Git,
     RequiredTools,
     /// F12 "Go to definition" result. Only selectable while `definition_view` is
     /// set (the tab is hidden otherwise).
@@ -563,6 +565,8 @@ pub struct AppIde {
     serial: crate::serial::SerialMonitor,
     // ── Terminal (built-in streaming command console) ────────────────────────
     terminal: crate::terminal::TerminalConsole,
+    // ── Git (commit/push/pull in the project directory) ──────────────────────
+    git: crate::git::GitConsole,
     // ── Activity log (per-Save/Build/Flash timing breakdown) ─────────────────
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
     /// MRU file-switch history + active Ctrl+Tab cycling session
@@ -823,6 +827,7 @@ impl AppIde {
             full_block_selection: None,
             serial: crate::serial::SerialMonitor::default(),
             terminal: crate::terminal::TerminalConsole::default(),
+            git: crate::git::GitConsole::default(),
             activity: Arc::new(Mutex::new(crate::activity::ActivityLog::default())),
             flushed_hashes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             file_cycle: editor_panel::file_cycle::FileCycle::default(),
@@ -1639,6 +1644,13 @@ impl eframe::App for AppIde {
         let open_project_clicked = signals.open_clicked;
         let new_project_clicked = signals.new_clicked;
         let save_project_clicked = signals.save_clicked;
+
+        // A Git action from the tree's context menu: open the Git tab (so the
+        // output/commit UI is visible) and spawn the worker (guards inside).
+        if let Some(op) = signals.git_op {
+            self.build_tab = BuildPanelTab::Git;
+            self.run_git_op(op);
+        }
 
         // ── Handle toolbar button clicks ──────────────────────────────────────
 

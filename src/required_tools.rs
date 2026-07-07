@@ -178,6 +178,18 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
                 manual_url:    "https://www.rust-lang.org/tools/install",
                 status:        ToolStatus::Unknown,
             },
+            RequiredTool {
+                name:          "git",
+                description:   "Version control — powers the Git tab (commit / push / pull)",
+                toolchain:     None,
+                check_cmd:     "git",
+                check_args:    &["--version"],
+                check_pattern: "",
+                install_cmd:   None, // installed manually from git-scm.com
+                install_args:  &[],
+                manual_url:    "https://git-scm.com",
+                status:        ToolStatus::Unknown,
+            },
             // ── RustEmbedded (STM32 / ARM Cortex-M) ─────────────────────────
             RequiredTool {
                 name:          "thumbv7m-none-eabi",

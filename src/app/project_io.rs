@@ -263,6 +263,71 @@ impl AppIde {
     }
 }
 
+impl AppIde {
+    /// Start a git operation on a worker thread (signal handler for the Git
+    /// tab's buttons and the tree's context menu). Guards: needs a saved
+    /// project (`project_dir`), no overlap with a running op, and no save in
+    /// flight (git would read a half-written tree).
+    pub(super) fn run_git_op(&mut self, op: crate::git::GitOp) {
+        let Some(dir) = self.project_dir.clone() else {
+            return; // the tab shows the "save first" hint instead
+        };
+        if self.git.is_busy() {
+            return;
+        }
+        if self.save_in_progress.is_some() {
+            self.git
+                .state
+                .lock()
+                .unwrap()
+                .lines
+                .push((crate::git::GitLine::Notice, "[busy] save in progress — retry in a moment".into()));
+            return;
+        }
+        let msg = self.git.commit_msg.trim().to_owned();
+        crate::git::run_op(
+            op,
+            msg,
+            dir,
+            self.git_disk_snapshot(),
+            std::sync::Arc::clone(&self.git.state),
+            std::sync::Arc::clone(&self.activity),
+            self.egui_ctx.clone(),
+        );
+    }
+
+    /// The in-memory project content, keyed by project-relative path — the
+    /// exact file set `write_project` persists. The git worker compares it
+    /// against disk for the "unsaved changes" warning (commits are strictly
+    /// what's ON DISK; this only powers the warning).
+    fn git_disk_snapshot(&self) -> Vec<(String, String)> {
+        let files = self.current_project_files();
+        let mut snap = vec![
+            ("src/main.rs".to_owned(), files.main_rs),
+            ("Cargo.toml".to_owned(), files.cargo_toml),
+            (".cargo/config.toml".to_owned(), files.cargo_config),
+            (".gitignore".to_owned(), files.gitignore),
+        ];
+        if !files.memory_x.is_empty() {
+            snap.push(("memory.x".to_owned(), files.memory_x));
+        }
+        if !files.build_rs.is_empty() {
+            snap.push(("build.rs".to_owned(), files.build_rs));
+        }
+        let mcu_cfg = self.mcu_config_text();
+        if !mcu_cfg.trim().is_empty() {
+            snap.push((
+                crate::panels::mcu_module::mcu_config::FILE_NAME.to_owned(),
+                mcu_cfg,
+            ));
+        }
+        for (rel, content) in &self.project_tree.user_src_files {
+            snap.push((format!("src/{rel}"), content.clone()));
+        }
+        snap
+    }
+}
+
 /// Apply one watcher CREATE event to the tree state. A directory is tracked as
 /// a FOLDER (never a file); a file needs readable `content` (`None` — deleted
 /// meanwhile, or unreadable — is skipped, NOT pushed as an empty phantom).

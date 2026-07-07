@@ -14,6 +14,7 @@ pub mod build;
 pub mod dfu;
 pub mod editor;
 pub mod espflash;
+pub mod git;
 pub mod lsp;
 pub mod openocd;
 pub mod panels;
