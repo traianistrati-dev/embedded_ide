@@ -4,6 +4,15 @@ use eframe::egui;
 use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
 use super::layout;
 
+// ── Pin-number label (drawn INSIDE the chip body, white) ────────────────────
+/// Inset from the chip edge for the number.
+const NUM_MARGIN: f32 = 4.0;
+const NUM_COLOR: egui::Color32 = egui::Color32::WHITE;
+/// `FontId` isn't const (needs a runtime `f32` size), so this is a small fn.
+fn num_font() -> egui::FontId {
+    egui::FontId::monospace(11.0)
+}
+
 /// Draw the chip body (gray rectangle).
 pub fn draw_chip_body(painter: &egui::Painter, chip_rect: egui::Rect) {
     painter.rect_filled(chip_rect, 4.0, egui::Color32::from_rgb(45, 45, 55));
@@ -33,6 +42,14 @@ pub fn render_pins_and_detect_clicks(
             Some(ui),
             selected == Some(pin.number),
         );
+        // Pin number inside the chip, right-aligned just inside the right edge.
+        painter.text(
+            egui::pos2(chip_rect.right() - NUM_MARGIN, y + PIN_WIDTH / 2.0),
+            egui::Align2::RIGHT_CENTER,
+            pin.number,
+            num_font(),
+            NUM_COLOR,
+        );
         if hit {
             clicked_pin = Some(pin.number);
         }
@@ -50,6 +67,14 @@ pub fn render_pins_and_detect_clicks(
             PIN_WIDTH,
             Some(ui),
             selected == Some(pin.number),
+        );
+        // Pin number inside the chip, left-aligned just inside the left edge.
+        painter.text(
+            egui::pos2(chip_rect.left() + NUM_MARGIN, y + PIN_WIDTH / 2.0),
+            egui::Align2::LEFT_CENTER,
+            pin.number,
+            num_font(),
+            NUM_COLOR,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -69,6 +94,14 @@ pub fn render_pins_and_detect_clicks(
             Some(ui),
             selected == Some(pin.number),
         );
+        // Pin number inside the chip, just below the top edge.
+        painter.text(
+            egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.top() + NUM_MARGIN),
+            egui::Align2::CENTER_TOP,
+            pin.number,
+            num_font(),
+            NUM_COLOR,
+        );
         if hit {
             clicked_pin = Some(pin.number);
         }
@@ -86,6 +119,14 @@ pub fn render_pins_and_detect_clicks(
             PIN_WIDTH,
             Some(ui),
             selected == Some(pin.number),
+        );
+        // Pin number inside the chip, just above the bottom edge.
+        painter.text(
+            egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.bottom() - NUM_MARGIN),
+            egui::Align2::CENTER_BOTTOM,
+            pin.number,
+            num_font(),
+            NUM_COLOR,
         );
         if hit {
             clicked_pin = Some(pin.number);
