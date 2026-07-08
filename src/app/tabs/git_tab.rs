@@ -15,6 +15,10 @@ pub fn show_git_tab(
     git: &mut GitConsole,
     project_dir: Option<&std::path::Path>,
     op_out: &mut Option<GitOp>,
+    // Set to `(git path, 1-based line)` when the user clicks an added (green)
+    // row in the diff view — the caller opens that file in the editor and
+    // scrolls to the line.
+    open_file: &mut Option<(String, usize)>,
 ) {
     let Some(project_dir) = project_dir else {
         ui.add_space(8.0);
@@ -307,6 +311,8 @@ pub fn show_git_tab(
                                         git.excluded.insert(c.path.clone());
                                     }
                                 }
+                                // File name — CLICK OPENS ITS DIFF in the right
+                                // pane (highlighted while open).
                                 let resp = ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(format!("{:>2}  {}", c.code, c.path))
@@ -327,7 +333,7 @@ pub fn show_git_tab(
                                 }
                                 if resp
                                     .on_hover_text(
-                                        "click: diff (disc vs HEAD — ce ar intra în commit)",
+                                        "click: arată modificările (disc vs HEAD) în dreapta",
                                     )
                                     .clicked()
                                     && busy.is_none()
@@ -382,26 +388,55 @@ pub fn show_git_tab(
                     .show(ui, |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         ui.spacing_mut().item_spacing.y = 0.0;
+                        let diff_path = d.path.clone();
                         for row in &d.rows {
-                            let (text, col) = match row {
+                            // Added (green) rows are clickable → jump to that
+                            // line in the editor; the rest are static.
+                            let (text, col, jump_line) = match row {
                                 crate::git::DiffRow::Hunk(h) => (
                                     h.clone(),
                                     egui::Color32::from_rgb(110, 145, 200),
+                                    None,
                                 ),
                                 crate::git::DiffRow::Ctx(o, n, t) => (
                                     format!("{o:>4} {n:>4}   {t}"),
                                     egui::Color32::from_gray(150),
+                                    None,
                                 ),
                                 crate::git::DiffRow::Del(o, t) => (
                                     format!("{o:>4}      - {t}"),
                                     egui::Color32::from_rgb(230, 105, 95),
+                                    None,
                                 ),
                                 crate::git::DiffRow::Add(n, t) => (
                                     format!("     {n:>4} + {t}"),
                                     egui::Color32::from_rgb(110, 200, 120),
+                                    Some(*n as usize),
                                 ),
                             };
-                            ui.label(egui::RichText::new(text).monospace().size(10.5).color(col));
+                            let rich = egui::RichText::new(text).monospace().size(10.5).color(col);
+                            match jump_line {
+                                Some(line) => {
+                                    let resp = ui.add(
+                                        egui::Label::new(rich)
+                                            .sense(egui::Sense::click())
+                                            .selectable(false),
+                                    );
+                                    if resp.hovered() {
+                                        ui.ctx()
+                                            .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if resp
+                                        .on_hover_text("click: deschide fișierul la această linie")
+                                        .clicked()
+                                    {
+                                        *open_file = Some((diff_path.clone(), line));
+                                    }
+                                }
+                                None => {
+                                    ui.label(rich);
+                                }
+                            }
                         }
                     });
             } else {

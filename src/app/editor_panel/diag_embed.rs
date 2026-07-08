@@ -83,6 +83,8 @@ impl AppIde {
         let clippy_gen_ranges = crate::app::generated_byte_ranges(&self.generated_code);
         // Set by the Git tab's buttons; the caller spawns the worker below.
         let mut git_op: Option<crate::git::GitOp> = None;
+        // Set when the user clicks an added row in the Git diff view.
+        let mut git_open: Option<(String, usize)> = None;
         let project_dir = self.project_dir.clone();
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
@@ -168,11 +170,24 @@ impl AppIde {
                         &mut self.git,
                         project_dir.as_deref(),
                         &mut git_op,
+                        &mut git_open,
                     );
                 });
         // A Git tab button was clicked: spawn the worker (guards inside).
         if let Some(op) = git_op {
             self.run_git_op(op);
+        }
+        // An added diff row was clicked in the Git tab → open its file in the
+        // editor and scroll to that line (jump straight to the changed code).
+        // Config files map too; paths with no editor equivalent (e.g.
+        // mcu.config) are silently ignored.
+        if let Some((path, line)) = git_open {
+            if let Some(id) =
+                crate::app::resolve_diag_file(&path, &self.project_tree.user_src_files)
+            {
+                self.selected_file = id;
+                self.pending_scroll_to_line = Some((id, line));
+            }
         }
         // "Run clippy" was clicked: write the project to the workspace and start
         // `cargo clippy` on a worker thread (serialized with Build).

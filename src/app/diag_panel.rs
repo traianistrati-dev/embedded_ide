@@ -73,6 +73,10 @@ pub(super) fn show_diag_panel(
     git: &mut crate::git::GitConsole,
     project_dir: Option<&std::path::Path>,
     git_op: &mut Option<crate::git::GitOp>,
+    // `(git path, 1-based line)` of an added diff row the user clicked to open
+    // in the editor; the caller maps the path to a `ProjectFileId`, selects it
+    // and scrolls to the line.
+    git_open: &mut Option<(String, usize)>,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -446,7 +450,7 @@ pub(super) fn show_diag_panel(
             show_activity_tab(ui, activity);
         }
         BuildPanelTab::Git => {
-            show_git_tab(ui, git, project_dir, git_op);
+            show_git_tab(ui, git, project_dir, git_op, git_open);
         }
         BuildPanelTab::Clippy => {
             let build_busy = build_state.lock().unwrap().is_building();

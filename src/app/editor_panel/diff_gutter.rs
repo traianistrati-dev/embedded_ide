@@ -16,6 +16,11 @@ use std::sync::{Arc, Mutex};
 const ADDED: egui::Color32 = egui::Color32::from_rgb(110, 200, 120);
 const MODIFIED: egui::Color32 = egui::Color32::from_rgb(220, 170, 60);
 const DELETED: egui::Color32 = egui::Color32::from_rgb(230, 105, 95);
+/// Translucent yellow line background for added / modified lines — spans the
+/// whole editor width (line numbers included) to make changes stand out.
+/// Premultiplied form of unmultiplied `(230, 205, 70, α=28)` (`from_rgba_
+/// unmultiplied` isn't `const`).
+const LINE_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(25, 22, 7, 28);
 
 /// Per-app state: the baseline slot shared with the fetch worker + the hunks
 /// computed for the current text (valid only while `computed_hash` matches).
@@ -166,6 +171,20 @@ impl AppIde {
             };
             if y_bot < clip.top() || y_top > clip.bottom() {
                 continue;
+            }
+            // Added / modified lines (new_len > 0): a translucent yellow band
+            // across the FULL width — line-number gutter included — so the
+            // changed lines are obvious. Deletion markers have no line to fill.
+            // Painted first, so the coloured bar stays on top.
+            if hk.new_len > 0 {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(clip.left(), y_top),
+                        egui::pos2(clip.right(), y_bot),
+                    ),
+                    0.0,
+                    LINE_BG,
+                );
             }
             let x = gp.x - 7.0;
             if hk.new_len == 0 {
