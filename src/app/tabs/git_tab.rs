@@ -63,7 +63,7 @@ pub fn show_git_tab(
         if let Some(op) = busy {
             crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
             ui.label(
-                egui::RichText::new(format!(" git {op}…"))
+                egui::RichText::new(format!(" git {op} {}", ph::DOTS_THREE))
                     .size(11.5)
                     .color(egui::Color32::from_rgb(220, 180, 70)),
             );
@@ -90,11 +90,14 @@ pub fn show_git_tab(
             );
             if let Some(up) = &status.upstream {
                 ui.label(
-                    egui::RichText::new(format!("→ {up}"))
+                    egui::RichText::new(format!("{} {up}", ph::ARROW_RIGHT))
                         .size(11.0)
                         .color(egui::Color32::from_gray(140)),
                 );
-                let ab = format!("↑{} ↓{}", status.ahead, status.behind);
+                let ab = format!(
+                    "{}{} {}{}",
+                    ph::ARROW_UP, status.ahead, ph::ARROW_DOWN, status.behind
+                );
                 let col = if status.ahead > 0 || status.behind > 0 {
                     egui::Color32::from_rgb(220, 180, 70)
                 } else {
@@ -136,7 +139,8 @@ pub fn show_git_tab(
             let n = status.changes.len();
             ui.label(
                 egui::RichText::new(format!(
-                    "· {n} {}",
+                    "{} {n} {}",
+                    ph::DOT,
                     if n == 1 { "change" } else { "changes" }
                 ))
                 .size(11.0)
@@ -215,7 +219,7 @@ pub fn show_git_tab(
                 ui.scope(|ui| {
                     ui.style_mut().interaction.tooltip_delay = 1.0;
                     egui::ComboBox::from_id_salt("commit_prefix")
-                        .selected_text("type ▾")
+                        .selected_text(format!("type {}", ph::CARET_DOWN))
                         .width(76.0)
                         .show_ui(ui, |ui| {
                             for (prefix, desc) in crate::git::COMMIT_TYPES {
@@ -236,7 +240,7 @@ pub fn show_git_tab(
                     idle,
                     egui::TextEdit::singleline(&mut git.commit_msg)
                         .desired_width(f32::INFINITY)
-                        .hint_text("commit message…"),
+                        .hint_text("commit message..."),
                 );
             });
             ui.horizontal(|ui| {
