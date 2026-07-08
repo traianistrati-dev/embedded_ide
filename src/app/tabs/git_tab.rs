@@ -157,7 +157,10 @@ pub fn show_git_tab(
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add_enabled(busy.is_none(), egui::Button::new(format!("{} Refresh", ph::ARROWS_CLOCKWISE)))
+                .add_enabled(
+                    busy.is_none(),
+                    egui::Button::new(format!("{} Refresh", ph::ARROWS_CLOCKWISE)),
+                )
                 .clicked()
             {
                 *op_out = Some(GitOp::Refresh);
@@ -199,7 +202,7 @@ pub fn show_git_tab(
     egui::Panel::bottom("git_actions")
         .exact_size(58.0)
         .show_inside(ui, |ui| {
-            ui.add_space(2.0);
+            // ui.add_space(2.0);
             ui.separator();
             let idle = busy.is_none() && is_repo && !git_missing;
             let remoted = idle && remote_url.is_some();
@@ -238,7 +241,10 @@ pub fn show_git_tab(
             });
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(can_commit, egui::Button::new(format!("{} Commit", ph::CHECK)))
+                    .add_enabled(
+                        can_commit,
+                        egui::Button::new(format!("{} Commit", ph::CHECK)),
+                    )
                     .on_disabled_hover_text("write a message and check at least one changed file")
                     .clicked()
                 {
@@ -249,7 +255,9 @@ pub fn show_git_tab(
                         can_commit && remoted,
                         egui::Button::new(format!("{} Commit & Push", ph::ARROW_SQUARE_UP)),
                     )
-                    .on_disabled_hover_text("needs a message, checked files, and a configured remote")
+                    .on_disabled_hover_text(
+                        "needs a message, checked files, and a configured remote",
+                    )
                     .clicked()
                 {
                     *op_out = Some(GitOp::CommitPush);
@@ -268,13 +276,19 @@ pub fn show_git_tab(
                     *op_out = Some(GitOp::Push);
                 }
                 if ui
-                    .add_enabled(remoted, egui::Button::new(format!("{} Pull", ph::ARROW_DOWN)))
+                    .add_enabled(
+                        remoted,
+                        egui::Button::new(format!("{} Pull", ph::ARROW_DOWN)),
+                    )
                     .clicked()
                 {
                     *op_out = Some(GitOp::Pull);
                 }
                 if ui
-                    .add_enabled(remoted, egui::Button::new(format!("{} Fetch", ph::ARROWS_DOWN_UP)))
+                    .add_enabled(
+                        remoted,
+                        egui::Button::new(format!("{} Fetch", ph::ARROWS_DOWN_UP)),
+                    )
                     .clicked()
                 {
                     *op_out = Some(GitOp::Fetch);
@@ -418,11 +432,9 @@ pub fn show_git_tab(
                             // Added (green) rows are clickable → jump to that
                             // line in the editor; the rest are static.
                             let (text, col, jump_line) = match row {
-                                crate::git::DiffRow::Hunk(h) => (
-                                    h.clone(),
-                                    egui::Color32::from_rgb(110, 145, 200),
-                                    None,
-                                ),
+                                crate::git::DiffRow::Hunk(h) => {
+                                    (h.clone(), egui::Color32::from_rgb(110, 145, 200), None)
+                                }
                                 crate::git::DiffRow::Ctx(o, n, t) => (
                                     format!("{o:>4} {n:>4}   {t}"),
                                     egui::Color32::from_gray(150),
@@ -448,8 +460,7 @@ pub fn show_git_tab(
                                             .selectable(false),
                                     );
                                     if resp.hovered() {
-                                        ui.ctx()
-                                            .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
                                     if resp
                                         .on_hover_text("click: open the file at this line")
@@ -487,5 +498,4 @@ pub fn show_git_tab(
             }
         });
     });
-
 }

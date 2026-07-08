@@ -195,53 +195,6 @@ pub(super) fn show_diag_panel(
 
         ui.separator();
 
-        // Terminal tab button (streaming command console).
-        {
-            let active = *tab == BuildPanelTab::Terminal;
-            let running = terminal.is_running();
-            let badge = if running { " …".to_owned() } else { String::new() };
-            let col = if running {
-                egui::Color32::GRAY
-            } else {
-                egui::Color32::from_rgb(150, 180, 210)
-            };
-            let label = format!("{} Terminal{badge}", ph::TERMINAL_WINDOW);
-            let btn = ui.add(
-                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
-                    egui::Color32::WHITE
-                } else {
-                    col
-                }))
-                .frame(active),
-            );
-            if btn.clicked() {
-                *tab = BuildPanelTab::Terminal;
-            }
-        }
-
-        ui.separator();
-
-        // Activity tab button (timing breakdown).
-        {
-            let active = *tab == BuildPanelTab::Activity;
-            let n = activity.lock().unwrap().actions.len();
-            let badge = if n > 0 { format!(" {n}") } else { String::new() };
-            let label = format!("{} Activity{badge}", ph::TIMER);
-            let btn = ui.add(
-                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
-                    egui::Color32::WHITE
-                } else {
-                    egui::Color32::from_rgb(160, 185, 215)
-                }))
-                .frame(active),
-            );
-            if btn.clicked() {
-                *tab = BuildPanelTab::Activity;
-            }
-        }
-
-        ui.separator();
-
         // Git tab button (commit/push/pull in the project directory).
         {
             let active = *tab == BuildPanelTab::Git;
@@ -355,39 +308,6 @@ pub(super) fn show_diag_panel(
             }
         }
 
-        ui.separator();
-
-        // Required Tools tab button
-        {
-            let ts = tools_state.lock().unwrap();
-            let missing = ts.missing_installable_count();
-            let any_busy = ts.any_busy();
-            drop(ts);
-            let (badge, col) = if any_busy {
-                (" …".to_owned(), egui::Color32::from_rgb(180, 180, 80))
-            } else if missing > 0 {
-                (
-                    format!(" {} {}", missing, ph::WARNING),
-                    egui::Color32::from_rgb(230, 160, 50),
-                )
-            } else {
-                (String::new(), egui::Color32::DARK_GRAY)
-            };
-            let label = format!("{} Tools{badge}", ph::WRENCH);
-            let active = *tab == BuildPanelTab::RequiredTools;
-            let btn = ui.add(
-                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
-                    egui::Color32::WHITE
-                } else {
-                    col
-                }))
-                .frame(active),
-            );
-            if btn.clicked() {
-                *tab = BuildPanelTab::RequiredTools;
-            }
-        }
-
         // Definition tab (F12) — only present while there is a definition to show.
         if definition.is_some() {
             ui.separator();
@@ -413,6 +333,90 @@ pub(super) fn show_diag_panel(
                 *definition_close = true;
             }
         }
+
+        // ── "More" dropdown (right-aligned) — groups the auxiliary panels
+        //    Terminal / Activity / Tools so the main tab bar stays compact. ──
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let grouped = matches!(
+                *tab,
+                BuildPanelTab::Terminal | BuildPanelTab::Activity | BuildPanelTab::RequiredTools
+            );
+            let running = terminal.is_running();
+            let acts = activity.lock().unwrap().actions.len();
+            let (missing, tools_busy) = {
+                let ts = tools_state.lock().unwrap();
+                (ts.missing_installable_count(), ts.any_busy())
+            };
+            // Label shows the active grouped tab (so it's obvious which is
+            // selected), else "More"; a caret hints at the dropdown.
+            let name = match *tab {
+                BuildPanelTab::Terminal => "Terminal",
+                BuildPanelTab::Activity => "Activity",
+                BuildPanelTab::RequiredTools => "Tools",
+                _ => "More",
+            };
+            // A badge when a grouped panel wants attention while NOT selected.
+            let attention = (running && *tab != BuildPanelTab::Terminal)
+                || (missing > 0 && *tab != BuildPanelTab::RequiredTools);
+            let col = if grouped {
+                egui::Color32::WHITE
+            } else if attention {
+                egui::Color32::from_rgb(230, 160, 50)
+            } else {
+                egui::Color32::from_rgb(160, 185, 215)
+            };
+            let hint = if running {
+                " …".to_owned()
+            } else if missing > 0 {
+                format!(" {missing} {}", ph::WARNING)
+            } else {
+                String::new()
+            };
+            ui.menu_button(
+                egui::RichText::new(format!("{name}{hint} {}", ph::CARET_DOWN)).size(11.0).color(col),
+                |ui| {
+                    let term_badge = if running { " …" } else { "" };
+                    if ui
+                        .selectable_label(
+                            *tab == BuildPanelTab::Terminal,
+                            format!("{} Terminal{term_badge}", ph::TERMINAL_WINDOW),
+                        )
+                        .clicked()
+                    {
+                        *tab = BuildPanelTab::Terminal;
+                        ui.close();
+                    }
+                    let act_badge = if acts > 0 { format!(" {acts}") } else { String::new() };
+                    if ui
+                        .selectable_label(
+                            *tab == BuildPanelTab::Activity,
+                            format!("{} Activity{act_badge}", ph::TIMER),
+                        )
+                        .clicked()
+                    {
+                        *tab = BuildPanelTab::Activity;
+                        ui.close();
+                    }
+                    let tool_badge = if tools_busy {
+                        " …".to_owned()
+                    } else if missing > 0 {
+                        format!(" {missing} {}", ph::WARNING)
+                    } else {
+                        String::new()
+                    };
+                    if ui
+                        .selectable_label(
+                            *tab == BuildPanelTab::RequiredTools,
+                            format!("{} Tools{tool_badge}", ph::WRENCH),
+                        )
+                        .clicked()
+                    {
+                        *tab = BuildPanelTab::RequiredTools;
+                        ui.close();
+                    }
+                },
+            );
+        });
     });
 
     ui.separator();
