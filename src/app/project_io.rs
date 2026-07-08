@@ -306,7 +306,7 @@ impl AppIde {
             {
                 self.git.state.lock().unwrap().lines.push((
                     crate::git::GitLine::Notice,
-                    "[info] niciun fișier bifat — bifează ce vrei să intre în commit".into(),
+                    "[info] no files checked — check what you want in the commit".into(),
                 ));
                 return;
             }

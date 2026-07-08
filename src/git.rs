@@ -76,6 +76,40 @@ pub struct GitChange {
     pub path: String,
 }
 
+/// Conventional-commit message prefixes offered by the tab's dropdown, each
+/// with a one-line tooltip explaining when to use it (best-practice guidance).
+pub const COMMIT_TYPES: &[(&str, &str)] = &[
+    ("feat:", "A new feature for the user."),
+    ("fix:", "A bug fix for the user."),
+    ("refactor:", "A code change that neither fixes a bug nor adds a feature."),
+    ("perf:", "A change that improves performance."),
+    ("docs:", "Documentation-only changes."),
+    ("style:", "Formatting / whitespace only — no code-behaviour change."),
+    ("test:", "Adding or correcting tests."),
+    ("build:", "Changes to the build system or dependencies."),
+    ("ci:", "Changes to CI configuration or scripts."),
+    ("chore:", "Routine maintenance — no production code change."),
+    ("revert:", "Reverts a previous commit."),
+];
+
+/// Prepend a conventional-commit `prefix` (e.g. `"feat:"`) to `msg`, replacing
+/// any conventional-commit prefix `msg` already starts with (so picking a
+/// different type swaps cleanly) and leaving exactly one trailing space.
+pub fn apply_commit_prefix(msg: &str, prefix: &str) -> String {
+    let mut rest = msg.trim_start();
+    for (p, _) in COMMIT_TYPES {
+        if let Some(after) = rest.strip_prefix(p) {
+            rest = after.trim_start();
+            break;
+        }
+    }
+    if rest.is_empty() {
+        format!("{prefix} ")
+    } else {
+        format!("{prefix} {rest}")
+    }
+}
+
 /// Parsed `git status --porcelain=v2 --branch`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GitStatus {
@@ -795,6 +829,21 @@ mod tests {
             commands_for(GitOp::SetRemote, "", "https://github.com/u/r.git", true, &None),
             vec![vec!["remote", "add", "origin", "https://github.com/u/r.git"]]
         );
+    }
+
+    #[test]
+    fn commit_prefix_prepends_and_swaps() {
+        // Empty message → just the prefix + space.
+        assert_eq!(apply_commit_prefix("", "feat:"), "feat: ");
+        // Plain text → prefix prepended.
+        assert_eq!(apply_commit_prefix("add blinker", "feat:"), "feat: add blinker");
+        // Existing conventional prefix is REPLACED, not stacked.
+        assert_eq!(apply_commit_prefix("feat: add x", "fix:"), "fix: add x");
+        // Leading whitespace + existing prefix are stripped; the rest is kept
+        // verbatim (only the front is trimmed).
+        assert_eq!(apply_commit_prefix("  refactor:  tidy ", "chore:"), "chore: tidy ");
+        // A non-prefix colon word is left alone.
+        assert_eq!(apply_commit_prefix("note: hi", "feat:"), "feat: note: hi");
     }
 
     #[test]

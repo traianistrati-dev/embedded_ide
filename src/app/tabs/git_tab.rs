@@ -24,7 +24,7 @@ pub fn show_git_tab(
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(format!(
-                "{}  Salvează proiectul întâi (Ctrl+S) — git rulează în folderul proiectului.",
+                "{}  Save the project first (Ctrl+S) — git runs in the project folder.",
                 ph::GIT_BRANCH
             ))
             .size(12.0)
@@ -72,7 +72,7 @@ pub fn show_git_tab(
         if git_missing {
             ui.label(
                 egui::RichText::new(format!(
-                    "{} `git` nu e instalat — https://git-scm.com",
+                    "{} `git` is not installed — https://git-scm.com",
                     ph::X_CIRCLE
                 ))
                 .size(11.5)
@@ -105,7 +105,7 @@ pub fn show_git_tab(
                 // Remote configured but no upstream yet — the first Push will
                 // create it (`push -u origin HEAD`).
                 ui.label(
-                    egui::RichText::new(format!("remote: {url} (primul Push setează upstream-ul)"))
+                    egui::RichText::new(format!("remote: {url} (first Push sets the upstream)"))
                         .size(10.5)
                         .color(egui::Color32::from_gray(130)),
                 );
@@ -124,9 +124,9 @@ pub fn show_git_tab(
                         egui::Button::new(format!("{} Set remote", ph::PLUG)),
                     )
                     .on_hover_text(
-                        "git remote add origin <url> — creează întâi repo-ul (gol) pe GitHub, \
-                         apoi lipește URL-ul aici. Autentificarea la primul push o face \
-                         Git Credential Manager (fereastră de browser).",
+                        "git remote add origin <url> — create the (empty) repo on GitHub first, \
+                         then paste its URL here. Authentication on the first push is handled by \
+                         Git Credential Manager (a browser window).",
                     )
                     .clicked()
                 {
@@ -137,14 +137,14 @@ pub fn show_git_tab(
             ui.label(
                 egui::RichText::new(format!(
                     "· {n} {}",
-                    if n == 1 { "modificare" } else { "modificări" }
+                    if n == 1 { "change" } else { "changes" }
                 ))
                 .size(11.0)
                 .color(egui::Color32::from_gray(140)),
             );
         } else if loaded {
             ui.label(
-                egui::RichText::new("nu e un repository git")
+                egui::RichText::new("not a git repository")
                     .size(11.5)
                     .color(egui::Color32::from_gray(150)),
             );
@@ -175,9 +175,9 @@ pub fn show_git_tab(
         let n = unsaved.len();
         let resp = ui.label(
             egui::RichText::new(format!(
-                "{}  {n} fișier{} cu modificări NESALVATE — commit-ul include doar starea de pe disc. Salvează întâi (Ctrl+S).",
+                "{}  {n} file{} with UNSAVED changes — the commit only includes what's on disk. Save first (Ctrl+S).",
                 ph::WARNING,
-                if n == 1 { "" } else { "e" }
+                if n == 1 { "" } else { "s" }
             ))
             .size(11.5)
             .color(egui::Color32::from_rgb(230, 180, 60)),
@@ -205,16 +205,41 @@ pub fn show_git_tab(
             let remoted = idle && remote_url.is_some();
             let has_msg = !git.commit_msg.trim().is_empty();
             let can_commit = idle && has_msg && any_checked;
-            ui.add_enabled(
-                idle,
-                egui::TextEdit::singleline(&mut git.commit_msg)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("mesaj de commit…"),
-            );
+            ui.horizontal(|ui| {
+                // Conventional-commit prefix dropdown — picking a type
+                // prepends it to the message (best-practice guidance in the
+                // per-item tooltips, shown after a 1 s hover).
+                ui.scope(|ui| {
+                    ui.style_mut().interaction.tooltip_delay = 1.0;
+                    egui::ComboBox::from_id_salt("commit_prefix")
+                        .selected_text("type ▾")
+                        .width(76.0)
+                        .show_ui(ui, |ui| {
+                            for (prefix, desc) in crate::git::COMMIT_TYPES {
+                                if ui
+                                    .selectable_label(false, *prefix)
+                                    .on_hover_text(*desc)
+                                    .clicked()
+                                {
+                                    git.commit_msg =
+                                        crate::git::apply_commit_prefix(&git.commit_msg, prefix);
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Conventional-commit type — prepended to the message.");
+                });
+                ui.add_enabled(
+                    idle,
+                    egui::TextEdit::singleline(&mut git.commit_msg)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("commit message…"),
+                );
+            });
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(can_commit, egui::Button::new(format!("{} Commit", ph::CHECK)))
-                    .on_disabled_hover_text("scrie un mesaj și bifează cel puțin un fișier modificat")
+                    .on_disabled_hover_text("write a message and check at least one changed file")
                     .clicked()
                 {
                     *op_out = Some(GitOp::Commit);
@@ -224,7 +249,7 @@ pub fn show_git_tab(
                         can_commit && remoted,
                         egui::Button::new(format!("{} Commit & Push", ph::ARROW_SQUARE_UP)),
                     )
-                    .on_disabled_hover_text("cere mesaj, fișiere bifate și un remote setat")
+                    .on_disabled_hover_text("needs a message, checked files, and a configured remote")
                     .clicked()
                 {
                     *op_out = Some(GitOp::CommitPush);
@@ -236,7 +261,7 @@ pub fn show_git_tab(
                         egui::Button::new(format!("{} Push", ph::ARROW_UP)),
                     )
                     .on_disabled_hover_text(
-                        "cere un remote setat și cel puțin un commit local (fă întâi Commit)",
+                        "needs a configured remote and at least one local commit (Commit first)",
                     )
                     .clicked()
                 {
@@ -281,7 +306,7 @@ pub fn show_git_tab(
                     .show(ui, |ui| {
                         if status.changes.is_empty() && is_repo {
                             ui.label(
-                                egui::RichText::new("fără modificări")
+                                egui::RichText::new("no changes")
                                     .size(11.0)
                                     .italics()
                                     .color(egui::Color32::from_gray(120)),
@@ -302,7 +327,7 @@ pub fn show_git_tab(
                                 let mut on = !git.excluded.contains(&c.path);
                                 if ui
                                     .checkbox(&mut on, "")
-                                    .on_hover_text("bifat = intră în commit")
+                                    .on_hover_text("checked = included in the commit")
                                     .changed()
                                 {
                                     if on {
@@ -333,7 +358,7 @@ pub fn show_git_tab(
                                 }
                                 if resp
                                     .on_hover_text(
-                                        "click: arată modificările (disc vs HEAD) în dreapta",
+                                        "click: show its changes (disk vs HEAD) on the right",
                                     )
                                     .clicked()
                                     && busy.is_none()
@@ -374,7 +399,7 @@ pub fn show_git_tab(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button(egui::RichText::new(format!("{} închide", ph::X)).size(10.5))
+                            .button(egui::RichText::new(format!("{} close", ph::X)).size(10.5))
                             .clicked()
                         {
                             git.state.lock().unwrap().diff = None;
@@ -427,7 +452,7 @@ pub fn show_git_tab(
                                             .set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
                                     if resp
-                                        .on_hover_text("click: deschide fișierul la această linie")
+                                        .on_hover_text("click: open the file at this line")
                                         .clicked()
                                     {
                                         *open_file = Some((diff_path.clone(), line));
