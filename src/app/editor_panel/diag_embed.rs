@@ -34,8 +34,7 @@ impl AppIde {
             || !self.dfu_log.lock().unwrap().is_empty();
         // The Serial tab is opened from the toolbar (`build_tab == Serial`) and
         // stays available while a port is connected.
-        let serial_active =
-            self.build_tab == BuildPanelTab::Serial || self.serial.is_connected();
+        let serial_active = self.build_tab == BuildPanelTab::Serial || self.serial.is_connected();
         // The Clippy tab stays available while selected or while a run is going.
         let clippy_active = self.build_tab == BuildPanelTab::Clippy
             || matches!(*self.clippy_state.lock().unwrap(), BuildState::Building);
@@ -85,97 +84,116 @@ impl AppIde {
         let mut git_op: Option<crate::git::GitOp> = None;
         // Set when the user clicks an added row in the Git diff view.
         let mut git_open: Option<(String, usize)> = None;
+        // Flash-tab Programmer-row buttons (moved off the top toolbar).
+        let mut flash_scan = false;
+        let mut flash_go = false;
+        let can_flash = self.selected_build_cfg().is_some();
         let project_dir = self.project_dir.clone();
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
             .show_inside(ui, |ui| {
-                    // ── Drag handle (top edge of panel) ───────
-                    let (handle_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), HANDLE_H),
-                        egui::Sense::hover(),
-                    );
-                    let drag_resp = ui.interact(
-                        handle_rect,
-                        egui::Id::new("diag_panel_resize"),
-                        egui::Sense::drag(),
-                    );
+                // ── Drag handle (top edge of panel) ───────
+                let (handle_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), HANDLE_H),
+                    egui::Sense::hover(),
+                );
+                let drag_resp = ui.interact(
+                    handle_rect,
+                    egui::Id::new("diag_panel_resize"),
+                    egui::Sense::drag(),
+                );
 
-                    let mid_y = handle_rect.center().y;
-                    let line_color = if drag_resp.hovered() || drag_resp.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                        egui::Color32::from_rgb(100, 140, 200)
-                    } else {
-                        egui::Color32::from_gray(65)
-                    };
+                let mid_y = handle_rect.center().y;
+                let line_color = if drag_resp.hovered() || drag_resp.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    egui::Color32::from_rgb(100, 140, 200)
+                } else {
+                    egui::Color32::from_gray(65)
+                };
 
-                    // Line + three grip dots
-                    ui.painter().hline(
-                        handle_rect.x_range(),
-                        mid_y,
-                        egui::Stroke::new(1.5, line_color),
+                // Line + three grip dots
+                ui.painter().hline(
+                    handle_rect.x_range(),
+                    mid_y,
+                    egui::Stroke::new(1.5, line_color),
+                );
+                for dx in [-6.0_f32, 0.0, 6.0] {
+                    ui.painter().circle_filled(
+                        egui::pos2(handle_rect.center().x + dx, mid_y),
+                        1.5,
+                        line_color,
                     );
-                    for dx in [-6.0_f32, 0.0, 6.0] {
-                        ui.painter().circle_filled(
-                            egui::pos2(handle_rect.center().x + dx, mid_y),
-                            1.5,
-                            line_color,
-                        );
-                    }
+                }
 
-                    if drag_resp.dragged() {
-                        // Dragging up → negative delta.y → panel grows
-                        self.diag_panel_height =
-                            (self.diag_panel_height - drag_resp.drag_delta().y).clamp(MIN_H, max_h);
-                    }
+                if drag_resp.dragged() {
+                    // Dragging up → negative delta.y → panel grows
+                    self.diag_panel_height =
+                        (self.diag_panel_height - drag_resp.drag_delta().y).clamp(MIN_H, max_h);
+                }
 
-                    // ── Content ────────────────────────────────
-                    let toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
-                    let definition = self
-                        .definition_view
-                        .as_ref()
-                        .map(|d| (d.header.as_str(), d.code.as_str(), d.highlight));
-                    show_diag_panel(
-                        ui,
-                        &self.egui_ctx,
-                        &self.build_state,
-                        &self.lsp_state,
-                        &self.dfu_state,
-                        &self.dfu_log,
-                        &self.dfu_programmers,
-                        &mut self.dfu_sel_programmer,
-                        &mut self.dfu_flash_addr,
-                        &self.openocd_state,
-                        &mut self.openocd_target_cfg,
-                        &self.espflash_state,
-                        &mut self.espflash_port,
-                        &self.tools_state,
-                        &mut self.serial,
-                        &mut self.terminal,
-                        &self.activity,
-                        &self.clippy_state,
-                        &mut self.clippy_sel,
-                        &mut clippy_run,
-                        &mut clippy_apply_one,
-                        &mut clippy_apply_all,
-                        &mut clippy_apply_rename,
-                        &clippy_gen_ranges,
-                        &toolchain,
-                        &mut self.build_tab,
-                        &mut self.selected_diagnostic,
-                        &mut self.lsp_selected_diagnostic,
-                        &mut nav,
-                        definition,
-                        &mut def_close,
-                        &mut self.def_scroll_pending,
-                        &mut self.git,
-                        project_dir.as_deref(),
-                        &mut git_op,
-                        &mut git_open,
-                    );
-                });
+                // ── Content ────────────────────────────────
+                let toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
+                let definition = self
+                    .definition_view
+                    .as_ref()
+                    .map(|d| (d.header.as_str(), d.code.as_str(), d.highlight));
+                show_diag_panel(
+                    ui,
+                    &self.egui_ctx,
+                    &self.build_state,
+                    &self.lsp_state,
+                    &self.dfu_state,
+                    &self.dfu_log,
+                    &self.dfu_programmers,
+                    &mut self.dfu_sel_programmer,
+                    &mut self.dfu_flash_addr,
+                    &self.openocd_state,
+                    &mut self.openocd_target_cfg,
+                    &self.espflash_state,
+                    &mut self.espflash_port,
+                    &self.tools_state,
+                    &mut self.serial,
+                    &mut self.terminal,
+                    &self.activity,
+                    &self.clippy_state,
+                    &mut self.clippy_sel,
+                    &mut clippy_run,
+                    &mut clippy_apply_one,
+                    &mut clippy_apply_all,
+                    &mut clippy_apply_rename,
+                    &clippy_gen_ranges,
+                    &toolchain,
+                    &mut self.build_tab,
+                    &mut self.selected_diagnostic,
+                    &mut self.lsp_selected_diagnostic,
+                    &mut nav,
+                    definition,
+                    &mut def_close,
+                    &mut self.def_scroll_pending,
+                    &mut self.git,
+                    project_dir.as_deref(),
+                    &mut git_op,
+                    &mut git_open,
+                    &mut flash_scan,
+                    &mut flash_go,
+                    can_flash,
+                );
+            });
         // A Git tab button was clicked: spawn the worker (guards inside).
         if let Some(op) = git_op {
             self.run_git_op(op);
+        }
+        // Flash-tab Programmer-row buttons.
+        if flash_scan {
+            self.scan_usb();
+        }
+        if flash_go {
+            match self.selected_toolchain() {
+                Some(crate::panels::mcu_module::mcu_catalog::ToolchainKind::EspRust) => {
+                    self.flash_esp()
+                }
+                _ => self.flash_swd(),
+            }
         }
         // An added diff row was clicked in the Git tab → open its file in the
         // editor and scroll to that line (jump straight to the changed code).
@@ -200,9 +218,11 @@ impl AppIde {
             let edits: Vec<crate::build::SpanEdit> = {
                 let cs = self.clippy_state.lock().unwrap();
                 match &*cs {
-                    BuildState::Done(r) => {
-                        r.diagnostics.get(idx).map(|d| d.fixes.clone()).unwrap_or_default()
-                    }
+                    BuildState::Done(r) => r
+                        .diagnostics
+                        .get(idx)
+                        .map(|d| d.fixes.clone())
+                        .unwrap_or_default(),
                     _ => Vec::new(),
                 }
             };

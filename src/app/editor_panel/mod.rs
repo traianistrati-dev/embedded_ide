@@ -17,24 +17,25 @@ use egui_code_editor::{CodeEditor, ColorTheme};
 
 mod brace_block;
 pub(crate) mod cargo_complete;
+mod code_action;
 mod comment;
 mod completion;
 mod context_menu;
 mod delete_line;
-mod duplicate_line;
 mod diag_embed;
 pub(crate) mod diff_gutter;
-mod let_annotation;
+mod duplicate_line;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
 mod format;
+mod let_annotation;
 mod move_lines;
 mod multi_cursor;
 mod rename;
 mod snippet;
-mod word_select;
 mod toolbar;
 pub(crate) mod usages;
+mod word_select;
 
 /// Default code-editor font size (points); the zoom baseline (Ctrl+0 resets to it).
 pub(crate) const DEFAULT_EDITOR_FONT_SIZE: f32 = 13.0;
@@ -223,10 +224,16 @@ impl AppIde {
                 // plain Ctrl+Up/Down (move line) shortcut from also matching
                 // the same key-down event.
                 let mc_up_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::ArrowUp)
+                    i.consume_key(
+                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                        egui::Key::ArrowUp,
+                    )
                 });
                 let mc_down_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::ArrowDown)
+                    i.consume_key(
+                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                        egui::Key::ArrowDown,
+                    )
                 });
                 // Escape → clear every extra multi-cursor caret. Peeked (not
                 // consumed) so it doesn't steal Escape from the completion
@@ -238,7 +245,10 @@ impl AppIde {
                 // BEFORE the editor so Tab never inserts indentation. The Shift
                 // variant must be checked first (consume_key is Shift-lenient).
                 let mut cycle_prev_pressed = ui.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Tab)
+                    i.consume_key(
+                        egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                        egui::Key::Tab,
+                    )
                 });
                 let mut cycle_next_pressed = !cycle_prev_pressed
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab));
@@ -304,6 +314,12 @@ impl AppIde {
                     i.consume_key(egui::Modifiers::CTRL, egui::Key::OpenBracket)
                         || i.consume_key(egui::Modifiers::CTRL, egui::Key::CloseBracket)
                 });
+                // Ctrl+Enter → rust-analyzer code actions (assists / quick-fixes)
+                // at the cursor. Consumed before the editor so it never inserts
+                // a newline. Ignored while the code-action popup is already open
+                // (its own Enter handling wins there).
+                let ctrl_enter_pressed = !self.code_action_popup_open
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
                 // F12 → show the definition of the symbol at the cursor.
                 let mut f12_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
@@ -549,6 +565,39 @@ impl AppIde {
                 self.tick_diff_gutter(&display_code);
                 self.paint_diff_gutter(ui, &editor_resp, editor_clip, &mut display_code);
 
+                // ── Ctrl+Enter code actions (RA assists / quick-fixes) ────────
+                if ctrl_enter_pressed {
+                    let cursor_idx = editor_resp
+                        .state
+                        .cursor
+                        .char_range()
+                        .map(|r| r.primary.index);
+                    let anchor = editor_resp
+                        .state
+                        .cursor
+                        .char_range()
+                        .map(|cr| {
+                            let clamped = cr.primary.index.min(
+                                editor_resp
+                                    .galley
+                                    .job
+                                    .text
+                                    .chars()
+                                    .count()
+                                    .saturating_sub(1),
+                            );
+                            let local = editor_resp
+                                .galley
+                                .pos_from_cursor(egui::text::CCursor::new(clamped));
+                            editor_resp.response.rect.left_top()
+                                + local.min.to_vec2()
+                                + egui::vec2(0.0, local.height() + 4.0)
+                        })
+                        .unwrap_or_else(|| editor_resp.response.rect.left_top());
+                    self.trigger_code_actions(&display_code, cursor_idx, anchor);
+                }
+                self.show_code_action_popup(ui);
+
                 // ── Right-click context menu ──────────────────────────────────
                 // Lists every editor command with its shortcut. A click drives
                 // the same flags the keyboard shortcut sets (so both share one
@@ -669,9 +718,7 @@ impl AppIde {
                     );
                     let user_files = &self.project_tree.user_src_files;
                     self.file_cycle.purge(|e| match e {
-                        file_cycle::HistEntry::User(p) => {
-                            user_files.iter().any(|(q, _)| q == p)
-                        }
+                        file_cycle::HistEntry::User(p) => user_files.iter().any(|(q, _)| q == p),
                         file_cycle::HistEntry::Fixed(
                             ProjectFileId::MemoryX | ProjectFileId::BuildRs,
                         ) => rust_embedded,
@@ -829,13 +876,11 @@ impl AppIde {
                     // Highlight the clicked diagnostic's line (colour keyed by
                     // severity) and the F12 definition line (yellow), but only
                     // while the editor shows the file each belongs to.
-                    let highlight: Option<(u32, egui::Color32)> =
-                        match self.highlighted_error_line {
-                            Some((f, line, color)) if f == displayed_file => {
-                                Some((line as u32, color))
-                            }
-                            _ => None,
-                        };
+                    let highlight: Option<(u32, egui::Color32)> = match self.highlighted_error_line
+                    {
+                        Some((f, line, color)) if f == displayed_file => Some((line as u32, color)),
+                        _ => None,
+                    };
                     let def_line: Option<u32> = match self.highlighted_def_line {
                         Some((f, line)) if f == displayed_file => Some(line as u32),
                         _ => None,
@@ -917,9 +962,7 @@ impl AppIde {
         let scroll_id = ui
             .id()
             .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
-        if let Some(mut state) =
-            egui::containers::scroll_area::State::load(ui.ctx(), scroll_id)
-        {
+        if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
             state.offset.y = (state.offset.y + delta).max(0.0);
             state.store(ui.ctx(), scroll_id);
             ui.ctx().request_repaint();
@@ -1006,13 +1049,15 @@ impl AppIde {
         let scroll_id = ui
             .id()
             .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
-        if let Some(mut state) =
-            egui::containers::scroll_area::State::load(ui.ctx(), scroll_id)
-        {
+        if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
             state.offset.y = offset_y;
             state.store(ui.ctx(), scroll_id);
             // Suppress caret-follow from snapping back to the (stale) caret.
-            self.last_caret_idx = editor_resp.state.cursor.char_range().map(|r| r.primary.index);
+            self.last_caret_idx = editor_resp
+                .state
+                .cursor
+                .char_range()
+                .map(|r| r.primary.index);
             ui.ctx().request_repaint();
         }
     }
@@ -1110,9 +1155,11 @@ fn show_file_cycle_overlay(ctx: &egui::Context, fc: &file_cycle::FileCycle) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.label(
-                    egui::RichText::new("Recent files — Tab: next · Shift+Tab: back · release Ctrl: open")
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(140)),
+                    egui::RichText::new(
+                        "Recent files — Tab: next · Shift+Tab: back · release Ctrl: open",
+                    )
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
                 );
                 ui.separator();
                 for (i, e) in entries.iter().take(10).enumerate() {

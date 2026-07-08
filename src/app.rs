@@ -543,6 +543,22 @@ pub struct AppIde {
     rename_popup_pos: egui::Pos2,
     /// `true` after a rename request was sent, until RA's edits are applied.
     rename_in_flight: bool,
+    // ── Code actions (Ctrl+Enter — RA assists / quick-fixes) ─────────────────
+    /// `true` after a codeAction request, until the list arrives.
+    code_action_in_flight: bool,
+    /// `true` after a codeAction/resolve request, until its edits arrive.
+    code_action_resolve_in_flight: bool,
+    /// The code actions to choose from (popup shown when > 1).
+    code_actions: Vec<lsp::CodeAction>,
+    /// Whether the chooser popup is open.
+    code_action_popup_open: bool,
+    /// Highlighted row in the chooser popup.
+    code_action_sel: usize,
+    /// Screen anchor for the chooser popup (the cursor rect when triggered).
+    code_action_popup_pos: egui::Pos2,
+    /// Chooser selection deferred to next frame's `init_frame` (so the edit
+    /// applies at frame TOP, avoiding the display_code write-back revert).
+    code_action_choice: Option<usize>,
     /// `true` when the in-flight rename came from a Clippy "Rename" button — once
     /// RA's edits land, clippy is re-run so its (now-stale) list refreshes.
     clippy_rename_pending: bool,
@@ -821,6 +837,13 @@ impl AppIde {
             rename_char: 0,
             rename_popup_pos: egui::Pos2::ZERO,
             rename_in_flight: false,
+            code_action_in_flight: false,
+            code_action_resolve_in_flight: false,
+            code_actions: Vec::new(),
+            code_action_popup_open: false,
+            code_action_sel: 0,
+            code_action_popup_pos: egui::Pos2::ZERO,
+            code_action_choice: None,
             clippy_rename_pending: false,
             clippy_rename_queue: std::collections::VecDeque::new(),
             rename_focus: false,
@@ -1197,6 +1220,10 @@ impl AppIde {
             }
             _ => {}
         }
+
+        // ── Code actions (Ctrl+Enter) — list / choice / resolve, applied at
+        //    frame top so edits survive the editor's end-of-frame write-back. ─
+        self.poll_code_actions();
 
         // ── Apply a completed rename (textDocument/rename) across files ───────
         if self.rename_in_flight {

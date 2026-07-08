@@ -20,6 +20,12 @@ pub fn show_dfu_tab(
     //espflash_port: &mut String,
     _: &mut String,
     toolchain: &ToolchainKind,
+    // Set true when the user clicks Scan / Flash on the Programmer row; the
+    // caller runs `AppIde::scan_usb` / `flash_swd` / `flash_esp`. `can_flash`
+    // gates the Flash button (a buildable chip config exists).
+    scan_out: &mut bool,
+    flash_out: &mut bool,
+    can_flash: bool,
 ) {
     let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
@@ -65,13 +71,90 @@ pub fn show_dfu_tab(
     let is_swd = matches!(sel_kind.as_str(), "ST-Link" | "J-Link" | "CMSIS-DAP");
     let interface_cfg = openocd::interface_cfg_for_kind(&sel_kind);
 
-    // ── Programmer selector ComboBox ──────────────────────────────────────────
+    let dfu_busy = state.is_busy();
+    let any_busy = dfu_busy || ocd_state.is_busy() || esp_state.is_busy();
+
+    // ── Programmer selector row: Scan · Flash · ComboBox ──────────────────────
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Programmer:")
                 .size(10.5)
                 .color(egui::Color32::GRAY),
         );
+
+        // Scan USB (detect DFU / ST-Link / J-Link / CMSIS-DAP / USB-serial).
+        if ui
+            .add_enabled(
+                !dfu_busy,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Scan USB", ph::MAGNIFYING_GLASS)).size(10.5),
+                ),
+            )
+            .on_hover_text(
+                "Scan for connected USB programmers:\n\
+                 - DFU bootloader (STM32 with BOOT0 = 1)\n\
+                 - ST-Link / J-Link / CMSIS-DAP\n\
+                 - USB-Serial (ESP32-C3, ...)",
+            )
+            .clicked()
+        {
+            *scan_out = true;
+        }
+
+        // Toolchain-specific Flash button.
+        match toolchain {
+            ToolchainKind::RustEmbedded => {
+                let enabled = is_swd && !any_busy && can_flash;
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Flash SWD", ph::LIGHTNING))
+                                .size(10.5)
+                                .color(if enabled {
+                                    egui::Color32::from_rgb(255, 165, 50)
+                                } else {
+                                    egui::Color32::GRAY
+                                }),
+                        ),
+                    )
+                    .on_hover_text(
+                        "Build --release, then program via SWD (OpenOCD).\n\
+                         Needs: OpenOCD in PATH, a selected ST-Link/J-Link/CMSIS-DAP,\n\
+                         the target .cfg below, and SWDIO + SWCLK + GND wiring.",
+                    )
+                    .clicked()
+                {
+                    *flash_out = true;
+                }
+            }
+            ToolchainKind::EspRust => {
+                let enabled = !any_busy && can_flash;
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Flash ESP32", ph::LIGHTNING))
+                                .size(10.5)
+                                .color(if enabled {
+                                    egui::Color32::from_rgb(220, 140, 60)
+                                } else {
+                                    egui::Color32::GRAY
+                                }),
+                        ),
+                    )
+                    .on_hover_text(
+                        "Build --release, then flash via espflash.\n\
+                         Needs: espflash in PATH, the ESP32 in download mode\n\
+                         (hold BOOT -> press RESET -> release BOOT).",
+                    )
+                    .clicked()
+                {
+                    *flash_out = true;
+                }
+            }
+            ToolchainKind::SdccC => {}
+        }
 
         let combo_label = if progs.is_empty() {
             "— none detected —".to_string()
@@ -84,7 +167,7 @@ pub fn show_dfu_tab(
 
         egui::ComboBox::from_id_salt("dfu_programmer_selector")
             .selected_text(egui::RichText::new(&combo_label).size(10.5).monospace())
-            .width(ui.available_width() - 2.0)
+            .width((ui.available_width() - 2.0).max(120.0))
             .height(progs.len() as f32 * 30.0)
             .show_ui(ui, |ui| {
                 if progs.is_empty() {
@@ -307,7 +390,7 @@ pub fn show_dfu_tab(
             );
             ui.add(
                 egui::TextEdit::singleline(dfu_flash_addr)
-                    .desired_width(82.0)
+                    .desired_width(90.0)
                     .font(egui::TextStyle::Monospace),
             )
             .on_hover_text(

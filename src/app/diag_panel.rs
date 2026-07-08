@@ -77,6 +77,11 @@ pub(super) fn show_diag_panel(
     // in the editor; the caller maps the path to a `ProjectFileId`, selects it
     // and scrolls to the line.
     git_open: &mut Option<(String, usize)>,
+    // Flash-tab Programmer-row buttons: set `flash_scan`/`flash_go` on click;
+    // `can_flash` = a buildable chip config exists (gates the Flash button).
+    flash_scan: &mut bool,
+    flash_go: &mut bool,
+    can_flash: bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -442,6 +447,9 @@ pub(super) fn show_diag_panel(
                 espflash_state,
                 espflash_port,
                 toolchain,
+                flash_scan,
+                flash_go,
+                can_flash,
             );
         }
         BuildPanelTab::Serial => {

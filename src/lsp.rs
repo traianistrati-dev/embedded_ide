@@ -147,6 +147,28 @@ pub struct RenameEdit {
     pub new_text: String,
 }
 
+/// One `textDocument/codeAction` result (an RA assist / quick-fix). The `edits`
+/// are `None` when RA returned the action lazily — the caller then sends
+/// `codeAction/resolve` with `raw` (RA requires the whole action object back,
+/// not just its `data`) to obtain them.
+#[derive(Clone, Debug)]
+pub struct CodeAction {
+    pub title: String,
+    /// Parsed `WorkspaceEdit`, or `None` until resolved.
+    pub edits: Option<Vec<RenameEdit>>,
+    /// The original JSON action, sent verbatim to `codeAction/resolve`.
+    pub raw: serde_json::Value,
+}
+
+impl CodeAction {
+    /// True when this action can produce edits — either inline or via resolve
+    /// (has a `data` field). Command-only actions (no edit, no data) are
+    /// skipped: we don't run `workspace/executeCommand` in v1.
+    pub fn is_applicable(&self) -> bool {
+        self.edits.is_some() || !self.raw["data"].is_null()
+    }
+}
+
 /// A `textDocument/definition` target: the file + 0-based position RA points to.
 #[derive(Clone, Debug)]
 pub struct DefinitionLoc {
@@ -292,6 +314,18 @@ pub struct LspState {
     pub rename_response_received: bool,
     /// The edits returned by the last rename (empty on error / no-op).
     pub rename_edits: Vec<RenameEdit>,
+    /// The request id of the pending `textDocument/codeAction`, if any.
+    code_action_req_id: Option<u64>,
+    /// Set when a codeAction list response arrives; consumed by the app.
+    pub code_action_response_received: bool,
+    /// The code actions returned by the last request.
+    pub code_actions: Vec<CodeAction>,
+    /// The request id of the pending `codeAction/resolve`, if any.
+    code_action_resolve_req_id: Option<u64>,
+    /// Set when a resolve response arrives; consumed by the app.
+    pub code_action_resolve_received: bool,
+    /// The resolved edits (`None` when resolve produced no edit).
+    pub code_action_resolved: Option<Vec<RenameEdit>>,
     /// The request id of the pending `textDocument/definition`, if any.
     definition_req_id: Option<u64>,
     /// The request id of the pending `textDocument/implementation` (Ctrl+F12),
@@ -350,6 +384,12 @@ impl Default for LspState {
             rename_req_id: None,
             rename_response_received: false,
             rename_edits: Vec::new(),
+            code_action_req_id: None,
+            code_action_response_received: false,
+            code_actions: Vec::new(),
+            code_action_resolve_req_id: None,
+            code_action_resolve_received: false,
+            code_action_resolved: None,
             definition_req_id: None,
             implementation_req_id: None,
             definition_response_received: false,
@@ -615,6 +655,82 @@ impl LspState {
         }
     }
 
+    /// Request the assists / quick-fixes available at `(line, character)` in
+    /// `rel_path` (`textDocument/codeAction`, Ctrl+Enter). A zero-width range at
+    /// the cursor is enough for import/qualify assists. Poll
+    /// [`take_code_actions_result`].
+    pub fn request_code_actions(&mut self, rel_path: &str, line: u32, character: u32) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.code_action_req_id = Some(id);
+        self.code_action_response_received = false;
+        self.code_actions.clear();
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        let pos = serde_json::json!({ "line": line, "character": character });
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/codeAction",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "range":        { "start": pos, "end": pos },
+                    // No diagnostics in context (v1 = assists at the cursor, not
+                    // diagnostic quick-fixes); `only` unset → RA returns all.
+                    "context":      { "diagnostics": [] },
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the code-action list once RA responded (`Some(vec)`; empty = none).
+    pub fn take_code_actions_result(&mut self) -> Option<Vec<CodeAction>> {
+        if self.code_action_response_received {
+            self.code_action_response_received = false;
+            Some(std::mem::take(&mut self.code_actions))
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a lazily-returned code action (`codeAction/resolve`). RA requires
+    /// the WHOLE action object back (with its `data`), so `action_raw` is sent
+    /// verbatim. Poll [`take_code_action_resolve_result`].
+    pub fn request_code_action_resolve(&mut self, action_raw: serde_json::Value) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.code_action_resolve_req_id = Some(id);
+        self.code_action_resolve_received = false;
+        self.code_action_resolved = None;
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "codeAction/resolve",
+                "params":  action_raw,
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the resolved edits (`Some(Some(edits))` = resolved, `Some(None)` =
+    /// resolve produced no edit, `None` = still waiting).
+    pub fn take_code_action_resolve_result(&mut self) -> Option<Option<Vec<RenameEdit>>> {
+        if self.code_action_resolve_received {
+            self.code_action_resolve_received = false;
+            Some(self.code_action_resolved.take())
+        } else {
+            None
+        }
+    }
+
     /// Request the definition of the symbol at `(line, character)` in `rel_path`
     /// (`textDocument/definition`). Result arrives async; poll
     /// [`take_definition_result`].
@@ -860,6 +976,12 @@ impl LspState {
         self.symbols_for_file.clear();
         self.symbols_response_received = false;
         self.symbols_result.clear();
+        self.code_action_req_id = None;
+        self.code_action_response_received = false;
+        self.code_actions.clear();
+        self.code_action_resolve_req_id = None;
+        self.code_action_resolve_received = false;
+        self.code_action_resolved = None;
         self.references_pending.clear();
         self.references_results.clear();
     }
@@ -1023,6 +1145,21 @@ fn launch(
                     // const/… so we can fade unused ones and offer a references list.
                     "documentSymbol": {
                         "hierarchicalDocumentSymbolSupport": true,
+                    },
+                    // Ctrl+Enter assists / quick-fixes. `codeActionLiteralSupport`
+                    // → RA may return `CodeAction` objects (with edits) not just
+                    // `Command`s; `resolveSupport` → RA may defer the `edit` and
+                    // we fetch it via `codeAction/resolve`.
+                    "codeAction": {
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "", "quickfix", "refactor", "refactor.extract",
+                                    "refactor.inline", "refactor.rewrite", "source"
+                                ]
+                            }
+                        },
+                        "resolveSupport": { "properties": ["edit"] },
                     },
                 },
                 "window": { "workDoneProgress": true },
@@ -1423,6 +1560,18 @@ fn handle_incoming(
                     s.symbols_result = parse_document_symbols(&msg["result"]);
                     s.symbols_response_received = true;
                     ctx.request_repaint();
+                } else if s.code_action_req_id == Some(req_id) {
+                    s.code_action_req_id = None;
+                    s.code_actions = parse_code_actions(&msg["result"], root_uri);
+                    s.code_action_response_received = true;
+                    ctx.request_repaint();
+                } else if s.code_action_resolve_req_id == Some(req_id) {
+                    s.code_action_resolve_req_id = None;
+                    // The resolved action carries its `edit` now.
+                    let edits = parse_workspace_edit(&msg["result"]["edit"], root_uri);
+                    s.code_action_resolved = (!edits.is_empty()).then_some(edits);
+                    s.code_action_resolve_received = true;
+                    ctx.request_repaint();
                 } else if let Some(local_idx) = s.references_pending.remove(&req_id) {
                     s.references_results
                         .insert(local_idx, parse_references(&msg["result"]));
@@ -1476,6 +1625,14 @@ fn handle_incoming(
                 } else if s.symbols_req_id == Some(req_id) {
                     s.symbols_req_id = None;
                     s.symbols_response_received = true; // empty result, stop waiting
+                    ctx.request_repaint();
+                } else if s.code_action_req_id == Some(req_id) {
+                    s.code_action_req_id = None;
+                    s.code_action_response_received = true; // empty list, stop waiting
+                    ctx.request_repaint();
+                } else if s.code_action_resolve_req_id == Some(req_id) {
+                    s.code_action_resolve_req_id = None;
+                    s.code_action_resolve_received = true; // no edit, stop waiting
                     ctx.request_repaint();
                 } else if let Some(local_idx) = s.references_pending.remove(&req_id) {
                     // Treat as "0 references" rather than leaving it pending forever.
@@ -1610,6 +1767,27 @@ fn parse_workspace_edit(result: &serde_json::Value, root_uri: &str) -> Vec<Renam
         }
     }
     out
+}
+
+/// Parse a `textDocument/codeAction` result: `(Command | CodeAction)[]`. Plain
+/// `Command`s (no `edit`, no `data`, but a `command` field) are dropped —
+/// `is_applicable` filters them anyway. Each `CodeAction`'s inline `edit` is
+/// parsed now; lazy ones keep `edits: None` and resolve later.
+fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAction> {
+    let Some(arr) = result.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|a| {
+            let title = a["title"].as_str()?.to_owned();
+            let edits = a
+                .get("edit")
+                .filter(|e| !e.is_null())
+                .map(|e| parse_workspace_edit(e, root_uri));
+            Some(CodeAction { title, edits, raw: a.clone() })
+        })
+        .filter(CodeAction::is_applicable)
+        .collect()
 }
 
 /// Parse a `textDocument/definition` result (Location / Location[] / LocationLink[])
