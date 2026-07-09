@@ -59,6 +59,10 @@ pub struct FindReplace {
     pub replace: String,
     /// Request focus on the query field next frame.
     focus_query: bool,
+    /// Request focus on the replace field next frame — set when a Replace mode
+    /// is opened pre-filled with the identifier under the cursor, so the user
+    /// edits the new name straight away.
+    focus_replace: bool,
     /// Current in-file match index.
     current: usize,
     /// Status text shown in the bar (`3/12`, `No results`, `Replaced 5`, …).
@@ -75,9 +79,24 @@ impl FindReplace {
         self.open = true;
         self.mode = mode;
         self.focus_query = true;
+        self.focus_replace = false;
         self.current = 0;
         self.status.clear();
         self.results.clear();
+    }
+
+    /// Open a Replace mode pre-filled with `word` (the identifier under the
+    /// cursor): the find field searches for it, the replace field starts from
+    /// it (edit to the new name), and focus goes to the replace field. When
+    /// `word` is empty this is just [`open_with`].
+    pub fn open_replace_with_word(&mut self, mode: FindMode, word: &str) {
+        self.open_with(mode);
+        if !word.is_empty() {
+            self.query = word.to_owned();
+            self.replace = word.to_owned();
+            self.focus_query = false;
+            self.focus_replace = true;
+        }
     }
 }
 
@@ -212,6 +231,10 @@ impl AppIde {
                             .desired_width(230.0)
                             .hint_text("replace with"),
                     );
+                    if self.find.focus_replace {
+                        r.request_focus();
+                        self.find.focus_replace = false;
+                    }
                     let renter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.button("Replace All").clicked() || renter {
                         do_replace_all = true;

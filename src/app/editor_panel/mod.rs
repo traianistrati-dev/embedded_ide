@@ -327,6 +327,13 @@ impl AppIde {
                 // Find / Replace bar shortcuts (consumed before the editor so the
                 // keys never reach the TextEdit). Shift variants are checked first
                 // so Ctrl+Shift+F isn't swallowed by the plain Ctrl+F branch.
+                // Replace opens PRE-FILLED with the identifier under the cursor
+                // (query searches for it, replace field starts from it + gets
+                // focus) — quick rename of the symbol you're on.
+                let word_under_cursor = self
+                    .last_caret_idx
+                    .map(|idx| rename::identifier_at(&display_code, idx))
+                    .unwrap_or_default();
                 ui.input_mut(|i| {
                     use find_replace::FindMode as M;
                     let ctrl = egui::Modifiers::CTRL;
@@ -334,11 +341,11 @@ impl AppIde {
                     if i.consume_key(ctrl_shift, egui::Key::F) {
                         self.find.open_with(M::FindProject);
                     } else if i.consume_key(ctrl_shift, egui::Key::H) {
-                        self.find.open_with(M::ReplaceProject);
+                        self.find.open_replace_with_word(M::ReplaceProject, &word_under_cursor);
                     } else if i.consume_key(ctrl, egui::Key::F) {
                         self.find.open_with(M::FindFile);
                     } else if i.consume_key(ctrl, egui::Key::H) {
-                        self.find.open_with(M::ReplaceFile);
+                        self.find.open_replace_with_word(M::ReplaceFile, &word_under_cursor);
                     }
                 });
 
@@ -630,15 +637,16 @@ impl AppIde {
                         Some(A::SelectBlock) => select_block_pressed = true,
                         Some(A::Completion) => ctrl_space_pressed = true,
                         Some(A::Find) => self.find.open_with(find_replace::FindMode::FindFile),
-                        Some(A::Replace) => {
-                            self.find.open_with(find_replace::FindMode::ReplaceFile)
-                        }
+                        Some(A::Replace) => self
+                            .find
+                            .open_replace_with_word(find_replace::FindMode::ReplaceFile, &word_under_cursor),
                         Some(A::FindInProject) => {
                             self.find.open_with(find_replace::FindMode::FindProject)
                         }
-                        Some(A::ReplaceInProject) => {
-                            self.find.open_with(find_replace::FindMode::ReplaceProject)
-                        }
+                        Some(A::ReplaceInProject) => self.find.open_replace_with_word(
+                            find_replace::FindMode::ReplaceProject,
+                            &word_under_cursor,
+                        ),
                         Some(A::Cut) => {
                             // Cut the selection (mirrors the native Ctrl+X): copy
                             // it, remove it, collapse the cursor to the cut point.
