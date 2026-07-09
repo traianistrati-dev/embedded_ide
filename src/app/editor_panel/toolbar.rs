@@ -1,9 +1,12 @@
-//! Code-editor toolbar (header row): Copy, Build, Scan USB, and the
-//! toolchain-specific Flash buttons (SWD / ESP32), plus the live status label.
+//! Code-editor toolbar (header row): Copy and Build, plus the live status
+//! label. (Scan USB + Flash moved to the Flash tab; the Serial / Terminal /
+//! Activity / Clippy shortcut buttons were removed — reach those from the
+//! bottom-panel tab bar / "More" dropdown.)
 //!
-//! One inherent method on AppIde; reads the displayed code (for Copy) and the
-//! project-files snapshot (to gate the Build/Flash buttons), and fires the
-//! background build/flash operations as side effects.
+//! Also hosts three `pub(crate)` flash helpers on AppIde (`scan_usb`,
+//! `flash_swd`, `flash_esp`) fired from the Flash tab. `show_editor_toolbar`
+//! reads the displayed code (for Copy) and the project-files snapshot (to gate
+//! Build), and fires the background build as a side effect.
 
 use crate::app::{AppIde, BuildPanelTab, ProjectFileId};
 use crate::build::{self, BuildState};
@@ -138,93 +141,9 @@ impl AppIde {
 
                 ui.add_space(4.0);
 
-                // ── Serial monitor button — opens the bottom "Serial" tab ──
-                let serial_on = self.serial.is_connected();
-                let serial_btn = ui.add(egui::Button::new(
-                    egui::RichText::new(format!("{} Serial", ph::TERMINAL))
-                        .size(11.0)
-                        .color(if serial_on {
-                            egui::Color32::from_rgb(80, 200, 100)
-                        } else {
-                            egui::Color32::from_rgb(150, 180, 220)
-                        }),
-                ));
-                if serial_btn.clicked() {
-                    self.build_tab = BuildPanelTab::Serial;
-                    self.serial.refresh_ports();
-                    // Seed the baud from the first GI_USART module (when idle).
-                    let module_baud = self.mcu.as_ref().and_then(|mcu| {
-                        mcu.modules.iter().find_map(|m| match &m.config {
-                            crate::panels::mcu_module::modules::ModuleConfig::Usart(c) => {
-                                Some(c.baud_rate)
-                            }
-                            _ => None,
-                        })
-                    });
-                    if !serial_on {
-                        if let Some(b) = module_baud {
-                            self.serial.baud = b;
-                        }
-                    }
-                }
-                serial_btn.on_hover_text("Open the serial monitor (USART/UART console)");
-
-                ui.add_space(4.0);
-
-                // ── Terminal button — opens the bottom "Terminal" tab ──
-                let term_on = self.terminal.is_running();
-                let term_btn = ui.add(egui::Button::new(
-                    egui::RichText::new(format!("{} Terminal", ph::TERMINAL_WINDOW))
-                        .size(11.0)
-                        .color(if term_on {
-                            egui::Color32::from_rgb(220, 180, 60)
-                        } else {
-                            egui::Color32::from_rgb(150, 180, 210)
-                        }),
-                ));
-                if term_btn.clicked() {
-                    self.build_tab = BuildPanelTab::Terminal;
-                }
-                term_btn.on_hover_text(
-                    "Open the terminal — run any command (PowerShell) in the project \
-                     workspace, with live output",
-                );
-
-                ui.add_space(4.0);
-
-                // ── Activity button — opens the bottom "Activity" (timing) tab ──
-                let activity_btn = ui.add(egui::Button::new(
-                    egui::RichText::new(format!("{} Activity", ph::TIMER))
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(160, 185, 215)),
-                ));
-                if activity_btn.clicked() {
-                    self.build_tab = BuildPanelTab::Activity;
-                }
-                activity_btn.on_hover_text(
-                    "Open the Activity tab — per-Save/Build/Flash timing breakdown \
-                     (see where the time goes)",
-                );
-
-                ui.add_space(4.0);
-
-                // ── Clippy button — opens the bottom "Clippy" tab ──
-                let clippy_running = self.clippy_state.lock().unwrap().is_building();
-                let clippy_btn = ui.add(egui::Button::new(
-                    egui::RichText::new(format!("{} Clippy", ph::SPARKLE))
-                        .size(11.0)
-                        .color(if clippy_running {
-                            egui::Color32::from_rgb(180, 180, 180)
-                        } else {
-                            egui::Color32::from_rgb(150, 200, 120)
-                        }),
-                ));
-                if clippy_btn.clicked() {
-                    self.build_tab = BuildPanelTab::Clippy;
-                }
-                clippy_btn.on_hover_text("Open the Clippy tab (code-improvement suggestions)");
-
-                ui.add_space(4.0);
+                // (Serial / Terminal / Activity / Clippy shortcut buttons were
+                // removed on 2026-07-08 — reach those from the bottom-panel tab
+                // bar / the "More" dropdown. Only Copy and Build stay here.)
 
                 // ── Build button ──────────────────────────────────────
                 let build_guard = self.build_state.lock().unwrap();

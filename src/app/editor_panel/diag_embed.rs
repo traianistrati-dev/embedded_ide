@@ -26,6 +26,24 @@ impl AppIde {
         ui: &mut egui::Ui,
         source_rewritten: &mut bool,
     ) -> Option<f32> {
+        // First-open baud seeding for the Serial tab (was the toolbar Serial
+        // button's job before it was removed): while the tab is selected and
+        // idle, seed the baud from the first GI_USART virtual module — once.
+        if self.build_tab == BuildPanelTab::Serial
+            && !self.serial.baud_seeded
+            && !self.serial.is_connected()
+        {
+            self.serial.baud_seeded = true;
+            if let Some(baud) = self.mcu.as_ref().and_then(|mcu| {
+                mcu.modules.iter().find_map(|m| match &m.config {
+                    crate::panels::mcu_module::modules::ModuleConfig::Usart(c) => Some(c.baud_rate),
+                    _ => None,
+                })
+            }) {
+                self.serial.baud = baud;
+            }
+        }
+
         let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
         let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
         let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)

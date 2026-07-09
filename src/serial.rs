@@ -73,6 +73,10 @@ pub struct SerialMonitor {
     tx_next_at: Option<Instant>,
     /// Cached list of available ports (refreshed on demand).
     pub ports: Vec<String>,
+    /// One-shot: `false` until the baud has been seeded from the first
+    /// GI_USART virtual module (done when the Serial tab first opens while
+    /// idle — replaces the old toolbar Serial button's seeding).
+    pub baud_seeded: bool,
 }
 
 impl Default for SerialMonitor {
@@ -97,6 +101,7 @@ impl Default for SerialMonitor {
             tx_queue: std::collections::VecDeque::new(),
             tx_next_at: None,
             ports: Vec::new(),
+            baud_seeded: false,
         }
     }
 }
