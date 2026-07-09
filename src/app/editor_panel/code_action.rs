@@ -36,7 +36,13 @@ impl AppIde {
             return;
         };
         let Some(idx) = cursor_char_idx else { return };
-        let (line, col) = lsp_cursor_pos(display_code, idx);
+        // When the line is a `let x = …` without a type, re-target the request
+        // to the binding name — rust-analyzer only offers "Add explicit type"
+        // on the `let` pattern, not on the initializer where the cursor usually
+        // sits. This makes Ctrl+Enter add the type from anywhere on the line.
+        let chars: Vec<char> = display_code.chars().collect();
+        let target = super::let_annotation::let_binding_pos(&chars, idx).unwrap_or(idx);
+        let (line, col) = lsp_cursor_pos(display_code, target);
         {
             let mut lsp = self.lsp_state.lock().unwrap();
             if !matches!(lsp.status, crate::lsp::LspStatus::Ready) {

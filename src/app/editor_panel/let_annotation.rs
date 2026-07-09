@@ -112,6 +112,67 @@ fn keyword_at(chars: &[char], i: usize, end: usize, kw: &str) -> bool {
         && chars[i + k.len()].is_whitespace()
 }
 
+/// If the STATEMENT enclosing `cursor` is a `let [mut] <ident> = …` binding
+/// WITHOUT an explicit type (no `:` before the `=`), return the char index of
+/// `<ident>`.
+///
+/// rust-analyzer's "Add explicit type" assist is position-sensitive — it's
+/// offered only when the cursor is on the `let` pattern, NOT on the initializer
+/// expression. Ctrl+Enter therefore re-targets its code-action request to this
+/// binding position, so the type-add works from ANYWHERE in the statement —
+/// including the continuation lines of a multi-line method chain
+/// (`let clocks = rcc.cfgr.sysclk(..)\n .freeze(..);`).
+///
+/// The statement is found by scanning back to the previous `;` / `{` / `}`
+/// (or file start). `None` for already-typed / destructured / non-`let`
+/// statements. (Limitation: a `;`/`{`/`}` inside a string/char/comment on the
+/// initializer would cut the scan short — rare in the builder chains this
+/// targets.)
+pub fn let_binding_pos(chars: &[char], cursor: usize) -> Option<usize> {
+    let n = chars.len();
+    let cursor = cursor.min(n);
+    // Start of the enclosing statement: just after the nearest preceding
+    // statement / block boundary.
+    let mut stmt_start = cursor;
+    while stmt_start > 0 && !matches!(chars[stmt_start - 1], ';' | '{' | '}') {
+        stmt_start -= 1;
+    }
+
+    let mut i = stmt_start;
+    let skip_ws = |i: &mut usize| {
+        while *i < n && chars[*i].is_whitespace() {
+            *i += 1;
+        }
+    };
+    skip_ws(&mut i);
+    if !keyword_at(chars, i, n, "let") {
+        return None;
+    }
+    i += 3;
+    skip_ws(&mut i);
+    if keyword_at(chars, i, n, "mut") {
+        i += 3;
+        skip_ws(&mut i);
+    }
+    // Single plain-identifier binding.
+    let id_start = i;
+    if i < n && (chars[i] == '_' || chars[i].is_ascii_alphabetic()) {
+        i += 1;
+        while i < n && (chars[i] == '_' || chars[i].is_ascii_alphanumeric()) {
+            i += 1;
+        }
+    }
+    if i == id_start {
+        return None; // destructuring / no binding name
+    }
+    // After the name: whitespace, then `=` (not `:` = already typed, not `==`).
+    skip_ws(&mut i);
+    match chars.get(i) {
+        Some('=') if chars.get(i + 1) != Some(&'=') => Some(id_start),
+        _ => None,
+    }
+}
+
 /// Extract the return type from a rust-analyzer signature `detail`, e.g.
 /// `fn get_param_value<const N: usize>(tx: &mut T, …) -> Option<u32>` →
 /// `Some("Option<u32>")`.
@@ -150,7 +211,58 @@ pub fn return_type(detail: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_callable_kind, let_context, return_type};
+    use super::{is_callable_kind, let_binding_pos, let_context, return_type};
+
+    fn binding_pos(text: &str, cursor: usize) -> Option<usize> {
+        let_binding_pos(&text.chars().collect::<Vec<_>>(), cursor)
+    }
+
+    #[test]
+    fn let_binding_pos_targets_the_name_from_anywhere_on_the_line() {
+        // The reported case: cursor anywhere on `let mut cp = cortex_m::…`
+        // resolves to `cp`'s position (index 8) so RA offers "Add explicit type".
+        let src = "let mut cp = cortex_m::Peripherals::take().unwrap();";
+        let cp = src.find("cp").unwrap();
+        // Cursor on the RHS call (where RA would NOT offer the assist directly).
+        let on_call = src.find("take").unwrap();
+        assert_eq!(binding_pos(src, on_call), Some(cp));
+        // Cursor on the binding name itself.
+        assert_eq!(binding_pos(src, cp), Some(cp));
+        // `let x = ` on an indented line.
+        assert_eq!(binding_pos("    let x = 1;", 10), Some(8));
+    }
+
+    #[test]
+    fn let_binding_pos_spans_a_multiline_method_chain() {
+        // The reported case: cursor on the `.freeze(...)` continuation line of a
+        // multi-line `let` still resolves to the binding name so RA offers
+        // "Add explicit type".
+        let src = "let clocks2 = rcc.cfgr.sysclk(8.MHz())\n\
+                   .pclk1(4.MHz())\n\
+                   .freeze(&mut flash.acr);";
+        let clocks2 = src.find("clocks2").unwrap();
+        let on_freeze = src.find("freeze").unwrap();
+        let on_pclk1 = src.find("pclk1").unwrap();
+        assert_eq!(let_binding_pos(&src.chars().collect::<Vec<_>>(), on_freeze), Some(clocks2));
+        assert_eq!(let_binding_pos(&src.chars().collect::<Vec<_>>(), on_pclk1), Some(clocks2));
+        // A statement BEFORE this one terminates the backward scan.
+        let two = "let a = 1;\nlet b = obj.foo()\n    .bar();";
+        let b = two.find('b').unwrap();
+        let on_bar = two.find("bar").unwrap();
+        assert_eq!(let_binding_pos(&two.chars().collect::<Vec<_>>(), on_bar), Some(b));
+    }
+
+    #[test]
+    fn let_binding_pos_rejects_typed_destructured_and_non_let() {
+        assert_eq!(binding_pos("let x: u32 = 1;", 4), None); // already typed
+        assert_eq!(binding_pos("let (a, b) = f();", 5), None); // destructuring
+        assert_eq!(binding_pos("x = 1;", 0), None); // not a let
+        assert_eq!(binding_pos("let y == z;", 4), None); // comparison, no `=` binding
+        // Only the cursor's own line is considered.
+        let two = "let a: u8 = 1;\nlet b = 2;";
+        let on_b = two.find("b = 2").unwrap();
+        assert_eq!(binding_pos(two, on_b), Some(two.find("b = 2").unwrap()));
+    }
 
     fn ctx(text: &str) -> Option<usize> {
         // The insertion point is the end of the text (as when the user triggers
