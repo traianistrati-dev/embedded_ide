@@ -28,6 +28,7 @@ mod duplicate_line;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
 mod format;
+mod inlay_hint;
 mod let_annotation;
 mod move_lines;
 mod multi_cursor;
@@ -207,6 +208,29 @@ impl AppIde {
                         }
                     });
                 }
+                // ── Inline type hint: Tab accepts (inserts the inferred type) ─
+                // Only when a ghost hint is showing, no completion popup is up
+                // (their Tab handling ran above and would have consumed it first),
+                // AND the caret sits on the hint's line at/after the name — so
+                // Tab still inserts a tab when indenting at line start. Consumed
+                // here so the editor doesn't also type a tab; the edit is applied
+                // at frame top next `init_frame` (poll_inlay_hint).
+                let hint_pos = self.inlay_hint.as_ref().map(|h| (h.line, h.character));
+                if let Some((hint_line, hint_char)) = hint_pos {
+                    let popup_up = self.completion_open
+                        || (self.cargo_complete.open && !self.cargo_complete.items.is_empty());
+                    let caret_ok = self.last_caret_idx.map_or(false, |idx| {
+                        let (l, c) =
+                            crate::editor::gui::text_pos::lsp_cursor_pos(&display_code, idx);
+                        l == hint_line && c >= hint_char
+                    });
+                    if !popup_up
+                        && caret_ok
+                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+                    {
+                        self.inlay_accept_pending = true;
+                    }
+                }
                 // Detect Ctrl+Space BEFORE the editor so egui doesn't pass it
                 // to the TextEdit as a literal character.
                 // These flags are `mut` so the right-click context menu (handled
@@ -341,11 +365,13 @@ impl AppIde {
                     if i.consume_key(ctrl_shift, egui::Key::F) {
                         self.find.open_with(M::FindProject);
                     } else if i.consume_key(ctrl_shift, egui::Key::H) {
-                        self.find.open_replace_with_word(M::ReplaceProject, &word_under_cursor);
+                        self.find
+                            .open_replace_with_word(M::ReplaceProject, &word_under_cursor);
                     } else if i.consume_key(ctrl, egui::Key::F) {
                         self.find.open_with(M::FindFile);
                     } else if i.consume_key(ctrl, egui::Key::H) {
-                        self.find.open_replace_with_word(M::ReplaceFile, &word_under_cursor);
+                        self.find
+                            .open_replace_with_word(M::ReplaceFile, &word_under_cursor);
                     }
                 });
 
@@ -637,9 +663,10 @@ impl AppIde {
                         Some(A::SelectBlock) => select_block_pressed = true,
                         Some(A::Completion) => ctrl_space_pressed = true,
                         Some(A::Find) => self.find.open_with(find_replace::FindMode::FindFile),
-                        Some(A::Replace) => self
-                            .find
-                            .open_replace_with_word(find_replace::FindMode::ReplaceFile, &word_under_cursor),
+                        Some(A::Replace) => self.find.open_replace_with_word(
+                            find_replace::FindMode::ReplaceFile,
+                            &word_under_cursor,
+                        ),
                         Some(A::FindInProject) => {
                             self.find.open_with(find_replace::FindMode::FindProject)
                         }

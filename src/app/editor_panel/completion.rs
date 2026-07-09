@@ -6,10 +6,10 @@
 //! the inline diagnostic overlays.
 
 use crate::app::{AppIde, ProjectFileId};
-use crate::editor::gui::show_diagnostics_overlay;
+use crate::editor::gui::{show_diagnostics_overlay, show_inlay_hint};
 use crate::editor::gui::text_pos::{
-    diags_for_file, lsp_completion_prefix, lsp_cursor_pos, lsp_kind_icon, lsp_word_start,
-    selected_file_rel_path,
+    diags_for_file, lsp_completion_prefix, lsp_cursor_pos, lsp_kind_icon, lsp_pos_to_char_idx,
+    lsp_word_start, selected_file_rel_path,
 };
 use crate::lsp;
 use eframe::egui;
@@ -578,6 +578,29 @@ impl AppIde {
                 highlight,
                 def_line,
             );
+        }
+
+        // ── Inferred-type ghost hint (cursor line only) ────────────────
+        // Independent of the inline-errors toggle: request/clear the hint for
+        // the caret's untyped `let`, then draw it as dim ghost text after the
+        // name (Tab to insert — handled in `mod.rs`, applied in `init_frame`).
+        let inlay_line =
+            self.update_inlay_hint(&display_code, cursor_char_idx, current_rel_path.as_deref());
+        if let (Some(line), Some(hint)) = (inlay_line, self.inlay_hint.as_ref()) {
+            // Only draw a hint that still belongs to the caret's current line.
+            if hint.line == line {
+                let insert_idx =
+                    lsp_pos_to_char_idx(&display_code, hint.line + 1, hint.character + 1);
+                show_inlay_hint(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &editor_resp.galley,
+                    insert_idx,
+                    &hint.label,
+                    self.editor_font_size,
+                );
+            }
         }
     }
 }

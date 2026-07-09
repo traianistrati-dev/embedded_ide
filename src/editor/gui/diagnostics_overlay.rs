@@ -246,3 +246,38 @@ pub fn show_diagnostics_overlay(
         });
     }
 }
+
+/// Draw a single inferred-type inlay hint as dim ghost text at `insert_idx`
+/// (the char index in `display_code` just after the binding name). Positioned
+/// through the galley so it tracks scrolling, and clipped to the visible editor
+/// area. Purely visual — the text is NOT part of the document (accepting it is
+/// handled separately, by the caller's Tab binding).
+pub fn show_inlay_hint(
+    ui: &egui::Ui,
+    galley_pos: egui::Pos2,
+    text_clip_rect: egui::Rect,
+    galley: &egui::text::Galley,
+    insert_idx: usize,
+    label: &str,
+    font_size: f32,
+) {
+    let painter = ui.painter().with_clip_rect(text_clip_rect);
+    let loc = galley.pos_from_cursor(egui::text::CCursor::new(insert_idx));
+    let x = galley_pos.x + loc.min.x;
+    let y_top = galley_pos.y + loc.min.y;
+    let y_bot = galley_pos.y + loc.max.y;
+    // Skip when scrolled out of the visible editor.
+    if y_bot < text_clip_rect.top() || y_top > text_clip_rect.bottom() {
+        return;
+    }
+    // rust-analyzer's type-hint label already includes the leading `: `
+    // (renderColons default); render it verbatim, dimmed like an editor hint.
+    let y_mid = (y_top + y_bot) * 0.5;
+    painter.text(
+        egui::pos2(x, y_mid),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::monospace(font_size),
+        egui::Color32::from_rgb(120, 130, 140),
+    );
+}

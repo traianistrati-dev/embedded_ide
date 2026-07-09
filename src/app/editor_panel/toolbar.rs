@@ -275,6 +275,32 @@ impl AppIde {
                 });
 
                 ui.add_space(4.0);
+
+                // ── Inferred-type hint toggle ─────────────────────────
+                // Show/hide the ghost type on the cursor's untyped `let` line
+                // (Tab inserts it). OFF also disables the Tab accept.
+                let types_btn = ui.selectable_label(
+                    self.inlay_types_enabled,
+                    egui::RichText::new(format!("{} Types", ph::TEXT_T))
+                        .size(11.0)
+                        .color(if self.inlay_types_enabled {
+                            egui::Color32::from_rgb(120, 170, 210)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                );
+                if types_btn.clicked() {
+                    self.inlay_types_enabled = !self.inlay_types_enabled;
+                }
+                types_btn.on_hover_text(if self.inlay_types_enabled {
+                    "Inferred types: ON — the type of the `let` on the cursor line \
+                     shows as ghost text; press Tab to insert it.\nClick to hide."
+                } else {
+                    "Inferred types: OFF — no ghost type is shown.\nClick to show \
+                     the inferred type on the cursor's `let` line (Tab inserts it)."
+                });
+
+                ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
 

@@ -26,3 +26,12 @@ pub struct Pin {
     /// editable via the in/out arrow on the Pins canvas (GPIO In/Out & PWM).
     pub custom_label: String,
 }
+
+impl Pin {
+    /// `true` when any available function is a serial communication bus
+    /// (USART / SPI / I2C / USB / CAN). Such pins get an orange number on the
+    /// chip so they stand out from plain GPIO / analog / power pins.
+    pub fn has_bus_function(&self) -> bool {
+        self.available_functions.iter().any(PinFunction::is_bus)
+    }
+}

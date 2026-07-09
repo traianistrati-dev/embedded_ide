@@ -169,6 +169,24 @@ impl CodeAction {
     }
 }
 
+/// One `textDocument/inlayHint` — an inferred-type annotation rust-analyzer
+/// would draw after an untyped `let` binding. We request them one line at a
+/// time (the cursor's line) and keep only **type** hints; the `label` is what
+/// we draw as ghost text (e.g. `": u32"`) and `text_edits` are the edits that
+/// splice the type into the source when the user presses Tab. RA fills
+/// `text_edits` eagerly because we do NOT advertise inlay-hint resolve support,
+/// so accepting a hint needs no extra round-trip.
+#[derive(Clone, Debug)]
+pub struct InlayHint {
+    /// 0-based position where the label sits (just after the binding name).
+    pub line: u32,
+    pub character: u32,
+    /// The hint text, e.g. `": u32"`.
+    pub label: String,
+    /// Edits that materialize the type into the source (may be empty).
+    pub text_edits: Vec<RenameEdit>,
+}
+
 /// A `textDocument/definition` target: the file + 0-based position RA points to.
 #[derive(Clone, Debug)]
 pub struct DefinitionLoc {
@@ -343,6 +361,16 @@ pub struct LspState {
     /// Set when a documentSymbol response arrives; consumed by the app.
     pub symbols_response_received: bool,
     pub symbols_result: Vec<SymbolInfo>,
+    /// The request id of the pending `textDocument/inlayHint`, if any.
+    inlay_req_id: Option<u64>,
+    /// The rel_path + 0-based line the pending/last inlay request was for — so
+    /// the app can discard a result that arrived after the cursor moved.
+    inlay_for_file: String,
+    inlay_for_line: u32,
+    /// Set when an inlayHint response arrives; consumed by the app.
+    pub inlay_response_received: bool,
+    /// The (type-only) inlay hints from the last request (cursor-line scope).
+    pub inlay_result: Vec<InlayHint>,
     /// In-flight `textDocument/references` requests: request id → the caller's
     /// own index for that symbol (its position in the app's item list) — lets
     /// many reference lookups run concurrently for one file (one per symbol),
@@ -398,6 +426,11 @@ impl Default for LspState {
             symbols_for_file: String::new(),
             symbols_response_received: false,
             symbols_result: Vec::new(),
+            inlay_req_id: None,
+            inlay_for_file: String::new(),
+            inlay_for_line: 0,
+            inlay_response_received: false,
+            inlay_result: Vec::new(),
             references_pending: HashMap::new(),
             references_results: HashMap::new(),
             child: None,
@@ -838,6 +871,54 @@ impl LspState {
         }
     }
 
+    /// Request inlay hints for a SINGLE line of `rel_path` — the range is
+    /// narrowed to `line` (0-based) so the request is tiny. Used to show the
+    /// inferred type of an untyped `let` on the cursor's line. Poll
+    /// [`take_inlay_result`].
+    pub fn request_inlay_hints(&mut self, rel_path: &str, line: u32) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.inlay_req_id = Some(id);
+        self.inlay_for_file = rel_path.to_owned();
+        self.inlay_for_line = line;
+        self.inlay_response_received = false;
+        self.inlay_result.clear();
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/inlayHint",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": line,     "character": 0 },
+                        "end":   { "line": line + 1, "character": 0 },
+                    }
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Take the inlay-hint result once ready: `(rel_path, 0-based line, hints)`.
+    /// The caller re-checks the path/line since the cursor may have moved on.
+    pub fn take_inlay_result(&mut self) -> Option<(String, u32, Vec<InlayHint>)> {
+        if self.inlay_response_received {
+            self.inlay_response_received = false;
+            Some((
+                self.inlay_for_file.clone(),
+                self.inlay_for_line,
+                std::mem::take(&mut self.inlay_result),
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Request every usage site of the symbol at `(line, character)` in
     /// `rel_path` (`textDocument/references`, declaration excluded). `local_idx`
     /// is an opaque caller-assigned key (e.g. the symbol's index in the app's own
@@ -976,6 +1057,11 @@ impl LspState {
         self.symbols_for_file.clear();
         self.symbols_response_received = false;
         self.symbols_result.clear();
+        self.inlay_req_id = None;
+        self.inlay_for_file.clear();
+        self.inlay_for_line = 0;
+        self.inlay_response_received = false;
+        self.inlay_result.clear();
         self.code_action_req_id = None;
         self.code_action_response_received = false;
         self.code_actions.clear();
@@ -1160,6 +1246,14 @@ fn launch(
                             }
                         },
                         "resolveSupport": { "properties": ["edit"] },
+                    },
+                    // Inferred-type inlay hints — drawn as ghost text on the
+                    // cursor's line; Tab inserts the type. We deliberately do
+                    // NOT advertise `resolveSupport` here, so rust-analyzer fills
+                    // each hint's `textEdits` eagerly (accepting needs no extra
+                    // `inlayHint/resolve` round-trip).
+                    "inlayHint": {
+                        "dynamicRegistration": false,
                     },
                 },
                 "window": { "workDoneProgress": true },
@@ -1560,6 +1654,12 @@ fn handle_incoming(
                     s.symbols_result = parse_document_symbols(&msg["result"]);
                     s.symbols_response_received = true;
                     ctx.request_repaint();
+                } else if s.inlay_req_id == Some(req_id) {
+                    s.inlay_req_id = None;
+                    let rel = s.inlay_for_file.clone();
+                    s.inlay_result = parse_inlay_hints(&msg["result"], &rel);
+                    s.inlay_response_received = true;
+                    ctx.request_repaint();
                 } else if s.code_action_req_id == Some(req_id) {
                     s.code_action_req_id = None;
                     s.code_actions = parse_code_actions(&msg["result"], root_uri);
@@ -1625,6 +1725,10 @@ fn handle_incoming(
                 } else if s.symbols_req_id == Some(req_id) {
                     s.symbols_req_id = None;
                     s.symbols_response_received = true; // empty result, stop waiting
+                    ctx.request_repaint();
+                } else if s.inlay_req_id == Some(req_id) {
+                    s.inlay_req_id = None;
+                    s.inlay_response_received = true; // no hints, stop waiting
                     ctx.request_repaint();
                 } else if s.code_action_req_id == Some(req_id) {
                     s.code_action_req_id = None;
@@ -1788,6 +1892,51 @@ fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAct
         })
         .filter(CodeAction::is_applicable)
         .collect()
+}
+
+/// Parse a `textDocument/inlayHint` result (`InlayHint[]`). Only **type** hints
+/// (kind 1, or unspecified) are kept — parameter-name hints (kind 2) are
+/// dropped. `label` may be a plain string or an `InlayHintLabelPart[]` (each
+/// part's `value` concatenated). `rel` is the file the `textEdits` apply to.
+fn parse_inlay_hints(result: &serde_json::Value, rel: &str) -> Vec<InlayHint> {
+    let Some(arr) = result.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|h| {
+            // kind: 1 = Type, 2 = Parameter. Absent → treat as a type hint.
+            if h["kind"].as_u64() == Some(2) {
+                return None;
+            }
+            let pos = &h["position"];
+            let line = pos["line"].as_u64()? as u32;
+            let character = pos["character"].as_u64()? as u32;
+            let label = inlay_label_text(&h["label"]);
+            if label.trim().is_empty() {
+                return None;
+            }
+            let text_edits = h["textEdits"]
+                .as_array()
+                .map(|es| es.iter().filter_map(|e| parse_text_edit(e, rel)).collect())
+                .unwrap_or_default();
+            Some(InlayHint { line, character, label, text_edits })
+        })
+        .collect()
+}
+
+/// Flatten an inlay-hint `label` — a `String` or an `InlayHintLabelPart[]`
+/// (whose `value` fields are concatenated).
+fn inlay_label_text(label: &serde_json::Value) -> String {
+    if let Some(s) = label.as_str() {
+        return s.to_owned();
+    }
+    if let Some(parts) = label.as_array() {
+        return parts
+            .iter()
+            .filter_map(|p| p["value"].as_str())
+            .collect::<String>();
+    }
+    String::new()
 }
 
 /// Parse a `textDocument/definition` result (Location / Location[] / LocationLink[])
@@ -2050,6 +2199,71 @@ fn strip_md_fences(s: &str) -> String {
         }
     }
     out.trim().to_owned()
+}
+
+#[cfg(test)]
+mod inlay_hint_tests {
+    use super::*;
+
+    #[test]
+    fn parses_type_hint_with_string_label_and_text_edit() {
+        let result = serde_json::json!([
+            {
+                "position": { "line": 4, "character": 9 },
+                "kind": 1,
+                "label": ": u32",
+                "textEdits": [
+                    {
+                        "range": {
+                            "start": { "line": 4, "character": 9 },
+                            "end":   { "line": 4, "character": 9 }
+                        },
+                        "newText": ": u32"
+                    }
+                ]
+            }
+        ]);
+        let hints = parse_inlay_hints(&result, "src/main.rs");
+        assert_eq!(hints.len(), 1);
+        let h = &hints[0];
+        assert_eq!((h.line, h.character), (4, 9));
+        assert_eq!(h.label, ": u32");
+        assert_eq!(h.text_edits.len(), 1);
+        assert_eq!(h.text_edits[0].new_text, ": u32");
+        assert_eq!(h.text_edits[0].rel_path, "src/main.rs");
+    }
+
+    #[test]
+    fn concatenates_labelpart_arrays() {
+        let result = serde_json::json!([
+            {
+                "position": { "line": 0, "character": 5 },
+                "label": [ { "value": ": " }, { "value": "Vec<u8>" } ]
+            }
+        ]);
+        let hints = parse_inlay_hints(&result, "src/main.rs");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].label, ": Vec<u8>");
+        assert!(hints[0].text_edits.is_empty(), "no textEdits provided");
+    }
+
+    #[test]
+    fn drops_parameter_name_hints() {
+        // kind 2 = parameter-name hint; we only keep type hints.
+        let result = serde_json::json!([
+            { "position": { "line": 1, "character": 3 }, "kind": 2, "label": "count:" },
+            { "position": { "line": 1, "character": 8 }, "kind": 1, "label": ": i64" }
+        ]);
+        let hints = parse_inlay_hints(&result, "src/lib.rs");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].label, ": i64");
+    }
+
+    #[test]
+    fn empty_or_non_array_result_yields_nothing() {
+        assert!(parse_inlay_hints(&serde_json::json!(null), "src/main.rs").is_empty());
+        assert!(parse_inlay_hints(&serde_json::json!([]), "src/main.rs").is_empty());
+    }
 }
 
 #[cfg(test)]

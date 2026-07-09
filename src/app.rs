@@ -564,6 +564,25 @@ pub struct AppIde {
     /// Chooser selection deferred to next frame's `init_frame` (so the edit
     /// applies at frame TOP, avoiding the display_code write-back revert).
     code_action_choice: Option<usize>,
+    // ── Inline type hints (inferred type on the cursor's `let` line) ──────────
+    /// Master switch for the cursor-line inferred-type ghost hint + its Tab
+    /// accept; toggled from the editor toolbar ("Types" button). `true` default.
+    inlay_types_enabled: bool,
+    /// The inferred-type hint to draw as ghost text after an untyped `let` on
+    /// the cursor's line, if any (its `text_edits` insert the type on Tab).
+    /// Cleared when the caret leaves an untyped `let`.
+    inlay_hint: Option<lsp::InlayHint>,
+    /// `(rel_path, 0-based line, line-text hash)` the last inlay request was
+    /// fired for — so we re-request when the caret moves to a different line OR
+    /// the caret's `let` line text changes (e.g. a fresh `let x = 5` resolves
+    /// its type once the initializer is typed), but not on every keystroke.
+    inlay_requested: Option<(String, u32, u64)>,
+    /// Set when Tab is pressed while the ghost hint shows; the type is inserted
+    /// at frame TOP next `init_frame` (like code actions, to dodge the revert).
+    inlay_accept_pending: bool,
+    /// When the last inlay request went out — throttles same-line re-requests
+    /// (each carries a full-file `did_change`) to a few per second while typing.
+    inlay_last_req_at: Option<std::time::Instant>,
     /// `true` when the in-flight rename came from a Clippy "Rename" button — once
     /// RA's edits land, clippy is re-run so its (now-stale) list refreshes.
     clippy_rename_pending: bool,
@@ -850,6 +869,11 @@ impl AppIde {
             code_action_sel: 0,
             code_action_popup_pos: egui::Pos2::ZERO,
             code_action_choice: None,
+            inlay_types_enabled: true,
+            inlay_hint: None,
+            inlay_requested: None,
+            inlay_accept_pending: false,
+            inlay_last_req_at: None,
             clippy_rename_pending: false,
             clippy_rename_queue: std::collections::VecDeque::new(),
             rename_focus: false,
@@ -1230,6 +1254,10 @@ impl AppIde {
         // ── Code actions (Ctrl+Enter) — list / choice / resolve, applied at
         //    frame top so edits survive the editor's end-of-frame write-back. ─
         self.poll_code_actions();
+
+        // ── Inline type hint — receive the cursor-line result and apply a Tab
+        //    accept at frame top (same write-back-revert dodge as above). ──────
+        self.poll_inlay_hint();
 
         // ── Apply a completed rename (textDocument/rename) across files ───────
         if self.rename_in_flight {

@@ -6,4 +6,4 @@ pub mod diagnostics_overlay;
 pub mod text_pos;
 
 pub use status_bar::show_ra_status_bar;
-pub use diagnostics_overlay::show_diagnostics_overlay;
+pub use diagnostics_overlay::{show_diagnostics_overlay, show_inlay_hint};

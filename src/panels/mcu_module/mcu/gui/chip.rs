@@ -4,10 +4,14 @@ use eframe::egui;
 use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
 use super::layout;
 
-// ── Pin-number label (drawn INSIDE the chip body, white) ────────────────────
+// ── Pin-number label (drawn INSIDE the chip body) ───────────────────────────
 /// Inset from the chip edge for the number.
 const NUM_MARGIN: f32 = 4.0;
+/// Default number colour (plain GPIO / analog / power pins).
 const NUM_COLOR: egui::Color32 = egui::Color32::WHITE;
+/// Number colour for pins carrying a serial-bus function (USART / SPI / I2C /
+/// USB / CAN) — orange so multi-function comm pins stand out from plain I/O.
+const NUM_COLOR_BUS: egui::Color32 = egui::Color32::from_rgb(255, 150, 40);
 /// `FontId` isn't const (needs a runtime `f32` size), so this is a small fn.
 fn num_font() -> egui::FontId {
     egui::FontId::monospace(11.0)
@@ -43,12 +47,13 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, right-aligned just inside the right edge.
+        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
         painter.text(
             egui::pos2(chip_rect.right() - NUM_MARGIN, y + PIN_WIDTH / 2.0),
             egui::Align2::RIGHT_CENTER,
             pin.number,
             num_font(),
-            NUM_COLOR,
+            num_color,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -69,12 +74,13 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, left-aligned just inside the left edge.
+        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
         painter.text(
             egui::pos2(chip_rect.left() + NUM_MARGIN, y + PIN_WIDTH / 2.0),
             egui::Align2::LEFT_CENTER,
             pin.number,
             num_font(),
-            NUM_COLOR,
+            num_color,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -95,12 +101,13 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, just below the top edge.
+        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
         painter.text(
             egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.top() + NUM_MARGIN),
             egui::Align2::CENTER_TOP,
             pin.number,
             num_font(),
-            NUM_COLOR,
+            num_color,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -121,12 +128,13 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, just above the bottom edge.
+        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
         painter.text(
             egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.bottom() - NUM_MARGIN),
             egui::Align2::CENTER_BOTTOM,
             pin.number,
             num_font(),
-            NUM_COLOR,
+            num_color,
         );
         if hit {
             clicked_pin = Some(pin.number);
