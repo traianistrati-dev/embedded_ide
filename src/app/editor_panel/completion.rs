@@ -15,15 +15,15 @@ use crate::lsp;
 use eframe::egui;
 use egui::text_edit::TextEditOutput;
 
-/// Master switch for the **inline** diagnostic overlay — the squiggles and
-/// message text drawn over the code in the editor.
-///
-/// Only **errors and info** are drawn inline; warnings (and hints) are filtered
-/// out at the call site below and remain in the bottom panel (Cargo Check /
-/// rust-analyzer tabs) to keep the code view uncluttered. Diagnostics refresh on
-/// the LSP debounce (3 s after typing stops, or on Project Save — see
-/// `app::init_frame`), so their positions no longer lag behind active typing.
-const SHOW_INLINE_DIAGNOSTICS: bool = true;
+// The **inline** diagnostic overlay — squiggles and inline message text drawn
+// over the code — is gated at the call site by `self.inline_errors_enabled`
+// (toggled from the editor toolbar, default on).
+//
+// Only **errors and info** are drawn inline; warnings (and hints) are filtered
+// out at the call site below and remain in the bottom panel (Cargo Check /
+// rust-analyzer tabs) to keep the code view uncluttered. Diagnostics refresh on
+// the LSP debounce (3 s after typing stops, or on Project Save — see
+// `app::init_frame`), so their positions no longer lag behind active typing.
 
 impl AppIde {
     /// Apply/trigger LSP completion and draw diagnostics, after the editor.
@@ -508,7 +508,7 @@ impl AppIde {
         }
 
         // ── Diagnostic overlays ───────────────────────────────────────
-        if lsp_file_tracked && SHOW_INLINE_DIAGNOSTICS {
+        if lsp_file_tracked && self.inline_errors_enabled {
             // Only draw the inline overlay when RA holds the CURRENT text for the
             // displayed file (per-file, not a global check). With pending edits
             // the diagnostics are stale — their line/col cling to a row that was

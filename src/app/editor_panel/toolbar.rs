@@ -247,6 +247,34 @@ impl AppIde {
                 }
 
                 ui.add_space(4.0);
+
+                // ── Inline-errors toggle ──────────────────────────────
+                // Show/hide the in-editor RA/cargo diagnostic overlay
+                // (squiggles + inline error text). The bottom-panel Cargo
+                // Check / rust-analyzer tabs keep listing everything.
+                let inline_btn = ui.selectable_label(
+                    self.inline_errors_enabled,
+                    egui::RichText::new(format!("{} Errors", ph::WARNING_OCTAGON))
+                        .size(11.0)
+                        .color(if self.inline_errors_enabled {
+                            egui::Color32::from_rgb(230, 160, 60)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                );
+                if inline_btn.clicked() {
+                    self.inline_errors_enabled = !self.inline_errors_enabled;
+                }
+                inline_btn.on_hover_text(if self.inline_errors_enabled {
+                    "Inline errors: ON — squiggles and error messages are drawn in \
+                     the editor.\nClick to hide them (they stay in the Cargo Check / \
+                     rust-analyzer tabs)."
+                } else {
+                    "Inline errors: OFF — the editor overlay is hidden.\nClick to \
+                     show squiggles and error messages inline again."
+                });
+
+                ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
 

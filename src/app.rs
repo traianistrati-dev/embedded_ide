@@ -401,6 +401,11 @@ pub struct AppIde {
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
     copy_flash: u8,
+    /// Master switch for the inline RA/cargo diagnostic overlay (squiggles +
+    /// inline error text drawn over the code). Toggled from the editor toolbar;
+    /// `true` by default. When off, the bottom-panel Cargo Check / rust-analyzer
+    /// tabs still list everything — only the in-editor overlay is suppressed.
+    inline_errors_enabled: bool,
     /// Show the export/save result message until this deadline. Time-based
     /// (not a frame countdown): frame cadence varies from 60+ FPS to the 4 FPS
     /// activity watchdog, so counting frames made the message's lifetime
@@ -785,6 +790,7 @@ impl AppIde {
             active_tab: McuTab::Pins,
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
+            inline_errors_enabled: true,
             export_status_until: None,
             last_frame_at: None,
             was_busy_last_frame: false,
