@@ -247,37 +247,49 @@ pub fn show_diagnostics_overlay(
     }
 }
 
-/// Draw a single inferred-type inlay hint as dim ghost text at `insert_idx`
-/// (the char index in `display_code` just after the binding name). Positioned
-/// through the galley so it tracks scrolling, and clipped to the visible editor
-/// area. Purely visual — the text is NOT part of the document (accepting it is
-/// handled separately, by the caller's Tab binding).
+/// Draw a single inferred-type inlay hint as dim ghost text just past the END
+/// of the line at `eol_idx` (the char index of that line's last character in
+/// `display_code`). Positioned through the galley so it tracks scrolling, and
+/// clipped to the visible editor area. Purely visual — the text is NOT part of
+/// the document (accepting it is handled separately, by the caller's Tab
+/// binding).
+///
+/// It sits after the line rather than inline after the binding name because an
+/// overlay can't reflow the real text: an inline hint painted over the ` =
+/// initializer …`, so it read as garbage (`parser:=Parser…`).
 pub fn show_inlay_hint(
     ui: &egui::Ui,
     galley_pos: egui::Pos2,
     text_clip_rect: egui::Rect,
     galley: &egui::text::Galley,
-    insert_idx: usize,
+    eol_idx: usize,
     label: &str,
     font_size: f32,
 ) {
     let painter = ui.painter().with_clip_rect(text_clip_rect);
-    let loc = galley.pos_from_cursor(egui::text::CCursor::new(insert_idx));
-    let x = galley_pos.x + loc.min.x;
+    let loc = galley.pos_from_cursor(egui::text::CCursor::new(eol_idx));
     let y_top = galley_pos.y + loc.min.y;
     let y_bot = galley_pos.y + loc.max.y;
     // Skip when scrolled out of the visible editor.
     if y_bot < text_clip_rect.top() || y_top > text_clip_rect.bottom() {
         return;
     }
+    // A gap past the line's end, mirroring the inline-diagnostic messages.
     // rust-analyzer's type-hint label already includes the leading `: `
     // (renderColons default); render it verbatim, dimmed like an editor hint.
+    let font = egui::FontId::monospace(font_size);
+    let color = egui::Color32::from_rgb(150, 165, 180);
+    // Clamp X so the hint stays on-screen even when the line is long enough that
+    // its end scrolls past the right edge — otherwise the hint would be clipped
+    // and appear to be missing. Measure the label width and keep it inside the
+    // visible editor, right-aligned against the edge when the line-end is far.
+    let text_w = painter
+        .layout_no_wrap(label.to_owned(), font.clone(), color)
+        .size()
+        .x;
+    let eol_x = galley_pos.x + loc.max.x + 16.0;
+    let max_x = (text_clip_rect.right() - text_w - 4.0).max(text_clip_rect.left());
+    let x = eol_x.min(max_x);
     let y_mid = (y_top + y_bot) * 0.5;
-    painter.text(
-        egui::pos2(x, y_mid),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::monospace(font_size),
-        egui::Color32::from_rgb(120, 130, 140),
-    );
+    painter.text(egui::pos2(x, y_mid), egui::Align2::LEFT_CENTER, label, font, color);
 }

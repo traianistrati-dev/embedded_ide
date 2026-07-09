@@ -208,16 +208,38 @@ impl AppIde {
                         }
                     });
                 }
+                // ── Code-action chooser popup: nav / accept keys ─────────────
+                // MUST run BEFORE the editor: the popup renders after the editor
+                // (`show_code_action_popup`), so if Enter were consumed only there
+                // the editor would already have inserted a newline into the code
+                // (splitting the identifier the assist targets). Consuming here
+                // keeps the accept clean. A choice is deferred to next frame's
+                // `poll_code_actions` (so the edit applies at frame top).
+                if self.code_action_popup_open && !self.code_actions.is_empty() {
+                    let count = self.code_actions.len();
+                    ui.input_mut(|i| {
+                        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                            self.code_action_popup_open = false;
+                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                            self.code_action_sel = (self.code_action_sel + 1).min(count - 1);
+                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                            self.code_action_sel = self.code_action_sel.saturating_sub(1);
+                        } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                            self.code_action_choice = Some(self.code_action_sel.min(count - 1));
+                        }
+                    });
+                }
                 // ── Inline type hint: Tab accepts (inserts the inferred type) ─
-                // Only when a ghost hint is showing, no completion popup is up
-                // (their Tab handling ran above and would have consumed it first),
-                // AND the caret sits on the hint's line at/after the name — so
-                // Tab still inserts a tab when indenting at line start. Consumed
-                // here so the editor doesn't also type a tab; the edit is applied
-                // at frame top next `init_frame` (poll_inlay_hint).
+                // Only when a ghost hint is showing, no completion / code-action
+                // popup is up (their key handling ran above and would have
+                // consumed it first), AND the caret sits on the hint's line
+                // at/after the name — so Tab still inserts a tab when indenting at
+                // line start. Consumed here so the editor doesn't also type a tab;
+                // the edit is applied at frame top next `init_frame`.
                 let hint_pos = self.inlay_hint.as_ref().map(|h| (h.line, h.character));
                 if let Some((hint_line, hint_char)) = hint_pos {
                     let popup_up = self.completion_open
+                        || self.code_action_popup_open
                         || (self.cargo_complete.open && !self.cargo_complete.items.is_empty());
                     let caret_ok = self.last_caret_idx.map_or(false, |idx| {
                         let (l, c) =

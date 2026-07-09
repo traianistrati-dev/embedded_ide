@@ -3,14 +3,13 @@
 //! Orchestrator only: renders the tab-header buttons (with status badges) and
 //! dispatches to the per-tab render functions in `super::tabs`.
 
+use super::BuildPanelTab;
 use super::tabs::{
     show_activity_tab, show_cargo_tab, show_clippy_tab, show_dfu_tab, show_git_tab, show_ra_tab,
     show_serial_tab, show_terminal_tab, show_tools_tab,
 };
-use super::BuildPanelTab;
 use crate::activity::ActivityLog;
 use crate::build::BuildState;
-use crate::terminal::TerminalConsole;
 use crate::dfu::{self, DfuState};
 use crate::espflash::EspFlashState;
 use crate::lsp::{self, LspStatus};
@@ -18,6 +17,7 @@ use crate::openocd::OpenOcdState;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::required_tools;
 use crate::serial::SerialMonitor;
+use crate::terminal::TerminalConsole;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::collections::HashMap;
@@ -146,7 +146,7 @@ pub(super) fn show_diag_panel(
                 ),
                 _ => (String::new(), egui::Color32::DARK_GRAY),
             };
-            let label = format!("rust-analyzer{badge}");
+            let label = format!("Analyzer{badge}");
             let active = *tab == BuildPanelTab::RustAnalyzer;
             let btn = ui.add(
                 egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
@@ -317,16 +317,17 @@ pub(super) fn show_diag_panel(
         if definition.is_some() {
             ui.separator();
             let active = *tab == BuildPanelTab::Definition;
-            let btn = ui.add(
-                egui::Button::new(egui::RichText::new("Definition").size(11.0).color(
-                    if active {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::from_rgb(120, 180, 240)
-                    },
-                ))
-                .frame(active),
-            );
+            let btn =
+                ui.add(
+                    egui::Button::new(egui::RichText::new("Definition").size(11.0).color(
+                        if active {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(120, 180, 240)
+                        },
+                    ))
+                    .frame(active),
+                );
             if btn.clicked() {
                 *tab = BuildPanelTab::Definition;
             }
@@ -378,7 +379,9 @@ pub(super) fn show_diag_panel(
                 String::new()
             };
             ui.menu_button(
-                egui::RichText::new(format!("{name}{hint} {}", ph::CARET_DOWN)).size(11.0).color(col),
+                egui::RichText::new(format!("{name}{hint} {}", ph::CARET_DOWN))
+                    .size(11.0)
+                    .color(col),
                 |ui| {
                     let term_badge = if running { " …" } else { "" };
                     if ui
@@ -391,7 +394,11 @@ pub(super) fn show_diag_panel(
                         *tab = BuildPanelTab::Terminal;
                         ui.close();
                     }
-                    let act_badge = if acts > 0 { format!(" {acts}") } else { String::new() };
+                    let act_badge = if acts > 0 {
+                        format!(" {acts}")
+                    } else {
+                        String::new()
+                    };
                     if ui
                         .selectable_label(
                             *tab == BuildPanelTab::Activity,
@@ -536,19 +543,14 @@ pub(super) fn show_diag_panel(
                             );
                         } else {
                             ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(shown).monospace().size(12.0),
-                                )
-                                .selectable(true),
+                                egui::Label::new(egui::RichText::new(shown).monospace().size(12.0))
+                                    .selectable(true),
                             );
                         }
                     }
                 });
             } else {
-                ui.label(
-                    egui::RichText::new("No definition.")
-                        .color(egui::Color32::GRAY),
-                );
+                ui.label(egui::RichText::new("No definition.").color(egui::Color32::GRAY));
             }
         }
     }

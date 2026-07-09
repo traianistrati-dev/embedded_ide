@@ -126,20 +126,11 @@ impl AppIde {
         if !self.code_action_popup_open || self.code_actions.is_empty() {
             return;
         }
-        let count = self.code_actions.len();
-        // Keyboard navigation (consumed here so the editor doesn't see them).
-        ui.input_mut(|i| {
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
-                self.code_action_popup_open = false;
-            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                self.code_action_sel = (self.code_action_sel + 1).min(count - 1);
-            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
-                self.code_action_sel = self.code_action_sel.saturating_sub(1);
-            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
-                self.code_action_choice = Some(self.code_action_sel.min(count - 1));
-            }
-        });
-        if !self.code_action_popup_open || self.code_action_choice.is_some() {
+        // NOTE: keyboard nav / accept (Up/Down/Enter/Esc) is consumed BEFORE the
+        // editor renders (see `editor_panel/mod.rs`), not here — otherwise the
+        // editor would process Enter first and insert a newline into the code.
+        // This method only renders the list and handles mouse clicks.
+        if self.code_action_choice.is_some() {
             return;
         }
 

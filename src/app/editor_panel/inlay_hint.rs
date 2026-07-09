@@ -51,33 +51,26 @@ impl AppIde {
         };
         let (line, _col) = lsp_cursor_pos(display_code, target);
 
-        // (Re)request only when the line — or the line's text — changed, so a
-        // fresh `let x = 5` picks up its type once the initializer is typed.
-        // Moving to a new line/file refreshes immediately; a mere text change on
-        // the SAME line is throttled (each request carries a full-file
-        // `did_change`, and the app deliberately keeps RA sync sparse), with a
-        // trailing repaint so the final state still gets requested once typing
-        // stops.
-        let key = (rel.to_owned(), line, line_hash_at(&chars, target));
-        if self.inlay_requested.as_ref() != Some(&key) {
-            const THROTTLE: std::time::Duration = std::time::Duration::from_millis(300);
-            let same_line = self
-                .inlay_requested
-                .as_ref()
-                .is_some_and(|(r, l, _)| r == rel && *l == line);
-            let wait = if same_line {
-                self.inlay_last_req_at
-                    .map(|t| THROTTLE.saturating_sub(t.elapsed()))
-                    .unwrap_or_default()
-            } else {
-                std::time::Duration::ZERO // new line/file → no throttle
-            };
-
-            if wait.is_zero() {
+        // Request once per (file, line) — on caret NAVIGATION to a new `let`
+        // line, NOT per keystroke (the key has no text component). The request
+        // carries a `did_change` so the hint reflects unsaved edits too, but ONLY
+        // when NO code-action / completion request is in flight: a did_change
+        // bumps the document version, which would make their pending resolve
+        // "stale code action" or cancel them "content modified". Outside that
+        // window the version bump is harmless (RA re-publishes), and the app's
+        // sparse-sync design is preserved (this fires on navigation, rarely).
+        let already = self
+            .inlay_requested
+            .as_ref()
+            .is_some_and(|(r, l)| r == rel && *l == line);
+        if !already {
+            let busy = self.code_action_in_flight
+                || self.code_action_resolve_in_flight
+                || self.completion_open;
+            if !busy {
                 let sent = {
                     let mut lsp = self.lsp_state.lock().unwrap();
                     if matches!(lsp.status, lsp::LspStatus::Ready) {
-                        // Sync the live text so the hint matches what's on screen.
                         lsp.did_change(rel, display_code, false);
                         lsp.request_inlay_hints(rel, line);
                         true
@@ -86,19 +79,15 @@ impl AppIde {
                     }
                 };
                 if sent {
-                    self.inlay_requested = Some(key);
-                    self.inlay_last_req_at = Some(std::time::Instant::now());
-                    // Drop a hint that belonged to the previous line while the
-                    // new request is in flight, so a stale type never flashes.
+                    self.inlay_requested = Some((rel.to_owned(), line));
+                    // Drop a hint from the previous line while the new request is
+                    // in flight, so a stale type never flashes.
                     if self.inlay_hint.as_ref().map(|h| h.line) != Some(line) {
                         self.inlay_hint = None;
                     }
                 }
-            } else {
-                // Throttled — schedule a trailing frame so the final request
-                // fires shortly after the user stops typing on this line.
-                self.egui_ctx.request_repaint_after(wait);
             }
+            // else: busy → retry on a later frame (leaves `inlay_requested` unset).
         }
         Some(line)
     }
@@ -135,26 +124,4 @@ impl AppIde {
         self.inlay_requested = None;
         self.inlay_accept_pending = false;
     }
-}
-
-/// Hash of the text of the line containing `idx` — used to detect when the
-/// caret's `let` line changed enough to warrant a fresh type request.
-fn line_hash_at(chars: &[char], idx: usize) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let idx = idx.min(chars.len());
-    let start = chars[..idx]
-        .iter()
-        .rposition(|&c| c == '\n')
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    let end = chars[idx..]
-        .iter()
-        .position(|&c| c == '\n')
-        .map(|p| idx + p)
-        .unwrap_or(chars.len());
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for &c in &chars[start..end] {
-        c.hash(&mut h);
-    }
-    h.finish()
 }
