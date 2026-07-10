@@ -464,15 +464,27 @@ pub fn show(
         };
         let stroke = egui::Stroke::new((1.1 * scale).clamp(0.5, 2.0), CALL_COLOR);
         for e in calls {
-            let going_right =
-                lay.pos[e.to_node].center_x() >= lay.pos[e.from_node].center_x();
-            let from = anchor(e.from_node, e.from_row, going_right);
-            let to = anchor(e.to_node, e.to_row, !going_right);
-            let dx = ((to.x - from.x).abs() * 0.4)
-                .clamp(20.0 * scale, 120.0 * scale)
-                * if going_right { 1.0 } else { -1.0 };
-            let c1 = from + egui::vec2(dx, 0.0);
-            let c2 = to + egui::vec2(-dx, 0.0);
+            let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
+            // OUTER-FLANK routing (user feedback): the straight blue dep edges
+            // run through the inner corridor between stacked nodes, and the
+            // old inner-side beziers crossed them there. Instead, exit AND
+            // enter on the flank facing the target and push the bow PAST the
+            // outermost node edge — the amber curve travels in the outer lane,
+            // clear of the dep corridor.
+            let outer_right = b.center_x() >= a.center_x();
+            let from = anchor(e.from_node, e.from_row, outer_right);
+            let to = anchor(e.to_node, e.to_row, outer_right);
+            // Swing past the outer edge, staggered per row so parallel calls
+            // between the same nodes don't ride one arc (virtual units).
+            let swing = 26.0 + ((e.from_row + e.to_row) % 4) as f32 * 8.0;
+            let outer_x = if outer_right {
+                (a.x + a.w).max(b.x + b.w) + swing
+            } else {
+                a.x.min(b.x) - swing
+            };
+            let cx = to_screen(outer_x, 0.0).x;
+            let c1 = egui::pos2(cx, from.y + 0.25 * (to.y - from.y));
+            let c2 = egui::pos2(cx, from.y + 0.75 * (to.y - from.y));
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
                 [from, c1, c2, to],
                 false,
