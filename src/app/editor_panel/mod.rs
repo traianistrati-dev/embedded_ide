@@ -96,7 +96,7 @@ impl AppIde {
             .max_width(avail * 0.7)
             .show_inside(ui, |ui| {
                 // Header row
-                self.show_editor_toolbar(ui, &display_code, &project_files);
+                self.show_editor_toolbar(ui, &display_code);
 
                 ui.separator();
 

@@ -106,6 +106,8 @@ impl AppIde {
         let mut flash_scan = false;
         let mut flash_go = false;
         let can_flash = self.selected_build_cfg().is_some();
+        // Cargo-tab Build button (moved off the top toolbar on 2026-07-10).
+        let mut build_go = false;
         let project_dir = self.project_dir.clone();
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
@@ -195,11 +197,16 @@ impl AppIde {
                     &mut flash_scan,
                     &mut flash_go,
                     can_flash,
+                    &mut build_go,
                 );
             });
         // A Git tab button was clicked: spawn the worker (guards inside).
         if let Some(op) = git_op {
             self.run_git_op(op);
+        }
+        // Cargo-tab Build button.
+        if build_go {
+            self.start_build();
         }
         // Flash-tab Programmer-row buttons.
         if flash_scan {

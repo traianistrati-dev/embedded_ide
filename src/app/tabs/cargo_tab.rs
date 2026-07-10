@@ -12,30 +12,39 @@ pub fn show_cargo_tab(
     // Set to `(rel_path, 1-based line, highlight-band colour)` when a row is
     // expanded, so the editor opens that file, scrolls to the line, and tints it.
     nav: &mut Option<(String, usize, egui::Color32)>,
+    // Build button (moved here from the top toolbar on 2026-07-10): set on
+    // click, handled by AppIde after the panel (`start_build`). `can_build` =
+    // a buildable chip config exists; `clippy_running` serializes with Clippy
+    // (they share the same target/ directory).
+    build_go: &mut bool,
+    can_build: bool,
+    clippy_running: bool,
 ) {
     let state = build_state.lock().unwrap().clone();
     let workspace = std::env::temp_dir().join("embedded_ide_0_check");
 
     // ── Status bar ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
-        let (icon, text, color) = match &state {
-            BuildState::Idle => return,
-            BuildState::Building => (
+        // Idle shows no status text but MUST still render the buttons row —
+        // the first build of a session starts from here now.
+        let status = match &state {
+            BuildState::Idle => None,
+            BuildState::Building => Some((
                 ph::HAMMER,
                 "Building…".to_owned(),
                 egui::Color32::from_rgb(180, 180, 180),
-            ),
+            )),
             BuildState::Failed(msg) => {
                 let first = msg.lines().next().unwrap_or(msg);
                 // Suppress the [DISK_FULL] prefix from the one-liner badge
                 let first = first.strip_prefix("[DISK_FULL] ").unwrap_or(first);
-                (
+                Some((
                     ph::X_CIRCLE,
                     format!("Build failed: {}", first),
                     egui::Color32::from_rgb(230, 90, 80),
-                )
+                ))
             }
-            BuildState::Done(r) if r.error_count() > 0 => (
+            BuildState::Done(r) if r.error_count() > 0 => Some((
                 ph::X_CIRCLE,
                 format!(
                     "{} error{}{}",
@@ -52,8 +61,8 @@ pub fn show_cargo_tab(
                     }
                 ),
                 egui::Color32::from_rgb(230, 90, 80),
-            ),
-            BuildState::Done(r) if r.warning_count() > 0 => (
+            )),
+            BuildState::Done(r) if r.warning_count() > 0 => Some((
                 ph::WARNING,
                 format!(
                     "{} warning{}",
@@ -61,55 +70,96 @@ pub fn show_cargo_tab(
                     if r.warning_count() == 1 { "" } else { "s" }
                 ),
                 egui::Color32::from_rgb(230, 190, 50),
-            ),
-            BuildState::Done(_) => (
+            )),
+            BuildState::Done(_) => Some((
                 ph::CHECK_CIRCLE,
                 "Build succeeded — no errors".to_owned(),
                 egui::Color32::from_rgb(80, 200, 100),
-            ),
+            )),
         };
+        if let Some((icon, text, color)) = &status {
+            ui.label(egui::RichText::new(*icon).size(13.0).color(*color));
+            ui.label(egui::RichText::new(text).size(12.0).color(*color).strong());
+        }
 
-        ui.label(egui::RichText::new(icon).size(13.0).color(color));
-        ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
-
-        // Right-side buttons: Clean target/ | Clear
+        // Right-side buttons (RTL: first added = rightmost): Clear | Clean
+        // target/ | Build — so Build sits to their LEFT, per the user's ask.
+        let is_building = matches!(state, BuildState::Building);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Clear result button
-            if ui
-                .add(egui::Button::new(
-                    egui::RichText::new(format!("{} Clear", ph::X))
-                        .size(10.0)
-                        .color(egui::Color32::GRAY),
-                ))
-                .clicked()
-            {
-                *build_state.lock().unwrap() = BuildState::Idle;
-                *selected_diagnostic = None;
+            if status.is_some() {
+                // Clear result button
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new(format!("{} Clear", ph::X))
+                            .size(10.0)
+                            .color(egui::Color32::GRAY),
+                    ))
+                    .clicked()
+                {
+                    *build_state.lock().unwrap() = BuildState::Idle;
+                    *selected_diagnostic = None;
+                }
+
+                ui.add_space(4.0);
+
+                // "Clean target/" — deletes cached LLVM/cargo build artefacts to
+                // recover disk space.  Especially helpful after a disk-full
+                // build failure.
+                if ui
+                    .add_enabled(
+                        !is_building,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Clean target/", ph::TRASH))
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(200, 160, 80)),
+                        ),
+                    )
+                    .on_hover_text(
+                        "Run `cargo clean` — deletes the target/ directory to free disk space.\n\
+                         Crates cached in ~/.cargo are NOT removed; only rebuilt files are re-compiled.",
+                    )
+                    .clicked()
+                {
+                    build::start_clean(workspace.clone(), Arc::clone(build_state), ctx.clone());
+                    *selected_diagnostic = None;
+                }
+
+                ui.add_space(4.0);
             }
 
-            ui.add_space(4.0);
-
-            // "Clean target/" — deletes cached LLVM/cargo build artefacts to
-            // recover disk space.  Shown always; especially helpful after a
-            // disk-full build failure.
-            let is_building = matches!(state, BuildState::Building);
-            if ui
-                .add_enabled(
-                    !is_building,
-                    egui::Button::new(
-                        egui::RichText::new(format!("{} Clean target/", ph::TRASH))
-                            .size(10.0)
-                            .color(egui::Color32::from_rgb(200, 160, 80)),
-                    ),
-                )
-                .on_hover_text(
-                    "Run `cargo clean` — deletes the target/ directory to free disk space.\n\
-                     Crates cached in ~/.cargo are NOT removed; only rebuilt files are re-compiled.",
-                )
-                .clicked()
-            {
-                build::start_clean(workspace.clone(), Arc::clone(build_state), ctx.clone());
-                *selected_diagnostic = None;
+            // ── Build button (moved from the top toolbar) ─────────────────
+            let build_label = if is_building {
+                let dots = match (ctx.cumulative_frame_nr() / 15) % 3 {
+                    0 => ".",
+                    1 => "..",
+                    _ => "...",
+                };
+                format!("Building{dots}")
+            } else {
+                format!("{} Build", ph::HAMMER)
+            };
+            let build_enabled = !is_building && !clippy_running && can_build;
+            let build_btn = ui.add_enabled(
+                build_enabled,
+                egui::Button::new(egui::RichText::new(&build_label).size(10.0).color(
+                    if build_enabled {
+                        egui::Color32::from_rgb(100, 220, 100)
+                    } else {
+                        egui::Color32::GRAY
+                    },
+                )),
+            );
+            if build_btn.clicked() {
+                *build_go = true;
+            }
+            build_btn.on_hover_text(
+                "Run `cargo check` on the generated project.\n\
+                 Requires the Rust toolchain + thumbv7m-none-eabi target:\n\
+                 rustup target add thumbv7m-none-eabi",
+            );
+            // Keep UI refreshing while build runs (drives the dot animation).
+            if is_building {
+                ctx.request_repaint_after(std::time::Duration::from_millis(120));
             }
         });
     });

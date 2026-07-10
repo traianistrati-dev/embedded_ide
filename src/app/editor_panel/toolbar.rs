@@ -1,19 +1,18 @@
-//! Code-editor toolbar (header row): Copy and Build, plus the live status
-//! label. (Scan USB + Flash moved to the Flash tab; the Serial / Terminal /
-//! Activity / Clippy shortcut buttons were removed — reach those from the
-//! bottom-panel tab bar / "More" dropdown.)
+//! Code-editor toolbar (header row): Copy, the Errors / Types toggles and the
+//! live status label. (Scan USB + Flash moved to the Flash tab; Serial /
+//! Terminal / Activity / Clippy shortcuts were removed; the Build button moved
+//! into the Cargo Check tab on 2026-07-10.)
 //!
-//! Also hosts three `pub(crate)` flash helpers on AppIde (`scan_usb`,
-//! `flash_swd`, `flash_esp`) fired from the Flash tab. `show_editor_toolbar`
-//! reads the displayed code (for Copy) and the project-files snapshot (to gate
-//! Build), and fires the background build as a side effect.
+//! Also hosts the `pub(crate)` action helpers on AppIde fired from the
+//! bottom-panel tabs: `scan_usb`, `flash_swd`, `flash_esp` (Flash tab) and
+//! `start_build` (Cargo tab).
 
 use crate::app::{AppIde, BuildPanelTab, ProjectFileId};
 use crate::build::{self, BuildState};
 use crate::dfu::{self, DfuState};
 use crate::espflash::{self, EspFlashState};
 use crate::openocd::{self, OpenOcdState};
-use crate::panels::mcu_module::project_gen::{self, ProjectFiles};
+use crate::panels::mcu_module::project_gen;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::Arc;
@@ -107,15 +106,47 @@ impl AppIde {
         }
     }
 
+    /// Run `cargo check` on the generated project: write it to the check
+    /// workspace, snapshot the compiled text (for the unused-local fade), then
+    /// start the background build. No-op without a buildable chip config.
+    /// Fired from the Cargo Check tab's Build button (was a top-toolbar button
+    /// before 2026-07-10).
+    pub(crate) fn start_build(&mut self) {
+        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        match project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+        ) {
+            Ok(()) => {
+                self.selected_diagnostic = None;
+                self.build_tab = BuildPanelTab::Cargo;
+                // Snapshot the compiled text so the "unused local variable"
+                // fade can tell later whether this run's diagnostics still
+                // match the live file.
+                self.snapshot_build_text();
+                build::start_build(
+                    build_dir,
+                    project.target.clone(),
+                    Arc::clone(&self.build_state),
+                    self.egui_ctx.clone(),
+                    Arc::clone(&self.activity),
+                );
+            }
+            Err(e) => {
+                *self.build_state.lock().unwrap() =
+                    BuildState::Failed(format!("Could not write project to temp dir: {e}"));
+            }
+        }
+    }
+
     /// Render the editor header toolbar.  `display_code` is the text shown in
-    /// the editor (copied verbatim by the Copy button); `project_files` gates
-    /// the Build button (disabled when the chip has no project config).
-    pub(super) fn show_editor_toolbar(
-        &mut self,
-        ui: &mut egui::Ui,
-        display_code: &str,
-        project_files: &Option<ProjectFiles>,
-    ) {
+    /// the editor (copied verbatim by the Copy button).
+    pub(super) fn show_editor_toolbar(&mut self, ui: &mut egui::Ui, display_code: &str) {
         ui.horizontal(|ui| {
             ui.heading("Code Editor");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -142,111 +173,8 @@ impl AppIde {
                 ui.add_space(4.0);
 
                 // (Serial / Terminal / Activity / Clippy shortcut buttons were
-                // removed on 2026-07-08 — reach those from the bottom-panel tab
-                // bar / the "More" dropdown. Only Copy and Build stay here.)
-
-                // ── Build button ──────────────────────────────────────
-                let build_guard = self.build_state.lock().unwrap();
-                let is_building = build_guard.is_building();
-
-                // Animate trailing dots while building
-                let build_label = if is_building {
-                    let dots = match (ui.ctx().cumulative_frame_nr() / 15) % 3 {
-                        0 => ".",
-                        1 => "..",
-                        _ => "...",
-                    };
-                    format!("Building{dots}")
-                } else {
-                    format!("{} Build", ph::HAMMER)
-                };
-
-                // Badge: error/warning/ok count shown to the left of the button
-                let badge_text = match &*build_guard {
-                    BuildState::Done(r) if r.error_count() > 0 => Some((
-                        format!("{} {}", r.error_count(), ph::X_CIRCLE),
-                        egui::Color32::from_rgb(230, 90, 80),
-                    )),
-                    BuildState::Done(r) if r.warning_count() > 0 => Some((
-                        format!("{} {}", r.warning_count(), ph::WARNING),
-                        egui::Color32::from_rgb(230, 190, 50),
-                    )),
-                    BuildState::Done(r) if r.success => Some((
-                        format!("{}", ph::CHECK_CIRCLE),
-                        egui::Color32::from_rgb(80, 200, 100),
-                    )),
-                    BuildState::Failed(_) => Some((
-                        format!("{}", ph::X_CIRCLE),
-                        egui::Color32::from_rgb(230, 90, 80),
-                    )),
-                    _ => None,
-                };
-                drop(build_guard);
-
-                if let Some((badge, color)) = badge_text {
-                    ui.label(egui::RichText::new(badge).size(11.0).color(color));
-                }
-
-                // Serialized with Clippy: don't allow a Build while clippy runs
-                // (they share the same target/ directory).
-                let clippy_running = self.clippy_state.lock().unwrap().is_building();
-                let build_enabled = !is_building && !clippy_running && project_files.is_some();
-                let build_btn = ui.add_enabled(
-                    build_enabled,
-                    egui::Button::new(egui::RichText::new(&build_label).size(11.0).color(
-                        if build_enabled {
-                            egui::Color32::from_rgb(100, 220, 100)
-                        } else {
-                            egui::Color32::GRAY
-                        },
-                    )),
-                );
-
-                if build_btn.clicked() {
-                    if let Some((project, _toolchain)) = self.selected_build_cfg() {
-                        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
-                        match project_gen::write_project(
-                            &build_dir,
-                            &self.current_project_files(),
-                            &self.project_tree.user_src_files,
-                            &self.mcu_config_text(),
-                        ) {
-                            Ok(()) => {
-                                self.selected_diagnostic = None;
-                                self.build_tab = BuildPanelTab::Cargo;
-                                // Snapshot the compiled text so the "unused local
-                                // variable" fade can tell later whether this run's
-                                // diagnostics still match the live file.
-                                self.snapshot_build_text();
-                                build::start_build(
-                                    build_dir,
-                                    project.target.clone(),
-                                    Arc::clone(&self.build_state),
-                                    self.egui_ctx.clone(),
-                                    Arc::clone(&self.activity),
-                                );
-                            }
-                            Err(e) => {
-                                *self.build_state.lock().unwrap() = BuildState::Failed(format!(
-                                    "Could not write project to temp dir: {e}"
-                                ));
-                            }
-                        }
-                    }
-                }
-                build_btn.on_hover_text(
-                    "Run `cargo check` on the generated project.\n\
-                     Requires the Rust toolchain + thumbv7m-none-eabi target:\n\
-                     rustup target add thumbv7m-none-eabi",
-                );
-
-                // Keep UI refreshing while build is running (drives dot animation)
-                if is_building {
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_millis(120));
-                }
-
-                ui.add_space(4.0);
+                // removed on 2026-07-08; the Build button moved into the Cargo
+                // Check tab on 2026-07-10 — see `show_cargo_tab` / `start_build`.)
 
                 // ── Inline-errors toggle ──────────────────────────────
                 // Show/hide the in-editor RA/cargo diagnostic overlay

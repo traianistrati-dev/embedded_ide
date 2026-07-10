@@ -82,6 +82,9 @@ pub(super) fn show_diag_panel(
     flash_scan: &mut bool,
     flash_go: &mut bool,
     can_flash: bool,
+    // Cargo-tab Build button (moved off the top toolbar): set on click; the
+    // caller runs `start_build`. Gated like Flash, on the same chip config.
+    build_go: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -436,7 +439,17 @@ pub(super) fn show_diag_panel(
     // ── Tab content ───────────────────────────────────────────────────────────
     match tab {
         BuildPanelTab::Cargo => {
-            show_cargo_tab(ui, ctx, build_state, cargo_sel, nav);
+            let clippy_running = clippy_state.lock().unwrap().is_building();
+            show_cargo_tab(
+                ui,
+                ctx,
+                build_state,
+                cargo_sel,
+                nav,
+                build_go,
+                can_flash, // same gate: a buildable chip config exists
+                clippy_running,
+            );
         }
         BuildPanelTab::RustAnalyzer => {
             show_ra_tab(ui, lsp_state, lsp_sel, nav);
