@@ -96,22 +96,155 @@ pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> Graph
         .chain(calls.iter().copied().filter(|(a, b)| a != b))
         .collect();
 
-    // ── Layering: bounded longest-path relaxation (cycle-safe) ────────────
-    // layer[target] ≥ layer[source] + 1 for every edge; at most `n` sweeps, so
-    // a dependency cycle can't loop forever (its layers just stop growing).
-    let mut layer = vec![0usize; n];
-    for _ in 0..n {
-        let mut changed = false;
-        for &(u, v) in &edges {
-            if layer[v] < layer[u] + 1 && layer[u] + 1 < n {
-                layer[v] = layer[u] + 1;
-                changed = true;
+    // ── Ring assignment: hub-centered layout ──────────────────────────────
+    // The crate root (`main`, node 0) sits in the MIDDLE; every other node's
+    // ring is its USE distance from main — an undirected BFS over dep/call
+    // edges, with containment edges counting only BETWEEN non-main nodes
+    // (`mod x;` in main.rs is structure, not usage — so a subtree's leaves
+    // land next to main and its root on the far side, the shape the user
+    // arranges by hand). Connected components (main removed) go above/below
+    // main, size-balanced; the component holding main's first `mod` goes UP;
+    // fully isolated modules park on the topmost ring.
+    let layer: Vec<usize> = {
+        // USE edges = deps + calls (NOT containment — `mod x;` is structure,
+        // not usage; a containment hub-link would drag subtree roots next to
+        // main and defeat the leaves-near/root-far shape).
+        let use_edges: Vec<(usize, usize)> = graph
+            .deps
+            .iter()
+            .copied()
+            .chain(calls.iter().copied())
+            .filter(|(a, b)| a != b)
+            .collect();
+        // Undirected adjacency among NON-main nodes: every edge kind.
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &(u, v) in &all_edges {
+            if u != 0 && v != 0 && u != v {
+                adj[u].push(v);
+                adj[v].push(u);
             }
         }
-        if !changed {
-            break;
+        let mut hub_linked = vec![false; n];
+        for &(u, v) in &use_edges {
+            if u == 0 && v != 0 {
+                hub_linked[v] = true;
+            } else if v == 0 && u != 0 {
+                hub_linked[u] = true;
+            }
         }
-    }
+        // Directed dep/call in-degree among non-main nodes — for picking BFS
+        // entries in components main never references (their "sources").
+        let mut in_deg = vec![0usize; n];
+        let mut out_deg = vec![0usize; n];
+        for &(u, v) in &use_edges {
+            if u != 0 && v != 0 {
+                in_deg[v] += 1;
+                out_deg[u] += 1;
+            }
+        }
+
+        // Components over nodes 1..n (discovery order = node index order).
+        let mut comp_of = vec![usize::MAX; n];
+        let mut comps: Vec<Vec<usize>> = Vec::new();
+        for start in 1..n {
+            if comp_of[start] != usize::MAX {
+                continue;
+            }
+            let id = comps.len();
+            let mut members = vec![start];
+            comp_of[start] = id;
+            let mut qi = 0;
+            while qi < members.len() {
+                let m = members[qi];
+                qi += 1;
+                for &next in &adj[m] {
+                    if comp_of[next] == usize::MAX {
+                        comp_of[next] = id;
+                        members.push(next);
+                    }
+                }
+            }
+            comps.push(members);
+        }
+
+        // Ring of each node inside its component: BFS from the entry set —
+        // nodes main references directly; else the component's own dep/call
+        // sources; else its lowest-index node.
+        let mut ring = vec![0usize; n];
+        for members in &comps {
+            let mut entry: Vec<usize> =
+                members.iter().copied().filter(|&m| hub_linked[m]).collect();
+            if entry.is_empty() {
+                entry = members
+                    .iter()
+                    .copied()
+                    .filter(|&m| in_deg[m] == 0 && out_deg[m] > 0)
+                    .collect();
+            }
+            if entry.is_empty() {
+                entry = vec![*members.iter().min().unwrap()];
+            }
+            let mut q: std::collections::VecDeque<usize> = entry.iter().copied().collect();
+            for &e in &entry {
+                ring[e] = 1;
+            }
+            while let Some(m) = q.pop_front() {
+                for &next in &adj[m] {
+                    if ring[next] == 0 && next != 0 {
+                        ring[next] = ring[m] + 1;
+                        q.push_back(next);
+                    }
+                }
+            }
+        }
+
+        // Side per component: the one holding main's first `mod` child is UP;
+        // the rest greedily balance node counts. Isolated singletons park top.
+        let first_child_comp = graph
+            .contains
+            .iter()
+            .filter(|&&(u, v)| u == 0 && v != 0)
+            .map(|&(_, v)| comp_of[v])
+            .min();
+        let mut order: Vec<usize> = (0..comps.len()).collect();
+        order.sort_by_key(|&c| {
+            (
+                if Some(c) == first_child_comp { 0 } else { 1 },
+                usize::MAX - comps[c].len(),
+                comps[c].iter().min().copied().unwrap_or(usize::MAX),
+            )
+        });
+        let mut row = vec![0i32; n]; // main stays 0
+        let (mut up_total, mut down_total) = (0usize, 0usize);
+        let mut parked: Vec<usize> = Vec::new();
+        for c in order {
+            let members = &comps[c];
+            let lone = members.len() == 1 && {
+                let m = members[0];
+                adj[m].is_empty() && !hub_linked[m]
+            };
+            if lone {
+                parked.push(members[0]);
+                continue;
+            }
+            let up = up_total <= down_total;
+            for &m in members {
+                row[m] = if up { -(ring[m] as i32) } else { ring[m] as i32 };
+            }
+            if up {
+                up_total += members.len();
+            } else {
+                down_total += members.len();
+            }
+        }
+        let min_row = row.iter().copied().min().unwrap_or(0);
+        let park_row = min_row - 1;
+        for &m in &parked {
+            row[m] = park_row;
+        }
+        let base = row.iter().copied().min().unwrap_or(0);
+        row.iter().map(|&r| (r - base) as usize).collect()
+    };
 
     // ── Group into layers (stable initial order = node index) ─────────────
     let max_layer = layer.iter().copied().max().unwrap_or(0);
@@ -385,17 +518,43 @@ mod tests {
     use super::super::parse::build_graph;
     use super::*;
 
+    /// Hub layout: main sits BETWEEN its subtrees — the component holding
+    /// main's first `mod` goes above, the next balances below; inside a
+    /// subtree the leaves main uses sit NEXT to main and the subtree root on
+    /// the far side (the arrangement the user builds by hand).
     #[test]
-    fn root_is_on_top_and_deps_below() {
-        let main_rs = "mod a;\nuse crate::a::f;\n".to_owned();
-        let files = vec![("a.rs".into(), "pub fn f() {}\n".into())];
+    fn hub_sits_between_subtrees_with_leaves_adjacent() {
+        let main_rs = "\
+mod p;
+mod m;
+use crate::p::cfg::usart::init;
+use crate::m::report::decode;
+"
+        .to_owned();
+        let files = vec![
+            ("p/mod.rs".into(), "pub mod cfg;\n".into()),
+            ("p/cfg/mod.rs".into(), "pub mod usart;\n".into()),
+            ("p/cfg/usart.rs".into(), "pub fn init() {}\n".into()),
+            ("m/mod.rs".into(), "pub mod report;\n".into()),
+            ("m/report.rs".into(), "pub fn decode() {}\n".into()),
+        ];
         let g = build_graph(&main_rs, &files);
         let lay = layout(&g);
-        assert_eq!(lay.pos.len(), 2);
-        assert!(
-            lay.pos[0].y < lay.pos[1].y,
-            "main must sit above the module it uses"
-        );
+        let at = |path: &str| {
+            let i = g.nodes.iter().position(|n| n.path == path).unwrap();
+            lay.pos[i]
+        };
+        let main = lay.pos[0];
+        // p-side above main (first `mod`), m-side below.
+        for p in ["p", "p::cfg", "p::cfg::usart"] {
+            assert!(at(p).y < main.y, "{p} must sit above main");
+        }
+        for m in ["m", "m::report"] {
+            assert!(at(m).y > main.y, "{m} must sit below main");
+        }
+        // Leaves adjacent to main, subtree roots on the far side.
+        assert!(at("p").y < at("p::cfg").y && at("p::cfg").y < at("p::cfg::usart").y);
+        assert!(at("m::report").y < at("m").y);
         assert!(lay.width > 0.0 && lay.height > 0.0);
     }
 
@@ -449,9 +608,14 @@ mod tests {
             lay.pos[a].h > HEADER_H,
             "symbol rows must grow the node height"
         );
-        // The layer below main starts below main's bottom edge (no overlap).
-        assert!(lay.pos[a].y >= lay.pos[0].bottom());
-        assert!(lay.height >= lay.pos[a].y + lay.pos[a].h);
+        // Adjacent rings never overlap vertically, whichever side of the hub
+        // `a` landed on.
+        let (pa, pm) = (lay.pos[a], lay.pos[0]);
+        assert!(
+            pa.bottom() <= pm.y || pa.y >= pm.bottom(),
+            "a's band must not overlap main's"
+        );
+        assert!(lay.height >= pa.y + pa.h);
     }
 
     #[test]
