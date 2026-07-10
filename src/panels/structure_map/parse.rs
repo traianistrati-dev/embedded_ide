@@ -28,6 +28,10 @@ pub struct SymbolItem {
     pub name: String,
     pub kind: SymKind,
     pub line: usize,
+    /// 1-based line of the item's closing brace (== `line` for `struct Foo;`).
+    /// Together with `line` this is the item's SPAN, used to attribute a
+    /// reference site to its enclosing top-level item.
+    pub end_line: usize,
     /// 0-based column (chars) of the name on its line — the position a
     /// `textDocument/references` request must point at. Keyword/modifier
     /// prefixes are ASCII, so char count == UTF-16 units here.
@@ -49,27 +53,23 @@ pub struct ModuleNode {
     pub fn_count: usize,
     /// Number of `struct` / `enum` / `trait` items.
     pub ty_count: usize,
-    /// Top-level items (column-0 `fn` / `struct` / `enum` / `trait`), in file
-    /// order. Methods inside `impl` blocks are counted in `fn_count` but not
-    /// listed here (they'd bloat the node).
+    /// Top-level items (brace-depth-0 `fn` / `struct` / `enum` / `trait`), in
+    /// file order. Methods inside `impl` blocks are counted in `fn_count` but
+    /// not listed here (they'd bloat the node).
     pub symbols: Vec<SymbolItem>,
-    /// Every column-0 non-blank, non-comment line (1-based), each mapped to the
-    /// symbol row it STARTS (`Some(row)`) or `None` (attrs, `impl`, `use`, the
-    /// closing `}` of a block, …). Used to attribute a reference site to its
-    /// enclosing top-level item: the last anchor at or before the site's line.
-    /// A closing `}` anchor correctly ENDS the previous item's span, and an
-    /// `impl` anchor keeps its methods from being blamed on the item above it.
-    pub anchors: Vec<(usize, Option<usize>)>,
 }
 
 impl ModuleNode {
-    /// The symbol row enclosing 1-based `line`, per the anchor rule above.
+    /// The symbol row whose line SPAN contains 1-based `line` — brace-depth
+    /// based, so it is immune to indentation style. (The first version used
+    /// "column-0 line = item boundary", which real code broke: statements
+    /// written at column 0 inside `fn main` — e.g. `radar.read_data(|rx| {` —
+    /// became anonymous boundaries and every call site after them was
+    /// attributed to nothing, so its call edge silently vanished.)
     pub fn enclosing_row(&self, line: usize) -> Option<usize> {
-        let at = self.anchors.partition_point(|&(l, _)| l <= line);
-        if at == 0 {
-            return None; // above the first top-level item
-        }
-        self.anchors[at - 1].1
+        self.symbols
+            .iter()
+            .position(|s| line >= s.line && line <= s.end_line)
     }
 }
 
@@ -182,7 +182,7 @@ fn make_node(
     file: Option<usize>,
     content: &str,
 ) -> ModuleNode {
-    let (fn_count, ty_count, symbols, anchors) = scan_items(content);
+    let (fn_count, ty_count, symbols) = scan_items(content);
     ModuleNode {
         path,
         name: name.to_owned(),
@@ -191,25 +191,32 @@ fn make_node(
         fn_count,
         ty_count,
         symbols,
-        anchors,
     }
 }
 
-/// Count `fn` and `struct`/`enum`/`trait` item lines (badge-grade accuracy),
-/// collect the TOP-LEVEL ones (column 0 — items inside `impl`/`mod` blocks are
-/// indented, so the badge counts them but the symbol list skips them), and
-/// record the column-0 anchors (see [`ModuleNode::anchors`]).
-fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, Option<usize>)>) {
+/// Count `fn` and `struct`/`enum`/`trait` item lines (badge-grade accuracy)
+/// and collect the TOP-LEVEL ones with their line spans.
+///
+/// "Top-level" = the declaration appears at **brace depth 0**, and the item's
+/// span runs until the depth returns to 0 (its closing brace) — never by
+/// indentation, which real code violates (column-0 statements inside `fn
+/// main`). Items inside `impl`/`mod` blocks sit at depth ≥ 1, so the badge
+/// counts them but the symbol list skips them. Braces inside string literals
+/// can skew the depth — badge-grade accuracy, and they usually balance out.
+fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
     let mut fns = 0;
     let mut tys = 0;
-    let mut symbols = Vec::new();
-    let mut anchors = Vec::new();
-    for (li, line) in text.lines().enumerate() {
-        let trimmed = line.trim_start();
-        let t = strip_modifiers(trimmed);
-        let top_level = !line.starts_with(char::is_whitespace);
-        // Column-0 anchor (may be upgraded to Some(row) below).
-        let is_anchor = top_level && !trimmed.is_empty() && !trimmed.starts_with("//");
+    let mut symbols: Vec<SymbolItem> = Vec::new();
+    let mut depth: i32 = 0;
+    // Row of the depth-0 item whose body the scan is currently inside, and
+    // whether its opening `{` has been seen yet (multi-line signatures put it
+    // lines later; `struct Foo;` never opens one and closes at the `;`).
+    let mut open: Option<usize> = None;
+    let mut entered_body = false;
+    for (li, raw) in text.lines().enumerate() {
+        // Naive comment strip — same trade-off as the edge scan above.
+        let line = raw.split("//").next().unwrap_or("");
+        let t = strip_modifiers(line.trim_start());
         let (kind, rest) = if let Some(r) = t.strip_prefix("fn ") {
             fns += 1;
             (Some(SymKind::Fn), r)
@@ -225,27 +232,50 @@ fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, Option<
         } else {
             (None, t)
         };
-        let mut row: Option<usize> = None;
-        if top_level {
+        if depth == 0 && open.is_none() {
             if let Some(kind) = kind {
                 let name: String = rest
                     .chars()
                     .take_while(|&c| c.is_alphanumeric() || c == '_')
                     .collect();
                 if !name.is_empty() {
-                    // Column of the name = indent + stripped modifiers + keyword
-                    // (all ASCII, so chars == UTF-16 units).
+                    // Column of the name = chars before `rest` on the raw line
+                    // (prefixes are ASCII, so chars == UTF-16 units).
                     let col = line.chars().count() - rest.chars().count();
-                    row = Some(symbols.len());
-                    symbols.push(SymbolItem { name, kind, line: li + 1, col });
+                    open = Some(symbols.len());
+                    symbols.push(SymbolItem {
+                        name,
+                        kind,
+                        line: li + 1,
+                        end_line: li + 1,
+                        col,
+                    });
                 }
             }
         }
-        if is_anchor {
-            anchors.push((li + 1, row));
+        for c in line.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = (depth - 1).max(0),
+                _ => {}
+            }
+        }
+        if let Some(row) = open {
+            symbols[row].end_line = li + 1;
+            if !entered_body && line.contains('{') {
+                entered_body = true;
+            }
+            if entered_body {
+                if depth == 0 {
+                    open = None; // the item's closing brace reached
+                    entered_body = false;
+                }
+            } else if depth == 0 && line.contains(';') {
+                open = None; // bodyless item: `struct Foo;` / `struct P(u8);`
+            }
         }
     }
-    (fns, tys, symbols, anchors)
+    (fns, tys, symbols)
 }
 
 /// Strip leading visibility / item modifiers so `pub async fn` matches `fn `.
@@ -524,6 +554,45 @@ trait Frame {}
         // …but the badge still counts the method.
         assert_eq!(a.fn_count, 2);
         assert_eq!(a.ty_count, 3);
+    }
+
+    /// Regression (user report): statements written at COLUMN 0 inside `fn
+    /// main` plus call sites inside a closure. The old column-0 anchor rule
+    /// treated `let x = 1;` / `radar.read_data(|rx| {` as anonymous item
+    /// boundaries, so every site after them mapped to no symbol and its call
+    /// edge vanished. Brace-depth spans are immune to indentation.
+    #[test]
+    fn spans_survive_column0_statements_and_closures() {
+        let text = "\
+#[entry]
+fn main() {
+let x = 1;
+radar.read_data(|rx| {
+    helper();
+});
+}
+pub fn other(
+    a: u8,
+) -> u8 {
+    a
+}
+";
+        let g = build_graph(text, &[]);
+        let node = &g.nodes[0];
+        let names: Vec<(&str, usize, usize)> = node
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.line, s.end_line))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("main", 2, 7), ("other", 8, 12)],
+            "col-0 statements must not end main's span; multi-line signature spans to its brace"
+        );
+        assert_eq!(node.enclosing_row(5), Some(0), "closure site belongs to main");
+        assert_eq!(node.enclosing_row(3), Some(0), "col-0 statement belongs to main");
+        assert_eq!(node.enclosing_row(11), Some(1), "body of the multi-line-sig fn");
+        assert_eq!(node.enclosing_row(1), None, "the attr line is outside any item");
     }
 
     #[test]

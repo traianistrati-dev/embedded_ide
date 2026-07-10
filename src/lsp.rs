@@ -1517,6 +1517,12 @@ fn read_lsp<R: BufRead>(reader: &mut R) -> Option<serde_json::Value> {
 
 // ── Message handler ───────────────────────────────────────────────────────────
 
+/// Debug-log a line into the shared LSP log from OUTSIDE this module (e.g. the
+/// Structure tab's call-graph pass) — same file, same debug-only gating.
+pub fn debug_log(line: &str) {
+    lsp_log(line);
+}
+
 /// Append a line to the LSP debug log in the system temp dir.
 /// File: <TEMP>/embedded_ide_lsp.log
 /// Only active in debug builds; no-op in release.

@@ -150,7 +150,12 @@ impl AppIde {
         }
         // (Re)start the pass when the content hash moved.
         if self.structure_calls.as_ref().map(|p| p.hash) != Some(hash) {
-            self.structure_calls = Some(calls::CallPass::new(graph, hash));
+            let pass = calls::CallPass::new(graph, hash);
+            crate::lsp::debug_log(&format!(
+                "CALLS_PASS start total={} hash={hash:x}",
+                pass.total
+            ));
+            self.structure_calls = Some(pass);
         }
         let pass = self.structure_calls.as_mut().unwrap();
 
@@ -162,27 +167,60 @@ impl AppIde {
             if pass.in_flight.map(|(k, _, _)| k) == Some(key) {
                 let (_, node, row) = pass.in_flight.take().unwrap();
                 pass.add_references(graph, node, row, &locs);
+                pass.log_once(format!(
+                    "CALLS_RESP key={key} sites={} done={}/{} edges={}",
+                    locs.len(),
+                    pass.done,
+                    pass.total,
+                    pass.edges.len()
+                ));
             }
         }
 
-        // 2) Fire the next lookup.
+        // 2) Fire the next lookup — scanning the WHOLE queue for the first
+        //    fireable symbol, so one open-but-edited file can't freeze the
+        //    rest of the pass behind it (head-of-line blocking).
+        let mut blocked: Option<&'static str> = None;
         if pass.in_flight.is_none() && !pass.queue.is_empty() {
-            let ready = matches!(lsp.status, crate::lsp::LspStatus::Ready);
-            if ready && !lsp.references_busy() {
-                let &(node_i, row) = pass.queue.front().unwrap();
-                let node = &graph.nodes[node_i];
-                let content: &str = match node.file {
-                    None => &self.generated_code,
-                    Some(i) => &self.project_tree.user_src_files[i].1,
-                };
-                let rel = format!("src/{}", node.file_rel);
-                // Sync gate: RA must hold THIS text, or the symbol positions
-                // (and the reply's site lines) would be stale. No did_change —
-                // the pass just waits for the next Project Save.
-                if lsp.last_sent_matches(&rel, content) {
-                    pass.queue.pop_front();
+            if !matches!(lsp.status, crate::lsp::LspStatus::Ready) {
+                blocked = Some("waiting for rust-analyzer…");
+            } else if lsp.references_busy() {
+                blocked = Some("waiting for the usages pass…");
+            } else {
+                // Sync gate per symbol: RA must hold THIS text, or the symbol
+                // positions (and the reply's site lines) would be stale. Never
+                // a did_change (version bumps cancel other requests and
+                // re-trigger flycheck) — but a file RA hasn't opened AT ALL
+                // (fresh app start: docs only open on Save/completion) is
+                // seeded with did_open: a FIRST open bumps nothing, cancels
+                // nothing, runs no flycheck. Open-but-EDITED files wait for
+                // the next Project Save (and are skipped over meanwhile).
+                let mut fired = false;
+                for qi in 0..pass.queue.len() {
+                    let (node_i, row) = pass.queue[qi];
+                    let node = &graph.nodes[node_i];
+                    let content: &str = match node.file {
+                        None => &self.generated_code,
+                        Some(i) => &self.project_tree.user_src_files[i].1,
+                    };
+                    let rel = format!("src/{}", node.file_rel);
+                    let synced = lsp.last_sent_matches(&rel, content);
+                    let seed_open = !synced && !lsp.is_file_open(&rel);
+                    if !(synced || seed_open) {
+                        continue; // open but edited — retry after the next save
+                    }
+                    if seed_open {
+                        lsp.did_open(&rel, content);
+                    }
+                    pass.queue.remove(qi);
                     let sym = &node.symbols[row];
                     let key = pass.take_key();
+                    pass.log_once(format!(
+                        "CALLS_REQ key={key} file={rel} line={} col={} sym={} seed={seed_open}",
+                        sym.line - 1,
+                        sym.col,
+                        sym.name
+                    ));
                     lsp.request_references_for_calls(
                         &rel,
                         (sym.line - 1) as u32,
@@ -191,21 +229,32 @@ impl AppIde {
                     );
                     pass.in_flight = Some((key, node_i, row));
                     pass.waiting_sync = false;
-                } else {
+                    fired = true;
+                    break;
+                }
+                if !fired {
                     pass.waiting_sync = true;
                 }
             }
         }
 
-        // 3) Toolbar status.
-        if pass.waiting_sync && pass.running() {
-            "unsaved changes — Save the project to update the call graph".to_owned()
-        } else if pass.running() {
-            format!("analyzing calls {}/{}…", pass.done, pass.total)
+        // 3) Toolbar status — always says WHY nothing is moving.
+        let status = if pass.running() {
+            if let Some(b) = blocked {
+                b.to_owned()
+            } else if pass.waiting_sync {
+                "unsaved changes — Save the project to update the call graph".to_owned()
+            } else {
+                format!("analyzing calls {}/{}…", pass.done, pass.total)
+            }
         } else if !pass.edges.is_empty() {
             format!("{} call edges", pass.edges.len())
         } else {
-            String::new()
-        }
+            // Distinguish "finished, none found" from "not running" — an
+            // empty diagram with silent status made failures undiagnosable.
+            "no cross-module calls found".to_owned()
+        };
+        pass.log_once(format!("CALLS_STATE {status}"));
+        status
     }
 }

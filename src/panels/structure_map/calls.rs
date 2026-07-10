@@ -41,14 +41,15 @@ pub struct CallPass {
     pub queue: VecDeque<(usize, usize)>,
     /// The one in-flight request: `(local key, node, row)`.
     pub in_flight: Option<(usize, usize, usize)>,
-    /// Monotonic key generator for this pass's requests.
-    next_key: usize,
     pub edges: Vec<CallEdge>,
     seen: HashSet<CallEdge>,
     pub done: usize,
     pub total: usize,
     /// `true` while paused because a file's text isn't synced to RA yet.
     pub waiting_sync: bool,
+    /// Last state line written to the debug log — dedup so the per-frame tick
+    /// doesn't spam the file.
+    pub last_log: String,
 }
 
 impl CallPass {
@@ -66,12 +67,20 @@ impl CallPass {
             hash,
             queue,
             in_flight: None,
-            next_key: 0,
             edges: Vec::new(),
             seen: HashSet::new(),
             done: 0,
             total,
             waiting_sync: false,
+            last_log: String::new(),
+        }
+    }
+
+    /// Debug-log `line` once (skips consecutive duplicates).
+    pub fn log_once(&mut self, line: String) {
+        if self.last_log != line {
+            crate::lsp::debug_log(&line);
+            self.last_log = line;
         }
     }
 
@@ -80,10 +89,12 @@ impl CallPass {
         self.in_flight.is_some() || !self.queue.is_empty()
     }
 
-    /// Fresh key for the next request.
+    /// Fresh request key — globally unique across passes (a per-pass counter
+    /// restarting at 1 let a superseded pass's late reply be mistaken for the
+    /// NEW pass's first request and mis-attribute its references).
     pub fn take_key(&mut self) -> usize {
-        self.next_key += 1;
-        self.next_key
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Fold one symbol's reference sites into edges. `(to_node, to_row)` is the
