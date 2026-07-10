@@ -51,43 +51,53 @@ impl AppIde {
         };
         let (line, _col) = lsp_cursor_pos(display_code, target);
 
-        // Request once per (file, line) — on caret NAVIGATION to a new `let`
-        // line, NOT per keystroke (the key has no text component). The request
-        // carries a `did_change` so the hint reflects unsaved edits too, but ONLY
-        // when NO code-action / completion request is in flight: a did_change
-        // bumps the document version, which would make their pending resolve
-        // "stale code action" or cancel them "content modified". Outside that
-        // window the version bump is harmless (RA re-publishes), and the app's
-        // sparse-sync design is preserved (this fires on navigation, rarely).
+        // CRITICAL — we send NO `did_change` here. A did_change bumps RA's
+        // document version, which (a) cancels other in-flight requests ("content
+        // modified" / "stale code action") AND (b) re-triggers analysis, which
+        // reintroduced the slow "1-minute save" degradation. The app keeps RA
+        // sync SPARSE on purpose (flushed ONLY on Project Save — see
+        // [[lsp-verify-debounce]] / [[session-degradation-fixes]]). So the inlay
+        // path only QUERIES RA while its document already matches what's on
+        // screen (`last_sent_matches`); a plain inlayHint request does not bump
+        // the version, so it's cheap and side-effect-free. While the file is
+        // dirty we hide the hint (its line/cols would be stale against RA's older
+        // text) and re-request once RA catches up (next save / completion /
+        // code-action sync). Ctrl+Enter still works on dirty files — it syncs
+        // itself.
+        let in_sync = self
+            .lsp_state
+            .lock()
+            .unwrap()
+            .last_sent_matches(rel, display_code);
+        if !in_sync {
+            self.inlay_hint = None;
+            self.inlay_requested = None; // re-request once RA catches up
+            return Some(line);
+        }
+
+        // In sync → request once per (file, line).
         let already = self
             .inlay_requested
             .as_ref()
             .is_some_and(|(r, l)| r == rel && *l == line);
         if !already {
-            let busy = self.code_action_in_flight
-                || self.code_action_resolve_in_flight
-                || self.completion_open;
-            if !busy {
-                let sent = {
-                    let mut lsp = self.lsp_state.lock().unwrap();
-                    if matches!(lsp.status, lsp::LspStatus::Ready) {
-                        lsp.did_change(rel, display_code, false);
-                        lsp.request_inlay_hints(rel, line);
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if sent {
-                    self.inlay_requested = Some((rel.to_owned(), line));
-                    // Drop a hint from the previous line while the new request is
-                    // in flight, so a stale type never flashes.
-                    if self.inlay_hint.as_ref().map(|h| h.line) != Some(line) {
-                        self.inlay_hint = None;
-                    }
+            let sent = {
+                let mut lsp = self.lsp_state.lock().unwrap();
+                if matches!(lsp.status, lsp::LspStatus::Ready) {
+                    lsp.request_inlay_hints(rel, line);
+                    true
+                } else {
+                    false
+                }
+            };
+            if sent {
+                self.inlay_requested = Some((rel.to_owned(), line));
+                // Drop a hint from the previous line while the new request is in
+                // flight, so a stale type never flashes.
+                if self.inlay_hint.as_ref().map(|h| h.line) != Some(line) {
+                    self.inlay_hint = None;
                 }
             }
-            // else: busy → retry on a later frame (leaves `inlay_requested` unset).
         }
         Some(line)
     }
