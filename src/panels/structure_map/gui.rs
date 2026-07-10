@@ -2,6 +2,7 @@
 //! lines, solid dependency arrows, and clickable nodes (click → the caller
 //! opens that node's file in the editor).
 
+use super::calls::CallEdge;
 use super::layout::{shown_rows, GraphLayout, HEADER_H, MAX_SYMBOL_ROWS, ROW_H, ROW_NAME_CHARS};
 use super::parse::{ModuleGraph, SymKind};
 use eframe::egui;
@@ -10,11 +11,13 @@ use eframe::egui;
 pub struct StructureView {
     pub zoom: f32,
     pub pan: egui::Vec2,
+    /// Draw the cross-module call edges (Phase 3) over the diagram.
+    pub show_calls: bool,
 }
 
 impl Default for StructureView {
     fn default() -> Self {
-        Self { zoom: 1.0, pan: egui::Vec2::ZERO }
+        Self { zoom: 1.0, pan: egui::Vec2::ZERO, show_calls: true }
     }
 }
 
@@ -31,13 +34,18 @@ const NODE_STROKE: egui::Color32 = egui::Color32::from_rgb(96, 106, 128);
 const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 170, 240);
 const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 145, 215);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
+const CALL_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(200, 150, 50, 160);
 
 /// Render the diagram; returns `Some(NodeClick)` when a node was clicked.
+/// `calls` are the Phase-3 cross-module call edges (drawn when `view.show_calls`);
+/// `calls_status` is a short toolbar note ("analyzing 12/47…" / save hint / "").
 pub fn show(
     ui: &mut egui::Ui,
     graph: &ModuleGraph,
     lay: &GraphLayout,
     view: &mut StructureView,
+    calls: &[CallEdge],
+    calls_status: &str,
 ) -> Option<NodeClick> {
     // ── Toolbar ───────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -65,6 +73,20 @@ pub fn show(
         {
             view.zoom = 1.0;
             view.pan = egui::Vec2::ZERO;
+        }
+        ui.separator();
+        ui.checkbox(&mut view.show_calls, egui::RichText::new("Calls").size(11.0))
+            .on_hover_text(
+                "Show cross-module call edges (amber): which fn/struct is used \
+                 by which item of another module. Computed via rust-analyzer, \
+                 one symbol at a time, only while the project is saved/in sync.",
+            );
+        if !calls_status.is_empty() {
+            ui.label(
+                egui::RichText::new(calls_status)
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(200, 160, 70)),
+            );
         }
         ui.label(
             egui::RichText::new("· drag to pan · click a module to open its file")
@@ -283,6 +305,44 @@ pub fn show(
         ));
         if resp.clicked() && !row_clicked {
             clicked = Some(NodeClick { file: node.file, line: None });
+        }
+    }
+
+    // ── Call edges (Phase 3): caller row → callee row, amber beziers ──────
+    // Drawn OVER the nodes (they attach to row side-edges and travel between
+    // nodes) with a translucent stroke so the text stays readable.
+    if view.show_calls && !calls.is_empty() {
+        let anchor = |ni: usize, row: usize, right_side: bool| -> egui::Pos2 {
+            let p = lay.pos[ni];
+            let visible = graph.nodes[ni].symbols.len().min(MAX_SYMBOL_ROWS);
+            // Row center when rows are drawn; node center when zoomed out or
+            // the row sits past the "+K more" cut.
+            let y = if show_detail && row < visible {
+                p.y + HEADER_H + (row as f32 + 0.5) * ROW_H
+            } else {
+                p.y + p.h / 2.0
+            };
+            let x = if right_side { p.x + p.w } else { p.x };
+            to_screen(x, y)
+        };
+        let stroke = egui::Stroke::new((1.1 * scale).clamp(0.5, 2.0), CALL_COLOR);
+        for e in calls {
+            let going_right =
+                lay.pos[e.to_node].center_x() >= lay.pos[e.from_node].center_x();
+            let from = anchor(e.from_node, e.from_row, going_right);
+            let to = anchor(e.to_node, e.to_row, !going_right);
+            let dx = ((to.x - from.x).abs() * 0.4)
+                .clamp(20.0 * scale, 120.0 * scale)
+                * if going_right { 1.0 } else { -1.0 };
+            let c1 = from + egui::vec2(dx, 0.0);
+            let c2 = to + egui::vec2(-dx, 0.0);
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [from, c1, c2, to],
+                false,
+                egui::Color32::TRANSPARENT,
+                stroke,
+            ));
+            arrowhead(&painter, c2, to, 6.0 * scale.clamp(0.5, 1.5), stroke);
         }
     }
 

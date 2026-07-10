@@ -378,6 +378,12 @@ pub struct LspState {
     references_pending: HashMap<u64, usize>,
     /// Completed reference results, keyed by that same index; drained by the app.
     pub references_results: HashMap<usize, Vec<ReferenceLoc>>,
+    /// Same request/result shape, but a SEPARATE channel for the Structure
+    /// tab's call-graph pass. It cannot share `references_pending`: the usages
+    /// poll drains `take_reference_results` indiscriminately, so a shared map
+    /// would let one consumer steal the other's replies.
+    calls_refs_pending: HashMap<u64, usize>,
+    calls_refs_results: HashMap<usize, Vec<ReferenceLoc>>,
     /// The running rust-analyzer process. Held so it can be KILLED on restart /
     /// app exit — dropping a `std::process::Child` only detaches it (it does NOT
     /// terminate the process), which used to leave orphaned rust-analyzer
@@ -433,6 +439,8 @@ impl Default for LspState {
             inlay_result: Vec::new(),
             references_pending: HashMap::new(),
             references_results: HashMap::new(),
+            calls_refs_pending: HashMap::new(),
+            calls_refs_results: HashMap::new(),
             child: None,
         }
     }
@@ -960,6 +968,50 @@ impl LspState {
         std::mem::take(&mut self.references_results)
     }
 
+    /// Like [`request_references`], but on the Structure tab's own channel —
+    /// its replies land in [`take_calls_reference_results`], out of reach of
+    /// the usages poll (which drains the shared map indiscriminately).
+    pub fn request_references_for_calls(
+        &mut self,
+        rel_path: &str,
+        line: u32,
+        character: u32,
+        local_idx: usize,
+    ) {
+        if self.sender.is_none() {
+            return;
+        }
+        self.next_req_id += 1;
+        let id = self.next_req_id;
+        self.calls_refs_pending.insert(id, local_idx);
+        let uri = format!("{}/{}", self.root_uri, rel_path);
+        self.send_raw(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id":      id,
+                "method":  "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                    "context": { "includeDeclaration": false }
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    /// Drain the completed call-graph reference lookups (Structure tab).
+    pub fn take_calls_reference_results(&mut self) -> HashMap<usize, Vec<ReferenceLoc>> {
+        std::mem::take(&mut self.calls_refs_results)
+    }
+
+    /// `true` while ANY whole-crate references search is in flight (usages pass
+    /// or the Structure call-graph pass) — used to keep those passes serialized
+    /// with each other, never flooding rust-analyzer with parallel searches.
+    pub fn references_busy(&self) -> bool {
+        !self.references_pending.is_empty() || !self.calls_refs_pending.is_empty()
+    }
+
     // ── Diagnostic helpers ────────────────────────────────────────────────────
 
     pub fn error_count_for(&self, path: &str) -> usize {
@@ -1070,6 +1122,8 @@ impl LspState {
         self.code_action_resolved = None;
         self.references_pending.clear();
         self.references_results.clear();
+        self.calls_refs_pending.clear();
+        self.calls_refs_results.clear();
     }
 }
 
@@ -1676,6 +1730,10 @@ fn handle_incoming(
                     s.references_results
                         .insert(local_idx, parse_references(&msg["result"]));
                     ctx.request_repaint();
+                } else if let Some(local_idx) = s.calls_refs_pending.remove(&req_id) {
+                    s.calls_refs_results
+                        .insert(local_idx, parse_references(&msg["result"]));
+                    ctx.request_repaint();
                 } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;
                     s.completion_response_received = true;
@@ -1741,6 +1799,10 @@ fn handle_incoming(
                 } else if let Some(local_idx) = s.references_pending.remove(&req_id) {
                     // Treat as "0 references" rather than leaving it pending forever.
                     s.references_results.insert(local_idx, Vec::new());
+                    ctx.request_repaint();
+                } else if let Some(local_idx) = s.calls_refs_pending.remove(&req_id) {
+                    // Same: an error reply must not wedge the call-graph pass.
+                    s.calls_refs_results.insert(local_idx, Vec::new());
                     ctx.request_repaint();
                 } else if s.completion_req_id == Some(req_id) {
                     s.completion_req_id = None;

@@ -28,6 +28,10 @@ pub struct SymbolItem {
     pub name: String,
     pub kind: SymKind,
     pub line: usize,
+    /// 0-based column (chars) of the name on its line — the position a
+    /// `textDocument/references` request must point at. Keyword/modifier
+    /// prefixes are ASCII, so char count == UTF-16 units here.
+    pub col: usize,
 }
 
 /// One module in the graph.
@@ -49,6 +53,24 @@ pub struct ModuleNode {
     /// order. Methods inside `impl` blocks are counted in `fn_count` but not
     /// listed here (they'd bloat the node).
     pub symbols: Vec<SymbolItem>,
+    /// Every column-0 non-blank, non-comment line (1-based), each mapped to the
+    /// symbol row it STARTS (`Some(row)`) or `None` (attrs, `impl`, `use`, the
+    /// closing `}` of a block, …). Used to attribute a reference site to its
+    /// enclosing top-level item: the last anchor at or before the site's line.
+    /// A closing `}` anchor correctly ENDS the previous item's span, and an
+    /// `impl` anchor keeps its methods from being blamed on the item above it.
+    pub anchors: Vec<(usize, Option<usize>)>,
+}
+
+impl ModuleNode {
+    /// The symbol row enclosing 1-based `line`, per the anchor rule above.
+    pub fn enclosing_row(&self, line: usize) -> Option<usize> {
+        let at = self.anchors.partition_point(|&(l, _)| l <= line);
+        if at == 0 {
+            return None; // above the first top-level item
+        }
+        self.anchors[at - 1].1
+    }
 }
 
 /// The whole module graph. Edge tuples are `(from, to)` node indices.
@@ -160,7 +182,7 @@ fn make_node(
     file: Option<usize>,
     content: &str,
 ) -> ModuleNode {
-    let (fn_count, ty_count, symbols) = scan_items(content);
+    let (fn_count, ty_count, symbols, anchors) = scan_items(content);
     ModuleNode {
         path,
         name: name.to_owned(),
@@ -169,45 +191,61 @@ fn make_node(
         fn_count,
         ty_count,
         symbols,
+        anchors,
     }
 }
 
-/// Count `fn` and `struct`/`enum`/`trait` item lines (badge-grade accuracy)
-/// and collect the TOP-LEVEL ones (column 0 — items inside `impl`/`mod` blocks
-/// are indented, so the badge counts them but the symbol list skips them).
-fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
+/// Count `fn` and `struct`/`enum`/`trait` item lines (badge-grade accuracy),
+/// collect the TOP-LEVEL ones (column 0 — items inside `impl`/`mod` blocks are
+/// indented, so the badge counts them but the symbol list skips them), and
+/// record the column-0 anchors (see [`ModuleNode::anchors`]).
+fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, Option<usize>)>) {
     let mut fns = 0;
     let mut tys = 0;
     let mut symbols = Vec::new();
+    let mut anchors = Vec::new();
     for (li, line) in text.lines().enumerate() {
-        let t = strip_modifiers(line.trim_start());
+        let trimmed = line.trim_start();
+        let t = strip_modifiers(trimmed);
         let top_level = !line.starts_with(char::is_whitespace);
+        // Column-0 anchor (may be upgraded to Some(row) below).
+        let is_anchor = top_level && !trimmed.is_empty() && !trimmed.starts_with("//");
         let (kind, rest) = if let Some(r) = t.strip_prefix("fn ") {
             fns += 1;
-            (SymKind::Fn, r)
+            (Some(SymKind::Fn), r)
         } else if let Some(r) = t.strip_prefix("struct ") {
             tys += 1;
-            (SymKind::Struct, r)
+            (Some(SymKind::Struct), r)
         } else if let Some(r) = t.strip_prefix("enum ") {
             tys += 1;
-            (SymKind::Enum, r)
+            (Some(SymKind::Enum), r)
         } else if let Some(r) = t.strip_prefix("trait ") {
             tys += 1;
-            (SymKind::Trait, r)
+            (Some(SymKind::Trait), r)
         } else {
-            continue;
+            (None, t)
         };
+        let mut row: Option<usize> = None;
         if top_level {
-            let name: String = rest
-                .chars()
-                .take_while(|&c| c.is_alphanumeric() || c == '_')
-                .collect();
-            if !name.is_empty() {
-                symbols.push(SymbolItem { name, kind, line: li + 1 });
+            if let Some(kind) = kind {
+                let name: String = rest
+                    .chars()
+                    .take_while(|&c| c.is_alphanumeric() || c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    // Column of the name = indent + stripped modifiers + keyword
+                    // (all ASCII, so chars == UTF-16 units).
+                    let col = line.chars().count() - rest.chars().count();
+                    row = Some(symbols.len());
+                    symbols.push(SymbolItem { name, kind, line: li + 1, col });
+                }
             }
         }
+        if is_anchor {
+            anchors.push((li + 1, row));
+        }
     }
-    (fns, tys, symbols)
+    (fns, tys, symbols, anchors)
 }
 
 /// Strip leading visibility / item modifiers so `pub async fn` matches `fn `.

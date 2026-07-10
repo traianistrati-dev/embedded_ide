@@ -411,6 +411,9 @@ pub struct AppIde {
     )>,
     /// Zoom / pan state of the Structure diagram (session-only).
     structure_view: crate::panels::structure_map::gui::StructureView,
+    /// The incremental cross-module call-graph pass (Phase 3) — serialized
+    /// references lookups, one per top-level symbol; rebuilt on content change.
+    structure_calls: Option<crate::panels::structure_map::calls::CallPass>,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -819,6 +822,7 @@ impl AppIde {
             active_tab: McuTab::Pins,
             structure_cache: None,
             structure_view: Default::default(),
+            structure_calls: None,
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
             inline_errors_enabled: true,

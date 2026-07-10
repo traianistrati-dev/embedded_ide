@@ -12,6 +12,7 @@
 //! `parse` builds the graph, `layout` assigns layered positions, `gui` draws
 //! it (fit + zoom + pan; click on a node opens its file in the editor).
 
+pub mod calls;
 pub mod gui;
 pub mod layout;
 pub mod parse;
