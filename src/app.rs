@@ -31,6 +31,8 @@ mod project_panel;
 
 mod mcu_panel;
 
+mod structure_tab;
+
 mod editor_panel;
 
 mod project_io;
@@ -202,6 +204,8 @@ enum McuTab {
     Peripherals,
     Clock,
     System,
+    /// Module-relationship diagram of the project (parse-based, chip-agnostic).
+    Structure,
 }
 
 impl McuTab {
@@ -211,6 +215,7 @@ impl McuTab {
             Self::Peripherals => "Peripherals",
             Self::Clock => "Clock",
             Self::System => "System",
+            Self::Structure => "Structure",
         }
     }
 }
@@ -397,6 +402,15 @@ pub struct AppIde {
     cached_project_files: Option<ProjectFiles>,
     /// Active tab in the MCU configurator
     active_tab: McuTab,
+    /// Cached module graph for the Structure tab: `(content hash, graph,
+    /// layout)`. Rebuilt only when a file's content or the file list changes.
+    structure_cache: Option<(
+        u64,
+        crate::panels::structure_map::parse::ModuleGraph,
+        crate::panels::structure_map::layout::GraphLayout,
+    )>,
+    /// Zoom / pan state of the Structure diagram (session-only).
+    structure_view: crate::panels::structure_map::gui::StructureView,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -803,6 +817,8 @@ impl AppIde {
             cached_project_files: None,
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
+            structure_cache: None,
+            structure_view: Default::default(),
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
             inline_errors_enabled: true,

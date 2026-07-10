@@ -59,6 +59,7 @@ impl AppIde {
                     McuTab::Peripherals,
                     McuTab::Clock,
                     McuTab::System,
+                    McuTab::Structure,
                 ] {
                     let is_active = self.active_tab == tab;
                     let label = egui::RichText::new(tab.label())
@@ -278,6 +279,9 @@ impl AppIde {
                         );
                     });
                 }
+                // Module-relationship diagram — chip-agnostic (works with no
+                // MCU selected), so it doesn't gate on `self.mcu`.
+                McuTab::Structure => self.show_structure_tab(ui),
             }
         });
     }
