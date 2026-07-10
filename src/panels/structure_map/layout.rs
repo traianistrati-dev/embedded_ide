@@ -64,8 +64,19 @@ pub struct GraphLayout {
     pub height: f32,
 }
 
-/// Compute the layered layout for `graph`.
+/// Compute the layered layout for `graph` (module edges only).
 pub fn layout(graph: &ModuleGraph) -> GraphLayout {
+    layout_with_calls(graph, &[])
+}
+
+/// Compute the layered layout for `graph`, also minimizing overlap against the
+/// Phase-3 call edges (`calls` = node-level `(from, to)` pairs). Beyond the
+/// barycenter sweeps, a TRANSPOSE pass swaps adjacent nodes within a layer
+/// whenever that lowers a geometric cost = edge–edge crossings + a penalty for
+/// every edge that passes THROUGH a non-endpoint node box — directly the "paths
+/// should overlap as little as possible" objective. One-time cost per layout
+/// (cached by content hash), tiny at this graph size.
+pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> GraphLayout {
     let n = graph.nodes.len();
     if n == 0 {
         return GraphLayout::default();
@@ -75,6 +86,12 @@ pub fn layout(graph: &ModuleGraph) -> GraphLayout {
         .iter()
         .chain(graph.contains.iter())
         .copied()
+        .collect();
+    // Everything the cost/ordering should care about, calls included.
+    let all_edges: Vec<(usize, usize)> = edges
+        .iter()
+        .copied()
+        .chain(calls.iter().copied().filter(|(a, b)| a != b))
         .collect();
 
     // ── Layering: bounded longest-path relaxation (cycle-safe) ────────────
@@ -101,9 +118,10 @@ pub fn layout(graph: &ModuleGraph) -> GraphLayout {
         layers[l].push(i);
     }
 
-    // Neighbor sets (both directions) for the barycenter heuristic.
+    // Neighbor sets (both directions) for the barycenter heuristic — call
+    // edges participate too, so heavily-calling modules gravitate together.
     let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for &(u, v) in &edges {
+    for &(u, v) in &all_edges {
         neighbors[u].push(v);
         neighbors[v].push(u);
     }
@@ -150,6 +168,18 @@ pub fn layout(graph: &ModuleGraph) -> GraphLayout {
         pack(l, &mut centers);
     }
 
+    // Layer Y baselines — depend only on the layer assignment (tallest node of
+    // each layer above), NOT on in-layer order, so they can be fixed here and
+    // reused by the geometric cost below and the final positions.
+    let mut layer_y = vec![MARGIN; max_layer + 1];
+    for l in 1..=max_layer {
+        let above_h = layers[l - 1]
+            .iter()
+            .map(|&i| height_of(i))
+            .fold(0.0, f32::max);
+        layer_y[l] = layer_y[l - 1] + above_h + V_GAP;
+    }
+
     // ── Barycenter sweeps: sort each layer by the mean center of its
     //    neighbors, then repack. Two down-up passes settle small graphs. ────
     for _ in 0..2 {
@@ -183,17 +213,82 @@ pub fn layout(graph: &ModuleGraph) -> GraphLayout {
         }
     }
 
-    // ── Final positions ────────────────────────────────────────────────────
-    // Y: layers stack on the TALLEST node of each layer above (heights vary
-    // with the symbol-row count). X: shift so the leftmost node is at MARGIN.
-    let mut layer_y = vec![MARGIN; max_layer + 1];
-    for l in 1..=max_layer {
-        let above_h = layers[l - 1]
+    // ── Transpose: adjacent in-layer swaps that reduce path overlap ────────
+    // Cost = proper edge–edge crossings (edges sharing a node excluded — port
+    // spreading in the GUI separates those) + 4× for every edge that passes
+    // THROUGH a non-endpoint node box. Straight-segment geometry approximates
+    // the drawn curves well enough to order nodes by.
+    let cost = |centers: &[f32]| -> f32 {
+        let seg = |u: usize, v: usize| -> ((f32, f32), (f32, f32)) {
+            if layer[v] > layer[u] {
+                (
+                    (centers[u], layer_y[layer[u]] + height_of(u)),
+                    (centers[v], layer_y[layer[v]]),
+                )
+            } else {
+                // Back edge (cycle): leaves the top, enters the bottom.
+                (
+                    (centers[u], layer_y[layer[u]]),
+                    (centers[v], layer_y[layer[v]] + height_of(v)),
+                )
+            }
+        };
+        let segs: Vec<((f32, f32), (f32, f32), usize, usize)> = all_edges
             .iter()
-            .map(|&i| height_of(i))
-            .fold(0.0, f32::max);
-        layer_y[l] = layer_y[l - 1] + above_h + V_GAP;
+            .map(|&(u, v)| {
+                let (a, b) = seg(u, v);
+                (a, b, u, v)
+            })
+            .collect();
+        let mut c = 0.0;
+        for i in 0..segs.len() {
+            let (a1, a2, u1, v1) = segs[i];
+            for &(b1, b2, u2, v2) in segs.iter().skip(i + 1) {
+                if u1 == u2 || u1 == v2 || v1 == u2 || v1 == v2 {
+                    continue;
+                }
+                if segments_cross(a1, a2, b1, b2) {
+                    c += 1.0;
+                }
+            }
+            for k in 0..n {
+                if k == u1 || k == v1 {
+                    continue;
+                }
+                let (w, h) = (width_of(k), height_of(k));
+                if seg_hits_rect(a1, a2, centers[k] - w / 2.0, layer_y[layer[k]], w, h) {
+                    c += 4.0;
+                }
+            }
+        }
+        c
+    };
+    let mut best = cost(&centers);
+    if best > 0.0 {
+        for _ in 0..3 {
+            let mut improved = false;
+            for li in 0..layers.len() {
+                for a in 0..layers[li].len().saturating_sub(1) {
+                    layers[li].swap(a, a + 1);
+                    pack(&layers[li], &mut centers);
+                    let c = cost(&centers);
+                    if c + 0.01 < best {
+                        best = c;
+                        improved = true;
+                    } else {
+                        layers[li].swap(a, a + 1); // revert
+                        pack(&layers[li], &mut centers);
+                    }
+                }
+            }
+            if !improved || best == 0.0 {
+                break;
+            }
+        }
     }
+
+    // ── Final positions ────────────────────────────────────────────────────
+    // X: shift so the leftmost node starts at MARGIN (layer Y fixed above).
     let min_cx = (0..n)
         .map(|i| centers[i] - width_of(i) / 2.0)
         .fold(f32::MAX, f32::min);
@@ -213,6 +308,37 @@ pub fn layout(graph: &ModuleGraph) -> GraphLayout {
     }
 
     GraphLayout { pos, width: max_x + MARGIN, height: max_y + MARGIN }
+}
+
+// ── Geometry helpers (transpose cost + GUI edge routing) ────────────────────
+
+fn orient(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+}
+
+/// `true` when segments `p1–p2` and `q1–q2` PROPERLY cross (shared endpoints
+/// and mere touching don't count — those are handled by port spreading).
+pub fn segments_cross(p1: (f32, f32), p2: (f32, f32), q1: (f32, f32), q2: (f32, f32)) -> bool {
+    let d1 = orient(q1, q2, p1);
+    let d2 = orient(q1, q2, p2);
+    let d3 = orient(p1, p2, q1);
+    let d4 = orient(p1, p2, q2);
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
+}
+
+/// `true` when segment `p1–p2` passes through the `(x, y, w, h)` rectangle
+/// (an endpoint strictly inside, or a proper crossing of any side).
+pub fn seg_hits_rect(p1: (f32, f32), p2: (f32, f32), x: f32, y: f32, w: f32, h: f32) -> bool {
+    let inside =
+        |p: (f32, f32)| p.0 > x && p.0 < x + w && p.1 > y && p.1 < y + h;
+    if inside(p1) || inside(p2) {
+        return true;
+    }
+    let c = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
+    segments_cross(p1, p2, c[0], c[1])
+        || segments_cross(p1, p2, c[1], c[2])
+        || segments_cross(p1, p2, c[2], c[3])
+        || segments_cross(p1, p2, c[3], c[0])
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -296,5 +422,78 @@ mod tests {
         assert_eq!(shown_rows(0), 0);
         assert_eq!(shown_rows(MAX_SYMBOL_ROWS), MAX_SYMBOL_ROWS);
         assert_eq!(shown_rows(MAX_SYMBOL_ROWS + 5), MAX_SYMBOL_ROWS + 1);
+    }
+
+    #[test]
+    fn segment_geometry_helpers() {
+        // An X-crossing…
+        assert!(segments_cross((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0)));
+        // …parallel lines don't cross, and a shared endpoint doesn't count.
+        assert!(!segments_cross((0.0, 0.0), (10.0, 0.0), (0.0, 5.0), (10.0, 5.0)));
+        assert!(!segments_cross((0.0, 0.0), (10.0, 10.0), (10.0, 10.0), (20.0, 0.0)));
+        // Through the box, ending inside it, and missing it entirely.
+        assert!(seg_hits_rect((0.0, 5.0), (20.0, 5.0), 5.0, 0.0, 10.0, 10.0));
+        assert!(seg_hits_rect((0.0, 0.0), (8.0, 5.0), 5.0, 0.0, 10.0, 10.0));
+        assert!(!seg_hits_rect((0.0, 20.0), (20.0, 20.0), 5.0, 0.0, 10.0, 10.0));
+    }
+
+    /// The dep edges `a→y` and `b→x` start out crossed (creation order puts
+    /// `x` left of `y` while `a` sits left of `b`); the ordering optimization
+    /// must untangle them.
+    #[test]
+    fn ordering_untangles_crossing_dep_edges() {
+        let main_rs = "mod a;\nmod b;\nmod x;\nmod y;\n".to_owned();
+        let files = vec![
+            ("a.rs".into(), "use crate::y::f;\n".into()),
+            ("b.rs".into(), "use crate::x::g;\n".into()),
+            ("x.rs".into(), "pub fn g() {}\n".into()),
+            ("y.rs".into(), "pub fn f() {}\n".into()),
+        ];
+        let g = build_graph(&main_rs, &files);
+        let lay = layout(&g);
+        let at = |p: &str| {
+            let i = g.nodes.iter().position(|n| n.path == p).unwrap();
+            lay.pos[i]
+        };
+        let (a, b, x, y) = (at("a"), at("b"), at("x"), at("y"));
+        assert!(
+            !segments_cross(
+                (a.center_x(), a.bottom()),
+                (y.center_x(), y.y),
+                (b.center_x(), b.bottom()),
+                (x.center_x(), x.y),
+            ),
+            "a→y and b→x must not cross after ordering"
+        );
+    }
+
+    /// With NO module edge distinguishing `c` from `d`, a call pair `b → d`
+    /// must pull `d` toward `b`'s side so the call edge doesn't cross `a`'s
+    /// containment links (calls participate in the ordering).
+    #[test]
+    fn call_edges_influence_ordering() {
+        let main_rs = "mod a;\nmod b;\n".to_owned();
+        let files = vec![
+            ("a/mod.rs".into(), "pub mod d;\npub mod c;\n".into()),
+            ("a/d.rs".into(), "pub fn f() {}\n".into()),
+            ("a/c.rs".into(), "pub fn g() {}\n".into()),
+            ("b.rs".into(), "pub fn caller() {}\n".into()),
+        ];
+        let g = build_graph(&main_rs, &files);
+        let idx = |p: &str| g.nodes.iter().position(|n| n.path == p).unwrap();
+        let (a, ac, ad, b) = (idx("a"), idx("a::c"), idx("a::d"), idx("b"));
+        let lay = layout_with_calls(&g, &[(b, ad)]); // b calls into a::d
+        let seg_down = |i: usize, j: usize| {
+            (
+                (lay.pos[i].center_x(), lay.pos[i].bottom()),
+                (lay.pos[j].center_x(), lay.pos[j].y),
+            )
+        };
+        let (call_from, call_to) = seg_down(b, ad);
+        let (link_from, link_to) = seg_down(a, ac);
+        assert!(
+            !segments_cross(call_from, call_to, link_from, link_to),
+            "the call edge must not cross a's containment link to c"
+        );
     }
 }

@@ -125,39 +125,111 @@ pub fn show(
 
     let stroke_w = (1.3 * scale).clamp(0.6, 2.4);
 
-    // ── Containment edges (dashed, parent bottom → child top) ─────────────
-    for &(p, c) in &graph.contains {
-        let a = lay.pos[p];
-        let b = lay.pos[c];
-        let from = to_screen(a.center_x(), a.bottom());
-        let to = to_screen(b.center_x(), b.y);
-        painter.add(egui::Shape::dashed_line(
-            &[from, to],
-            egui::Stroke::new(stroke_w, CONTAIN_COLOR),
-            4.0 * scale.max(0.5),
-            4.0 * scale.max(0.5),
-        ));
-    }
+    // ── Module edges (containment dashed + dependency solid), routed ──────
+    // Two anti-overlap measures: (1) PORT SPREADING — each edge endpoint gets
+    // its own x along the node's top/bottom edge, ordered by where the other
+    // end sits, so edges never converge on one point; (2) OBSTACLE DETOUR — an
+    // edge whose straight segment would cut through another node box becomes a
+    // lateral bezier around the blockers instead.
+    {
+        // (u, v, is_dep): deps drawn solid + arrowhead, containment dashed.
+        let module_edges: Vec<(usize, usize, bool)> = graph
+            .contains
+            .iter()
+            .map(|&(u, v)| (u, v, false))
+            .chain(graph.deps.iter().map(|&(u, v)| (u, v, true)))
+            .collect();
 
-    // ── Dependency edges (solid arrows, user bottom → used top) ───────────
-    for &(u, v) in &graph.deps {
-        let a = lay.pos[u];
-        let b = lay.pos[v];
-        // A back-edge (cycle) leaves from the top and enters the bottom.
-        let downward = b.y > a.y;
-        let from = if downward {
-            to_screen(a.center_x(), a.bottom())
-        } else {
-            to_screen(a.center_x(), a.y)
-        };
-        let to = if downward {
-            to_screen(b.center_x(), b.y)
-        } else {
-            to_screen(b.center_x(), b.bottom())
-        };
-        let stroke = egui::Stroke::new(stroke_w, DEP_COLOR);
-        painter.line_segment([from, to], stroke);
-        arrowhead(&painter, from, to, 7.0 * scale.clamp(0.5, 1.6), stroke);
+        // Ports in VIRTUAL coords. Endpoint id = 2·edge (source) / 2·edge+1
+        // (target). A downward edge exits u's bottom and enters v's top; a
+        // back edge (cycle) exits the top and enters the bottom.
+        let mut port_x = vec![0.0f32; module_edges.len() * 2];
+        let mut groups: std::collections::HashMap<(usize, bool), Vec<(usize, f32)>> =
+            std::collections::HashMap::new();
+        for (ei, &(u, v, _)) in module_edges.iter().enumerate() {
+            let downward = lay.pos[v].y > lay.pos[u].y;
+            groups
+                .entry((u, !downward))
+                .or_default()
+                .push((ei * 2, lay.pos[v].center_x()));
+            groups
+                .entry((v, downward))
+                .or_default()
+                .push((ei * 2 + 1, lay.pos[u].center_x()));
+        }
+        for ((node, _is_top), mut ends) in groups {
+            ends.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.0.cmp(&b.0))
+            });
+            let p = lay.pos[node];
+            let count = ends.len() as f32;
+            for (k, (endpoint, _)) in ends.into_iter().enumerate() {
+                let frac = (k as f32 + 1.0) / (count + 1.0);
+                port_x[endpoint] = p.x + p.w * (0.12 + 0.76 * frac);
+            }
+        }
+
+        let dash = 4.0 * scale.max(0.5);
+        for (ei, &(u, v, is_dep)) in module_edges.iter().enumerate() {
+            let (a, b) = (lay.pos[u], lay.pos[v]);
+            let downward = b.y > a.y;
+            let from_v = (port_x[ei * 2], if downward { a.bottom() } else { a.y });
+            let to_v = (port_x[ei * 2 + 1], if downward { b.y } else { b.bottom() });
+
+            // Straight segment blocked by a non-endpoint node box? → detour x
+            // just past the blockers, on whichever side deviates less.
+            let mut blocked = false;
+            let (mut left_cand, mut right_cand) = (f32::MAX, f32::MIN);
+            for (k, q) in lay.pos.iter().enumerate() {
+                if k == u || k == v {
+                    continue;
+                }
+                if crate::panels::structure_map::layout::seg_hits_rect(
+                    from_v, to_v, q.x, q.y, q.w, q.h,
+                ) {
+                    blocked = true;
+                    left_cand = left_cand.min(q.x);
+                    right_cand = right_cand.max(q.x + q.w);
+                }
+            }
+            let stroke = egui::Stroke::new(
+                stroke_w,
+                if is_dep { DEP_COLOR } else { CONTAIN_COLOR },
+            );
+            let from = to_screen(from_v.0, from_v.1);
+            let to = to_screen(to_v.0, to_v.1);
+            if !blocked {
+                if is_dep {
+                    painter.line_segment([from, to], stroke);
+                    arrowhead(&painter, from, to, 7.0 * scale.clamp(0.5, 1.6), stroke);
+                } else {
+                    painter.add(egui::Shape::dashed_line(&[from, to], stroke, dash, dash));
+                }
+            } else {
+                const PAD: f32 = 14.0;
+                let mid = (from_v.0 + to_v.0) / 2.0;
+                let (l, r) = (left_cand - PAD, right_cand + PAD);
+                let detour_x = if (mid - l).abs() <= (r - mid).abs() { l } else { r };
+                let c1 = to_screen(detour_x, from_v.1 + 0.30 * (to_v.1 - from_v.1));
+                let c2 = to_screen(detour_x, from_v.1 + 0.70 * (to_v.1 - from_v.1));
+                let bez = egui::epaint::CubicBezierShape::from_points_stroke(
+                    [from, c1, c2, to],
+                    false,
+                    egui::Color32::TRANSPARENT,
+                    stroke,
+                );
+                if is_dep {
+                    painter.add(bez);
+                    arrowhead(&painter, c2, to, 7.0 * scale.clamp(0.5, 1.6), stroke);
+                } else {
+                    // Dashed beziers aren't a primitive — flatten to a polyline.
+                    let pts = bez.flatten(Some(2.0));
+                    painter.add(egui::Shape::dashed_line(&pts, stroke, dash, dash));
+                }
+            }
+        }
     }
 
     // ── Nodes ─────────────────────────────────────────────────────────────

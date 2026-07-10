@@ -31,10 +31,32 @@ impl AppIde {
                 parse::build_graph(&self.generated_code, &self.project_tree.user_src_files);
             let lay = layout::layout(&graph);
             self.structure_cache = Some((hash, graph, lay));
+            self.structure_layout_calls = 0; // fresh layout knows no call edges
         }
 
         // ── Drive the call-graph pass (only while the tab is open) ─────────
         let calls_status = self.tick_structure_calls(hash);
+
+        // ── Re-layout once the call pass settles ───────────────────────────
+        // The initial layout only knows module edges; when the finished pass
+        // contributes call pairs, one re-layout lets the ordering + transpose
+        // minimize call-edge crossings too (see `layout_with_calls`).
+        if let Some(pass) = &self.structure_calls {
+            if pass.hash == hash && !pass.running() {
+                let pairs: std::collections::BTreeSet<(usize, usize)> = pass
+                    .edges
+                    .iter()
+                    .map(|e| (e.from_node, e.to_node))
+                    .collect();
+                if pairs.len() != self.structure_layout_calls {
+                    if let Some((_, graph, lay)) = self.structure_cache.as_mut() {
+                        let pairs: Vec<(usize, usize)> = pairs.into_iter().collect();
+                        *lay = layout::layout_with_calls(graph, &pairs);
+                        self.structure_layout_calls = pairs.len();
+                    }
+                }
+            }
+        }
         // Keep frames coming while the pass works or waits for a save — LSP
         // replies repaint on arrival, but the NEXT request fires from here.
         if self

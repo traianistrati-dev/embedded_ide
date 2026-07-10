@@ -414,6 +414,10 @@ pub struct AppIde {
     /// The incremental cross-module call-graph pass (Phase 3) — serialized
     /// references lookups, one per top-level symbol; rebuilt on content change.
     structure_calls: Option<crate::panels::structure_map::calls::CallPass>,
+    /// Node-level call-pair count the current layout was optimized with — when
+    /// the finished pass yields a different set, the diagram is re-laid-out
+    /// once so node ordering also minimizes call-edge crossings.
+    structure_layout_calls: usize,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -823,6 +827,7 @@ impl AppIde {
             structure_cache: None,
             structure_view: Default::default(),
             structure_calls: None,
+            structure_layout_calls: 0,
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
             inline_errors_enabled: true,
