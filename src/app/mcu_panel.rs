@@ -206,24 +206,46 @@ impl AppIde {
                     // Diagram fills the remaining (top) area.
                     // Computed before borrowing `self.mcu` mutably below.
                     let chip_label = self.selected_label();
-                    let pin_changed = egui::ScrollArea::both()
-                        .show(ui, |ui| match &mut self.mcu {
-                            Some(mcu) => mcu.draw(ui),
-                            None => {
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}  {}  —  support coming soon",
-                                            ph::GEAR, chip_label
-                                        ))
-                                        .size(18.0)
-                                        .color(egui::Color32::GRAY),
-                                    );
-                                });
-                                None
-                            }
-                        })
-                        .inner;
+                    let pin_changed = match &mut self.mcu {
+                        Some(mcu) => {
+                            // AUTO-ZOOM: the chip + virtual modules are drawn at
+                            // their natural fixed size inside an `egui::Scene`
+                            // whose rect is fed each frame from LAST frame's
+                            // content bounds — so the canvas always rescales to
+                            // fit the panel (window resizes, panel drags, new
+                            // modules). Drag-pan is disabled and the rect is
+                            // overwritten every frame, so no manual pan/zoom
+                            // sticks: it is a pure fit-to-view. Capped at 1.0 —
+                            // a large panel shows the chip at 100%, centered,
+                            // never blown up.
+                            let mut scene_rect = self.mcu_scene_bounds;
+                            let mut content_bounds = egui::Rect::NOTHING;
+                            let inner = egui::Scene::new()
+                                .zoom_range(0.05..=1.0)
+                                .drag_pan_buttons(egui::DragPanButtons::empty())
+                                .show(ui, &mut scene_rect, |ui| {
+                                    let r = mcu.draw(ui);
+                                    content_bounds = ui.min_rect();
+                                    r
+                                })
+                                .inner;
+                            self.mcu_scene_bounds = content_bounds;
+                            inner
+                        }
+                        None => {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}  {}  —  support coming soon",
+                                        ph::GEAR, chip_label
+                                    ))
+                                    .size(18.0)
+                                    .color(egui::Color32::GRAY),
+                                );
+                            });
+                            None
+                        }
+                    };
 
                     // Any pin change (configure OR deselect) triggers a full
                     // sync: files for unconfigured pins are removed, files for

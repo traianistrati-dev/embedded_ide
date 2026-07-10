@@ -402,6 +402,11 @@ pub struct AppIde {
     cached_project_files: Option<ProjectFiles>,
     /// Active tab in the MCU configurator
     active_tab: McuTab,
+    /// Content bounds (scene coords) of the Pins canvas — chip + virtual
+    /// modules — measured last frame. Fed back as the `egui::Scene` rect each
+    /// frame, so the canvas AUTO-FITS the panel: resizing the window (or
+    /// adding/dragging modules) rescales it; manual pan/zoom never persists.
+    mcu_scene_bounds: egui::Rect,
     /// Cached module graph for the Structure tab: `(content hash, graph,
     /// layout)`. Rebuilt only when a file's content or the file list changes.
     structure_cache: Option<(
@@ -828,6 +833,7 @@ impl AppIde {
             cached_project_files: None,
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
+            mcu_scene_bounds: egui::Rect::NOTHING,
             structure_cache: None,
             structure_view: Default::default(),
             structure_calls: None,
