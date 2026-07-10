@@ -1,12 +1,13 @@
-//! Center-left "Code Editor" panel.
+//! Leftmost "Code Editor" panel (the [Editor][Project][MCU] layout).
 //!
-//! Owns: the toolbar (Copy / Build / Scan / Flash buttons), the code editor
-//! widget itself, the embedded bottom diagnostics panel, the LSP completion
-//! popup, and the inline-diagnostic overlays.  It also writes the edited text
-//! back into `generated_code` (main.rs) or the matching user source file.
+//! Owns: the toolbar (Copy + Errors/Types toggles), the code editor widget
+//! itself, the embedded bottom diagnostics panel, the LSP completion popup,
+//! and the inline-diagnostic overlays.  It also writes the edited text back
+//! into `generated_code` (main.rs) or the matching user source file.
 //!
-//! Implemented as one inherent method on `AppIde`; it consumes the
-//! `project_files` snapshot (nothing after this panel needs it).
+//! Implemented as one inherent method on `AppIde`; it borrows the
+//! `project_files` snapshot (the project tree, rendered after it, needs the
+//! same snapshot).
 
 use super::AppIde;
 use super::ProjectFileId;
@@ -45,19 +46,19 @@ const MIN_EDITOR_FONT_SIZE: f32 = 7.0;
 const MAX_EDITOR_FONT_SIZE: f32 = 40.0;
 
 impl AppIde {
-    /// Render the central-left code editor panel (toolbar + editor + diagnostics).
+    /// Render the leftmost code editor panel (toolbar + editor + diagnostics).
     pub(super) fn show_editor_panel(
         &mut self,
         ui: &mut egui::Ui,
-        project_files: Option<ProjectFiles>,
+        project_files: &Option<ProjectFiles>,
     ) {
-        // ── Compute editor content AFTER the project tree ─────────────────────
-        // IMPORTANT: display_code must be computed AFTER the project tree panel
-        // so that self.selected_file reflects any click the user just made.
-        // Computing it before the tree caused a write-back bug: when the user
-        // clicked a user file, self.selected_file was already updated by the
-        // click handler, but display_code still held the OLD file's content.
-        // The write-back then wrongly stored the old content into the new file.
+        // ── Ordering invariant vs. the project tree ───────────────────────────
+        // IMPORTANT: the tree panel must NEVER run BETWEEN computing
+        // display_code and the end-of-frame write-back — a tree click would
+        // switch `selected_file` mid-frame and the write-back would store the
+        // OLD file's text into the NEW file. Running the WHOLE editor panel
+        // before the tree (the [Editor][Project][MCU] layout since 2026-07-10)
+        // keeps the pair atomic: a click this frame takes effect next frame.
         let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
             self.project_tree
                 .user_src_files
@@ -72,7 +73,7 @@ impl AppIde {
             // and then immediately overwrite generated_code via the write-back.
             self.generated_code.clone()
         } else {
-            match &project_files {
+            match project_files {
                 Some(files) => self.selected_file.content(files).to_owned(),
                 None => self.generated_code.clone(),
             }
@@ -84,7 +85,7 @@ impl AppIde {
         // shows that file (next frame for a cross-file jump).
         let displayed_file = self.selected_file;
 
-        // ── Panel 2: Code Editor ──────────────────────────────────────────────
+        // ── Panel 1: Code Editor (leftmost) ───────────────────────────────────
         // Cap the width so the editor can never fully cover the MCU Configurator
         // (the central panel) — a too-wide persisted/dragged width used to hide
         // it entirely. Always leave ≥30% for the MCU panel.

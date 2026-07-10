@@ -1,4 +1,5 @@
-//! Left "Project" panel — header toolbar (Save / Open / New) plus the file
+//! "Project" panel — docked between the editor and the MCU Configurator (the
+//! [Editor][Project][MCU] layout) — header toolbar (Save / Open / New) plus the file
 //! tree body (delegated to [`crate::project_tree`]).
 //!
 //! Rendering is an inherent method on [`AppIde`] so it can read/write the
