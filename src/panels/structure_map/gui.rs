@@ -2,8 +2,8 @@
 //! lines, solid dependency arrows, and clickable nodes (click → the caller
 //! opens that node's file in the editor).
 
-use super::layout::GraphLayout;
-use super::parse::ModuleGraph;
+use super::layout::{shown_rows, GraphLayout, HEADER_H, MAX_SYMBOL_ROWS, ROW_H, ROW_NAME_CHARS};
+use super::parse::{ModuleGraph, SymKind};
 use eframe::egui;
 
 /// Session view state of the diagram (not persisted).
@@ -18,9 +18,11 @@ impl Default for StructureView {
     }
 }
 
-/// A click on a node: which file to open (`None` = main.rs).
+/// A click on a node: which file to open (`None` = main.rs) and, when a
+/// symbol row was clicked, the 1-based line to jump to.
 pub struct NodeClick {
     pub file: Option<usize>,
+    pub line: Option<usize>,
 }
 
 const NODE_FILL: egui::Color32 = egui::Color32::from_rgb(46, 52, 66);
@@ -140,6 +142,9 @@ pub fn show(
     let mut clicked: Option<NodeClick> = None;
     let name_font = egui::FontId::proportional((11.5 * scale).clamp(6.0, 24.0));
     let sub_font = egui::FontId::proportional((8.5 * scale).clamp(5.0, 18.0));
+    let row_font = egui::FontId::monospace((8.0 * scale).clamp(5.0, 16.0));
+    // Symbol rows are unreadable below this scale — draw compact nodes instead.
+    let show_detail = scale > 0.45;
     for (i, node) in graph.nodes.iter().enumerate() {
         let p = lay.pos[i];
         let r = egui::Rect::from_min_size(
@@ -164,19 +169,30 @@ pub fn show(
             egui::StrokeKind::Inside,
         );
 
-        // Name (upper line) + a small fn/ty badge (lower line, hidden when tiny).
-        let show_sub = scale > 0.45;
-        let name_y = if show_sub { r.center().y - r.height() * 0.18 } else { r.center().y };
+        // ── Header band: name + fn/ty badge ───────────────────────────────
+        // Rows below need the detail scale; a row-less (or zoomed-out) node
+        // centers the header content in the whole box instead.
+        let rows = if show_detail { shown_rows(node.symbols.len()) } else { 0 };
+        let header = if rows > 0 {
+            egui::Rect::from_min_size(r.min, egui::vec2(r.width(), HEADER_H * scale))
+        } else {
+            r
+        };
+        let name_y = if show_detail {
+            header.center().y - header.height() * 0.18
+        } else {
+            header.center().y
+        };
         painter.text(
-            egui::pos2(r.center().x, name_y),
+            egui::pos2(header.center().x, name_y),
             egui::Align2::CENTER_CENTER,
             &node.name,
             name_font.clone(),
             egui::Color32::WHITE,
         );
-        if show_sub {
+        if show_detail {
             painter.text(
-                egui::pos2(r.center().x, r.center().y + r.height() * 0.24),
+                egui::pos2(header.center().x, header.center().y + header.height() * 0.24),
                 egui::Align2::CENTER_CENTER,
                 format!("{} fn · {} ty", node.fn_count, node.ty_count),
                 sub_font.clone(),
@@ -184,17 +200,112 @@ pub fn show(
             );
         }
 
+        // ── Symbol rows (top-level fn/struct/enum/trait; click → jump) ────
+        let mut row_clicked = false;
+        if rows > 0 {
+            painter.line_segment(
+                [
+                    egui::pos2(r.left() + 4.0 * scale, header.bottom()),
+                    egui::pos2(r.right() - 4.0 * scale, header.bottom()),
+                ],
+                egui::Stroke::new(0.8, NODE_STROKE),
+            );
+            let row_h = ROW_H * scale;
+            for j in 0..rows {
+                let row_rect = egui::Rect::from_min_size(
+                    egui::pos2(r.left(), header.bottom() + j as f32 * row_h),
+                    egui::vec2(r.width(), row_h),
+                );
+                // Trailing "+K more" row when truncated (not clickable).
+                if node.symbols.len() > MAX_SYMBOL_ROWS && j == rows - 1 {
+                    painter.text(
+                        egui::pos2(row_rect.left() + 6.0 * scale, row_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("+{} more", node.symbols.len() - MAX_SYMBOL_ROWS),
+                        row_font.clone(),
+                        egui::Color32::from_rgb(130, 135, 150),
+                    );
+                    continue;
+                }
+                let sym = &node.symbols[j];
+                let row_resp = ui.interact(
+                    row_rect.intersect(rect),
+                    ui.id().with(("structure_row", i, j)),
+                    egui::Sense::click(),
+                );
+                if row_resp.hovered() {
+                    painter.rect_filled(
+                        row_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 170, 240, 26),
+                    );
+                }
+                let (glyph, g_color) = kind_glyph(sym.kind);
+                painter.text(
+                    egui::pos2(row_rect.left() + 6.0 * scale, row_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    glyph,
+                    row_font.clone(),
+                    g_color,
+                );
+                let name: String = if sym.name.chars().count() > ROW_NAME_CHARS {
+                    let mut s: String =
+                        sym.name.chars().take(ROW_NAME_CHARS - 1).collect();
+                    s.push('…');
+                    s
+                } else {
+                    sym.name.clone()
+                };
+                painter.text(
+                    egui::pos2(row_rect.left() + 16.0 * scale, row_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    row_font.clone(),
+                    egui::Color32::from_rgb(200, 205, 215),
+                );
+                row_resp.clone().on_hover_text(format!(
+                    "{} {} — line {}\nClick to jump to it",
+                    kind_word(sym.kind),
+                    sym.name,
+                    sym.line
+                ));
+                if row_resp.clicked() {
+                    clicked = Some(NodeClick { file: node.file, line: Some(sym.line) });
+                    row_clicked = true;
+                }
+            }
+        }
+
         let full = if node.path.is_empty() { "crate root" } else { &node.path };
         resp.clone().on_hover_text(format!(
             "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor",
             node.file_rel, node.fn_count, node.ty_count
         ));
-        if resp.clicked() {
-            clicked = Some(NodeClick { file: node.file });
+        if resp.clicked() && !row_clicked {
+            clicked = Some(NodeClick { file: node.file, line: None });
         }
     }
 
     clicked
+}
+
+/// Glyph letter + colour for a symbol kind (drawn before the name in a row).
+fn kind_glyph(kind: SymKind) -> (&'static str, egui::Color32) {
+    match kind {
+        SymKind::Fn => ("f", egui::Color32::from_rgb(130, 170, 240)),
+        SymKind::Struct => ("S", egui::Color32::from_rgb(230, 160, 80)),
+        SymKind::Enum => ("E", egui::Color32::from_rgb(190, 130, 230)),
+        SymKind::Trait => ("T", egui::Color32::from_rgb(120, 200, 140)),
+    }
+}
+
+fn kind_word(kind: SymKind) -> &'static str {
+    match kind {
+        SymKind::Fn => "fn",
+        SymKind::Struct => "struct",
+        SymKind::Enum => "enum",
+        SymKind::Trait => "trait",
+    }
 }
 
 /// Two short lines forming an arrowhead at `to`, pointing away from `from`.

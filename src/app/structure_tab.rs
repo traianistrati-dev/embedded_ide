@@ -36,7 +36,7 @@ impl AppIde {
             return;
         };
         if let Some(click) = gui::show(ui, graph, lay, &mut self.structure_view) {
-            self.selected_file = match click.file {
+            let id = match click.file {
                 None => ProjectFileId::MainRs,
                 // Guard against a stale index (file list changed this frame).
                 Some(i) if i < self.project_tree.user_src_files.len() => {
@@ -44,6 +44,13 @@ impl AppIde {
                 }
                 Some(_) => return,
             };
+            self.selected_file = id;
+            // A symbol-row click also jumps to the item's line (same scroll +
+            // highlight path the usages popup and F12 navigation use).
+            if let Some(line) = click.line {
+                self.pending_scroll_to_line = Some((id, line));
+                self.highlighted_def_line = Some((id, line));
+            }
         }
     }
 }

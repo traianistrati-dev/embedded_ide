@@ -10,6 +10,26 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Kind of a top-level item shown inside a module node (Phase 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymKind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+}
+
+/// One top-level item of a module — listed inside its node, UML-package style.
+/// `line` is 1-based in the module's file (used for click-to-jump), exact for
+/// the text the graph was parsed from (unlike LSP positions, which refer to
+/// rust-analyzer's last-synced text and would mis-jump after unsaved edits).
+#[derive(Clone, Debug)]
+pub struct SymbolItem {
+    pub name: String,
+    pub kind: SymKind,
+    pub line: usize,
+}
+
 /// One module in the graph.
 #[derive(Clone, Debug)]
 pub struct ModuleNode {
@@ -25,6 +45,10 @@ pub struct ModuleNode {
     pub fn_count: usize,
     /// Number of `struct` / `enum` / `trait` items.
     pub ty_count: usize,
+    /// Top-level items (column-0 `fn` / `struct` / `enum` / `trait`), in file
+    /// order. Methods inside `impl` blocks are counted in `fn_count` but not
+    /// listed here (they'd bloat the node).
+    pub symbols: Vec<SymbolItem>,
 }
 
 /// The whole module graph. Edge tuples are `(from, to)` node indices.
@@ -136,7 +160,7 @@ fn make_node(
     file: Option<usize>,
     content: &str,
 ) -> ModuleNode {
-    let (fn_count, ty_count) = count_items(content);
+    let (fn_count, ty_count, symbols) = scan_items(content);
     ModuleNode {
         path,
         name: name.to_owned(),
@@ -144,22 +168,46 @@ fn make_node(
         file,
         fn_count,
         ty_count,
+        symbols,
     }
 }
 
-/// Count `fn` and `struct`/`enum`/`trait` item lines (badge-grade accuracy).
-fn count_items(text: &str) -> (usize, usize) {
+/// Count `fn` and `struct`/`enum`/`trait` item lines (badge-grade accuracy)
+/// and collect the TOP-LEVEL ones (column 0 — items inside `impl`/`mod` blocks
+/// are indented, so the badge counts them but the symbol list skips them).
+fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
     let mut fns = 0;
     let mut tys = 0;
-    for line in text.lines() {
+    let mut symbols = Vec::new();
+    for (li, line) in text.lines().enumerate() {
         let t = strip_modifiers(line.trim_start());
-        if t.starts_with("fn ") {
+        let top_level = !line.starts_with(char::is_whitespace);
+        let (kind, rest) = if let Some(r) = t.strip_prefix("fn ") {
             fns += 1;
-        } else if t.starts_with("struct ") || t.starts_with("enum ") || t.starts_with("trait ") {
+            (SymKind::Fn, r)
+        } else if let Some(r) = t.strip_prefix("struct ") {
             tys += 1;
+            (SymKind::Struct, r)
+        } else if let Some(r) = t.strip_prefix("enum ") {
+            tys += 1;
+            (SymKind::Enum, r)
+        } else if let Some(r) = t.strip_prefix("trait ") {
+            tys += 1;
+            (SymKind::Trait, r)
+        } else {
+            continue;
+        };
+        if top_level {
+            let name: String = rest
+                .chars()
+                .take_while(|&c| c.is_alphanumeric() || c == '_')
+                .collect();
+            if !name.is_empty() {
+                symbols.push(SymbolItem { name, kind, line: li + 1 });
+            }
         }
     }
-    (fns, tys)
+    (fns, tys, symbols)
 }
 
 /// Strip leading visibility / item modifiers so `pub async fn` matches `fn `.
@@ -403,6 +451,41 @@ fn main() {
         let g = build_graph(main_rs, &[]);
         assert!(g.deps.is_empty(), "external crate paths must not create edges");
         assert_eq!(g.nodes[0].fn_count, 1);
+    }
+
+    #[test]
+    fn extracts_top_level_symbols_with_lines() {
+        let text = "\
+pub struct Parser<const N: usize> {
+    len: usize,
+}
+pub enum State { Idle, Busy }
+impl Parser<8> {
+    pub fn feed(&mut self, b: u8) {}
+}
+pub fn checksum(data: &[u8]) -> u8 { 0 }
+trait Frame {}
+";
+        let g = build_graph("mod a;\n", &[("a.rs".into(), text.into())]);
+        let a = &g.nodes[1];
+        let names: Vec<(&str, SymKind, usize)> = a
+            .symbols
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind, s.line))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Parser", SymKind::Struct, 1),
+                ("State", SymKind::Enum, 4),
+                ("checksum", SymKind::Fn, 8),
+                ("Frame", SymKind::Trait, 9),
+            ],
+            "top-level items only — the indented `fn feed` method is excluded"
+        );
+        // …but the badge still counts the method.
+        assert_eq!(a.fn_count, 2);
+        assert_eq!(a.ty_count, 3);
     }
 
     #[test]
