@@ -23,9 +23,36 @@ use super::modules::VirtualModule;
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
+const STRUCTURE_HEADER: &str = "@structure_layout";
 
 /// File name written at the project root.
 pub const FILE_NAME: &str = "mcu.config";
+
+/// Manually dragged node positions of the Structure diagram, keyed by the
+/// module's workspace-relative file (`"mw_radar/utils.rs"`, `"main.rs"`) —
+/// stable across graph rebuilds, unlike node indices. BTreeMap so the
+/// serialized section is deterministic (the mtime-stable project writes rely
+/// on unchanged content staying byte-identical).
+pub type StructurePositions = std::collections::BTreeMap<String, (f32, f32)>;
+
+/// The `@structure_layout` section text for `positions` (empty map → "").
+/// Appended to [`serialize`]'s output by the app (the diagram isn't MCU state).
+pub fn structure_layout_section(positions: &StructurePositions) -> String {
+    if positions.is_empty() {
+        return String::new();
+    }
+    let body = ron::ser::to_string_pretty(positions, ron::ser::PrettyConfig::new())
+        .unwrap_or_else(|_| ron::to_string(positions).unwrap_or_else(|_| "{}".into()));
+    format!("{STRUCTURE_HEADER}\n{body}\n")
+}
+
+/// Parse the `@structure_layout` section back (absent/garbled → empty map, so
+/// projects saved before this feature load unchanged).
+pub fn parse_structure_layout(text: &str) -> StructurePositions {
+    section_body(text, STRUCTURE_HEADER)
+        .and_then(|body| ron::from_str::<StructurePositions>(body.trim()).ok())
+        .unwrap_or_default()
+}
 
 /// Build the `mcu.config` text from the MCU's `modules` and (STM32-only) clock.
 /// Returns an empty string when there is nothing to persist (no modules and no
@@ -146,5 +173,26 @@ mod tests {
         let (m, c) = parse("not a config file\n");
         assert!(m.is_empty());
         assert!(c.is_none());
+    }
+
+    #[test]
+    fn structure_layout_round_trips_and_coexists() {
+        let mut pos = StructurePositions::new();
+        pos.insert("main.rs".into(), (14.0, 14.0));
+        pos.insert("mw_radar/utils.rs".into(), (321.5, 208.0));
+
+        // Appended after the MCU sections, every section still parses.
+        let mut text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()));
+        text.push('\n');
+        text.push_str(&structure_layout_section(&pos));
+
+        assert_eq!(parse_structure_layout(&text), pos, "positions round-trip");
+        let (m, c) = parse(&text);
+        assert_eq!(m.len(), 1, "modules unaffected by the extra section");
+        assert!(c.is_some(), "clock unaffected by the extra section");
+
+        // Absent section (older projects) → empty map; empty map → no section.
+        assert!(parse_structure_layout("@modules\n[]\n").is_empty());
+        assert_eq!(structure_layout_section(&StructurePositions::new()), "");
     }
 }

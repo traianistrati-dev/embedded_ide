@@ -77,6 +77,19 @@ impl AppIde {
         // the first check re-resolves for this project (later saves keep it).
         self.reset_workspace_lock();
 
+        // Restore the Structure diagram's dragged positions (`@structure_layout`
+        // in mcu.config) — read independently of the MCU restore below since
+        // the diagram is chip-agnostic. Missing file/section → automatic layout.
+        {
+            use crate::panels::mcu_module::mcu_config;
+            self.structure_overrides = std::fs::read_to_string(root.join(mcu_config::FILE_NAME))
+                .map(|t| mcu_config::parse_structure_layout(&t))
+                .unwrap_or_default();
+            // Force the next Structure-tab frame to rebuild + re-apply them
+            // even when the content hash happens to match the cached graph.
+            self.structure_cache = None;
+        }
+
         // ── Restore pin state from src/main.rs ───────────────────────────────
         // Parse the GEN_BEGIN…GEN_END block and apply every recognised pin
         // assignment back to the MCU diagram.  If no markers are found (e.g.

@@ -29,7 +29,8 @@ impl AppIde {
         if self.structure_cache.as_ref().map(|(h, _, _)| *h) != Some(hash) {
             let graph =
                 parse::build_graph(&self.generated_code, &self.project_tree.user_src_files);
-            let lay = layout::layout(&graph);
+            let mut lay = layout::layout(&graph);
+            layout::apply_overrides(&mut lay, &graph, &self.structure_overrides);
             self.structure_cache = Some((hash, graph, lay));
             self.structure_layout_calls = 0; // fresh layout knows no call edges
         }
@@ -52,6 +53,7 @@ impl AppIde {
                     if let Some((_, graph, lay)) = self.structure_cache.as_mut() {
                         let pairs: Vec<(usize, usize)> = pairs.into_iter().collect();
                         *lay = layout::layout_with_calls(graph, &pairs);
+                        layout::apply_overrides(lay, graph, &self.structure_overrides);
                         self.structure_layout_calls = pairs.len();
                     }
                 }
@@ -68,8 +70,8 @@ impl AppIde {
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        // ── Draw + handle a node / symbol-row click ────────────────────────
-        let Some((_, graph, lay)) = &self.structure_cache else {
+        // ── Draw + handle clicks / drags ───────────────────────────────────
+        let Some((_, graph, lay)) = self.structure_cache.as_mut() else {
             return;
         };
         let call_edges: &[calls::CallEdge] = self
@@ -77,14 +79,43 @@ impl AppIde {
             .as_ref()
             .map(|p| p.edges.as_slice())
             .unwrap_or(&[]);
-        if let Some(click) = gui::show(
+        let result = gui::show(
             ui,
-            graph,
+            &*graph,
             lay,
             &mut self.structure_view,
             call_edges,
             &calls_status,
-        ) {
+        );
+
+        // A header drag ended → pin that node's position (keyed by its file,
+        // which survives graph rebuilds). Saved with the project (mcu.config).
+        if let Some(i) = result.moved {
+            if let Some(node) = graph.nodes.get(i) {
+                self.structure_overrides
+                    .insert(node.file_rel.clone(), (lay.pos[i].x, lay.pos[i].y));
+            }
+        }
+
+        // "Auto layout" → drop every pin and re-run the automatic arrangement
+        // (with the current call pairs, when the pass has delivered them).
+        if result.reset_layout {
+            self.structure_overrides.clear();
+            let pairs: Vec<(usize, usize)> = self
+                .structure_calls
+                .as_ref()
+                .filter(|p| p.hash == hash && !p.running())
+                .map(|p| {
+                    let set: std::collections::BTreeSet<(usize, usize)> =
+                        p.edges.iter().map(|e| (e.from_node, e.to_node)).collect();
+                    set.into_iter().collect()
+                })
+                .unwrap_or_default();
+            *lay = layout::layout_with_calls(&*graph, &pairs);
+            self.structure_layout_calls = pairs.len();
+        }
+
+        if let Some(click) = result.click {
             let id = match click.file {
                 None => ProjectFileId::MainRs,
                 // Guard against a stale index (file list changed this frame).

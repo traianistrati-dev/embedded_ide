@@ -418,6 +418,10 @@ pub struct AppIde {
     /// the finished pass yields a different set, the diagram is re-laid-out
     /// once so node ordering also minimizes call-edge crossings.
     structure_layout_calls: usize,
+    /// Manually dragged Structure-diagram positions, keyed by the module's
+    /// file. Applied over every automatic layout; persisted in the project's
+    /// `mcu.config` (`@structure_layout` section) on Project Save.
+    structure_overrides: crate::panels::mcu_module::mcu_config::StructurePositions,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -828,6 +832,7 @@ impl AppIde {
             structure_view: Default::default(),
             structure_calls: None,
             structure_layout_calls: 0,
+            structure_overrides: Default::default(),
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
             inline_errors_enabled: true,
@@ -1068,13 +1073,26 @@ impl AppIde {
         applied
     }
 
-    /// The `mcu.config` text for the live MCU (virtual modules + clock), written
-    /// alongside the project by `write_project`. Empty when no chip is selected.
+    /// The `mcu.config` text: the live MCU's sections (virtual modules + clock)
+    /// plus the Structure diagram's dragged positions (`@structure_layout`,
+    /// app-level state — not the MCU's). Written alongside the project by
+    /// `write_project`; empty when there is nothing to persist.
     fn mcu_config_text(&self) -> String {
-        self.mcu
+        let mut out = self
+            .mcu
             .as_ref()
             .map(|m| m.mcu_config_text())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let structure = crate::panels::mcu_module::mcu_config::structure_layout_section(
+            &self.structure_overrides,
+        );
+        if !structure.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&structure);
+        }
+        out
     }
 
     /// Regenerate every editable config file fresh from the selected chip,

@@ -3,7 +3,10 @@
 //! opens that node's file in the editor).
 
 use super::calls::CallEdge;
-use super::layout::{shown_rows, GraphLayout, HEADER_H, MAX_SYMBOL_ROWS, ROW_H, ROW_NAME_CHARS};
+use super::layout::{
+    recompute_bounds, shown_rows, GraphLayout, HEADER_H, MARGIN, MAX_SYMBOL_ROWS, ROW_H,
+    ROW_NAME_CHARS,
+};
 use super::parse::{ModuleGraph, SymKind};
 use eframe::egui;
 
@@ -28,6 +31,17 @@ pub struct NodeClick {
     pub line: Option<usize>,
 }
 
+/// Everything one frame of the diagram can report back to the driver.
+#[derive(Default)]
+pub struct ShowResult {
+    /// A node / symbol-row click (open the file, optionally jump to a line).
+    pub click: Option<NodeClick>,
+    /// A header drag ended on this node — persist its position override.
+    pub moved: Option<usize>,
+    /// The "Auto layout" button was clicked — clear overrides and re-lay-out.
+    pub reset_layout: bool,
+}
+
 const NODE_FILL: egui::Color32 = egui::Color32::from_rgb(46, 52, 66);
 const ROOT_FILL: egui::Color32 = egui::Color32::from_rgb(60, 58, 44);
 const NODE_STROKE: egui::Color32 = egui::Color32::from_rgb(96, 106, 128);
@@ -36,17 +50,20 @@ const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 145, 215);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
 const CALL_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(200, 150, 50, 160);
 
-/// Render the diagram; returns `Some(NodeClick)` when a node was clicked.
+/// Render the diagram; the [`ShowResult`] carries clicks, a finished node drag
+/// and the Auto-layout request. `lay` is mutable: dragging a node's HEADER
+/// moves it live (edges/ports/detours recompute from `lay.pos` every frame).
 /// `calls` are the Phase-3 cross-module call edges (drawn when `view.show_calls`);
 /// `calls_status` is a short toolbar note ("analyzing 12/47…" / save hint / "").
 pub fn show(
     ui: &mut egui::Ui,
     graph: &ModuleGraph,
-    lay: &GraphLayout,
+    lay: &mut GraphLayout,
     view: &mut StructureView,
     calls: &[CallEdge],
     calls_status: &str,
-) -> Option<NodeClick> {
+) -> ShowResult {
+    let mut result = ShowResult::default();
     // ── Toolbar ───────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
         ui.label(
@@ -74,6 +91,16 @@ pub fn show(
             view.zoom = 1.0;
             view.pan = egui::Vec2::ZERO;
         }
+        if ui
+            .small_button("Auto layout")
+            .on_hover_text(
+                "Discard the manually dragged positions and re-run the \
+                 automatic arrangement",
+            )
+            .clicked()
+        {
+            result.reset_layout = true;
+        }
         ui.separator();
         ui.checkbox(&mut view.show_calls, egui::RichText::new("Calls").size(11.0))
             .on_hover_text(
@@ -89,9 +116,12 @@ pub fn show(
             );
         }
         ui.label(
-            egui::RichText::new("· drag to pan · click a module to open its file")
-                .size(10.5)
-                .color(egui::Color32::from_rgb(120, 120, 130)),
+            egui::RichText::new(
+                "· drag background = pan · drag a module's header = move it · \
+                 click = open",
+            )
+            .size(10.5)
+            .color(egui::Color32::from_rgb(120, 120, 130)),
         );
     });
     ui.add_space(2.0);
@@ -99,7 +129,7 @@ pub fn show(
     // ── Canvas ────────────────────────────────────────────────────────────
     let avail = ui.available_size();
     if avail.x < 40.0 || avail.y < 40.0 || lay.pos.is_empty() {
-        return None;
+        return result;
     }
     let (rect, bg_resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
     if bg_resp.dragged() {
@@ -233,7 +263,6 @@ pub fn show(
     }
 
     // ── Nodes ─────────────────────────────────────────────────────────────
-    let mut clicked: Option<NodeClick> = None;
     let name_font = egui::FontId::proportional((11.5 * scale).clamp(6.0, 24.0));
     let sub_font = egui::FontId::proportional((8.5 * scale).clamp(5.0, 18.0));
     let row_font = egui::FontId::monospace((8.0 * scale).clamp(5.0, 16.0));
@@ -253,6 +282,40 @@ pub fn show(
             ui.id().with(("structure_node", i)),
             egui::Sense::click(),
         );
+
+        // ── Header drag: move the node ─────────────────────────────────────
+        // The header band is the drag handle (the whole box when compact) —
+        // registered after the node's click response so the pointer prefers
+        // it there; symbol rows below keep their click-to-jump untouched.
+        // Deltas are divided by `scale` (screen → virtual). Edges recompute
+        // from `lay.pos` next frame, so they follow with a one-frame lag —
+        // the usual immediate-mode drag behaviour.
+        let pre_rows = if show_detail { shown_rows(node.symbols.len()) } else { 0 };
+        let handle_h = if pre_rows > 0 { HEADER_H * scale } else { r.height() };
+        let drag_resp = ui
+            .interact(
+                egui::Rect::from_min_size(r.min, egui::vec2(r.width(), handle_h))
+                    .intersect(rect),
+                ui.id().with(("structure_drag", i)),
+                egui::Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        if drag_resp.dragged() {
+            let d = drag_resp.drag_delta() / scale;
+            lay.pos[i].x = (lay.pos[i].x + d.x).max(MARGIN);
+            lay.pos[i].y = (lay.pos[i].y + d.y).max(MARGIN);
+        }
+        if drag_resp.drag_stopped() {
+            recompute_bounds(lay);
+            result.moved = Some(i);
+        }
+        // Re-read the (possibly just-moved) position for drawing.
+        let p = lay.pos[i];
+        let r = egui::Rect::from_min_size(
+            to_screen(p.x, p.y),
+            egui::vec2(p.w, p.h) * scale,
+        );
+
         let fill = if i == 0 { ROOT_FILL } else { NODE_FILL };
         let stroke_c = if resp.hovered() { HOVER_STROKE } else { NODE_STROKE };
         painter.rect(
@@ -364,7 +427,7 @@ pub fn show(
                     sym.line
                 ));
                 if row_resp.clicked() {
-                    clicked = Some(NodeClick { file: node.file, line: Some(sym.line) });
+                    result.click = Some(NodeClick { file: node.file, line: Some(sym.line) });
                     row_clicked = true;
                 }
             }
@@ -375,8 +438,10 @@ pub fn show(
             "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor",
             node.file_rel, node.fn_count, node.ty_count
         ));
-        if resp.clicked() && !row_clicked {
-            clicked = Some(NodeClick { file: node.file, line: None });
+        // The header's drag-sense response wins the pointer there, so a plain
+        // click on the header surfaces as `drag_resp.clicked()`.
+        if (resp.clicked() || drag_resp.clicked()) && !row_clicked {
+            result.click = Some(NodeClick { file: node.file, line: None });
         }
     }
 
@@ -418,7 +483,7 @@ pub fn show(
         }
     }
 
-    clicked
+    result
 }
 
 /// Glyph letter + colour for a symbol kind (drawn before the name in a row).

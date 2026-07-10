@@ -27,7 +27,9 @@ pub const ROW_NAME_CHARS: usize = 26;
 const ROW_PAD_BOTTOM: f32 = 6.0;
 const H_GAP: f32 = 30.0;
 const V_GAP: f32 = 52.0;
-const MARGIN: f32 = 14.0;
+/// Outer margin of the virtual canvas — also the drag clamp (nodes can't be
+/// dragged to negative coordinates, which would break the fit math).
+pub const MARGIN: f32 = 14.0;
 
 /// Rows drawn for a node: every symbol, or MAX + a trailing "+K more" row.
 pub fn shown_rows(symbol_count: usize) -> usize {
@@ -310,6 +312,41 @@ pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> Graph
     GraphLayout { pos, width: max_x + MARGIN, height: max_y + MARGIN }
 }
 
+// ── Manual position overrides (drag & drop) ─────────────────────────────────
+
+/// Re-place every node whose file appears in `overrides` (keyed by
+/// `ModuleNode::file_rel` — stable across graph rebuilds, unlike node indices)
+/// at its user-dragged position, then refresh the layout bounds. Called after
+/// every automatic layout, so pinned nodes stay put while the rest auto-flow.
+pub fn apply_overrides(
+    lay: &mut GraphLayout,
+    graph: &ModuleGraph,
+    overrides: &std::collections::BTreeMap<String, (f32, f32)>,
+) {
+    if overrides.is_empty() {
+        return;
+    }
+    for (i, node) in graph.nodes.iter().enumerate() {
+        if let Some(&(x, y)) = overrides.get(&node.file_rel) {
+            lay.pos[i].x = x.max(MARGIN);
+            lay.pos[i].y = y.max(MARGIN);
+        }
+    }
+    recompute_bounds(lay);
+}
+
+/// Refresh `width`/`height` from the node boxes (after drags / overrides).
+pub fn recompute_bounds(lay: &mut GraphLayout) {
+    let mut max_x = 0.0f32;
+    let mut max_y = 0.0f32;
+    for p in &lay.pos {
+        max_x = max_x.max(p.x + p.w);
+        max_y = max_y.max(p.y + p.h);
+    }
+    lay.width = max_x + MARGIN;
+    lay.height = max_y + MARGIN;
+}
+
 // ── Geometry helpers (transpose cost + GUI edge routing) ────────────────────
 
 fn orient(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
@@ -465,6 +502,32 @@ mod tests {
             ),
             "a→y and b→x must not cross after ordering"
         );
+    }
+
+    #[test]
+    fn overrides_pin_nodes_by_file_and_grow_bounds() {
+        let main_rs = "mod a;\n".to_owned();
+        let files = vec![("a.rs".into(), "pub fn f() {}\n".into())];
+        let g = build_graph(&main_rs, &files);
+        let mut lay = layout(&g);
+        let auto_main = (lay.pos[0].x, lay.pos[0].y);
+
+        let mut ov = std::collections::BTreeMap::new();
+        ov.insert("a.rs".into(), (400.0, 300.0));
+        ov.insert("gone.rs".into(), (9.0, 9.0)); // stale key → ignored
+        apply_overrides(&mut lay, &g, &ov);
+
+        assert_eq!((lay.pos[1].x, lay.pos[1].y), (400.0, 300.0), "a.rs pinned");
+        assert_eq!((lay.pos[0].x, lay.pos[0].y), auto_main, "main untouched");
+        assert!(
+            lay.width >= 400.0 + lay.pos[1].w && lay.height >= 300.0 + lay.pos[1].h,
+            "bounds must grow to cover the dragged node"
+        );
+
+        // Below-margin positions are clamped (negative coords break fit math).
+        ov.insert("a.rs".into(), (-50.0, -50.0));
+        apply_overrides(&mut lay, &g, &ov);
+        assert_eq!((lay.pos[1].x, lay.pos[1].y), (MARGIN, MARGIN));
     }
 
     /// With NO module edge distinguishing `c` from `d`, a call pair `b → d`
