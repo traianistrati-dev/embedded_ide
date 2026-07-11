@@ -172,6 +172,29 @@ impl AppIde {
         }
     }
 
+    // ── Project rename ────────────────────────────────────────────────────────
+
+    /// Rename the saved project's FOLDER (leaf only — always the same drive)
+    /// and update `project_dir` / `project_name`. The Cargo package name is
+    /// deliberately untouched: it is per-chip (the flash pipeline looks the ELF
+    /// up by it), not per-project. Everything else follows automatically — the
+    /// Git tab reads `project_dir` per command, the fs watcher watches the temp
+    /// RA workspace, and no project file stores the folder name.
+    pub(super) fn rename_project(&mut self, new_name: &str) -> Result<(), String> {
+        let old_dir = self
+            .project_dir
+            .clone()
+            .ok_or("No saved project to rename")?;
+        let new_dir = rename_project_dir(&old_dir, new_name)?;
+        let name = new_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| new_name.trim().to_owned());
+        self.project_dir = Some(new_dir);
+        self.project_name = Some(name);
+        Ok(())
+    }
+
     // ── Filesystem watcher polling ────────────────────────────────────────────
     /// Drains the notify channel and applies any relevant Create / Remove /
     /// Rename events to `project_tree`.
@@ -370,6 +393,61 @@ impl AppIde {
     }
 }
 
+/// Validate a project FOLDER name for Windows: non-empty, no reserved
+/// characters, no trailing dot/space, not a reserved device name.
+pub(super) fn valid_project_name(name: &str) -> Result<(), String> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err("Name cannot be empty".into());
+    }
+    if n.chars()
+        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20)
+    {
+        return Err(r#"Name cannot contain < > : " / \ | ? *"#.into());
+    }
+    if n.ends_with('.') || n.ends_with(' ') {
+        return Err("Name cannot end with a dot or a space".into());
+    }
+    let stem = n.split('.').next().unwrap_or(n).to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.ends_with(|c: char| c.is_ascii_digit()));
+    if reserved {
+        return Err(format!("\"{n}\" is a reserved Windows name"));
+    }
+    Ok(())
+}
+
+/// Rename `old_dir`'s LEAF to `new_name` (same parent → same drive, so
+/// `fs::rename` always applies). Returns the new path. A case-only change is
+/// allowed (the `exists()` collision check would false-positive on Windows'
+/// case-insensitive filesystem); renaming to the identical name is a no-op.
+pub(super) fn rename_project_dir(
+    old_dir: &std::path::Path,
+    new_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let new_name = new_name.trim();
+    valid_project_name(new_name)?;
+    let parent = old_dir
+        .parent()
+        .ok_or("Project folder has no parent directory")?;
+    let new_dir = parent.join(new_name);
+    let old_leaf = old_dir
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if old_leaf == new_name {
+        return Ok(old_dir.to_path_buf()); // unchanged
+    }
+    let case_only = old_leaf.eq_ignore_ascii_case(new_name);
+    if !case_only && new_dir.exists() {
+        return Err(format!("\"{new_name}\" already exists here"));
+    }
+    std::fs::rename(old_dir, &new_dir).map_err(|e| format!("Rename failed: {e}"))?;
+    Ok(new_dir)
+}
+
 /// Apply one watcher CREATE event to the tree state. A directory is tracked as
 /// a FOLDER (never a file); a file needs readable `content` (`None` — deleted
 /// meanwhile, or unreadable — is skipped, NOT pushed as an empty phantom).
@@ -393,6 +471,49 @@ pub(super) fn apply_fs_create(
     };
     if !user_src_files.iter().any(|(p, _)| p == rel) {
         user_src_files.push((rel.to_owned(), content));
+    }
+}
+
+#[cfg(test)]
+mod rename_project_tests {
+    use super::{rename_project_dir, valid_project_name};
+
+    #[test]
+    fn name_validation() {
+        assert!(valid_project_name("my_project-2").is_ok());
+        assert!(valid_project_name("  ").is_err(), "empty");
+        assert!(valid_project_name("a/b").is_err(), "path separator");
+        assert!(valid_project_name("a:b").is_err(), "colon");
+        assert!(valid_project_name("done.").is_err(), "trailing dot");
+        assert!(valid_project_name("CON").is_err(), "reserved device");
+        assert!(valid_project_name("com3").is_err(), "reserved device");
+        assert!(valid_project_name("COMET").is_ok(), "COM prefix but not COMn");
+    }
+
+    #[test]
+    fn renames_leaf_and_reports_collisions() {
+        let base = std::env::temp_dir().join(format!("eide_rename_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let old = base.join("proj_a");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("marker.txt"), "x").unwrap();
+
+        // Plain rename moves the folder and its contents.
+        let newp = rename_project_dir(&old, "proj_b").unwrap();
+        assert_eq!(newp, base.join("proj_b"));
+        assert!(newp.join("marker.txt").exists());
+        assert!(!old.exists());
+
+        // Renaming to an existing sibling is refused.
+        std::fs::create_dir_all(base.join("proj_c")).unwrap();
+        assert!(rename_project_dir(&newp, "proj_c").is_err());
+
+        // Same name → no-op; case-only change is allowed on Windows.
+        assert_eq!(rename_project_dir(&newp, "proj_b").unwrap(), newp);
+        let cased = rename_project_dir(&newp, "Proj_B").unwrap();
+        assert!(cased.join("marker.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

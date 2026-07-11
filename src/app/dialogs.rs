@@ -12,6 +12,81 @@ use egui_phosphor::regular as ph;
 
 impl AppIde {
     /// "New Project" confirmation modal — picks a chip and clears all user files.
+    /// The "Rename Project" dialog (opened from the Project panel's Tools
+    /// menu). Renames the project FOLDER on disk — see
+    /// [`AppIde::rename_project`] for what does (and deliberately does not)
+    /// change. Result lands in the status bar via `export_msg`.
+    pub(super) fn show_rename_project_dialog(&mut self, ui: &mut egui::Ui) {
+        let Some(mut name) = self.renaming_project.clone() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Rename Project")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -60.0])
+            .show(ui.ctx(), |ui| {
+                ui.add_space(4.0);
+                ui.label("New folder name:");
+                let resp = ui.text_edit_singleline(&mut name);
+                if self.renaming_project_focus {
+                    resp.request_focus();
+                    self.renaming_project_focus = false;
+                }
+                // Live validation feedback (the same check rename enforces).
+                let err = super::project_io::valid_project_name(&name).err();
+                if let Some(e) = &err {
+                    ui.label(
+                        egui::RichText::new(e)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(230, 120, 90)),
+                    );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let enter =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui
+                        .add_enabled(err.is_none(), egui::Button::new("Rename"))
+                        .clicked()
+                        || (enter && err.is_none())
+                    {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked()
+                        || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                    {
+                        cancel = true;
+                    }
+                });
+                ui.add_space(2.0);
+            });
+
+        if confirm {
+            match self.rename_project(&name) {
+                Ok(()) => {
+                    self.export_msg = format!(
+                        "{}  renamed to {}",
+                        egui_phosphor::regular::CHECK_CIRCLE,
+                        name.trim()
+                    );
+                }
+                Err(e) => {
+                    self.export_msg =
+                        format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
+                }
+            }
+            self.export_status_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
+            self.renaming_project = None;
+        } else if cancel {
+            self.renaming_project = None;
+        } else {
+            self.renaming_project = Some(name); // keep edits
+        }
+    }
+
     pub(super) fn show_new_project_dialog(
         &mut self,
         ui: &mut egui::Ui,

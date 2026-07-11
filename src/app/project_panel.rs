@@ -157,6 +157,30 @@ impl AppIde {
                                     save_project_clicked = true;
                                     ui.close();
                                 }
+                                // Rename needs a folder on disk (a project gets
+                                // its name at the first Save) and no save
+                                // worker writing into the old path meanwhile.
+                                let can_rename = self.project_dir.is_some()
+                                    && self.save_in_progress.is_none();
+                                if ui
+                                    .add_enabled(
+                                        can_rename,
+                                        egui::Button::new(format!(
+                                            "{} Rename Project…",
+                                            ph::PENCIL_SIMPLE
+                                        )),
+                                    )
+                                    .on_hover_text(
+                                        "Rename the project folder on disk \
+                                         (the Cargo package name is unaffected)",
+                                    )
+                                    .clicked()
+                                {
+                                    self.renaming_project =
+                                        Some(self.project_name.clone().unwrap_or_default());
+                                    self.renaming_project_focus = true;
+                                    ui.close();
+                                }
                             },
                         );
                     });

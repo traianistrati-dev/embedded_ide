@@ -402,6 +402,10 @@ pub struct AppIde {
     cached_project_files: Option<ProjectFiles>,
     /// Active tab in the MCU configurator
     active_tab: McuTab,
+    /// Rename-project dialog: `Some(edit buffer)` while open (Tools menu).
+    renaming_project: Option<String>,
+    /// One-shot: focus the rename field on the dialog's first frame.
+    renaming_project_focus: bool,
     /// Content bounds (scene coords) of the Pins canvas — chip + virtual
     /// modules — measured last frame. Fed back as the `egui::Scene` rect each
     /// frame, so the canvas AUTO-FITS the panel: resizing the window (or
@@ -833,6 +837,8 @@ impl AppIde {
             cached_project_files: None,
             mcu: Some(mcu),
             active_tab: McuTab::Pins,
+            renaming_project: None,
+            renaming_project_focus: false,
             mcu_scene_bounds: egui::Rect::NOTHING,
             structure_cache: None,
             structure_view: Default::default(),
@@ -1871,6 +1877,7 @@ impl eframe::App for AppIde {
         // (New File / New Folder are now inline inputs rendered in the project
         // tree at the target folder — see `project_tree::gui::inline_new_item`.)
         self.show_new_project_dialog(ui, &mut save_project_needed);
+        self.show_rename_project_dialog(ui);
 
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).
