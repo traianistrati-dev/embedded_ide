@@ -402,20 +402,24 @@ impl AppIde {
                 // (egui's global keyboard zoom is disabled in `app::new`, so these
                 // reach us here.) `consume_key` matches Shift loosely, so Ctrl++
                 // (= Ctrl+Shift+=) is caught by the `Plus` arm.
-                ui.input_mut(|i| {
-                    let cmd = egui::Modifiers::COMMAND;
-                    if i.consume_key(cmd, egui::Key::Num0) {
-                        self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE;
-                    } else if i.consume_key(cmd, egui::Key::Plus)
-                        || i.consume_key(cmd, egui::Key::Equals)
-                    {
-                        self.editor_font_size =
-                            (self.editor_font_size + 1.0).min(MAX_EDITOR_FONT_SIZE);
-                    } else if i.consume_key(cmd, egui::Key::Minus) {
-                        self.editor_font_size =
-                            (self.editor_font_size - 1.0).max(MIN_EDITOR_FONT_SIZE);
-                    }
-                });
+                // Consumed ONLY while the pointer is over the editor panel — the
+                // Structure diagram has its own Ctrl+± zoom, routed by hover.
+                if ui.rect_contains_pointer(ui.max_rect()) {
+                    ui.input_mut(|i| {
+                        let cmd = egui::Modifiers::COMMAND;
+                        if i.consume_key(cmd, egui::Key::Num0) {
+                            self.editor_font_size = DEFAULT_EDITOR_FONT_SIZE;
+                        } else if i.consume_key(cmd, egui::Key::Plus)
+                            || i.consume_key(cmd, egui::Key::Equals)
+                        {
+                            self.editor_font_size =
+                                (self.editor_font_size + 1.0).min(MAX_EDITOR_FONT_SIZE);
+                        } else if i.consume_key(cmd, egui::Key::Minus) {
+                            self.editor_font_size =
+                                (self.editor_font_size - 1.0).max(MIN_EDITOR_FONT_SIZE);
+                        }
+                    });
+                }
 
                 // Find / Replace bar, drawn above the editor when open. Renders
                 // before the editor-height calc so the editor sizes below it.

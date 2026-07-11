@@ -10,19 +10,26 @@ use super::layout::{
 use super::parse::{ModuleGraph, SymKind};
 use eframe::egui;
 
-/// Session view state of the diagram (not persisted).
+/// Session view state of the diagram (not persisted). The BASE zoom is
+/// automatic — the whole diagram fits the panel with [`FIT_PAD`] padding,
+/// recomputed every frame so panel/window resizes always track. `zoom` is a
+/// user multiplier on top (Ctrl+± while hovering the diagram, Ctrl+0 resets)
+/// — at 1.0 the diagram always fits; above it, scrollbars take over.
 pub struct StructureView {
+    /// User zoom multiplier over the auto-fit base (1.0 = pure auto-fit).
     pub zoom: f32,
-    pub pan: egui::Vec2,
     /// Draw the cross-module call edges (Phase 3) over the diagram.
     pub show_calls: bool,
 }
 
 impl Default for StructureView {
     fn default() -> Self {
-        Self { zoom: 1.0, pan: egui::Vec2::ZERO, show_calls: true }
+        Self { zoom: 1.0, show_calls: true }
     }
 }
+
+/// Padding kept around the diagram when it auto-fits the panel.
+const FIT_PAD: f32 = 20.0;
 
 /// A click on a node: which file to open (`None` = main.rs) and, when a
 /// symbol row was clicked, the 1-based line to jump to.
@@ -77,20 +84,6 @@ pub fn show(
             .color(egui::Color32::from_rgb(150, 150, 160)),
         );
         ui.separator();
-        ui.label(egui::RichText::new("Zoom").size(11.0));
-        ui.add(
-            egui::Slider::new(&mut view.zoom, 0.25..=3.0)
-                .show_value(false)
-                .clamping(egui::SliderClamping::Always),
-        );
-        if ui
-            .small_button("Fit")
-            .on_hover_text("Reset zoom and pan to fit the whole diagram")
-            .clicked()
-        {
-            view.zoom = 1.0;
-            view.pan = egui::Vec2::ZERO;
-        }
         if ui
             .small_button("Auto layout")
             .on_hover_text(
@@ -117,8 +110,8 @@ pub fn show(
         }
         ui.label(
             egui::RichText::new(
-                "· drag background = pan · drag a module's header = move it · \
-                 click = open",
+                "· auto-fits the panel · Ctrl+± zoom, Ctrl+0 reset · drag a \
+                 module's header = move it · click = open",
             )
             .size(10.5)
             .color(egui::Color32::from_rgb(120, 120, 130)),
@@ -128,25 +121,75 @@ pub fn show(
 
     // ── Canvas ────────────────────────────────────────────────────────────
     let avail = ui.available_size();
-    if avail.x < 40.0 || avail.y < 40.0 || lay.pos.is_empty() {
+    if avail.x < 3.0 * FIT_PAD || avail.y < 3.0 * FIT_PAD || lay.pos.is_empty() {
         return result;
     }
-    let (rect, bg_resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
-    if bg_resp.dragged() {
-        view.pan += bg_resp.drag_delta();
+
+    // Ctrl+± / Ctrl+0 zoom, consumed ONLY while the pointer hovers the diagram
+    // area (the editor keeps its own Ctrl+± when hovered — hover routes them).
+    if ui.rect_contains_pointer(ui.available_rect_before_wrap()) {
+        ui.input_mut(|i| {
+            let cmd = egui::Modifiers::COMMAND;
+            if i.consume_key(cmd, egui::Key::Num0) {
+                view.zoom = 1.0;
+            } else if i.consume_key(cmd, egui::Key::Plus)
+                || i.consume_key(cmd, egui::Key::Equals)
+            {
+                view.zoom = (view.zoom * 1.15).min(4.0);
+            } else if i.consume_key(cmd, egui::Key::Minus) {
+                view.zoom = (view.zoom / 1.15).max(0.3);
+            }
+        });
     }
 
-    // Fit the virtual bounds into the canvas, then apply the user zoom.
-    let fit = (rect.width() / lay.width)
-        .min(rect.height() / lay.height)
-        .min(1.6);
-    let scale = (fit * view.zoom).max(0.08);
+    // AUTO-ZOOM base: the WHOLE diagram fits the panel with FIT_PAD padding,
+    // recomputed every frame — panel/window resizes always rescale. The user
+    // multiplier stacks on top; past 1.0 the scroll area takes over.
+    let base = ((avail.x - 2.0 * FIT_PAD) / lay.width)
+        .min((avail.y - 2.0 * FIT_PAD) / lay.height)
+        .clamp(0.05, 2.5);
+    let scale = (base * view.zoom).clamp(0.05, 5.0);
     let content = egui::vec2(lay.width, lay.height) * scale;
-    // Center when smaller than the canvas, top-left anchor when larger.
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            show_canvas(
+                ui,
+                graph,
+                lay,
+                view,
+                calls,
+                scale,
+                content,
+                &mut result,
+            );
+        });
+
+    result
+}
+
+/// The scaled diagram body, drawn inside the vertical scroll area.
+#[allow(clippy::too_many_arguments)]
+fn show_canvas(
+    ui: &mut egui::Ui,
+    graph: &ModuleGraph,
+    lay: &mut GraphLayout,
+    view: &mut StructureView,
+    calls: &[CallEdge],
+    scale: f32,
+    content: egui::Vec2,
+    result: &mut ShowResult,
+) {
+    // Fill at least the viewport (no background gap); when zoomed past the
+    // fit, grow by the content + padding and let the scroll area take over.
+    let size = egui::vec2(
+        (content.x + 2.0 * FIT_PAD).max(ui.available_width()),
+        (content.y + 2.0 * FIT_PAD).max(ui.available_height()),
+    );
+    let (rect, _bg_resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+    // Center the diagram; `free` is ≥ FIT_PAD by construction of `size`.
     let free = (rect.size() - content) * 0.5;
-    let origin = rect.left_top()
-        + egui::vec2(free.x.max(8.0), free.y.max(8.0))
-        + view.pan;
+    let origin = rect.left_top() + egui::vec2(free.x.max(FIT_PAD), free.y.max(FIT_PAD));
     let to_screen =
         |x: f32, y: f32| -> egui::Pos2 { origin + egui::vec2(x, y) * scale };
 
@@ -494,8 +537,6 @@ pub fn show(
             arrowhead(&painter, c2, to, 6.0 * scale.clamp(0.5, 1.5), stroke);
         }
     }
-
-    result
 }
 
 /// Glyph letter + colour for a symbol kind (drawn before the name in a row).

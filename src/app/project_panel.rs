@@ -120,39 +120,45 @@ impl AppIde {
                 ui.horizontal(|ui| {
                     ui.heading("Project");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let btn = |ui: &mut egui::Ui, icon: &str, label: &str, tip: &str| {
-                            ui.add(egui::Button::new(
-                                egui::RichText::new(format!("{icon} {label}")).size(11.0),
-                            ))
-                            .on_hover_text(tip)
-                            .clicked()
-                        };
-
-                        // Save button
-                        let can_save = project_files.is_some();
-                        let save_label = if can_save { "Save" } else { "Save (N/A)" };
-                        if btn(
-                            ui,
-                            ph::EXPORT,
-                            save_label,
-                            "Export/Save project to disk (Ctrl+S)",
-                        ) {
-                            save_project_clicked = true;
-                        }
-                        ui.add_space(2.0);
-
-                        if btn(
-                            ui,
-                            ph::FOLDER_OPEN,
-                            "Open",
-                            "Open an existing project folder",
-                        ) {
-                            open_project_clicked = true;
-                        }
-                        ui.add_space(2.0);
-                        if btn(ui, ph::NOTE_PENCIL, "New", "Start a new empty project") {
-                            new_project_clicked = true;
-                        }
+                        // New / Open / Save grouped in one "Tools" dropdown
+                        // (2026-07-10 refactor — the three separate buttons
+                        // crowded the header).
+                        ui.menu_button(
+                            egui::RichText::new(format!("{} Tools", ph::WRENCH)).size(11.0),
+                            |ui| {
+                                if ui
+                                    .button(format!("{} New Project", ph::NOTE_PENCIL))
+                                    .on_hover_text("Start a new empty project")
+                                    .clicked()
+                                {
+                                    new_project_clicked = true;
+                                    ui.close();
+                                }
+                                if ui
+                                    .button(format!("{} Open Project…", ph::FOLDER_OPEN))
+                                    .on_hover_text("Open an existing project folder")
+                                    .clicked()
+                                {
+                                    open_project_clicked = true;
+                                    ui.close();
+                                }
+                                let can_save = project_files.is_some();
+                                if ui
+                                    .add_enabled(
+                                        can_save,
+                                        egui::Button::new(format!(
+                                            "{} Save Project",
+                                            ph::EXPORT
+                                        )),
+                                    )
+                                    .on_hover_text("Export/Save project to disk (Ctrl+S)")
+                                    .clicked()
+                                {
+                                    save_project_clicked = true;
+                                    ui.close();
+                                }
+                            },
+                        );
                     });
                 });
 

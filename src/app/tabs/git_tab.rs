@@ -96,7 +96,10 @@ pub fn show_git_tab(
                 );
                 let ab = format!(
                     "{}{} {}{}",
-                    ph::ARROW_UP, status.ahead, ph::ARROW_DOWN, status.behind
+                    ph::ARROW_UP,
+                    status.ahead,
+                    ph::ARROW_DOWN,
+                    status.behind
                 );
                 let col = if status.ahead > 0 || status.behind > 0 {
                     egui::Color32::from_rgb(220, 180, 70)
@@ -206,8 +209,8 @@ pub fn show_git_tab(
     egui::Panel::bottom("git_actions")
         .exact_size(58.0)
         .show_inside(ui, |ui| {
-            // ui.add_space(2.0);
-            ui.separator();
+            ui.add_space(5.0);
+            // ui.separator();
             let idle = busy.is_none() && is_repo && !git_missing;
             let remoted = idle && remote_url.is_some();
             let has_msg = !git.commit_msg.trim().is_empty();
