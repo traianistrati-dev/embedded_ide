@@ -60,14 +60,6 @@ pub(super) fn show_diag_panel(
     // Diagnostic-row click target: `(rel_path, 1-based line, band colour)`; the
     // editor opens the file, scrolls to the line, and tints it.
     nav: &mut Option<(String, usize, egui::Color32)>,
-    // `definition`: the F12 snippet (header, code, highlight-line-index); the
-    // "Definition" tab is shown only when this is Some. `definition_close`: set
-    // true when the user closes it.
-    definition: Option<(&str, &str, usize)>,
-    definition_close: &mut bool,
-    // One-shot flag: scroll the Definition view to the highlighted line on the
-    // first render after a new F12 snippet loads.
-    def_scroll_pending: &mut bool,
     // Git tab: console state + the saved project dir; buttons set `git_op`
     // (the `clippy_run` signal pattern — the caller spawns the worker).
     git: &mut crate::git::GitConsole,
@@ -316,32 +308,8 @@ pub(super) fn show_diag_panel(
             }
         }
 
-        // Definition tab (F12) — only present while there is a definition to show.
-        if definition.is_some() {
-            ui.separator();
-            let active = *tab == BuildPanelTab::Definition;
-            let btn =
-                ui.add(
-                    egui::Button::new(egui::RichText::new("Definition").size(11.0).color(
-                        if active {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::from_rgb(120, 180, 240)
-                        },
-                    ))
-                    .frame(active),
-                );
-            if btn.clicked() {
-                *tab = BuildPanelTab::Definition;
-            }
-            if ui
-                .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
-                .on_hover_text("Close definition")
-                .clicked()
-            {
-                *definition_close = true;
-            }
-        }
+        // (The F12 "Definition" tab moved to the MCU Configurator on
+        // 2026-07-10 — see `AppIde::show_definition_tab`.)
 
         // ── "More" dropdown (right-aligned) — groups the auxiliary panels
         //    Terminal / Activity / Tools so the main tab bar stays compact. ──
@@ -501,70 +469,6 @@ pub(super) fn show_diag_panel(
         }
         BuildPanelTab::RequiredTools => {
             show_tools_tab(ui, tools_state, ctx);
-        }
-        BuildPanelTab::Definition => {
-            if let Some((header, code, highlight)) = definition {
-                ui.label(
-                    egui::RichText::new(header)
-                        .size(11.0)
-                        .monospace()
-                        .color(egui::Color32::from_rgb(150, 190, 240)),
-                );
-                ui.separator();
-                // The whole file is shown (so the user can scroll above and
-                // below the target). Rows are virtualized (`show_rows` renders
-                // only the visible ones), and the target line is scrolled near
-                // the top once on open. The def line is drawn coloured so it
-                // stands out from the surrounding (white) code.
-                let lines: Vec<&str> = code.lines().collect();
-                // Height of one monospace-12 line (matches the rows below).
-                let row_h = ui
-                    .painter()
-                    .layout_no_wrap(
-                        "X".to_owned(),
-                        egui::FontId::monospace(12.0),
-                        egui::Color32::WHITE,
-                    )
-                    .size()
-                    .y;
-                // Match the spacing show_rows will use, so its offset math lines
-                // up with the rendered rows.
-                ui.spacing_mut().item_spacing.y = 1.0;
-                let pitch = row_h + ui.spacing().item_spacing.y;
-                let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
-                if *def_scroll_pending {
-                    // Target near the top (2 lines of context above), then free.
-                    let off = highlight.saturating_sub(2) as f32 * pitch;
-                    area = area.vertical_scroll_offset(off);
-                    *def_scroll_pending = false;
-                }
-                area.show_rows(ui, row_h, lines.len(), |ui, range| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    for i in range {
-                        let shown = if lines[i].is_empty() { " " } else { lines[i] };
-                        if i == highlight {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(shown)
-                                        .monospace()
-                                        .size(12.0)
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(255, 214, 90))
-                                        .background_color(egui::Color32::from_rgb(64, 58, 30)),
-                                )
-                                .selectable(true),
-                            );
-                        } else {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(shown).monospace().size(12.0))
-                                    .selectable(true),
-                            );
-                        }
-                    }
-                });
-            } else {
-                ui.label(egui::RichText::new("No definition.").color(egui::Color32::GRAY));
-            }
         }
     }
 }

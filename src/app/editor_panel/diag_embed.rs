@@ -70,8 +70,7 @@ impl AppIde {
             || clippy_active
             || terminal_active
             || activity_active
-            || git_active
-            || self.definition_view.is_some();
+            || git_active;
 
         if !show_panel {
             return None;
@@ -86,7 +85,6 @@ impl AppIde {
         // Panel::bottom takes space from the bottom of the remaining area
         // before the editor is laid out. exact_size gives us full control —
         // no egui-internal default that would reset on show/hide.
-        let mut def_close = false;
         // Diagnostic-row click navigation: (rel_path, 1-based line, band colour).
         let mut nav: Option<(String, usize, egui::Color32)> = None;
         // Set by the Clippy tab's "Run clippy" button.
@@ -153,10 +151,6 @@ impl AppIde {
 
                 // ── Content ────────────────────────────────
                 let toolchain = self.selected_toolchain().unwrap_or(ToolchainKind::SdccC);
-                let definition = self
-                    .definition_view
-                    .as_ref()
-                    .map(|d| (d.header.as_str(), d.code.as_str(), d.highlight));
                 show_diag_panel(
                     ui,
                     &self.egui_ctx,
@@ -187,9 +181,6 @@ impl AppIde {
                     &mut self.selected_diagnostic,
                     &mut self.lsp_selected_diagnostic,
                     &mut nav,
-                    definition,
-                    &mut def_close,
-                    &mut self.def_scroll_pending,
                     &mut self.git,
                     project_dir.as_deref(),
                     &mut git_op,
@@ -326,13 +317,6 @@ impl AppIde {
             }
         }
 
-        // Closing the Definition tab clears the snippet and switches away.
-        if def_close {
-            self.definition_view = None;
-            if self.build_tab == BuildPanelTab::Definition {
-                self.build_tab = BuildPanelTab::RustAnalyzer;
-            }
-        }
         // A diagnostic row was clicked: open its file (incl. user `src/` files)
         // and queue the scroll-to-line, applied once the editor shows that file.
         if let Some((path, line, color)) = nav {

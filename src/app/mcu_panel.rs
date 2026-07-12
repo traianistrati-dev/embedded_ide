@@ -52,25 +52,47 @@ impl AppIde {
 
             ui.separator();
 
-            // Tab bar
+            // Tab bar. The Definition tab (F12 snippet) exists only while a
+            // snippet is loaded — auto-leave it the moment the snippet clears.
+            if self.definition_view.is_none() && self.active_tab == McuTab::Definition {
+                self.active_tab = self.definition_return_tab;
+            }
             ui.horizontal(|ui| {
-                for tab in [
+                let mut tabs = vec![
                     McuTab::Pins,
                     McuTab::Peripherals,
                     McuTab::Clock,
                     McuTab::System,
                     McuTab::Structure,
-                ] {
+                ];
+                if self.definition_view.is_some() {
+                    tabs.push(McuTab::Definition);
+                }
+                for tab in tabs {
                     let is_active = self.active_tab == tab;
                     let label = egui::RichText::new(tab.label())
                         .size(13.0)
                         .color(if is_active {
                             egui::Color32::WHITE
+                        } else if tab == McuTab::Definition {
+                            egui::Color32::from_rgb(120, 180, 240)
                         } else {
                             egui::Color32::from_rgb(160, 160, 170)
                         });
                     if ui.selectable_label(is_active, label).clicked() {
                         self.active_tab = tab;
+                    }
+                }
+                // Close button for the transient Definition tab.
+                if self.definition_view.is_some()
+                    && ui
+                        .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
+                        .on_hover_text("Close definition")
+                        .clicked()
+                {
+                    self.definition_view = None;
+                    if self.active_tab == McuTab::Definition {
+                        self.active_tab = self.definition_return_tab;
                     }
                 }
             });
@@ -304,6 +326,73 @@ impl AppIde {
                 // Module-relationship diagram — chip-agnostic (works with no
                 // MCU selected), so it doesn't gate on `self.mcu`.
                 McuTab::Structure => self.show_structure_tab(ui),
+                McuTab::Definition => self.show_definition_tab(ui),
+            }
+        });
+    }
+
+    /// The F12 "Go to definition" snippet (external / crate / std files) —
+    /// moved here from the bottom diagnostics panel on 2026-07-10. The whole
+    /// file is shown (scrollable above and below the target); rows are
+    /// virtualized and the target line is scrolled near the top once on open,
+    /// drawn coloured so it stands out from the surrounding code.
+    fn show_definition_tab(&mut self, ui: &mut egui::Ui) {
+        let Some(def) = &self.definition_view else {
+            ui.label(egui::RichText::new("No definition.").color(egui::Color32::GRAY));
+            return;
+        };
+        ui.label(
+            egui::RichText::new(&def.header)
+                .size(11.0)
+                .monospace()
+                .color(egui::Color32::from_rgb(150, 190, 240)),
+        );
+        ui.separator();
+        let lines: Vec<&str> = def.code.lines().collect();
+        let highlight = def.highlight;
+        // Height of one monospace-12 line (matches the rows below).
+        let row_h = ui
+            .painter()
+            .layout_no_wrap(
+                "X".to_owned(),
+                egui::FontId::monospace(12.0),
+                egui::Color32::WHITE,
+            )
+            .size()
+            .y;
+        // Match the spacing show_rows will use, so its offset math lines up
+        // with the rendered rows.
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let pitch = row_h + ui.spacing().item_spacing.y;
+        let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+        if self.def_scroll_pending {
+            // Target near the top (2 lines of context above), then free.
+            let off = highlight.saturating_sub(2) as f32 * pitch;
+            area = area.vertical_scroll_offset(off);
+            self.def_scroll_pending = false;
+        }
+        area.show_rows(ui, row_h, lines.len(), |ui, range| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            for i in range {
+                let shown = if lines[i].is_empty() { " " } else { lines[i] };
+                if i == highlight {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(shown)
+                                .monospace()
+                                .size(12.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(255, 214, 90))
+                                .background_color(egui::Color32::from_rgb(64, 58, 30)),
+                        )
+                        .selectable(true),
+                    );
+                } else {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(shown).monospace().size(12.0))
+                            .selectable(true),
+                    );
+                }
             }
         });
     }

@@ -206,6 +206,9 @@ enum McuTab {
     System,
     /// Module-relationship diagram of the project (parse-based, chip-agnostic).
     Structure,
+    /// F12 "Go to definition" snippet (external / crate / std files). The tab
+    /// appears only while `definition_view` is set.
+    Definition,
 }
 
 impl McuTab {
@@ -216,6 +219,7 @@ impl McuTab {
             Self::Clock => "Clock",
             Self::System => "System",
             Self::Structure => "Structure",
+            Self::Definition => "Definition",
         }
     }
 }
@@ -239,12 +243,10 @@ enum BuildPanelTab {
     /// Git status / commit / push / pull in the project directory.
     Git,
     RequiredTools,
-    /// F12 "Go to definition" result. Only selectable while `definition_view` is
-    /// set (the tab is hidden otherwise).
-    Definition,
 }
 
-/// The source snippet shown in the F12 "Definition" bottom tab.
+/// The source snippet shown in the F12 "Definition" tab (MCU Configurator,
+/// next to Structure — moved from the bottom panel on 2026-07-10).
 struct DefinitionView {
     /// Header line, e.g. `src/pins/utils/i2c1.rs  (line 42)`.
     header: String,
@@ -663,8 +665,11 @@ pub struct AppIde {
     /// One-shot: scroll the Definition tab to the highlighted line on the first
     /// render after a new F12 snippet loads (then the user scrolls freely).
     def_scroll_pending: bool,
-    /// The fetched definition snippet — its presence shows the "Definition" tab.
+    /// The fetched definition snippet — its presence shows the "Definition" tab
+    /// in the MCU Configurator (next to Structure).
     definition_view: Option<DefinitionView>,
+    /// MCU tab to return to when the Definition tab closes / clears.
+    definition_return_tab: McuTab,
     /// Which tab is active in the bottom diagnostics panel
     build_tab: BuildPanelTab,
     /// Index of the RA diagnostic row that is expanded
@@ -928,6 +933,7 @@ impl AppIde {
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,
+            definition_return_tab: McuTab::Pins,
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
@@ -1346,16 +1352,17 @@ impl AppIde {
                         self.selected_file = id;
                         self.pending_scroll_to_line = Some((id, loc.line as usize + 1));
                         self.highlighted_def_line = Some((id, loc.line as usize + 1));
-                        // Not an error — clear any error tint and the snippet tab.
+                        // Not an error — clear the snippet; the MCU tab bar
+                        // auto-leaves the (now empty) Definition tab.
                         self.definition_view = None;
-                        if self.build_tab == BuildPanelTab::Definition {
-                            self.build_tab = BuildPanelTab::RustAnalyzer;
-                        }
                     } else if let Some(view) = build_definition_view(&loc) {
-                        // External file → read-only snippet in the Definition tab,
-                        // scrolled to the target line on open.
+                        // External file → read-only snippet in the Definition
+                        // tab (MCU Configurator), scrolled to the target line.
+                        if self.active_tab != McuTab::Definition {
+                            self.definition_return_tab = self.active_tab;
+                        }
                         self.definition_view = Some(view);
-                        self.build_tab = BuildPanelTab::Definition;
+                        self.active_tab = McuTab::Definition;
                         self.def_scroll_pending = true;
                     }
                 }
