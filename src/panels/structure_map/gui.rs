@@ -71,9 +71,11 @@ const PKG_PALETTE: [egui::Color32; 8] = [
 const NODE_STROKE: egui::Color32 = egui::Color32::from_rgb(96, 106, 128);
 // const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 170, 240);
 const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
-const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 145, 215);
+/// Module dependency edges (solid, straight): LIGHT GRAY — the old blue now
+/// belongs to fn-call edges (see below), so the module-level wiring recedes
+/// into the background while stays brighter than the dashed containment.
+const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 174, 184);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
-const CALL_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(200, 150, 50, 160);
 
 /// Render the diagram; the [`ShowResult`] carries clicks, a finished node drag
 /// and the Auto-layout request. `lay` is mutable: dragging a node's HEADER
@@ -118,9 +120,10 @@ pub fn show(
             egui::RichText::new("Calls").size(11.0),
         )
         .on_hover_text(
-            "Show cross-module call edges (amber): which fn/struct is used \
-                 by which item of another module. Computed via rust-analyzer, \
-                 one symbol at a time, only while the project is saved/in sync.",
+            "Show cross-module call edges, coloured by the TARGET's kind \
+                 (like the row glyphs): blue = fn, orange = struct, purple = \
+                 enum, green = trait. Computed via rust-analyzer, one symbol \
+                 at a time, only while the project is saved/in sync.",
         );
         if !calls_status.is_empty() {
             ui.label(
@@ -587,9 +590,21 @@ fn show_canvas(
             let x = if right_side { p.x + p.w } else { p.x };
             to_screen(x, y)
         };
-        let stroke = egui::Stroke::new((1.1 * scale).clamp(0.5, 2.0), CALL_COLOR);
         for e in calls {
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
+            // Edge colour = the TARGET symbol's kind colour (the same palette
+            // as the row glyphs): fn blue, Struct orange, Enum purple, Trait
+            // green — the arrow tells at a glance WHAT is being used.
+            let kind = graph.nodes[e.to_node]
+                .symbols
+                .get(e.to_row)
+                .map(|s| s.kind)
+                .unwrap_or(SymKind::Fn);
+            let (_, kc) = kind_glyph(kind);
+            let stroke = egui::Stroke::new(
+                (1.1 * scale).clamp(0.5, 2.0),
+                egui::Color32::from_rgba_unmultiplied(kc.r(), kc.g(), kc.b(), 200),
+            );
             // OUTER-FLANK routing (user feedback): the straight blue dep edges
             // run through the inner corridor between stacked nodes, and the
             // old inner-side beziers crossed them there. Instead, exit AND
