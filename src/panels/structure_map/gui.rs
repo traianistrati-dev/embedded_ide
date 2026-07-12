@@ -4,8 +4,8 @@
 
 use super::calls::CallEdge;
 use super::layout::{
-    recompute_bounds, shown_rows, GraphLayout, HEADER_H, MARGIN, MAX_SYMBOL_ROWS, ROW_H,
-    ROW_NAME_CHARS,
+    GraphLayout, HEADER_H, MARGIN, MAX_SYMBOL_ROWS, ROW_H, ROW_NAME_CHARS, recompute_bounds,
+    shown_rows,
 };
 use super::parse::{ModuleGraph, SymKind};
 use eframe::egui;
@@ -24,7 +24,10 @@ pub struct StructureView {
 
 impl Default for StructureView {
     fn default() -> Self {
-        Self { zoom: 1.0, show_calls: true }
+        Self {
+            zoom: 1.0,
+            show_calls: true,
+        }
     }
 }
 
@@ -49,10 +52,25 @@ pub struct ShowResult {
     pub reset_layout: bool,
 }
 
-const NODE_FILL: egui::Color32 = egui::Color32::from_rgb(46, 52, 66);
 const ROOT_FILL: egui::Color32 = egui::Color32::from_rgb(60, 58, 44);
+/// Per-PACKAGE fills: every node of one top-level module subtree (same first
+/// path segment — `pins::configs::usart1` → "pins") shares a colour, and each
+/// package gets a different one, for visual separation. Muted dark hues so the
+/// white node text stays readable on the dark canvas; assigned in
+/// first-encounter node order, cycling when there are more packages.
+const PKG_PALETTE: [egui::Color32; 8] = [
+    egui::Color32::from_rgb(46, 52, 66), // slate blue
+    egui::Color32::from_rgb(38, 60, 56), // teal
+    egui::Color32::from_rgb(58, 46, 68), // violet
+    egui::Color32::from_rgb(64, 54, 40), // amber brown
+    egui::Color32::from_rgb(42, 60, 46), // green
+    egui::Color32::from_rgb(64, 46, 52), // maroon
+    egui::Color32::from_rgb(38, 56, 68), // steel cyan
+    egui::Color32::from_rgb(56, 50, 58), // plum grey
+];
 const NODE_STROKE: egui::Color32 = egui::Color32::from_rgb(96, 106, 128);
-const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 170, 240);
+// const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 170, 240);
+const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
 const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 145, 215);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
 const CALL_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(200, 150, 50, 160);
@@ -95,12 +113,15 @@ pub fn show(
             result.reset_layout = true;
         }
         ui.separator();
-        ui.checkbox(&mut view.show_calls, egui::RichText::new("Calls").size(11.0))
-            .on_hover_text(
-                "Show cross-module call edges (amber): which fn/struct is used \
+        ui.checkbox(
+            &mut view.show_calls,
+            egui::RichText::new("Calls").size(11.0),
+        )
+        .on_hover_text(
+            "Show cross-module call edges (amber): which fn/struct is used \
                  by which item of another module. Computed via rust-analyzer, \
                  one symbol at a time, only while the project is saved/in sync.",
-            );
+        );
         if !calls_status.is_empty() {
             ui.label(
                 egui::RichText::new(calls_status)
@@ -132,9 +153,7 @@ pub fn show(
             let cmd = egui::Modifiers::COMMAND;
             if i.consume_key(cmd, egui::Key::Num0) {
                 view.zoom = 1.0;
-            } else if i.consume_key(cmd, egui::Key::Plus)
-                || i.consume_key(cmd, egui::Key::Equals)
-            {
+            } else if i.consume_key(cmd, egui::Key::Plus) || i.consume_key(cmd, egui::Key::Equals) {
                 view.zoom = (view.zoom * 1.15).min(4.0);
             } else if i.consume_key(cmd, egui::Key::Minus) {
                 view.zoom = (view.zoom / 1.15).max(0.3);
@@ -153,16 +172,7 @@ pub fn show(
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            show_canvas(
-                ui,
-                graph,
-                lay,
-                view,
-                calls,
-                scale,
-                content,
-                &mut result,
-            );
+            show_canvas(ui, graph, lay, view, calls, scale, content, &mut result);
         });
 
     result
@@ -190,8 +200,7 @@ fn show_canvas(
     // Center the diagram; `free` is ≥ FIT_PAD by construction of `size`.
     let free = (rect.size() - content) * 0.5;
     let origin = rect.left_top() + egui::vec2(free.x.max(FIT_PAD), free.y.max(FIT_PAD));
-    let to_screen =
-        |x: f32, y: f32| -> egui::Pos2 { origin + egui::vec2(x, y) * scale };
+    let to_screen = |x: f32, y: f32| -> egui::Pos2 { origin + egui::vec2(x, y) * scale };
 
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(24, 26, 32));
@@ -267,10 +276,8 @@ fn show_canvas(
                     right_cand = right_cand.max(q.x + q.w);
                 }
             }
-            let stroke = egui::Stroke::new(
-                stroke_w,
-                if is_dep { DEP_COLOR } else { CONTAIN_COLOR },
-            );
+            let stroke =
+                egui::Stroke::new(stroke_w, if is_dep { DEP_COLOR } else { CONTAIN_COLOR });
             let from = to_screen(from_v.0, from_v.1);
             let to = to_screen(to_v.0, to_v.1);
             if !blocked {
@@ -284,7 +291,11 @@ fn show_canvas(
                 const PAD: f32 = 14.0;
                 let mid = (from_v.0 + to_v.0) / 2.0;
                 let (l, r) = (left_cand - PAD, right_cand + PAD);
-                let detour_x = if (mid - l).abs() <= (r - mid).abs() { l } else { r };
+                let detour_x = if (mid - l).abs() <= (r - mid).abs() {
+                    l
+                } else {
+                    r
+                };
                 let c1 = to_screen(detour_x, from_v.1 + 0.30 * (to_v.1 - from_v.1));
                 let c2 = to_screen(detour_x, from_v.1 + 0.70 * (to_v.1 - from_v.1));
                 let bez = egui::epaint::CubicBezierShape::from_points_stroke(
@@ -311,12 +322,33 @@ fn show_canvas(
     let row_font = egui::FontId::monospace((8.0 * scale).clamp(5.0, 16.0));
     // Symbol rows are unreadable below this scale — draw compact nodes instead.
     let show_detail = scale > 0.45;
+    // One fill per PACKAGE (top-level module subtree): same colour for a
+    // package and all its children, different across packages. main keeps its
+    // olive root fill.
+    let fills: Vec<egui::Color32> = {
+        let mut by_pkg: std::collections::HashMap<&str, egui::Color32> =
+            std::collections::HashMap::new();
+        let mut next = 0usize;
+        graph
+            .nodes
+            .iter()
+            .map(|n| {
+                if n.path.is_empty() {
+                    ROOT_FILL
+                } else {
+                    let key = n.path.split("::").next().unwrap_or("");
+                    *by_pkg.entry(key).or_insert_with(|| {
+                        let c = PKG_PALETTE[next % PKG_PALETTE.len()];
+                        next += 1;
+                        c
+                    })
+                }
+            })
+            .collect()
+    };
     for (i, node) in graph.nodes.iter().enumerate() {
         let p = lay.pos[i];
-        let r = egui::Rect::from_min_size(
-            to_screen(p.x, p.y),
-            egui::vec2(p.w, p.h) * scale,
-        );
+        let r = egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale);
         if !rect.intersects(r) {
             continue;
         }
@@ -333,12 +365,19 @@ fn show_canvas(
         // Deltas are divided by `scale` (screen → virtual). Edges recompute
         // from `lay.pos` next frame, so they follow with a one-frame lag —
         // the usual immediate-mode drag behaviour.
-        let pre_rows = if show_detail { shown_rows(node.symbols.len()) } else { 0 };
-        let handle_h = if pre_rows > 0 { HEADER_H * scale } else { r.height() };
+        let pre_rows = if show_detail {
+            shown_rows(node.symbols.len())
+        } else {
+            0
+        };
+        let handle_h = if pre_rows > 0 {
+            HEADER_H * scale
+        } else {
+            r.height()
+        };
         let drag_resp = ui
             .interact(
-                egui::Rect::from_min_size(r.min, egui::vec2(r.width(), handle_h))
-                    .intersect(rect),
+                egui::Rect::from_min_size(r.min, egui::vec2(r.width(), handle_h)).intersect(rect),
                 ui.id().with(("structure_drag", i)),
                 egui::Sense::click_and_drag(),
             )
@@ -354,25 +393,44 @@ fn show_canvas(
         }
         // Re-read the (possibly just-moved) position for drawing.
         let p = lay.pos[i];
-        let r = egui::Rect::from_min_size(
-            to_screen(p.x, p.y),
-            egui::vec2(p.w, p.h) * scale,
-        );
+        let r = egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale);
 
-        let fill = if i == 0 { ROOT_FILL } else { NODE_FILL };
-        let stroke_c = if resp.hovered() { HOVER_STROKE } else { NODE_STROKE };
+        // Package roots (a `mod.rs` file) stand out: SHARP corners, a border
+        // twice as thick as regular nodes, and a bold name.
+        let is_pkg_root = node.file_rel.ends_with("/mod.rs");
+        let fill = fills[i];
+        let stroke_c = if resp.hovered() {
+            HOVER_STROKE
+        } else {
+            NODE_STROKE
+            // if is_pkg_root {
+            //     egui::Color32::from_rgb(150, 150, 150)
+            // } else {
+            //     NODE_STROKE
+            // }
+        };
+        let base_w = if resp.hovered() { 1.6 } else { 1.0 };
         painter.rect(
             r,
-            4.0 * scale.clamp(0.5, 1.5),
+            if is_pkg_root {
+                20.0 * scale.clamp(0.5, 1.5)
+                // 0.0
+            } else {
+                4.0 * scale.clamp(0.5, 1.5)
+            },
             fill,
-            egui::Stroke::new(if resp.hovered() { 1.6 } else { 1.0 }, stroke_c),
+            egui::Stroke::new(if is_pkg_root { base_w * 2.0 } else { base_w }, stroke_c),
             egui::StrokeKind::Inside,
         );
 
         // ── Header band: name + fn/ty badge ───────────────────────────────
         // Rows below need the detail scale; a row-less (or zoomed-out) node
         // centers the header content in the whole box instead.
-        let rows = if show_detail { shown_rows(node.symbols.len()) } else { 0 };
+        let rows = if show_detail {
+            shown_rows(node.symbols.len())
+        } else {
+            0
+        };
         let header = if rows > 0 {
             egui::Rect::from_min_size(r.min, egui::vec2(r.width(), HEADER_H * scale))
         } else {
@@ -383,16 +441,31 @@ fn show_canvas(
         } else {
             header.center().y
         };
+        let name_pos = egui::pos2(header.center().x, name_y);
         painter.text(
-            egui::pos2(header.center().x, name_y),
+            name_pos,
             egui::Align2::CENTER_CENTER,
             &node.name,
             name_font.clone(),
             egui::Color32::WHITE,
         );
+        if is_pkg_root {
+            // Poor-man's bold: egui ships no bold face, so overdraw the name
+            // with a sub-pixel offset to thicken the glyphs.
+            painter.text(
+                name_pos + egui::vec2((0.6 * scale).clamp(0.3, 0.9), 0.0),
+                egui::Align2::CENTER_CENTER,
+                &node.name,
+                name_font.clone(),
+                egui::Color32::WHITE,
+            );
+        }
         if show_detail {
             painter.text(
-                egui::pos2(header.center().x, header.center().y + header.height() * 0.24),
+                egui::pos2(
+                    header.center().x,
+                    header.center().y + header.height() * 0.24,
+                ),
                 egui::Align2::CENTER_CENTER,
                 format!("{} fn · {} ty", node.fn_count, node.ty_count),
                 sub_font.clone(),
@@ -449,8 +522,7 @@ fn show_canvas(
                     g_color,
                 );
                 let name: String = if sym.name.chars().count() > ROW_NAME_CHARS {
-                    let mut s: String =
-                        sym.name.chars().take(ROW_NAME_CHARS - 1).collect();
+                    let mut s: String = sym.name.chars().take(ROW_NAME_CHARS - 1).collect();
                     s.push('…');
                     s
                 } else {
@@ -470,13 +542,20 @@ fn show_canvas(
                     sym.line
                 ));
                 if row_resp.clicked() {
-                    result.click = Some(NodeClick { file: node.file, line: Some(sym.line) });
+                    result.click = Some(NodeClick {
+                        file: node.file,
+                        line: Some(sym.line),
+                    });
                     row_clicked = true;
                 }
             }
         }
 
-        let full = if node.path.is_empty() { "crate root" } else { &node.path };
+        let full = if node.path.is_empty() {
+            "crate root"
+        } else {
+            &node.path
+        };
         resp.clone().on_hover_text(format!(
             "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor",
             node.file_rel, node.fn_count, node.ty_count
@@ -484,7 +563,10 @@ fn show_canvas(
         // The header's drag-sense response wins the pointer there, so a plain
         // click on the header surfaces as `drag_resp.clicked()`.
         if (resp.clicked() || drag_resp.clicked()) && !row_clicked {
-            result.click = Some(NodeClick { file: node.file, line: None });
+            result.click = Some(NodeClick {
+                file: node.file,
+                line: None,
+            });
         }
     }
 
