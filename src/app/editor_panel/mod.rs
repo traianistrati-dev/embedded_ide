@@ -1,4 +1,4 @@
-//! Leftmost "Code Editor" panel (the [Editor][Project][MCU] layout).
+//! Leftmost "Code Editor" panel (the [Editor][MCU][Project] layout).
 //!
 //! Owns: the toolbar (Copy + Errors/Types toggles), the code editor widget
 //! itself, the embedded bottom diagnostics panel, the LSP completion popup,
@@ -57,7 +57,7 @@ impl AppIde {
         // display_code and the end-of-frame write-back — a tree click would
         // switch `selected_file` mid-frame and the write-back would store the
         // OLD file's text into the NEW file. Running the WHOLE editor panel
-        // before the tree (the [Editor][Project][MCU] layout since 2026-07-10)
+        // before the tree (the [Editor][MCU][Project] layout since 2026-07-10)
         // keeps the pair atomic: a click this frame takes effect next frame.
         let mut display_code: String = if let ProjectFileId::UserFile(i) = self.selected_file {
             self.project_tree

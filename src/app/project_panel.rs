@@ -1,5 +1,5 @@
-//! "Project" panel — docked between the editor and the MCU Configurator (the
-//! [Editor][Project][MCU] layout) — header toolbar (Save / Open / New) plus the file
+//! "Project" panel — docked on the FAR RIGHT (the [Editor][MCU][Project]
+//! layout) — header toolbar (Tools dropdown: Save / Open / New / Rename) plus the file
 //! tree body (delegated to [`crate::project_tree`]).
 //!
 //! Rendering is an inherent method on [`AppIde`] so it can read/write the
@@ -112,7 +112,7 @@ impl AppIde {
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
 
-        egui::Panel::left("project_tree")
+        egui::Panel::right("project_tree")
             .resizable(true)
             .default_size(200.0)
             .show_inside(ui, |ui| {

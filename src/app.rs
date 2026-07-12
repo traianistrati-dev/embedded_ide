@@ -1757,16 +1757,16 @@ impl eframe::App for AppIde {
             .map(|_| self.current_project_files());
 
         // ── Panel 1: Code Editor (leftmost) ─────
-        // Declared BEFORE the project tree so it docks on the outer left edge
-        // (left panels stack in declaration order): [Editor][Project][MCU].
-        // Running the WHOLE editor panel (display_code compute → render →
-        // write-back) before the tree also keeps the old write-back hazard
-        // away: a tree click changes `selected_file` only after this frame's
-        // write-back finished, so stale text can never land in the new file
-        // (the click's content shows next frame — invisible at UI framerates).
+        // The layout is [Editor][MCU][Project]: the editor docks left, the
+        // project tree docks on the FAR RIGHT, the MCU Configurator (central)
+        // takes the middle. Running the WHOLE editor panel (display_code
+        // compute → render → write-back) before the tree keeps the old
+        // write-back hazard away: a tree click changes `selected_file` only
+        // after this frame's write-back finished, so stale text can never land
+        // in the new file (the click's content shows next frame).
         self.show_editor_panel(ui, &project_files);
 
-        // ── Panel 2: Project Tree (between editor and MCU) ─────
+        // ── Panel 2: Project Tree (docked far right) ─────
         // `save_project_needed` is set when the tree mutates files/folders, so
         // the whole project gets rewritten to the workspace dir afterwards.
         let mut save_project_needed = false;
