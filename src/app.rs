@@ -222,6 +222,13 @@ impl McuTab {
             Self::Definition => "Definition",
         }
     }
+
+    /// Tab-bar group: `false` = the chip-config "MCU" group (Pins /
+    /// Peripherals / Clock / System), `true` = the chip-agnostic "Project"
+    /// group (Structure / Definition).
+    fn is_project_group(self) -> bool {
+        matches!(self, Self::Structure | Self::Definition)
+    }
 }
 
 // ── Build panel tab ──────────────────────────────────────────────────────────
@@ -670,6 +677,10 @@ pub struct AppIde {
     definition_view: Option<DefinitionView>,
     /// MCU tab to return to when the Definition tab closes / clears.
     definition_return_tab: McuTab,
+    /// Last active tab of each tab-bar group (two-level navigation): clicking
+    /// the "MCU" / "Project" group header returns to that group's last tab.
+    mcu_group_last: McuTab,
+    project_group_last: McuTab,
     /// Which tab is active in the bottom diagnostics panel
     build_tab: BuildPanelTab,
     /// Index of the RA diagnostic row that is expanded
@@ -934,6 +945,8 @@ impl AppIde {
             def_scroll_pending: false,
             definition_view: None,
             definition_return_tab: McuTab::Pins,
+            mcu_group_last: McuTab::Pins,
+            project_group_last: McuTab::Structure,
             build_tab: BuildPanelTab::RustAnalyzer,
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,

@@ -11,64 +11,112 @@ use egui_phosphor::regular as ph;
 
 impl AppIde {
     /// Render the central MCU configurator panel.
+    ///
+    /// Two-level navigation (2026-07-10): a GROUP row — "MCU" (chip config)
+    /// and "Project" (chip-agnostic) — then the active group's own tab row:
+    /// MCU → Pins / Peripherals / Clock / System; Project → Structure /
+    /// Definition. Clicking a group returns to its last-used tab; the chip
+    /// header row (Chip label + Reset pins) shows only for the MCU group.
     pub(super) fn show_mcu_panel(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("MCU Configurator");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let reset_btn = ui
-                        .add(egui::Button::new(
-                            egui::RichText::new(format!(
-                                "{} Reset pins",
-                                ph::ARROW_COUNTER_CLOCKWISE
-                            ))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(220, 100, 80)),
-                        ))
-                        .on_hover_text("Clear all pin function selections");
-                    if reset_btn.clicked() {
-                        if let Some(mcu) = &mut self.mcu {
-                            mcu.reset_all_pins();
-                        }
-                    }
-                });
-            });
-
-            // Chip label — always read-only.
-            // Selection is done exclusively via the "New Project" popup.
-            ui.horizontal(|ui| {
-                ui.label("Chip:");
-                ui.label(
-                    egui::RichText::new(self.selected_label())
-                        .strong()
-                        .color(egui::Color32::LIGHT_BLUE),
-                );
-                ui.label(
-                    egui::RichText::new(format!("·  {}", self.selected_family()))
-                        .color(egui::Color32::GRAY)
-                        .size(11.0),
-                );
-            });
-
-            ui.separator();
-
-            // Tab bar. The Definition tab (F12 snippet) exists only while a
-            // snippet is loaded — auto-leave it the moment the snippet clears.
+            // The Definition tab (F12 snippet) exists only while a snippet is
+            // loaded — auto-leave it the moment the snippet clears.
             if self.definition_view.is_none() && self.active_tab == McuTab::Definition {
                 self.active_tab = self.definition_return_tab;
             }
+            // Track each group's last-used tab so group clicks restore it.
+            if self.active_tab.is_project_group() {
+                self.project_group_last = self.active_tab;
+            } else {
+                self.mcu_group_last = self.active_tab;
+            }
+            let project_active = self.active_tab.is_project_group();
+
+            // ── Level 1: group selector ────────────────────────────────────
             ui.horizontal(|ui| {
-                let mut tabs = vec![
-                    McuTab::Pins,
-                    McuTab::Peripherals,
-                    McuTab::Clock,
-                    McuTab::System,
-                    McuTab::Structure,
-                ];
-                if self.definition_view.is_some() {
-                    tabs.push(McuTab::Definition);
+                for (label, is_project) in [("MCU", false), ("Project", true)] {
+                    let active = project_active == is_project;
+                    let text = egui::RichText::new(label).size(14.0).strong().color(
+                        if active {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(150, 150, 160)
+                        },
+                    );
+                    if ui.selectable_label(active, text).clicked() && !active {
+                        self.active_tab = if is_project {
+                            // A remembered Definition tab needs its snippet.
+                            if self.project_group_last == McuTab::Definition
+                                && self.definition_view.is_none()
+                            {
+                                McuTab::Structure
+                            } else {
+                                self.project_group_last
+                            }
+                        } else {
+                            self.mcu_group_last
+                        };
+                    }
                 }
-                for tab in tabs {
+                // Reset pins — a chip operation, shown with the MCU group only.
+                if !project_active {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let reset_btn = ui
+                            .add(egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{} Reset pins",
+                                    ph::ARROW_COUNTER_CLOCKWISE
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(220, 100, 80)),
+                            ))
+                            .on_hover_text("Clear all pin function selections");
+                        if reset_btn.clicked() {
+                            if let Some(mcu) = &mut self.mcu {
+                                mcu.reset_all_pins();
+                            }
+                        }
+                    });
+                }
+            });
+
+            // Chip label — MCU group only (read-only; selection happens in the
+            // "New Project" popup). The Project group doesn't involve the chip.
+            if !project_active {
+                ui.horizontal(|ui| {
+                    ui.label("Chip:");
+                    ui.label(
+                        egui::RichText::new(self.selected_label())
+                            .strong()
+                            .color(egui::Color32::LIGHT_BLUE),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("·  {}", self.selected_family()))
+                            .color(egui::Color32::GRAY)
+                            .size(11.0),
+                    );
+                });
+            }
+
+            ui.separator();
+
+            // ── Level 2: the active group's tab row ────────────────────────
+            ui.horizontal(|ui| {
+                let mut tabs: Vec<McuTab> = if project_active {
+                    let mut t = vec![McuTab::Structure];
+                    if self.definition_view.is_some() {
+                        t.push(McuTab::Definition);
+                    }
+                    t
+                } else {
+                    vec![
+                        McuTab::Pins,
+                        McuTab::Peripherals,
+                        McuTab::Clock,
+                        McuTab::System,
+                    ]
+                };
+                for tab in tabs.drain(..) {
                     let is_active = self.active_tab == tab;
                     let label = egui::RichText::new(tab.label())
                         .size(13.0)
@@ -84,7 +132,8 @@ impl AppIde {
                     }
                 }
                 // Close button for the transient Definition tab.
-                if self.definition_view.is_some()
+                if project_active
+                    && self.definition_view.is_some()
                     && ui
                         .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
                         .on_hover_text("Close definition")
