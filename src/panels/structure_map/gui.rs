@@ -81,7 +81,7 @@ const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
 /// Module dependency edges (solid, straight): LIGHT GRAY — the old blue now
 /// belongs to fn-call edges (see below), so the module-level wiring recedes
 /// into the background while stays brighter than the dashed containment.
-const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 80, 80);
+const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(40, 40, 40);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
 
 /// Render the diagram; the [`ShowResult`] carries clicks, a finished node drag
@@ -769,10 +769,28 @@ fn show_canvas(
                     }
                 }
                 for (i, r) in node_rects.iter().enumerate() {
-                    if i == skip_a || i == skip_b {
-                        continue;
-                    }
-                    for w in pts.windows(2) {
+                    // The route legitimately touches its own endpoints' boxes
+                    // ONLY at the very start/end (leaving/arriving). Beyond
+                    // that trimmed stretch, hitting the source or target box —
+                    // e.g. an L-leg running back through its own node — is
+                    // penalized like any other box cut (the reported bug).
+                    let check: &[egui::Pos2] = if i == skip_a {
+                        let start = pts
+                            .iter()
+                            .position(|p| !r.contains(*p))
+                            .unwrap_or(pts.len());
+                        &pts[start..]
+                    } else if i == skip_b {
+                        let end = pts
+                            .iter()
+                            .rposition(|p| !r.contains(*p))
+                            .map(|x| x + 1)
+                            .unwrap_or(0);
+                        &pts[..end]
+                    } else {
+                        pts
+                    };
+                    for w in check.windows(2) {
                         if seg_hits_rect(
                             (w[0].x, w[0].y),
                             (w[1].x, w[1].y),
@@ -813,12 +831,13 @@ fn show_canvas(
             // row. Exit side follows the target's vertical direction; a small
             // per-row stagger keeps several departures off one corner point.
             let via_top = (b.y + b.h / 2.0) < (a.y + a.h / 2.0);
-            let src = |right: bool| -> egui::Pos2 {
+            let src_at = |right: bool, top: bool| -> egui::Pos2 {
                 let inset = (10.0 + (e.from_row % 4) as f32 * 7.0).min(a.w * 0.45);
                 let x = if right { a.x + a.w - inset } else { a.x + inset };
-                let y = if via_top { a.y } else { a.y + a.h };
+                let y = if top { a.y } else { a.y + a.h };
                 to_screen(x, y)
             };
+            let src = |right: bool| -> egui::Pos2 { src_at(right, via_top) };
             // Candidate 1: FACING sides — the short direct route (vertical
             // takeoff from the corner, horizontal landing at the row).
             let f_from = src(toward_right);
@@ -876,24 +895,59 @@ fn show_canvas(
                 f_to - egui::vec2(dxs, 0.0),
                 f_to,
             ];
-            let mut cands = vec![
-                Route::Bez(cand_facing),
-                Route::Bez(cand_side),
-                Route::Bez(mk_flank(false)),
-                Route::Bez(mk_flank(true)),
+            let corner_r = 12.0 * scale.clamp(0.5, 1.5);
+            // Rounded-orthogonal LANE routes (user mockup): out the side at
+            // header height, rounded bend, vertical run in the outer lane,
+            // rounded bend, horizontal into the target row.
+            let mk_lane = |right: bool| -> Vec<egui::Pos2> {
+                let s = src_side(right);
+                let lane_x_v = if right {
+                    (a.x + a.w).max(b.x + b.w) + swing
+                } else {
+                    a.x.min(b.x) - swing
+                };
+                let lane_x = to_screen(lane_x_v, 0.0).x;
+                let to_pt = anchor(e.to_node, e.to_row, right);
+                rounded_path(
+                    &[s, egui::pos2(lane_x, s.y), egui::pos2(lane_x, to_pt.y), to_pt],
+                    corner_r,
+                )
+            };
+            // (route, stylistic cost multiplier): beziers pay a small premium
+            // so at similar length the rounded-orthogonal "circuit trace"
+            // shape wins — the user prefers it over field-cutting diagonals.
+            let mut cands: Vec<(Route, f32)> = vec![
+                (Route::Bez(cand_facing), 1.15),
+                (Route::Bez(cand_side), 1.15),
+                (Route::Bez(mk_flank(false)), 1.15),
+                (Route::Bez(mk_flank(true)), 1.15),
+                (Route::Poly(mk_lane(false)), 1.0),
+                (Route::Poly(mk_lane(true)), 1.0),
             ];
             {
                 let (bl, br) = (to_screen(b.x, 0.0).x, to_screen(b.x + b.w, 0.0).x);
-                if f_from.x < bl - 8.0 || f_from.x > br + 8.0 {
-                    cands.push(Route::Poly(vec![
-                        f_from,
-                        egui::pos2(f_from.x, f_to.y),
-                        f_to,
-                    ]));
+                let src_top = to_screen(0.0, a.y).y;
+                let src_bot = to_screen(0.0, a.y + a.h).y;
+                // The L's vertical leg must run OUTSIDE the source box, so the
+                // exit edge follows the TARGET ROW's y (not the node centers —
+                // that variant sent the leg straight through the source, the
+                // reported bug), and the route is offered only when the row
+                // sits clearly above/below the source.
+                if f_to.y < src_top - 4.0 || f_to.y > src_bot + 4.0 {
+                    let l_from = src_at(toward_right, f_to.y < src_top);
+                    if l_from.x < bl - 8.0 || l_from.x > br + 8.0 {
+                        cands.push((
+                            Route::Poly(rounded_path(
+                                &[l_from, egui::pos2(l_from.x, f_to.y), f_to],
+                                corner_r,
+                            )),
+                            1.0,
+                        ));
+                    }
                 }
             }
             let mut best: Option<(Route, Vec<egui::Pos2>, f32)> = None;
-            for cand in cands {
+            for (cand, mult) in cands {
                 let pts = match &cand {
                     Route::Bez(b4) => egui::epaint::CubicBezierShape::from_points_stroke(
                         *b4,
@@ -904,7 +958,7 @@ fn show_canvas(
                     .flatten(Some(4.0)),
                     Route::Poly(p) => p.clone(),
                 };
-                let cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys);
+                let cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys) * mult;
                 if best.as_ref().is_none_or(|(_, _, c)| cost < *c) {
                     best = Some((cand, pts, cost));
                 }
@@ -955,6 +1009,39 @@ fn kind_word(kind: SymKind) -> &'static str {
         SymKind::Enum => "enum",
         SymKind::Trait => "trait",
     }
+}
+
+/// Round every interior corner of an orthogonal polyline: each bend is
+/// replaced by a small quadratic arc of `radius` (clamped to half of the
+/// adjacent segment lengths), so 90° routes read as smooth "circuit traces"
+/// instead of sharp elbows.
+fn rounded_path(pts: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let mut out = vec![pts[0]];
+    for i in 1..pts.len() - 1 {
+        let p = pts[i];
+        let vin = p - pts[i - 1];
+        let vout = pts[i + 1] - p;
+        let (lin, lout) = (vin.length(), vout.length());
+        if lin < 1.0 || lout < 1.0 {
+            out.push(p);
+            continue;
+        }
+        let r = radius.min(lin * 0.5).min(lout * 0.5);
+        let a = p - vin / lin * r;
+        let b = p + vout / lout * r;
+        out.push(a);
+        for t in [0.25f32, 0.5, 0.75] {
+            let ap = a.lerp(p, t);
+            let pb = p.lerp(b, t);
+            out.push(ap.lerp(pb, t));
+        }
+        out.push(b);
+    }
+    out.push(*pts.last().unwrap());
+    out
 }
 
 /// Where a polyline (running INTO `target`'s interior) crosses the target's
