@@ -423,6 +423,10 @@ fn show_canvas(
     let row_font = egui::FontId::monospace((8.0 * scale).clamp(5.0, 16.0));
     // Symbol rows are unreadable below this scale — draw compact nodes instead.
     let show_detail = scale > 0.45;
+    // Hover-focus state, fed to the call-edge draw pass below: while a node
+    // or a symbol row is hovered, unrelated call edges dim.
+    let mut hovered_node: Option<usize> = None;
+    let mut hovered_row: Option<(usize, usize)> = None;
     // One fill per PACKAGE (top-level module subtree): same colour for a
     // package and all its children, different across packages. main keeps its
     // olive root fill.
@@ -506,6 +510,9 @@ fn show_canvas(
         //   2. SELECTED (the focus node) — the hover style, held while the
         //      node stays selected, so it's obvious whose edges are shown;
         //   3. hover; 4. normal.
+        if resp.hovered() || drag_resp.hovered() {
+            hovered_node = Some(i);
+        }
         let has_error = node_errors.get(i).copied().unwrap_or(false);
         let blink_on = has_error && (ui.ctx().input(|inp| inp.time) * 2.0) as i64 % 2 == 0;
         if has_error {
@@ -617,6 +624,7 @@ fn show_canvas(
                     egui::Sense::click(),
                 );
                 if row_resp.hovered() {
+                    hovered_row = Some((i, j));
                     painter.rect_filled(
                         row_rect,
                         0.0,
@@ -838,6 +846,9 @@ fn show_canvas(
                 }
                 cost
             };
+        // Routed edges collected first (route → polyline → kind colour), then
+        // drawn in a second pass so hover-focus can dim the unrelated ones.
+        let mut routed: Vec<(&CallEdge, Vec<egui::Pos2>, egui::Color32)> = Vec::new();
         for e in visible {
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
             // Edge colour = the TARGET symbol's kind colour (the same palette
@@ -1002,7 +1013,7 @@ fn show_canvas(
                         egui::Color32::TRANSPARENT,
                         stroke,
                     )
-                    .flatten(Some(4.0)),
+                    .flatten(Some(2.0)),
                     Route::Poly(p) => p.clone(),
                 };
                 let mut cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys) * mult;
@@ -1015,20 +1026,52 @@ fn show_canvas(
                     best = Some((cand, pts, cost));
                 }
             }
-            let (cand, pts, _) = best.unwrap();
-            match &cand {
-                Route::Bez(b4) => {
-                    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                        *b4,
-                        false,
-                        egui::Color32::TRANSPARENT,
-                        stroke,
-                    ));
-                }
-                Route::Poly(p) => {
-                    painter.add(egui::Shape::line(p.clone(), stroke));
+            let (_, pts, _) = best.unwrap();
+            edge_polys.push(pts.clone());
+            routed.push((e, pts, kc));
+        }
+
+        // ── Hover detection + draw pass ───────────────────────────────────
+        // Edges are painter shapes, not widgets, so hover is a distance test
+        // against the routed polylines (suppressed while the pointer is over
+        // a node — its own interactions win there).
+        let pointer = ui.ctx().pointer_latest_pos();
+        let over_node = pointer
+            .map(|p| node_rects.iter().any(|r| r.contains(p)))
+            .unwrap_or(false);
+        let hovered_edge: Option<usize> = pointer.filter(|_| !over_node).and_then(|p| {
+            let mut best: Option<(usize, f32)> = None;
+            for (idx, (_, pts, _)) in routed.iter().enumerate() {
+                let d = dist_to_polyline(p, pts);
+                if d < 6.0 && best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((idx, d));
                 }
             }
+            best.map(|(i, _)| i)
+        });
+        let any_focus = hovered_row.is_some() || hovered_node.is_some() || hovered_edge.is_some();
+        for (idx, (e, pts, kc)) in routed.iter().enumerate() {
+            // HOVER-FOCUS: while something is hovered (a row, a node or an
+            // edge), unrelated edges dim so the relevant wiring pops out.
+            let emphasized = if let Some((hn, hr)) = hovered_row {
+                (e.to_node == hn && e.to_row == hr) || (e.from_node == hn && e.from_row == hr)
+            } else if let Some(hn) = hovered_node {
+                e.from_node == hn || e.to_node == hn
+            } else {
+                hovered_edge == Some(idx)
+            };
+            let (alpha, width_mult) = if !any_focus {
+                (200, 1.0)
+            } else if emphasized {
+                (255, if hovered_edge == Some(idx) { 1.8 } else { 1.4 })
+            } else {
+                (45, 1.0)
+            };
+            let stroke = egui::Stroke::new(
+                (1.1 * scale).clamp(0.5, 2.0) * width_mult,
+                egui::Color32::from_rgba_unmultiplied(kc.r(), kc.g(), kc.b(), alpha),
+            );
+            painter.add(egui::Shape::line(pts.clone(), stroke));
             // Arrowhead along the final segment, whatever the shape.
             if pts.len() >= 2 {
                 arrowhead(
@@ -1039,9 +1082,73 @@ fn show_canvas(
                     stroke,
                 );
             }
-            edge_polys.push(pts);
+
+            // Interactive edge: tooltip with the relation + click to jump to
+            // the used symbol's definition.
+            if hovered_edge == Some(idx) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                let from_n = &graph.nodes[e.from_node];
+                let to_n = &graph.nodes[e.to_node];
+                let from_sym = from_n
+                    .symbols
+                    .get(e.from_row)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("?");
+                let to_sym = to_n.symbols.get(e.to_row);
+                let sites = ref_counts
+                    .get(&(e.to_node, e.to_row))
+                    .map(|c| format!("\n{c} reference site(s) in total"))
+                    .unwrap_or_default();
+                egui::Tooltip::always_open(
+                    ui.ctx().clone(),
+                    ui.layer_id(),
+                    egui::Id::new(("structure_edge_tip", idx)),
+                    egui::PopupAnchor::Pointer,
+                )
+                .gap(12.0)
+                .show(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}::{} → {}::{}{}",
+                            from_n.name,
+                            from_sym,
+                            to_n.name,
+                            to_sym.map(|s| s.name.as_str()).unwrap_or("?"),
+                            sites
+                        ))
+                        .size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new("Click to open the used symbol")
+                            .size(9.5)
+                            .color(egui::Color32::from_rgb(130, 140, 155)),
+                    );
+                });
+                if ui.input(|i| i.pointer.primary_clicked()) {
+                    result.click = Some(NodeClick {
+                        file: to_n.file,
+                        line: to_sym.map(|s| s.line),
+                    });
+                }
+            }
         }
     }
+}
+
+/// Shortest distance from `p` to the polyline `pts` (segment-wise).
+fn dist_to_polyline(p: egui::Pos2, pts: &[egui::Pos2]) -> f32 {
+    let mut best = f32::MAX;
+    for w in pts.windows(2) {
+        let ab = w[1] - w[0];
+        let len2 = ab.length_sq();
+        let t = if len2 <= 0.0 {
+            0.0
+        } else {
+            ((p - w[0]).dot(ab) / len2).clamp(0.0, 1.0)
+        };
+        best = best.min((w[0] + ab * t).distance(p));
+    }
+    best
 }
 
 /// Glyph letter + colour for a symbol kind (drawn before the name in a row).
