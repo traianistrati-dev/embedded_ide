@@ -91,6 +91,16 @@ impl AppIde {
                 .unwrap_or(0),
             _ => 0, // main.rs / config files → main
         };
+        // Per-node error flags (rust-analyzer + flycheck diagnostics, keyed by
+        // the workspace-relative path) — nodes with errors blink a red border.
+        let node_errors: Vec<bool> = {
+            let lsp = self.lsp_state.lock().unwrap();
+            graph
+                .nodes
+                .iter()
+                .map(|n| lsp.error_count_for(&format!("src/{}", n.file_rel)) > 0)
+                .collect()
+        };
         let result = gui::show(
             ui,
             &*graph,
@@ -99,6 +109,7 @@ impl AppIde {
             call_edges,
             &calls_status,
             focus_node,
+            &node_errors,
         );
 
         // A header drag ended → pin that node's position (keyed by its file,

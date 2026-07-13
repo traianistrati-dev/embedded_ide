@@ -74,6 +74,8 @@ const PKG_PALETTE: [egui::Color32; 8] = [
     egui::Color32::from_rgb(56, 50, 58), // plum grey
 ];
 const NODE_STROKE: egui::Color32 = egui::Color32::from_rgb(96, 106, 128);
+/// Blinking border of nodes whose file carries error diagnostics.
+const ERROR_STROKE: egui::Color32 = egui::Color32::from_rgb(230, 70, 60);
 // const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 170, 240);
 const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
 /// Module dependency edges (solid, straight): LIGHT GRAY — the old blue now
@@ -99,6 +101,9 @@ pub fn show(
     // selected FILE (main.rs by default), so clicking a node (which opens its
     // file) also moves the focus.
     focus_node: usize,
+    // Per-node error flag (diagnostics in that module's file): the node's
+    // border blinks red at 3× width so broken files stand out.
+    node_errors: &[bool],
 ) -> ShowResult {
     let mut result = ShowResult::default();
     // ── Toolbar ───────────────────────────────────────────────────────────
@@ -235,6 +240,7 @@ pub fn show(
                 scale,
                 content,
                 focus_node,
+                node_errors,
                 &mut result,
             );
         });
@@ -253,6 +259,7 @@ fn show_canvas(
     scale: f32,
     content: egui::Vec2,
     focus_node: usize,
+    node_errors: &[bool],
     result: &mut ShowResult,
 ) {
     // Fill at least the viewport (no background gap); when zoomed past the
@@ -445,26 +452,35 @@ fn show_canvas(
         let p = lay.pos[i];
         let r = egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale);
 
-        // Package roots (a `mod.rs` file) stand out: SHARP corners, a border
+        // Package roots (a `mod.rs` file) stand out: pill corners, a border
         // twice as thick as regular nodes, and a bold name.
         let is_pkg_root = node.file_rel.ends_with("/mod.rs");
         let fill = fills[i];
-        let stroke_c = if resp.hovered() {
-            HOVER_STROKE
+        // Border style, by priority:
+        //   1. ERROR — the file has diagnostics: BLINKING red at 3× width
+        //      (driven by wall time; repaint scheduled below);
+        //   2. SELECTED (the focus node) — the hover style, held while the
+        //      node stays selected, so it's obvious whose edges are shown;
+        //   3. hover; 4. normal.
+        let has_error = node_errors.get(i).copied().unwrap_or(false);
+        let blink_on = has_error && (ui.ctx().input(|inp| inp.time) * 2.0) as i64 % 2 == 0;
+        if has_error {
+            // Keep frames coming so the blink actually blinks.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        let selected = i == focus_node;
+        let (stroke_c, base_w) = if blink_on {
+            (ERROR_STROKE, 3.0)
+        } else if selected || resp.hovered() {
+            (HOVER_STROKE, 1.6)
         } else {
-            NODE_STROKE
-            // if is_pkg_root {
-            //     egui::Color32::from_rgb(150, 150, 150)
-            // } else {
-            //     NODE_STROKE
-            // }
+            (NODE_STROKE, 1.0)
         };
-        let base_w = if resp.hovered() { 1.6 } else { 1.0 };
         painter.rect(
             r,
             if is_pkg_root {
                 20.0 * scale.clamp(0.5, 1.5)
-                // 0.0
             } else {
                 4.0 * scale.clamp(0.5, 1.5)
             },
@@ -702,16 +718,22 @@ fn show_canvas(
             .map(|p| egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale))
             .collect();
         use crate::panels::structure_map::layout::{seg_hits_rect, segments_cross};
-        // Candidate cost: length in px, +400 per crossed polyline (one per
-        // pair), +900 per non-endpoint node box it cuts through — so a
-        // crossing is worth a ~400 px longer detour, never more than needed.
+        // Everything in `edge_polys` up to this point is MODULE wiring (gray
+        // deps/containment) — background lines, cheap to cross. Entries pushed
+        // later are routed CALL edges — crossing those costs real money.
+        let module_polys_len = edge_polys.len();
+        // Candidate cost: length in px, +60 per crossed module line (they're
+        // background — a short direct route beats dodging them to the far
+        // side, the reported bug), +400 per crossed CALL edge, +900 per
+        // non-endpoint node box it cuts through.
         let poly_cost =
             |pts: &[egui::Pos2], skip_a: usize, skip_b: usize, polys: &[Vec<egui::Pos2>]| -> f32 {
                 let mut cost = 0.0;
                 for w in pts.windows(2) {
                     cost += w[0].distance(w[1]);
                 }
-                for other in polys {
+                for (oi, other) in polys.iter().enumerate() {
+                    let penalty = if oi < module_polys_len { 60.0 } else { 400.0 };
                     'pair: for w1 in pts.windows(2) {
                         for w2 in other.windows(2) {
                             if segments_cross(
@@ -720,7 +742,7 @@ fn show_canvas(
                                 (w2[0].x, w2[0].y),
                                 (w2[1].x, w2[1].y),
                             ) {
-                                cost += 400.0;
+                                cost += penalty;
                                 break 'pair;
                             }
                         }
