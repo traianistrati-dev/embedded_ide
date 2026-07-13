@@ -79,7 +79,7 @@ const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
 /// Module dependency edges (solid, straight): LIGHT GRAY — the old blue now
 /// belongs to fn-call edges (see below), so the module-level wiring recedes
 /// into the background while stays brighter than the dashed containment.
-const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 174, 184);
+const DEP_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 80, 80);
 const CONTAIN_COLOR: egui::Color32 = egui::Color32::from_rgb(105, 105, 115);
 
 /// Render the diagram; the [`ShowResult`] carries clicks, a finished node drag
@@ -227,7 +227,15 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             show_canvas(
-                ui, graph, lay, view, calls, scale, content, focus_node, &mut result,
+                ui,
+                graph,
+                lay,
+                view,
+                calls,
+                scale,
+                content,
+                focus_node,
+                &mut result,
             );
         });
 
@@ -263,6 +271,10 @@ fn show_canvas(
     painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(24, 26, 32));
 
     let stroke_w = (1.3 * scale).clamp(0.6, 2.4);
+
+    // Screen polylines of every edge already drawn — the call-edge router
+    // below scores its candidate routes against them (crossing penalties).
+    let mut edge_polys: Vec<Vec<egui::Pos2>> = Vec::new();
 
     // ── Module edges (containment dashed + dependency solid), routed ──────
     // Two anti-overlap measures: (1) PORT SPREADING — each edge endpoint gets
@@ -344,6 +356,7 @@ fn show_canvas(
                 } else {
                     painter.add(egui::Shape::dashed_line(&[from, to], stroke, dash, dash));
                 }
+                edge_polys.push(vec![from, to]);
             } else {
                 const PAD: f32 = 14.0;
                 let mid = (from_v.0 + to_v.0) / 2.0;
@@ -361,14 +374,15 @@ fn show_canvas(
                     egui::Color32::TRANSPARENT,
                     stroke,
                 );
+                let pts = bez.flatten(Some(2.0));
                 if is_dep {
                     painter.add(bez);
                     arrowhead(&painter, c2, to, 7.0 * scale.clamp(0.5, 1.6), stroke);
                 } else {
                     // Dashed beziers aren't a primitive — flatten to a polyline.
-                    let pts = bez.flatten(Some(2.0));
                     painter.add(egui::Shape::dashed_line(&pts, stroke, dash, dash));
                 }
+                edge_polys.push(pts);
             }
         }
     }
@@ -680,12 +694,80 @@ fn show_canvas(
             }
             dist
         };
-        for e in calls {
-            let downstream = dist[e.from_node] < depth_limit;
-            let incoming = in_set[e.to_node];
-            if !downstream && !incoming {
-                continue;
-            }
+        // ── Candidate ROUTER (user fix: "choose the shortest path without
+        //    crossing other paths") ─────────────────────────────────────────
+        // For every visible edge THREE routes are scored — the direct
+        // facing-sides bezier, and the left / right outer-flank arcs — by
+        // length plus penalties for crossing anything already drawn (module
+        // edges + previously routed calls) or cutting through a node box; the
+        // cheapest wins. Short edges route first so they claim the direct
+        // lanes and longer ones bend around them.
+        let mut visible: Vec<&CallEdge> = calls
+            .iter()
+            .filter(|e| dist[e.from_node] < depth_limit || in_set[e.to_node])
+            .collect();
+        let center_dist2 = |e: &CallEdge| -> f32 {
+            let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
+            let dx = a.center_x() - b.center_x();
+            let dy = (a.y + a.h / 2.0) - (b.y + b.h / 2.0);
+            dx * dx + dy * dy
+        };
+        visible.sort_by(|x, y| {
+            center_dist2(x)
+                .partial_cmp(&center_dist2(y))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let node_rects: Vec<egui::Rect> = lay
+            .pos
+            .iter()
+            .map(|p| egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale))
+            .collect();
+        use crate::panels::structure_map::layout::{seg_hits_rect, segments_cross};
+        // Candidate cost: length in px, +400 per crossed polyline (one per
+        // pair), +900 per non-endpoint node box it cuts through — so a
+        // crossing is worth a ~400 px longer detour, never more than needed.
+        let poly_cost =
+            |pts: &[egui::Pos2], skip_a: usize, skip_b: usize, polys: &[Vec<egui::Pos2>]| -> f32 {
+                let mut cost = 0.0;
+                for w in pts.windows(2) {
+                    cost += w[0].distance(w[1]);
+                }
+                for other in polys {
+                    'pair: for w1 in pts.windows(2) {
+                        for w2 in other.windows(2) {
+                            if segments_cross(
+                                (w1[0].x, w1[0].y),
+                                (w1[1].x, w1[1].y),
+                                (w2[0].x, w2[0].y),
+                                (w2[1].x, w2[1].y),
+                            ) {
+                                cost += 400.0;
+                                break 'pair;
+                            }
+                        }
+                    }
+                }
+                for (i, r) in node_rects.iter().enumerate() {
+                    if i == skip_a || i == skip_b {
+                        continue;
+                    }
+                    for w in pts.windows(2) {
+                        if seg_hits_rect(
+                            (w[0].x, w[0].y),
+                            (w[1].x, w[1].y),
+                            r.left(),
+                            r.top(),
+                            r.width(),
+                            r.height(),
+                        ) {
+                            cost += 900.0;
+                            break;
+                        }
+                    }
+                }
+                cost
+            };
+        for e in visible {
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
             // Edge colour = the TARGET symbol's kind colour (the same palette
             // as the row glyphs): fn blue, Struct orange, Enum purple, Trait
@@ -700,33 +782,66 @@ fn show_canvas(
                 (1.1 * scale).clamp(0.5, 2.0),
                 egui::Color32::from_rgba_unmultiplied(kc.r(), kc.g(), kc.b(), 200),
             );
-            // OUTER-FLANK routing (user feedback): the straight blue dep edges
-            // run through the inner corridor between stacked nodes, and the
-            // old inner-side beziers crossed them there. Instead, exit AND
-            // enter on the flank facing the target and push the bow PAST the
-            // outermost node edge — the amber curve travels in the outer lane,
-            // clear of the dep corridor.
-            let outer_right = b.center_x() >= a.center_x();
-            let from = anchor(e.from_node, e.from_row, outer_right);
-            let to = anchor(e.to_node, e.to_row, outer_right);
-            // Swing past the outer edge, staggered per row so parallel calls
-            // between the same nodes don't ride one arc (virtual units).
+            let toward_right = b.center_x() >= a.center_x();
+            // Stagger keeps parallel calls between the same nodes off one arc.
             let swing = 26.0 + ((e.from_row + e.to_row) % 4) as f32 * 8.0;
-            let outer_x = if outer_right {
-                (a.x + a.w).max(b.x + b.w) + swing
-            } else {
-                a.x.min(b.x) - swing
+            // Candidate 1: FACING sides — the short direct route.
+            let f_from = anchor(e.from_node, e.from_row, toward_right);
+            let f_to = anchor(e.to_node, e.to_row, !toward_right);
+            let dxf = ((f_to.x - f_from.x).abs() * 0.4).clamp(20.0 * scale, 120.0 * scale)
+                * if toward_right { 1.0 } else { -1.0 };
+            let cand_facing = [
+                f_from,
+                f_from + egui::vec2(dxf, 0.0),
+                f_to - egui::vec2(dxf, 0.0),
+                f_to,
+            ];
+            // Candidates 2 + 3: LEFT / RIGHT outer-flank arcs past the boxes.
+            let mk_flank = |right: bool| {
+                let from = anchor(e.from_node, e.from_row, right);
+                let to = anchor(e.to_node, e.to_row, right);
+                let outer_x = if right {
+                    (a.x + a.w).max(b.x + b.w) + swing
+                } else {
+                    a.x.min(b.x) - swing
+                };
+                let cx = to_screen(outer_x, 0.0).x;
+                [
+                    from,
+                    egui::pos2(cx, from.y + 0.25 * (to.y - from.y)),
+                    egui::pos2(cx, from.y + 0.75 * (to.y - from.y)),
+                    to,
+                ]
             };
-            let cx = to_screen(outer_x, 0.0).x;
-            let c1 = egui::pos2(cx, from.y + 0.25 * (to.y - from.y));
-            let c2 = egui::pos2(cx, from.y + 0.75 * (to.y - from.y));
+            let mut best: Option<([egui::Pos2; 4], Vec<egui::Pos2>, f32)> = None;
+            for cand in [cand_facing, mk_flank(false), mk_flank(true)] {
+                let bez = egui::epaint::CubicBezierShape::from_points_stroke(
+                    cand,
+                    false,
+                    egui::Color32::TRANSPARENT,
+                    stroke,
+                );
+                let pts = bez.flatten(Some(4.0));
+                let cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys);
+                if best.as_ref().is_none_or(|(_, _, c)| cost < *c) {
+                    best = Some((cand, pts, cost));
+                }
+            }
+            let (cand, pts, _) = best.unwrap();
             painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [from, c1, c2, to],
+                cand,
                 false,
                 egui::Color32::TRANSPARENT,
                 stroke,
             ));
-            arrowhead(&painter, c2, to, 6.0 * scale.clamp(0.5, 1.5), stroke);
+            arrowhead(
+                &painter,
+                cand[2],
+                cand[3],
+                6.0 * scale.clamp(0.5, 1.5),
+                stroke,
+            );
+            edge_polys.push(pts);
         }
     }
 }
