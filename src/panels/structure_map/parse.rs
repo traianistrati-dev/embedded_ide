@@ -96,6 +96,30 @@ pub struct ModuleGraph {
     pub contains: Vec<(usize, usize)>,
 }
 
+impl ModuleGraph {
+    /// The FOCUS SET for the call-edge display, as a membership mask. A plain
+    /// module focuses itself alone; a PACKAGE ROOT (a `mod.rs` file, e.g.
+    /// selecting `mw_radar/mod.rs`) focuses the whole package subtree — the
+    /// root plus every `pkg::…` descendant — so the diagram shows all interior
+    /// links of the package at once, plus its outside connections.
+    pub fn focus_set(&self, focus: usize) -> Vec<bool> {
+        let mut set = vec![false; self.nodes.len()];
+        let Some(node) = self.nodes.get(focus) else {
+            return set;
+        };
+        set[focus] = true;
+        if node.file_rel.ends_with("/mod.rs") && !node.path.is_empty() {
+            let prefix = format!("{}::", node.path);
+            for (i, n) in self.nodes.iter().enumerate() {
+                if n.path.starts_with(&prefix) {
+                    set[i] = true;
+                }
+            }
+        }
+        set
+    }
+}
+
 /// `"foo/bar.rs"` → `"foo::bar"`, `"foo/mod.rs"` → `"foo"`, `"utils.rs"` → `"utils"`.
 pub fn module_path_of(rel: &str) -> String {
     let no_ext = rel.strip_suffix(".rs").unwrap_or(rel);
@@ -638,6 +662,25 @@ trait Frame {}
         // …but the badge still counts the method.
         assert_eq!(a.fn_count, 2);
         assert_eq!(a.ty_count, 3);
+    }
+
+    /// Selecting a package's `mod.rs` focuses the whole subtree; a plain file
+    /// focuses only itself.
+    #[test]
+    fn focus_set_expands_package_roots() {
+        let (main_rs, files) = sample(); // pins/{mod,configs/{mod,usart1}} + mw_radar/…
+        let g = build_graph(&main_rs, &files);
+        let idx = |p: &str| g.nodes.iter().position(|n| n.path == p).unwrap();
+
+        // pins/mod.rs → pins + configs + usart1, NOT mw_radar or main.
+        let set = g.focus_set(idx("pins"));
+        assert!(set[idx("pins")] && set[idx("pins::configs")] && set[idx("pins::configs::usart1")]);
+        assert!(!set[idx("mw_radar")] && !set[0]);
+
+        // A leaf file focuses itself alone.
+        let set = g.focus_set(idx("pins::configs::usart1"));
+        assert_eq!(set.iter().filter(|&&b| b).count(), 1);
+        assert!(set[idx("pins::configs::usart1")]);
     }
 
     /// Call sites inside `impl` methods must attribute to the implemented

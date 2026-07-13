@@ -20,9 +20,10 @@ pub struct StructureView {
     pub zoom: f32,
     /// Draw the cross-module call edges (Phase 3) over the diagram.
     pub show_calls: bool,
-    /// Ignore the focus filter and draw EVERY collected call edge, from all
-    /// modules at once — dense, but the full picture on demand.
-    pub show_all_calls: bool,
+    /// How many call-hops BELOW the focused module to draw: `Some(1)` = only
+    /// its direct edges (default), `Some(n)` = the downstream tree n levels
+    /// deep, `None` = "All" (the whole tree under the selected module).
+    pub call_depth: Option<usize>,
 }
 
 impl Default for StructureView {
@@ -30,7 +31,7 @@ impl Default for StructureView {
         Self {
             zoom: 1.0,
             show_calls: true,
-            show_all_calls: false,
+            call_depth: Some(1),
         }
     }
 }
@@ -134,27 +135,46 @@ pub fn show(
                  enum, green = trait. Computed via rust-analyzer, one symbol \
                  at a time, only while the project is saved/in sync.",
         );
-        // Whose calls are shown (follows the selected file; main by default) —
-        // or everything at once when "All" is on.
+        // Whose calls are shown (follows the selected file; main by default)
+        // and how many hops DEEP below it the display drills.
         if view.show_calls {
-            ui.checkbox(&mut view.show_all_calls, egui::RichText::new("All").size(11.0))
+            if let Some(node) = graph.nodes.get(focus_node) {
+                // A package root (mod.rs) focuses its whole subtree.
+                let label = if node.file_rel.ends_with("/mod.rs") {
+                    format!("of {}::*", node.name)
+                } else {
+                    format!("of {}", node.name)
+                };
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(150, 158, 172)),
+                )
                 .on_hover_text(
-                    "Draw EVERY call edge from all modules at once, instead of \
-                     only the selected file's — dense, but the complete picture.",
+                    "The call edges shown start from the selected file's module \
+                     — selecting a package's mod.rs focuses the WHOLE package \
+                     (all interior links + its outside connections). Select \
+                     another file (tree / editor / node click) to move the focus.",
                 );
-            if !view.show_all_calls {
-                if let Some(node) = graph.nodes.get(focus_node) {
-                    ui.label(
-                        egui::RichText::new(format!("of {}", node.name))
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(150, 158, 172)),
-                    )
-                    .on_hover_text(
-                        "Only the selected file's call edges are drawn — select \
-                         another file (tree / editor / node click) to move the focus.",
-                    );
-                }
             }
+            egui::ComboBox::from_id_salt("structure_call_depth")
+                .width(52.0)
+                .selected_text(match view.call_depth {
+                    Some(n) => n.to_string(),
+                    None => "All".to_owned(),
+                })
+                .show_ui(ui, |ui| {
+                    for n in 1..=10usize {
+                        ui.selectable_value(&mut view.call_depth, Some(n), n.to_string());
+                    }
+                    ui.selectable_value(&mut view.call_depth, None, "All");
+                })
+                .response
+                .on_hover_text(
+                    "Depth of the displayed call tree below the focused module: \
+                     1 = its direct edges only; N = follow callees N levels \
+                     down; All = the whole tree under the selected module.",
+                );
         }
         if !calls_status.is_empty() {
             ui.label(
@@ -624,10 +644,46 @@ fn show_canvas(
             let x = if right_side { p.x + p.w } else { p.x };
             to_screen(x, y)
         };
+        // Downstream reach from the FOCUS SET (a single module, or a whole
+        // package when its mod.rs is selected): multi-source BFS over the
+        // node-level call graph. An edge is drawn when its SOURCE lies within
+        // `call_depth` hops of the set (level 1 = the members' own edges —
+        // which for a package means ALL its interior links plus the first
+        // exterior level), plus any edge ENTERING the set (who uses it).
+        // "All" = unbounded — the whole tree under the selection.
+        let depth_limit = view.call_depth.unwrap_or(usize::MAX);
+        let in_set = graph.focus_set(focus_node);
+        let dist: Vec<usize> = {
+            let n = graph.nodes.len();
+            let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+            for e in calls {
+                adj[e.from_node].push(e.to_node);
+            }
+            let mut dist = vec![usize::MAX; n];
+            let mut q = std::collections::VecDeque::new();
+            for (i, &member) in in_set.iter().enumerate() {
+                if member {
+                    dist[i] = 0;
+                    q.push_back(i);
+                }
+            }
+            while let Some(u) = q.pop_front() {
+                if dist[u] >= depth_limit {
+                    continue; // deep enough — don't expand further
+                }
+                for &v in &adj[u] {
+                    if dist[v] == usize::MAX {
+                        dist[v] = dist[u] + 1;
+                        q.push_back(v);
+                    }
+                }
+            }
+            dist
+        };
         for e in calls {
-            // Focus filter: only edges touching the focused module (selected
-            // file, main by default) — unless "All" asks for the full picture.
-            if !view.show_all_calls && e.from_node != focus_node && e.to_node != focus_node {
+            let downstream = dist[e.from_node] < depth_limit;
+            let incoming = in_set[e.to_node];
+            if !downstream && !incoming {
                 continue;
             }
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
