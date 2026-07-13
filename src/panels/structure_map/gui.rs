@@ -277,11 +277,12 @@ fn show_canvas(
     let mut edge_polys: Vec<Vec<egui::Pos2>> = Vec::new();
 
     // ── Module edges (containment dashed + dependency solid), routed ──────
-    // Two anti-overlap measures: (1) PORT SPREADING — each edge endpoint gets
-    // its own x along the node's top/bottom edge, ordered by where the other
-    // end sits, so edges never converge on one point; (2) OBSTACLE DETOUR — an
-    // edge whose straight segment would cut through another node box becomes a
-    // lateral bezier around the blockers instead.
+    // CENTER anchoring (user fix): every dep/containment edge runs from node
+    // CENTER to node CENTER — the convergence point hides BEHIND the node box
+    // (edges draw before nodes), so nothing splays along the borders anymore;
+    // only the arrowhead stays visible, clipped to the target's boundary.
+    // OBSTACLE DETOUR kept: an edge whose straight segment would cut through
+    // another node box becomes a lateral bezier around the blockers.
     {
         // (u, v, is_dep): deps drawn solid + arrowhead, containment dashed.
         let module_edges: Vec<(usize, usize, bool)> = graph
@@ -291,43 +292,11 @@ fn show_canvas(
             .chain(graph.deps.iter().map(|&(u, v)| (u, v, true)))
             .collect();
 
-        // Ports in VIRTUAL coords. Endpoint id = 2·edge (source) / 2·edge+1
-        // (target). A downward edge exits u's bottom and enters v's top; a
-        // back edge (cycle) exits the top and enters the bottom.
-        let mut port_x = vec![0.0f32; module_edges.len() * 2];
-        let mut groups: std::collections::HashMap<(usize, bool), Vec<(usize, f32)>> =
-            std::collections::HashMap::new();
-        for (ei, &(u, v, _)) in module_edges.iter().enumerate() {
-            let downward = lay.pos[v].y > lay.pos[u].y;
-            groups
-                .entry((u, !downward))
-                .or_default()
-                .push((ei * 2, lay.pos[v].center_x()));
-            groups
-                .entry((v, downward))
-                .or_default()
-                .push((ei * 2 + 1, lay.pos[u].center_x()));
-        }
-        for ((node, _is_top), mut ends) in groups {
-            ends.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.0.cmp(&b.0))
-            });
-            let p = lay.pos[node];
-            let count = ends.len() as f32;
-            for (k, (endpoint, _)) in ends.into_iter().enumerate() {
-                let frac = (k as f32 + 1.0) / (count + 1.0);
-                port_x[endpoint] = p.x + p.w * (0.12 + 0.76 * frac);
-            }
-        }
-
         let dash = 4.0 * scale.max(0.5);
-        for (ei, &(u, v, is_dep)) in module_edges.iter().enumerate() {
+        for &(u, v, is_dep) in &module_edges {
             let (a, b) = (lay.pos[u], lay.pos[v]);
-            let downward = b.y > a.y;
-            let from_v = (port_x[ei * 2], if downward { a.bottom() } else { a.y });
-            let to_v = (port_x[ei * 2 + 1], if downward { b.y } else { b.bottom() });
+            let from_v = (a.center_x(), a.y + a.h / 2.0);
+            let to_v = (b.center_x(), b.y + b.h / 2.0);
 
             // Straight segment blocked by a non-endpoint node box? → detour x
             // just past the blockers, on whichever side deviates less.
@@ -349,14 +318,19 @@ fn show_canvas(
                 egui::Stroke::new(stroke_w, if is_dep { DEP_COLOR } else { CONTAIN_COLOR });
             let from = to_screen(from_v.0, from_v.1);
             let to = to_screen(to_v.0, to_v.1);
-            if !blocked {
+            // Screen rect of the target — the arrowhead is drawn where the
+            // edge crosses its boundary (the tail hides behind the boxes).
+            let target_rect = egui::Rect::from_min_size(
+                to_screen(b.x, b.y),
+                egui::vec2(b.w, b.h) * scale,
+            );
+            let pts: Vec<egui::Pos2> = if !blocked {
                 if is_dep {
                     painter.line_segment([from, to], stroke);
-                    arrowhead(&painter, from, to, 7.0 * scale.clamp(0.5, 1.6), stroke);
                 } else {
                     painter.add(egui::Shape::dashed_line(&[from, to], stroke, dash, dash));
                 }
-                edge_polys.push(vec![from, to]);
+                vec![from, to]
             } else {
                 const PAD: f32 = 14.0;
                 let mid = (from_v.0 + to_v.0) / 2.0;
@@ -377,13 +351,18 @@ fn show_canvas(
                 let pts = bez.flatten(Some(2.0));
                 if is_dep {
                     painter.add(bez);
-                    arrowhead(&painter, c2, to, 7.0 * scale.clamp(0.5, 1.6), stroke);
                 } else {
                     // Dashed beziers aren't a primitive — flatten to a polyline.
                     painter.add(egui::Shape::dashed_line(&pts, stroke, dash, dash));
                 }
-                edge_polys.push(pts);
+                pts
+            };
+            if is_dep {
+                if let Some((prev, tip)) = boundary_tip(&pts, &target_rect) {
+                    arrowhead(&painter, prev, tip, 7.0 * scale.clamp(0.5, 1.6), stroke);
+                }
             }
+            edge_polys.push(pts);
         }
     }
 
@@ -863,6 +842,29 @@ fn kind_word(kind: SymKind) -> &'static str {
         SymKind::Enum => "enum",
         SymKind::Trait => "trait",
     }
+}
+
+/// Where a polyline (running INTO `target`'s interior) crosses the target's
+/// boundary: returns `(point just outside, boundary tip)` for the arrowhead —
+/// walked from the END of `pts` (which sits at the node's hidden center) back
+/// to the first point outside, then bisected onto the border. `None` when the
+/// whole polyline is inside (overlapping nodes) — no arrow then.
+fn boundary_tip(pts: &[egui::Pos2], target: &egui::Rect) -> Option<(egui::Pos2, egui::Pos2)> {
+    for i in (0..pts.len().saturating_sub(1)).rev() {
+        if !target.contains(pts[i]) {
+            let (mut lo, mut hi) = (pts[i], pts[i + 1]);
+            for _ in 0..8 {
+                let mid = lo + (hi - lo) * 0.5;
+                if target.contains(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            return Some((pts[i], lo));
+        }
+    }
+    None
 }
 
 /// Two short lines forming an arrowhead at `to`, pointing away from `from`.
