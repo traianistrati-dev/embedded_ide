@@ -20,6 +20,9 @@ pub struct StructureView {
     pub zoom: f32,
     /// Draw the cross-module call edges (Phase 3) over the diagram.
     pub show_calls: bool,
+    /// Ignore the focus filter and draw EVERY collected call edge, from all
+    /// modules at once — dense, but the full picture on demand.
+    pub show_all_calls: bool,
 }
 
 impl Default for StructureView {
@@ -27,6 +30,7 @@ impl Default for StructureView {
         Self {
             zoom: 1.0,
             show_calls: true,
+            show_all_calls: false,
         }
     }
 }
@@ -89,6 +93,11 @@ pub fn show(
     view: &mut StructureView,
     calls: &[CallEdge],
     calls_status: &str,
+    // Focused module (index): only call edges touching it are drawn — showing
+    // every collected edge at once was unreadable. Driven by the currently
+    // selected FILE (main.rs by default), so clicking a node (which opens its
+    // file) also moves the focus.
+    focus_node: usize,
 ) -> ShowResult {
     let mut result = ShowResult::default();
     // ── Toolbar ───────────────────────────────────────────────────────────
@@ -125,6 +134,28 @@ pub fn show(
                  enum, green = trait. Computed via rust-analyzer, one symbol \
                  at a time, only while the project is saved/in sync.",
         );
+        // Whose calls are shown (follows the selected file; main by default) —
+        // or everything at once when "All" is on.
+        if view.show_calls {
+            ui.checkbox(&mut view.show_all_calls, egui::RichText::new("All").size(11.0))
+                .on_hover_text(
+                    "Draw EVERY call edge from all modules at once, instead of \
+                     only the selected file's — dense, but the complete picture.",
+                );
+            if !view.show_all_calls {
+                if let Some(node) = graph.nodes.get(focus_node) {
+                    ui.label(
+                        egui::RichText::new(format!("of {}", node.name))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(150, 158, 172)),
+                    )
+                    .on_hover_text(
+                        "Only the selected file's call edges are drawn — select \
+                         another file (tree / editor / node click) to move the focus.",
+                    );
+                }
+            }
+        }
         if !calls_status.is_empty() {
             ui.label(
                 egui::RichText::new(calls_status)
@@ -175,7 +206,9 @@ pub fn show(
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            show_canvas(ui, graph, lay, view, calls, scale, content, &mut result);
+            show_canvas(
+                ui, graph, lay, view, calls, scale, content, focus_node, &mut result,
+            );
         });
 
     result
@@ -191,6 +224,7 @@ fn show_canvas(
     calls: &[CallEdge],
     scale: f32,
     content: egui::Vec2,
+    focus_node: usize,
     result: &mut ShowResult,
 ) {
     // Fill at least the viewport (no background gap); when zoomed past the
@@ -591,6 +625,11 @@ fn show_canvas(
             to_screen(x, y)
         };
         for e in calls {
+            // Focus filter: only edges touching the focused module (selected
+            // file, main by default) — unless "All" asks for the full picture.
+            if !view.show_all_calls && e.from_node != focus_node && e.to_node != focus_node {
+                continue;
+            }
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
             // Edge colour = the TARGET symbol's kind colour (the same palette
             // as the row glyphs): fn blue, Struct orange, Enum purple, Trait

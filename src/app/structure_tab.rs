@@ -79,6 +79,18 @@ impl AppIde {
             .as_ref()
             .map(|p| p.edges.as_slice())
             .unwrap_or(&[]);
+        // Focused module for the call-edge filter = the currently selected
+        // file's node (main by default — also for config files like
+        // Cargo.toml, which have no node). Clicking a diagram node opens its
+        // file, so the focus follows node clicks too.
+        let focus_node = match self.selected_file {
+            ProjectFileId::UserFile(i) => graph
+                .nodes
+                .iter()
+                .position(|n| n.file == Some(i))
+                .unwrap_or(0),
+            _ => 0, // main.rs / config files → main
+        };
         let result = gui::show(
             ui,
             &*graph,
@@ -86,6 +98,7 @@ impl AppIde {
             &mut self.structure_view,
             call_edges,
             &calls_status,
+            focus_node,
         );
 
         // A header drag ended → pin that node's position (keyed by its file,

@@ -57,6 +57,12 @@ pub struct ModuleNode {
     /// file order. Methods inside `impl` blocks are counted in `fn_count` but
     /// not listed here (they'd bloat the node).
     pub symbols: Vec<SymbolItem>,
+    /// Depth-0 `impl` block spans, each resolved to the ROW of the implemented
+    /// type (`impl Parser { … }` / `impl Frame for HmmdFrame { … }` → the
+    /// `Parser` / `HmmdFrame` row). Call sites inside methods attribute to
+    /// that row — without this, modules that keep their logic in impl methods
+    /// (most library code) produced NO outgoing call edges at all.
+    pub impl_spans: Vec<(usize, usize, usize)>,
 }
 
 impl ModuleNode {
@@ -66,10 +72,17 @@ impl ModuleNode {
     /// written at column 0 inside `fn main` — e.g. `radar.read_data(|rx| {` —
     /// became anonymous boundaries and every call site after them was
     /// attributed to nothing, so its call edge silently vanished.)
+    /// Falls back to the enclosing `impl` block's type row (see `impl_spans`).
     pub fn enclosing_row(&self, line: usize) -> Option<usize> {
         self.symbols
             .iter()
             .position(|s| line >= s.line && line <= s.end_line)
+            .or_else(|| {
+                self.impl_spans
+                    .iter()
+                    .find(|&&(s, e, _)| line >= s && line <= e)
+                    .map(|&(_, _, row)| row)
+            })
     }
 }
 
@@ -182,7 +195,7 @@ fn make_node(
     file: Option<usize>,
     content: &str,
 ) -> ModuleNode {
-    let (fn_count, ty_count, symbols) = scan_items(content);
+    let (fn_count, ty_count, symbols, impl_spans) = scan_items(content);
     ModuleNode {
         path,
         name: name.to_owned(),
@@ -191,6 +204,7 @@ fn make_node(
         fn_count,
         ty_count,
         symbols,
+        impl_spans,
     }
 }
 
@@ -203,15 +217,22 @@ fn make_node(
 /// main`). Items inside `impl`/`mod` blocks sit at depth ≥ 1, so the badge
 /// counts them but the symbol list skips them. Braces inside string literals
 /// can skew the depth — badge-grade accuracy, and they usually balance out.
-fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
+fn scan_items(
+    text: &str,
+) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, usize, usize)>) {
     let mut fns = 0;
     let mut tys = 0;
     let mut symbols: Vec<SymbolItem> = Vec::new();
+    // Depth-0 impl blocks: (start, end, implemented-type NAME) — resolved to
+    // symbol rows after the scan (the type may be declared below its impl).
+    let mut pending_impls: Vec<(usize, usize, Option<String>)> = Vec::new();
     let mut depth: i32 = 0;
-    // Row of the depth-0 item whose body the scan is currently inside, and
-    // whether its opening `{` has been seen yet (multi-line signatures put it
-    // lines later; `struct Foo;` never opens one and closes at the `;`).
-    let mut open: Option<usize> = None;
+    // The depth-0 block the scan is currently inside — a symbol item or an
+    // `impl` — and whether its opening `{` has been seen yet (multi-line
+    // signatures put it lines later; `struct Foo;` never opens one and closes
+    // at the `;`).
+    let mut open_sym: Option<usize> = None;
+    let mut open_impl: Option<(usize, Option<String>, usize)> = None;
     let mut entered_body = false;
     for (li, raw) in text.lines().enumerate() {
         // Naive comment strip — same trade-off as the edge scan above.
@@ -232,7 +253,7 @@ fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
         } else {
             (None, t)
         };
-        if depth == 0 && open.is_none() {
+        if depth == 0 && open_sym.is_none() && open_impl.is_none() {
             if let Some(kind) = kind {
                 let name: String = rest
                     .chars()
@@ -242,7 +263,7 @@ fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
                     // Column of the name = chars before `rest` on the raw line
                     // (prefixes are ASCII, so chars == UTF-16 units).
                     let col = line.chars().count() - rest.chars().count();
-                    open = Some(symbols.len());
+                    open_sym = Some(symbols.len());
                     symbols.push(SymbolItem {
                         name,
                         kind,
@@ -250,6 +271,11 @@ fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
                         end_line: li + 1,
                         col,
                     });
+                }
+            } else if let Some(r) = t.strip_prefix("impl") {
+                // Word boundary: `impl` / `impl<…>` / `impl Foo`, not `implxyz`.
+                if r.starts_with(|c: char| !c.is_alphanumeric() && c != '_') || r.is_empty() {
+                    open_impl = Some((li + 1, impl_target_name(r), li + 1));
                 }
             }
         }
@@ -260,22 +286,80 @@ fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>) {
                 _ => {}
             }
         }
-        if let Some(row) = open {
-            symbols[row].end_line = li + 1;
+        if open_sym.is_some() || open_impl.is_some() {
+            if let Some(row) = open_sym {
+                symbols[row].end_line = li + 1;
+            }
+            if let Some((_, _, end)) = &mut open_impl {
+                *end = li + 1;
+            }
             if !entered_body && line.contains('{') {
                 entered_body = true;
             }
             if entered_body {
                 if depth == 0 {
-                    open = None; // the item's closing brace reached
+                    // The block's closing brace was reached on this line.
+                    if let Some((s, name, e)) = open_impl.take() {
+                        pending_impls.push((s, e, name));
+                    }
+                    open_sym = None;
                     entered_body = false;
                 }
             } else if depth == 0 && line.contains(';') {
-                open = None; // bodyless item: `struct Foo;` / `struct P(u8);`
+                open_sym = None; // bodyless item: `struct Foo;` / `struct P(u8);`
+                open_impl = None;
             }
         }
     }
-    (fns, tys, symbols)
+    // An unclosed impl at EOF (mid-typing) still gets its span so far.
+    if let Some((s, name, e)) = open_impl.take() {
+        pending_impls.push((s, e, name));
+    }
+    // Resolve impl targets to symbol rows (unresolved → dropped: the type
+    // lives elsewhere, e.g. `impl Display for ExternalType`).
+    let impl_spans: Vec<(usize, usize, usize)> = pending_impls
+        .into_iter()
+        .filter_map(|(s, e, name)| {
+            let name = name?;
+            let row = symbols.iter().position(|sym| sym.name == name)?;
+            Some((s, e, row))
+        })
+        .collect();
+    (fns, tys, symbols, impl_spans)
+}
+
+/// The NAME of the type an `impl` line implements — `rest` is everything after
+/// the `impl` keyword. Handles generics and trait impls by scanning at
+/// angle-bracket depth 0: `<const N: usize> Parser<N> {` → `Parser`,
+/// ` Frame for HmmdFrame {` → `HmmdFrame`, ` fmt::Display for Config` →
+/// `Config` (last path segment; `impl Trait for Type` targets the TYPE).
+fn impl_target_name(rest: &str) -> Option<String> {
+    // Flatten to the angle-depth-0 text, stopping at the body brace.
+    let mut flat = String::new();
+    let mut depth = 0i32;
+    for c in rest.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = (depth - 1).max(0),
+            '{' if depth == 0 => break,
+            _ if depth == 0 => flat.push(c),
+            _ => {}
+        }
+    }
+    let flat = flat.split(" where").next().unwrap_or(&flat).trim();
+    // `impl Trait for Type` → the part after the LAST ` for `; else the whole.
+    let target = flat.rsplit(" for ").next().unwrap_or(flat).trim();
+    // Drop reference/mut sugar (`&mut Foo`), then the first token's last
+    // path segment, identifier chars only.
+    let target = target.trim_start_matches('&').trim_start();
+    let target = target.strip_prefix("mut ").unwrap_or(target).trim_start();
+    let token = target.split_whitespace().next()?;
+    let seg = token.rsplit("::").next().unwrap_or(token);
+    let name: String = seg
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// Strip leading visibility / item modifiers so `pub async fn` matches `fn `.
@@ -554,6 +638,67 @@ trait Frame {}
         // …but the badge still counts the method.
         assert_eq!(a.fn_count, 2);
         assert_eq!(a.ty_count, 3);
+    }
+
+    /// Call sites inside `impl` methods must attribute to the implemented
+    /// TYPE's row — modules keeping their logic in impl methods (most library
+    /// code) previously produced no outgoing call edges at all.
+    #[test]
+    fn impl_method_sites_attribute_to_the_type_row() {
+        let text = "\
+pub struct Parser {
+    len: usize,
+}
+impl Parser {
+    pub fn feed(&mut self, b: u8) {
+        helper(b);
+    }
+}
+pub struct HmmdFrame;
+impl Frame for HmmdFrame {
+    fn decode(&self) {
+        helper(0);
+    }
+}
+impl core::fmt::Display for External {
+    fn fmt(&self) {}
+}
+";
+        let g = build_graph(text, &[]);
+        let node = &g.nodes[0];
+        let parser = node.symbols.iter().position(|s| s.name == "Parser").unwrap();
+        let frame = node
+            .symbols
+            .iter()
+            .position(|s| s.name == "HmmdFrame")
+            .unwrap();
+        // Site inside `impl Parser` (line 6) → the Parser row.
+        assert_eq!(node.enclosing_row(6), Some(parser));
+        // Site inside `impl Frame for HmmdFrame` (line 12) → the TYPE's row.
+        assert_eq!(node.enclosing_row(12), Some(frame));
+        // Impl on an external type resolves to no local row → dropped.
+        assert_eq!(node.enclosing_row(16), None);
+    }
+
+    #[test]
+    fn impl_target_name_shapes() {
+        assert_eq!(impl_target_name(" Parser {").as_deref(), Some("Parser"));
+        assert_eq!(
+            impl_target_name("<const N: usize> Parser<N> {").as_deref(),
+            Some("Parser")
+        );
+        assert_eq!(
+            impl_target_name(" Frame for HmmdFrame {").as_deref(),
+            Some("HmmdFrame")
+        );
+        assert_eq!(
+            impl_target_name(" fmt::Display for Config {").as_deref(),
+            Some("Config")
+        );
+        assert_eq!(
+            impl_target_name("<'a> Iterator for &mut Cursor<'a> where Self: Sized {").as_deref(),
+            Some("Cursor")
+        );
     }
 
     /// Regression (user report): statements written at COLUMN 0 inside `fn
