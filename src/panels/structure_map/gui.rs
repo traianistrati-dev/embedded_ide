@@ -24,6 +24,30 @@ pub struct StructureView {
     /// its direct edges (default), `Some(n)` = the downstream tree n levels
     /// deep, `None` = "All" (the whole tree under the selected module).
     pub call_depth: Option<usize>,
+    /// Which route SHAPES the call-edge router may pick from.
+    pub path_style: PathStyle,
+}
+
+/// Call-edge route shapes offered to the router.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathStyle {
+    /// Orthogonal rounded "circuit traces" only (lanes + right-angle L).
+    Straight,
+    /// Bezier curves only (facing / side / flank arcs).
+    Curved,
+    /// Everything competes on cost (beziers pay a small stylistic premium).
+    #[default]
+    Mixed,
+}
+
+impl PathStyle {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Straight => "Straight",
+            Self::Curved => "Curved",
+            Self::Mixed => "Mixed",
+        }
+    }
 }
 
 impl Default for StructureView {
@@ -32,6 +56,7 @@ impl Default for StructureView {
             zoom: 1.0,
             show_calls: true,
             call_depth: Some(1),
+            path_style: PathStyle::Mixed,
         }
     }
 }
@@ -165,6 +190,20 @@ pub fn show(
                      another file (tree / editor / node click) to move the focus.",
                 );
             }
+            egui::ComboBox::from_id_salt("structure_path_style")
+                .width(76.0)
+                .selected_text(view.path_style.label())
+                .show_ui(ui, |ui| {
+                    for style in [PathStyle::Straight, PathStyle::Curved, PathStyle::Mixed] {
+                        ui.selectable_value(&mut view.path_style, style, style.label());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Call-edge shape: Straight = orthogonal rounded traces \
+                     only; Curved = bezier arcs only; Mixed = the router picks \
+                     the cheapest of both per edge.",
+                );
             egui::ComboBox::from_id_salt("structure_call_depth")
                 .width(52.0)
                 .selected_text(match view.call_depth {
@@ -770,23 +809,16 @@ fn show_canvas(
                 }
                 for (i, r) in node_rects.iter().enumerate() {
                     // The route legitimately touches its own endpoints' boxes
-                    // ONLY at the very start/end (leaving/arriving). Beyond
-                    // that trimmed stretch, hitting the source or target box —
-                    // e.g. an L-leg running back through its own node — is
-                    // penalized like any other box cut (the reported bug).
+                    // only through the FIRST / LAST segment (the anchor sits
+                    // on the boundary). Everything else hitting the source or
+                    // target box is penalized like any other cut — trimming by
+                    // containment instead exempted routes that BURROWED across
+                    // the whole target face to a far-side anchor (drawing over
+                    // the row text, the reported bug).
                     let check: &[egui::Pos2] = if i == skip_a {
-                        let start = pts
-                            .iter()
-                            .position(|p| !r.contains(*p))
-                            .unwrap_or(pts.len());
-                        &pts[start..]
+                        &pts[1.min(pts.len())..]
                     } else if i == skip_b {
-                        let end = pts
-                            .iter()
-                            .rposition(|p| !r.contains(*p))
-                            .map(|x| x + 1)
-                            .unwrap_or(0);
-                        &pts[..end]
+                        &pts[..pts.len().saturating_sub(1)]
                     } else {
                         pts
                     };
@@ -913,18 +945,32 @@ fn show_canvas(
                     corner_r,
                 )
             };
-            // (route, stylistic cost multiplier): beziers pay a small premium
-            // so at similar length the rounded-orthogonal "circuit trace"
-            // shape wins — the user prefers it over field-cutting diagonals.
-            let mut cands: Vec<(Route, f32)> = vec![
-                (Route::Bez(cand_facing), 1.15),
-                (Route::Bez(cand_side), 1.15),
-                (Route::Bez(mk_flank(false)), 1.15),
-                (Route::Bez(mk_flank(true)), 1.15),
-                (Route::Poly(mk_lane(false)), 1.0),
-                (Route::Poly(mk_lane(true)), 1.0),
-            ];
-            {
+            // (route, stylistic cost multiplier). The Paths dropdown picks the
+            // shape family: Straight = orthogonal traces only, Curved =
+            // beziers only, Mixed = both (beziers pay a small premium so at
+            // similar length the rounded-orthogonal shape wins).
+            // (route, cost multiplier, entry_right): entering the target row
+            // from the side FACING the caller is free; a far-side entry pays
+            // +250, so wrap-arounds happen only when the near side is truly
+            // blocked (the user's "connect on the left, not the right" fix).
+            let mut cands: Vec<(Route, f32, bool)> = Vec::new();
+            let style = view.path_style;
+            if style != PathStyle::Straight {
+                let bez_mult = if style == PathStyle::Mixed { 1.15 } else { 1.0 };
+                cands.extend([
+                    (Route::Bez(cand_facing), bez_mult, !toward_right),
+                    (Route::Bez(cand_side), bez_mult, !toward_right),
+                    (Route::Bez(mk_flank(false)), bez_mult, false),
+                    (Route::Bez(mk_flank(true)), bez_mult, true),
+                ]);
+            }
+            if style != PathStyle::Curved {
+                cands.extend([
+                    (Route::Poly(mk_lane(false)), 1.0, false),
+                    (Route::Poly(mk_lane(true)), 1.0, true),
+                ]);
+            }
+            if style != PathStyle::Curved {
                 let (bl, br) = (to_screen(b.x, 0.0).x, to_screen(b.x + b.w, 0.0).x);
                 let src_top = to_screen(0.0, a.y).y;
                 let src_bot = to_screen(0.0, a.y + a.h).y;
@@ -942,12 +988,13 @@ fn show_canvas(
                                 corner_r,
                             )),
                             1.0,
+                            !toward_right,
                         ));
                     }
                 }
             }
             let mut best: Option<(Route, Vec<egui::Pos2>, f32)> = None;
-            for (cand, mult) in cands {
+            for (cand, mult, entry_right) in cands {
                 let pts = match &cand {
                     Route::Bez(b4) => egui::epaint::CubicBezierShape::from_points_stroke(
                         *b4,
@@ -958,7 +1005,12 @@ fn show_canvas(
                     .flatten(Some(4.0)),
                     Route::Poly(p) => p.clone(),
                 };
-                let cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys) * mult;
+                let mut cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys) * mult;
+                // Far-side entry: the anchor sits on the side pointing AWAY
+                // from the caller (entry_right == "target is to the right").
+                if entry_right == toward_right {
+                    cost += 250.0;
+                }
                 if best.as_ref().is_none_or(|(_, _, c)| cost < *c) {
                     best = Some((cand, pts, cost));
                 }
