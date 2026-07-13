@@ -104,6 +104,9 @@ pub fn show(
     // Per-node error flag (diagnostics in that module's file): the node's
     // border blinks red at 3× width so broken files stand out.
     node_errors: &[bool],
+    // Total reference sites per symbol `(node, row)` — drawn right-aligned in
+    // the row (single edges aggregate many sites; the count shows the total).
+    ref_counts: &std::collections::HashMap<(usize, usize), usize>,
 ) -> ShowResult {
     let mut result = ShowResult::default();
     // ── Toolbar ───────────────────────────────────────────────────────────
@@ -241,6 +244,7 @@ pub fn show(
                 content,
                 focus_node,
                 node_errors,
+                ref_counts,
                 &mut result,
             );
         });
@@ -260,6 +264,7 @@ fn show_canvas(
     content: egui::Vec2,
     focus_node: usize,
     node_errors: &[bool],
+    ref_counts: &std::collections::HashMap<(usize, usize), usize>,
     result: &mut ShowResult,
 ) {
     // Fill at least the viewport (no background gap); when zoomed past the
@@ -601,11 +606,26 @@ fn show_canvas(
                     row_font.clone(),
                     egui::Color32::from_rgb(200, 205, 215),
                 );
+                // Total reference sites (right-aligned, kind-coloured) — many
+                // sites aggregate into one drawn edge, so the count keeps the
+                // full picture (matches the editor's "N refs" pill).
+                let refs = ref_counts.get(&(i, j)).copied();
+                if let Some(cnt) = refs {
+                    painter.text(
+                        egui::pos2(row_rect.right() - 5.0 * scale, row_rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        cnt.to_string(),
+                        row_font.clone(),
+                        g_color,
+                    );
+                }
                 row_resp.clone().on_hover_text(format!(
-                    "{} {} — line {}\nClick to jump to it",
+                    "{} {} — line {}{}\nClick to jump to it",
                     kind_word(sym.kind),
                     sym.name,
-                    sym.line
+                    sym.line,
+                    refs.map(|c| format!(" — {c} reference site(s)"))
+                        .unwrap_or_default()
                 ));
                 if row_resp.clicked() {
                     result.click = Some(NodeClick {
@@ -830,34 +850,89 @@ fn show_canvas(
                     to,
                 ]
             };
-            let mut best: Option<([egui::Pos2; 4], Vec<egui::Pos2>, f32)> = None;
-            for cand in [cand_facing, mk_flank(false), mk_flank(true)] {
-                let bez = egui::epaint::CubicBezierShape::from_points_stroke(
-                    cand,
-                    false,
-                    egui::Color32::TRANSPARENT,
-                    stroke,
-                );
-                let pts = bez.flatten(Some(4.0));
+            // Candidate shapes: 3 beziers + an ORTHOGONAL 90°-bend route
+            // (vertical drop from the corner, right-angle turn, horizontal run
+            // into the row) — added only when the source corner sits clearly
+            // beside the target's x-range, so the horizontal leg is real.
+            enum Route {
+                Bez([egui::Pos2; 4]),
+                Poly(Vec<egui::Pos2>),
+            }
+            // SIDE exit (user fix): the source may also leave through the
+            // node's LEFT/RIGHT edge — but only at HEADER height, never beside
+            // the symbol-row zone. Horizontal takeoff, straight into the
+            // target row: the shortest shape when the nodes sit side by side.
+            let src_side = |right: bool| -> egui::Pos2 {
+                let y = a.y + (HEADER_H * 0.5).min(a.h * 0.5);
+                let x = if right { a.x + a.w } else { a.x };
+                to_screen(x, y)
+            };
+            let s_from = src_side(toward_right);
+            let dxs = ((f_to.x - s_from.x).abs() * 0.4).clamp(20.0 * scale, 120.0 * scale)
+                * if toward_right { 1.0 } else { -1.0 };
+            let cand_side = [
+                s_from,
+                s_from + egui::vec2(dxs, 0.0),
+                f_to - egui::vec2(dxs, 0.0),
+                f_to,
+            ];
+            let mut cands = vec![
+                Route::Bez(cand_facing),
+                Route::Bez(cand_side),
+                Route::Bez(mk_flank(false)),
+                Route::Bez(mk_flank(true)),
+            ];
+            {
+                let (bl, br) = (to_screen(b.x, 0.0).x, to_screen(b.x + b.w, 0.0).x);
+                if f_from.x < bl - 8.0 || f_from.x > br + 8.0 {
+                    cands.push(Route::Poly(vec![
+                        f_from,
+                        egui::pos2(f_from.x, f_to.y),
+                        f_to,
+                    ]));
+                }
+            }
+            let mut best: Option<(Route, Vec<egui::Pos2>, f32)> = None;
+            for cand in cands {
+                let pts = match &cand {
+                    Route::Bez(b4) => egui::epaint::CubicBezierShape::from_points_stroke(
+                        *b4,
+                        false,
+                        egui::Color32::TRANSPARENT,
+                        stroke,
+                    )
+                    .flatten(Some(4.0)),
+                    Route::Poly(p) => p.clone(),
+                };
                 let cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys);
                 if best.as_ref().is_none_or(|(_, _, c)| cost < *c) {
                     best = Some((cand, pts, cost));
                 }
             }
             let (cand, pts, _) = best.unwrap();
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                cand,
-                false,
-                egui::Color32::TRANSPARENT,
-                stroke,
-            ));
-            arrowhead(
-                &painter,
-                cand[2],
-                cand[3],
-                6.0 * scale.clamp(0.5, 1.5),
-                stroke,
-            );
+            match &cand {
+                Route::Bez(b4) => {
+                    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                        *b4,
+                        false,
+                        egui::Color32::TRANSPARENT,
+                        stroke,
+                    ));
+                }
+                Route::Poly(p) => {
+                    painter.add(egui::Shape::line(p.clone(), stroke));
+                }
+            }
+            // Arrowhead along the final segment, whatever the shape.
+            if pts.len() >= 2 {
+                arrowhead(
+                    &painter,
+                    pts[pts.len() - 2],
+                    pts[pts.len() - 1],
+                    6.0 * scale.clamp(0.5, 1.5),
+                    stroke,
+                );
+            }
             edge_polys.push(pts);
         }
     }

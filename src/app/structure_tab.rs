@@ -101,6 +101,15 @@ impl AppIde {
                 .map(|n| lsp.error_count_for(&format!("src/{}", n.file_rel)) > 0)
                 .collect()
         };
+        // Reference counts per symbol row (shown right-aligned in the rows) —
+        // many sites aggregate into one edge, so the count keeps the total
+        // visible (matches the editor's "N refs" pill).
+        let empty_counts = std::collections::HashMap::new();
+        let ref_counts = self
+            .structure_calls
+            .as_ref()
+            .map(|p| &p.ref_counts)
+            .unwrap_or(&empty_counts);
         let result = gui::show(
             ui,
             &*graph,
@@ -110,6 +119,7 @@ impl AppIde {
             &calls_status,
             focus_node,
             &node_errors,
+            ref_counts,
         );
 
         // A header drag ended → pin that node's position (keyed by its file,

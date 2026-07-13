@@ -19,7 +19,7 @@
 
 use super::parse::ModuleGraph;
 use crate::lsp::ReferenceLoc;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Safety cap on symbols queried per pass (each is a whole-crate search).
 const MAX_SYMBOLS: usize = 400;
@@ -42,6 +42,10 @@ pub struct CallPass {
     /// The one in-flight request: `(local key, node, row)`.
     pub in_flight: Option<(usize, usize, usize)>,
     pub edges: Vec<CallEdge>,
+    /// TOTAL reference sites found per queried symbol `(node, row)` — shown as
+    /// a count next to the symbol row (many sites aggregate into few edges, so
+    /// the count keeps the full picture visible).
+    pub ref_counts: HashMap<(usize, usize), usize>,
     seen: HashSet<CallEdge>,
     pub done: usize,
     pub total: usize,
@@ -68,6 +72,7 @@ impl CallPass {
             queue,
             in_flight: None,
             edges: Vec::new(),
+            ref_counts: HashMap::new(),
             seen: HashSet::new(),
             done: 0,
             total,
@@ -106,6 +111,9 @@ impl CallPass {
         to_row: usize,
         locs: &[ReferenceLoc],
     ) {
+        if !locs.is_empty() {
+            self.ref_counts.insert((to_node, to_row), locs.len());
+        }
         for loc in locs {
             let Some((from_node, Some(from_row))) = map_reference(graph, loc) else {
                 continue; // unknown file, or a use-line/attr site (anchor None)
