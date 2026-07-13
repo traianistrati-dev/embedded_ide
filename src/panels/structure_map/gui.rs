@@ -764,20 +764,36 @@ fn show_canvas(
             let toward_right = b.center_x() >= a.center_x();
             // Stagger keeps parallel calls between the same nodes off one arc.
             let swing = 26.0 + ((e.from_row + e.to_row) % 4) as f32 * 8.0;
-            // Candidate 1: FACING sides — the short direct route.
-            let f_from = anchor(e.from_node, e.from_row, toward_right);
+            // SOURCE anchor (user fix): a call edge never latches onto the
+            // CALLER's symbol-row zone (the f/S/E/T list) — it leaves through
+            // the node's top/bottom edge beside the header's left/right
+            // corner. Only the TARGET end still points at the used symbol's
+            // row. Exit side follows the target's vertical direction; a small
+            // per-row stagger keeps several departures off one corner point.
+            let via_top = (b.y + b.h / 2.0) < (a.y + a.h / 2.0);
+            let src = |right: bool| -> egui::Pos2 {
+                let inset = (10.0 + (e.from_row % 4) as f32 * 7.0).min(a.w * 0.45);
+                let x = if right { a.x + a.w - inset } else { a.x + inset };
+                let y = if via_top { a.y } else { a.y + a.h };
+                to_screen(x, y)
+            };
+            // Candidate 1: FACING sides — the short direct route (vertical
+            // takeoff from the corner, horizontal landing at the row).
+            let f_from = src(toward_right);
             let f_to = anchor(e.to_node, e.to_row, !toward_right);
+            let dyf = ((f_to.y - f_from.y).abs() * 0.4).clamp(16.0 * scale, 100.0 * scale)
+                * if via_top { -1.0 } else { 1.0 };
             let dxf = ((f_to.x - f_from.x).abs() * 0.4).clamp(20.0 * scale, 120.0 * scale)
                 * if toward_right { 1.0 } else { -1.0 };
             let cand_facing = [
                 f_from,
-                f_from + egui::vec2(dxf, 0.0),
+                f_from + egui::vec2(0.0, dyf),
                 f_to - egui::vec2(dxf, 0.0),
                 f_to,
             ];
             // Candidates 2 + 3: LEFT / RIGHT outer-flank arcs past the boxes.
             let mk_flank = |right: bool| {
-                let from = anchor(e.from_node, e.from_row, right);
+                let from = src(right);
                 let to = anchor(e.to_node, e.to_row, right);
                 let outer_x = if right {
                     (a.x + a.w).max(b.x + b.w) + swing
