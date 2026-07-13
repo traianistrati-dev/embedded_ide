@@ -274,9 +274,11 @@ impl AppIde {
                         self.new_file_in_folder = None;
                         self.confirm_new_project = false;
                         self.mcu_import_status = None;
-                        // A new project starts with the automatic Structure layout.
+                        // A new project starts with the automatic Structure
+                        // layout and default view options.
                         self.structure_overrides.clear();
                         self.structure_cache = None;
+                        self.structure_view = Default::default();
                         // Pre-populate the pins/ scaffold so the tree shows
                         // the folder immediately, before any pin is configured.
                         self.project_tree.init_pins_scaffold();

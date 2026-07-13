@@ -63,6 +63,9 @@ pub struct ModuleNode {
     /// that row — without this, modules that keep their logic in impl methods
     /// (most library code) produced NO outgoing call edges at all.
     pub impl_spans: Vec<(usize, usize, usize)>,
+    /// GHOST node for an external crate (std / HAL / …), appended by
+    /// [`add_external_nodes`]: no file, no symbols, not clickable.
+    pub is_external: bool,
 }
 
 impl ModuleNode {
@@ -229,6 +232,95 @@ fn make_node(
         ty_count,
         symbols,
         impl_spans,
+        is_external: false,
+    }
+}
+
+/// Append GHOST nodes for every EXTERNAL crate the project uses (std / core /
+/// the HAL / …) plus a dep edge from each using module. Detection: a bare
+/// path chain (`cortex_m::asm::nop`, `core::str::from_utf8`) whose first
+/// segment is lowercase, has ≥ 2 segments, and resolves to NO local module —
+/// uppercase firsts (types/variants like `State::Idle`) are skipped, and
+/// `crate::`/`super::`/`self::` chains are local by definition.
+pub fn add_external_nodes(
+    graph: &mut ModuleGraph,
+    main_rs: &str,
+    user_files: &[(String, String)],
+) {
+    let by_path: HashMap<String, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.is_external)
+        .map(|(i, n)| (n.path.clone(), i))
+        .collect();
+    // Any local module NAME disqualifies a chain head: `utils::checksum()`
+    // after a `use super::utils;` doesn't resolve absolutely, but "utils" is a
+    // sibling module — without this it became a phantom external crate.
+    let local_names: HashSet<String> = graph
+        .nodes
+        .iter()
+        .filter(|n| !n.is_external)
+        .map(|n| n.name.clone())
+        .collect();
+    let mut extern_idx: HashMap<String, usize> = HashMap::new();
+    let mut dep_set: HashSet<(usize, usize)> = graph.deps.iter().copied().collect();
+
+    let texts: Vec<(usize, &str)> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.is_external)
+        .map(|(i, n)| {
+            let text = match n.file {
+                None => main_rs,
+                Some(fi) => user_files
+                    .get(fi)
+                    .map(|(_, c)| c.as_str())
+                    .unwrap_or(""),
+            };
+            (i, text)
+        })
+        .collect();
+
+    for (idx, text) in texts {
+        let cur_path = graph.nodes[idx].path.clone();
+        for raw_line in text.lines() {
+            let line = raw_line.split("//").next().unwrap_or("");
+            for chain in scan_chains(line) {
+                if matches!(chain[0].as_str(), "crate" | "super" | "self") {
+                    continue; // local by definition
+                }
+                if resolve(&chain, &cur_path, &by_path).is_some() {
+                    continue; // resolves to a project module
+                }
+                let first = &chain[0];
+                if !first.chars().next().is_some_and(|c| c.is_lowercase()) {
+                    continue; // `State::Idle`, `Vec::new`, … — not a crate
+                }
+                if local_names.contains(first.as_str()) {
+                    continue; // sibling-module reference, not an extern crate
+                }
+                let eidx = *extern_idx.entry(first.clone()).or_insert_with(|| {
+                    let id = graph.nodes.len();
+                    graph.nodes.push(ModuleNode {
+                        path: first.clone(),
+                        name: first.clone(),
+                        file_rel: format!("[extern] {first}"),
+                        file: None,
+                        fn_count: 0,
+                        ty_count: 0,
+                        symbols: Vec::new(),
+                        impl_spans: Vec::new(),
+                        is_external: true,
+                    });
+                    id
+                });
+                if idx != eidx && dep_set.insert((idx, eidx)) {
+                    graph.deps.push((idx, eidx));
+                }
+            }
+        }
     }
 }
 
@@ -662,6 +754,40 @@ trait Frame {}
         // …but the badge still counts the method.
         assert_eq!(a.fn_count, 2);
         assert_eq!(a.ty_count, 3);
+    }
+
+    /// External-crate ghosts: lowercase unresolved chain heads become extern
+    /// nodes with dep edges; local types, sibling modules and `crate::` paths
+    /// don't.
+    #[test]
+    fn external_nodes_detected_without_phantoms() {
+        let main_rs = "\
+mod a;
+use cortex_m::asm;
+fn main() {
+    core::str::from_utf8(&[]);
+    a::helper();
+}
+";
+        let files = vec![(
+            "a.rs".into(),
+            "pub fn helper() {}\npub struct Cfg;\nfn f() { Cfg::default(); }\n".into(),
+        )];
+        let mut g = build_graph(&main_rs, &files);
+        let before = g.nodes.len();
+        add_external_nodes(&mut g, &main_rs, &files);
+        let externs: Vec<&str> = g.nodes[before..]
+            .iter()
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(externs.contains(&"cortex_m"), "use-line crate: {externs:?}");
+        assert!(externs.contains(&"core"), "inline crate path: {externs:?}");
+        assert!(!externs.contains(&"a"), "local module must not ghost");
+        assert!(!externs.contains(&"Cfg"), "uppercase type must not ghost");
+        // main (node 0) depends on both externs.
+        let cm = g.nodes.iter().position(|n| n.name == "cortex_m").unwrap();
+        assert!(g.deps.contains(&(0, cm)));
+        assert!(g.nodes[cm].is_external && g.nodes[cm].symbols.is_empty());
     }
 
     /// Selecting a package's `mod.rs` focuses the whole subtree; a plain file

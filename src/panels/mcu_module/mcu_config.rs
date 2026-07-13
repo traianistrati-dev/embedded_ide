@@ -35,6 +35,24 @@ pub const FILE_NAME: &str = "mcu.config";
 /// on unchanged content staying byte-identical).
 pub type StructurePositions = std::collections::BTreeMap<String, (f32, f32)>;
 
+/// Structure-tab view options persisted per project:
+/// `(show_calls, call_depth, path_style as u8, show_externals)`.
+pub type StructureViewPersist = (bool, Option<usize>, u8, bool);
+const VIEW_HEADER: &str = "@structure_view";
+
+/// The `@structure_view` section text (always emitted — tiny and stable).
+pub fn structure_view_section(v: &StructureViewPersist) -> String {
+    let body = ron::to_string(v).unwrap_or_default();
+    format!("{VIEW_HEADER}\n{body}\n")
+}
+
+/// Parse the `@structure_view` section back (absent/garbled → `None`, the
+/// caller keeps its defaults — projects saved before this feature).
+pub fn parse_structure_view(text: &str) -> Option<StructureViewPersist> {
+    section_body(text, VIEW_HEADER)
+        .and_then(|body| ron::from_str::<StructureViewPersist>(body.trim()).ok())
+}
+
 /// The `@structure_layout` section text for `positions` (empty map → "").
 /// Appended to [`serialize`]'s output by the app (the diagram isn't MCU state).
 pub fn structure_layout_section(positions: &StructurePositions) -> String {

@@ -1123,6 +1123,19 @@ impl AppIde {
             }
             out.push_str(&structure);
         }
+        // Structure-tab view options (Calls / depth / path style / externals)
+        // — persisted so they survive restarts.
+        let v = &self.structure_view;
+        let view_sect = crate::panels::mcu_module::mcu_config::structure_view_section(&(
+            v.show_calls,
+            v.call_depth,
+            v.path_style.to_u8(),
+            v.show_externals,
+        ));
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&view_sect);
         out
     }
 

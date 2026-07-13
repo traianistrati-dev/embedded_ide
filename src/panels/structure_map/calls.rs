@@ -46,6 +46,9 @@ pub struct CallPass {
     /// a count next to the symbol row (many sites aggregate into few edges, so
     /// the count keeps the full picture visible).
     pub ref_counts: HashMap<(usize, usize), usize>,
+    /// Reference sites per drawn EDGE (caller row → callee row) — scales the
+    /// edge's stroke width, so heavy relationships read thicker.
+    pub pair_counts: HashMap<CallEdge, usize>,
     seen: HashSet<CallEdge>,
     pub done: usize,
     pub total: usize,
@@ -73,6 +76,7 @@ impl CallPass {
             in_flight: None,
             edges: Vec::new(),
             ref_counts: HashMap::new(),
+            pair_counts: HashMap::new(),
             seen: HashSet::new(),
             done: 0,
             total,
@@ -122,6 +126,7 @@ impl CallPass {
                 continue; // intra-module call — not drawn
             }
             let edge = CallEdge { from_node, from_row, to_node, to_row };
+            *self.pair_counts.entry(edge).or_insert(0) += 1;
             if self.seen.insert(edge) {
                 self.edges.push(edge);
             }

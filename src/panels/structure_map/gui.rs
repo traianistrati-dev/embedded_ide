@@ -26,6 +26,9 @@ pub struct StructureView {
     pub call_depth: Option<usize>,
     /// Which route SHAPES the call-edge router may pick from.
     pub path_style: PathStyle,
+    /// Show GHOST nodes for external crates (std / HAL / …) with dependency
+    /// edges from the modules that use them.
+    pub show_externals: bool,
 }
 
 /// Call-edge route shapes offered to the router.
@@ -48,6 +51,23 @@ impl PathStyle {
             Self::Mixed => "Mixed",
         }
     }
+
+    /// Stable numeric form for `mcu.config` persistence.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Straight => 0,
+            Self::Curved => 1,
+            Self::Mixed => 2,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Straight,
+            1 => Self::Curved,
+            _ => Self::Mixed,
+        }
+    }
 }
 
 impl Default for StructureView {
@@ -57,6 +77,7 @@ impl Default for StructureView {
             show_calls: true,
             call_depth: Some(1),
             path_style: PathStyle::Mixed,
+            show_externals: false,
         }
     }
 }
@@ -132,6 +153,9 @@ pub fn show(
     // Total reference sites per symbol `(node, row)` — drawn right-aligned in
     // the row (single edges aggregate many sites; the count shows the total).
     ref_counts: &std::collections::HashMap<(usize, usize), usize>,
+    // Reference sites per drawn edge — scales the stroke width (heavier
+    // relationships read thicker).
+    pair_counts: &std::collections::HashMap<CallEdge, usize>,
 ) -> ShowResult {
     let mut result = ShowResult::default();
     // ── Toolbar ───────────────────────────────────────────────────────────
@@ -190,6 +214,14 @@ pub fn show(
                      another file (tree / editor / node click) to move the focus.",
                 );
             }
+            ui.checkbox(
+                &mut view.show_externals,
+                egui::RichText::new("Externals").size(11.0),
+            )
+            .on_hover_text(
+                "Show ghost nodes for external crates (std / core / the HAL…) \
+                 with dependency edges from the modules that use them.",
+            );
             egui::ComboBox::from_id_salt("structure_path_style")
                 .width(76.0)
                 .selected_text(view.path_style.label())
@@ -284,6 +316,7 @@ pub fn show(
                 focus_node,
                 node_errors,
                 ref_counts,
+                pair_counts,
                 &mut result,
             );
         });
@@ -304,6 +337,7 @@ fn show_canvas(
     focus_node: usize,
     node_errors: &[bool],
     ref_counts: &std::collections::HashMap<(usize, usize), usize>,
+    pair_counts: &std::collections::HashMap<CallEdge, usize>,
     result: &mut ShowResult,
 ) {
     // Fill at least the viewport (no background gap); when zoomed past the
@@ -371,10 +405,8 @@ fn show_canvas(
             let to = to_screen(to_v.0, to_v.1);
             // Screen rect of the target — the arrowhead is drawn where the
             // edge crosses its boundary (the tail hides behind the boxes).
-            let target_rect = egui::Rect::from_min_size(
-                to_screen(b.x, b.y),
-                egui::vec2(b.w, b.h) * scale,
-            );
+            let target_rect =
+                egui::Rect::from_min_size(to_screen(b.x, b.y), egui::vec2(b.w, b.h) * scale);
             let pts: Vec<egui::Pos2> = if !blocked {
                 if is_dep {
                     painter.line_segment([from, to], stroke);
@@ -501,9 +533,14 @@ fn show_canvas(
         let r = egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale);
 
         // Package roots (a `mod.rs` file) stand out: pill corners, a border
-        // twice as thick as regular nodes, and a bold name.
+        // twice as thick as regular nodes, and a bold name. External-crate
+        // ghosts get a neutral fill.
         let is_pkg_root = node.file_rel.ends_with("/mod.rs");
-        let fill = fills[i];
+        let fill = if node.is_external {
+            egui::Color32::from_rgb(42, 44, 50)
+        } else {
+            fills[i]
+        };
         // Border style, by priority:
         //   1. ERROR — the file has diagnostics: BLINKING red at 3× width
         //      (driven by wall time; repaint scheduled below);
@@ -584,7 +621,11 @@ fn show_canvas(
                     header.center().y + header.height() * 0.24,
                 ),
                 egui::Align2::CENTER_CENTER,
-                format!("{} fn · {} ty", node.fn_count, node.ty_count),
+                if node.is_external {
+                    "extern crate".to_owned()
+                } else {
+                    format!("{} fn · {} ty", node.fn_count, node.ty_count)
+                },
                 sub_font.clone(),
                 egui::Color32::from_rgb(150, 158, 172),
             );
@@ -689,13 +730,22 @@ fn show_canvas(
         } else {
             &node.path
         };
-        resp.clone().on_hover_text(format!(
-            "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor",
-            node.file_rel, node.fn_count, node.ty_count
-        ));
+        if node.is_external {
+            resp.clone().on_hover_text(format!(
+                "external crate `{}`\nUsed by the modules pointing at it \
+                 (no project file to open).",
+                node.name
+            ));
+        } else {
+            resp.clone().on_hover_text(format!(
+                "{full}\n{}\n{} fn · {} struct/enum/trait\nClick to open in the editor",
+                node.file_rel, node.fn_count, node.ty_count
+            ));
+        }
         // The header's drag-sense response wins the pointer there, so a plain
-        // click on the header surfaces as `drag_resp.clicked()`.
-        if (resp.clicked() || drag_resp.clicked()) && !row_clicked {
+        // click on the header surfaces as `drag_resp.clicked()`. External
+        // ghosts have no file to open — clicks are ignored.
+        if (resp.clicked() || drag_resp.clicked()) && !row_clicked && !node.is_external {
             result.click = Some(NodeClick {
                 file: node.file,
                 line: None,
@@ -839,7 +889,11 @@ fn show_canvas(
                             r.width(),
                             r.height(),
                         ) {
-                            cost += 900.0;
+                            // Near-prohibitive: at 900 a box cut could still
+                            // beat 3 call-crossings (1200) on the near side and
+                            // the route sailed OVER the node face (reported
+                            // bug). Crossing a node must never win.
+                            cost += 2600.0;
                             break;
                         }
                     }
@@ -876,7 +930,11 @@ fn show_canvas(
             let via_top = (b.y + b.h / 2.0) < (a.y + a.h / 2.0);
             let src_at = |right: bool, top: bool| -> egui::Pos2 {
                 let inset = (10.0 + (e.from_row % 4) as f32 * 7.0).min(a.w * 0.45);
-                let x = if right { a.x + a.w - inset } else { a.x + inset };
+                let x = if right {
+                    a.x + a.w - inset
+                } else {
+                    a.x + inset
+                };
                 let y = if top { a.y } else { a.y + a.h };
                 to_screen(x, y)
             };
@@ -952,7 +1010,12 @@ fn show_canvas(
                 let lane_x = to_screen(lane_x_v, 0.0).x;
                 let to_pt = anchor(e.to_node, e.to_row, right);
                 rounded_path(
-                    &[s, egui::pos2(lane_x, s.y), egui::pos2(lane_x, to_pt.y), to_pt],
+                    &[
+                        s,
+                        egui::pos2(lane_x, s.y),
+                        egui::pos2(lane_x, to_pt.y),
+                        to_pt,
+                    ],
                     corner_r,
                 )
             };
@@ -1013,7 +1076,7 @@ fn show_canvas(
                         egui::Color32::TRANSPARENT,
                         stroke,
                     )
-                    .flatten(Some(2.0)),
+                    .flatten(Some(4.0)),
                     Route::Poly(p) => p.clone(),
                 };
                 let mut cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys) * mult;
@@ -1067,8 +1130,14 @@ fn show_canvas(
             } else {
                 (45, 1.0)
             };
+            // Width ∝ ln(reference sites): 1 site = 1×, 4 ≈ 1.5×, 16 ≈ 2× —
+            // heavy relationships read thicker, complementing the row counts.
+            let thick = pair_counts
+                .get(*e)
+                .map(|&c| (1.0 + (c as f32).ln() * 0.35).min(2.4))
+                .unwrap_or(1.0);
             let stroke = egui::Stroke::new(
-                (1.1 * scale).clamp(0.5, 2.0) * width_mult,
+                (1.1 * scale).clamp(0.5, 2.0) * width_mult * thick,
                 egui::Color32::from_rgba_unmultiplied(kc.r(), kc.g(), kc.b(), alpha),
             );
             painter.add(egui::Shape::line(pts.clone(), stroke));

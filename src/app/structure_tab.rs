@@ -24,11 +24,22 @@ impl AppIde {
                 rel.hash(&mut h);
                 content.hash(&mut h);
             }
-            h.finish()
+            // The externals toggle changes the node set (ghost nodes appended),
+            // so it participates in the cache key — toggling rebuilds
+            // instantly (parse is cheap) and restarts the call pass (node
+            // indices shift).
+            h.finish() ^ if self.structure_view.show_externals { 0x9E37_79B9_7F4A_7C15 } else { 0 }
         };
         if self.structure_cache.as_ref().map(|(h, _, _)| *h) != Some(hash) {
-            let graph =
+            let mut graph =
                 parse::build_graph(&self.generated_code, &self.project_tree.user_src_files);
+            if self.structure_view.show_externals {
+                parse::add_external_nodes(
+                    &mut graph,
+                    &self.generated_code,
+                    &self.project_tree.user_src_files,
+                );
+            }
             let mut lay = layout::layout(&graph);
             layout::apply_overrides(&mut lay, &graph, &self.structure_overrides);
             self.structure_cache = Some((hash, graph, lay));
@@ -110,6 +121,12 @@ impl AppIde {
             .as_ref()
             .map(|p| &p.ref_counts)
             .unwrap_or(&empty_counts);
+        let empty_pairs = std::collections::HashMap::new();
+        let pair_counts = self
+            .structure_calls
+            .as_ref()
+            .map(|p| &p.pair_counts)
+            .unwrap_or(&empty_pairs);
         let result = gui::show(
             ui,
             &*graph,
@@ -120,6 +137,7 @@ impl AppIde {
             focus_node,
             &node_errors,
             ref_counts,
+            pair_counts,
         );
 
         // A header drag ended → pin that node's position (keyed by its file,

@@ -82,9 +82,20 @@ impl AppIde {
         // the diagram is chip-agnostic. Missing file/section → automatic layout.
         {
             use crate::panels::mcu_module::mcu_config;
-            self.structure_overrides = std::fs::read_to_string(root.join(mcu_config::FILE_NAME))
-                .map(|t| mcu_config::parse_structure_layout(&t))
-                .unwrap_or_default();
+            let cfg_text =
+                std::fs::read_to_string(root.join(mcu_config::FILE_NAME)).unwrap_or_default();
+            self.structure_overrides = mcu_config::parse_structure_layout(&cfg_text);
+            // View options (Calls / depth / path style / externals) — absent
+            // section (older projects) keeps the defaults.
+            if let Some((show_calls, depth, style, externals)) =
+                mcu_config::parse_structure_view(&cfg_text)
+            {
+                self.structure_view.show_calls = show_calls;
+                self.structure_view.call_depth = depth;
+                self.structure_view.path_style =
+                    crate::panels::structure_map::gui::PathStyle::from_u8(style);
+                self.structure_view.show_externals = externals;
+            }
             // Force the next Structure-tab frame to rebuild + re-apply them
             // even when the content hash happens to match the cached graph.
             self.structure_cache = None;
