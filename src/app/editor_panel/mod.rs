@@ -259,8 +259,30 @@ impl AppIde {
                 // to the TextEdit as a literal character.
                 // These flags are `mut` so the right-click context menu (handled
                 // after the editor renders) can drive the exact same code paths.
-                let mut ctrl_space_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
+                //
+                // NOT `consume_key`: holding the shortcut delivers key-REPEAT
+                // events every frame, and each one used to re-fire the
+                // completion request (clearing the items → the popup flickered
+                // open/closed). All Ctrl+Space events are consumed here, but
+                // only the initial (non-repeat) press triggers.
+                let mut ctrl_space_pressed = false;
+                ui.input_mut(|i| {
+                    i.events.retain(|e| match e {
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            pressed: true,
+                            repeat,
+                            modifiers,
+                            ..
+                        } if modifiers.ctrl => {
+                            if !*repeat {
+                                ctrl_space_pressed = true;
+                            }
+                            false // swallow presses AND repeats
+                        }
+                        _ => true,
+                    });
+                });
                 // Ctrl+/ → toggle line comments on the selection (consumed before
                 // the editor so `/` is never typed into the text).
                 let mut ctrl_slash_pressed =

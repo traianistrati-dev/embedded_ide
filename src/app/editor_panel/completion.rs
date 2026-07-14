@@ -164,6 +164,7 @@ impl AppIde {
                         self.completion_trigger_idx = idx;
                         self.completion_sel = 0;
                         self.completion_open = true;
+                        self.completion_note = None;
                     }
                 }
 
@@ -312,6 +313,8 @@ impl AppIde {
                     // Nothing matches the current prefix — hide the popup.
                     self.completion_open = false;
                 } else {
+                    // Items on screen — any earlier "why empty" note is stale.
+                    self.completion_note = None;
                     // Clamp selection into the visible filtered range.
                     self.completion_sel = self.completion_sel.min(filtered.len() - 1);
                     let sel = self.completion_sel;
@@ -460,8 +463,20 @@ impl AppIde {
                 };
 
                 if resp_received || timed_out {
-                    // RA answered (empty) or request is stale — close popup.
+                    // RA answered (empty) or request is stale — close the
+                    // popup, but SAY WHY at the cursor: the silent one-frame
+                    // flash ("apare și dispare") was undiagnosable. The most
+                    // common real cause is a file that no `mod …;` declares —
+                    // rust-analyzer detaches it and answers `null` to every
+                    // completion request in it.
                     self.completion_open = false;
+                    let note = if timed_out && !resp_received {
+                        "rust-analyzer did not answer (busy / indexing) — try again".to_owned()
+                    } else {
+                        self.unlinked_module_hint()
+                            .unwrap_or_else(|| "no suggestions here".to_owned())
+                    };
+                    self.completion_note = Some((note, std::time::Instant::now()));
                 } else {
                     // Still waiting — show a small spinner popup.
                     let popup_pos = cursor_char_idx.and_then(|_| {
@@ -504,6 +519,50 @@ impl AppIde {
                         ui.ctx().request_repaint();
                     }
                 }
+            }
+        }
+
+        // ── "Why was the list empty?" note ─────────────────────────────────
+        // Shown at the cursor for a few seconds after a completion request came
+        // back with nothing (most often: the file has no `mod …;` declaration,
+        // so rust-analyzer does not analyze it at all). Cleared by its timeout,
+        // by typing, or by the next successful popup.
+        if let Some((note, at)) = self.completion_note.clone() {
+            if at.elapsed().as_secs_f32() > 6.0 || editor_resp.response.changed() {
+                self.completion_note = None;
+            } else {
+                let pos = editor_resp
+                    .state
+                    .cursor
+                    .char_range()
+                    .map(|cr| {
+                        let clamped = cr.primary.index.min(
+                            editor_resp.galley.job.text.chars().count().saturating_sub(1),
+                        );
+                        let local = editor_resp
+                            .galley
+                            .pos_from_cursor(egui::text::CCursor::new(clamped));
+                        editor_resp.response.rect.left_top()
+                            + local.min.to_vec2()
+                            + egui::vec2(0.0, local.height() + 2.0)
+                    })
+                    .unwrap_or_else(|| editor_resp.response.rect.left_top());
+                egui::Area::new(egui::Id::new("lsp_completion_note"))
+                    .fixed_pos(pos)
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
+                            ui.set_max_width(460.0);
+                            ui.label(
+                                egui::RichText::new(&note)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(230, 190, 90)),
+                            );
+                        });
+                    });
+                // Keep frames coming so the timeout fires without input.
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(400));
             }
         }
 
@@ -605,6 +664,66 @@ impl AppIde {
             }
         }
     }
+
+    /// If the displayed file is NOT declared by its parent module (`mod x;`
+    /// missing in the folder's `mod.rs`, or in `main.rs` for top-level files),
+    /// return a hint naming the exact missing line. rust-analyzer detaches
+    /// such files — no completions, no diagnostics — and every completion
+    /// request in them answers `null`, which used to read as a popup that
+    /// "appears and instantly disappears".
+    fn unlinked_module_hint(&self) -> Option<String> {
+        let ProjectFileId::UserFile(i) = self.selected_file else {
+            return None; // main.rs (and config files) are always linked
+        };
+        let (name, _) = self.project_tree.user_src_files.get(i)?;
+        let stem = name.rsplit('/').next()?.strip_suffix(".rs")?.to_owned();
+        if stem == "mod" {
+            return None; // a mod.rs is declared by ITS parent — keep it simple
+        }
+        let (parent_label, parent_text) = match name.rsplit_once('/') {
+            Some((dir, _)) => {
+                let parent_rel = format!("{dir}/mod.rs");
+                let text = self
+                    .project_tree
+                    .user_src_files
+                    .iter()
+                    .find(|(n, _)| *n == parent_rel)?
+                    .1
+                    .as_str();
+                (format!("src/{parent_rel}"), text)
+            }
+            None => ("src/main.rs".to_owned(), self.generated_code.as_str()),
+        };
+        (!mod_declared_in(parent_text, &stem)).then(|| {
+            format!(
+                "no suggestions — this file is not in the module tree: add \
+                 `mod {stem};` to {parent_label} (rust-analyzer skips \
+                 undeclared files entirely)"
+            )
+        })
+    }
+}
+
+/// `true` when `parent_text` declares the child module `stem` — accepts
+/// `mod x;`, `pub mod x;`, `pub(crate) mod x;` and `mod x {`; comment lines
+/// don't count. Used by [`AppIde::unlinked_module_hint`].
+fn mod_declared_in(parent_text: &str, stem: &str) -> bool {
+    parent_text.lines().any(|l| {
+        let l = l.trim();
+        if l.starts_with("//") {
+            return false;
+        }
+        let mut words = l.split_whitespace().peekable();
+        while let Some(w) = words.next() {
+            if w == "mod" {
+                if let Some(&next) = words.peek() {
+                    let ident = next.trim_end_matches([';', '{']).trim();
+                    return ident == stem;
+                }
+            }
+        }
+        false
+    })
 }
 
 /// Order completion items so those whose label starts with `prefix` (case-
@@ -625,8 +744,31 @@ fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::Co
 
 #[cfg(test)]
 mod tests {
-    use super::order_by_prefix;
+    use super::{mod_declared_in, order_by_prefix};
     use crate::lsp::CompletionItem;
+
+    /// The unlinked-file detector: every accepted `mod` declaration shape
+    /// counts, comments and other modules don't.
+    #[test]
+    fn mod_declaration_shapes_are_recognised() {
+        let parent = "// New file\n\
+                      pub mod data;\n\
+                      mod radar;\n\
+                      pub(crate) mod send_models;\n\
+                      mod inline { }\n\
+                      // mod commented_out;\n\
+                      pub use radar::*;\n";
+        assert!(mod_declared_in(parent, "data"));
+        assert!(mod_declared_in(parent, "radar"));
+        assert!(mod_declared_in(parent, "send_models"));
+        assert!(mod_declared_in(parent, "inline"));
+        assert!(!mod_declared_in(parent, "commented_out"));
+        // The real bug that motivated this: the declaration simply missing.
+        assert!(!mod_declared_in(parent, "read_report_admin"));
+        // `use radar::*` alone must NOT count as declaring `radar`… checked
+        // via a parent that only re-exports:
+        assert!(!mod_declared_in("pub use radar::*;\n", "radar"));
+    }
 
     fn items(labels: &[&str]) -> Vec<CompletionItem> {
         labels

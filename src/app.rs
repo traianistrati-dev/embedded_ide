@@ -527,6 +527,10 @@ pub struct AppIde {
     completer: Completer,
     /// True when the LSP completion popup is visible.
     completion_open: bool,
+    /// Transient note shown at the cursor when a completion request came back
+    /// EMPTY — a silent popup flash was undiagnosable. Carries the reason
+    /// (e.g. "the file has no `mod …;` declaration") + when it appeared.
+    completion_note: Option<(String, std::time::Instant)>,
     /// Index of the currently highlighted row in the completion popup.
     completion_sel: usize,
     /// Character-offset in the editor text where completion was triggered.
@@ -910,6 +914,7 @@ impl AppIde {
                 .with_auto_indent()
                 .with_user_words(),
             completion_open: false,
+            completion_note: None,
             completion_sel: 0,
             completion_trigger_idx: 0,
             completion_pending_insert: None,
