@@ -32,6 +32,11 @@ pub struct StructureView {
     /// Live search query — matching nodes get a gold border, matching symbol
     /// rows a gold tint. Session-only.
     pub search: String,
+    /// View offset from the centered position, in screen px — dragging the
+    /// empty background pans the diagram (useful past 1.0 zoom, where the
+    /// diagram overflows the fixed-size canvas). Clamped so the diagram can
+    /// never be dragged out of sight; Ctrl+0 re-centers. Session-only.
+    pub pan: egui::Vec2,
 }
 
 /// Call-edge route shapes offered to the router.
@@ -82,6 +87,7 @@ impl Default for StructureView {
             path_style: PathStyle::Mixed,
             show_externals: false,
             search: String::new(),
+            pan: egui::Vec2::ZERO,
         }
     }
 }
@@ -173,7 +179,7 @@ pub fn show(
     pair_counts: &std::collections::HashMap<CallEdge, usize>,
 ) -> ShowResult {
     let mut result = ShowResult::default();
-    // ── Toolbar ───────────────────────────────────────────────────────────
+    // ── Toolbar row 1: info text only ─────────────────────────────────────
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!(
@@ -185,37 +191,14 @@ pub fn show(
             .size(11.0)
             .color(egui::Color32::from_rgb(150, 150, 160)),
         );
-        ui.separator();
-        if ui
-            .small_button("Auto layout")
-            .on_hover_text(
-                "Discard the manually dragged positions and re-run the \
-                 automatic arrangement",
-            )
-            .clicked()
-        {
-            result.reset_layout = true;
-        }
-        ui.separator();
-        ui.checkbox(
-            &mut view.show_calls,
-            egui::RichText::new("Calls").size(11.0),
-        )
-        .on_hover_text(
-            "Show cross-module call edges, coloured by the TARGET's kind \
-                 (like the row glyphs): blue = fn, orange = struct, purple = \
-                 enum, green = trait. Computed via rust-analyzer, one symbol \
-                 at a time, only while the project is saved/in sync.",
-        );
-        // Whose calls are shown (follows the selected file; main by default)
-        // and how many hops DEEP below it the display drills.
+        // Whose calls are shown (follows the selected file; main by default).
         if view.show_calls {
             if let Some(node) = graph.nodes.get(focus_node) {
                 // A package root (mod.rs) focuses its whole subtree.
                 let label = if node.file_rel.ends_with("/mod.rs") {
-                    format!("of {}::*", node.name)
+                    format!("· calls of {}::*", node.name)
                 } else {
-                    format!("of {}", node.name)
+                    format!("· calls of {}", node.name)
                 };
                 ui.label(
                     egui::RichText::new(label)
@@ -229,28 +212,49 @@ pub fn show(
                      another file (tree / editor / node click) to move the focus.",
                 );
             }
-            ui.checkbox(
-                &mut view.show_externals,
-                egui::RichText::new("Externals").size(11.0),
-            )
-            .on_hover_text(
-                "Show ghost nodes for external crates (std / core / the HAL…) \
-                 with dependency edges from the modules that use them.",
+        }
+        if !calls_status.is_empty() {
+            ui.label(
+                egui::RichText::new(calls_status)
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(200, 160, 70)),
             );
-            egui::ComboBox::from_id_salt("structure_path_style")
-                .width(76.0)
-                .selected_text(view.path_style.label())
-                .show_ui(ui, |ui| {
-                    for style in [PathStyle::Straight, PathStyle::Curved, PathStyle::Mixed] {
-                        ui.selectable_value(&mut view.path_style, style, style.label());
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "Call-edge shape: Straight = orthogonal rounded traces \
-                     only; Curved = bezier arcs only; Mixed = the router picks \
-                     the cheapest of both per edge.",
-                );
+        }
+        ui.label(
+            egui::RichText::new(
+                "· Ctrl+± zoom, Ctrl+0 reset · drag the background = pan · \
+                 drag a module's header = move it · click = open",
+            )
+            .size(10.5)
+            .color(egui::Color32::from_rgb(120, 120, 130)),
+        );
+    });
+
+    // ── Toolbar row 2: the commands, groups separated by `|` ──────────────
+    ui.horizontal(|ui| {
+        if ui
+            .small_button("Auto layout")
+            .on_hover_text(
+                "Discard the manually dragged positions and re-run the \
+                 automatic arrangement",
+            )
+            .clicked()
+        {
+            result.reset_layout = true;
+            view.pan = egui::Vec2::ZERO;
+        }
+        ui.separator();
+        ui.checkbox(
+            &mut view.show_calls,
+            egui::RichText::new("Calls").size(11.0),
+        )
+        .on_hover_text(
+            "Show cross-module call edges, coloured by the TARGET's kind \
+                 (like the row glyphs): blue = fn, orange = struct, purple = \
+                 enum, green = trait. Computed via rust-analyzer, one symbol \
+                 at a time, only while the project is saved/in sync.",
+        );
+        if view.show_calls {
             egui::ComboBox::from_id_salt("structure_call_depth")
                 .width(52.0)
                 .selected_text(match view.call_depth {
@@ -269,13 +273,30 @@ pub fn show(
                      1 = its direct edges only; N = follow callees N levels \
                      down; All = the whole tree under the selected module.",
                 );
-        }
-        if !calls_status.is_empty() {
-            ui.label(
-                egui::RichText::new(calls_status)
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(200, 160, 70)),
+            ui.separator();
+            ui.checkbox(
+                &mut view.show_externals,
+                egui::RichText::new("Externals").size(11.0),
+            )
+            .on_hover_text(
+                "Show ghost nodes for external crates (std / core / the HAL…) \
+                 with dependency edges from the modules that use them.",
             );
+            ui.separator();
+            egui::ComboBox::from_id_salt("structure_path_style")
+                .width(76.0)
+                .selected_text(view.path_style.label())
+                .show_ui(ui, |ui| {
+                    for style in [PathStyle::Straight, PathStyle::Curved, PathStyle::Mixed] {
+                        ui.selectable_value(&mut view.path_style, style, style.label());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Call-edge shape: Straight = orthogonal rounded traces \
+                     only; Curved = bezier arcs only; Mixed = the router picks \
+                     the cheapest of both per edge.",
+                );
         }
         // Search: matching nodes get a gold border, matching rows a gold tint.
         ui.separator();
@@ -300,14 +321,6 @@ pub fn show(
         {
             view.search.clear();
         }
-        ui.label(
-            egui::RichText::new(
-                "· auto-fits the panel · Ctrl+± zoom, Ctrl+0 reset · drag a \
-                 module's header = move it · click = open",
-            )
-            .size(10.5)
-            .color(egui::Color32::from_rgb(120, 120, 130)),
-        );
     });
     ui.add_space(2.0);
 
@@ -324,6 +337,7 @@ pub fn show(
             let cmd = egui::Modifiers::COMMAND;
             if i.consume_key(cmd, egui::Key::Num0) {
                 view.zoom = 1.0;
+                view.pan = egui::Vec2::ZERO; // re-center too
             } else if i.consume_key(cmd, egui::Key::Plus) || i.consume_key(cmd, egui::Key::Equals) {
                 view.zoom = (view.zoom * 1.15).min(4.0);
             } else if i.consume_key(cmd, egui::Key::Minus) {
@@ -334,35 +348,45 @@ pub fn show(
 
     // AUTO-ZOOM base: the WHOLE diagram fits the panel with FIT_PAD padding,
     // recomputed every frame — panel/window resizes always rescale. The user
-    // multiplier stacks on top; past 1.0 the scroll area takes over.
+    // multiplier stacks on top; past 1.0 the diagram overflows the fixed
+    // canvas and background-drag panning takes over (no scrollbars).
     let base = ((avail.x - 2.0 * FIT_PAD) / lay.width)
         .min((avail.y - 2.0 * FIT_PAD) / lay.height)
         .clamp(0.05, 2.5);
     let scale = (base * view.zoom).clamp(0.05, 5.0);
     let content = egui::vec2(lay.width, lay.height) * scale;
-    egui::ScrollArea::both()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            show_canvas(
-                ui,
-                graph,
-                lay,
-                view,
-                calls,
-                scale,
-                content,
-                focus_node,
-                node_errors,
-                ref_counts,
-                pair_counts,
-                &mut result,
-            );
-        });
+    show_canvas(
+        ui,
+        graph,
+        lay,
+        view,
+        calls,
+        scale,
+        content,
+        avail,
+        focus_node,
+        node_errors,
+        ref_counts,
+        pair_counts,
+        &mut result,
+    );
 
     result
 }
 
-/// The scaled diagram body, drawn inside the vertical scroll area.
+/// One panning axis: the content edge position (relative to the canvas edge)
+/// clamped so the diagram never leaves the viewport — fully inside (with the
+/// pad) while it fits, slideable edge-to-edge while it overflows.
+fn clamp_rel(rel: f32, avail: f32, content: f32) -> f32 {
+    if content + 2.0 * FIT_PAD <= avail {
+        rel.clamp(FIT_PAD, avail - content - FIT_PAD)
+    } else {
+        rel.clamp(avail - content - FIT_PAD, FIT_PAD)
+    }
+}
+
+/// The scaled diagram body — a FIXED canvas exactly the visible size (the
+/// diagram scales/pans inside it; it never grows the panel).
 #[allow(clippy::too_many_arguments)]
 fn show_canvas(
     ui: &mut egui::Ui,
@@ -372,22 +396,30 @@ fn show_canvas(
     calls: &[CallEdge],
     scale: f32,
     content: egui::Vec2,
+    avail: egui::Vec2,
     focus_node: usize,
     node_errors: &[bool],
     ref_counts: &std::collections::HashMap<(usize, usize), usize>,
     pair_counts: &std::collections::HashMap<CallEdge, usize>,
     result: &mut ShowResult,
 ) {
-    // Fill at least the viewport (no background gap); when zoomed past the
-    // fit, grow by the content + padding and let the scroll area take over.
-    let size = egui::vec2(
-        (content.x + 2.0 * FIT_PAD).max(ui.available_width()),
-        (content.y + 2.0 * FIT_PAD).max(ui.available_height()),
-    );
-    let (rect, _bg_resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    // Center the diagram; `free` is ≥ FIT_PAD by construction of `size`.
+    // The canvas is exactly the space that is visible. Dragging its empty
+    // background pans the view (nodes/rows are registered AFTER this response,
+    // so egui hands them the pointer first — the background only sees drags
+    // that start in the gaps around them).
+    let (rect, bg_resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
+    if bg_resp.dragged() {
+        view.pan += bg_resp.drag_delta();
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    // Center the diagram, then apply the (clamped) pan on top.
     let free = (rect.size() - content) * 0.5;
-    let origin = rect.left_top() + egui::vec2(free.x.max(FIT_PAD), free.y.max(FIT_PAD));
+    let rel = egui::vec2(
+        clamp_rel(free.x + view.pan.x, rect.width(), content.x),
+        clamp_rel(free.y + view.pan.y, rect.height(), content.y),
+    );
+    view.pan = rel - free;
+    let origin = rect.left_top() + rel;
     let to_screen = |x: f32, y: f32| -> egui::Pos2 { origin + egui::vec2(x, y) * scale };
 
     let painter = ui.painter().with_clip_rect(rect);
