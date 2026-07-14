@@ -220,14 +220,6 @@ pub fn show(
                     .color(egui::Color32::from_rgb(200, 160, 70)),
             );
         }
-        ui.label(
-            egui::RichText::new(
-                "· Ctrl+± zoom, Ctrl+0 reset · drag the background = pan · \
-                 drag a module's header = move it · click = open",
-            )
-            .size(10.5)
-            .color(egui::Color32::from_rgb(120, 120, 130)),
-        );
     });
 
     // ── Toolbar row 2: the commands, groups separated by `|` ──────────────
@@ -322,6 +314,16 @@ pub fn show(
             view.search.clear();
         }
     });
+
+    // ── Toolbar row 3: usage hints, last line under the buttons ───────────
+    ui.label(
+        egui::RichText::new(
+            "Ctrl+± / mouse wheel zoom, Ctrl+0 reset · drag the background = \
+             pan · drag a module's header = move it · click = open",
+        )
+        .size(10.5)
+        .color(egui::Color32::from_rgb(120, 120, 130)),
+    );
     ui.add_space(2.0);
 
     // ── Canvas ────────────────────────────────────────────────────────────
@@ -342,6 +344,13 @@ pub fn show(
                 view.zoom = (view.zoom * 1.15).min(4.0);
             } else if i.consume_key(cmd, egui::Key::Minus) {
                 view.zoom = (view.zoom / 1.15).max(0.3);
+            }
+            // Mouse wheel = smooth zoom (consumed so no outer area scrolls) —
+            // multiplicative, so notches compose like the Ctrl+± steps.
+            let scroll = i.smooth_scroll_delta.y;
+            if scroll != 0.0 {
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                view.zoom = (view.zoom * (scroll * 0.002).exp()).clamp(0.3, 4.0);
             }
         });
     }
