@@ -29,6 +29,9 @@ pub struct StructureView {
     /// Show GHOST nodes for external crates (std / HAL / …) with dependency
     /// edges from the modules that use them.
     pub show_externals: bool,
+    /// Live search query — matching nodes get a gold border, matching symbol
+    /// rows a gold tint. Session-only.
+    pub search: String,
 }
 
 /// Call-edge route shapes offered to the router.
@@ -78,6 +81,7 @@ impl Default for StructureView {
             call_depth: Some(1),
             path_style: PathStyle::Mixed,
             show_externals: false,
+            search: String::new(),
         }
     }
 }
@@ -131,6 +135,8 @@ const PKG_PALETTE: [egui::Color32; 8] = [
 const NODE_STROKE: egui::Color32 = egui::Color32::from_rgb(96, 106, 128);
 /// Blinking border of nodes whose file carries error diagnostics.
 const ERROR_STROKE: egui::Color32 = egui::Color32::from_rgb(230, 70, 60);
+/// Border / row tint of search matches (the definition-highlight gold).
+const SEARCH_STROKE: egui::Color32 = egui::Color32::from_rgb(255, 214, 90);
 // const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 170, 240);
 const HOVER_STROKE: egui::Color32 = egui::Color32::from_rgb(250, 250, 250);
 /// Module dependency edges (solid, straight): LIGHT GRAY — the old blue now
@@ -270,6 +276,29 @@ pub fn show(
                     .size(10.5)
                     .color(egui::Color32::from_rgb(200, 160, 70)),
             );
+        }
+        // Search: matching nodes get a gold border, matching rows a gold tint.
+        ui.separator();
+        ui.label(
+            egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS).size(11.0),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut view.search)
+                .desired_width(110.0)
+                .hint_text("Search…"),
+        )
+        .on_hover_text("Highlight modules and symbols whose name contains this text");
+        if !view.search.is_empty()
+            && ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(egui_phosphor::regular::X).size(10.0),
+                    )
+                    .frame(false),
+                )
+                .clicked()
+        {
+            view.search.clear();
         }
         ui.label(
             egui::RichText::new(
@@ -468,6 +497,8 @@ fn show_canvas(
     // or a symbol row is hovered, unrelated call edges dim.
     let mut hovered_node: Option<usize> = None;
     let mut hovered_row: Option<(usize, usize)> = None;
+    // Search query (case-insensitive substring on module and symbol names).
+    let query = view.search.trim().to_lowercase();
     // One fill per PACKAGE (top-level module subtree): same colour for a
     // package and all its children, different across packages. main keeps its
     // olive root fill.
@@ -567,8 +598,19 @@ fn show_canvas(
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
         let selected = i == focus_node;
+        // Search: the node matches when its name/path or ANY of its symbols
+        // contains the query — so matches show even zoomed out (rows hidden).
+        let search_hit = !query.is_empty()
+            && (node.name.to_lowercase().contains(&query)
+                || node.path.to_lowercase().contains(&query)
+                || node
+                    .symbols
+                    .iter()
+                    .any(|s| s.name.to_lowercase().contains(&query)));
         let (stroke_c, base_w) = if blink_on {
             (ERROR_STROKE, 3.0)
+        } else if search_hit {
+            (SEARCH_STROKE, 2.0)
         } else if selected || resp.hovered() {
             (HOVER_STROKE, 1.6)
         } else {
@@ -679,6 +721,14 @@ fn show_canvas(
                         row_rect,
                         0.0,
                         egui::Color32::from_rgba_unmultiplied(120, 170, 240, 26),
+                    );
+                }
+                // Search hit on this symbol → gold row tint.
+                if !query.is_empty() && sym.name.to_lowercase().contains(&query) {
+                    painter.rect_filled(
+                        row_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 214, 90, 30),
                     );
                 }
                 let (glyph, g_color) = kind_glyph(sym.kind);
