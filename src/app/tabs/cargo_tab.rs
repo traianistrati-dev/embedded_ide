@@ -3,6 +3,7 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
 use crate::build::{self, BuildState};
+use crate::size::{MemUsage, SizeState};
 
 pub fn show_cargo_tab(
     ui: &mut egui::Ui,
@@ -19,8 +20,13 @@ pub fn show_cargo_tab(
     build_go: &mut bool,
     can_build: bool,
     clippy_running: bool,
+    // Flash/RAM usage measurement (the Size button; caller runs
+    // `start_size_measure` — same signal pattern as `build_go`).
+    size_state: &Arc<Mutex<SizeState>>,
+    size_go: &mut bool,
 ) {
     let state = build_state.lock().unwrap().clone();
+    let size_snapshot = size_state.lock().unwrap().clone();
     let workspace = std::env::temp_dir().join("embedded_ide_0_check");
 
     // ── Status bar ────────────────────────────────────────────────────────────
@@ -157,12 +163,44 @@ pub fn show_cargo_tab(
                  Requires the Rust toolchain + thumbv7m-none-eabi target:\n\
                  rustup target add thumbv7m-none-eabi",
             );
+
+            ui.add_space(4.0);
+
+            // ── Size button — measure Flash/RAM usage ─────────────────────
+            let size_busy = size_snapshot.is_busy();
+            let size_label = if size_busy {
+                "Measuring…".to_owned()
+            } else {
+                format!("{} Size", ph::RULER)
+            };
+            let size_enabled = !size_busy && !is_building && !clippy_running && can_build;
+            let size_btn = ui.add_enabled(
+                size_enabled,
+                egui::Button::new(egui::RichText::new(&size_label).size(10.0).color(
+                    if size_enabled {
+                        egui::Color32::from_rgb(120, 170, 210)
+                    } else {
+                        egui::Color32::GRAY
+                    },
+                )),
+            );
+            if size_btn.clicked() {
+                *size_go = true;
+            }
+            size_btn.on_hover_text(
+                "Measure Flash/RAM usage: `cargo build --release`, then read \
+                 the ELF section sizes against the memory.x limits.\n\
+                 RAM = static usage (.data + .bss) — stack and heap come on top.",
+            );
+
             // Keep UI refreshing while build runs (drives the dot animation).
-            if is_building {
+            if is_building || size_busy {
                 ctx.request_repaint_after(std::time::Duration::from_millis(120));
             }
         });
     });
+
+    render_size_row(ui, &size_snapshot);
 
     let BuildState::Done(result) = &state else {
         // For Building/Failed we've shown what we can
@@ -248,6 +286,157 @@ pub fn show_cargo_tab(
     };
 
     render_diagnostics(ui, result, selected_diagnostic, nav);
+}
+
+/// The Flash/RAM usage strip under the status bar: two labelled bars (with
+/// percentages when memory.x limits are known) + a section breakdown on hover.
+/// Hidden while nothing was measured yet.
+fn render_size_row(ui: &mut egui::Ui, state: &SizeState) {
+    match state {
+        SizeState::Idle => {}
+        SizeState::Building => {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Measuring Flash/RAM… (cargo build --release)",
+                        ph::RULER
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(180, 180, 180)),
+                );
+            });
+        }
+        SizeState::Failed(msg) => {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Size: {}",
+                        ph::X_CIRCLE,
+                        msg.lines().next().unwrap_or("failed")
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(230, 90, 80)),
+                )
+                .on_hover_text(msg);
+            });
+        }
+        SizeState::Done(u) => {
+            ui.horizontal(|ui| {
+                usage_bar(ui, "Flash", u.flash_used, u.limits.flash.map(|r| r.length), u, true);
+                ui.add_space(12.0);
+                usage_bar(ui, "RAM", u.ram_used, u.limits.ram.map(|r| r.length), u, false);
+                if u.limits.ram.is_none() {
+                    ui.label(
+                        egui::RichText::new("(no memory.x — sizes only)")
+                            .size(9.5)
+                            .color(egui::Color32::from_gray(110)),
+                    )
+                    .on_hover_text(
+                        "This toolchain has no project memory.x (esp-hal owns the \
+                         memory layout), so total capacity is unknown — the raw \
+                         static sizes are still exact.",
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// One labelled usage bar: `Flash ▓▓░░ 34.2 KB / 64 KB · 53%`. Green under
+/// 70%, amber under 90%, red above. Hover lists the matching ELF sections.
+fn usage_bar(
+    ui: &mut egui::Ui,
+    label: &str,
+    used: u64,
+    limit: Option<u64>,
+    usage: &MemUsage,
+    flash: bool,
+) {
+    ui.label(
+        egui::RichText::new(label)
+            .size(10.5)
+            .color(egui::Color32::from_gray(160)),
+    );
+    let pct = limit.map(|l| used as f32 / l.max(1) as f32);
+    let color = match pct {
+        Some(p) if p >= 0.9 => egui::Color32::from_rgb(230, 80, 60),
+        Some(p) if p >= 0.7 => egui::Color32::from_rgb(230, 180, 60),
+        _ => egui::Color32::from_rgb(80, 200, 100),
+    };
+
+    // The bar itself (only when a limit is known — no denominator, no bar).
+    if let Some(p) = pct {
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(120.0, 11.0), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(48));
+        let mut fill = rect;
+        fill.set_width(rect.width() * p.min(1.0));
+        painter.rect_filled(fill, 2.0, color);
+        painter.rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+            egui::StrokeKind::Inside,
+        );
+        resp.on_hover_text(section_breakdown(usage, flash));
+    }
+
+    let text = match limit {
+        Some(l) => format!(
+            "{} / {} · {:.0}%",
+            fmt_bytes(used),
+            fmt_bytes(l),
+            (used as f64 / l.max(1) as f64) * 100.0
+        ),
+        None => fmt_bytes(used),
+    };
+    ui.label(
+        egui::RichText::new(text)
+            .size(10.5)
+            .monospace()
+            .color(if pct.is_some_and(|p| p >= 0.9) {
+                color
+            } else {
+                egui::Color32::from_rgb(200, 205, 215)
+            }),
+    )
+    .on_hover_text(section_breakdown(usage, flash));
+}
+
+/// Hover text: the ELF sections counted on this side (flash or RAM), largest
+/// first, plus the static-RAM caveat.
+fn section_breakdown(usage: &MemUsage, flash: bool) -> String {
+    let mut rows: Vec<&crate::size::SectionUse> = usage
+        .sections
+        .iter()
+        .filter(|s| if flash { s.in_flash } else { s.in_ram })
+        .collect();
+    rows.sort_by(|a, b| b.size.cmp(&a.size));
+    let mut out = String::new();
+    for s in rows {
+        out.push_str(&format!("{:<16} {}\n", s.name, fmt_bytes(s.size)));
+    }
+    if out.is_empty() {
+        out.push_str("(no section details)\n");
+    }
+    if flash {
+        out.push_str("\nProgrammed image: vectors + code + constants + .data initializers.");
+    } else {
+        out.push_str("\nStatic RAM only (.data + .bss) — stack and heap come on top.");
+    }
+    out
+}
+
+/// `812 B`, `34.2 KB`, `1.25 MB`.
+fn fmt_bytes(b: u64) -> String {
+    if b < 1024 {
+        format!("{b} B")
+    } else if b < 1024 * 1024 {
+        format!("{:.1} KB", b as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", b as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// Render a `cargo check`/`clippy` diagnostics list (clickable rows → navigate)

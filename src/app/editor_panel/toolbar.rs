@@ -144,6 +144,105 @@ impl AppIde {
         }
     }
 
+    /// Measure Flash/RAM usage: write the project, `cargo build --release`,
+    /// then parse the ELF against the memory.x limits (see `crate::size`).
+    /// Fired from the Cargo tab's Size button. No-op without a chip config.
+    pub(crate) fn start_size_measure(&mut self) {
+        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        match project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+        ) {
+            Ok(()) => {
+                self.build_tab = BuildPanelTab::Cargo;
+                crate::size::start_measure(
+                    build_dir,
+                    project.target.clone(),
+                    self.memory_x.clone(),
+                    Arc::clone(&self.size_state),
+                    self.egui_ctx.clone(),
+                    Arc::clone(&self.activity),
+                );
+            }
+            Err(e) => {
+                *self.size_state.lock().unwrap() =
+                    crate::size::SizeState::Failed(format!("Could not write project: {e}"));
+            }
+        }
+    }
+
+    /// Start an RTT session: write the project, then hand off to the
+    /// [`crate::rtt::RttConsole`] pipeline (build --release → probe-rs
+    /// run/attach). Fired from the RTT tab's buttons. No-op without a chip.
+    pub(crate) fn start_rtt(&mut self, mode: crate::rtt::RttMode) {
+        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        match project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+        ) {
+            Ok(()) => {
+                self.build_tab = BuildPanelTab::Rtt;
+                self.rtt.start(
+                    mode,
+                    build_dir,
+                    project.target.clone(),
+                    project.probe_chip.clone(),
+                    self.egui_ctx.clone(),
+                );
+            }
+            Err(e) => {
+                *self.rtt.phase.lock().unwrap() =
+                    crate::rtt::RttPhase::Error(format!("could not write project: {e}"));
+            }
+        }
+    }
+
+    /// Start a debug session: write the project, snapshot the breakpoints,
+    /// then hand off to the [`crate::debugger::Debugger`] pipeline (build →
+    /// probe-rs dap-server → flash + attach). No-op without a chip config.
+    pub(crate) fn start_debug(&mut self) {
+        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        match project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+        ) {
+            Ok(()) => {
+                self.build_tab = BuildPanelTab::Debug;
+                let bps: std::collections::BTreeMap<String, Vec<u32>> = self
+                    .breakpoints
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
+                    .collect();
+                self.debugger.start(
+                    build_dir,
+                    project.target.clone(),
+                    project.probe_chip.clone(),
+                    bps,
+                    self.egui_ctx.clone(),
+                );
+            }
+            Err(e) => {
+                self.debugger.state.lock().unwrap().phase =
+                    crate::debugger::DebugPhase::Error(format!("could not write project: {e}"));
+            }
+        }
+    }
+
     /// Render the editor header toolbar.  `display_code` is the text shown in
     /// the editor (copied verbatim by the Copy button).
     pub(super) fn show_editor_toolbar(&mut self, ui: &mut egui::Ui, display_code: &str) {

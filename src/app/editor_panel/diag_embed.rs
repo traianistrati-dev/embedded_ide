@@ -106,6 +106,16 @@ impl AppIde {
         let can_flash = self.selected_build_cfg().is_some();
         // Cargo-tab Build button (moved off the top toolbar on 2026-07-10).
         let mut build_go = false;
+        // Cargo-tab Size button (Flash/RAM usage measurement).
+        let mut size_go = false;
+        // RTT-tab Run/Attach buttons.
+        let mut rtt_go: Option<crate::rtt::RttMode> = None;
+        // Debug-tab Start button.
+        let mut debug_go = false;
+        let rtt_chip = self
+            .selected_build_cfg()
+            .map(|(p, _)| p.probe_chip)
+            .unwrap_or_default();
         let project_dir = self.project_dir.clone();
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(self.diag_panel_height + HANDLE_H)
@@ -189,6 +199,13 @@ impl AppIde {
                     &mut flash_go,
                     can_flash,
                     &mut build_go,
+                    &self.size_state,
+                    &mut size_go,
+                    &mut self.rtt,
+                    &mut rtt_go,
+                    &rtt_chip,
+                    &mut self.debugger,
+                    &mut debug_go,
                 );
             });
         // A Git tab button was clicked: spawn the worker (guards inside).
@@ -198,6 +215,30 @@ impl AppIde {
         // Cargo-tab Build button.
         if build_go {
             self.start_build();
+        }
+        // Cargo-tab Size button (Flash/RAM measurement).
+        if size_go {
+            self.start_size_measure();
+        }
+        // RTT-tab Run/Attach buttons.
+        if let Some(mode) = rtt_go {
+            self.start_rtt(mode);
+        }
+        // Debug-tab Start button.
+        if debug_go {
+            self.start_debug();
+        }
+        // Debugger halt location (breakpoint / step landed): jump the editor
+        // there with an amber band — same path as a diagnostic-row click.
+        if let Some((rel, line)) = self.debugger.take_nav() {
+            if let Some(id) =
+                crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
+            {
+                self.selected_file = id;
+                self.pending_scroll_to_line = Some((id, line as usize));
+                self.highlighted_error_line =
+                    Some((id, line as usize, egui::Color32::from_rgb(235, 190, 60)));
+            }
         }
         // Flash-tab Programmer-row buttons.
         if flash_scan {

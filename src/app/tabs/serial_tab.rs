@@ -15,6 +15,10 @@ use egui_phosphor::regular as ph;
 /// Common baud rates offered in the dropdown.
 const BAUDS: [u32; 8] = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
+/// Height of the send-area resize handle / minimum send-area height.
+const HANDLE_H: f32 = 6.0;
+const MIN_TX: f32 = 26.0;
+
 pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Context) {
     if serial.ports.is_empty() {
         serial.refresh_ports();
@@ -72,6 +76,14 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         }
 
         ui.separator();
+        // Plot view: parse numeric lines into live curves (Arduino Serial
+        // Plotter style) — replaces the text/hex view while on.
+        ui.checkbox(&mut serial.plot_on, "Plot")
+            .on_hover_text(
+                "Plot numeric lines as live curves.\n\
+                 Formats:  temp:23.4 hum:56   ·   1.0 2.5 -3\n\
+                 One line = one sample tick; log lines in between are ignored.",
+            );
         ui.checkbox(&mut serial.hex, "Hex");
         // Number of bytes per repeating sequence to colour (hex mode).
         ui.add_enabled_ui(serial.hex, |ui| {
@@ -127,8 +139,6 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     ui.separator();
 
     // ── RX view (fills the space left above the resizable send area) ────────────
-    const HANDLE_H: f32 = 6.0;
-    const MIN_TX: f32 = 26.0;
     let section_h = ui.available_height();
     // Keep the send area valid for the current panel height (≥ Send button, and
     // leaving ≥ 40px for the RX view).
@@ -136,6 +146,26 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     serial.tx_height = serial.tx_height.clamp(MIN_TX, max_tx);
     let rx_height = (section_h - serial.tx_height - HANDLE_H).max(40.0);
 
+    // ── Plot view (replaces the text/hex view while on; the send area below
+    //    keeps working, so commands can be sent while plotting) ────────────────
+    if serial.plot_on {
+        {
+            let st = serial.state.lock().unwrap();
+            serial.plot.feed(&st.rx, st.rx_total);
+        }
+        crate::serial_plot::show_plot(ui, &mut serial.plot, rx_height);
+    } else {
+        show_rx_view(ui, serial, rx_height);
+    }
+
+    // ── Send area (drag handle + TX line) — shared by both views ────────────────
+    show_tx_area(ui, serial, ctx, max_tx);
+}
+
+/// The classic RX view: coloured hex (+ unique-sequences legend) or decoded
+/// text, with the Find highlights. Extracted unchanged so the Plot toggle can
+/// swap it for the live plotter.
+fn show_rx_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
     // Build the display under one lock. Search mode → yellow/grey highlight (no
     // legend); hex mode → per-sequence colours + unique-sequences legend; text
     // mode → plain decoded text.
@@ -292,6 +322,19 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 }
             });
     }
+
+}
+
+/// The resizable send area: drag handle, TX text box (hex-coloured in hex
+/// mode), Send + CR+LF + line-gap pacing. Shared by the RX and Plot views.
+fn show_tx_area(
+    ui: &mut egui::Ui,
+    serial: &mut SerialMonitor,
+    ctx: &egui::Context,
+    max_tx: f32,
+) {
+    let hex = serial.hex;
+    let connected = serial.is_connected();
 
     // ── Drag handle — resize the send area up / down ────────────────────────────
     let (handle_rect, _) = ui.allocate_exact_size(

@@ -48,7 +48,7 @@ pub struct TerminalState {
 }
 
 impl TerminalState {
-    fn push(&mut self, kind: LineKind, spans: Vec<(String, Option<egui::Color32>)>) {
+    pub(crate) fn push(&mut self, kind: LineKind, spans: Vec<(String, Option<egui::Color32>)>) {
         self.lines.push(TermLine { kind, spans });
         if self.lines.len() > MAX_LINES {
             let excess = self.lines.len() - MAX_LINES;
@@ -56,7 +56,7 @@ impl TerminalState {
         }
     }
 
-    fn push_plain(&mut self, kind: LineKind, text: impl Into<String>) {
+    pub(crate) fn push_plain(&mut self, kind: LineKind, text: impl Into<String>) {
         self.push(kind, vec![(text.into(), None)]);
     }
 }
@@ -291,8 +291,8 @@ fn parse_cd(cmd: &str) -> Option<String> {
 
 /// Background line reader: reads `pipe` to EOF, parsing each line's ANSI SGR
 /// colours, appending to the scrollback (throttled repaint). Bumps `done` on
-/// EOF so the waiter can reap the child.
-fn spawn_reader(
+/// EOF so the waiter can reap the child. (Shared with the RTT console.)
+pub(crate) fn spawn_reader(
     pipe: impl std::io::Read + Send + 'static,
     kind: LineKind,
     state: Arc<Mutex<TerminalState>>,

@@ -2,9 +2,49 @@
 //! in the project workspace, streaming output live. See
 //! [`crate::terminal::TerminalConsole`].
 
-use crate::terminal::{LineKind, TerminalConsole};
+use crate::terminal::{LineKind, TerminalConsole, TerminalState};
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::sync::{Arc, Mutex};
+
+/// Render a [`TerminalState`] scrollback: one `LayoutJob` per line, ANSI span
+/// colours honoured, per-kind default colours. Shared with the RTT tab.
+pub(crate) fn render_scrollback(
+    ui: &mut egui::Ui,
+    state: &Arc<Mutex<TerminalState>>,
+    id_salt: &str,
+    max_height: f32,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt(id_salt.to_owned())
+        .max_height(max_height)
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            let st = state.lock().unwrap();
+            for line in &st.lines {
+                let default_col = match line.kind {
+                    LineKind::Input => egui::Color32::from_rgb(150, 200, 130),
+                    LineKind::Stdout => egui::Color32::from_gray(205),
+                    LineKind::Stderr => egui::Color32::from_rgb(230, 140, 120),
+                    LineKind::Notice => egui::Color32::from_rgb(130, 160, 200),
+                };
+                let mut job = egui::text::LayoutJob::default();
+                for (text, col) in &line.spans {
+                    job.append(
+                        text,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::monospace(11.5),
+                            color: col.unwrap_or(default_col),
+                            ..Default::default()
+                        },
+                    );
+                }
+                ui.label(job);
+            }
+        });
+}
 
 pub fn show_terminal_tab(ui: &mut egui::Ui, term: &mut TerminalConsole, ctx: &egui::Context) {
     let running = term.is_running();
@@ -54,35 +94,7 @@ pub fn show_terminal_tab(ui: &mut egui::Ui, term: &mut TerminalConsole, ctx: &eg
     // ── Output scrollback ─────────────────────────────────────────────────────
     let input_row_h = 26.0;
     let out_h = (ui.available_height() - input_row_h).max(40.0);
-    egui::ScrollArea::vertical()
-        .id_salt("terminal_scroll")
-        .max_height(out_h)
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            let st = term.state.lock().unwrap();
-            for line in &st.lines {
-                let default_col = match line.kind {
-                    LineKind::Input => egui::Color32::from_rgb(150, 200, 130),
-                    LineKind::Stdout => egui::Color32::from_gray(205),
-                    LineKind::Stderr => egui::Color32::from_rgb(230, 140, 120),
-                    LineKind::Notice => egui::Color32::from_rgb(130, 160, 200),
-                };
-                let mut job = egui::text::LayoutJob::default();
-                for (text, col) in &line.spans {
-                    job.append(
-                        text,
-                        0.0,
-                        egui::TextFormat {
-                            font_id: egui::FontId::monospace(11.5),
-                            color: col.unwrap_or(default_col),
-                            ..Default::default()
-                        },
-                    );
-                }
-                ui.label(job);
-            }
-        });
+    render_scrollback(ui, &term.state, "terminal_scroll", out_h);
 
     // ── Input row ─────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {

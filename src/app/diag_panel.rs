@@ -5,8 +5,8 @@
 
 use super::BuildPanelTab;
 use super::tabs::{
-    show_activity_tab, show_cargo_tab, show_clippy_tab, show_dfu_tab, show_git_tab, show_ra_tab,
-    show_serial_tab, show_terminal_tab, show_tools_tab,
+    show_activity_tab, show_cargo_tab, show_clippy_tab, show_debug_tab, show_dfu_tab, show_git_tab,
+    show_ra_tab, show_rtt_tab, show_serial_tab, show_terminal_tab, show_tools_tab,
 };
 use crate::activity::ActivityLog;
 use crate::build::BuildState;
@@ -77,6 +77,18 @@ pub(super) fn show_diag_panel(
     // Cargo-tab Build button (moved off the top toolbar): set on click; the
     // caller runs `start_build`. Gated like Flash, on the same chip config.
     build_go: &mut bool,
+    // Cargo-tab Size button: Flash/RAM usage measurement (state + signal; the
+    // caller runs `start_size_measure`).
+    size_state: &Arc<Mutex<crate::size::SizeState>>,
+    size_go: &mut bool,
+    // RTT tab: console + Run/Attach signal (caller runs `start_rtt`) + the
+    // probe-rs chip name shown in the tab.
+    rtt: &mut crate::rtt::RttConsole,
+    rtt_go: &mut Option<crate::rtt::RttMode>,
+    rtt_chip: &str,
+    // Debug tab: session + Start signal (caller runs `start_debug`).
+    debugger: &mut crate::debugger::Debugger,
+    debug_go: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -281,6 +293,71 @@ pub(super) fn show_diag_panel(
             }
         }
 
+        // RTT / defmt tab button (streaming badge while a session is live).
+        {
+            let active = *tab == BuildPanelTab::Rtt;
+            let (badge, col) = match rtt.phase() {
+                crate::rtt::RttPhase::Streaming => (
+                    format!(" {}", ph::BROADCAST),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                crate::rtt::RttPhase::Building => (" …".to_owned(), egui::Color32::GRAY),
+                crate::rtt::RttPhase::Error(_) => (
+                    format!(" {}", ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                crate::rtt::RttPhase::Idle => (String::new(), egui::Color32::DARK_GRAY),
+            };
+            let label = format!("{} RTT{badge}", ph::BROADCAST);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Rtt;
+            }
+        }
+
+        // Debug tab button (state badge while a session is live).
+        {
+            let active = *tab == BuildPanelTab::Debug;
+            use crate::debugger::DebugPhase;
+            let (badge, col) = match debugger.phase() {
+                DebugPhase::Stopped(_) => (
+                    format!(" {}", ph::PAUSE),
+                    egui::Color32::from_rgb(230, 180, 60),
+                ),
+                DebugPhase::Running => (
+                    format!(" {}", ph::PLAY),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                DebugPhase::Building | DebugPhase::Launching => {
+                    (" …".to_owned(), egui::Color32::GRAY)
+                }
+                DebugPhase::Error(_) => (
+                    format!(" {}", ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                DebugPhase::Idle => (String::new(), egui::Color32::DARK_GRAY),
+            };
+            let label = format!("{} Debug{badge}", ph::BUG);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Debug;
+            }
+        }
+
         ui.separator();
 
         // Serial monitor tab button
@@ -417,6 +494,8 @@ pub(super) fn show_diag_panel(
                 build_go,
                 can_flash, // same gate: a buildable chip config exists
                 clippy_running,
+                size_state,
+                size_go,
             );
         }
         BuildPanelTab::RustAnalyzer => {
@@ -439,6 +518,12 @@ pub(super) fn show_diag_panel(
                 flash_go,
                 can_flash,
             );
+        }
+        BuildPanelTab::Rtt => {
+            show_rtt_tab(ui, rtt, rtt_go, can_flash, rtt_chip);
+        }
+        BuildPanelTab::Debug => {
+            show_debug_tab(ui, debugger, debug_go, can_flash, rtt_chip);
         }
         BuildPanelTab::Serial => {
             show_serial_tab(ui, serial, ctx);

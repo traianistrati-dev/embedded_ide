@@ -11,6 +11,7 @@ pub mod activity;
 use app::AppIde;
 
 pub mod build;
+pub mod debugger;
 pub mod dfu;
 pub mod editor;
 pub mod espflash;
@@ -20,7 +21,10 @@ pub mod openocd;
 pub mod panels;
 pub mod project_tree;
 pub mod required_tools;
+pub mod rtt;
 pub mod serial;
+pub mod serial_plot;
+pub mod size;
 pub mod terminal;
 
 fn main() -> eframe::Result<()> {

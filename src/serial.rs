@@ -23,6 +23,10 @@ const RX_CAP: usize = 64_000;
 pub struct SerialState {
     /// Raw received bytes (capped to the last [`RX_CAP`]).
     pub rx: Vec<u8>,
+    /// Monotonic count of ALL bytes ever received on this port (never trimmed
+    /// like `rx`) — lets incremental consumers (the plotter) know exactly how
+    /// many tail bytes of `rx` are new since their last look.
+    pub rx_total: u64,
     /// `true` while a reader thread is alive and the port is open.
     pub connected: bool,
     /// Last open / read / write error, shown in the UI.
@@ -77,6 +81,11 @@ pub struct SerialMonitor {
     /// GI_USART virtual module (done when the Serial tab first opens while
     /// idle — replaces the old toolbar Serial button's seeding).
     pub baud_seeded: bool,
+    /// `true` → the RX area shows the live plot instead of the text/hex view
+    /// (the send area keeps working, so commands can be sent while plotting).
+    pub plot_on: bool,
+    /// The plotter's parsed channels + view options (see `crate::serial_plot`).
+    pub plot: crate::serial_plot::PlotState,
 }
 
 impl Default for SerialMonitor {
@@ -102,6 +111,8 @@ impl Default for SerialMonitor {
             tx_next_at: None,
             ports: Vec::new(),
             baud_seeded: false,
+            plot_on: false,
+            plot: Default::default(),
         }
     }
 }
@@ -238,6 +249,7 @@ fn spawn_reader(
                 Ok(n) => {
                     let mut s = state.lock().unwrap();
                     s.rx.extend_from_slice(&buf[..n]);
+                    s.rx_total += n as u64;
                     if s.rx.len() > RX_CAP {
                         let excess = s.rx.len() - RX_CAP;
                         s.rx.drain(..excess);

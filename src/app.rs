@@ -239,6 +239,10 @@ enum BuildPanelTab {
     RustAnalyzer,
     Cargo,
     Dfu,
+    /// RTT / defmt live logs through the debug probe (probe-rs).
+    Rtt,
+    /// On-target debugger (probe-rs dap-server): breakpoints, step, variables.
+    Debug,
     /// Built-in USART/UART serial console.
     Serial,
     /// `cargo clippy` improvement suggestions.
@@ -485,6 +489,9 @@ pub struct AppIde {
     /// BuildState) + the expanded-suggestion index for the Clippy tab.
     clippy_state: Arc<Mutex<BuildState>>,
     clippy_sel: Option<usize>,
+    /// Shared state of the Flash/RAM size measurement (Cargo tab's Size button:
+    /// `cargo build --release` + ELF section parse — see `crate::size`).
+    size_state: Arc<Mutex<crate::size::SizeState>>,
     /// Shared state for USB DFU detection and flashing
     dfu_state: Arc<Mutex<DfuState>>,
     /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
@@ -508,6 +515,13 @@ pub struct AppIde {
     espflash_port: String,
     /// Shared state for the Required Tools tab (check + install operations)
     tools_state: Arc<Mutex<required_tools::ToolsState>>,
+    /// RTT / defmt console (probe-rs pipeline + scrollback) — the RTT tab.
+    rtt: crate::rtt::RttConsole,
+    /// On-target debug session (DAP client over probe-rs dap-server).
+    debugger: crate::debugger::Debugger,
+    /// Source breakpoints per workspace-relative path (1-based lines), toggled
+    /// from the editor's line-number gutter. Session-only (not persisted).
+    breakpoints: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
     /// Code-completion engine — stores the trie, current prefix and popup state.
     /// Must live in the App (not a local) so state is preserved across frames.
     completer: Completer,
@@ -874,6 +888,7 @@ impl AppIde {
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             clippy_state: Arc::new(Mutex::new(BuildState::Idle)),
+            size_state: Arc::new(Mutex::new(crate::size::SizeState::Idle)),
             clippy_sel: None,
             selected_diagnostic: None,
             dfu_state,
@@ -887,6 +902,9 @@ impl AppIde {
             espflash_state,
             espflash_port: String::new(),
             tools_state: required_tools::make_tools_state(),
+            rtt: crate::rtt::RttConsole::default(),
+            debugger: crate::debugger::Debugger::default(),
+            breakpoints: std::collections::BTreeMap::new(),
             // Completer: seeded with Rust keywords/types + learns words from code
             completer: Completer::new_with_syntax(&Syntax::rust())
                 .with_auto_indent()
@@ -1703,6 +1721,10 @@ impl eframe::App for AppIde {
     // the "everything gets slower" degradation across restarts.
     fn on_exit(&mut self) {
         self.lsp_state.lock().unwrap().kill_child();
+        // Orphaned probe-rs processes would keep the debug probe locked for
+        // the next app start — kill them synchronously.
+        self.rtt.stop();
+        self.debugger.kill_now();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

@@ -205,7 +205,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             },
             RequiredTool {
                 name:          "probe-rs",
-                description:   "ARM debug probe runner — flashes and debugs STM32 via SWD / JTAG",
+                description:   "Debug probe runner — powers the RTT tab (defmt logs) and SWD/JTAG flashing",
                 toolchain:     Some(ToolchainKind::RustEmbedded),
                 check_cmd:     "probe-rs",
                 check_args:    &["--version"],
