@@ -85,6 +85,15 @@ impl Default for StructureView {
 /// Padding kept around the diagram when it auto-fits the panel.
 const FIT_PAD: f32 = 20.0;
 
+/// A call-edge route candidate: a cubic bezier, or an (already rounded)
+/// orthogonal polyline. Kept alongside the coarse cost polyline so the DRAW
+/// pass can render beziers natively (smooth at any zoom — the coarse flatten
+/// is for cost/hover only).
+enum Route {
+    Bez([egui::Pos2; 4]),
+    Poly(Vec<egui::Pos2>),
+}
+
 /// A click on a node: which file to open (`None` = main.rs) and, when a
 /// symbol row was clicked, the 1-based line to jump to.
 pub struct NodeClick {
@@ -900,9 +909,11 @@ fn show_canvas(
                 }
                 cost
             };
-        // Routed edges collected first (route → polyline → kind colour), then
-        // drawn in a second pass so hover-focus can dim the unrelated ones.
-        let mut routed: Vec<(&CallEdge, Vec<egui::Pos2>, egui::Color32)> = Vec::new();
+        // Routed edges collected first (route + coarse polyline + kind
+        // colour), then drawn in a second pass so hover-focus can dim the
+        // unrelated ones. The polyline serves cost + hover; beziers draw
+        // natively for smoothness.
+        let mut routed: Vec<(&CallEdge, Route, Vec<egui::Pos2>, egui::Color32)> = Vec::new();
         for e in visible {
             let (a, b) = (lay.pos[e.from_node], lay.pos[e.to_node]);
             // Edge colour = the TARGET symbol's kind colour (the same palette
@@ -974,11 +985,7 @@ fn show_canvas(
             // (vertical drop from the corner, right-angle turn, horizontal run
             // into the row) — added only when the source corner sits clearly
             // beside the target's x-range, so the horizontal leg is real.
-            enum Route {
-                Bez([egui::Pos2; 4]),
-                Poly(Vec<egui::Pos2>),
-            }
-            // SIDE exit (user fix): the source may also leave through the
+// SIDE exit (user fix): the source may also leave through the
             // node's LEFT/RIGHT edge — but only at HEADER height, never beside
             // the symbol-row zone. Horizontal takeoff, straight into the
             // target row: the shortest shape when the nodes sit side by side.
@@ -1089,9 +1096,9 @@ fn show_canvas(
                     best = Some((cand, pts, cost));
                 }
             }
-            let (_, pts, _) = best.unwrap();
+            let (cand, pts, _) = best.unwrap();
             edge_polys.push(pts.clone());
-            routed.push((e, pts, kc));
+            routed.push((e, cand, pts, kc));
         }
 
         // ── Hover detection + draw pass ───────────────────────────────────
@@ -1104,7 +1111,7 @@ fn show_canvas(
             .unwrap_or(false);
         let hovered_edge: Option<usize> = pointer.filter(|_| !over_node).and_then(|p| {
             let mut best: Option<(usize, f32)> = None;
-            for (idx, (_, pts, _)) in routed.iter().enumerate() {
+            for (idx, (_, _, pts, _)) in routed.iter().enumerate() {
                 let d = dist_to_polyline(p, pts);
                 if d < 6.0 && best.map_or(true, |(_, bd)| d < bd) {
                     best = Some((idx, d));
@@ -1113,7 +1120,7 @@ fn show_canvas(
             best.map(|(i, _)| i)
         });
         let any_focus = hovered_row.is_some() || hovered_node.is_some() || hovered_edge.is_some();
-        for (idx, (e, pts, kc)) in routed.iter().enumerate() {
+        for (idx, (e, route, pts, kc)) in routed.iter().enumerate() {
             // HOVER-FOCUS: while something is hovered (a row, a node or an
             // edge), unrelated edges dim so the relevant wiring pops out.
             let emphasized = if let Some((hn, hr)) = hovered_row {
@@ -1140,7 +1147,21 @@ fn show_canvas(
                 (1.1 * scale).clamp(0.5, 2.0) * width_mult * thick,
                 egui::Color32::from_rgba_unmultiplied(kc.r(), kc.g(), kc.b(), alpha),
             );
-            painter.add(egui::Shape::line(pts.clone(), stroke));
+            // Beziers render natively (smooth at any zoom); the coarse
+            // polyline is only for cost/hover.
+            match route {
+                Route::Bez(b4) => {
+                    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                        *b4,
+                        false,
+                        egui::Color32::TRANSPARENT,
+                        stroke,
+                    ));
+                }
+                Route::Poly(p) => {
+                    painter.add(egui::Shape::line(p.clone(), stroke));
+                }
+            }
             // Arrowhead along the final segment, whatever the shape.
             if pts.len() >= 2 {
                 arrowhead(
@@ -1178,9 +1199,10 @@ fn show_canvas(
                 .show(|ui| {
                     ui.label(
                         egui::RichText::new(format!(
-                            "{}::{} → {}::{}{}",
+                            "{}::{} {} {}::{}{}",
                             from_n.name,
                             from_sym,
+                            egui_phosphor::regular::ARROW_RIGHT,
                             to_n.name,
                             to_sym.map(|s| s.name.as_str()).unwrap_or("?"),
                             sites
@@ -1261,7 +1283,9 @@ fn rounded_path(pts: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
         let a = p - vin / lin * r;
         let b = p + vout / lout * r;
         out.push(a);
-        for t in [0.25f32, 0.5, 0.75] {
+        // 5 samples per corner arc — smooth even at thick strokes.
+        for k in 1..6 {
+            let t = k as f32 / 6.0;
             let ap = a.lerp(p, t);
             let pb = p.lerp(b, t);
             out.push(ap.lerp(pb, t));
