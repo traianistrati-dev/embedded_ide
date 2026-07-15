@@ -6,8 +6,8 @@
 //! terminal. See [`crate::serial::SerialMonitor`].
 
 use crate::serial::{
-    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, gap_counts, hex_layout_job,
-    hex_search_job, parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
+    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, gap_counts, hex_layout_job, hex_search_job,
+    parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -105,7 +105,7 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         // Search fields. Field 1 works in BOTH views: hex mode highlights the
         // byte sequence in yellow; text mode tints whole LINES that START with
         // the typed text. Field 2 stays hex-only.
-        ui.colored_label(SEARCH_HIT, "Find:");
+        ui.colored_label(SEARCH_HIT, "Find start:");
         ui.add(
             egui::TextEdit::singleline(&mut serial.search)
                 .hint_text(if serial.hex { "hex e.g. 0D 0A" } else { "line prefix" })
@@ -115,15 +115,7 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             "Hex view: highlight this hex sequence in yellow (rest greyed).\n\
              Text view: lines STARTING with this text turn yellow.",
         );
-        ui.add_enabled_ui(serial.hex, |ui| {
-            ui.colored_label(SEARCH_HIT2, "Find:");
-            ui.add(
-                egui::TextEdit::singleline(&mut serial.search2)
-                    .hint_text("hex e.g. 4F 4E")
-                    .desired_width(110.0),
-            )
-            .on_hover_text("Highlight this hex sequence in blue (rest greyed).");
-        });
+
         // ── Payload size between the two markers ──────────────────────────
         // How many bytes sit BETWEEN Find1 and Find2 (both excluded) — the
         // payload length of each framed message. Hex mode only: that's where
@@ -155,12 +147,12 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 };
                 ui.label(egui::RichText::new(text).size(11.0).monospace().color(color))
                     .on_hover_text(if gaps.is_empty() {
-                        "Bytes between Find1 and Find2, both markers excluded.\n\
-                         No complete Find1 … Find2 pair in the buffer yet."
+                        "Bytes between Find start and Find end, both markers excluded.\n\
+                         No complete Find start … Find end pair in the buffer yet."
                             .to_owned()
                     } else {
                         format!(
-                            "Bytes between Find1 and Find2, both markers excluded \
+                            "Bytes between Find start and Find end, both markers excluded \
                              (the payload of each framed message).\n\
                              {} frame(s) · last {} B · min {} B · max {} B",
                             gaps.len(),
@@ -171,6 +163,16 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                     });
             }
         }
+
+        ui.add_enabled_ui(serial.hex, |ui| {
+            ui.colored_label(SEARCH_HIT2, "Find end:");
+            ui.add(
+                egui::TextEdit::singleline(&mut serial.search2)
+                    .hint_text("hex e.g. 4F 4E")
+                    .desired_width(110.0),
+            )
+            .on_hover_text("Highlight this hex sequence in blue (rest greyed).");
+        });
         ui.checkbox(&mut serial.autoscroll, "Autoscroll");
         if ui.button(format!("{} Clear", ph::BROOM)).clicked() {
             serial.clear_rx();
@@ -369,17 +371,11 @@ fn show_rx_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
                 }
             });
     }
-
 }
 
 /// The resizable send area: drag handle, TX text box (hex-coloured in hex
 /// mode), Send + CR+LF + line-gap pacing. Shared by the RX and Plot views.
-fn show_tx_area(
-    ui: &mut egui::Ui,
-    serial: &mut SerialMonitor,
-    ctx: &egui::Context,
-    max_tx: f32,
-) {
+fn show_tx_area(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui::Context, max_tx: f32) {
     let hex = serial.hex;
     let connected = serial.is_connected();
 
