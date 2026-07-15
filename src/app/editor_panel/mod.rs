@@ -322,6 +322,26 @@ impl AppIde {
                 });
                 let mut cycle_next_pressed = !cycle_prev_pressed
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab));
+                // Ctrl+Left / Ctrl+Right (+Shift = select) → word movement.
+                // Consumed BEFORE the editor so egui's own word jump never
+                // runs: it segments with UAX#29, where `:` is a MidLetter, so
+                // `name:Type` is ONE word and the jump swallowed both sides
+                // (see `word_select`). The Shift variants are checked first —
+                // `consume_key` is Shift-lenient (see the multi-cursor note).
+                let word_move: Option<(bool, bool)> = ui.input_mut(|i| {
+                    let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+                    if i.consume_key(cs, egui::Key::ArrowRight) {
+                        Some((true, true))
+                    } else if i.consume_key(cs, egui::Key::ArrowLeft) {
+                        Some((false, true))
+                    } else if i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowRight) {
+                        Some((true, false))
+                    } else if i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowLeft) {
+                        Some((false, false))
+                    } else {
+                        None
+                    }
+                });
                 // Ctrl+Up / Ctrl+Down → move the selected lines up / down.
                 let mut ctrl_up_pressed =
                     ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
@@ -570,6 +590,11 @@ impl AppIde {
                 // glues `name:Type` into one "word" via the `:` MidLetter rule)
                 // with the plain identifier run under the pointer.
                 self.fix_double_click_selection(ui, &editor_resp, &display_code);
+                // Ctrl(+Shift)+Left/Right: our own word jump, for the same
+                // reason — the keys were consumed before the editor rendered.
+                if let Some((right, extend)) = word_move {
+                    self.apply_word_move(ui, &editor_resp, &display_code, right, extend);
+                }
                 Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
                 // Highlight all occurrences of the active find query (current one
                 // in amber), so matches show even when the find field has focus.
