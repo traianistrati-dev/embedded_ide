@@ -26,7 +26,10 @@ pub fn show_rtt_tab(
     let busy = rtt.is_busy();
 
     // ── Controls row ──────────────────────────────────────────────────────────
-    ui.horizontal(|ui| {
+    // Wrapped for the same reason as the Debug tab's: an overflowing plain row
+    // would keep re-widening the Code Editor side panel (it adopts its
+    // content's rect as its width).
+    ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
                 !busy && can_run,

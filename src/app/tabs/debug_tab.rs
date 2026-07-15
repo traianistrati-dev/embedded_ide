@@ -27,7 +27,10 @@ pub fn show_debug_tab(
     let running = matches!(phase, DebugPhase::Running);
 
     // ── Toolbar ───────────────────────────────────────────────────────────────
-    ui.horizontal(|ui| {
+    // Wrapped, not `ui.horizontal`: a plain row keeps allocating past the edge
+    // on a narrow panel, and the Code Editor side panel adopts its content's
+    // width — an overflowing row would widen the panel every frame.
+    ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
                 !busy && can_run,
@@ -265,11 +268,18 @@ pub fn show_debug_tab(
     }
 
     // ── Three panes: console | stack | variables ──────────────────────────────
+    // The row is allocated EXACTLY the visible size and the panes are placed
+    // inside it at fixed rects. Nothing here may ask for more width than the
+    // panel has: the Code Editor is an egui side panel, which stores the rect
+    // its CONTENT produced as its new width (`PanelState { rect }`), so a row
+    // that overflows by a few pixels re-widens the panel every frame — that
+    // was this tab's runaway growth, squeezing the MCU / Project panels to
+    // their minimum. See `pane_widths`.
     let avail_h = ui.available_height();
     let total_w = ui.available_width();
-    let stack_w = (total_w * 0.26).clamp(160.0, 340.0);
-    let vars_w = (total_w * 0.30).clamp(180.0, 400.0);
-    let console_w = (total_w - stack_w - vars_w - 24.0).max(160.0);
+    let gap = ui.spacing().item_spacing.x.max(4.0);
+    let [console_w, stack_w, vars_w] = pane_widths(total_w - 2.0 * gap);
+    let body_h = (avail_h - 18.0).max(24.0); // minus the pane title row
 
     // Snapshot the state once (short lock) — the panes render from the copy.
     let (stack, locals, registers, sel_frame) = {
@@ -283,24 +293,42 @@ pub fn show_debug_tab(
     };
     let mut select: Option<Frame> = None;
 
-    ui.horizontal_top(|ui| {
-        // Console.
-        ui.vertical(|ui| {
-            ui.set_width(console_w);
-            pane_title(ui, "Console");
-            render_scrollback(ui, &dbg.console, "debug_console", avail_h - 24.0);
-        });
-        ui.separator();
+    let (row, _) =
+        ui.allocate_exact_size(egui::vec2(total_w, avail_h), egui::Sense::hover());
+    // Child uis at explicit rects: their content never feeds back into the
+    // parent's min_rect (unlike `ui.vertical`, which grows it).
+    let mut pane = |ui: &mut egui::Ui, x: f32, w: f32| -> egui::Ui {
+        let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), egui::vec2(w, avail_h));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        child
+    };
+    // Separator lines live in the gaps — painted, so they cost no layout.
+    let sep = ui.visuals().widgets.noninteractive.bg_stroke;
+    for x in [row.left() + console_w + gap * 0.5, row.right() - vars_w - gap * 0.5] {
+        ui.painter().vline(x, row.y_range(), sep);
+    }
 
-        // Stack frames.
-        ui.vertical(|ui| {
-            ui.set_width(stack_w);
-            pane_title(ui, "Call stack");
-            egui::ScrollArea::vertical()
-                .id_salt("debug_stack")
-                .max_height(avail_h - 24.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+    // Console.
+    {
+        let ui = &mut pane(ui, row.left(), console_w);
+        pane_title(ui, "Console");
+        render_scrollback(ui, &dbg.console, "debug_console", body_h);
+    }
+
+    // Stack frames.
+    {
+        let ui = &mut pane(ui, row.left() + console_w + gap, stack_w);
+        pane_title(ui, "Call stack");
+        egui::ScrollArea::vertical()
+            .id_salt("debug_stack")
+            .max_height(body_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
                     if stack.is_empty() {
                         ui.label(
                             egui::RichText::new(if running {
@@ -327,51 +355,63 @@ pub fn show_debug_tab(
                             .size(10.5)
                             .monospace()
                             .color(color);
-                        if ui.selectable_label(selected, text).clicked() {
-                            select = Some(f.clone());
-                        }
+                    if ui.selectable_label(selected, text).clicked() {
+                        select = Some(f.clone());
                     }
-                });
-        });
-        ui.separator();
+                }
+            });
+    }
 
-        // Variables: locals then registers.
-        ui.vertical(|ui| {
-            ui.set_width(vars_w);
-            pane_title(ui, "Variables");
-            egui::ScrollArea::vertical()
-                .id_salt("debug_vars")
-                .max_height(avail_h - 24.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if locals.is_empty() && registers.is_empty() {
-                        ui.label(
-                            egui::RichText::new("halt on a breakpoint to inspect")
-                                .size(10.5)
-                                .color(egui::Color32::from_gray(110)),
-                        );
+    // Variables: locals then registers.
+    {
+        let ui = &mut pane(ui, row.right() - vars_w, vars_w);
+        pane_title(ui, "Variables");
+        egui::ScrollArea::vertical()
+            .id_salt("debug_vars")
+            .max_height(body_h)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if locals.is_empty() && registers.is_empty() {
+                    ui.label(
+                        egui::RichText::new("halt on a breakpoint to inspect")
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(110)),
+                    );
+                }
+                for v in &locals {
+                    var_row(ui, v, egui::Color32::from_rgb(120, 170, 240));
+                }
+                if !registers.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Registers")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                    for v in &registers {
+                        var_row(ui, v, egui::Color32::from_rgb(190, 150, 90));
                     }
-                    for v in &locals {
-                        var_row(ui, v, egui::Color32::from_rgb(120, 170, 240));
-                    }
-                    if !registers.is_empty() {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new("Registers")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(140)),
-                        );
-                        for v in &registers {
-                            var_row(ui, v, egui::Color32::from_rgb(190, 150, 90));
-                        }
-                    }
-                });
-        });
-    });
+                }
+            });
+    }
 
     if let Some(f) = select {
         dbg.select_frame(&f);
     }
+}
+
+/// Widths of the console / call-stack / variables panes for a row `usable` px
+/// wide (the row minus its two gaps). They sum to EXACTLY `usable` and are
+/// never negative: the panes shrink together on a narrow panel instead of
+/// holding a floor, because a row wider than the panel makes egui re-widen the
+/// panel from its content rect — forever (see the note at the call site).
+fn pane_widths(usable: f32) -> [f32; 3] {
+    let usable = usable.max(0.0);
+    // Caps keep the side panes readable-but-bounded on a wide panel; the
+    // console takes whatever is left (26% + 30% < 100%, so it stays positive).
+    let stack = (usable * 0.26).min(340.0);
+    let vars = (usable * 0.30).min(400.0);
+    [usable - stack - vars, stack, vars]
 }
 
 fn pane_title(ui: &mut egui::Ui, title: &str) {
@@ -400,5 +440,42 @@ fn var_row(ui: &mut egui::Ui, v: &crate::debugger::VarRow, name_color: egui::Col
     });
     if let Some(ty) = &v.ty {
         resp.response.on_hover_text(ty);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_widths;
+
+    /// The three panes must fit the row EXACTLY at every width — the runaway
+    /// this replaced came from floors (console 160 / stack 160 / vars 180) that
+    /// out-demanded a narrow panel, and the Code Editor side panel adopts its
+    /// content's width, so the row re-widened it every frame until the MCU and
+    /// Project panels hit their minimum.
+    #[test]
+    fn panes_always_fit_the_row() {
+        for usable in [0.0_f32, 1.0, 80.0, 200.0, 418.0, 500.0, 900.0, 1600.0, 4000.0] {
+            let [console, stack, vars] = pane_widths(usable);
+            assert!(
+                console >= 0.0 && stack >= 0.0 && vars >= 0.0,
+                "negative pane at {usable}: {console}/{stack}/{vars}"
+            );
+            let sum = console + stack + vars;
+            assert!(
+                (sum - usable).abs() < 0.001,
+                "row of {usable} demands {sum} ({console}/{stack}/{vars})"
+            );
+        }
+        // A degenerate/negative row (panel dragged to nothing) stays at zero.
+        assert_eq!(pane_widths(-50.0), [0.0, 0.0, 0.0]);
+    }
+
+    /// On a wide panel the side panes stop growing and the console takes the
+    /// rest — the caps must not break the exact-fit contract above.
+    #[test]
+    fn side_panes_cap_and_the_console_absorbs_the_rest() {
+        let [console, stack, vars] = pane_widths(4000.0);
+        assert_eq!((stack, vars), (340.0, 400.0));
+        assert_eq!(console, 4000.0 - 340.0 - 400.0);
     }
 }
