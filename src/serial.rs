@@ -385,6 +385,58 @@ pub fn parse_hex_search(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Byte counts BETWEEN each `a` … `b` pair — the payload length of every frame
+/// the two searched sequences delimit, with **both markers excluded**:
+/// `FD FC FB FA | 01 02 03 04 05 | 04 03 02 01` → `[5]`.
+///
+/// Scanning is left to right: each `a` opens a frame, the FIRST `b` at or after
+/// it closes one, and the next scan resumes past that `b` (frames never nest).
+/// A second `a` seen before the closing `b` RESTARTS the frame there — a
+/// truncated frame must not inflate the next one's count. `b` is matched before
+/// `a`, so identical patterns measure the gap between consecutive markers. A
+/// trailing `a` with no `b` yet contributes nothing (the frame is still
+/// incoming). Empty patterns yield no counts.
+pub fn gap_counts(bytes: &[u8], a: &[u8], b: &[u8]) -> Vec<usize> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + a.len() <= bytes.len() {
+        if &bytes[i..i + a.len()] != a {
+            i += 1;
+            continue;
+        }
+        // Frame opened — walk forward to its closing marker.
+        let mut start = i + a.len();
+        let mut j = start;
+        let mut closed = None;
+        while j < bytes.len() {
+            if bytes[j..].starts_with(b) {
+                closed = Some(j);
+                break;
+            }
+            if bytes[j..].starts_with(a) {
+                // A fresh header before the tail: the previous frame was cut
+                // short — measure from this one instead.
+                start = j + a.len();
+                j = start;
+                continue;
+            }
+            j += 1;
+        }
+        match closed {
+            Some(end) => {
+                out.push(end - start);
+                i = end + b.len();
+            }
+            // No closing marker (yet) — the rest of the buffer is a partial frame.
+            None => break,
+        }
+    }
+    out
+}
+
 /// Hex `LayoutJob` in *search* mode: bytes belonging to an occurrence of any
 /// `(pattern, colour)` are coloured with that colour, everything else grey
 /// ([`SEARCH_MISS`]). Later patterns win on overlap. Tail only; overlapping
@@ -551,6 +603,47 @@ mod tests {
         assert_eq!(colors[1], ("0D".into(), SEARCH_HIT)); // yellow
         assert_eq!(colors[2], ("0A".into(), SEARCH_HIT)); // yellow
         assert_eq!(colors[3], ("02".into(), SEARCH_MISS)); // grey
+    }
+
+    /// The user's example: header `FD FC FB FA`, tail `04 03 02 01`, payload
+    /// `01 02 03 04 05` → 5 bytes between the markers (markers excluded).
+    #[test]
+    fn gap_counts_measures_payload_between_markers() {
+        use super::gap_counts;
+        let a = [0xFD, 0xFC, 0xFB, 0xFA];
+        let b = [0x04, 0x03, 0x02, 0x01];
+        let stream = [
+            0xFD, 0xFC, 0xFB, 0xFA, // Find1
+            0x01, 0x02, 0x03, 0x04, 0x05, // payload — note it contains 04
+            0x04, 0x03, 0x02, 0x01, // Find2
+        ];
+        assert_eq!(gap_counts(&stream, &a, &b), vec![5]);
+        // Bytes before the first header and after the last tail are ignored.
+        let noisy = [&[0xFF, 0xFF][..], &stream[..], &[0xEE][..]].concat();
+        assert_eq!(gap_counts(&noisy, &a, &b), vec![5]);
+    }
+
+    #[test]
+    fn gap_counts_handles_multiple_frames_and_partial_tail() {
+        use super::gap_counts;
+        let (a, b) = ([0xAAu8], [0xBBu8]);
+        // Two complete frames (2 B and 0 B) + an unterminated third.
+        let stream = [0xAA, 1, 2, 0xBB, 0xAA, 0xBB, 0xAA, 9, 9];
+        assert_eq!(gap_counts(&stream, &a, &b), vec![2, 0]);
+        // Empty patterns → nothing to measure.
+        assert!(gap_counts(&stream, &[], &b).is_empty());
+        assert!(gap_counts(&stream, &a, &[]).is_empty());
+        // Same pattern both sides → gap between consecutive markers.
+        assert_eq!(gap_counts(&[0xAA, 1, 2, 0xAA], &a, &a), vec![2]);
+    }
+
+    /// A truncated frame (header, no tail, header again) must measure from the
+    /// SECOND header — otherwise the lost frame's bytes inflate the count.
+    #[test]
+    fn gap_counts_restarts_on_a_repeated_header() {
+        use super::gap_counts;
+        let stream = [0xAA, 7, 7, 7, 0xAA, 1, 0xBB];
+        assert_eq!(gap_counts(&stream, &[0xAA], &[0xBB]), vec![1]);
     }
 
     #[test]

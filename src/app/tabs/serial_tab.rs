@@ -6,8 +6,8 @@
 //! terminal. See [`crate::serial::SerialMonitor`].
 
 use crate::serial::{
-    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, hex_layout_job, hex_search_job,
-    parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
+    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, gap_counts, hex_layout_job,
+    hex_search_job, parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -124,6 +124,53 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             )
             .on_hover_text("Highlight this hex sequence in blue (rest greyed).");
         });
+        // ── Payload size between the two markers ──────────────────────────
+        // How many bytes sit BETWEEN Find1 and Find2 (both excluded) — the
+        // payload length of each framed message. Hex mode only: that's where
+        // both Find fields are byte sequences.
+        if serial.hex {
+            let a = parse_hex_search(&serial.search);
+            let b = parse_hex_search(&serial.search2);
+            if !a.is_empty() && !b.is_empty() {
+                let gaps = {
+                    let st = serial.state.lock().unwrap();
+                    gap_counts(&st.rx, &a, &b)
+                };
+                ui.label(
+                    egui::RichText::new("Between:")
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                );
+                let (text, color) = match (gaps.last(), gaps.iter().min(), gaps.iter().max()) {
+                    (Some(&last), Some(&min), Some(&max)) => (
+                        if min == max {
+                            format!("{last} B")
+                        } else {
+                            // Sizes vary across frames — show the spread too.
+                            format!("{last} B  ({min}..{max})")
+                        },
+                        egui::Color32::from_rgb(120, 210, 140),
+                    ),
+                    _ => ("—".to_owned(), egui::Color32::from_gray(120)),
+                };
+                ui.label(egui::RichText::new(text).size(11.0).monospace().color(color))
+                    .on_hover_text(if gaps.is_empty() {
+                        "Bytes between Find1 and Find2, both markers excluded.\n\
+                         No complete Find1 … Find2 pair in the buffer yet."
+                            .to_owned()
+                    } else {
+                        format!(
+                            "Bytes between Find1 and Find2, both markers excluded \
+                             (the payload of each framed message).\n\
+                             {} frame(s) · last {} B · min {} B · max {} B",
+                            gaps.len(),
+                            gaps.last().copied().unwrap_or(0),
+                            gaps.iter().min().copied().unwrap_or(0),
+                            gaps.iter().max().copied().unwrap_or(0),
+                        )
+                    });
+            }
+        }
         ui.checkbox(&mut serial.autoscroll, "Autoscroll");
         if ui.button(format!("{} Clear", ph::BROOM)).clicked() {
             serial.clear_rx();
