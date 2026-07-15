@@ -386,12 +386,25 @@ pub fn show(
 /// One panning axis: the content edge position (relative to the canvas edge)
 /// clamped so the diagram never leaves the viewport — fully inside (with the
 /// pad) while it fits, slideable edge-to-edge while it overflows.
+///
+/// The two bounds are ORDERED rather than picked by a `content + 2·FIT_PAD <=
+/// avail` test, because at the auto-fit scale the two disagree: `content` is
+/// `width * ((avail - 2·FIT_PAD) / width)`, and those two roundings can land it
+/// a hair ABOVE `avail - 2·FIT_PAD` while `content + 2·FIT_PAD` still rounds
+/// down to `<= avail` — the branch then fed `clamp` a max below its min and
+/// panicked ("min > max ... min = 20.0, max = 19.99997"). `max`/`min` also
+/// swallow a non-finite bound instead of panicking on it.
 fn clamp_rel(rel: f32, avail: f32, content: f32) -> f32 {
-    if content + 2.0 * FIT_PAD <= avail {
-        rel.clamp(FIT_PAD, avail - content - FIT_PAD)
+    // Fits: pinned FIT_PAD from the near edge. Overflows: the far edge, i.e. a
+    // negative offset. Whichever is smaller is the lower bound.
+    let inside = FIT_PAD;
+    let overflow = avail - content - FIT_PAD;
+    let (lo, hi) = if inside <= overflow {
+        (inside, overflow)
     } else {
-        rel.clamp(avail - content - FIT_PAD, FIT_PAD)
-    }
+        (overflow, inside)
+    };
+    rel.max(lo).min(hi)
 }
 
 /// The scaled diagram body — a FIXED canvas exactly the visible size (the
@@ -1432,4 +1445,43 @@ fn arrowhead(
     );
     painter.line_segment([to, to + left * len], stroke);
     painter.line_segment([to, to + right * len], stroke);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_rel, FIT_PAD};
+
+    /// The auto-fit geometry that crashed the tab: `content` comes from
+    /// `width * ((avail - 2·FIT_PAD) / width)`, whose two roundings put it a
+    /// hair ABOVE `avail - 2·FIT_PAD` while `content + 2·FIT_PAD` still rounds
+    /// to `<= avail`. The old branch then called `clamp(20.0, 19.999985)` and
+    /// panicked ("min > max"). Reproduces with width 100 / avail 256.
+    #[test]
+    fn clamp_rel_survives_the_auto_fit_rounding() {
+        let (w, avail) = (100.0_f32, 256.0_f32);
+        let content = w * ((avail - 2.0 * FIT_PAD) / w);
+        // The exact disagreement this guards against.
+        assert!(content + 2.0 * FIT_PAD <= avail);
+        assert!(avail - content - FIT_PAD < FIT_PAD);
+        // Must not panic, and must still park the diagram at the padding.
+        let got = clamp_rel(FIT_PAD, avail, content);
+        assert!(got.is_finite());
+        assert!((got - (avail - content - FIT_PAD)).abs() < 0.001);
+    }
+
+    /// The panning contract on both sides of the fit boundary.
+    #[test]
+    fn clamp_rel_pins_when_it_fits_and_slides_when_it_overflows() {
+        // Fits with room to spare: dragging past either edge parks it there,
+        // anything in between is free.
+        assert_eq!(clamp_rel(-999.0, 600.0, 200.0), FIT_PAD);
+        assert_eq!(clamp_rel(999.0, 600.0, 200.0), 600.0 - 200.0 - FIT_PAD);
+        assert_eq!(clamp_rel(100.0, 600.0, 200.0), 100.0);
+        // Overflows: slides edge to edge, never further.
+        assert_eq!(clamp_rel(999.0, 300.0, 800.0), FIT_PAD);
+        assert_eq!(clamp_rel(-9999.0, 300.0, 800.0), 300.0 - 800.0 - FIT_PAD);
+        assert_eq!(clamp_rel(-100.0, 300.0, 800.0), -100.0);
+        // A non-finite bound returns a usable offset instead of panicking.
+        assert!(clamp_rel(0.0, f32::NAN, 100.0).is_finite());
+    }
 }
