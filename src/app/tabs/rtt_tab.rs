@@ -2,9 +2,13 @@
 //! See [`crate::rtt::RttConsole`] for the pipeline.
 
 use super::terminal_tab::render_scrollback;
+use crate::app::helpers::help_panel;
 use crate::rtt::{RttConsole, RttMode, RttPhase};
 use eframe::egui;
 use egui_phosphor::regular as ph;
+
+/// Memory key of this tab's help panel.
+const HELP_ID: &str = "rtt";
 
 pub fn show_rtt_tab(
     ui: &mut egui::Ui,
@@ -82,6 +86,9 @@ pub fn show_rtt_tab(
         }
 
         ui.separator();
+        help_panel::toggle_button(ui, HELP_ID);
+
+        ui.separator();
         ui.label(
             egui::RichText::new("Chip:")
                 .size(10.5)
@@ -121,6 +128,58 @@ pub fn show_rtt_tab(
             }
         });
     });
+
+    // ── Help panel (toggled from the toolbar) ─────────────────────────────────
+    help_panel::show_panel(
+        ui,
+        HELP_ID,
+        &[
+            (
+                "Run (flash + RTT)",
+                egui::Color32::from_rgb(100, 220, 100),
+                "Builds the project with `cargo build --release`, flashes it to \
+                 the chip through the debug probe, resets the target, then \
+                 streams its RTT output live. This is the button to use after \
+                 changing the code.",
+            ),
+            (
+                "Attach",
+                egui::Color32::from_rgb(200, 210, 230),
+                "Streams RTT from the firmware ALREADY running on the chip: \
+                 nothing is flashed and the target is not reset — use it to \
+                 watch a device mid-run. The build still runs because probe-rs \
+                 needs the ELF symbols (RTT block address, defmt table), so the \
+                 sources must match what is on the chip; otherwise the logs come \
+                 out garbled or no RTT block is found.",
+            ),
+            (
+                "Stop",
+                egui::Color32::from_rgb(230, 120, 110),
+                "Kills probe-rs and releases the debug probe. Only one process \
+                 can hold the probe, so stop the RTT session before starting a \
+                 Debug session (and the other way round). The firmware keeps \
+                 running on the chip.",
+            ),
+            (
+                "Clear",
+                egui::Color32::from_gray(170),
+                "Empties the log view. It does not touch the target or an \
+                 active session.",
+            ),
+        ],
+        &[
+            "Requires `probe-rs` in PATH (cargo install probe-rs-tools) and a \
+             probe: ST-Link / J-Link / CMSIS-DAP, or the built-in USB-JTAG on \
+             ESP32-C3. The Tools tab can install it.",
+            "Firmware side: `rtt-target` with `rtt_init_print!()` + \
+             `rprintln!(…)`, or `defmt` + `defmt-rtt` — probe-rs decodes defmt \
+             frames automatically.",
+            "RTT logs travel over the probe, so no USART pin is used and the \
+             throughput is far higher than a serial console.",
+            "Chip is taken from the selected MCU definition; a wrong chip name \
+             makes probe-rs refuse to attach.",
+        ],
+    );
 
     ui.separator();
 

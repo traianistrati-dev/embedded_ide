@@ -4,9 +4,13 @@
 //! (locals + registers). See [`crate::debugger::Debugger`].
 
 use super::terminal_tab::render_scrollback;
+use crate::app::helpers::help_panel;
 use crate::debugger::{DebugPhase, Debugger, Frame};
 use eframe::egui;
 use egui_phosphor::regular as ph;
+
+/// Memory key of this tab's help panel.
+const HELP_ID: &str = "debug";
 
 pub fn show_debug_tab(
     ui: &mut egui::Ui,
@@ -113,6 +117,9 @@ pub fn show_debug_tab(
         }
 
         ui.separator();
+        help_panel::toggle_button(ui, HELP_ID);
+
+        ui.separator();
         ui.label(
             egui::RichText::new("Chip:")
                 .size(10.5)
@@ -159,6 +166,80 @@ pub fn show_debug_tab(
             }
         });
     });
+
+    // ── Help panel (toggled from the toolbar) ─────────────────────────────────
+    help_panel::show_panel(
+        ui,
+        HELP_ID,
+        &[
+            (
+                "Debug",
+                egui::Color32::from_rgb(100, 220, 100),
+                "Starts a session: `cargo build --release`, flash the chip, then \
+                 attach through `probe-rs dap-server`. The target starts running \
+                 and halts as soon as it reaches a breakpoint — the editor jumps \
+                 to that line and the panes below fill in.",
+            ),
+            (
+                "Breakpoints",
+                egui::Color32::from_rgb(220, 70, 60),
+                "Click left of a line number in the editor: a red dot appears \
+                 (click it again to remove). They can be set before OR during a \
+                 session — changes are pushed to the running session \
+                 immediately. Only Rust source files can hold one.",
+            ),
+            (
+                "Continue",
+                egui::Color32::from_rgb(200, 210, 230),
+                "Resumes a halted target until it hits the next breakpoint. \
+                 Shown while the target is stopped; while it runs, the same slot \
+                 offers Pause.",
+            ),
+            (
+                "Pause",
+                egui::Color32::from_rgb(200, 210, 230),
+                "Halts the running target wherever it currently is — the way to \
+                 find out where a program that seems stuck is spinning.",
+            ),
+            (
+                "Over / In / Out",
+                egui::Color32::from_rgb(200, 210, 230),
+                "Only while halted. Over = run the next line, executing any call \
+                 on it fully. In = enter the call on the line. Out = run until \
+                 the current function returns to its caller.",
+            ),
+            (
+                "Stop",
+                egui::Color32::from_rgb(230, 120, 110),
+                "Ends the session, kills the DAP server and releases the probe. \
+                 The firmware stays on the chip and keeps running. Stop the \
+                 session before using the RTT tab — one process at a time may \
+                 hold the probe.",
+            ),
+            (
+                "Clear",
+                egui::Color32::from_gray(170),
+                "Empties the console. It does not touch the target or the \
+                 session.",
+            ),
+        ],
+        &[
+            "Call stack: the frames of the halted target, innermost first — \
+             click a frame to jump to its source line and show its variables. \
+             Frames without source (HAL internals, assembly) are greyed.",
+            "Variables: the locals of the selected frame plus the core \
+             registers; hover a row to see its type.",
+            "Console: build progress, probe-rs messages, and the target's \
+             RTT/defmt output during the session.",
+            "Requires `probe-rs` in PATH (cargo install probe-rs-tools) and a \
+             probe: ST-Link / J-Link / CMSIS-DAP, or the built-in USB-JTAG on \
+             ESP32-C3.",
+            "Debug info comes from the release build (`debug = true` in the \
+             generated Cargo.toml). Optimised code can make lines jump around \
+             or variables read as <optimized out> — that is the compiler, not \
+             the debugger.",
+        ],
+    );
 
     ui.separator();
 
