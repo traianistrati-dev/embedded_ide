@@ -84,6 +84,18 @@ pub fn decode_values(payload: &[u8], value_bytes: usize, le: bool) -> Vec<u64> {
         .collect()
 }
 
+/// Characters the widest value of `value_bytes` bytes needs — hex is
+/// zero-padded to 2·vb, decimal takes the digits of `2^(8·vb) − 1`. The cell
+/// width derives from THIS (the config), never from the data on screen.
+fn cell_chars(value_bytes: usize, hex: bool) -> usize {
+    let vb = value_bytes.clamp(1, 8);
+    if hex {
+        vb * 2
+    } else {
+        [3, 5, 8, 10, 13, 15, 17, 20][vb - 1]
+    }
+}
+
 /// Heatmap tint: 0 → cold dark blue, the frame's max → red. Transparent when
 /// the whole frame is zeros (no information to colour).
 fn heat_color(v: u64, max: u64) -> egui::Color32 {
@@ -208,7 +220,10 @@ pub fn show_matrix(
     let shown = want.min(values.len()).min(MAX_CELLS);
     let max = values[..shown].iter().copied().max().unwrap_or(0);
 
-    // Cell metrics from the widest text the grid will show.
+    // Cell metrics from the CONFIG, not the data: sizing by the widest value
+    // currently on screen made every column jump left/right as values came
+    // in, so it was impossible to spot WHICH cell changed. The cell is as
+    // wide as the biggest value `value_bytes` can hold, and stays put.
     let font = egui::FontId::monospace(11.0);
     let fmt = |v: u64| -> String {
         if m.hex {
@@ -217,11 +232,7 @@ pub fn show_matrix(
             v.to_string()
         }
     };
-    let widest = (0..shown)
-        .map(|i| fmt(values[i]).len())
-        .max()
-        .unwrap_or(1)
-        .max(if m.hex { vb * 2 } else { 3 });
+    let widest = cell_chars(vb, m.hex);
     let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
     let cell = egui::vec2(char_w * widest as f32 + 10.0, 17.0);
     let idx_w = char_w * 5.0;
@@ -275,9 +286,11 @@ pub fn show_matrix(
                                 heat_color(v, max),
                             );
                         }
+                        // Right-aligned: with the fixed cell width, the units
+                        // digit stays put — a changed value is spottable.
                         ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
+                            rect.right_center() - egui::vec2(5.0, 0.0),
+                            egui::Align2::RIGHT_CENTER,
                             fmt(v),
                             font.clone(),
                             egui::Color32::from_gray(215),
@@ -357,6 +370,24 @@ mod tests {
         assert_eq!(decode_values(&[0xFF; 16], 99, true), vec![u64::MAX; 2]);
         // Zero width clamps to 1.
         assert_eq!(decode_values(&[5], 0, true), vec![5]);
+    }
+
+    /// The fixed cell width: derived from the config only. The decimal table
+    /// must match the real digit counts of the widest representable values.
+    #[test]
+    fn cell_width_is_config_derived_and_exact() {
+        for vb in 1..=8usize {
+            let max_val = (1u128 << (8 * vb)) - 1;
+            assert_eq!(
+                cell_chars(vb, false),
+                max_val.to_string().len(),
+                "decimal digits for {vb}-byte values"
+            );
+            assert_eq!(cell_chars(vb, true), vb * 2, "hex chars for {vb}-byte values");
+        }
+        // Out-of-range widths clamp like the decoder does.
+        assert_eq!(cell_chars(0, false), 3);
+        assert_eq!(cell_chars(99, true), 16);
     }
 
     /// Heat: zero-max frames stay untinted; the gradient's ends are stable.
