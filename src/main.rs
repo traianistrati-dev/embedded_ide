@@ -23,6 +23,7 @@ pub mod project_tree;
 pub mod required_tools;
 pub mod rtt;
 pub mod serial;
+pub mod serial_matrix;
 pub mod serial_plot;
 pub mod size;
 pub mod terminal;

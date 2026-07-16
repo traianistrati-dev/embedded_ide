@@ -6,8 +6,8 @@
 //! terminal. See [`crate::serial::SerialMonitor`].
 
 use crate::serial::{
-    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, gap_counts, hex_layout_job, hex_search_job,
-    parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
+    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, frame_ranges, gap_counts, hex_layout_job,
+    hex_search_job, parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -78,12 +78,32 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         ui.separator();
         // Plot view: parse numeric lines into live curves (Arduino Serial
         // Plotter style) — replaces the text/hex view while on.
-        ui.checkbox(&mut serial.plot_on, "Plot")
+        if ui
+            .checkbox(&mut serial.plot_on, "Plot")
             .on_hover_text(
                 "Plot numeric lines as live curves.\n\
                  Formats:  temp:23.4 hum:56   ·   1.0 2.5 -3\n\
                  One line = one sample tick; log lines in between are ignored.",
-            );
+            )
+            .clicked()
+            && serial.plot_on
+        {
+            serial.matrix.on = false; // one special view at a time
+        }
+        // Matrix view: the newest Find start…Find end payload as a rows×cols
+        // grid of N-byte integers (e.g. 1280 B = 20×16×u32 radar frame).
+        if ui
+            .checkbox(&mut serial.matrix.on, "Matrix")
+            .on_hover_text(
+                "Show the newest payload between `Find start` and `Find end` \
+                 as a 2D matrix of N-byte values.\n\
+                 Example: 1280 B payload = 20 rows × 16 values × 4 bytes (u32).",
+            )
+            .clicked()
+            && serial.matrix.on
+        {
+            serial.plot_on = false;
+        }
         ui.checkbox(&mut serial.hex, "Hex");
         // Number of bytes per repeating sequence to colour (hex mode).
         ui.add_enabled_ui(serial.hex, |ui| {
@@ -195,9 +215,33 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
     serial.tx_height = serial.tx_height.clamp(MIN_TX, max_tx);
     let rx_height = (section_h - serial.tx_height - HANDLE_H).max(40.0);
 
-    // ── Plot view (replaces the text/hex view while on; the send area below
-    //    keeps working, so commands can be sent while plotting) ────────────────
-    if serial.plot_on {
+    // ── Plot / Matrix view (replaces the text/hex view while on; the send
+    //    area below keeps working, so commands can be sent meanwhile) ─────────
+    if serial.matrix.on {
+        // Newest complete Find-start…Find-end payload + how many the buffer
+        // holds (the counter makes a live stream visibly tick).
+        let (payload, frames_total) = {
+            let a = parse_hex_search(&serial.search);
+            let b = parse_hex_search(&serial.search2);
+            if a.is_empty() || b.is_empty() {
+                (None, 0)
+            } else {
+                let st = serial.state.lock().unwrap();
+                let ranges = frame_ranges(&st.rx, &a, &b);
+                (
+                    ranges.last().map(|&(s, e)| st.rx[s..e].to_vec()),
+                    ranges.len(),
+                )
+            }
+        };
+        crate::serial_matrix::show_matrix(
+            ui,
+            &mut serial.matrix,
+            payload.as_deref(),
+            frames_total,
+            rx_height,
+        );
+    } else if serial.plot_on {
         {
             let st = serial.state.lock().unwrap();
             serial.plot.feed(&st.rx, st.rx_total);

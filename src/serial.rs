@@ -86,6 +86,8 @@ pub struct SerialMonitor {
     pub plot_on: bool,
     /// The plotter's parsed channels + view options (see `crate::serial_plot`).
     pub plot: crate::serial_plot::PlotState,
+    /// The 2D matrix view of framed payloads (see `crate::serial_matrix`).
+    pub matrix: crate::serial_matrix::MatrixView,
 }
 
 impl Default for SerialMonitor {
@@ -113,6 +115,7 @@ impl Default for SerialMonitor {
             baud_seeded: false,
             plot_on: false,
             plot: Default::default(),
+            matrix: Default::default(),
         }
     }
 }
@@ -385,18 +388,19 @@ pub fn parse_hex_search(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Byte counts BETWEEN each `a` … `b` pair — the payload length of every frame
-/// the two searched sequences delimit, with **both markers excluded**:
-/// `FD FC FB FA | 01 02 03 04 05 | 04 03 02 01` → `[5]`.
+/// Payload ranges `[start, end)` of every complete `a` … `b` frame — the
+/// bytes BETWEEN the markers, **both excluded**:
+/// `FD FC FB FA | 01 02 03 04 05 | 04 03 02 01` → one range of 5 bytes.
 ///
 /// Scanning is left to right: each `a` opens a frame, the FIRST `b` at or after
 /// it closes one, and the next scan resumes past that `b` (frames never nest).
 /// A second `a` seen before the closing `b` RESTARTS the frame there — a
-/// truncated frame must not inflate the next one's count. `b` is matched before
-/// `a`, so identical patterns measure the gap between consecutive markers. A
-/// trailing `a` with no `b` yet contributes nothing (the frame is still
-/// incoming). Empty patterns yield no counts.
-pub fn gap_counts(bytes: &[u8], a: &[u8], b: &[u8]) -> Vec<usize> {
+/// truncated frame must not bleed into the next one. `b` is matched before
+/// `a`, so identical patterns delimit consecutive markers. A trailing `a`
+/// with no `b` yet contributes nothing (the frame is still incoming). Empty
+/// patterns yield no frames. Feeds both the "Between" byte counter and the
+/// Matrix view (which decodes the LAST complete payload).
+pub fn frame_ranges(bytes: &[u8], a: &[u8], b: &[u8]) -> Vec<(usize, usize)> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
@@ -427,7 +431,7 @@ pub fn gap_counts(bytes: &[u8], a: &[u8], b: &[u8]) -> Vec<usize> {
         }
         match closed {
             Some(end) => {
-                out.push(end - start);
+                out.push((start, end));
                 i = end + b.len();
             }
             // No closing marker (yet) — the rest of the buffer is a partial frame.
@@ -435,6 +439,15 @@ pub fn gap_counts(bytes: &[u8], a: &[u8], b: &[u8]) -> Vec<usize> {
         }
     }
     out
+}
+
+/// Byte counts BETWEEN each `a` … `b` pair (the payload length of every
+/// frame) — [`frame_ranges`] reduced to lengths, for the "Between" counter.
+pub fn gap_counts(bytes: &[u8], a: &[u8], b: &[u8]) -> Vec<usize> {
+    frame_ranges(bytes, a, b)
+        .into_iter()
+        .map(|(s, e)| e - s)
+        .collect()
 }
 
 /// Hex `LayoutJob` in *search* mode: bytes belonging to an occurrence of any
