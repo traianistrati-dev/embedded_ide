@@ -41,6 +41,9 @@ pub struct MatrixView {
     pub heat: bool,
     /// Freeze the current frame (new payloads are ignored while set).
     pub paused: bool,
+    /// Fullscreen: the grid covers the whole window, auto-zoomed so ALL
+    /// rows × cols fit the display (Esc or the Normal button returns).
+    pub full: bool,
     /// The payload snapshot shown while paused.
     frozen: Option<Vec<u8>>,
 }
@@ -57,6 +60,7 @@ impl Default for MatrixView {
             hex: false,
             heat: true,
             paused: false,
+            full: false,
             frozen: None,
         }
     }
@@ -165,8 +169,22 @@ pub fn show_matrix(
         ui.checkbox(&mut m.heat, egui::RichText::new("Heat").size(10.5))
             .on_hover_text("Tint each cell by its value (blue = 0 … red = the frame's max)");
 
-        // Status, right-aligned: which frame is shown + its size.
+        // Status, right-aligned: which frame is shown + its size. The Max
+        // button sits rightmost (fullscreen, auto-zoomed to fit the display).
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .selectable_label(
+                    m.full,
+                    egui::RichText::new(format!("{} Max", ph::CORNERS_OUT)).size(10.5),
+                )
+                .on_hover_text(
+                    "Show the matrix over the whole window, zoomed so the \
+                     entire grid fits the display. Esc or `Normal` returns.",
+                )
+                .clicked()
+            {
+                m.full = !m.full;
+            }
             let (text, color) = match (m.paused, live) {
                 (true, _) => (
                     format!("{} frozen", ph::SNOWFLAKE),
@@ -183,14 +201,16 @@ pub fn show_matrix(
     });
 
     // ── Payload resolution (frozen wins while paused) ─────────────────────────
-    let payload: Option<&[u8]> = if m.paused {
+    // Owned copy (a frame is a few KB): the fullscreen toggle below mutates
+    // `m`, which a live borrow of `m.frozen` would forbid.
+    let payload: Option<Vec<u8>> = if m.paused {
         // A pause hit before any frame arrived freezes the first one to come.
         if m.frozen.is_none() {
             m.frozen = live.map(|p| p.to_vec());
         }
-        m.frozen.as_deref()
+        m.frozen.clone()
     } else {
-        live
+        live.map(|p| p.to_vec())
     };
     let Some(payload) = payload else {
         ui.add_space(8.0);
@@ -209,22 +229,152 @@ pub fn show_matrix(
         return;
     };
 
-    // ── Decode + grid ─────────────────────────────────────────────────────────
+    // ── Decode ────────────────────────────────────────────────────────────────
     // "Ignore first" trims the leading status/length fields; hover offsets
     // stay ABSOLUTE in the payload (skip included) so they match the Hex view.
     let skip = m.skip_bytes.min(payload.len());
-    let payload = &payload[skip..];
-    let values = decode_values(payload, m.value_bytes, m.le);
+    let frame_len = payload.len();
+    let data = &payload[skip..];
+    let values = decode_values(data, m.value_bytes, m.le);
     let vb = m.value_bytes.clamp(1, 8);
     let want = m.rows * m.cols;
     let shown = want.min(values.len()).min(MAX_CELLS);
     let max = values[..shown].iter().copied().max().unwrap_or(0);
-
     // Cell metrics from the CONFIG, not the data: sizing by the widest value
     // currently on screen made every column jump left/right as values came
     // in, so it was impossible to spot WHICH cell changed. The cell is as
     // wide as the biggest value `value_bytes` can hold, and stays put.
+    let widest = cell_chars(vb, m.hex);
+
+    // ── Fullscreen: the whole window, auto-zoomed so ALL data fits ───────────
+    if m.full {
+        let mut close = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Area::new(egui::Id::new("serial_matrix_full"))
+            .fixed_pos(egui::Pos2::ZERO)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                let screen = ui.ctx().screen_rect();
+                // Claim the whole screen (blocks the panels underneath) and
+                // paint an opaque backdrop.
+                let _ = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_rgb(14, 16, 20));
+
+                const TOP_H: f32 = 30.0;
+                // MAX ZOOM that still fits: scale the base (font-11) metrics
+                // by min(width ratio, height ratio) — the whole rows × cols
+                // grid is on screen by construction, no scrolling.
+                let base_font = egui::FontId::monospace(11.0);
+                let char_w = ui.fonts_mut(|f| f.glyph_width(&base_font, '0'));
+                let base_cell = egui::vec2(char_w * widest as f32 + 10.0, 17.0);
+                let base_idx = char_w * 5.0;
+                let grid_base = egui::vec2(
+                    base_idx + base_cell.x * m.cols as f32,
+                    base_cell.y * m.rows as f32 + 18.0, // + the notes line
+                );
+                let avail = screen.size() - egui::vec2(24.0, TOP_H + 20.0);
+                let s = (avail.x / grid_base.x)
+                    .min(avail.y / grid_base.y)
+                    .clamp(0.2, 8.0);
+                let font = egui::FontId::monospace(11.0 * s);
+                let cell = base_cell * s;
+                let idx_w = base_idx * s;
+
+                // Top bar: restore button + frame status + Esc hint.
+                let bar_rect = egui::Rect::from_min_size(
+                    egui::pos2(12.0, 4.0),
+                    egui::vec2(screen.width() - 24.0, TOP_H),
+                );
+                let mut bar = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(bar_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                if bar
+                    .selectable_label(
+                        true,
+                        egui::RichText::new(format!("{} Normal", ph::CORNERS_IN)).size(11.0),
+                    )
+                    .on_hover_text("Back to the panel view (Esc)")
+                    .clicked()
+                {
+                    close = true;
+                }
+                bar.label(
+                    egui::RichText::new(format!(
+                        "Serial Matrix · frame #{frames_total} · {frame_len} B · {}×{}×{vb}",
+                        m.rows, m.cols
+                    ))
+                    .size(11.0)
+                    .monospace()
+                    .color(egui::Color32::from_gray(180)),
+                );
+                bar.label(
+                    egui::RichText::new("Esc = exit")
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(110)),
+                );
+
+                // The grid, centered in the space under the bar.
+                let grid_size = egui::vec2(
+                    idx_w + cell.x * m.cols as f32,
+                    cell.y * m.rows as f32 + 18.0 * s.min(1.5),
+                );
+                let origin = egui::pos2(
+                    (screen.width() - grid_size.x).max(0.0) / 2.0,
+                    TOP_H + 8.0 + ((screen.height() - TOP_H - 16.0) - grid_size.y).max(0.0) / 2.0,
+                );
+                let mut grid_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(origin, grid_size))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                draw_grid(&mut grid_ui, m, data, &values, shown, max, skip, vb, cell, idx_w, &font);
+            });
+        if close {
+            m.full = false;
+        }
+        // Placeholder in the panel while the overlay is up.
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Matrix shown fullscreen — Esc or `Normal` returns.")
+                .size(11.0)
+                .color(egui::Color32::GRAY),
+        );
+        return;
+    }
+
+    // ── Inline grid (fixed font, scrollable) ──────────────────────────────────
     let font = egui::FontId::monospace(11.0);
+    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let cell = egui::vec2(char_w * widest as f32 + 10.0, 17.0);
+    let idx_w = char_w * 5.0;
+    egui::ScrollArea::both()
+        .id_salt("serial_matrix")
+        .auto_shrink([false, false])
+        .max_height(height - 26.0)
+        .show(ui, |ui| {
+            draw_grid(ui, m, data, &values, shown, max, skip, vb, cell, idx_w, &font);
+        });
+}
+
+/// The rows × cols grid + the leftover/short notes — shared by the inline
+/// (scrollable, font 11) and fullscreen (fit-scaled) views; `cell`/`idx_w`/
+/// `font` carry the caller's metrics.
+#[allow(clippy::too_many_arguments)]
+fn draw_grid(
+    ui: &mut egui::Ui,
+    m: &MatrixView,
+    payload: &[u8],
+    values: &[u64],
+    shown: usize,
+    max: u64,
+    skip: usize,
+    vb: usize,
+    cell: egui::Vec2,
+    idx_w: f32,
+    font: &egui::FontId,
+) {
     let fmt = |v: u64| -> String {
         if m.hex {
             format!("{v:0width$X}", width = vb * 2)
@@ -232,109 +382,99 @@ pub fn show_matrix(
             v.to_string()
         }
     };
-    let widest = cell_chars(vb, m.hex);
-    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
-    let cell = egui::vec2(char_w * widest as f32 + 10.0, 17.0);
-    let idx_w = char_w * 5.0;
-
+    let want = m.rows * m.cols;
     // Leftover info: payload bytes beyond the grid / grid cells beyond payload.
     let leftover = payload.len() as isize - (want * vb) as isize;
 
-    egui::ScrollArea::both()
-        .id_salt("serial_matrix")
-        .auto_shrink([false, false])
-        .max_height(height - 26.0)
-        .show(ui, |ui| {
-            for row in 0..m.rows {
-                ui.horizontal(|ui| {
-                    // Row index, dim, with the row's byte offset on hover.
-                    let (r, resp) =
-                        ui.allocate_exact_size(egui::vec2(idx_w, cell.y), egui::Sense::hover());
+    for row in 0..m.rows {
+        ui.horizontal(|ui| {
+            // Row index, dim, with the row's byte offset on hover.
+            let (r, resp) =
+                ui.allocate_exact_size(egui::vec2(idx_w, cell.y), egui::Sense::hover());
+            ui.painter().text(
+                r.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                format!("{row:>3} "),
+                font.clone(),
+                egui::Color32::from_gray(110),
+            );
+            let row_off = skip + row * m.cols * vb;
+            resp.on_hover_text(format!(
+                "row {row} — payload offset {row_off} (0x{row_off:X})"
+            ));
+            for col in 0..m.cols {
+                let i = row * m.cols + col;
+                let (rect, resp) = ui.allocate_exact_size(cell, egui::Sense::hover());
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                if i >= shown {
+                    // Beyond the payload (or the cell cap) — greyed.
                     ui.painter().text(
-                        r.right_center(),
-                        egui::Align2::RIGHT_CENTER,
-                        format!("{row:>3} "),
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "—",
                         font.clone(),
-                        egui::Color32::from_gray(110),
+                        egui::Color32::from_gray(70),
                     );
-                    let row_off = skip + row * m.cols * vb;
-                    resp.on_hover_text(format!(
-                        "row {row} — payload offset {row_off} (0x{row_off:X})"
-                    ));
-                    for col in 0..m.cols {
-                        let i = row * m.cols + col;
-                        let (rect, resp) = ui.allocate_exact_size(cell, egui::Sense::hover());
-                        if !ui.is_rect_visible(rect) {
-                            continue;
-                        }
-                        if i >= shown {
-                            // Beyond the payload (or the cell cap) — greyed.
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "—",
-                                font.clone(),
-                                egui::Color32::from_gray(70),
-                            );
-                            continue;
-                        }
-                        let v = values[i];
-                        if m.heat {
-                            ui.painter().rect_filled(
-                                rect.shrink(1.0),
-                                2.0,
-                                heat_color(v, max),
-                            );
-                        }
-                        // Right-aligned: with the fixed cell width, the units
-                        // digit stays put — a changed value is spottable.
-                        ui.painter().text(
-                            rect.right_center() - egui::vec2(5.0, 0.0),
-                            egui::Align2::RIGHT_CENTER,
-                            fmt(v),
-                            font.clone(),
-                            egui::Color32::from_gray(215),
-                        );
-                        let off = i * vb;
-                        let raw: String = payload[off..off + vb]
-                            .iter()
-                            .map(|b| format!("{b:02X}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let abs = skip + off;
-                        resp.on_hover_text(format!(
-                            "[{row}][{col}] = {v}  (0x{v:X})\nbytes {raw} @ offset {abs} (0x{abs:X})"
-                        ));
-                    }
-                });
-            }
-            if leftover > 0 {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "+{leftover} payload byte(s) beyond the {}×{} grid",
-                        m.rows, m.cols
-                    ))
-                    .size(10.0)
-                    .color(egui::Color32::from_rgb(200, 160, 80)),
+                    continue;
+                }
+                let v = values[i];
+                if m.heat {
+                    ui.painter().rect_filled(
+                        rect.shrink(1.0),
+                        2.0,
+                        heat_color(v, max),
+                    );
+                }
+                // Right-aligned: with the fixed cell width, the units
+                // digit stays put — a changed value is spottable.
+                ui.painter().text(
+                    rect.right_center() - egui::vec2(5.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    fmt(v),
+                    font.clone(),
+                    egui::Color32::from_gray(215),
                 );
-            } else if leftover < 0 {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "payload {} B short of the {}×{}×{} grid",
-                        -leftover, m.rows, m.cols, vb
-                    ))
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(120)),
-                );
-            }
-            if want > MAX_CELLS {
-                ui.label(
-                    egui::RichText::new(format!("showing the first {MAX_CELLS} cells"))
-                        .size(10.0)
-                        .color(egui::Color32::from_rgb(200, 160, 80)),
-                );
+                let off = i * vb;
+                let raw: String = payload[off..off + vb]
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let abs = skip + off;
+                resp.on_hover_text(format!(
+                    "[{row}][{col}] = {v}  (0x{v:X})\nbytes {raw} @ offset {abs} (0x{abs:X})"
+                ));
             }
         });
+    }
+    if leftover > 0 {
+        ui.label(
+            egui::RichText::new(format!(
+                "+{leftover} payload byte(s) beyond the {}×{} grid",
+                m.rows, m.cols
+            ))
+            .size(10.0)
+            .color(egui::Color32::from_rgb(200, 160, 80)),
+        );
+    } else if leftover < 0 {
+        ui.label(
+            egui::RichText::new(format!(
+                "payload {} B short of the {}×{}×{} grid",
+                -leftover, m.rows, m.cols, vb
+            ))
+            .size(10.0)
+            .color(egui::Color32::from_gray(120)),
+        );
+    }
+    if want > MAX_CELLS {
+        ui.label(
+            egui::RichText::new(format!("showing the first {MAX_CELLS} cells"))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(200, 160, 80)),
+        );
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
