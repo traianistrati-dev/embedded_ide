@@ -39,6 +39,11 @@ pub struct MatrixView {
     pub hex: bool,
     /// Heatmap cell tint (value vs the frame's max).
     pub heat: bool,
+    /// Heat mode switch: 0 = tint by MAGNITUDE (value vs the frame's max, the
+    /// original behaviour); N > 0 = tint ONLY cells that GREW ≥ N% since the
+    /// previous serial frame — big-but-static values stop glowing, real jumps
+    /// stand out.
+    pub change_pct: u32,
     /// Freeze the current frame (new payloads are ignored while set).
     pub paused: bool,
     /// Fullscreen: the grid covers the whole window, auto-zoomed so ALL
@@ -46,6 +51,12 @@ pub struct MatrixView {
     pub full: bool,
     /// The payload snapshot shown while paused.
     frozen: Option<Vec<u8>>,
+    /// The newest SERIAL frame seen (raw payload bytes) — not an egui-repaint
+    /// notion: it only advances when different bytes arrive.
+    cur_frame: Option<Vec<u8>>,
+    /// The frame before `cur_frame` — the `Change %` baseline. Raw bytes, so
+    /// decode-config changes (width/skip/endianness) can't desync the compare.
+    prev_payload: Option<Vec<u8>>,
 }
 
 impl Default for MatrixView {
@@ -59,9 +70,24 @@ impl Default for MatrixView {
             le: true,
             hex: false,
             heat: true,
+            change_pct: 0,
             paused: false,
             full: false,
             frozen: None,
+            cur_frame: None,
+            prev_payload: None,
+        }
+    }
+}
+
+impl MatrixView {
+    /// Track serial frames (NOT egui repaints): when a payload with different
+    /// bytes arrives, the current one becomes "previous" — the baseline the
+    /// `Change %` heat compares against. The byte compare is a few KB.
+    fn note_frame(&mut self, incoming: &[u8]) {
+        if self.cur_frame.as_deref() != Some(incoming) {
+            self.prev_payload = self.cur_frame.take();
+            self.cur_frame = Some(incoming.to_vec());
         }
     }
 }
@@ -100,18 +126,43 @@ fn cell_chars(value_bytes: usize, hex: bool) -> usize {
     }
 }
 
-/// Heatmap tint: 0 → cold dark blue, the frame's max → red. Transparent when
-/// the whole frame is zeros (no information to colour).
-fn heat_color(v: u64, max: u64) -> egui::Color32 {
-    if max == 0 {
-        return egui::Color32::TRANSPARENT;
-    }
-    let t = (v as f32 / max as f32).clamp(0.0, 1.0);
+/// The heat gradient at intensity `t` ∈ [0, 1]: cold dark blue → red.
+fn heat_t(t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
     egui::Color32::from_rgb(
         (30.0 + t * 175.0) as u8,
         (44.0 + t * 8.0) as u8,
         (92.0 - t * 52.0) as u8,
     )
+}
+
+/// Magnitude heat (Change % = 0): tint by value vs the frame's max.
+/// Transparent when the whole frame is zeros (no information to colour).
+fn heat_color(v: u64, max: u64) -> egui::Color32 {
+    if max == 0 {
+        return egui::Color32::TRANSPARENT;
+    }
+    heat_t(v as f32 / max as f32)
+}
+
+/// Percentage-growth heat (Change % = `thr` > 0): `Some(intensity)` when
+/// `now` grew at least `thr`% over `prev` — faint right at the threshold,
+/// saturated at 4× it. Growth out of zero is a full hit (the jump is
+/// "infinite" percent). Decreases and sub-threshold growth stay untinted, so
+/// big-but-static values no longer glow permanently.
+fn change_heat(prev: u64, now: u64, thr: u32) -> Option<f32> {
+    if now <= prev {
+        return None;
+    }
+    if prev == 0 {
+        return Some(1.0);
+    }
+    let growth = (now - prev) as f32 / prev as f32 * 100.0;
+    let thr = thr.max(1) as f32;
+    if growth < thr {
+        return None;
+    }
+    Some((0.15 + 0.85 * (growth - thr) / (3.0 * thr)).min(1.0))
 }
 
 /// Controls row + grid, `height` px tall in total. `live` is the newest
@@ -168,6 +219,21 @@ pub fn show_matrix(
             .on_hover_text("Show values in hexadecimal");
         ui.checkbox(&mut m.heat, egui::RichText::new("Heat").size(10.5))
             .on_hover_text("Tint each cell by its value (blue = 0 … red = the frame's max)");
+        ui.add_enabled_ui(m.heat, |ui| {
+            ui.label(
+                egui::RichText::new("Change %:")
+                    .size(10.5)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add(egui::DragValue::new(&mut m.change_pct).range(0..=1000).speed(0.5))
+                .on_hover_text(
+                    "0 = colour by MAGNITUDE (value vs the frame's max — big \
+                     values always glow).\n\
+                     N = tint ONLY cells that GREW ≥ N% since the previous \
+                     frame: faint at the threshold, red at 4× it. Growth from \
+                     0 counts as a full hit; decreases stay dark.",
+                );
+        });
 
         // Status, right-aligned: which frame is shown + its size. The Max
         // button sits rightmost (fullscreen, auto-zoomed to fit the display).
@@ -199,6 +265,16 @@ pub fn show_matrix(
             ui.label(egui::RichText::new(text).size(10.5).monospace().color(color));
         });
     });
+
+    // ── Serial-frame tracking for the Change % baseline ───────────────────────
+    // Advances only on DIFFERENT bytes (egui repaints re-see the same frame)
+    // and not while paused — pause freezes the change tints along with the
+    // values, keeping the comparison coherent with what is displayed.
+    if !m.paused {
+        if let Some(p) = live {
+            m.note_frame(p);
+        }
+    }
 
     // ── Payload resolution (frozen wins while paused) ─────────────────────────
     // Owned copy (a frame is a few KB): the fullscreen toggle below mutates
@@ -245,6 +321,16 @@ pub fn show_matrix(
     // in, so it was impossible to spot WHICH cell changed. The cell is as
     // wide as the biggest value `value_bytes` can hold, and stays put.
     let widest = cell_chars(vb, m.hex);
+    // The Change % baseline, decoded with the CURRENT config (raw bytes are
+    // stored, so width/skip/endianness edits can't desync the comparison).
+    let prev_values: Option<Vec<u64>> = if m.heat && m.change_pct > 0 {
+        m.prev_payload.as_deref().map(|p| {
+            let s = m.skip_bytes.min(p.len());
+            decode_values(&p[s..], m.value_bytes, m.le)
+        })
+    } else {
+        None
+    };
 
     // ── Fullscreen: the whole window, auto-zoomed so ALL data fits ───────────
     if m.full {
@@ -339,6 +425,7 @@ pub fn show_matrix(
                     m,
                     data,
                     &values,
+                    prev_values.as_deref(),
                     shown,
                     max,
                     skip,
@@ -372,7 +459,18 @@ pub fn show_matrix(
         .max_height(height - 26.0)
         .show(ui, |ui| {
             draw_grid(
-                ui, m, data, &values, shown, max, skip, vb, cell, idx_w, &font,
+                ui,
+                m,
+                data,
+                &values,
+                prev_values.as_deref(),
+                shown,
+                max,
+                skip,
+                vb,
+                cell,
+                idx_w,
+                &font,
             );
         });
 }
@@ -386,6 +484,9 @@ fn draw_grid(
     m: &MatrixView,
     payload: &[u8],
     values: &[u64],
+    // Previous frame's values (same decode config) — `Some` only in the
+    // Change % heat mode; cells without a counterpart stay untinted.
+    prev: Option<&[u64]>,
     shown: usize,
     max: u64,
     skip: usize,
@@ -466,8 +567,18 @@ fn draw_grid(
                 }
                 let v = values[i];
                 if m.heat {
-                    ui.painter()
-                        .rect_filled(rect.shrink(1.0), 2.0, heat_color(v, max));
+                    // Change % = 0 → magnitude tint; > 0 → tint only the
+                    // cells that grew enough since the previous frame.
+                    let color = if m.change_pct == 0 {
+                        Some(heat_color(v, max))
+                    } else {
+                        prev.and_then(|pv| pv.get(i))
+                            .and_then(|&p| change_heat(p, v, m.change_pct))
+                            .map(heat_t)
+                    };
+                    if let Some(c) = color {
+                        ui.painter().rect_filled(rect.shrink(1.0), 2.0, c);
+                    }
                 }
                 // Right-aligned: with the fixed cell width, the units
                 // digit stays put — a changed value is spottable.
@@ -575,6 +686,37 @@ mod tests {
         // Out-of-range widths clamp like the decoder does.
         assert_eq!(cell_chars(0, false), 3);
         assert_eq!(cell_chars(99, true), 16);
+    }
+
+    /// The Change % gate: decreases and sub-threshold growth stay dark, the
+    /// intensity rises with the growth, zero-baseline jumps are a full hit.
+    #[test]
+    fn change_heat_gates_on_growth_percent() {
+        assert_eq!(change_heat(100, 100, 10), None); // unchanged
+        assert_eq!(change_heat(100, 90, 10), None); // decrease
+        assert_eq!(change_heat(100, 105, 10), None); // +5% < 10%
+        let at = change_heat(100, 110, 10).unwrap(); // exactly the threshold
+        assert!((0.14..0.2).contains(&at), "faint at the threshold: {at}");
+        let mid = change_heat(100, 125, 10).unwrap(); // +25%
+        assert!(mid > at);
+        assert_eq!(change_heat(100, 500, 10), Some(1.0)); // way past 4× thr
+        // Growth out of zero = "infinite" percent → full hit; 0→0 is nothing.
+        assert_eq!(change_heat(0, 3, 10), Some(1.0));
+        assert_eq!(change_heat(0, 0, 10), None);
+    }
+
+    /// The baseline advances per SERIAL frame, not per egui repaint: re-seeing
+    /// the same bytes must not rotate the previous frame away.
+    #[test]
+    fn note_frame_tracks_serial_frames_not_repaints() {
+        let mut m = MatrixView::default();
+        m.note_frame(&[1, 2, 3]);
+        assert_eq!(m.prev_payload, None); // first frame has no baseline
+        m.note_frame(&[1, 2, 3]); // same frame re-seen (repaint)
+        assert_eq!(m.prev_payload, None);
+        m.note_frame(&[9, 9]);
+        assert_eq!(m.prev_payload.as_deref(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(m.cur_frame.as_deref(), Some(&[9u8, 9][..]));
     }
 
     /// Heat: zero-max frames stay untinted; the gradient's ends are stable.
