@@ -947,17 +947,27 @@ fn show_canvas(
             .iter()
             .map(|p| egui::Rect::from_min_size(to_screen(p.x, p.y), egui::vec2(p.w, p.h) * scale))
             .collect();
-        use crate::panels::structure_map::layout::{seg_hits_rect, segments_cross};
+        use crate::panels::structure_map::layout::segments_cross;
         // Everything in `edge_polys` up to this point is MODULE wiring (gray
         // deps/containment) — background lines, cheap to cross. Entries pushed
         // later are routed CALL edges — crossing those costs real money.
         let module_polys_len = edge_polys.len();
+        // Grace given to the ENDPOINT boxes only: an anchor sits ON its node's
+        // boundary, so the first / last segment is allowed to touch that much
+        // of it — and no more (see `path_cuts_box`).
+        let anchor_slack = (2.0 * scale).clamp(1.0, 4.0);
         // Candidate cost: length in px, +60 per crossed module line (they're
         // background — a short direct route beats dodging them to the far
-        // side, the reported bug), +400 per crossed CALL edge, +900 per
-        // non-endpoint node box it cuts through.
-        let poly_cost =
-            |pts: &[egui::Pos2], skip_a: usize, skip_b: usize, polys: &[Vec<egui::Pos2>]| -> f32 {
+        // side, the reported bug), +400 per crossed CALL edge, +2600 per node
+        // box it cuts through (endpoints included, beyond the anchor slack).
+        // Returns `(cost, cuts_a_node)` — the flag feeds the HARD straight-
+        // route rule in `pick_route` (a penalty alone still let a cutting
+        // route win when every alternative was pricier).
+        let poly_cost = |pts: &[egui::Pos2],
+                         skip_a: usize,
+                         skip_b: usize,
+                         polys: &[Vec<egui::Pos2>]|
+         -> (f32, bool) {
                 let mut cost = 0.0;
                 for w in pts.windows(2) {
                     cost += w[0].distance(w[1]);
@@ -978,40 +988,17 @@ fn show_canvas(
                         }
                     }
                 }
+                let mut cuts = false;
                 for (i, r) in node_rects.iter().enumerate() {
-                    // The route legitimately touches its own endpoints' boxes
-                    // only through the FIRST / LAST segment (the anchor sits
-                    // on the boundary). Everything else hitting the source or
-                    // target box is penalized like any other cut — trimming by
-                    // containment instead exempted routes that BURROWED across
-                    // the whole target face to a far-side anchor (drawing over
-                    // the row text, the reported bug).
-                    let check: &[egui::Pos2] = if i == skip_a {
-                        &pts[1.min(pts.len())..]
-                    } else if i == skip_b {
-                        &pts[..pts.len().saturating_sub(1)]
-                    } else {
-                        pts
-                    };
-                    for w in check.windows(2) {
-                        if seg_hits_rect(
-                            (w[0].x, w[0].y),
-                            (w[1].x, w[1].y),
-                            r.left(),
-                            r.top(),
-                            r.width(),
-                            r.height(),
-                        ) {
-                            // Near-prohibitive: at 900 a box cut could still
-                            // beat 3 call-crossings (1200) on the near side and
-                            // the route sailed OVER the node face (reported
-                            // bug). Crossing a node must never win.
-                            cost += 2600.0;
-                            break;
-                        }
+                    // Near-prohibitive: at 900 a box cut could still beat 3
+                    // call-crossings (1200) on the near side and the route
+                    // sailed OVER the node face. Crossing a node never wins.
+                    if path_cuts_box(pts, *r, i == skip_a || i == skip_b, anchor_slack) {
+                        cost += 2600.0;
+                        cuts = true;
                     }
                 }
-                cost
+                (cost, cuts)
             };
         // Routed edges collected first (route + coarse polyline + kind
         // colour), then drawn in a second pass so hover-focus can dim the
@@ -1108,6 +1095,77 @@ fn show_canvas(
                 f_to,
             ];
             let corner_r = 12.0 * scale.clamp(0.5, 1.5);
+            // ── UNDER / OVER lane routes (user fix) ──────────────────────────
+            // Every shape above reaches the target row by running horizontally
+            // AT the row's height — so when another node sits between caller
+            // and callee at that height, all of them cut straight across its
+            // face (the reported bug: the edge left `read_report` on the far
+            // side, wrapped around and sailed over `data`'s rows). These leave
+            // through the source's bottom/top instead, run a horizontal lane
+            // clear of every box in the way, then come up in the gap BESIDE
+            // the target and turn into its row.
+            // The lane leaves through the source edge FACING the target: up
+            // when the target is above, down otherwise. Offering the opposite
+            // side too let a route exit the bottom to reach a node ABOVE it and
+            // loop back up (the reported `send_models → data` bug) — and every
+            // extra candidate clutters the diagram. One lane per edge, on the
+            // sensible side.
+            let lane_below = lane_exits_below(a.y + a.h / 2.0, b.y + b.h / 2.0);
+            let hl_from = src_at(toward_right, !lane_below);
+            // Entry side by GEOMETRY: the target side facing the EXIT CORNER,
+            // not `!toward_right` (node centers). With overlapping x-ranges
+            // the two disagree — send_models→data exited the top-LEFT corner
+            // but was sent around to data's RIGHT side, wrapping the node it
+            // could reach by going straight up (the reported bug).
+            let entry_right = hl_from.x >= to_screen(b.x + b.w * 0.5, 0.0).x;
+            let hl_to = anchor(e.to_node, e.to_row, entry_right);
+            // The vertical leg sits just outside the target, on the caller's
+            // side — i.e. in the gap between the target and its neighbour.
+            let hl_turn = if entry_right {
+                hl_to.x + 16.0 * scale
+            } else {
+                hl_to.x - 16.0 * scale
+            };
+            let lane_y_for = |below: bool, from_y: f32, from_x: f32| -> f32 {
+                lane_y(
+                    &node_rects,
+                    e.to_node,
+                    below,
+                    from_y,
+                    from_x,
+                    hl_turn,
+                    swing * scale,
+                )
+            };
+            let mk_hlane = |below: bool| -> Vec<egui::Pos2> {
+                let from = src_at(toward_right, !below);
+                let lane_y = lane_y_for(below, from.y, from.x);
+                rounded_path(
+                    &[
+                        from,
+                        egui::pos2(from.x, lane_y),
+                        egui::pos2(hl_turn, lane_y),
+                        egui::pos2(hl_turn, hl_to.y),
+                        hl_to,
+                    ],
+                    corner_r,
+                )
+            };
+            // Bezier sibling for the Curved style: a cubic's belly only
+            // reaches ~¾ of the way to its controls, so they overshoot the
+            // lane — B(0.5) = (P0 + 3·P1 + 3·P2 + P3)/8, solved for the
+            // control y that puts the midpoint exactly on the lane.
+            let mk_arc = |below: bool| -> [egui::Pos2; 4] {
+                let from = src_at(toward_right, !below);
+                let lane_y = lane_y_for(below, from.y, from.x);
+                let cy = (8.0 * lane_y - from.y - hl_to.y) / 6.0;
+                [
+                    from,
+                    egui::pos2(from.x, cy),
+                    egui::pos2(hl_turn, cy),
+                    hl_to,
+                ]
+            };
             // Rounded-orthogonal LANE routes (user mockup): out the side at
             // header height, rounded bend, vertical run in the outer lane,
             // rounded bend, horizontal into the target row.
@@ -1147,12 +1205,15 @@ fn show_canvas(
                     (Route::Bez(cand_side), bez_mult, !toward_right),
                     (Route::Bez(mk_flank(false)), bez_mult, false),
                     (Route::Bez(mk_flank(true)), bez_mult, true),
+                    // Over/under the boxes in the way, into the row's near side.
+                    (Route::Bez(mk_arc(lane_below)), bez_mult, entry_right),
                 ]);
             }
             if style != PathStyle::Curved {
                 cands.extend([
                     (Route::Poly(mk_lane(false)), 1.0, false),
                     (Route::Poly(mk_lane(true)), 1.0, true),
+                    (Route::Poly(mk_hlane(lane_below)), 1.0, entry_right),
                 ]);
             }
             if style != PathStyle::Curved {
@@ -1178,7 +1239,7 @@ fn show_canvas(
                     }
                 }
             }
-            let mut best: Option<(Route, Vec<egui::Pos2>, f32)> = None;
+            let mut scored: Vec<(Route, Vec<egui::Pos2>, f32, bool)> = Vec::new();
             for (cand, mult, entry_right) in cands {
                 let pts = match &cand {
                     Route::Bez(b4) => egui::epaint::CubicBezierShape::from_points_stroke(
@@ -1190,17 +1251,16 @@ fn show_canvas(
                     .flatten(Some(4.0)),
                     Route::Poly(p) => p.clone(),
                 };
-                let mut cost = poly_cost(&pts, e.from_node, e.to_node, &edge_polys) * mult;
+                let (raw, cuts) = poly_cost(&pts, e.from_node, e.to_node, &edge_polys);
+                let mut cost = raw * mult;
                 // Far-side entry: the anchor sits on the side pointing AWAY
                 // from the caller (entry_right == "target is to the right").
                 if entry_right == toward_right {
                     cost += 250.0;
                 }
-                if best.as_ref().is_none_or(|(_, _, c)| cost < *c) {
-                    best = Some((cand, pts, cost));
-                }
+                scored.push((cand, pts, cost, cuts));
             }
-            let (cand, pts, _) = best.unwrap();
+            let (cand, pts) = pick_route(scored);
             edge_polys.push(pts.clone());
             routed.push((e, cand, pts, kc));
         }
@@ -1369,6 +1429,98 @@ fn kind_word(kind: SymKind) -> &'static str {
 /// replaced by a small quadratic arc of `radius` (clamped to half of the
 /// adjacent segment lengths), so 90° routes read as smooth "circuit traces"
 /// instead of sharp elbows.
+/// Which source edge the over/under lane leaves through: `true` (bottom) when
+/// the target's center is BELOW the source's, `false` (top) when it is above.
+/// Always the side facing the target — so the route never exits away from it
+/// and loops back (the `send_models → data` bug: source below, target above,
+/// yet the lane left the bottom).
+fn lane_exits_below(src_center_y: f32, tgt_center_y: f32) -> bool {
+    tgt_center_y >= src_center_y
+}
+
+/// The winner among scored route candidates `(route, polyline, cost, cuts)`.
+///
+/// HARD RULE (user request): a STRAIGHT (orthogonal `Poly`) route may never
+/// cross a node — cutting Polys are dropped outright, so the shortest
+/// rule-abiding path wins even where a crossing shortcut would out-price the
+/// detour. CURVED routes stay soft: their cuts are already priced (+2600
+/// each), which keeps them out of nodes wherever a way around exists, but a
+/// dense diagram may still bend one across ("cele curbate sunt ok").
+///
+/// Fallback: when EVERY candidate is a cutting Poly (Straight style, no way
+/// through), the cheapest still draws — a missing edge would be worse.
+fn pick_route(scored: Vec<(Route, Vec<egui::Pos2>, f32, bool)>) -> (Route, Vec<egui::Pos2>) {
+    let mut best: Option<(Route, Vec<egui::Pos2>, f32)> = None;
+    let mut fallback: Option<(Route, Vec<egui::Pos2>, f32)> = None;
+    for (route, pts, cost, cuts) in scored {
+        let banned = cuts && matches!(route, Route::Poly(_));
+        let slot = if banned { &mut fallback } else { &mut best };
+        if slot.as_ref().is_none_or(|(_, _, c)| cost < *c) {
+            *slot = Some((route, pts, cost));
+        }
+    }
+    let (route, pts, _) = best.or(fallback).expect("router always offers candidates");
+    (route, pts)
+}
+
+/// True when `pts` cuts through `r` — the router prices every hit as a
+/// near-prohibitive crossing.
+///
+/// `endpoint` marks the route's OWN source / target box, whose anchor sits on
+/// the boundary: those get `slack` px of grace (the box is tested shrunk), so
+/// a segment that merely lands on the border is free while one that TRAVERSES
+/// the face to reach a far-side anchor is not. Skipping the first / last
+/// segment outright — the previous rule — made exactly that traversal free,
+/// which is how a call edge ended up drawn straight across `data`'s rows.
+fn path_cuts_box(pts: &[egui::Pos2], r: egui::Rect, endpoint: bool, slack: f32) -> bool {
+    use super::layout::seg_hits_rect;
+    let r = if endpoint { r.shrink(slack) } else { r };
+    if r.width() <= 0.0 || r.height() <= 0.0 {
+        return false; // node smaller than the slack (zoomed far out)
+    }
+    pts.windows(2).any(|w| {
+        seg_hits_rect(
+            (w[0].x, w[0].y),
+            (w[1].x, w[1].y),
+            r.left(),
+            r.top(),
+            r.width(),
+            r.height(),
+        )
+    })
+}
+
+/// Y of a horizontal lane that clears every box whose x-range overlaps the
+/// run `[x0, x1]` — `below` picks the lowest bottom (plus `clearance`), else
+/// the highest top (minus it). `from_y` seeds it with the source's exit edge.
+///
+/// Boxes outside the run are ignored: the lane only has to dodge what it
+/// would actually cross, so it stays as close to the nodes as it can.
+/// `skip` is the CALLEE, which is never an obstacle: the route reaches it
+/// through the vertical leg beside it, so counting its box would hoist the
+/// whole lane over the very node it is heading for (whenever the callee sits
+/// on the side the run comes from — `main → i2c1` in the reported diagram).
+fn lane_y(
+    rects: &[egui::Rect],
+    skip: usize,
+    below: bool,
+    from_y: f32,
+    x0: f32,
+    x1: f32,
+    clearance: f32,
+) -> f32 {
+    let (lo, hi) = (x0.min(x1), x0.max(x1));
+    let mut y = from_y;
+    for (_, r) in rects
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| *i != skip && r.right() >= lo && r.left() <= hi)
+    {
+        y = if below { y.max(r.bottom()) } else { y.min(r.top()) };
+    }
+    y + if below { clearance } else { -clearance }
+}
+
 fn rounded_path(pts: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
     if pts.len() < 3 {
         return pts.to_vec();
@@ -1449,7 +1601,294 @@ fn arrowhead(
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_rel, FIT_PAD};
+    use super::{clamp_rel, lane_exits_below, lane_y, path_cuts_box, rounded_path, FIT_PAD};
+    use crate::panels::structure_map::layout::seg_hits_rect;
+    use eframe::egui::{pos2, vec2, Pos2, Rect};
+
+    /// True when any segment of `pts` touches `r` — the predicate the router's
+    /// cost function uses to price a box cut.
+    fn hits(r: &Rect, pts: &[Pos2]) -> bool {
+        pts.windows(2).any(|w| {
+            seg_hits_rect(
+                (w[0].x, w[0].y),
+                (w[1].x, w[1].y),
+                r.left(),
+                r.top(),
+                r.width(),
+                r.height(),
+            )
+        })
+    }
+
+    /// The reported layout: caller `read_report` on the right, callee on the
+    /// left, and `data` sitting between them AT the target row's height — so
+    /// every route that reaches the row horizontally cuts across `data`'s
+    /// face. The under-lane route must leave through the caller's bottom, pass
+    /// below `data` and come up in the gap beside the callee.
+    #[test]
+    fn under_lane_route_clears_a_node_between_caller_and_callee() {
+        let source = Rect::from_min_size(pos2(1150.0, 100.0), vec2(600.0, 340.0));
+        let data = Rect::from_min_size(pos2(370.0, 100.0), vec2(590.0, 420.0));
+        let callee = Rect::from_min_size(pos2(0.0, 95.0), vec2(195.0, 560.0));
+        let rects = [source, data, callee];
+        let row_y = 450.0; // the callee's target row
+        let to = pos2(callee.right(), row_y); // near-side entry (caller is right)
+        let from = pos2(source.left() + 40.0, source.bottom()); // bottom corner
+        let turn_x = to.x + 16.0; // vertical leg in the callee/data gap
+
+        let lane = lane_y(&rects, 2, true, from.y, from.x, turn_x, 30.0);
+        // The lane clears the obstacle, not just the caller.
+        assert!(lane > data.bottom(), "lane {lane} must clear data");
+        let path = rounded_path(
+            &[
+                from,
+                pos2(from.x, lane),
+                pos2(turn_x, lane),
+                pos2(turn_x, to.y),
+                to,
+            ],
+            12.0,
+        );
+        // The point of the fix: nothing of the route touches `data`.
+        assert!(!hits(&data, &path));
+        // …while the row-height approach every older shape used does.
+        assert!(hits(&data, &[pos2(source.left(), row_y), to]));
+        // The vertical leg stays outside the callee too: only the final
+        // approach reaches its border (the anchor itself).
+        assert!(!hits(&callee, &path[..path.len() - 1]));
+        // The lane must not dive below the callee — it is not in the run.
+        assert!(lane < callee.bottom());
+    }
+
+    /// `lane_y` only dodges boxes the run would actually cross, and mirrors
+    /// for the over-lane.
+    #[test]
+    fn lane_only_dodges_boxes_inside_the_run() {
+        let near = Rect::from_min_size(pos2(100.0, 0.0), vec2(100.0, 200.0));
+        let far = Rect::from_min_size(pos2(900.0, 0.0), vec2(100.0, 900.0)); // outside
+        let rects = [near, far];
+        let none = usize::MAX; // no callee to exclude
+        // Run x∈[50, 300] overlaps `near` only → lane clears it by `clearance`.
+        assert_eq!(lane_y(&rects, none, true, 10.0, 50.0, 300.0, 30.0), 230.0);
+        // The over-lane mirrors (topmost - clearance).
+        assert_eq!(lane_y(&rects, none, false, 190.0, 50.0, 300.0, 30.0), -30.0);
+        // A run clear of everything just takes the exit edge + clearance.
+        assert_eq!(lane_y(&rects, none, true, 10.0, 400.0, 800.0, 30.0), 40.0);
+    }
+
+    /// The over/under lane always leaves through the source edge facing the
+    /// target. `send_models` (below) → `data` (above): the lane must exit the
+    /// TOP, not the bottom (the reported loop-under-the-node bug).
+    #[test]
+    fn lane_exits_toward_the_target() {
+        // send_models center ~820, data center ~200 → target above → exit top.
+        assert!(!lane_exits_below(820.0, 200.0));
+        // Target below → exit bottom.
+        assert!(lane_exits_below(200.0, 820.0));
+        // Level nodes default to the bottom (a horizontal edge has no "up").
+        assert!(lane_exits_below(400.0, 400.0));
+    }
+
+    /// The straight-route rule: a cutting orthogonal candidate loses to ANY
+    /// rule-abiding one, price notwithstanding; curved candidates stay
+    /// cost-governed; all-cutting-Polys falls back to the cheapest.
+    #[test]
+    fn straight_routes_never_cross_nodes_curved_stay_priced() {
+        use super::{pick_route, Route};
+        // Identifiable candidates: the polyline length doubles as an id.
+        let poly = |n: usize| {
+            Route::Poly(vec![pos2(0.0, 0.0); n])
+        };
+        let marker = |r: &[Pos2]| r.len();
+
+        // A cutting Poly at cost 100 vs a clean Poly at cost 3000 → the rule
+        // beats the price: the clean one wins.
+        let (_, pts) = pick_route(vec![
+            (poly(2), vec![pos2(0.0, 0.0); 2], 100.0, true),
+            (poly(3), vec![pos2(0.0, 0.0); 3], 3000.0, false),
+        ]);
+        assert_eq!(marker(&pts), 3);
+
+        // A cutting CURVE is allowed to compete (its +2600 is already in the
+        // cost) — cheapest of the allowed set wins.
+        let (r, pts) = pick_route(vec![
+            (poly(2), vec![pos2(0.0, 0.0); 2], 100.0, true), // banned
+            (Route::Bez([pos2(0.0, 0.0); 4]), vec![pos2(0.0, 0.0); 9], 2700.0, true),
+            (poly(4), vec![pos2(0.0, 0.0); 4], 2900.0, false),
+        ]);
+        assert!(matches!(r, Route::Bez(_)));
+        assert_eq!(marker(&pts), 9);
+
+        // Every candidate a cutting Poly (dense Straight diagram) → fallback
+        // to the cheapest so the edge still draws.
+        let (_, pts) = pick_route(vec![
+            (poly(2), vec![pos2(0.0, 0.0); 2], 500.0, true),
+            (poly(3), vec![pos2(0.0, 0.0); 3], 300.0, true),
+        ]);
+        assert_eq!(marker(&pts), 3);
+    }
+
+    /// The MIRROR of `side_by_side_call_goes_under_the_caller_not_across_it`:
+    /// reported `radar → parameter` with the CALLER on the RIGHT. The old
+    /// route left radar's right side, looped around its edge and came back at
+    /// row height across radar's whole face. Verifies the exact current
+    /// pipeline values: exit corner (top — parameter's center is the higher),
+    /// entry side (parameter's RIGHT, facing the exit corner), a lane that
+    /// hugs radar's top, and a bad route that pays the box-cut.
+    #[test]
+    fn mirror_side_by_side_caller_right_goes_over_not_around() {
+        // Screen-space geometry lifted from the screenshot.
+        let parameter = Rect::from_min_size(pos2(40.0, 45.0), vec2(560.0, 420.0));
+        let radar = Rect::from_min_size(pos2(800.0, 45.0), vec2(740.0, 480.0));
+        let rects = [parameter, radar];
+        let row_y = 345.0; // parameter's `ReadParam` row
+        let slack = 3.0;
+
+        // lane_exits_below(radar_cy=285, parameter_cy=255) → false → exit TOP.
+        assert!(!lane_exits_below(285.0, 255.0));
+        let from = pos2(radar.left() + 15.0, radar.top());
+        // entry_right = exit x >= target center x → parameter's RIGHT side.
+        assert!(from.x >= parameter.center().x);
+        let to = pos2(parameter.right(), row_y);
+        let turn_x = to.x + 16.0;
+
+        // The lane's run [turn_x, from.x] touches radar only → it hugs
+        // radar's top edge instead of over-clearing.
+        let lane = lane_y(&rects, 0, false, from.y, from.x, turn_x, 30.0);
+        assert_eq!(lane, radar.top() - 30.0);
+
+        let over = rounded_path(
+            &[
+                from,
+                pos2(from.x, lane),
+                pos2(turn_x, lane),
+                pos2(turn_x, to.y),
+                to,
+            ],
+            12.0,
+        );
+        assert!(!path_cuts_box(&over, radar, true, slack));
+        assert!(!path_cuts_box(&over, parameter, true, slack));
+
+        // The screenshot's route: out radar's RIGHT side, around its edge,
+        // back at row height — the return leg crosses radar's face, which the
+        // endpoint slack must NOT excuse.
+        let around = rounded_path(
+            &[
+                pos2(radar.right(), 85.0),
+                pos2(radar.right() + 30.0, 85.0),
+                pos2(radar.right() + 30.0, row_y),
+                to,
+            ],
+            12.0,
+        );
+        assert!(path_cuts_box(&around, radar, true, slack));
+        // And even ignoring the penalty it is the long way.
+        let len = |p: &[Pos2]| p.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+        assert!(len(&over) < len(&around));
+    }
+
+    /// The reported purple line: a route that reaches the callee's row by
+    /// running across its whole face must be priced, even though the callee is
+    /// its own endpoint — the old "skip the last segment" rule made exactly
+    /// that traversal free, so the edge was drawn over `data`'s rows.
+    #[test]
+    fn a_route_across_its_own_target_face_is_still_a_cut() {
+        let data = Rect::from_min_size(pos2(160.0, 30.0), vec2(370.0, 260.0));
+        let row_y = 245.0; // the `CommandID` row
+        let slack = 3.0;
+
+        // Burrow: comes from the right, crosses the face, lands on the anchor
+        // at the FAR (left) edge — what the screenshot shows.
+        let burrow = [pos2(600.0, row_y), pos2(data.left(), row_y)];
+        assert!(path_cuts_box(&burrow, data, true, slack));
+
+        // Legitimate approach: from outside, stops AT the near edge's anchor.
+        let approach = [pos2(600.0, row_y), pos2(data.right(), row_y)];
+        assert!(!path_cuts_box(&approach, data, true, slack));
+
+        // Same for the source end: leaving the top edge upwards is free…
+        let exit = [pos2(300.0, data.top()), pos2(300.0, data.top() - 90.0)];
+        assert!(!path_cuts_box(&exit, data, true, slack));
+        // …while a leg dropped down THROUGH the node is not.
+        let through = [pos2(300.0, data.top() - 20.0), pos2(300.0, data.bottom() + 20.0)];
+        assert!(path_cuts_box(&through, data, true, slack));
+
+        // A third node in the way is granted no slack: a shallow clip of its
+        // face counts…
+        let graze = [pos2(600.0, row_y), pos2(data.right() - 2.0, row_y)];
+        assert!(path_cuts_box(&graze, data, false, slack));
+        // …while on the route's OWN endpoint that much is the anchor's grace.
+        assert!(!path_cuts_box(&graze, data, true, slack));
+        // Degenerate box (zoomed far out) must not panic on the shrink.
+        let tiny = Rect::from_min_size(pos2(0.0, 0.0), vec2(2.0, 2.0));
+        assert!(!path_cuts_box(&burrow, tiny, true, slack));
+    }
+
+    /// Reported `radar → parameter`: two nodes SIDE BY SIDE at the same
+    /// height. In the Straight style the only shapes were the outer lanes,
+    /// whose final leg runs back across the caller's own face — which is how
+    /// the edge ended up drawn over `radar`'s rows, after looping out to its
+    /// left. The under-lane dips below the caller instead: no cut, and short.
+    #[test]
+    fn side_by_side_call_goes_under_the_caller_not_across_it() {
+        let radar = Rect::from_min_size(pos2(85.0, 40.0), vec2(245.0, 145.0));
+        let parameter = Rect::from_min_size(pos2(390.0, 45.0), vec2(190.0, 135.0));
+        let rects = [radar, parameter];
+        let row_y = 143.0; // parameter's `ReadParam` row
+        let to = pos2(parameter.left(), row_y); // near-side entry: caller is left
+        let from = pos2(radar.right() - 15.0, radar.bottom()); // exit corner
+        let turn_x = to.x - 16.0;
+        let slack = 3.0;
+
+        let lane = lane_y(&rects, 1, true, from.y, from.x, turn_x, 30.0);
+        let under = rounded_path(
+            &[
+                from,
+                pos2(from.x, lane),
+                pos2(turn_x, lane),
+                pos2(turn_x, to.y),
+                to,
+            ],
+            12.0,
+        );
+        // Clears BOTH boxes — the caller's face included (only the anchors
+        // touch, within the slack).
+        assert!(!path_cuts_box(&under, radar, true, slack));
+        assert!(!path_cuts_box(&under, parameter, true, slack));
+
+        // The outer-lane shape it replaces: out the caller's left side, down
+        // the outer lane, then a long leg back across `radar` into the row.
+        let outer = rounded_path(
+            &[pos2(radar.left(), 60.0), pos2(40.0, 60.0), pos2(40.0, row_y), to],
+            12.0,
+        );
+        assert!(path_cuts_box(&outer, radar, true, slack));
+        // …and it is the long way round, on top of the cut.
+        let len = |p: &[Pos2]| p.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
+        assert!(len(&under) < len(&outer));
+    }
+
+    /// The callee is never an obstacle for its own lane. Reported case:
+    /// `main → i2c1` — the callee sits above and to the right, so its x-range
+    /// overlaps the run and counting it hoisted the route right over the node
+    /// instead of taking it straight up into the row.
+    #[test]
+    fn lane_ignores_the_callee_box() {
+        let main_ = Rect::from_min_size(pos2(450.0, 1240.0), vec2(370.0, 300.0));
+        let i2c1 = Rect::from_min_size(pos2(580.0, 130.0), vec2(280.0, 360.0));
+        let rects = [main_, i2c1];
+        let from_x = main_.right() - 30.0; // caller's top-right exit corner
+        let turn_x = i2c1.left() - 16.0; // vertical leg beside the callee
+        // Skipping the callee (index 1): the lane hugs the caller's top edge,
+        // so the route is "up, over, up into the row" — the shape asked for.
+        let lane = lane_y(&rects, 1, false, main_.top(), from_x, turn_x, 30.0);
+        assert_eq!(lane, main_.top() - 30.0);
+        // Counting it would lift the lane above the callee — the whole edge
+        // would loop over the node it is heading into.
+        let looped = lane_y(&rects, usize::MAX, false, main_.top(), from_x, turn_x, 30.0);
+        assert!(looped < i2c1.top(), "{looped} should be above i2c1");
+    }
 
     /// The auto-fit geometry that crashed the tab: `content` comes from
     /// `width * ((avail - 2·FIT_PAD) / width)`, whose two roundings put it a
