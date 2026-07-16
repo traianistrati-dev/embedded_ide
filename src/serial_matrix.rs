@@ -253,7 +253,7 @@ pub fn show_matrix(
             .fixed_pos(egui::Pos2::ZERO)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
-                let screen = ui.ctx().screen_rect();
+                let screen = ui.ctx().viewport_rect();
                 // Claim the whole screen (blocks the panels underneath) and
                 // paint an opaque backdrop.
                 let _ = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
@@ -268,9 +268,14 @@ pub fn show_matrix(
                 let char_w = ui.fonts_mut(|f| f.glyph_width(&base_font, '0'));
                 let base_cell = egui::vec2(char_w * widest as f32 + 10.0, 17.0);
                 let base_idx = char_w * 5.0;
+                // Exact model — with `draw_grid` zeroing egui's item spacing,
+                // the rendered grid is EXACTLY this many pixels (the earlier
+                // ×1.06 fudge compensated for the unmodelled 8px spacing and
+                // would now overshoot the other way).
                 let grid_base = egui::vec2(
                     base_idx + base_cell.x * m.cols as f32,
-                    base_cell.y * m.rows as f32 + 18.0, // + the notes line
+                    // rows + the column-numbering header + the notes line
+                    base_cell.y * (m.rows + 1) as f32 + 18.0,
                 );
                 let avail = screen.size() - egui::vec2(24.0, TOP_H + 20.0);
                 let s = (avail.x / grid_base.x)
@@ -318,7 +323,7 @@ pub fn show_matrix(
                 // The grid, centered in the space under the bar.
                 let grid_size = egui::vec2(
                     idx_w + cell.x * m.cols as f32,
-                    cell.y * m.rows as f32 + 18.0 * s.min(1.5),
+                    cell.y * (m.rows + 1) as f32 + 18.0 * s.min(1.5),
                 );
                 let origin = egui::pos2(
                     (screen.width() - grid_size.x).max(0.0) / 2.0,
@@ -329,7 +334,19 @@ pub fn show_matrix(
                         .max_rect(egui::Rect::from_min_size(origin, grid_size))
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
-                draw_grid(&mut grid_ui, m, data, &values, shown, max, skip, vb, cell, idx_w, &font);
+                draw_grid(
+                    &mut grid_ui,
+                    m,
+                    data,
+                    &values,
+                    shown,
+                    max,
+                    skip,
+                    vb,
+                    cell,
+                    idx_w,
+                    &font,
+                );
             });
         if close {
             m.full = false;
@@ -354,7 +371,9 @@ pub fn show_matrix(
         .auto_shrink([false, false])
         .max_height(height - 26.0)
         .show(ui, |ui| {
-            draw_grid(ui, m, data, &values, shown, max, skip, vb, cell, idx_w, &font);
+            draw_grid(
+                ui, m, data, &values, shown, max, skip, vb, cell, idx_w, &font,
+            );
         });
 }
 
@@ -386,11 +405,37 @@ fn draw_grid(
     // Leftover info: payload bytes beyond the grid / grid cells beyond payload.
     let leftover = payload.len() as isize - (want * vb) as isize;
 
+    // Geometry must equal the fit math EXACTLY: egui's default item spacing
+    // (8 px, unscaled) between cells grew the REAL grid by ~8·cols horizontally
+    // and ~4·rows vertically over the computed size — the fullscreen fit then
+    // missed by more the more columns there were (the reported growing gap).
+    // Cells carry their own padding, so spacing is zeroed outright.
+    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+
+    // Column numbering across the top — right-aligned like the values, so the
+    // header digit sits over the units digit of its column. (The fullscreen
+    // fit budgets this as one extra row.)
+    ui.horizontal(|ui| {
+        let _ = ui.allocate_exact_size(egui::vec2(idx_w, cell.y), egui::Sense::hover());
+        for col in 0..m.cols {
+            let (rect, _) = ui.allocate_exact_size(cell, egui::Sense::hover());
+            if !ui.is_rect_visible(rect) {
+                continue;
+            }
+            ui.painter().text(
+                rect.right_center() - egui::vec2(5.0, 0.0),
+                egui::Align2::RIGHT_CENTER,
+                col.to_string(),
+                font.clone(),
+                egui::Color32::from_gray(110),
+            );
+        }
+    });
+
     for row in 0..m.rows {
         ui.horizontal(|ui| {
             // Row index, dim, with the row's byte offset on hover.
-            let (r, resp) =
-                ui.allocate_exact_size(egui::vec2(idx_w, cell.y), egui::Sense::hover());
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(idx_w, cell.y), egui::Sense::hover());
             ui.painter().text(
                 r.right_center(),
                 egui::Align2::RIGHT_CENTER,
@@ -421,11 +466,8 @@ fn draw_grid(
                 }
                 let v = values[i];
                 if m.heat {
-                    ui.painter().rect_filled(
-                        rect.shrink(1.0),
-                        2.0,
-                        heat_color(v, max),
-                    );
+                    ui.painter()
+                        .rect_filled(rect.shrink(1.0), 2.0, heat_color(v, max));
                 }
                 // Right-aligned: with the fixed cell width, the units
                 // digit stays put — a changed value is spottable.
@@ -449,6 +491,7 @@ fn draw_grid(
             }
         });
     }
+    ui.add_space(4.0); // zero item-spacing above — keep the notes off the grid
     if leftover > 0 {
         ui.label(
             egui::RichText::new(format!(
@@ -523,7 +566,11 @@ mod tests {
                 max_val.to_string().len(),
                 "decimal digits for {vb}-byte values"
             );
-            assert_eq!(cell_chars(vb, true), vb * 2, "hex chars for {vb}-byte values");
+            assert_eq!(
+                cell_chars(vb, true),
+                vb * 2,
+                "hex chars for {vb}-byte values"
+            );
         }
         // Out-of-range widths clamp like the decoder does.
         assert_eq!(cell_chars(0, false), 3);
