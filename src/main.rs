@@ -6,8 +6,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-pub mod app;
 pub mod activity;
+pub mod app;
 use app::AppIde;
 
 pub mod build;
@@ -30,7 +30,15 @@ pub mod terminal;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_maximized(true),
+        viewport: egui::ViewportBuilder::default()
+            .with_maximized(true)
+            // Window + taskbar icon while the app runs. The PNG is baked into
+            // the exe at compile time — replace assets/icon.png (any size,
+            // 256×256 recommended) and rebuild to change it.
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                    .expect("assets/icon.png must be a valid PNG"),
+            ),
         ..Default::default()
     };
 
