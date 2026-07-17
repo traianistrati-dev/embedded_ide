@@ -33,40 +33,55 @@ pub struct PinRow {
 }
 
 /// The clock model offered by the form. A full graph editor is out of scope,
-/// so the choices are the two built-in family models plus "none"; importing a
-/// `.ron` remains the way to carry a hand-authored [`ClockDef::Graph`].
+/// so the choices are the built-in family models plus "none"; importing a
+/// `.ron` remains the way to carry a hand-authored [`ClockDef::Graph`] (the
+/// form PRESERVES such a graph — see [`McuForm::imported_clock`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClockChoice {
     None,
     Stm32f1,
     Esp32c3,
+    /// STM32WBA tree (data-driven graph — ships the 100 MHz PLL preset).
+    Stm32wba,
 }
 
 impl ClockChoice {
-    pub const ALL: [ClockChoice; 3] = [
+    pub const ALL: [ClockChoice; 4] = [
         ClockChoice::None,
         ClockChoice::Stm32f1,
         ClockChoice::Esp32c3,
+        ClockChoice::Stm32wba,
     ];
     pub fn label(self) -> &'static str {
         match self {
             ClockChoice::None => "None",
             ClockChoice::Stm32f1 => "STM32F1 tree",
             ClockChoice::Esp32c3 => "ESP32-C3 tree",
+            ClockChoice::Stm32wba => "STM32WBA tree",
         }
     }
     fn to_def(self) -> ClockDef {
+        use crate::panels::mcu_module::clock::graph::{
+            stm32wba_graph, stm32wba_layout, GraphClock,
+        };
         match self {
             ClockChoice::None => ClockDef::None,
             ClockChoice::Stm32f1 => ClockDef::Stm32f1(Default::default()),
             ClockChoice::Esp32c3 => ClockDef::Esp32c3,
+            ClockChoice::Stm32wba => ClockDef::Graph(GraphClock {
+                graph: stm32wba_graph(),
+                layout: stm32wba_layout(),
+            }),
         }
     }
     fn from_def(d: &ClockDef) -> ClockChoice {
+        use crate::panels::mcu_module::clock::graph::is_wba_graph;
         match d {
             ClockDef::Stm32f1(_) => ClockChoice::Stm32f1,
             ClockDef::Esp32c3 => ClockChoice::Esp32c3,
-            // A graph or none maps to None — the form can't re-author a graph.
+            ClockDef::Graph(gc) if is_wba_graph(&gc.graph) => ClockChoice::Stm32wba,
+            // A foreign graph maps to None here but is PRESERVED via
+            // `McuForm::imported_clock`; plain none stays none.
             ClockDef::Graph(_) | ClockDef::None => ClockChoice::None,
         }
     }
@@ -95,6 +110,10 @@ pub struct McuForm {
     pub hal_dep: String,
     // Clock model
     pub clock: ClockChoice,
+    /// A hand-imported [`ClockDef::Graph`] the form cannot re-author: carried
+    /// through Edit → Save verbatim while the choice stays `None`, so editing
+    /// an imported chip never silently drops its clock tree.
+    pub imported_clock: Option<ClockDef>,
     // Pins, per side
     pub pins: [Vec<PinRow>; 4],
     /// True when the form was opened to EDIT/clone an existing chip (so the
@@ -127,6 +146,7 @@ impl McuForm {
             probe_chip: String::new(),
             hal_dep: "stm32f1xx-hal = { version = \"0.10\", features = [\"rt\"] }".into(),
             clock: ClockChoice::Stm32f1,
+            imported_clock: None,
             pins: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             editing: false,
         }
@@ -160,6 +180,11 @@ impl McuForm {
             probe_chip: def.project.probe_chip.clone(),
             hal_dep: def.project.hal_dep.clone(),
             clock: ClockChoice::from_def(&def.clock),
+            imported_clock: match (&def.clock, ClockChoice::from_def(&def.clock)) {
+                // A graph the form can't re-author (not the WBA one).
+                (ClockDef::Graph(_), ClockChoice::None) => Some(def.clock.clone()),
+                _ => None,
+            },
             pins: [
                 side(&def.pins.top),
                 side(&def.pins.bottom),
@@ -299,8 +324,20 @@ impl McuForm {
                 left: side(&self.pins[2]),
                 right: side(&self.pins[3]),
             },
-            clock: self.clock.to_def(),
-            clock_limits: Default::default(),
+            clock: match (&self.imported_clock, self.clock) {
+                // The preserved imported graph, unless the user actively
+                // switched to a family model.
+                (Some(g), ClockChoice::None) => g.clone(),
+                _ => self.clock.to_def(),
+            },
+            // WBA ships its own ceilings (100 MHz across the board) — the
+            // F103 defaults would flag the 100 MHz preset as over-limit.
+            clock_limits: match self.clock {
+                ClockChoice::Stm32wba => {
+                    crate::panels::mcu_module::clock::graph::stm32wba_limits()
+                }
+                _ => Default::default(),
+            },
             clock_presets: Vec::new(),
         }
     }
@@ -604,6 +641,43 @@ mod tests {
         assert_eq!(rebuilt.id, def.id);
         assert_eq!(rebuilt.pins, def.pins);
         assert_eq!(rebuilt.project, def.project);
+    }
+
+    /// The WBA clock choice: the def carries the WBA graph + the WBA ceilings,
+    /// Edit detects it back, and a FOREIGN imported graph survives Edit→Save.
+    #[test]
+    fn wba_clock_choice_round_trips_and_foreign_graphs_survive() {
+        use crate::panels::mcu_module::clock::graph::{is_wba_graph, GraphClock};
+
+        let mut f = McuForm::blank();
+        f.id = "stm32wba55cg".into();
+        f.display_name = "STM32WBA55CG".into();
+        f.family = "stm32wba".into();
+        f.probe_chip = "STM32WBA55CGUx".into();
+        f.target = "thumbv8m.main-none-eabihf".into();
+        f.clock = ClockChoice::Stm32wba;
+        let def = f.to_definition();
+        match &def.clock {
+            ClockDef::Graph(gc) => assert!(is_wba_graph(&gc.graph)),
+            other => panic!("expected WBA graph, got {other:?}"),
+        }
+        assert_eq!(def.clock_limits.sysclk_max, 100_000_000);
+        // Edit path detects the WBA tree again.
+        assert_eq!(McuForm::from_definition(&def).clock, ClockChoice::Stm32wba);
+
+        // A hand-imported foreign graph: choice shows None but the graph is
+        // preserved verbatim through Edit → Save.
+        let mut imported = def.clone();
+        imported.clock = ClockDef::Graph(GraphClock {
+            graph: crate::panels::mcu_module::clock::graph::ClockGraph {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            },
+            layout: Default::default(),
+        }); // an empty graph — not the WBA tree
+        let edited = McuForm::from_definition(&imported);
+        assert_eq!(edited.clock, ClockChoice::None);
+        assert_eq!(edited.to_definition().clock, imported.clock);
     }
 
     #[test]

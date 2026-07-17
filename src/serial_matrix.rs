@@ -225,7 +225,7 @@ pub fn show_matrix(
                     .size(10.5)
                     .color(egui::Color32::GRAY),
             );
-            ui.add(egui::DragValue::new(&mut m.change_pct).range(0..=1000).speed(0.5))
+            ui.add(egui::DragValue::new(&mut m.change_pct).range(0..=1000000).speed(0.5))
                 .on_hover_text(
                     "0 = colour by MAGNITUDE (value vs the frame's max — big \
                      values always glow).\n\

@@ -140,14 +140,14 @@ impl FamilyBackend for WbaBackend {
         format!(
             "{header}{section}\n{tail}",
             header = wba::invariant_header(&mcu.name, &mcu.id),
-            section = wba::make_generated_section(&mcu.name, &all),
+            section = wba::make_generated_section(&mcu.name, &all, &mcu.clock),
             tail = USER_TAIL,
         )
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
-        let section = wba::make_generated_section(&mcu.name, &all);
+        let section = wba::make_generated_section(&mcu.name, &all, &mcu.clock);
         wba::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
     // No per-peripheral config files yet — bus init is documented inline (v1).
