@@ -10,6 +10,7 @@
 pub mod common;
 pub mod family;
 pub mod stm32;
+pub mod wba;
 
 use super::mcu::Mcu;
 

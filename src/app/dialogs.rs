@@ -45,8 +45,7 @@ impl AppIde {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let enter =
-                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui
                         .add_enabled(err.is_none(), egui::Button::new("Rename"))
                         .clicked()
@@ -73,8 +72,7 @@ impl AppIde {
                     );
                 }
                 Err(e) => {
-                    self.export_msg =
-                        format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
+                    self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
                 }
             }
             self.export_status_until =
@@ -95,10 +93,14 @@ impl AppIde {
         if !self.confirm_new_project {
             return;
         }
+        // Deferred form-open requests (set inside the window closure, which
+        // already borrows `self`; acted on after it returns).
+        let mut open_form_blank = false;
+        let mut open_form_edit: Option<String> = None;
         egui::Window::new("New Project")
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::LEFT_TOP, [20.0, 10.0])
+            .anchor(egui::Align2::RIGHT_TOP, [20.0, 10.0])
             .show(ui.ctx(), |ui| {
                 ui.add_space(4.0);
                 ui.label("This will clear all user files and folders.");
@@ -181,9 +183,33 @@ impl AppIde {
                                         Some(format!("{}  Imported {name}{note}", ph::CHECK));
                                 }
                                 Err(e) => {
-                                    self.mcu_import_status =
-                                        Some(format!("{}  {e}", ph::WARNING));
+                                    self.mcu_import_status = Some(format!("{}  {e}", ph::WARNING));
                                 }
+                            }
+                        }
+                    }
+
+                    // ── New / Edit MCU definition (visual form) ────────────
+                    // Deferred to after the window closure — `open_mcu_form`
+                    // borrows `self`, already borrowed here.
+                    if ui
+                        .button(egui::RichText::new(format!("{} New MCU…", ph::WRENCH)).size(12.0))
+                        .on_hover_text("Author a new chip definition in a form")
+                        .clicked()
+                    {
+                        open_form_blank = true;
+                    }
+                    if let Some(id) = &self.pending_mcu_id {
+                        if self.mcu_registry.iter().any(|d| &d.id == id) {
+                            if ui
+                                .button(
+                                    egui::RichText::new(format!("{} Edit…", ph::PENCIL_SIMPLE))
+                                        .size(12.0),
+                                )
+                                .on_hover_text("Edit / clone the selected chip's definition")
+                                .clicked()
+                            {
+                                open_form_edit = Some(id.clone());
                             }
                         }
                     }
@@ -296,5 +322,15 @@ impl AppIde {
                 });
                 ui.add_space(4.0);
             });
+
+        // ── Act on deferred form-open requests ─────────────────────────────
+        if open_form_blank {
+            self.open_mcu_form(None);
+        } else if let Some(id) = open_form_edit {
+            if let Some(def) = self.mcu_registry.iter().find(|d| d.id == id) {
+                let seed = crate::panels::mcu_module::mcu_form::McuForm::from_definition(def);
+                self.open_mcu_form(Some(seed));
+            }
+        }
     }
 }

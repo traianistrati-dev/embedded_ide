@@ -128,6 +128,20 @@ pub fn import_file(path: &Path) -> Result<McuDefinition, String> {
     Ok(def)
 }
 
+/// Persist a form-authored definition to `<user mcus>/<id>.ron` (the same
+/// folder imports live in, so it survives restarts and re-authoring an id
+/// overwrites cleanly). Returns the written path. Fails only on I/O errors or
+/// when no user dir resolves.
+pub fn save_definition(def: &McuDefinition) -> Result<PathBuf, String> {
+    let dir = user_mcus_dir().ok_or("could not resolve the user config folder")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let text = ron::ser::to_string_pretty(def, ron::ser::PrettyConfig::default())
+        .map_err(|e| format!("RON serialize error: {e}"))?;
+    let dest = dir.join(format!("{}.ron", def.id));
+    std::fs::write(&dest, text).map_err(|e| format!("could not write {}: {e}", dest.display()))?;
+    Ok(dest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -280,10 +280,15 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
     for line in gen_block.lines() {
         let trimmed = line.trim();
 
-        // ── STM32: "let p{port}{num} = ..." ──────────────────────────────────
+        // ── STM32: "let [mut ]p{port}{num} = ..." ────────────────────────────
         // trimmed = "let pc13 = &mut gpioc.pc13.into_push_pull_output(…); // …"
-        if trimmed.starts_with("let p") {
-            let after_let = &trimmed["let ".len()..]; // "pc13 = …"
+        // The `mut` form is emitted by the WBA (embassy) backend for outputs
+        // (`let mut pb5 = Output::new(…)`) — strip it so both shapes parse.
+        if trimmed.starts_with("let p") || trimmed.starts_with("let mut p") {
+            let after_let = trimmed
+                .strip_prefix("let mut ")
+                .or_else(|| trimmed.strip_prefix("let "))
+                .unwrap_or(trimmed); // "pc13 = …"
             let Some(eq_pos) = after_let.find(" =") else {
                 continue;
             };

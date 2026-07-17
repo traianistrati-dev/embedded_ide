@@ -12,7 +12,7 @@
 //! here — they are pure data (a `.ron` definition).
 
 use super::common::USER_TAIL;
-use super::stm32;
+use super::{stm32, wba};
 use crate::panels::mcu_module::codegen_esp;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::modules;
@@ -127,8 +127,34 @@ impl FamilyBackend for Esp32Backend {
     }
 }
 
+// ── STM32WBA (embassy-stm32, blocking) ──────────────────────────────────────
+struct WbaBackend;
+
+impl FamilyBackend for WbaBackend {
+    fn family_id(&self) -> &'static str {
+        "stm32wba"
+    }
+
+    fn fresh_main_rs(&self, mcu: &Mcu) -> String {
+        let all = pins_of(mcu);
+        format!(
+            "{header}{section}\n{tail}",
+            header = wba::invariant_header(&mcu.name, &mcu.id),
+            section = wba::make_generated_section(&mcu.name, &all),
+            tail = USER_TAIL,
+        )
+    }
+
+    fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
+        let all = pins_of(mcu);
+        let section = wba::make_generated_section(&mcu.name, &all);
+        wba::splice_section(existing, &section, &mcu.name, &mcu.id)
+    }
+    // No per-peripheral config files yet — bus init is documented inline (v1).
+}
+
 /// Registry of every known family backend. Add new families here.
-const BACKENDS: &[&dyn FamilyBackend] = &[&Stm32f1Backend, &Esp32Backend];
+const BACKENDS: &[&dyn FamilyBackend] = &[&Stm32f1Backend, &Esp32Backend, &WbaBackend];
 
 /// Look up the backend for a family key, if one is registered.
 ///
@@ -146,11 +172,30 @@ mod tests {
     fn known_families_resolve() {
         assert_eq!(backend_for("stm32f1").unwrap().family_id(), "stm32f1");
         assert_eq!(backend_for("esp32c3").unwrap().family_id(), "esp32c3");
+        assert_eq!(backend_for("stm32wba").unwrap().family_id(), "stm32wba");
     }
 
     #[test]
     fn unknown_family_is_none() {
         assert!(backend_for("stm8").is_none());
         assert!(backend_for("").is_none());
+    }
+
+    /// The WBA backend produces a complete embassy skeleton with the markers,
+    /// entry point and user tail — enough for the project to build.
+    #[test]
+    fn wba_backend_emits_a_complete_skeleton() {
+        use crate::panels::mcu_module::mcu_def::McuDefinition;
+        let mut def: McuDefinition =
+            crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+        def.family = "stm32wba".into();
+        def.id = "stm32wba55cg".into();
+        let mcu = def.build_mcu();
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("#![no_std]"));
+        assert!(code.contains("fn main() -> !"));
+        assert!(code.contains("embassy_stm32::init"));
+        assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
+        assert!(code.contains(crate::panels::mcu_module::codegen::GEN_END));
     }
 }

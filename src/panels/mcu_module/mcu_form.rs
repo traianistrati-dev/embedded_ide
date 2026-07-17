@@ -1,0 +1,619 @@
+//! Editable form model for authoring a new [`McuDefinition`] in the UI.
+//!
+//! This is the PURE half (no egui): the field buffers, validation, and the
+//! `McuForm ⇄ McuDefinition` conversions. The dialog in `app::mcu_form_dialog`
+//! renders it and, on Save, writes the RON to the user `mcus/` folder and
+//! merges it into the live registry — the same path an imported `.ron` takes,
+//! so a form-authored chip is indistinguishable from an imported one.
+//!
+//! Scope: a chip in an ALREADY-SUPPORTED family (STM32F1 / ESP32-C3) is pure
+//! data and fully authorable here. A brand-new family still needs a codegen
+//! `FamilyBackend` in code — the form warns when the family is unknown.
+
+use serde::{Deserialize, Serialize};
+
+use super::mcu_catalog::ToolchainKind;
+use super::mcu_def::{ClockDef, McuDefinition, PinDef, PinLayout, ProjectDef};
+use super::pins::logic::pin_function::PinFunction;
+
+/// The four sides, in tab order — used by the GUI to iterate side editors.
+pub const SIDES: [&str; 4] = ["Top", "Bottom", "Left", "Right"];
+
+/// One editable pin row (data form of [`PinDef`]). Numbers and functions are
+/// STRINGS so a half-typed value never snaps back: the number stays as typed,
+/// and functions are a space/comma list of tokens ([`parse_functions`]) — far
+/// lighter to edit than a per-pin multi-select of a dozen parameterized
+/// variants. `in out usart1_tx spi2_sck i2c1_scl adc1_5 tim2_1 swdio` etc.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PinRow {
+    pub number: String,
+    pub name: String,
+    pub reserved: bool,
+    pub functions: String,
+}
+
+/// The clock model offered by the form. A full graph editor is out of scope,
+/// so the choices are the two built-in family models plus "none"; importing a
+/// `.ron` remains the way to carry a hand-authored [`ClockDef::Graph`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClockChoice {
+    None,
+    Stm32f1,
+    Esp32c3,
+}
+
+impl ClockChoice {
+    pub const ALL: [ClockChoice; 3] = [
+        ClockChoice::None,
+        ClockChoice::Stm32f1,
+        ClockChoice::Esp32c3,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            ClockChoice::None => "None",
+            ClockChoice::Stm32f1 => "STM32F1 tree",
+            ClockChoice::Esp32c3 => "ESP32-C3 tree",
+        }
+    }
+    fn to_def(self) -> ClockDef {
+        match self {
+            ClockChoice::None => ClockDef::None,
+            ClockChoice::Stm32f1 => ClockDef::Stm32f1(Default::default()),
+            ClockChoice::Esp32c3 => ClockDef::Esp32c3,
+        }
+    }
+    fn from_def(d: &ClockDef) -> ClockChoice {
+        match d {
+            ClockDef::Stm32f1(_) => ClockChoice::Stm32f1,
+            ClockDef::Esp32c3 => ClockChoice::Esp32c3,
+            // A graph or none maps to None — the form can't re-author a graph.
+            ClockDef::Graph(_) | ClockDef::None => ClockChoice::None,
+        }
+    }
+}
+
+/// All editable fields of a new / cloned MCU definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McuForm {
+    // Identity
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub cpu: String,
+    pub package: String,
+    // Toolchain + target
+    pub toolchain: ToolchainKind,
+    pub target: String,
+    // Memory (RustEmbedded only — ESP owns its layout)
+    pub flash_origin: String,
+    pub flash_size: String,
+    pub ram_origin: String,
+    pub ram_size: String,
+    pub memory_comment: String,
+    // Probe / flash + dependency line
+    pub probe_chip: String,
+    pub hal_dep: String,
+    // Clock model
+    pub clock: ClockChoice,
+    // Pins, per side
+    pub pins: [Vec<PinRow>; 4],
+    /// True when the form was opened to EDIT/clone an existing chip (so the
+    /// dialog can warn before an id collision silently overrides a built-in).
+    pub editing: bool,
+}
+
+impl Default for McuForm {
+    fn default() -> Self {
+        Self::blank()
+    }
+}
+
+impl McuForm {
+    /// A blank STM32-flavoured starting point (the most common authoring case).
+    pub fn blank() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            family: "stm32f1".into(),
+            cpu: "Cortex-M3".into(),
+            package: String::new(),
+            toolchain: ToolchainKind::RustEmbedded,
+            target: "thumbv7m-none-eabi".into(),
+            flash_origin: "0x08000000".into(),
+            flash_size: "64K".into(),
+            ram_origin: "0x20000000".into(),
+            ram_size: "20K".into(),
+            memory_comment: String::new(),
+            probe_chip: String::new(),
+            hal_dep: "stm32f1xx-hal = { version = \"0.10\", features = [\"rt\"] }".into(),
+            clock: ClockChoice::Stm32f1,
+            pins: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            editing: false,
+        }
+    }
+
+    /// Seed the form from an existing definition (the "Clone / Edit" path).
+    pub fn from_definition(def: &McuDefinition) -> Self {
+        let side = |ds: &[PinDef]| -> Vec<PinRow> {
+            ds.iter()
+                .map(|d| PinRow {
+                    number: d.number.to_string(),
+                    name: d.name.clone(),
+                    reserved: d.reserved,
+                    functions: functions_to_string(&d.functions),
+                })
+                .collect()
+        };
+        Self {
+            id: def.id.clone(),
+            display_name: def.display_name.clone(),
+            family: def.family.clone(),
+            cpu: def.cpu.clone(),
+            package: def.package.clone(),
+            toolchain: def.toolchain.clone(),
+            target: def.project.target.clone(),
+            flash_origin: def.project.flash_origin.clone(),
+            flash_size: def.project.flash_size.clone(),
+            ram_origin: def.project.ram_origin.clone(),
+            ram_size: def.project.ram_size.clone(),
+            memory_comment: def.project.memory_comment.clone(),
+            probe_chip: def.project.probe_chip.clone(),
+            hal_dep: def.project.hal_dep.clone(),
+            clock: ClockChoice::from_def(&def.clock),
+            pins: [
+                side(&def.pins.top),
+                side(&def.pins.bottom),
+                side(&def.pins.left),
+                side(&def.pins.right),
+            ],
+            editing: true,
+        }
+    }
+
+    /// Collected blocking errors — empty means [`to_definition`] will succeed.
+    /// Order matches the form top-to-bottom so the first message points at the
+    /// first offending field.
+    pub fn errors(&self) -> Vec<String> {
+        let mut e = Vec::new();
+        if !is_valid_id(&self.id) {
+            e.push(
+                "Id must be non-empty and use only a–z, 0–9 and _ (it becomes the \
+                 file name and the registry key)."
+                    .into(),
+            );
+        }
+        if self.display_name.trim().is_empty() {
+            e.push("Display name is required.".into());
+        }
+        if self.family.trim().is_empty() {
+            e.push("Family is required (selects the codegen + clock backend).".into());
+        }
+        if self.target.trim().is_empty() {
+            e.push("Target triple is required (e.g. thumbv7m-none-eabi).".into());
+        }
+        // Memory + probe only matter for the ARM / probe-rs toolchain; ESP owns
+        // its own memory layout and flashes over serial.
+        if self.toolchain == ToolchainKind::RustEmbedded {
+            if self.probe_chip.trim().is_empty() {
+                e.push("Probe chip is required for the ARM toolchain (used by probe-rs).".into());
+            }
+            for (label, v) in [
+                ("Flash origin", &self.flash_origin),
+                ("Flash size", &self.flash_size),
+                ("RAM origin", &self.ram_origin),
+                ("RAM size", &self.ram_size),
+            ] {
+                if parse_ld_number(v).is_none() {
+                    e.push(format!(
+                        "{label} ('{v}') is not a valid value — use hex (0x…), \
+                         decimal, or a K/M suffix (e.g. 64K)."
+                    ));
+                }
+            }
+        }
+        // Pin numbers, when present, must be positive and unique across sides;
+        // every function token must be recognised.
+        let mut seen = std::collections::HashSet::new();
+        for row in self.pins.iter().flatten() {
+            let n = row.number.trim();
+            if n.is_empty() && row.name.trim().is_empty() && row.functions.trim().is_empty() {
+                continue; // a wholly blank scratch row is ignored, not an error
+            }
+            match n.parse::<usize>() {
+                Ok(num) if num >= 1 => {
+                    if !seen.insert(num) {
+                        e.push(format!("Pin number {num} is used more than once."));
+                    }
+                }
+                _ => e.push(format!(
+                    "Pin '{}' has an invalid number ('{n}') — use a positive integer.",
+                    row.name.trim()
+                )),
+            }
+            for bad in unknown_function_tokens(&row.functions) {
+                e.push(format!(
+                    "Pin '{}' has an unknown function token '{bad}'.",
+                    row.name.trim()
+                ));
+            }
+        }
+        e
+    }
+
+    /// Non-blocking advisories (shown amber; do not prevent Save).
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if !KNOWN_FAMILIES.contains(&self.family.trim()) {
+            w.push(format!(
+                "Family '{}' has no codegen backend yet — the chip loads and its \
+                 pins/clock show, but configuring a peripheral won't generate init \
+                 code until a backend is added.",
+                self.family.trim()
+            ));
+        }
+        if self.pins.iter().all(|s| s.is_empty()) {
+            w.push("No pins defined — the Pins canvas will be empty.".into());
+        }
+        w
+    }
+
+    /// Build the [`McuDefinition`]. Call only when [`errors`] is empty; blank
+    /// scratch pin rows are dropped and numbers are parsed here.
+    pub fn to_definition(&self) -> McuDefinition {
+        let side = |rows: &[PinRow]| -> Vec<PinDef> {
+            rows.iter()
+                .filter(|r| {
+                    !(r.number.trim().is_empty()
+                        && r.name.trim().is_empty()
+                        && r.functions.trim().is_empty())
+                })
+                .map(|r| PinDef {
+                    number: r.number.trim().parse().unwrap_or(0),
+                    name: r.name.trim().to_string(),
+                    reserved: r.reserved,
+                    functions: parse_functions(&r.functions),
+                })
+                .collect()
+        };
+        McuDefinition {
+            id: self.id.trim().to_string(),
+            display_name: self.display_name.trim().to_string(),
+            family: self.family.trim().to_string(),
+            package: self.package.trim().to_string(),
+            cpu: self.cpu.trim().to_string(),
+            toolchain: self.toolchain.clone(),
+            project: ProjectDef {
+                pkg_name: self.id.trim().to_string(),
+                target: self.target.trim().to_string(),
+                flash_origin: self.flash_origin.trim().to_string(),
+                flash_size: self.flash_size.trim().to_string(),
+                ram_origin: self.ram_origin.trim().to_string(),
+                ram_size: self.ram_size.trim().to_string(),
+                hal_dep: self.hal_dep.trim().to_string(),
+                probe_chip: self.probe_chip.trim().to_string(),
+                memory_comment: self.memory_comment.trim().to_string(),
+            },
+            pins: PinLayout {
+                top: side(&self.pins[0]),
+                bottom: side(&self.pins[1]),
+                left: side(&self.pins[2]),
+                right: side(&self.pins[3]),
+            },
+            clock: self.clock.to_def(),
+            clock_limits: Default::default(),
+            clock_presets: Vec::new(),
+        }
+    }
+
+    /// Serialize the built definition to pretty RON (what gets written to disk).
+    pub fn to_ron(&self) -> Result<String, String> {
+        ron::ser::to_string_pretty(&self.to_definition(), ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("RON serialize error: {e}"))
+    }
+}
+
+/// Codegen-backed families (extend as backends land). Others load as data but
+/// warn — see [`McuForm::warnings`].
+const KNOWN_FAMILIES: &[&str] = &["stm32f1", "esp32c3", "stm32wba"];
+
+/// A valid registry id / file stem: non-empty, ASCII `a–z 0–9 _` only.
+pub fn is_valid_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Parse an ld-style number: hex (`0x…`), decimal, optional `K`/`M` suffix.
+/// `None` on anything else. (Mirrors the private helper in `crate::size`; kept
+/// here so the form has no dependency on that module.)
+pub fn parse_ld_number(tok: &str) -> Option<u64> {
+    let tok = tok.trim();
+    if tok.is_empty() {
+        return None;
+    }
+    let (body, mult) = match tok.chars().last() {
+        Some('K') | Some('k') => (&tok[..tok.len() - 1], 1024u64),
+        Some('M') | Some('m') => (&tok[..tok.len() - 1], 1024 * 1024),
+        _ => (tok, 1),
+    };
+    let body = body.trim();
+    let value = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()?
+    } else {
+        body.parse::<u64>().ok()?
+    };
+    Some(value * mult)
+}
+
+/// Fill one side with `count` sequential general-purpose pins named `prefix{n}`
+/// (e.g. `PA0…`), each offering GPIO in/out — a fast start for a fresh chip.
+pub fn gpio_bank(prefix: &str, start_number: usize, count: usize) -> Vec<PinRow> {
+    (0..count)
+        .map(|i| PinRow {
+            number: (start_number + i).to_string(),
+            name: format!("{prefix}{i}"),
+            reserved: false,
+            functions: "in out".to_string(),
+        })
+        .collect()
+}
+
+/// The function-token cheatsheet shown under the pin editor.
+pub const FUNCTION_TOKEN_HELP: &str = "in out · usart{n}_tx/rx/cts/rts/ck · \
+    spi{n}_nss/sck/miso/mosi · i2c{n}_scl/sda · adc{a}_{ch} · tim{t}_{ch} · \
+    swdio swclk · usb_dm usb_dp · can_rx can_tx · mco";
+
+/// Parse a space/comma-separated function token list into [`PinFunction`]s.
+/// Unrecognised tokens are skipped here (validation lists them separately).
+pub fn parse_functions(s: &str) -> Vec<PinFunction> {
+    s.split([' ', ',', '\t', '\n'])
+        .filter(|t| !t.is_empty())
+        .filter_map(token_to_function)
+        .collect()
+}
+
+/// Tokens that don't map to any [`PinFunction`] — surfaced as validation
+/// errors so a typo (`uart1_tx`) is caught before Save.
+pub fn unknown_function_tokens(s: &str) -> Vec<String> {
+    s.split([' ', ',', '\t', '\n'])
+        .filter(|t| !t.is_empty())
+        .filter(|t| token_to_function(t).is_none())
+        .map(str::to_string)
+        .collect()
+}
+
+/// One token → one [`PinFunction`]. Case-insensitive; the inverse of
+/// [`function_to_token`].
+fn token_to_function(tok: &str) -> Option<PinFunction> {
+    let t = tok.trim().to_ascii_lowercase();
+    // Fixed tokens first.
+    let simple = match t.as_str() {
+        "in" | "gpioinput" => Some(PinFunction::GpioInput),
+        "out" | "gpiooutput" => Some(PinFunction::GpioOutput),
+        "swdio" => Some(PinFunction::SwdIo),
+        "swclk" => Some(PinFunction::SwdClk),
+        "usb_dm" => Some(PinFunction::UsbDm),
+        "usb_dp" => Some(PinFunction::UsbDp),
+        "can_rx" => Some(PinFunction::CanRx),
+        "can_tx" => Some(PinFunction::CanTx),
+        "mco" => Some(PinFunction::Mco),
+        _ => None,
+    };
+    if simple.is_some() {
+        return simple;
+    }
+    // Parameterized `<peripheral><n>_<role>` and `<kind><a>_<b>`.
+    let (head, tail) = t.split_once('_')?;
+    // The instance number is the head's TRAILING digit run — NOT the first
+    // digit: `i2c1` has a `2` inside the peripheral word, so `usart1` → 1 and
+    // `i2c1` → 1 both need the suffix, not `find`.
+    let split = head.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let (word, n_str) = head.split_at(split);
+    let n: u8 = n_str.parse().ok()?;
+    match word {
+        "usart" => match tail {
+            "tx" => Some(PinFunction::UsartTx(n)),
+            "rx" => Some(PinFunction::UsartRx(n)),
+            "cts" => Some(PinFunction::UsartCts(n)),
+            "rts" => Some(PinFunction::UsartRts(n)),
+            "ck" => Some(PinFunction::UsartCk(n)),
+            _ => None,
+        },
+        "spi" => match tail {
+            "nss" => Some(PinFunction::SpiNss(n)),
+            "sck" => Some(PinFunction::SpiSck(n)),
+            "miso" => Some(PinFunction::SpiMiso(n)),
+            "mosi" => Some(PinFunction::SpiMosi(n)),
+            _ => None,
+        },
+        "i2c" => match tail {
+            "scl" => Some(PinFunction::I2cScl(n)),
+            "sda" => Some(PinFunction::I2cSda(n)),
+            _ => None,
+        },
+        // `adc1_5` → ADC1 channel 5; `tim2_1` → TIM2 CH1.
+        "adc" => tail.parse().ok().map(|ch| PinFunction::AdcChannel { adc: n, channel: ch }),
+        "tim" => tail.parse().ok().map(|ch| PinFunction::TimerPwm { timer: n, channel: ch }),
+        _ => None,
+    }
+}
+
+/// One [`PinFunction`] → its canonical token (inverse of [`token_to_function`]).
+fn function_to_token(f: &PinFunction) -> Option<String> {
+    Some(match f {
+        PinFunction::Unset => return None,
+        PinFunction::GpioInput => "in".into(),
+        PinFunction::GpioOutput => "out".into(),
+        PinFunction::SwdIo => "swdio".into(),
+        PinFunction::SwdClk => "swclk".into(),
+        PinFunction::UsbDm => "usb_dm".into(),
+        PinFunction::UsbDp => "usb_dp".into(),
+        PinFunction::CanRx => "can_rx".into(),
+        PinFunction::CanTx => "can_tx".into(),
+        PinFunction::Mco => "mco".into(),
+        PinFunction::UsartTx(n) => format!("usart{n}_tx"),
+        PinFunction::UsartRx(n) => format!("usart{n}_rx"),
+        PinFunction::UsartCts(n) => format!("usart{n}_cts"),
+        PinFunction::UsartRts(n) => format!("usart{n}_rts"),
+        PinFunction::UsartCk(n) => format!("usart{n}_ck"),
+        PinFunction::SpiNss(n) => format!("spi{n}_nss"),
+        PinFunction::SpiSck(n) => format!("spi{n}_sck"),
+        PinFunction::SpiMiso(n) => format!("spi{n}_miso"),
+        PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
+        PinFunction::I2cScl(n) => format!("i2c{n}_scl"),
+        PinFunction::I2cSda(n) => format!("i2c{n}_sda"),
+        PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_{channel}"),
+        PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_{channel}"),
+    })
+}
+
+/// Format a function list back into an editable token string (space-joined).
+pub fn functions_to_string(fns: &[PinFunction]) -> String {
+    fns.iter()
+        .filter_map(function_to_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::mcu_module::builtins::builtin_for;
+
+    #[test]
+    fn ld_number_parses_hex_dec_and_suffixes() {
+        assert_eq!(parse_ld_number("0x08000000"), Some(0x0800_0000));
+        assert_eq!(parse_ld_number("64K"), Some(64 * 1024));
+        assert_eq!(parse_ld_number("1M"), Some(1024 * 1024));
+        assert_eq!(parse_ld_number("131072"), Some(131072));
+        assert_eq!(parse_ld_number(""), None);
+        assert_eq!(parse_ld_number("garbage"), None);
+    }
+
+    #[test]
+    fn id_validation() {
+        assert!(is_valid_id("stm32f103rb"));
+        assert!(is_valid_id("esp32_c6"));
+        assert!(!is_valid_id(""));
+        assert!(!is_valid_id("STM32")); // uppercase
+        assert!(!is_valid_id("a b")); // space
+        assert!(!is_valid_id("a-b")); // dash
+    }
+
+    #[test]
+    fn blank_form_reports_the_missing_essentials() {
+        let f = McuForm::blank();
+        let errs = f.errors();
+        // id, display_name, probe_chip empty on a blank ARM form.
+        assert!(errs.iter().any(|e| e.contains("Id must")));
+        assert!(errs.iter().any(|e| e.contains("Display name")));
+        assert!(errs.iter().any(|e| e.contains("Probe chip")));
+    }
+
+    #[test]
+    fn a_minimal_valid_form_builds_and_round_trips() {
+        let mut f = McuForm::blank();
+        f.id = "stm32f103rb".into();
+        f.display_name = "STM32F103RB".into();
+        f.probe_chip = "STM32F103RB".into();
+        f.pins[2] = gpio_bank("PA", 1, 4);
+        assert!(f.errors().is_empty(), "{:?}", f.errors());
+
+        let def = f.to_definition();
+        assert_eq!(def.id, "stm32f103rb");
+        assert_eq!(def.pins.left.len(), 4);
+        assert_eq!(def.pins.left[0].name, "PA0");
+        // Builds into a runtime Mcu.
+        assert!(def.build_mcu().iter_all_pins().count() >= 4);
+
+        // The RON it writes parses back to an equal definition.
+        let ron = f.to_ron().unwrap();
+        let parsed: McuDefinition = ron::from_str(&ron).unwrap();
+        assert_eq!(parsed, def);
+    }
+
+    #[test]
+    fn duplicate_and_bad_pin_numbers_are_errors() {
+        let mut f = McuForm::blank();
+        f.id = "x".into();
+        f.display_name = "X".into();
+        f.probe_chip = "X".into();
+        f.pins[0] = vec![
+            PinRow { number: "1".into(), name: "PA0".into(), ..Default::default() },
+            PinRow { number: "1".into(), name: "PA1".into(), ..Default::default() },
+            PinRow { number: "abc".into(), name: "PA2".into(), ..Default::default() },
+        ];
+        let errs = f.errors();
+        assert!(errs.iter().any(|e| e.contains("used more than once")));
+        assert!(errs.iter().any(|e| e.contains("invalid number")));
+    }
+
+    #[test]
+    fn function_tokens_round_trip_and_reject_typos() {
+        let src = "in out usart1_tx spi2_sck i2c1_scl adc1_5 tim2_1 swdio usb_dp can_tx mco";
+        let fns = parse_functions(src);
+        assert_eq!(fns.len(), 11);
+        assert_eq!(fns[2], PinFunction::UsartTx(1));
+        assert_eq!(fns[5], PinFunction::AdcChannel { adc: 1, channel: 5 });
+        assert_eq!(fns[6], PinFunction::TimerPwm { timer: 2, channel: 1 });
+        // Round-trips through the canonical string form.
+        assert_eq!(parse_functions(&functions_to_string(&fns)), fns);
+        // Commas and case are accepted; a typo is reported, others still parse.
+        assert_eq!(parse_functions("IN, USART2_RX").len(), 2);
+        assert_eq!(unknown_function_tokens("in uart1_tx spi9_bad out"), vec!["uart1_tx", "spi9_bad"]);
+        // A bad token on a pin row surfaces as a validation error.
+        let mut f = McuForm::blank();
+        f.id = "x".into();
+        f.display_name = "X".into();
+        f.probe_chip = "X".into();
+        f.pins[0] = vec![PinRow {
+            number: "1".into(),
+            name: "PA0".into(),
+            reserved: false,
+            functions: "in wat".into(),
+        }];
+        assert!(f.errors().iter().any(|e| e.contains("unknown function token 'wat'")));
+    }
+
+    #[test]
+    fn esp_form_skips_memory_and_probe_requirements() {
+        let mut f = McuForm::blank();
+        f.id = "esp32c6".into();
+        f.display_name = "ESP32-C6".into();
+        f.family = "esp32c3".into(); // reuse the backed family for the test
+        f.toolchain = ToolchainKind::EspRust;
+        f.target = "riscv32imac-unknown-none-elf".into();
+        f.clock = ClockChoice::Esp32c3;
+        // No probe_chip, no memory — must still be valid for ESP.
+        f.probe_chip.clear();
+        f.flash_origin.clear();
+        assert!(f.errors().is_empty(), "{:?}", f.errors());
+    }
+
+    #[test]
+    fn from_definition_seeds_every_field() {
+        let def = builtin_for("stm32f103c8t6").unwrap();
+        let f = McuForm::from_definition(&def);
+        assert_eq!(f.id, def.id);
+        assert!(f.editing);
+        // Round-trip through the form preserves the definition (clock graphs
+        // collapse to their choice, but stm32f1 defaults reconstruct equal).
+        let rebuilt = f.to_definition();
+        assert_eq!(rebuilt.id, def.id);
+        assert_eq!(rebuilt.pins, def.pins);
+        assert_eq!(rebuilt.project, def.project);
+    }
+
+    #[test]
+    fn unknown_family_warns_but_does_not_block() {
+        let mut f = McuForm::blank();
+        f.id = "rp2040".into();
+        f.display_name = "RP2040".into();
+        f.probe_chip = "RP2040".into();
+        f.family = "rp2040".into();
+        assert!(f.errors().is_empty());
+        assert!(f.warnings().iter().any(|w| w.contains("no codegen backend")));
+    }
+}

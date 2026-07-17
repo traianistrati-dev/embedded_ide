@@ -24,6 +24,7 @@ pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
 mod dialogs;
+mod mcu_form_dialog;
 
 mod diag_panel;
 
@@ -734,6 +735,9 @@ pub struct AppIde {
     /// Last "Import MCU…" result message shown in the New Project popup
     /// (`✔ …` on success, `✗ …` on failure). Cleared when the popup closes.
     mcu_import_status: Option<String>,
+    /// `Some` while the "New MCU definition" form is open (the editable chip
+    /// authoring dialog — see `app::mcu_form_dialog`). Session-only.
+    mcu_form: Option<crate::panels::mcu_module::mcu_form::McuForm>,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -987,6 +991,7 @@ impl AppIde {
             confirm_new_project: false,
             pending_mcu_id: None,
             mcu_import_status: None,
+            mcu_form: None,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -1938,6 +1943,7 @@ impl eframe::App for AppIde {
         // tree at the target folder — see `project_tree::gui::inline_new_item`.)
         self.show_new_project_dialog(ui, &mut save_project_needed);
         self.show_rename_project_dialog(ui);
+        self.show_mcu_form_dialog(ui);
 
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).
