@@ -231,7 +231,7 @@ pub fn show_matrix(
                      values always glow).\n\
                      N = tint ONLY cells that GREW ≥ N% since the previous \
                      frame: faint at the threshold, red at 4× it. Growth from \
-                     0 counts as a full hit; decreases stay dark.",
+                     0 counts as a full hit; decreases stay dark. max value = 1000000",
                 );
         });
 

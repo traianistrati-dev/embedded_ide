@@ -25,6 +25,7 @@ impl AppIde {
         };
         let mut keep_open = true;
         let mut do_save = false;
+        let mut want_open_import = false;
 
         egui::Window::new(if form.editing {
             "Edit MCU definition"
@@ -43,6 +44,30 @@ impl AppIde {
             egui::ScrollArea::vertical()
                 .max_height(ui.ctx().screen_rect().height() * 0.62)
                 .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!(
+                                    "{} Import from datasheet (AI)…",
+                                    ph::SPARKLE
+                                ))
+                                .color(egui::Color32::from_rgb(150, 200, 255)),
+                            )
+                            .on_hover_text(
+                                "Paste a datasheet pin table and let Claude fill this form",
+                            )
+                            .clicked()
+                        {
+                            want_open_import = true;
+                        }
+                        ui.label(
+                            egui::RichText::new("fills the fields below for you to review")
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                    });
+                    ui.add_space(4.0);
+
                     section(ui, "Identity");
                     egui::Grid::new("mcu_form_identity")
                         .num_columns(2)
@@ -259,7 +284,16 @@ impl AppIde {
 
         // Keep the (mutated) form unless it was closed / saved.
         if keep_open {
+            // Open / render the AI import sub-dialog while we still hold the
+            // form mutably (a finished extraction patches it in place).
+            if want_open_import && self.datasheet_import.is_none() {
+                self.open_datasheet_import(&form);
+            }
+            self.show_datasheet_import(ui, &mut form);
             self.mcu_form = Some(form);
+        } else {
+            // The form closed — close its import sub-dialog too.
+            self.datasheet_import = None;
         }
     }
 }
@@ -299,6 +333,14 @@ fn pin_side_editor(ui: &mut egui::Ui, side: usize, name: &str, rows: &mut Vec<Pi
             let mut remove: Option<usize> = None;
             for (i, row) in rows.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
+                    if row.imported {
+                        ui.label(
+                            egui::RichText::new(ph::SPARKLE)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(150, 200, 255)),
+                        )
+                        .on_hover_text("Imported by AI — review this pin");
+                    }
                     ui.add(
                         egui::TextEdit::singleline(&mut row.number)
                             .desired_width(34.0)

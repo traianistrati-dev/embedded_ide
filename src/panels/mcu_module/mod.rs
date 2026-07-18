@@ -2,6 +2,7 @@ pub mod builtins;
 pub mod clock;
 pub mod codegen;
 pub mod codegen_esp;
+pub mod datasheet_import;
 pub mod mcu;
 pub mod mcu_catalog;
 pub mod mcu_config;

@@ -25,6 +25,7 @@ use helpers::apply_dark_theme;
 
 mod dialogs;
 mod mcu_form_dialog;
+mod datasheet_import_dialog;
 
 mod diag_panel;
 
@@ -738,6 +739,9 @@ pub struct AppIde {
     /// `Some` while the "New MCU definition" form is open (the editable chip
     /// authoring dialog — see `app::mcu_form_dialog`). Session-only.
     mcu_form: Option<crate::panels::mcu_module::mcu_form::McuForm>,
+    /// `Some` while the "Import from datasheet (AI)" sub-dialog of the MCU form
+    /// is open (see `app::datasheet_import_dialog`). Session-only.
+    datasheet_import: Option<datasheet_import_dialog::DatasheetImport>,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -992,6 +996,7 @@ impl AppIde {
             pending_mcu_id: None,
             mcu_import_status: None,
             mcu_form: None,
+            datasheet_import: None,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),

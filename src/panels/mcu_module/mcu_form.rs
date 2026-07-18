@@ -30,6 +30,10 @@ pub struct PinRow {
     pub name: String,
     pub reserved: bool,
     pub functions: String,
+    /// UI-only provenance flag: `true` for a row that an AI datasheet import
+    /// created, so the pin editor can tag it as "review me". Never persisted
+    /// (dropped by [`McuForm::to_definition`]).
+    pub imported: bool,
 }
 
 /// The clock model offered by the form. A full graph editor is out of scope,
@@ -161,6 +165,7 @@ impl McuForm {
                     name: d.name.clone(),
                     reserved: d.reserved,
                     functions: functions_to_string(&d.functions),
+                    imported: false,
                 })
                 .collect()
         };
@@ -393,6 +398,7 @@ pub fn gpio_bank(prefix: &str, start_number: usize, count: usize) -> Vec<PinRow>
             name: format!("{prefix}{i}"),
             reserved: false,
             functions: "in out".to_string(),
+            imported: false,
         })
         .collect()
 }
@@ -610,6 +616,7 @@ mod tests {
             name: "PA0".into(),
             reserved: false,
             functions: "in wat".into(),
+            imported: false,
         }];
         assert!(f.errors().iter().any(|e| e.contains("unknown function token 'wat'")));
     }
