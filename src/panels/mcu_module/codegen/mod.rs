@@ -9,6 +9,7 @@
 
 pub mod common;
 pub mod embassy_common;
+pub mod f4;
 pub mod family;
 pub mod stm32;
 pub mod wba;

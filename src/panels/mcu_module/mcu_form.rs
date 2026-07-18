@@ -47,14 +47,17 @@ pub enum ClockChoice {
     Esp32c3,
     /// STM32WBA tree (data-driven graph — ships the 100 MHz PLL preset).
     Stm32wba,
+    /// STM32F4 tree (data-driven graph — ships the 100 MHz HSI→PLL preset).
+    Stm32f4,
 }
 
 impl ClockChoice {
-    pub const ALL: [ClockChoice; 4] = [
+    pub const ALL: [ClockChoice; 5] = [
         ClockChoice::None,
         ClockChoice::Stm32f1,
         ClockChoice::Esp32c3,
         ClockChoice::Stm32wba,
+        ClockChoice::Stm32f4,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -62,11 +65,12 @@ impl ClockChoice {
             ClockChoice::Stm32f1 => "STM32F1 tree",
             ClockChoice::Esp32c3 => "ESP32-C3 tree",
             ClockChoice::Stm32wba => "STM32WBA tree",
+            ClockChoice::Stm32f4 => "STM32F4 tree",
         }
     }
     fn to_def(self) -> ClockDef {
         use crate::panels::mcu_module::clock::graph::{
-            stm32wba_graph, stm32wba_layout, GraphClock,
+            stm32f4_graph, stm32f4_layout, stm32wba_graph, stm32wba_layout, GraphClock,
         };
         match self {
             ClockChoice::None => ClockDef::None,
@@ -76,14 +80,19 @@ impl ClockChoice {
                 graph: stm32wba_graph(),
                 layout: stm32wba_layout(),
             }),
+            ClockChoice::Stm32f4 => ClockDef::Graph(GraphClock {
+                graph: stm32f4_graph(),
+                layout: stm32f4_layout(),
+            }),
         }
     }
     fn from_def(d: &ClockDef) -> ClockChoice {
-        use crate::panels::mcu_module::clock::graph::is_wba_graph;
+        use crate::panels::mcu_module::clock::graph::{is_f4_graph, is_wba_graph};
         match d {
             ClockDef::Stm32f1(_) => ClockChoice::Stm32f1,
             ClockDef::Esp32c3 => ClockChoice::Esp32c3,
             ClockDef::Graph(gc) if is_wba_graph(&gc.graph) => ClockChoice::Stm32wba,
+            ClockDef::Graph(gc) if is_f4_graph(&gc.graph) => ClockChoice::Stm32f4,
             // A foreign graph maps to None here but is PRESERVED via
             // `McuForm::imported_clock`; plain none stays none.
             ClockDef::Graph(_) | ClockDef::None => ClockChoice::None,
@@ -337,11 +346,15 @@ impl McuForm {
                 (Some(g), ClockChoice::None) => g.clone(),
                 _ => self.clock.to_def(),
             },
-            // WBA ships its own ceilings (100 MHz across the board) — the
-            // F103 defaults would flag the 100 MHz preset as over-limit.
+            // Each graph family ships its own ceilings so its preset isn't
+            // flagged against the F103 defaults. (F4's real per-chip ceiling is
+            // set by the XML converter; this is the F411-class default.)
             clock_limits: match self.clock {
                 ClockChoice::Stm32wba => {
                     crate::panels::mcu_module::clock::graph::stm32wba_limits()
+                }
+                ClockChoice::Stm32f4 => {
+                    crate::panels::mcu_module::clock::graph::stm32f4_limits_default()
                 }
                 _ => Default::default(),
             },

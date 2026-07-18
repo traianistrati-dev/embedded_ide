@@ -327,7 +327,30 @@ fn clock_for_family(family: &str) -> ClockChoice {
     match family {
         "stm32f1" => ClockChoice::Stm32f1,
         "stm32wba" => ClockChoice::Stm32wba,
+        "stm32f4" => ClockChoice::Stm32f4,
         _ => ClockChoice::None,
+    }
+}
+
+/// Per-chip F4 clock ceilings (embassy's `max` table): SYSCLK varies by model
+/// and the two PCLK ceilings follow the chip's bus-split rule. Applied by the
+/// import handler over the form's F411-class default.
+pub fn f4_limits_for_chip(id: &str) -> crate::panels::mcu_module::clock::model::ClockLimits {
+    use crate::panels::mcu_module::clock::graph::stm32f4_limits;
+    let m = 1_000_000;
+    // `id` is the slug, e.g. "stm32f411re" → model "f411".
+    let model = id.get(5..9).unwrap_or("");
+    let (sysclk, high_split) = match model {
+        "f401" => (84 * m, false),
+        "f405" | "f407" | "f415" | "f417" => (168 * m, true),
+        "f427" | "f429" | "f437" | "f439" | "f446" | "f469" | "f479" => (180 * m, true),
+        // f410/f411/f412/f413/f423 and any unrecognised F4 → the 100 MHz class.
+        _ => (100 * m, false),
+    };
+    if high_split {
+        stm32f4_limits(sysclk, sysclk / 4, sysclk / 2) // PCLK1 = HCLK/4, PCLK2 = HCLK/2
+    } else {
+        stm32f4_limits(sysclk, sysclk / 2, sysclk) // PCLK1 = HCLK/2, PCLK2 = HCLK
     }
 }
 

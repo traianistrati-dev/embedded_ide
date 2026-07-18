@@ -40,7 +40,12 @@ impl AppIde {
                                 .get_or_insert(format!("{}: {}", chip.form.display_name, errs[0]));
                             continue;
                         }
-                        let def = chip.form.to_definition();
+                        let mut def = chip.form.to_definition();
+                        // F4's real ceiling is per-chip (F401 84 … F429 180) —
+                        // override the form's F411-class default.
+                        if def.family == "stm32f4" {
+                            def.clock_limits = stm32_pin_data::f4_limits_for_chip(&def.id);
+                        }
                         match registry::save_definition(&def) {
                             Ok(_) => {
                                 last_id = Some(def.id.clone());
