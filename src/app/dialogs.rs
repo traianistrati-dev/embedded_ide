@@ -6,11 +6,87 @@
 //! (writing the whole project to disk when the tree changed).
 
 use super::{AppIde, McuTab, ProjectFileId};
-use crate::panels::mcu_module::{codegen, registry};
+use crate::panels::mcu_module::{codegen, registry, stm32_pin_data};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
 impl AppIde {
+    /// Bulk-convert STM32 open-pin-data XML file(s) into `.ron` definitions in
+    /// the user `mcus/` folder (Phase 3). A range file (`STM32F103C(8-B)Tx`)
+    /// expands into several chips; only variants whose form validates are
+    /// saved. Result summary lands in `mcu_import_status`.
+    fn import_stm32_pin_data(&mut self, paths: &[std::path::PathBuf]) {
+        let mut saved = 0usize;
+        let mut skipped = 0usize;
+        let mut last_id: Option<String> = None;
+        let mut first_err: Option<String> = None;
+
+        for path in paths {
+            let xml = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    skipped += 1;
+                    first_err.get_or_insert(format!("{}: {e}", path.display()));
+                    continue;
+                }
+            };
+            match stm32_pin_data::convert_xml(&xml) {
+                Ok(chips) => {
+                    for chip in chips {
+                        let errs = chip.form.errors();
+                        if !errs.is_empty() {
+                            skipped += 1;
+                            first_err
+                                .get_or_insert(format!("{}: {}", chip.form.display_name, errs[0]));
+                            continue;
+                        }
+                        let def = chip.form.to_definition();
+                        match registry::save_definition(&def) {
+                            Ok(_) => {
+                                last_id = Some(def.id.clone());
+                                registry::merge_def(&mut self.mcu_registry, def);
+                                saved += 1;
+                            }
+                            Err(e) => {
+                                skipped += 1;
+                                first_err.get_or_insert(e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    skipped += 1;
+                    first_err.get_or_insert(format!("{}: {e}", path.display()));
+                }
+            }
+        }
+
+        // Select the last chip added, so it's ready in the chip list.
+        if let Some(id) = last_id {
+            self.pending_mcu_id = Some(id);
+        }
+        self.mcu_import_status = Some(if saved > 0 {
+            let mut msg = format!(
+                "{}  Imported {saved} chip(s) from {} file(s)",
+                ph::CHECK,
+                paths.len()
+            );
+            if skipped > 0 {
+                msg.push_str(&format!("; {skipped} skipped"));
+                if let Some(e) = first_err {
+                    msg.push_str(&format!(" ({e})"));
+                }
+            }
+            msg
+        } else {
+            format!(
+                "{}  No chips imported{}",
+                ph::WARNING,
+                first_err.map(|e| format!(": {e}")).unwrap_or_default()
+            )
+        });
+    }
+
     /// "New Project" confirmation modal — picks a chip and clears all user files.
     /// The "Rename Project" dialog (opened from the Project panel's Tools
     /// menu). Renames the project FOLDER on disk — see
@@ -186,6 +262,26 @@ impl AppIde {
                                     self.mcu_import_status = Some(format!("{}  {e}", ph::WARNING));
                                 }
                             }
+                        }
+                    }
+
+                    // ── Import STM32 open-pin-data XML (bulk vendor data) ──
+                    if ui
+                        .button(
+                            egui::RichText::new(format!("{} STM32 XML…", ph::FILE_CODE)).size(12.0),
+                        )
+                        .on_hover_text(
+                            "Bulk-import chips from STMicroelectronics STM32_open_pin_data \
+                             XML (mcu/*.xml). One file may add several flash variants.",
+                        )
+                        .clicked()
+                    {
+                        if let Some(paths) = rfd::FileDialog::new()
+                            .add_filter("STM32 pin-data XML", &["xml"])
+                            .set_title("Import STM32 open-pin-data XML")
+                            .pick_files()
+                        {
+                            self.import_stm32_pin_data(&paths);
                         }
                     }
 

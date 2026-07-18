@@ -14,6 +14,7 @@ pub mod modules;
 pub mod pins;
 pub mod project_gen;
 pub mod registry;
+pub mod stm32_pin_data;
 
 // ── Core types re-exports (convenience imports) ──────────────────
 pub use pins::logic::{
