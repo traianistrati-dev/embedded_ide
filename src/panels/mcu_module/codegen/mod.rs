@@ -8,6 +8,7 @@
 //! - unknown families (e.g. STM8) → no generated code yet.
 
 pub mod common;
+pub mod embassy_common;
 pub mod family;
 pub mod stm32;
 pub mod wba;

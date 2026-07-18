@@ -109,7 +109,6 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
     let clock = clock_for_family(&family);
     let target = core_to_target(&core).to_string();
     let cpu = core.trim_start_matches("Arm ").trim().to_string();
-    let hal_dep = hal_dep_for(&family, &line);
 
     let mut base_warnings = Vec::new();
     if skipped_positions > 0 {
@@ -140,7 +139,7 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
         form.ram_origin = "0x20000000".into();
         form.ram_size = ram_k.map(|k| format!("{k}K")).unwrap_or_default();
         form.probe_chip = name.clone();
-        form.hal_dep = hal_dep.clone();
+        form.hal_dep = hal_dep_for(&family, &line, &name);
         form.memory_comment = format!("Imported from STM32 open-pin-data ({ref_name})");
         form.clock = clock;
         form.pins = [
@@ -332,15 +331,36 @@ fn clock_for_family(family: &str) -> ClockChoice {
     }
 }
 
-/// A best-effort HAL dependency line. Only STM32F1 has a verified crate today;
-/// other families get a TODO the user completes (Cargo.toml stays editable).
-fn hal_dep_for(family: &str, line: &str) -> String {
-    match family {
-        "stm32f1" => format!(
-            "stm32f1xx-hal = {{ version = \"0.10.0\", features = [\"{}\", \"rt\"] }}",
+/// The HAL dependency line. STM32F1 keeps its dedicated `stm32f1xx-hal`; every
+/// other STM32 family uses `embassy-stm32` (the generic embassy backend) with
+/// the per-chip feature; non-STM32 families get a TODO (Cargo.toml is editable).
+fn hal_dep_for(family: &str, line: &str, name: &str) -> String {
+    if family == "stm32f1" {
+        return format!(
+            "stm32f1xx-hal = {{ version = \"0.10\", features = [\"{}\", \"rt\"] }}",
             line.to_ascii_lowercase()
-        ),
-        _ => format!("# TODO: add the HAL / PAC dependency for family {family}"),
+        );
+    }
+    if family.starts_with("stm32") {
+        // Generic embassy backend. The chip feature is just the part number —
+        // verified to compile with only `features = ["<chip>"]`.
+        return format!(
+            "embassy-stm32 = {{ version = \"0.4\", features = [\"{}\"] }}",
+            embassy_chip_feature(name)
+        );
+    }
+    format!("# TODO: add the HAL / PAC dependency for family {family}")
+}
+
+/// The embassy-stm32 chip feature for a concrete part: the part number without
+/// the trailing package + temperature code (open-pin-data names end in a
+/// `<PackageLetter>x` pair — `STM32F411RETx` → `stm32f411re`).
+fn embassy_chip_feature(name: &str) -> String {
+    let slug = slugify(name);
+    if slug.len() > 2 && slug.ends_with('x') {
+        slug[..slug.len() - 2].to_string()
+    } else {
+        slug
     }
 }
 
@@ -492,6 +512,20 @@ mod tests {
         assert_eq!(core_to_target("Arm Cortex-M33"), "thumbv8m.main-none-eabihf");
         assert_eq!(core_to_target("Arm Cortex-M0+"), "thumbv6m-none-eabi");
         assert_eq!(expand_variants("STM32F103CBTx"), vec![("STM32F103CBTx".to_string(), 0)]);
+        assert_eq!(embassy_chip_feature("STM32F411RETx"), "stm32f411re");
+        assert_eq!(embassy_chip_feature("STM32G0B1RETx"), "stm32g0b1re");
+    }
+
+    #[test]
+    fn hal_dep_picks_the_right_crate_per_family() {
+        // F1 keeps stm32f1xx-hal; the F103 fixture proves it end-to-end.
+        assert!(convert_xml(F103).unwrap()[0].form.hal_dep.contains("stm32f1xx-hal"));
+        // Any other STM32 family → embassy-stm32 with the chip feature.
+        let g0 = hal_dep_for("stm32g0", "STM32G0B1", "STM32G0B1RETx");
+        assert!(g0.contains("embassy-stm32"), "{g0}");
+        assert!(g0.contains("\"stm32g0b1re\""), "{g0}");
+        // Non-STM32 falls back to a TODO the user completes.
+        assert!(hal_dep_for("rp2040", "", "RP2040").contains("TODO"));
     }
 
     #[test]

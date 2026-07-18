@@ -273,7 +273,9 @@ impl McuForm {
     /// Non-blocking advisories (shown amber; do not prevent Save).
     pub fn warnings(&self) -> Vec<String> {
         let mut w = Vec::new();
-        if !KNOWN_FAMILIES.contains(&self.family.trim()) {
+        // Warn exactly when no codegen backend claims this family — so a family
+        // handled by the generic STM32 (embassy) backend never flags.
+        if crate::panels::mcu_module::codegen::family::backend_for(self.family.trim()).is_none() {
             w.push(format!(
                 "Family '{}' has no codegen backend yet — the chip loads and its \
                  pins/clock show, but configuring a peripheral won't generate init \
@@ -354,9 +356,6 @@ impl McuForm {
     }
 }
 
-/// Codegen-backed families (extend as backends land). Others load as data but
-/// warn — see [`McuForm::warnings`].
-const KNOWN_FAMILIES: &[&str] = &["stm32f1", "esp32c3", "stm32wba"];
 
 /// A valid registry id / file stem: non-empty, ASCII `a–z 0–9 _` only.
 pub fn is_valid_id(id: &str) -> bool {
