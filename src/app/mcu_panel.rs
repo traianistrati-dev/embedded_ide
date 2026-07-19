@@ -171,36 +171,56 @@ impl AppIde {
                                         .size(12.0)
                                         .color(egui::Color32::from_rgb(150, 150, 160)),
                                 );
-                                for (kind, hover) in [
-                                    (
-                                        ModuleKind::GenericInterfaceUsart,
-                                        "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
-                                    ),
-                                    (
-                                        ModuleKind::GenericInterfaceSpi,
-                                        "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
-                                    ),
-                                    (
-                                        ModuleKind::GenericInterfaceI2c,
-                                        "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
-                                    ),
-                                    (
-                                        ModuleKind::GenericInterfaceCan,
-                                        "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
-                                    ),
-                                    (
-                                        ModuleKind::GenericInterfaceUsb,
-                                        "Add a virtual USB device and auto-wire it to the USB D-/D+ pins (PA11/PA12)",
-                                    ),
-                                ] {
+                                // Only the kinds THIS chip's pins can host are
+                                // offered (derived from the pins, so a new chip
+                                // needs no per-family list). A supported-but-
+                                // exhausted kind stays visible but disabled with
+                                // the reason — a button that silently vanishes
+                                // is more confusing than one that explains.
+                                let mut any_supported = false;
+                                for kind in ModuleKind::ALL {
+                                    if !mcu.supports_module(kind) {
+                                        continue; // this chip has no such pins
+                                    }
+                                    any_supported = true;
+                                    let can_add = mcu.can_add_module(kind);
+                                    let hover = match kind {
+                                        ModuleKind::GenericInterfaceUsart => "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
+                                        ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
+                                        ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                        ModuleKind::GenericInterfaceCan => "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
+                                        ModuleKind::GenericInterfaceUsb => "Add a virtual USB device and auto-wire it to the USB D-/D+ pins",
+                                    };
                                     if ui
-                                        .button(format!("{} {}", ph::PLUS, kind.short()))
+                                        .add_enabled(
+                                            can_add,
+                                            egui::Button::new(format!(
+                                                "{} {}",
+                                                ph::PLUS,
+                                                kind.short()
+                                            )),
+                                        )
                                         .on_hover_text(hover)
+                                        .on_disabled_hover_text(if kind.is_single_instance() {
+                                            "this chip has only one such peripheral and it's already used"
+                                        } else {
+                                            "every instance of this peripheral is already wired to a module — remove one to free it"
+                                        })
                                         .clicked()
                                         && mcu.add_module(kind)
                                     {
                                         modules_changed = true;
                                     }
+                                }
+                                if !any_supported {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "this chip's pins offer no USART / SPI / I2C / CAN / USB interface",
+                                        )
+                                        .size(11.0)
+                                        .italics()
+                                        .color(egui::Color32::from_gray(130)),
+                                    );
                                 }
                             });
 

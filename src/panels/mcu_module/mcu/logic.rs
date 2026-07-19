@@ -89,6 +89,47 @@ impl Mcu {
 
     // ── Virtual modules ───────────────────────────────────────────────────────
 
+    /// Does this CHIP have the pins to host `kind` at all? A dry run of the
+    /// real auto-wiring against a pristine chip (nothing wired yet), so it
+    /// answers with exactly the logic [`add_module`](Self::add_module) uses —
+    /// including the subtle part, that one peripheral INSTANCE must offer all
+    /// the required signals (it isn't enough that some pin can TX and some
+    /// unrelated pin can RX).
+    ///
+    /// Static: independent of what's currently wired. Use it to hide kinds the
+    /// chip simply doesn't have.
+    pub fn supports_module(&self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
+        use crate::panels::mcu_module::modules::autowire;
+        let (required, optional) = kind.signals();
+        autowire::pick_pins(self, &Default::default(), &Default::default(), required, optional)
+            .is_some()
+    }
+
+    /// Could another `kind` be added RIGHT NOW — i.e. are there still free pins
+    /// and a free instance? Dynamic: changes as modules/pins are edited. A kind
+    /// that is [`supports_module`](Self::supports_module) but not this is
+    /// *exhausted*, which the palette shows disabled-with-a-reason rather than
+    /// hiding (a button that silently vanishes is worse than one that explains).
+    pub fn can_add_module(&self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
+        use crate::panels::mcu_module::modules::autowire;
+        if kind.is_single_instance() && self.modules.iter().any(|m| m.kind == kind) {
+            return false;
+        }
+        let (required, optional) = kind.signals();
+        let used: std::collections::HashSet<usize> = self
+            .modules
+            .iter()
+            .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
+            .collect();
+        let used_instances: std::collections::HashSet<u8> = self
+            .modules
+            .iter()
+            .filter(|m| m.kind == kind)
+            .map(|m| m.instance())
+            .collect();
+        autowire::pick_pins(self, &used, &used_instances, required, optional).is_some()
+    }
+
     /// Add a virtual module (GI_USART / GI_SPI / GI_I2C) and auto-wire it to
     /// compatible MCU pins, setting those pins' functions. Returns `false` (and
     /// adds nothing) when the chip has no free pins for the module's interface.
@@ -96,27 +137,16 @@ impl Mcu {
         &mut self,
         kind: crate::panels::mcu_module::modules::ModuleKind,
     ) -> bool {
-        use crate::panels::mcu_module::modules::ModuleSignal::*;
-        use crate::panels::mcu_module::modules::{autowire, ModuleKind};
+        use crate::panels::mcu_module::modules::autowire;
 
-        // CAN and USB are single-instance on STM32F1 and their pin functions
-        // carry no index, so the instance-exclusion guard below can't stop a 2nd
-        // module from grabbing the alternate pins — refuse it here.
-        let single_instance = matches!(
-            kind,
-            ModuleKind::GenericInterfaceCan | ModuleKind::GenericInterfaceUsb
-        );
-        if single_instance && self.modules.iter().any(|m| m.kind == kind) {
+        // CAN and USB are single-instance and their pin functions carry no
+        // index, so the instance-exclusion guard below can't stop a 2nd module
+        // from grabbing the alternate pins — refuse it here.
+        if kind.is_single_instance() && self.modules.iter().any(|m| m.kind == kind) {
             return false;
         }
 
-        let (required, optional): (&[_], &[_]) = match kind {
-            ModuleKind::GenericInterfaceUsart => (&[Tx, Rx][..], &[][..]),
-            ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso][..], &[Nss][..]),
-            ModuleKind::GenericInterfaceI2c => (&[Scl, Sda][..], &[][..]),
-            ModuleKind::GenericInterfaceCan => (&[CanRx, CanTx][..], &[][..]),
-            ModuleKind::GenericInterfaceUsb => (&[UsbDm, UsbDp][..], &[][..]),
-        };
+        let (required, optional) = kind.signals();
 
         // Pins already wired to an existing module are off-limits.
         let used: std::collections::HashSet<usize> = self
@@ -434,5 +464,98 @@ impl Mcu {
     /// Finds a pin by number (mutable)
     pub fn find_pin_mut(&mut self, number: usize) -> Option<&mut Pin> {
         self.iter_all_pins_mut().find(|p| p.number == number)
+    }
+}
+
+#[cfg(test)]
+mod module_support_tests {
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+    use crate::panels::mcu_module::{create_esp32c3, create_stm32f103c8tx};
+
+    /// Both bundled chips genuinely expose all five interfaces, so a fresh
+    /// palette offers everything.
+    #[test]
+    fn bundled_chips_support_every_kind() {
+        for mcu in [create_stm32f103c8tx(), create_esp32c3()] {
+            for kind in ModuleKind::ALL {
+                assert!(
+                    mcu.supports_module(kind),
+                    "{} should host {}",
+                    mcu.name,
+                    kind.short()
+                );
+            }
+        }
+    }
+
+    /// Support is derived from the PINS: strip a peripheral's pins and its kind
+    /// disappears from the palette — no per-family list to maintain.
+    #[test]
+    fn a_chip_without_the_pins_does_not_offer_the_kind() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.supports_module(ModuleKind::GenericInterfaceUsb));
+        for p in mcu.iter_all_pins_mut() {
+            p.available_functions
+                .retain(|f| !matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
+        }
+        assert!(
+            !mcu.supports_module(ModuleKind::GenericInterfaceUsb),
+            "no USB pins → the kind is hidden"
+        );
+        // Untouched peripherals still show.
+        assert!(mcu.supports_module(ModuleKind::GenericInterfaceUsart));
+        assert!(mcu.supports_module(ModuleKind::GenericInterfaceI2c));
+    }
+
+    /// The subtle part the dry-run buys us: ONE peripheral instance must offer
+    /// every required signal — it is NOT enough that some pin can TX and some
+    /// unrelated pin can RX.
+    #[test]
+    fn required_signals_must_come_from_the_same_instance() {
+        let mut mcu = create_stm32f103c8tx();
+        for p in mcu.iter_all_pins_mut() {
+            p.available_functions.retain(|f| match f {
+                PinFunction::UsartTx(n) => *n == 1, // TX only on USART1
+                PinFunction::UsartRx(n) => *n == 2, // RX only on USART2
+                _ => true,
+            });
+        }
+        assert!(
+            !mcu.supports_module(ModuleKind::GenericInterfaceUsart),
+            "TX on USART1 + RX on USART2 is not a usable pair"
+        );
+    }
+
+    /// Exhausting a kind must flip only AVAILABILITY — it stays supported, so
+    /// the palette keeps the button visible (disabled + reason) instead of
+    /// silently dropping it.
+    #[test]
+    fn exhausting_a_kind_keeps_it_supported_but_unavailable() {
+        let mut mcu = create_stm32f103c8tx();
+        let kind = ModuleKind::GenericInterfaceUsb; // single-instance
+        assert!(mcu.supports_module(kind) && mcu.can_add_module(kind));
+        assert!(mcu.add_module(kind));
+        assert!(mcu.supports_module(kind), "the chip still has the pins");
+        assert!(!mcu.can_add_module(kind), "but none are free any more");
+    }
+
+    /// The palette can never lie: whatever `can_add_module` promises,
+    /// `add_module` delivers — driven to exhaustion across every kind.
+    #[test]
+    fn can_add_module_always_agrees_with_add_module() {
+        let mut mcu = create_stm32f103c8tx();
+        for _ in 0..12 {
+            for kind in ModuleKind::ALL {
+                let promised = mcu.can_add_module(kind);
+                let actual = mcu.add_module(kind);
+                assert_eq!(
+                    promised,
+                    actual,
+                    "{}: palette promised {promised} but add_module returned {actual}",
+                    kind.short()
+                );
+            }
+        }
     }
 }

@@ -23,6 +23,40 @@ pub enum ModuleKind {
 }
 
 impl ModuleKind {
+    /// Every kind, in palette order.
+    pub const ALL: [ModuleKind; 5] = [
+        ModuleKind::GenericInterfaceUsart,
+        ModuleKind::GenericInterfaceSpi,
+        ModuleKind::GenericInterfaceI2c,
+        ModuleKind::GenericInterfaceCan,
+        ModuleKind::GenericInterfaceUsb,
+    ];
+
+    /// The `(required, optional)` signals this kind needs to auto-wire.
+    /// Single source of truth: `Mcu::add_module` wires from it, and the palette
+    /// asks the SAME table whether a chip can host the kind — so what the UI
+    /// offers can never drift from what actually succeeds.
+    pub fn signals(self) -> (&'static [ModuleSignal], &'static [ModuleSignal]) {
+        use ModuleSignal::*;
+        match self {
+            ModuleKind::GenericInterfaceUsart => (&[Tx, Rx], &[]),
+            ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso], &[Nss]),
+            ModuleKind::GenericInterfaceI2c => (&[Scl, Sda], &[]),
+            ModuleKind::GenericInterfaceCan => (&[CanRx, CanTx], &[]),
+            ModuleKind::GenericInterfaceUsb => (&[UsbDm, UsbDp], &[]),
+        }
+    }
+
+    /// `true` for peripherals that exist only once on the chip and whose pin
+    /// functions carry no instance index, so the per-instance guard can't stop
+    /// a second module from grabbing the alternate pins.
+    pub fn is_single_instance(self) -> bool {
+        matches!(
+            self,
+            ModuleKind::GenericInterfaceCan | ModuleKind::GenericInterfaceUsb
+        )
+    }
+
     /// Short tag used in the palette and as the default module name prefix.
     pub fn short(self) -> &'static str {
         match self {
