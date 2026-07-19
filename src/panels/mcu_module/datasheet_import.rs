@@ -172,6 +172,9 @@ pub fn build_prompt(family_hint: &str, package: &str) -> String {
          letter+digit code.\n\
          - Power / ground / NC / reset / oscillator pins: reserved=true, \
          \"signals\": [].\n\
+         - IGNORE the exposed thermal pad — it is drawn INSIDE the package \
+         outline (labelled \"exposed pad VSS\", \"EPAD\" or \"thermal pad\"), \
+         has no pin number, and is NOT part of the pin list.\n\
          - Never invent pins or signals; include only what the text actually \
          shows.\n\
          - Output the JSON object only.{hint}"
@@ -417,8 +420,15 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     // become generic `af:<name>` tokens, collected here (deduped) so the review
     // report can say which ones carry no native driver support.
     let mut generic: std::collections::BTreeSet<String> = Default::default();
+    let mut exposed_pads = 0usize;
     let mut rows: Vec<PinRow> = Vec::new();
     for p in &chip.pins {
+        // The exposed thermal pad ("exposed pad VSS") is drawn inside the
+        // package outline and has no pin number — never a pin.
+        if stm32_pin_data::is_exposed_pad(&p.name) {
+            exposed_pads += 1;
+            continue;
+        }
         let name = p.name.trim().to_string();
         let number = p.number.trim().to_string();
         let mut tokens: Vec<String> = Vec::new();
@@ -447,6 +457,13 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
         });
     }
     r.pins_added = rows.len();
+    if exposed_pads > 0 {
+        r.raw_notes.push(format!(
+            "Skipped {exposed_pads} exposed thermal-pad entr{} — it has no pin number and is \
+             not part of the pinout.",
+            if exposed_pads == 1 { "y" } else { "ies" }
+        ));
+    }
     if !generic.is_empty() {
         const MAX_LISTED: usize = 24;
         let total = generic.len();
@@ -650,6 +667,48 @@ fn save_cached(key: &str, model_text: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, model_text);
+}
+
+/// How many cached extractions exist and how much disk they use — shown next
+/// to the Clear button so the user can tell whether clearing is worth it.
+pub fn cache_stats() -> (usize, u64) {
+    let Some(dir) = cache_dir() else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0); // no cache folder yet
+    };
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for e in entries.flatten() {
+        if e.path().extension().and_then(|x| x.to_str()) == Some("json") {
+            count += 1;
+            bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    (count, bytes)
+}
+
+/// Delete every cached extraction, returning how many were removed. Only
+/// touches our own `*.json` entries, so anything else a user parked in that
+/// folder survives. Re-importing the same datasheet then calls the API again.
+pub fn clear_cache() -> Result<usize, String> {
+    let Some(dir) = cache_dir() else {
+        return Err("could not resolve the cache folder".into());
+    };
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) == Some("json")
+            && std::fs::remove_file(&p).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// One extraction plus whether it came from the on-disk cache (so the UI can
@@ -1048,6 +1107,30 @@ mod tests {
         );
         // 4 pins for a 48-pin package → the "gaps" wording, not the merge one.
         assert!(r.warnings.iter().any(|w| w.contains("implies 48 pins")));
+    }
+
+    /// The exposed thermal pad ("exposed pad VSS" inside the package outline)
+    /// is not a pin — it must never reach the pinout, but the skip is reported.
+    #[test]
+    fn exposed_thermal_pad_is_not_a_pin() {
+        let chip = ExtractedChip {
+            pins: vec![
+                ExtractedPin { number: "1".into(), name: "VSS".into(), reserved: true, ..Default::default() },
+                ExtractedPin { number: "".into(), name: "exposed pad VSS".into(), reserved: true, ..Default::default() },
+                ExtractedPin { number: "".into(), name: "EPAD".into(), reserved: true, ..Default::default() },
+                ExtractedPin { number: "2".into(), name: "PA0".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let mut form = McuForm::blank();
+        let r = apply_to_form(&chip, &mut form);
+        assert_eq!(r.pins_added, 2, "only the two real pins");
+        let names: Vec<&str> = form.pins.iter().flatten().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"VSS"), "a numbered VSS pin must survive");
+        assert!(!names.iter().any(|n| n.to_ascii_uppercase().contains("PAD")));
+        assert!(r.raw_notes.iter().any(|n| n.contains("2 exposed thermal-pad entries")));
+        // …and no bogus "non-integer number" warning from the pad's empty slot.
+        assert!(!r.warnings.iter().any(|w| w.contains("non-integer numbers")), "{:?}", r.warnings);
     }
 
     #[test]

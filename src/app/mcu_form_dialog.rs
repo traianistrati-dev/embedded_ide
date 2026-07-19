@@ -7,7 +7,9 @@
 
 use super::AppIde;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
-use crate::panels::mcu_module::mcu_form::{self, McuForm, PinRow, SIDES};
+use crate::panels::mcu_module::mcu_form::{
+    self, McuForm, PinRow, SIDES, SIDE_DISPLAY_ORDER,
+};
 use crate::panels::mcu_module::registry;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -234,8 +236,27 @@ impl AppIde {
                         .size(10.0)
                         .color(egui::Color32::from_gray(140)),
                     );
-                    for (si, side_name) in SIDES.iter().enumerate() {
-                        pin_side_editor(ui, si, side_name, &mut form.pins[si]);
+                    // A move touches two sides, so it's collected here and
+                    // applied after the loop, once no side is borrowed.
+                    let mut pending_move: Option<(usize, usize, usize)> = None;
+                    let mut pending_reorder: Option<(usize, usize, isize)> = None;
+                    // Presented Left → Bottom → Right → Top so the editors read
+                    // in QFP pin-number order (see `SIDE_DISPLAY_ORDER`).
+                    for &si in &SIDE_DISPLAY_ORDER {
+                        let (mut mv, mut ro) = (None, None);
+                        pin_side_editor(ui, si, SIDES[si], &mut form.pins[si], &mut mv, &mut ro);
+                        if let Some((idx, to)) = mv {
+                            pending_move = Some((si, idx, to));
+                        }
+                        if let Some((idx, delta)) = ro {
+                            pending_reorder = Some((si, idx, delta));
+                        }
+                    }
+                    if let Some((from, idx, to)) = pending_move {
+                        form.move_pin(from, idx, to);
+                    }
+                    if let Some((si, idx, delta)) = pending_reorder {
+                        form.reorder_pin(si, idx, delta);
                     }
                 });
 
@@ -357,11 +378,27 @@ fn toolchain_label(tc: &ToolchainKind) -> &'static str {
 }
 
 /// One collapsible side editor: a scrollable list of pin rows + add/fill.
-fn pin_side_editor(ui: &mut egui::Ui, side: usize, name: &str, rows: &mut Vec<PinRow>) {
+///
+/// Moving a pin to another side touches TWO sides at once, which this function
+/// can't do (it only borrows its own). So it reports the intent through
+/// `move_out` / `reorder_out` and the caller — which owns all four sides —
+/// applies it via `McuForm::move_pin` / `reorder_pin`. Same deferred pattern
+/// the row-remove already uses.
+fn pin_side_editor(
+    ui: &mut egui::Ui,
+    side: usize,
+    name: &str,
+    rows: &mut Vec<PinRow>,
+    // `(row index, target side)`
+    move_out: &mut Option<(usize, usize)>,
+    // `(row index, -1 = earlier | +1 = later)`
+    reorder_out: &mut Option<(usize, isize)>,
+) {
     egui::CollapsingHeader::new(format!("{name}  ({} pins)", rows.len()))
         .id_salt(("mcu_form_side", side))
         .show(ui, |ui| {
             let mut remove: Option<usize> = None;
+            let count = rows.len();
             for (i, row) in rows.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     if row.imported {
@@ -390,6 +427,50 @@ fn pin_side_editor(ui: &mut egui::Ui, side: usize, name: &str, rows: &mut Vec<Pi
                             .desired_width(280.0)
                             .hint_text("in out usart1_tx …"),
                     );
+                    // ── Position along THIS side (list order = physical order)
+                    if ui
+                        .add_enabled(
+                            i > 0,
+                            egui::Button::new(egui::RichText::new(ph::ARROW_UP).size(10.0))
+                                .small(),
+                        )
+                        .on_hover_text("Move earlier along this side")
+                        .clicked()
+                    {
+                        *reorder_out = Some((i, -1));
+                    }
+                    if ui
+                        .add_enabled(
+                            i + 1 < count,
+                            egui::Button::new(egui::RichText::new(ph::ARROW_DOWN).size(10.0))
+                                .small(),
+                        )
+                        .on_hover_text("Move later along this side")
+                        .clicked()
+                    {
+                        *reorder_out = Some((i, 1));
+                    }
+                    // ── Move to another side (keeps the pin + its number) ────
+                    egui::ComboBox::from_id_salt(("mcu_form_pin_side", side, i))
+                        .selected_text(&SIDES[side][..1]) // T / B / L / R
+                        .width(42.0)
+                        .show_ui(ui, |ui| {
+                            // Same Left → Bottom → Right → Top order as the
+                            // editors, so the picker doesn't contradict them.
+                            for &target in &SIDE_DISPLAY_ORDER {
+                                if ui
+                                    .selectable_label(target == side, SIDES[target])
+                                    .clicked()
+                                    && target != side
+                                {
+                                    *move_out = Some((i, target));
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "Move this pin to another side — the pin and its number are kept",
+                        );
                     if ui
                         .button(egui::RichText::new(ph::TRASH).size(11.0))
                         .on_hover_text("Remove this pin")

@@ -16,8 +16,17 @@ use super::mcu_catalog::ToolchainKind;
 use super::mcu_def::{ClockDef, McuDefinition, PinDef, PinLayout, ProjectDef};
 use super::pins::logic::pin_function::PinFunction;
 
-/// The four sides, in tab order — used by the GUI to iterate side editors.
+/// The four sides. This is the STORAGE order of `McuForm::pins` (and of
+/// `PinLayout` in the definition) — do not reorder it.
 pub const SIDES: [&str; 4] = ["Top", "Bottom", "Left", "Right"];
+
+/// The order the GUI presents the sides in: **Left → Bottom → Right → Top**.
+/// That mirrors QFP/QFN numbering (pin 1 sits at the top of the left side and
+/// the count runs counter-clockwise), so reading the editors top-to-bottom
+/// follows the pin numbers — the same walk [`crate::panels::mcu_module::stm32_pin_data`]
+/// uses when it distributes an imported pinout. Values are indices into
+/// [`SIDES`] / `McuForm::pins`; the storage order above is unchanged.
+pub const SIDE_DISPLAY_ORDER: [usize; 4] = [2, 1, 3, 0];
 
 /// One editable pin row (data form of [`PinDef`]). Numbers and functions are
 /// STRINGS so a half-typed value never snaps back: the number stays as typed,
@@ -187,6 +196,41 @@ impl McuForm {
         if self.probe_chip.trim().is_empty() {
             self.probe_chip = name;
         }
+        true
+    }
+
+    /// Move pin `idx` from side `from` to the END of side `to`, keeping the row
+    /// intact. The pin NUMBER is untouched — which side a pin is drawn on is
+    /// layout, not identity. `false` (no-op) for a same-side move or any
+    /// out-of-range index/side.
+    pub fn move_pin(&mut self, from: usize, idx: usize, to: usize) -> bool {
+        if from == to || from >= self.pins.len() || to >= self.pins.len() {
+            return false;
+        }
+        if idx >= self.pins[from].len() {
+            return false;
+        }
+        let row = self.pins[from].remove(idx);
+        self.pins[to].push(row);
+        true
+    }
+
+    /// Move pin `idx` by `delta` positions within its own side (−1 = earlier,
+    /// +1 = later). Order along a side IS the physical position, so this is how
+    /// a pin gets placed after being moved across. `false` (no-op) at the ends.
+    pub fn reorder_pin(&mut self, side: usize, idx: usize, delta: isize) -> bool {
+        let Some(rows) = self.pins.get_mut(side) else {
+            return false;
+        };
+        if idx >= rows.len() {
+            return false;
+        }
+        let target = idx as isize + delta;
+        if target < 0 || target as usize >= rows.len() {
+            return false;
+        }
+        let row = rows.remove(idx);
+        rows.insert(target as usize, row);
         true
     }
 
@@ -842,6 +886,52 @@ mod tests {
         let f = PinFunction::Other("SAI1_SD_A".into());
         assert_eq!(f.label(), "SAI1_SD_A");
         assert_eq!(PinFunction::from_label(&f.label()), Some(f));
+    }
+
+    /// Moving a pin across sides and positioning it within a side — the pin
+    /// keeps its number (the side is layout, not identity).
+    #[test]
+    fn move_and_reorder_pins() {
+        let mut f = McuForm::blank();
+        // pins = [top, bottom, left, right]
+        f.pins[1] = gpio_bank("PB", 1, 3); // bottom: PB0 PB1 PB2
+        f.pins[3] = gpio_bank("PC", 10, 1); // right:  PC0
+
+        // Bottom → Right (the user's case): appended at the end, number kept.
+        assert!(f.move_pin(1, 1, 3)); // PB1
+        assert_eq!(names(&f.pins[1]), vec!["PB0", "PB2"]);
+        assert_eq!(names(&f.pins[3]), vec!["PC0", "PB1"]);
+        assert_eq!(f.pins[3][1].number, "2", "package number is untouched");
+
+        // Position it within the side.
+        assert!(f.reorder_pin(3, 1, -1));
+        assert_eq!(names(&f.pins[3]), vec!["PB1", "PC0"]);
+        // Clamped at the ends — no wrap-around, no panic.
+        assert!(!f.reorder_pin(3, 0, -1));
+        assert!(!f.reorder_pin(3, 1, 1));
+        assert_eq!(names(&f.pins[3]), vec!["PB1", "PC0"]);
+
+        // Guards: same side, out-of-range index, out-of-range side.
+        assert!(!f.move_pin(1, 0, 1));
+        assert!(!f.move_pin(1, 99, 3));
+        assert!(!f.move_pin(1, 0, 9));
+        assert!(!f.reorder_pin(9, 0, 1));
+        assert!(!f.reorder_pin(1, 99, 1));
+    }
+
+    fn names(rows: &[PinRow]) -> Vec<&str> {
+        rows.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    /// The GUI order must be a real permutation of the four sides — a typo
+    /// would silently hide one editor and show another twice.
+    #[test]
+    fn side_display_order_is_left_bottom_right_top() {
+        let shown: Vec<&str> = SIDE_DISPLAY_ORDER.iter().map(|&i| SIDES[i]).collect();
+        assert_eq!(shown, vec!["Left", "Bottom", "Right", "Top"]);
+        let mut sorted = SIDE_DISPLAY_ORDER;
+        sorted.sort_unstable();
+        assert_eq!(sorted, [0, 1, 2, 3], "must cover every side exactly once");
     }
 
     #[test]

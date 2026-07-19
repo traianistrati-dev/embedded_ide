@@ -29,6 +29,19 @@ struct PdfPick {
     bytes: Vec<u8>,
 }
 
+/// Compact human-readable byte size for the cache row.
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Session-only state for the import sub-dialog.
 pub(crate) struct DatasheetImport {
     api_key: String,
@@ -47,6 +60,10 @@ pub(crate) struct DatasheetImport {
     force_reextract: bool,
     /// Whether the last applied extraction came from the cache (free).
     last_from_cache: bool,
+    /// `(entries, bytes)` on disk — refreshed on open, after an extraction and
+    /// after clearing, so the row never re-scans the folder per frame.
+    cache_stats: (usize, u64),
+    cache_note: Option<String>,
     job: Option<Arc<Mutex<ImportJob>>>,
     report: Option<ds::ApplyReport>,
     error: Option<String>,
@@ -65,6 +82,8 @@ impl DatasheetImport {
             package: form.package.clone(),
             force_reextract: false,
             last_from_cache: false,
+            cache_stats: ds::cache_stats(),
+            cache_note: None,
             job: None,
             report: None,
             error: None,
@@ -108,6 +127,9 @@ impl AppIde {
                         di.last_from_cache = ex.from_cache;
                         di.report = Some(ds::apply_to_form(&ex.chip, form));
                         di.error = None;
+                        // A fresh extraction just wrote a new cache entry.
+                        di.cache_stats = ds::cache_stats();
+                        di.cache_note = None;
                     }
                     Some(Err(e)) => {
                         di.error = Some(e);
@@ -125,6 +147,7 @@ impl AppIde {
         let mut do_extract = false;
         let mut do_save_key = false;
         let mut dismiss_report = false;
+        let mut do_clear_cache = false;
 
         egui::Window::new(format!("{} Import from datasheet (AI)", ph::SPARKLE))
             .collapsible(false)
@@ -237,6 +260,41 @@ impl AppIde {
                             egui::RichText::new("required — without it the wrong column gets read")
                                 .size(10.0)
                                 .color(egui::Color32::from_rgb(230, 170, 70)),
+                        );
+                    }
+                });
+
+                // ── Cache stats + clear ──────────────────────────────────────
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (n, bytes) = di.cache_stats;
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Cache: {n} extraction(s) · {}",
+                            human_size(bytes)
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                    if ui
+                        .add_enabled(
+                            n > 0,
+                            egui::Button::new(egui::RichText::new("Clear").size(10.0)).small(),
+                        )
+                        .on_hover_text(
+                            "Delete every cached extraction. Re-importing the same datasheet \
+                             will call (and bill) the API again.",
+                        )
+                        .on_disabled_hover_text("nothing cached yet")
+                        .clicked()
+                    {
+                        do_clear_cache = true;
+                    }
+                    if let Some(note) = &di.cache_note {
+                        ui.label(
+                            egui::RichText::new(note)
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(150)),
                         );
                     }
                 });
@@ -438,6 +496,13 @@ impl AppIde {
         }
         if dismiss_report {
             di.report = None;
+        }
+        if do_clear_cache {
+            di.cache_note = Some(match ds::clear_cache() {
+                Ok(n) => format!("{} cleared {n}", ph::CHECK_CIRCLE),
+                Err(e) => format!("{} {e}", ph::X_CIRCLE),
+            });
+            di.cache_stats = ds::cache_stats();
         }
         if do_extract && di.job.is_none() {
             let shared = Arc::new(Mutex::new(ImportJob::Running));

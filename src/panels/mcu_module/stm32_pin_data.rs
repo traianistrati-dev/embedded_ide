@@ -68,6 +68,10 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
                 let position = ch.attribute("Position").unwrap_or("").trim();
                 let name_raw = ch.attribute("Name").unwrap_or("").trim();
                 let ptype = ch.attribute("Type").unwrap_or("").trim();
+                // The exposed thermal pad is not a pin (no package position).
+                if is_exposed_pad(name_raw) {
+                    continue;
+                }
                 // BGA / non-numeric positions ("A1") can't be a pin number here.
                 if position.parse::<usize>().is_err() {
                     if !position.is_empty() {
@@ -151,6 +155,21 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
         chips.push(ConvertedChip { form, warnings: base_warnings.clone() });
     }
     Ok(chips)
+}
+
+/// `true` for the exposed thermal / ground pad under QFN-style packages —
+/// drawn INSIDE the package outline as "exposed pad VSS", "EPAD" or "thermal
+/// pad". It carries no pin number, so it must never enter the pin list.
+/// A normal numbered `VSS` pin is NOT one of these. `pub(crate)` — shared with
+/// the AI datasheet import.
+pub(crate) fn is_exposed_pad(name: &str) -> bool {
+    let n = name.trim().to_ascii_uppercase();
+    let squashed = n.replace(['-', '_'], " ");
+    squashed.contains("EXPOSED PAD")
+        || squashed.contains("EXPOSEDPAD")
+        || squashed.contains("THERMAL PAD")
+        || squashed == "EPAD"
+        || squashed == "PAD"
 }
 
 /// Signals with no pin function worth modelling: the per-pin interrupt/event
@@ -575,6 +594,14 @@ mod tests {
         assert_eq!(clean_pin_name("PA0-WKUP"), "PA0");
         assert_eq!(clean_pin_name("VBAT"), "VBAT");
         assert_eq!(clean_pin_name("NRST"), "NRST");
+        // Exposed thermal pad — not a pin; a numbered VSS still is.
+        assert!(is_exposed_pad("exposed pad VSS"));
+        assert!(is_exposed_pad("EPAD"));
+        assert!(is_exposed_pad("Thermal-Pad"));
+        assert!(is_exposed_pad("PAD"));
+        assert!(!is_exposed_pad("VSS"));
+        assert!(!is_exposed_pad("VSSA"));
+        assert!(!is_exposed_pad("PA0"));
         assert_eq!(map_signal("USART2_RX").as_deref(), Some("usart2_rx"));
         assert_eq!(map_signal("UART4_TX").as_deref(), Some("usart4_tx")); // UART→usart
         assert_eq!(map_signal("ADC123_IN10").as_deref(), Some("adc1_10")); // combined→first
