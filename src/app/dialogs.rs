@@ -11,6 +11,120 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 impl AppIde {
+    /// Confirmation modal for discarding a whole file's changes (Phase A). On
+    /// confirm it queues `pending_discard_file` (applied at the next editor
+    /// render, so the open editor's `display_code` refreshes). No-op closed.
+    pub(super) fn show_git_discard_dialog(&mut self, ui: &egui::Ui) {
+        let Some((path, untracked)) = self.git_discard_confirm.clone() else {
+            return;
+        };
+        let mut keep = true;
+        let mut confirmed = false;
+        egui::Window::new(if untracked {
+            "Delete untracked file?"
+        } else {
+            "Discard changes?"
+        })
+        .id(egui::Id::new("git_discard_confirm"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(&path).monospace().strong());
+            ui.add_space(6.0);
+            if untracked {
+                ui.label(
+                    egui::RichText::new(
+                        "This file isn't tracked by git — deleting it is PERMANENT and cannot be undone.",
+                    )
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(230, 130, 90)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "Restore this file to its last committed version. Uncommitted changes to it will be lost.",
+                    )
+                    .size(12.0),
+                );
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let (label, col) = if untracked {
+                    (format!("{} Delete", ph::TRASH), egui::Color32::from_rgb(230, 110, 90))
+                } else {
+                    (
+                        format!("{} Discard", ph::ARROW_COUNTER_CLOCKWISE),
+                        egui::Color32::from_rgb(230, 160, 70),
+                    )
+                };
+                if ui.button(egui::RichText::new(label).color(col)).clicked() {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    keep = false;
+                }
+            });
+        });
+
+        if confirmed {
+            self.pending_discard_file = Some(path);
+            keep = false;
+        }
+        if !keep {
+            self.git_discard_confirm = None;
+        }
+
+        // ── Discard ALL changes (Phase C) — the strongest confirm ────────────
+        if self.git_discard_all_confirm {
+            let mut keep_all = true;
+            let mut confirmed_all = false;
+            egui::Window::new("Discard ALL changes?")
+                .id(egui::Id::new("git_discard_all_confirm"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Reset EVERY tracked file to the last commit and DELETE all untracked files.",
+                        )
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(230, 130, 90)),
+                    );
+                    ui.label(
+                        egui::RichText::new("This cannot be undone.")
+                            .size(12.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(230, 110, 90)),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} Discard everything", ph::WARNING))
+                                    .color(egui::Color32::from_rgb(230, 100, 85)),
+                            )
+                            .clicked()
+                        {
+                            confirmed_all = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            keep_all = false;
+                        }
+                    });
+                });
+            if confirmed_all {
+                self.git_discard_all_confirm = false;
+                self.apply_discard_all();
+            } else if !keep_all {
+                self.git_discard_all_confirm = false;
+            }
+        }
+    }
+
     /// Bulk-convert STM32 open-pin-data XML file(s) into `.ron` definitions in
     /// the user `mcus/` folder (Phase 3). A range file (`STM32F103C(8-B)Tx`)
     /// expands into several chips; only variants whose form validates are

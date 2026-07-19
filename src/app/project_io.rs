@@ -402,6 +402,204 @@ impl AppIde {
         }
         snap
     }
+
+    /// Reverse ONE hunk of a changed file — the Git diff view's per-hunk revert
+    /// (Phase B). Reconstructs that hunk's patch from the open diff and applies
+    /// it in reverse on disk, then refreshes the file's in-memory buffer so the
+    /// next Save doesn't clobber it. Returns true when a buffer changed (the
+    /// caller then refreshes the editor's `display_code`). IDE-managed files are
+    /// refused (main.rs is better reverted hunk-by-hunk in the editor gutter).
+    pub(super) fn apply_hunk_revert(&mut self, path: &str, hunk_row: usize) -> bool {
+        let Some(dir) = self.project_dir.clone() else {
+            return false;
+        };
+        if crate::app::tabs::git_tab::is_ide_managed(path) {
+            self.git.state.lock().unwrap().lines.push((
+                crate::git::GitLine::Notice,
+                format!("[skip] {path} is IDE-managed — change it via the UI (for main.rs, use the editor gutter to revert hunks)"),
+            ));
+            return false;
+        }
+        // Build the single-hunk patch from the currently-open diff.
+        let patch = {
+            let st = self.git.state.lock().unwrap();
+            match &st.diff {
+                Some(d) if d.path == path => crate::git::hunk_patch(path, &d.rows, hunk_row),
+                _ => None,
+            }
+        };
+        let Some(patch) = patch else {
+            self.git.state.lock().unwrap().lines.push((
+                crate::git::GitLine::Notice,
+                format!("[error] couldn't build the revert patch for {path}"),
+            ));
+            return false;
+        };
+
+        match crate::git::apply_reverse_patch(&dir, &patch) {
+            Ok(()) => {
+                // Refresh the in-memory buffer from the now-reverted disk file.
+                // Only user `src/` files reach here (managed ones are refused).
+                let mut changed = false;
+                if let Some(rel) = path.strip_prefix("src/") {
+                    if let Ok(disk) = std::fs::read_to_string(dir.join(path)) {
+                        let disk = disk.replace("\r\n", "\n");
+                        if let Some(entry) = self
+                            .project_tree
+                            .user_src_files
+                            .iter_mut()
+                            .find(|(p, _)| p == rel)
+                        {
+                            entry.1 = disk;
+                            changed = true;
+                        }
+                    }
+                }
+                {
+                    let mut st = self.git.state.lock().unwrap();
+                    st.op_gen += 1; // refresh the editor gutter's HEAD baseline marks
+                    st.lines
+                        .push((crate::git::GitLine::Notice, format!("reverted a hunk in {path}")));
+                }
+                // Re-open the diff so the remaining hunks show (or it closes if
+                // the file now matches HEAD).
+                crate::git::run_diff(
+                    path.to_owned(),
+                    false,
+                    dir,
+                    std::sync::Arc::clone(&self.git.state),
+                    self.egui_ctx.clone(),
+                );
+                changed
+            }
+            Err(e) => {
+                self.git.state.lock().unwrap().lines.push((
+                    crate::git::GitLine::Notice,
+                    format!("[error] git apply --reverse failed: {e}"),
+                ));
+                false
+            }
+        }
+    }
+
+    /// Discard a whole file's changes — Phase A. A TRACKED file is restored to
+    /// its HEAD version (disk + in-memory buffer); an UNTRACKED file is deleted
+    /// (disk + buffer + tree selection remap). Returns true when the open file's
+    /// buffer was updated in place (the caller then refreshes `display_code`).
+    /// IDE-managed files are refused; the caller confirms via a dialog first.
+    pub(super) fn apply_discard_file(&mut self, path: &str) -> bool {
+        let Some(dir) = self.project_dir.clone() else {
+            return false;
+        };
+        if crate::app::tabs::git_tab::is_ide_managed(path) {
+            self.git_note(format!(
+                "[skip] {path} is IDE-managed — change it via the UI (for main.rs, use the editor gutter)"
+            ));
+            return false;
+        }
+        let untracked = self
+            .git
+            .state
+            .lock()
+            .unwrap()
+            .status
+            .changes
+            .iter()
+            .any(|c| c.path == path && c.code == "??");
+
+        let changed = if untracked {
+            // Untracked → delete the file (irreversible) + drop its buffer/tree.
+            match std::fs::remove_file(dir.join(path)) {
+                Ok(()) => {
+                    if let Some(rel) = path.strip_prefix("src/") {
+                        if let Some(idx) = self
+                            .project_tree
+                            .user_src_files
+                            .iter()
+                            .position(|(p, _)| p == rel)
+                        {
+                            self.project_tree.user_src_files.remove(idx);
+                            // Remap the index-based selection across the removal.
+                            if let ProjectFileId::UserFile(sel) = self.selected_file {
+                                self.selected_file = if sel == idx {
+                                    ProjectFileId::MainRs
+                                } else if sel > idx {
+                                    ProjectFileId::UserFile(sel - 1)
+                                } else {
+                                    ProjectFileId::UserFile(sel)
+                                };
+                            }
+                        }
+                    }
+                    self.git_note(format!("Deleted untracked {path}"));
+                    false
+                }
+                Err(e) => {
+                    self.git_note(format!("[error] couldn't delete {path}: {e}"));
+                    false
+                }
+            }
+        } else {
+            // Tracked → restore its HEAD version on disk + refresh the buffer.
+            match crate::git::restore_file_to_head(&dir, path) {
+                Ok(content) => {
+                    let mut c = false;
+                    if let Some(rel) = path.strip_prefix("src/") {
+                        if let Some(entry) = self
+                            .project_tree
+                            .user_src_files
+                            .iter_mut()
+                            .find(|(p, _)| p == rel)
+                        {
+                            entry.1 = content;
+                            c = true;
+                        }
+                    }
+                    self.git_note(format!("Restored {path} to HEAD"));
+                    c
+                }
+                Err(e) => {
+                    self.git_note(format!("[error] couldn't discard {path}: {e}"));
+                    false
+                }
+            }
+        };
+
+        self.git.state.lock().unwrap().op_gen += 1; // refresh gutter baseline
+        self.run_git_op(crate::git::GitOp::Refresh); // status + clears the diff
+        changed
+    }
+
+    /// Discard ALL uncommitted changes back to HEAD — Phase C. `git reset
+    /// --hard` + `git clean -fd`, then RELOAD the whole project from disk
+    /// (`load_project_from_dir` re-reads main.rs/pins, config files, user files,
+    /// mcu.config) so every in-memory buffer matches the reset tree. The caller
+    /// confirms first and gates on `has_commits`.
+    pub(super) fn apply_discard_all(&mut self) {
+        let Some(dir) = self.project_dir.clone() else {
+            return;
+        };
+        match crate::git::discard_all_to_head(&dir) {
+            Ok(()) => {
+                // Rebuild every buffer from the now-reset disk.
+                self.load_project_from_dir(&dir);
+                self.git_note("Discarded all changes (reset --hard + clean)".into());
+            }
+            Err(e) => self.git_note(format!("[error] discard-all failed: {e}")),
+        }
+        self.git.state.lock().unwrap().op_gen += 1; // refresh gutter baseline
+        self.run_git_op(crate::git::GitOp::Refresh);
+    }
+
+    /// Push a one-off notice line into the Git tab's output scrollback.
+    fn git_note(&self, msg: String) {
+        self.git
+            .state
+            .lock()
+            .unwrap()
+            .lines
+            .push((crate::git::GitLine::Notice, msg));
+    }
 }
 
 /// Validate a project FOLDER name for Windows: non-empty, no reserved

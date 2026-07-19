@@ -86,7 +86,7 @@ fn generated_folder_reason(path: &str) -> Option<&'static str> {
 /// each frame from the MCU / pin configuration (see
 /// `ProjectTreeState::sync_pin_files` / `sync_config_files`), so moving one
 /// would be silently undone or would break the generated module tree.
-fn generated_file_reason(path: &str) -> Option<&'static str> {
+pub(crate) fn generated_file_reason(path: &str) -> Option<&'static str> {
     if path == "pins/mod.rs" || path == "pins/configs/mod.rs" {
         return Some("it's an auto-generated module file (rebuilt from your pin / peripheral configuration)");
     }

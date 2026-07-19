@@ -526,6 +526,100 @@ pub fn parse_unified_diff(text: &str) -> (Vec<DiffRow>, usize, usize) {
     (rows, added, removed)
 }
 
+/// Reconstruct a single-hunk unified-diff patch (revertible with `git apply
+/// --reverse`) from a [`FileDiff`]'s rows. `hunk_row` is the index of the
+/// [`DiffRow::Hunk`] that starts the hunk; the body runs to the next hunk (or
+/// the end). `None` if `hunk_row` isn't a hunk header. Pure — tested below.
+pub fn hunk_patch(path: &str, rows: &[DiffRow], hunk_row: usize) -> Option<String> {
+    let DiffRow::Hunk(header) = rows.get(hunk_row)? else {
+        return None;
+    };
+    let mut body = String::new();
+    for row in &rows[hunk_row + 1..] {
+        match row {
+            DiffRow::Hunk(_) => break, // next hunk starts here
+            DiffRow::Ctx(_, _, t) => {
+                body.push(' ');
+                body.push_str(t);
+                body.push('\n');
+            }
+            DiffRow::Del(_, t) => {
+                body.push('-');
+                body.push_str(t);
+                body.push('\n');
+            }
+            DiffRow::Add(_, t) => {
+                body.push('+');
+                body.push_str(t);
+                body.push('\n');
+            }
+        }
+    }
+    Some(format!("--- a/{path}\n+++ b/{path}\n{header}\n{body}"))
+}
+
+/// Apply `patch` in REVERSE to the working tree in `dir` — undo exactly that
+/// hunk (`git apply --reverse --recount`). `--recount` lets git recompute the
+/// `@@` line counts, so a faithfully-reconstructed body applies even if the
+/// header counts drift. The patch is written to a temp file (git apply reads a
+/// path — avoids stdin plumbing). Synchronous; a fast local operation.
+pub fn apply_reverse_patch(dir: &Path, patch: &str) -> Result<(), String> {
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("eide_revert_{}_{salt}.patch", std::process::id()));
+    std::fs::write(&tmp, patch).map_err(|e| format!("temp patch write failed: {e}"))?;
+    let out = run_git(
+        dir,
+        &[
+            "apply".into(),
+            "--reverse".into(),
+            "--recount".into(),
+            tmp.to_string_lossy().into_owned(),
+        ],
+    );
+    let _ = std::fs::remove_file(&tmp);
+    let out = out.map_err(|e| format!("couldn't run git apply: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Restore one TRACKED file to its HEAD version on disk — discard its
+/// working-tree changes (Phase A). Returns that content so the caller can
+/// refresh the file's in-memory buffer to match. `git show HEAD:<path>`
+/// (LF-normalised, like [`fetch_baseline`]) → write. Synchronous; fast/local.
+pub fn restore_file_to_head(dir: &Path, path: &str) -> Result<String, String> {
+    let out = run_git(dir, &["show".into(), format!("HEAD:{path}")])
+        .map_err(|e| format!("couldn't run git show: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let content = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    std::fs::write(dir.join(path), &content).map_err(|e| format!("write failed: {e}"))?;
+    Ok(content)
+}
+
+/// Discard ALL working-tree changes back to HEAD (Phase C): `git reset --hard
+/// HEAD` (tracked, staged + unstaged) then `git clean -f -d` (untracked files +
+/// dirs; `.gitignore`'d paths like `target/` are kept — no `-x`). Synchronous.
+/// Only sensible with a committed HEAD; callers gate on `has_commits`.
+pub fn discard_all_to_head(dir: &Path) -> Result<(), String> {
+    for args in [
+        vec!["reset".to_string(), "--hard".into(), "HEAD".into()],
+        vec!["clean".into(), "-f".into(), "-d".into()],
+    ] {
+        let out = run_git(dir, &args).map_err(|e| format!("couldn't run git: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+    }
+    Ok(())
+}
+
 /// An all-added [`FileDiff`] for an UNTRACKED file (`git diff HEAD` doesn't
 /// show those) from its on-disk content.
 fn synthesized_added(path: &str, content: &str) -> FileDiff {
@@ -910,6 +1004,35 @@ index abc..def 100644
         assert_eq!(rows[1], DiffRow::Del(1, "a".into()));
         assert_eq!(rows[2], DiffRow::Add(1, "A".into()));
         assert_eq!(rows[4], DiffRow::Ctx(50, 50, "same".into()));
+    }
+
+    #[test]
+    fn hunk_patch_reconstructs_a_single_hunk() {
+        let rows = vec![
+            DiffRow::Hunk("@@ -10,3 +10,4 @@ fn main() {".into()),
+            DiffRow::Ctx(10, 10, "ctx line".into()),
+            DiffRow::Del(11, "old line".into()),
+            DiffRow::Add(11, "new line".into()),
+            DiffRow::Add(12, "extra line".into()),
+            DiffRow::Hunk("@@ -50,1 +51,1 @@".into()),
+            DiffRow::Del(50, "x".into()),
+            DiffRow::Add(51, "y".into()),
+        ];
+        let p = hunk_patch("src/main.rs", &rows, 0).unwrap();
+        assert!(p.starts_with(
+            "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@ fn main() {\n"
+        ));
+        assert!(p.contains(" ctx line\n"));
+        assert!(p.contains("-old line\n"));
+        assert!(p.contains("+new line\n"));
+        assert!(p.contains("+extra line\n"));
+        // Stops at the next hunk header — the second hunk isn't bundled in.
+        assert!(!p.contains("-x\n"), "second hunk leaked in:\n{p}");
+        // The second hunk reconstructs on its own.
+        let p2 = hunk_patch("src/main.rs", &rows, 5).unwrap();
+        assert!(p2.ends_with("@@ -50,1 +51,1 @@\n-x\n+y\n"), "{p2}");
+        // A non-hunk index is rejected.
+        assert!(hunk_patch("x", &rows, 1).is_none());
     }
 
     #[test]

@@ -100,6 +100,12 @@ impl AppIde {
         let mut git_op: Option<crate::git::GitOp> = None;
         // Set when the user clicks an added row in the Git diff view.
         let mut git_open: Option<(String, usize)> = None;
+        // Set when the user clicks a hunk's revert button in the Git diff view.
+        let mut git_revert_hunk: Option<(String, usize)> = None;
+        // Set when the user clicks a file's discard button in the Git tab.
+        let mut git_discard: Option<(String, bool)> = None;
+        // Set when the user clicks "Discard all" in the Git tab.
+        let mut git_discard_all = false;
         // Flash-tab Programmer-row buttons (moved off the top toolbar).
         let mut flash_scan = false;
         let mut flash_go = false;
@@ -195,6 +201,9 @@ impl AppIde {
                     project_dir.as_deref(),
                     &mut git_op,
                     &mut git_open,
+                    &mut git_revert_hunk,
+                    &mut git_discard,
+                    &mut git_discard_all,
                     &mut flash_scan,
                     &mut flash_go,
                     can_flash,
@@ -262,6 +271,32 @@ impl AppIde {
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line));
+            }
+        }
+        // A hunk's revert button was clicked in the Git diff view (Phase B):
+        // reverse just that hunk on disk + refresh its in-memory buffer. Like
+        // the Clippy "Fix", set `source_rewritten` so the editor refreshes
+        // `display_code` and the end-of-frame write-back keeps the change.
+        if let Some((path, hunk_row)) = git_revert_hunk {
+            if self.apply_hunk_revert(&path, hunk_row) {
+                *source_rewritten = true;
+            }
+        }
+        // A file's discard button was clicked (Phase A) → open the confirm
+        // dialog; the actual restore/delete runs once the user confirms.
+        if let Some((path, untracked)) = git_discard {
+            self.git_discard_confirm = Some((path, untracked));
+        }
+        // "Discard all" was clicked (Phase C) → open the strong confirm dialog.
+        if git_discard_all {
+            self.git_discard_all_confirm = true;
+        }
+        // A confirmed whole-file discard, queued by the dialog on the previous
+        // frame — apply it here (same `source_rewritten` refresh as the hunk
+        // revert, so the open editor keeps the restored content).
+        if let Some(path) = self.pending_discard_file.take() {
+            if self.apply_discard_file(&path) {
+                *source_rewritten = true;
             }
         }
         // "Run clippy" was clicked: write the project to the workspace and start

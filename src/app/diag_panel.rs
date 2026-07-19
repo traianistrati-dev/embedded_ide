@@ -69,6 +69,15 @@ pub(super) fn show_diag_panel(
     // in the editor; the caller maps the path to a `ProjectFileId`, selects it
     // and scrolls to the line.
     git_open: &mut Option<(String, usize)>,
+    // `(git path, hunk row index)` when the user clicks a hunk's revert button
+    // in the diff view; the caller reverses just that hunk (Phase B).
+    git_revert_hunk: &mut Option<(String, usize)>,
+    // `(git path, is_untracked)` when the user clicks a file's discard button;
+    // the caller confirms then restores/deletes the whole file (Phase A).
+    git_discard: &mut Option<(String, bool)>,
+    // True when the user clicks "Discard all"; the caller confirms then resets
+    // the whole tree to HEAD (Phase C).
+    git_discard_all: &mut bool,
     // Flash-tab Programmer-row buttons: set `flash_scan`/`flash_go` on click;
     // `can_flash` = a buildable chip config exists (gates the Flash button).
     flash_scan: &mut bool,
@@ -535,7 +544,16 @@ pub(super) fn show_diag_panel(
             show_activity_tab(ui, activity);
         }
         BuildPanelTab::Git => {
-            show_git_tab(ui, git, project_dir, git_op, git_open);
+            show_git_tab(
+                ui,
+                git,
+                project_dir,
+                git_op,
+                git_open,
+                git_revert_hunk,
+                git_discard,
+                git_discard_all,
+            );
         }
         BuildPanelTab::Clippy => {
             let build_busy = build_state.lock().unwrap().is_building();

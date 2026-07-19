@@ -699,6 +699,36 @@ mod tests {
         assert_eq!(edited.to_definition().clock, imported.clock);
     }
 
+    /// The STM32F4 clock choice drives the whole chain: the def carries the F4
+    /// graph, the generated main.rs carries the embassy F4 RCC config, and Edit
+    /// detects the choice back.
+    #[test]
+    fn stm32f4_clock_choice_reaches_generated_code() {
+        use crate::panels::mcu_module::clock::graph::is_f4_graph;
+
+        let mut f = McuForm::blank();
+        f.id = "stm32f411re".into();
+        f.display_name = "STM32F411RE".into();
+        f.family = "stm32f4".into();
+        f.probe_chip = "STM32F411RE".into();
+        f.target = "thumbv7em-none-eabihf".into();
+        f.clock = ClockChoice::Stm32f4;
+
+        let def = f.to_definition();
+        match &def.clock {
+            ClockDef::Graph(gc) => assert!(is_f4_graph(&gc.graph)),
+            other => panic!("expected F4 graph, got {other:?}"),
+        }
+        assert_eq!(def.clock_limits.sysclk_max, 100_000_000);
+
+        // Full chain: build the Mcu and generate main.rs.
+        let code = def.build_mcu().fresh_main_rs();
+        assert!(code.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"), "{code}");
+        assert!(code.contains("SYSCLK 100 MHz"), "{code}");
+        // Edit round-trips the choice.
+        assert_eq!(McuForm::from_definition(&def).clock, ClockChoice::Stm32f4);
+    }
+
     #[test]
     fn unknown_family_warns_but_does_not_block() {
         let mut f = McuForm::blank();

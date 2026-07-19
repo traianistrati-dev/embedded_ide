@@ -10,6 +10,26 @@ use crate::git::{GitConsole, GitLine, GitOp};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
+/// `true` for files the IDE generates / manages, which must NOT be discarded
+/// through git (they're rebuilt from the pin/clock model, or belong to a
+/// generated block). main.rs is better reverted hunk-by-hunk in the editor
+/// gutter. Everything else (the user's own `src/` modules) is discardable.
+pub(crate) fn is_ide_managed(path: &str) -> bool {
+    matches!(
+        path,
+        "src/main.rs"
+            | "Cargo.toml"
+            | ".cargo/config.toml"
+            | "memory.x"
+            | "build.rs"
+            | ".gitignore"
+    ) || path == crate::panels::mcu_module::mcu_config::FILE_NAME
+        || path
+            .strip_prefix("src/")
+            .and_then(crate::project_tree::gui::generated_file_reason)
+            .is_some()
+}
+
 pub fn show_git_tab(
     ui: &mut egui::Ui,
     git: &mut GitConsole,
@@ -19,6 +39,16 @@ pub fn show_git_tab(
     // row in the diff view — the caller opens that file in the editor and
     // scrolls to the line.
     open_file: &mut Option<(String, usize)>,
+    // Set to `(git path, hunk row index)` when the user clicks a hunk's revert
+    // button — the caller reverses just that hunk (Phase B).
+    revert_hunk: &mut Option<(String, usize)>,
+    // Set to `(git path, is_untracked)` when the user clicks a file's discard
+    // button — the caller confirms, then restores it to HEAD (tracked) or
+    // deletes it (untracked) (Phase A).
+    discard_out: &mut Option<(String, bool)>,
+    // Set true when the user clicks "Discard all" — the caller confirms, then
+    // resets every file to HEAD + deletes untracked files (Phase C).
+    discard_all_out: &mut bool,
 ) {
     let Some(project_dir) = project_dir else {
         ui.add_space(8.0);
@@ -309,6 +339,25 @@ pub fn show_git_tab(
                 {
                     *op_out = Some(GitOp::Log);
                 }
+                // Discard ALL changes (Phase C) — destructive; needs a commit to
+                // reset to and at least one change. The caller confirms first.
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        idle && status.has_commits && !status.changes.is_empty(),
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Discard all", ph::TRASH))
+                                .color(egui::Color32::from_rgb(220, 120, 100)),
+                        ),
+                    )
+                    .on_hover_text(
+                        "Reset every tracked file to HEAD and delete untracked files (asks first)",
+                    )
+                    .on_disabled_hover_text("needs a commit to reset to and at least one change")
+                    .clicked()
+                {
+                    *discard_all_out = true;
+                }
             });
         });
 
@@ -392,6 +441,30 @@ pub fn show_git_tab(
                                         ui.ctx().clone(),
                                     );
                                 }
+                                // Discard button (user files only): ↺ restore to
+                                // HEAD for a tracked file, 🗑 delete for an
+                                // untracked one. The caller confirms first.
+                                if !is_ide_managed(&c.path) && busy.is_none() {
+                                    let untracked = c.code == "??";
+                                    let (icon, hint) = if untracked {
+                                        (ph::TRASH, "Delete this untracked file (not recoverable)")
+                                    } else {
+                                        (
+                                            ph::ARROW_COUNTER_CLOCKWISE,
+                                            "Discard changes — restore this file to HEAD",
+                                        )
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(egui::RichText::new(icon).size(10.0))
+                                                .small(),
+                                        )
+                                        .on_hover_text(hint)
+                                        .clicked()
+                                    {
+                                        *discard_out = Some((c.path.clone(), untracked));
+                                    }
+                                }
                             });
                         }
                     });
@@ -435,7 +508,38 @@ pub fn show_git_tab(
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         ui.spacing_mut().item_spacing.y = 0.0;
                         let diff_path = d.path.clone();
-                        for row in &d.rows {
+                        // The user's own modules can be reverted hunk-by-hunk;
+                        // IDE-generated files can't (see `is_ide_managed`).
+                        let discardable = !is_ide_managed(&diff_path);
+                        for (i, row) in d.rows.iter().enumerate() {
+                            // Hunk header: a small "revert this hunk" button
+                            // (discardable files only) + the header text.
+                            if let crate::git::DiffRow::Hunk(h) = row {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    if discardable
+                                        && ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new(ph::ARROW_COUNTER_CLOCKWISE)
+                                                        .size(10.0),
+                                                )
+                                                .small(),
+                                            )
+                                            .on_hover_text("Revert this hunk (restore it to HEAD)")
+                                            .clicked()
+                                    {
+                                        *revert_hunk = Some((diff_path.clone(), i));
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(h)
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(110, 145, 200)),
+                                    );
+                                });
+                                continue;
+                            }
                             // Added (green) rows are clickable → jump to that
                             // line in the editor; the rest are static.
                             let (text, col, jump_line) = match row {

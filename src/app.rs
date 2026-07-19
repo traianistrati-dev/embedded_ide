@@ -742,6 +742,14 @@ pub struct AppIde {
     /// `Some` while the "Import from datasheet (AI)" sub-dialog of the MCU form
     /// is open (see `app::datasheet_import_dialog`). Session-only.
     datasheet_import: Option<datasheet_import_dialog::DatasheetImport>,
+    /// `Some((git path, is_untracked))` while the Git "discard file" confirm
+    /// dialog is open (Phase A). Session-only.
+    git_discard_confirm: Option<(String, bool)>,
+    /// A whole-file discard the user CONFIRMED — applied at the top of the next
+    /// editor render (so `display_code` refreshes; see `diag_embed`).
+    pending_discard_file: Option<String>,
+    /// `true` while the "Discard ALL changes" confirm dialog is open (Phase C).
+    git_discard_all_confirm: bool,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -997,6 +1005,9 @@ impl AppIde {
             mcu_import_status: None,
             mcu_form: None,
             datasheet_import: None,
+            git_discard_confirm: None,
+            pending_discard_file: None,
+            git_discard_all_confirm: false,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -1949,6 +1960,7 @@ impl eframe::App for AppIde {
         self.show_new_project_dialog(ui, &mut save_project_needed);
         self.show_rename_project_dialog(ui);
         self.show_mcu_form_dialog(ui);
+        self.show_git_discard_dialog(ui);
 
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).
