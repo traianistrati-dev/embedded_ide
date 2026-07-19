@@ -91,12 +91,15 @@ impl AppIde {
         // (the central panel) — a too-wide persisted/dragged width used to hide
         // it entirely. Always leave ≥30% for the MCU panel.
         let avail = ui.available_width();
-        egui::Panel::left("code_editor")
-            .resizable(true)
-            .default_size(avail * 0.5)
-            .min_width(220.0)
-            .max_width(avail * 0.7)
-            .show_inside(ui, |ui| {
+        // Read before the closure borrows `self`.
+        let collapsed = self.side_panels_collapsed;
+        // The body is bound ONCE and then moved into whichever container runs
+        // (only one arm executes, so a single `FnOnce` is fine). Collapsed, the
+        // editor IS the central panel and fills the window naturally — no width
+        // juggling, and the 70 % cap below simply doesn't apply.
+        // NOTE: the body keeps its original indentation so this stays a small,
+        // reviewable diff rather than a ~900-line reindent.
+        let body = |ui: &mut egui::Ui| {
                 // Header row
                 self.show_editor_toolbar(ui, &display_code);
 
@@ -1015,7 +1018,25 @@ impl AppIde {
                 // Rename input popup (shown while active; sends the request on
                 // submit). Rendered after the editor so it overlays the code.
                 self.show_rename_popup(ui);
-            });
+        };
+
+        if collapsed {
+            // The MCU Configurator is hidden, so the editor takes the central
+            // slot and fills everything the Project tree (a right panel added
+            // before this) leaves — no width juggling, and the 70 % cap below
+            // doesn't apply.
+            egui::CentralPanel::default().show_inside(ui, body);
+        } else {
+            // Cap the width so the editor can never fully cover the MCU
+            // Configurator (the central panel) — a too-wide persisted/dragged
+            // width used to hide it entirely. Always leave ≥30 % for the MCU.
+            egui::Panel::left("code_editor")
+                .resizable(true)
+                .default_size(avail * 0.5)
+                .min_width(220.0)
+                .max_width(avail * 0.7)
+                .show_inside(ui, body);
+        }
     }
 
     /// Scroll the editor vertically so the primary caret stays visible when it

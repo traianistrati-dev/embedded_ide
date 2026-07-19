@@ -389,6 +389,9 @@ struct PersistedState {
     /// On startup the IDE reopens this folder automatically if it still exists.
     #[serde(default)]
     project_dir: Option<String>,
+    /// Editor-only layout (MCU + Project panels collapsed away).
+    #[serde(default)]
+    side_panels_collapsed: bool,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -750,6 +753,9 @@ pub struct AppIde {
     pending_discard_file: Option<String>,
     /// `true` while the "Discard ALL changes" confirm dialog is open (Phase C).
     git_discard_all_confirm: bool,
+    /// Collapse the MCU Configurator + Project tree so the editor fills the
+    /// window (toggled from the editor toolbar). Persisted across restarts.
+    side_panels_collapsed: bool,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -1008,6 +1014,7 @@ impl AppIde {
             git_discard_confirm: None,
             pending_discard_file: None,
             git_discard_all_confirm: false,
+            side_panels_collapsed: persisted.side_panels_collapsed,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -1434,6 +1441,10 @@ impl AppIde {
                         self.definition_view = Some(view);
                         self.active_tab = McuTab::Definition;
                         self.def_scroll_pending = true;
+                        // That tab lives in the middle zone, so a collapsed
+                        // layout would swallow the snippet — F12 would look
+                        // like it did nothing. Open the zone back up.
+                        self.side_panels_collapsed = false;
                     }
                 }
                 self.egui_ctx.request_repaint();
@@ -1735,6 +1746,7 @@ impl eframe::App for AppIde {
                     .as_ref()
                     .and_then(|p| p.to_str())
                     .map(String::from),
+                side_panels_collapsed: self.side_panels_collapsed,
             },
         );
     }
@@ -1838,11 +1850,20 @@ impl eframe::App for AppIde {
         // write-back hazard away: a tree click changes `selected_file` only
         // after this frame's write-back finished, so stale text can never land
         // in the new file (the click's content shows next frame).
-        self.show_editor_panel(ui, &project_files);
+        // Collapsed, the editor becomes the CENTRAL panel, and egui requires the
+        // central panel to come after every side panel — so it's rendered at the
+        // MCU slot further down instead. Safe: the end-of-frame write-back
+        // persists to the captured `displayed_file`, not to the live
+        // `selected_file`, so a tree click earlier in the frame can't misfile
+        // the text (see `show_editor_panel`).
+        if !self.side_panels_collapsed {
+            self.show_editor_panel(ui, &project_files);
+        }
 
         // ── Panel 2: Project Tree (docked far right) ─────
         // `save_project_needed` is set when the tree mutates files/folders, so
         // the whole project gets rewritten to the workspace dir afterwards.
+        // ALWAYS rendered — collapsing only hides the middle (MCU) zone.
         let mut save_project_needed = false;
         let signals =
             self.show_project_panel(ui, &project_files, ctrl_s_pressed, &mut save_project_needed);
@@ -1984,8 +2005,17 @@ impl eframe::App for AppIde {
             self.lsp_flush_requested = true;
         }
 
-        // ── Panel 3: MCU Configurator (central — takes the rest) ─────
-        self.show_mcu_panel(ui);
+        // ── Panel 3: the central slot ────────────────────────────────────────
+        // Normally the MCU Configurator (Pins / Clock / Structure / …). When
+        // collapsed that whole middle zone is hidden and the EDITOR takes the
+        // central slot instead, so it fills everything the Project tree leaves.
+        // Safe to skip the MCU panel: main.rs regeneration and the pin/config
+        // sync run in `init_frame` off `mcu_state_hash`, not from this panel.
+        if self.side_panels_collapsed {
+            self.show_editor_panel(ui, &project_files);
+        } else {
+            self.show_mcu_panel(ui);
+        }
     }
 }
 

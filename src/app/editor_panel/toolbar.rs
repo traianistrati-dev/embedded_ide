@@ -249,6 +249,40 @@ impl AppIde {
         ui.horizontal(|ui| {
             ui.heading("Code Editor");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // ── Collapse / expand the middle (MCU Configurator) zone ──
+                // Hides Pins / Clock / Structure / … so the editor widens; the
+                // Project tree on the far right always stays.
+                // NOTE: this layout is RIGHT-TO-LEFT, so the first widget added
+                // sits furthest right — this must come BEFORE Copy to appear to
+                // its right.
+                let collapsed = self.side_panels_collapsed;
+                if ui
+                    .selectable_label(
+                        collapsed,
+                        egui::RichText::new(if collapsed {
+                            format!("{} Panels", ph::ARROWS_OUT_SIMPLE)
+                        } else {
+                            format!("{} Panels", ph::ARROWS_IN_SIMPLE)
+                        })
+                        .size(11.0)
+                        .color(if collapsed {
+                            egui::Color32::from_rgb(120, 190, 240)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                    )
+                    .on_hover_text(if collapsed {
+                        "Show the MCU Configurator again (Pins / Clock / Structure …)"
+                    } else {
+                        "Hide the MCU Configurator (Pins / Clock / Structure …) so the editor widens — the Project tree stays"
+                    })
+                    .clicked()
+                {
+                    self.side_panels_collapsed = !collapsed;
+                }
+
+                ui.add_space(4.0);
+
                 // Copy button — copies the currently displayed file
                 let copy_ok = format!("{} Copied!", ph::CHECK);
                 let copy_def = format!("{} Copy", ph::COPY);
