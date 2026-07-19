@@ -165,6 +165,31 @@ impl McuForm {
         }
     }
 
+    /// Fill family / CPU / toolchain / target deterministically from the chip
+    /// NAME (display_name, else id) — the "Auto-fill from name" button. Also
+    /// seeds probe_chip when empty. No-op for a non-STM32 / unrecognised name;
+    /// returns true when it recognised the name. See [`super::mcu_identity`].
+    pub fn auto_fill_identity(&mut self) -> bool {
+        let name = if !self.display_name.trim().is_empty() {
+            self.display_name.trim().to_string()
+        } else {
+            self.id.trim().to_string()
+        };
+        let Some((family, cpu, toolchain, target)) =
+            super::mcu_identity::identity_from_name(&name)
+        else {
+            return false;
+        };
+        self.family = family;
+        self.cpu = cpu.to_string();
+        self.toolchain = toolchain;
+        self.target = target.to_string();
+        if self.probe_chip.trim().is_empty() {
+            self.probe_chip = name;
+        }
+        true
+    }
+
     /// Seed the form from an existing definition (the "Clone / Edit" path).
     pub fn from_definition(def: &McuDefinition) -> Self {
         let side = |ds: &[PinDef]| -> Vec<PinRow> {
@@ -295,6 +320,13 @@ impl McuForm {
         if self.pins.iter().all(|s| s.is_empty()) {
             w.push("No pins defined — the Pins canvas will be empty.".into());
         }
+        if self.package.trim().is_empty() {
+            w.push(
+                "Package is empty — set it (e.g. UFQFPN48 / LQFP64) before importing pins from a \
+                 datasheet, so the right pin-count column is read."
+                    .into(),
+            );
+        }
         w
     }
 
@@ -417,8 +449,9 @@ pub fn gpio_bank(prefix: &str, start_number: usize, count: usize) -> Vec<PinRow>
 
 /// The function-token cheatsheet shown under the pin editor.
 pub const FUNCTION_TOKEN_HELP: &str = "in out · usart{n}_tx/rx/cts/rts/ck · \
-    spi{n}_nss/sck/miso/mosi · i2c{n}_scl/sda · adc{a}_{ch} · tim{t}_{ch} · \
-    swdio swclk · usb_dm usb_dp · can_rx can_tx · mco";
+    lpuart{n}_tx/rx/cts/rts · spi{n}_nss/sck/miso/mosi/rdy · i2c{n}_scl/sda · \
+    adc{a}_{ch} · tim{t}_{ch} · swdio swclk · usb_dm usb_dp · can_rx can_tx · mco · \
+    af:{signal} for anything else (e.g. af:sai1_sd_a, af:fmc_a0)";
 
 /// Parse a space/comma-separated function token list into [`PinFunction`]s.
 /// Unrecognised tokens are skipped here (validation lists them separately).
@@ -443,6 +476,13 @@ pub fn unknown_function_tokens(s: &str) -> Vec<String> {
 /// [`function_to_token`].
 fn token_to_function(tok: &str) -> Option<PinFunction> {
     let t = tok.trim().to_ascii_lowercase();
+    // `af:<name>` — a generic alternate function the IDE doesn't model
+    // natively (SAI / FMC / DCMI / …). Explicit prefix so a TYPO still gets
+    // flagged by `unknown_function_tokens` instead of silently becoming one.
+    if let Some(name) = t.strip_prefix("af:") {
+        let name = name.trim();
+        return (!name.is_empty()).then(|| PinFunction::Other(name.to_ascii_uppercase()));
+    }
     // Fixed tokens first.
     let simple = match t.as_str() {
         "in" | "gpioinput" => Some(PinFunction::GpioInput),
@@ -472,8 +512,17 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             "tx" => Some(PinFunction::UsartTx(n)),
             "rx" => Some(PinFunction::UsartRx(n)),
             "cts" => Some(PinFunction::UsartCts(n)),
-            "rts" => Some(PinFunction::UsartRts(n)),
+            // `rts_de` is the same physical pin as RTS (it doubles as the RS485
+            // driver-enable), so both spellings land on RTS.
+            "rts" | "rts_de" => Some(PinFunction::UsartRts(n)),
             "ck" => Some(PinFunction::UsartCk(n)),
+            _ => None,
+        },
+        "lpuart" => match tail {
+            "tx" => Some(PinFunction::LpuartTx(n)),
+            "rx" => Some(PinFunction::LpuartRx(n)),
+            "cts" => Some(PinFunction::LpuartCts(n)),
+            "rts" | "rts_de" => Some(PinFunction::LpuartRts(n)),
             _ => None,
         },
         "spi" => match tail {
@@ -481,6 +530,7 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             "sck" => Some(PinFunction::SpiSck(n)),
             "miso" => Some(PinFunction::SpiMiso(n)),
             "mosi" => Some(PinFunction::SpiMosi(n)),
+            "rdy" => Some(PinFunction::SpiRdy(n)),
             _ => None,
         },
         "i2c" => match tail {
@@ -513,14 +563,20 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::UsartCts(n) => format!("usart{n}_cts"),
         PinFunction::UsartRts(n) => format!("usart{n}_rts"),
         PinFunction::UsartCk(n) => format!("usart{n}_ck"),
+        PinFunction::LpuartTx(n) => format!("lpuart{n}_tx"),
+        PinFunction::LpuartRx(n) => format!("lpuart{n}_rx"),
+        PinFunction::LpuartCts(n) => format!("lpuart{n}_cts"),
+        PinFunction::LpuartRts(n) => format!("lpuart{n}_rts"),
         PinFunction::SpiNss(n) => format!("spi{n}_nss"),
         PinFunction::SpiSck(n) => format!("spi{n}_sck"),
         PinFunction::SpiMiso(n) => format!("spi{n}_miso"),
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
+        PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::I2cScl(n) => format!("i2c{n}_scl"),
         PinFunction::I2cSda(n) => format!("i2c{n}_sda"),
         PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_{channel}"),
         PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_{channel}"),
+        PinFunction::Other(name) => format!("af:{}", name.to_ascii_lowercase()),
     })
 }
 
@@ -727,6 +783,94 @@ mod tests {
         assert!(code.contains("SYSCLK 100 MHz"), "{code}");
         // Edit round-trips the choice.
         assert_eq!(McuForm::from_definition(&def).clock, ClockChoice::Stm32f4);
+    }
+
+    /// LPUART / SPI-RDY are first-class tokens now, and `rts_de` is accepted as
+    /// a spelling of `rts` (same physical pin — RS485 driver enable).
+    #[test]
+    fn lpuart_spi_rdy_and_rts_de_tokens() {
+        let fns = parse_functions("lpuart1_tx lpuart1_rx lpuart2_cts lpuart1_rts spi3_rdy");
+        assert_eq!(
+            fns,
+            vec![
+                PinFunction::LpuartTx(1),
+                PinFunction::LpuartRx(1),
+                PinFunction::LpuartCts(2),
+                PinFunction::LpuartRts(1),
+                PinFunction::SpiRdy(3),
+            ]
+        );
+        // Canonical round-trip.
+        assert_eq!(parse_functions(&functions_to_string(&fns)), fns);
+        // `rts_de` is an accepted alias for `rts` on both peripherals.
+        assert_eq!(parse_functions("usart2_rts_de"), vec![PinFunction::UsartRts(2)]);
+        assert_eq!(parse_functions("lpuart1_rts_de"), vec![PinFunction::LpuartRts(1)]);
+        // None of them are flagged as unknown any more.
+        assert!(unknown_function_tokens(
+            "lpuart1_tx lpuart1_rts_de spi1_rdy usart2_rts_de"
+        )
+        .is_empty());
+        // The cheatsheet advertises them.
+        assert!(FUNCTION_TOKEN_HELP.contains("lpuart"));
+        assert!(FUNCTION_TOKEN_HELP.contains("rdy"));
+    }
+
+    /// `af:<signal>` carries anything the IDE doesn't model natively, so an
+    /// import never loses a pin function — while typos are STILL flagged
+    /// (that's why the prefix is explicit rather than a catch-all).
+    #[test]
+    fn generic_af_tokens_round_trip_and_typos_still_flagged() {
+        let fns = parse_functions("in out af:sai1_sd_a af:fmc_a0 af:tim1_ch1n");
+        assert_eq!(
+            fns,
+            vec![
+                PinFunction::GpioInput,
+                PinFunction::GpioOutput,
+                PinFunction::Other("SAI1_SD_A".into()),
+                PinFunction::Other("FMC_A0".into()),
+                PinFunction::Other("TIM1_CH1N".into()),
+            ]
+        );
+        // Canonical round-trip through the token string.
+        assert_eq!(functions_to_string(&fns), "in out af:sai1_sd_a af:fmc_a0 af:tim1_ch1n");
+        assert_eq!(parse_functions(&functions_to_string(&fns)), fns);
+        // Generic AFs are never "unknown"…
+        assert!(unknown_function_tokens("af:dcmi_d3 af:eth_mdio").is_empty());
+        // …but a real typo still is (the prefix keeps validation honest).
+        assert_eq!(unknown_function_tokens("uart1_tx spi9_bad af:"), vec!["uart1_tx", "spi9_bad", "af:"]);
+        // The label round-trips through codegen comments too.
+        let f = PinFunction::Other("SAI1_SD_A".into());
+        assert_eq!(f.label(), "SAI1_SD_A");
+        assert_eq!(PinFunction::from_label(&f.label()), Some(f));
+    }
+
+    #[test]
+    fn auto_fill_identity_from_name_sets_family_cpu_target() {
+        let mut f = McuForm::blank();
+        f.display_name = "STM32WBA55CG".into();
+        f.family.clear();
+        f.cpu.clear();
+        f.target.clear();
+        f.probe_chip.clear();
+        assert!(f.auto_fill_identity());
+        assert_eq!(f.family, "stm32wba");
+        assert_eq!(f.cpu, "Cortex-M33");
+        assert_eq!(f.target, "thumbv8m.main-none-eabihf");
+        assert_eq!(f.toolchain, ToolchainKind::RustEmbedded);
+        assert_eq!(f.probe_chip, "STM32WBA55CG"); // seeded because it was empty
+        // An unrecognised name changes nothing.
+        let mut g = McuForm::blank();
+        g.display_name = "ESP32-C3".into();
+        assert!(!g.auto_fill_identity());
+    }
+
+    #[test]
+    fn empty_package_warns() {
+        let mut f = McuForm::blank();
+        f.package.clear();
+        assert!(f.warnings().iter().any(|w| w.contains("Package is empty")));
+        f.package = "UFQFPN48".into();
+        assert!(!f.warnings().iter().any(|w| w.contains("Package is empty")));
     }
 
     #[test]

@@ -124,10 +124,15 @@ pub fn var_suffix(func: &PinFunction) -> String {
         PinFunction::UsartCts(n) => format!("usart{n}_cts"),
         PinFunction::UsartRts(n) => format!("usart{n}_rts"),
         PinFunction::UsartCk(n) => format!("usart{n}_ck"),
+        PinFunction::LpuartTx(n) => format!("lpuart{n}_tx"),
+        PinFunction::LpuartRx(n) => format!("lpuart{n}_rx"),
+        PinFunction::LpuartCts(n) => format!("lpuart{n}_cts"),
+        PinFunction::LpuartRts(n) => format!("lpuart{n}_rts"),
         PinFunction::SpiSck(n) => format!("spi{n}_sck"),
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiMiso(n) => format!("spi{n}_miso"),
         PinFunction::SpiNss(n) => format!("spi{n}_nss"),
+        PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::I2cScl(n) => format!("i2c{n}_scl"),
         PinFunction::I2cSda(n) => format!("i2c{n}_sda"),
         PinFunction::UsbDm => "usb_dm".into(),
@@ -137,6 +142,10 @@ pub fn var_suffix(func: &PinFunction) -> String {
         PinFunction::SwdIo => "swd_io".into(),
         PinFunction::SwdClk => "swd_clk".into(),
         PinFunction::Mco => "mco".into(),
+        // Generic AF: the signal name lowercased is already a valid Rust
+        // identifier fragment (`SAI1_SD_A` → `sai1_sd_a`); `-` (as in
+        // `JTDO-TRACESWO`) becomes `_`.
+        PinFunction::Other(name) => name.to_ascii_lowercase().replace('-', "_"),
         PinFunction::Unset => "unset".into(),
     }
 }

@@ -15,10 +15,16 @@ impl PinFunction {
             | PinFunction::UsartCts(_)
             | PinFunction::UsartRts(_)
             | PinFunction::UsartCk(_)       => egui::Color32::from_rgb(50, 110, 200),
+            // LPUART — same family as USART, slightly lighter blue.
+            PinFunction::LpuartTx(_)
+            | PinFunction::LpuartRx(_)
+            | PinFunction::LpuartCts(_)
+            | PinFunction::LpuartRts(_)     => egui::Color32::from_rgb(80, 140, 220),
             PinFunction::SpiNss(_)
             | PinFunction::SpiSck(_)
             | PinFunction::SpiMiso(_)
-            | PinFunction::SpiMosi(_)       => egui::Color32::from_rgb(30, 170, 170),
+            | PinFunction::SpiMosi(_)
+            | PinFunction::SpiRdy(_)        => egui::Color32::from_rgb(30, 170, 170),
             PinFunction::I2cScl(_)
             | PinFunction::I2cSda(_)        => egui::Color32::from_rgb(60, 180, 100),
             PinFunction::UsbDm
@@ -28,6 +34,9 @@ impl PinFunction {
             PinFunction::SwdIo
             | PinFunction::SwdClk           => egui::Color32::from_rgb(190, 50, 50),
             PinFunction::Mco                => egui::Color32::from_rgb(130, 130, 130),
+            // Generic alternate functions (SAI / FMC / DCMI / …) — muted slate
+            // so they read as "carried, but not natively modelled".
+            PinFunction::Other(_)           => egui::Color32::from_rgb(105, 115, 135),
         }
     }
 
@@ -44,10 +53,15 @@ impl PinFunction {
                 | PinFunction::UsartCts(_)
                 | PinFunction::UsartRts(_)
                 | PinFunction::UsartCk(_)
+                | PinFunction::LpuartTx(_)
+                | PinFunction::LpuartRx(_)
+                | PinFunction::LpuartCts(_)
+                | PinFunction::LpuartRts(_)
                 | PinFunction::SpiNss(_)
                 | PinFunction::SpiSck(_)
                 | PinFunction::SpiMiso(_)
                 | PinFunction::SpiMosi(_)
+                | PinFunction::SpiRdy(_)
                 | PinFunction::I2cScl(_)
                 | PinFunction::I2cSda(_)
                 | PinFunction::UsbDm

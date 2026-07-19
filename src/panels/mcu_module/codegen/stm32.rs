@@ -971,18 +971,27 @@ fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
         PinFunction::GpioOutput => format!("into_push_pull_output(&mut {pv}.{crx})"),
         PinFunction::AdcChannel { .. } => format!("into_analog(&mut {pv}.{crx})"),
         PinFunction::TimerPwm { .. } => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
-        PinFunction::UsartTx(_) | PinFunction::UsartCk(_) => {
+        // LPUART / SPI-RDY don't exist on STM32F1; they're grouped with their
+        // closest USART/SPI analogue so the mode stays sane if ever selected.
+        PinFunction::UsartTx(_) | PinFunction::UsartCk(_) | PinFunction::LpuartTx(_) => {
             format!("into_alternate_push_pull(&mut {pv}.{crx})")
         }
-        PinFunction::UsartRx(_) | PinFunction::UsartCts(_) => {
+        PinFunction::UsartRx(_)
+        | PinFunction::UsartCts(_)
+        | PinFunction::LpuartRx(_)
+        | PinFunction::LpuartCts(_) => {
             format!("into_floating_input(&mut {pv}.{crx})")
         }
-        PinFunction::UsartRts(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::UsartRts(_) | PinFunction::LpuartRts(_) => {
+            format!("into_push_pull_output(&mut {pv}.{crx})")
+        }
         PinFunction::SpiSck(_) | PinFunction::SpiMosi(_) => {
             format!("into_alternate_push_pull(&mut {pv}.{crx})")
         }
         PinFunction::SpiNss(_) => format!("into_push_pull_output(&mut {pv}.{crx})"),
-        PinFunction::SpiMiso(_) => format!("into_floating_input(&mut {pv}.{crx})"),
+        PinFunction::SpiMiso(_) | PinFunction::SpiRdy(_) => {
+            format!("into_floating_input(&mut {pv}.{crx})")
+        }
         PinFunction::I2cScl(_) | PinFunction::I2cSda(_) => {
             format!("into_alternate_open_drain(&mut {pv}.{crx})")
         }
@@ -995,6 +1004,9 @@ fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
         PinFunction::SwdIo | PinFunction::SwdClk => {
             "// SWD — active by default, no config needed".to_owned()
         }
+        // Generic alternate function — push-pull AF is the safe default; the
+        // user refines it if that peripheral needs something else.
+        PinFunction::Other(_) => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
         PinFunction::Unset => unreachable!(),
     }
 }

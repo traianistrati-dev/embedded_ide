@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::AppIde;
-use crate::panels::mcu_module::datasheet_import::{self as ds, ExtractedChip, Source};
+use crate::panels::mcu_module::datasheet_import::{self as ds, Extraction, Source};
 use crate::panels::mcu_module::mcu_form::McuForm;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -20,7 +20,7 @@ use egui_phosphor::regular as ph;
 /// Background extraction job state, shared with the worker thread.
 enum ImportJob {
     Running,
-    Done(Result<ExtractedChip, String>),
+    Done(Result<Extraction, String>),
 }
 
 /// A PDF the user picked (kept in memory until Extract or Remove).
@@ -37,9 +37,16 @@ pub(crate) struct DatasheetImport {
     text: String,
     /// A chosen datasheet PDF — when set, it is extracted instead of the text.
     pdf: Option<PdfPick>,
-    /// Copied from the form when opened, so the worker has hints to bias with.
+    /// Copied from the form when opened — biases the model only.
     family_hint: String,
-    package_hint: String,
+    /// The target package. AUTHORITATIVE (it picks which pin-number column the
+    /// model reads), editable here and REQUIRED before extracting; written back
+    /// to the form on apply.
+    package: String,
+    /// Ignore the on-disk cache and force a fresh (billed) API call.
+    force_reextract: bool,
+    /// Whether the last applied extraction came from the cache (free).
+    last_from_cache: bool,
     job: Option<Arc<Mutex<ImportJob>>>,
     report: Option<ds::ApplyReport>,
     error: Option<String>,
@@ -55,7 +62,9 @@ impl DatasheetImport {
             text: String::new(),
             pdf: None,
             family_hint: form.family.clone(),
-            package_hint: form.package.clone(),
+            package: form.package.clone(),
+            force_reextract: false,
+            last_from_cache: false,
             job: None,
             report: None,
             error: None,
@@ -91,8 +100,13 @@ impl AppIde {
                 };
                 di.job = None;
                 match result {
-                    Some(Ok(chip)) => {
-                        di.report = Some(ds::apply_to_form(&chip, form));
+                    Some(Ok(ex)) => {
+                        // The user's package is authoritative (it drove which
+                        // column was read) — write it to the form before
+                        // applying, so the pin-count cross-check uses it.
+                        form.package = di.package.trim().to_string();
+                        di.last_from_cache = ex.from_cache;
+                        di.report = Some(ds::apply_to_form(&ex.chip, form));
                         di.error = None;
                     }
                     Some(Err(e)) => {
@@ -191,15 +205,38 @@ impl AppIde {
                         egui::TextEdit::singleline(&mut di.model).desired_width(200.0),
                     )
                     .on_hover_text("Anthropic model id — e.g. claude-opus-4-8");
-                    if !di.family_hint.trim().is_empty() || !di.package_hint.trim().is_empty() {
+                    if !di.family_hint.trim().is_empty() {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "hints: {} {}",
-                                di.family_hint.trim(),
-                                di.package_hint.trim()
-                            ))
-                            .size(10.0)
-                            .color(egui::Color32::from_gray(140)),
+                            egui::RichText::new(format!("family: {}", di.family_hint.trim()))
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                    }
+                });
+
+                // ── Package (REQUIRED — picks the pin-number column) ─────────
+                ui.horizontal(|ui| {
+                    ui.label("Package *:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut di.package)
+                            .desired_width(140.0)
+                            .hint_text("UFQFPN48"),
+                    )
+                    .on_hover_text(
+                        "Must match a package name in the datasheet EXACTLY.\n\
+                         The datasheet lists one column / pinout figure per package \
+                         (UFQFPN32, WLCSP41, UFQFPN48, UFQFPN48 SMPS, UFBGA59…) — \
+                         this tells the model which one to read.\n\n\
+                         Variants matter: \"UFQFPN48\" and \"UFQFPN48 SMPS\" are \
+                         DIFFERENT pinouts (both figures just say \"UFQFPN48\" inside \
+                         the chip outline). Type the full variant name, e.g. copy it \
+                         from the figure title.",
+                    );
+                    if di.package.trim().is_empty() {
+                        ui.label(
+                            egui::RichText::new("required — without it the wrong column gets read")
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(230, 170, 70)),
                         );
                     }
                 });
@@ -276,7 +313,10 @@ impl AppIde {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let has_input = di.pdf.is_some() || !di.text.trim().is_empty();
-                    let can_extract = !running && has_input && !di.api_key.trim().is_empty();
+                    let can_extract = !running
+                        && has_input
+                        && !di.api_key.trim().is_empty()
+                        && !di.package.trim().is_empty();
                     if ui
                         .add_enabled(
                             can_extract,
@@ -290,6 +330,9 @@ impl AppIde {
                             ),
                         )
                         .on_hover_text("Send the text to Claude and fill the form")
+                        .on_disabled_hover_text(
+                            "needs an API key, a Package, and either pasted text or a PDF",
+                        )
                         .clicked()
                     {
                         do_extract = true;
@@ -302,6 +345,12 @@ impl AppIde {
                                 .color(egui::Color32::from_gray(160)),
                         );
                     }
+                    ui.checkbox(&mut di.force_reextract, "re-extract")
+                        .on_hover_text(
+                            "Off: an identical document + package + model reuses the cached \
+                             result — instant and free.\nOn: force a fresh (billed) API call, \
+                             e.g. after editing the pasted text.",
+                        );
                     if ui.button("Close").clicked() {
                         keep_open = false;
                     }
@@ -322,9 +371,15 @@ impl AppIde {
                     ui.separator();
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} Applied — {} pin(s) added. Review the form and fix \
+                            "{} Applied{} — {} pin(s). Review the form and fix \
                              anything flagged before Save.",
-                            ph::CHECK_CIRCLE, rep.pins_added
+                            ph::CHECK_CIRCLE,
+                            if di.last_from_cache {
+                                " from cache (no API call)"
+                            } else {
+                                ""
+                            },
+                            rep.pins_added
                         ))
                         .size(11.5)
                         .strong()
@@ -393,14 +448,15 @@ impl AppIde {
                 di.api_key.clone(),
                 di.model.clone(),
                 di.family_hint.clone(),
-                di.package_hint.clone(),
+                di.package.trim().to_string(),
             );
             let source = match &di.pdf {
                 Some(pdf) => Source::Pdf(pdf.bytes.clone()),
                 None => Source::Text(di.text.clone()),
             };
+            let use_cache = !di.force_reextract;
             std::thread::spawn(move || {
-                let res = ds::call_claude(&key, &model, &family, &package, &source);
+                let res = ds::call_claude(&key, &model, &family, &package, &source, use_cache);
                 *shared.lock().unwrap() = ImportJob::Done(res);
             });
             ui.ctx().request_repaint();

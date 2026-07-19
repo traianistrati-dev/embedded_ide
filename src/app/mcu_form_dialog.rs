@@ -92,8 +92,39 @@ impl AppIde {
                                 "codegen/clock backend key, e.g. stm32f1",
                             );
                             labeled(ui, "CPU", &mut form.cpu, "e.g. Cortex-M3 (label only)");
-                            labeled(ui, "Package", &mut form.package, "e.g. LQFP48 (label only)");
+                            labeled(
+                                ui,
+                                "Package *",
+                                &mut form.package,
+                                "e.g. UFQFPN48 — set this before importing pins from a datasheet \
+                                 (it selects the right pin-number column)",
+                            );
                         });
+
+                    // Fill the boring identity fields from the chip name.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new(format!(
+                                    "{} Auto-fill from name",
+                                    ph::MAGIC_WAND
+                                ))
+                                .size(11.0),
+                            )
+                            .on_hover_text(
+                                "Set Family / CPU / Toolchain / Target from the chip name \
+                                 (e.g. STM32WBA55CG → stm32wba · Cortex-M33 · thumbv8m.main-none-eabihf)",
+                            )
+                            .clicked()
+                        {
+                            form.auto_fill_identity();
+                        }
+                        ui.label(
+                            egui::RichText::new("fills Family/CPU/Toolchain/Target from the name")
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                    });
 
                     ui.add_space(6.0);
                     section(ui, "Toolchain & target");

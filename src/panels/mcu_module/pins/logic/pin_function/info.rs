@@ -97,10 +97,45 @@ impl PinFunction {
                 specs: usart_common_specs(*n),
             },
 
+            // ── LPUART (low-power UART — its own peripheral) ─────────────────
+            PinFunction::LpuartTx(n) => FunctionInfo {
+                description: format!(
+                    "LPUART{n} transmit (TX). Low-power UART — runs from LSE/HSI so it \
+                     keeps receiving in Stop mode, at lower maximum baud rates than USART."
+                ),
+                specs: usart_common_specs(*n),
+            },
+            PinFunction::LpuartRx(n) => FunctionInfo {
+                description: format!(
+                    "LPUART{n} receive (RX). Can wake the MCU from Stop mode on a start bit."
+                ),
+                specs: usart_common_specs(*n),
+            },
+            PinFunction::LpuartCts(n) => FunctionInfo {
+                description: format!(
+                    "LPUART{n} Clear-To-Send (CTS). Hardware flow-control input."
+                ),
+                specs: usart_common_specs(*n),
+            },
+            PinFunction::LpuartRts(n) => FunctionInfo {
+                description: format!(
+                    "LPUART{n} Request-To-Send (RTS). Flow-control output; the same pin \
+                     also serves as DE (driver enable) for RS485 transceivers."
+                ),
+                specs: usart_common_specs(*n),
+            },
+
             PinFunction::SpiNss(n) => FunctionInfo {
                 description: format!(
                     "SPI{n} Chip Select / Slave Select (NSS). \
                      Pulled LOW to activate the target device."
+                ),
+                specs: spi_common_specs(*n),
+            },
+            PinFunction::SpiRdy(n) => FunctionInfo {
+                description: format!(
+                    "SPI{n} RDY — slave-ready handshake. The slave drives it to tell the \
+                     master it can accept the next transfer (STM32WBA / U5 and later)."
                 ),
                 specs: spi_common_specs(*n),
             },
@@ -173,6 +208,16 @@ impl PinFunction {
                     ("Also".into(), "JTCK — JTAG clock".into()),
                     ("Note".into(), "Can be reconfigured as GPIO after boot".into()),
                 ],
+            },
+
+            PinFunction::Other(name) => FunctionInfo {
+                description: format!(
+                    "{name} — alternate function carried verbatim from the datasheet. \
+                     The IDE doesn't model this peripheral natively, so no init code is \
+                     generated: the pin is configured as an alternate function and its \
+                     peripheral singleton is handed to you to drive directly."
+                ),
+                specs: vec![("Signal".into(), name.clone())],
             },
 
             PinFunction::Mco => FunctionInfo {

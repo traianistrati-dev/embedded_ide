@@ -19,7 +19,8 @@
 use serde::{Deserialize, Deserializer};
 use std::path::PathBuf;
 
-use super::mcu_form::{unknown_function_tokens, McuForm, PinRow};
+use super::mcu_form::{McuForm, PinRow};
+use super::stm32_pin_data;
 
 /// Default model. Datasheet extraction rewards accuracy over cost, so the most
 /// capable model is the sensible default; the dialog lets the user override it.
@@ -37,8 +38,10 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 // ── Extraction result (the JSON contract the model must return) ─────────────
 
 /// One extracted pin. Every field defaults so a partial object still parses;
-/// `raw` carries any alternate-function text the model could not map to a
-/// token, so the human reviewer sees exactly what was dropped.
+/// The model reports the datasheet's RAW signal names; mapping them to the
+/// form's function tokens and laying them out across the four sides is done
+/// DETERMINISTICALLY in [`apply_to_form`] (same code as the XML importer), so
+/// the AI can't invent tokens like `spi1_rdy` or dump every pin on one side.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ExtractedPin {
@@ -47,13 +50,9 @@ pub struct ExtractedPin {
     pub number: String,
     pub name: String,
     pub reserved: bool,
-    /// `top` / `bottom` / `left` / `right` if the pinout shows it, else empty
-    /// (→ placed on the Left side for the reviewer to redistribute).
-    pub side: String,
-    /// Space-separated tokens from the form's function grammar.
-    pub functions: String,
-    /// Alternate-function text that did NOT fit a token, kept verbatim.
-    pub raw: String,
+    /// Alternate-function signal names EXACTLY as printed in the datasheet
+    /// (`USART1_TX`, `SPI1_SCK`, `TIM1_CH2`, `GPIO`, …).
+    pub signals: Vec<String>,
 }
 
 /// The full extraction. Identity fields default to empty ("model didn't say"),
@@ -93,27 +92,65 @@ fn de_string_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Erro
 
 // ── Prompt building ─────────────────────────────────────────────────────────
 
-/// Build the system prompt. `family_hint` / `package_hint` come from whatever
-/// the user already typed in the form (may be empty) and merely bias the model.
-pub fn build_prompt(family_hint: &str, package_hint: &str) -> String {
+/// Build the system prompt. `family_hint` merely biases the model, but
+/// `package` is an AUTHORITATIVE constraint: a datasheet pin table carries one
+/// number column per package, and picking the wrong one yields the wrong pin
+/// count with BGA letter+digit positions (the original failure mode — reading
+/// UFBGA59 instead of UFQFPN48). The dialog requires it before extracting.
+pub fn build_prompt(family_hint: &str, package: &str) -> String {
     let mut hint = String::new();
     if !family_hint.trim().is_empty() {
         hint.push_str(&format!("\nFamily hint (may be wrong): {}", family_hint.trim()));
     }
-    if !package_hint.trim().is_empty() {
-        hint.push_str(&format!("\nPackage hint (may be wrong): {}", package_hint.trim()));
+    let pkg = package.trim();
+    if !pkg.is_empty() {
+        hint.push_str(&format!(
+            "\n\nPACKAGE — a REQUIREMENT, not a hint. A datasheet describes SEVERAL \
+             packages side by side (pin-table columns like UFQFPN32, WLCSP41, \
+             UFQFPN48, UFQFPN48 SMPS, UFBGA59, and one pinout figure each). \
+             Extract the pins for EXACTLY the \"{pkg}\" package and nothing else:\n\
+             - match the package name EXACTLY, character for character. Names that \
+             share a prefix are DIFFERENT packages with DIFFERENT pinouts: \
+             \"UFQFPN48\" is NOT \"UFQFPN48 SMPS\", and \"LQFP64\" is NOT \
+             \"LQFP64 SMPS\". Use \"{pkg}\" and only \"{pkg}\";\n\
+             - identify the package by the TABLE COLUMN HEADER or the FIGURE TITLE \
+             (e.g. \"Figure 9. UFQFPN48 pinout\"). NEVER identify it by the text \
+             drawn INSIDE the package outline of a pinout diagram — that is just \
+             the base package family and is usually identical for every variant, \
+             so it cannot tell them apart;\n\
+             - every pin must come from ONE single pinout. Never merge pins from \
+             two figures, two tables or two columns. If the same pin number ends \
+             up with two different names, you have mixed variants — start over \
+             from the one matching \"{pkg}\";\n\
+             - take \"number\" from the \"{pkg}\" column/figure ONLY — those are \
+             plain integers;\n\
+             - if a pin's entry in that column is \"-\" or blank, that pin does \
+             NOT exist in this package: skip it entirely;\n\
+             - never take numbers from another column — BGA columns use \
+             letter+digit codes like A1 / H7 and are always wrong here;\n\
+             - the number of pins you return must match the \"{pkg}\" package;\n\
+             - if the datasheet contains no package named exactly \"{pkg}\", \
+             return \"pins\": [] rather than guessing a similar one."
+        ));
     }
     format!(
         "You are a datasheet-extraction assistant for an embedded-Rust IDE.\n\
-         From the microcontroller datasheet text the user provides, extract the \
-         chip identity, memory map, and pin / alternate-function table, and \
-         return the result as a SINGLE JSON object and nothing else — no \
-         markdown, no prose, no code fences.\n\
+         From the microcontroller datasheet the user provides, extract the chip \
+         identity, memory map, and the pin table, and return the result as a \
+         SINGLE JSON object and nothing else — no markdown, no prose, no code \
+         fences.\n\
+         \n\
+         For every pin, list its alternate-function SIGNAL NAMES **exactly as \
+         printed** in the datasheet — do NOT rename, abbreviate, translate or \
+         map them to anything. Copy them verbatim, e.g. \"USART1_TX\", \
+         \"SPI1_SCK\", \"TIM1_CH2\", \"I2C1_SDA\", \"ADC1_IN5\", \
+         \"LPUART1_TX\". Also include \"GPIO\" for any general-purpose I/O pin. \
+         The IDE maps these names itself.\n\
          \n\
          JSON shape:\n\
          {{\n\
          \x20 \"display_name\": string,   // e.g. \"STM32F103RB\"\n\
-         \x20 \"family\": string,         // lowercase key if known: stm32f1, stm32wba, esp32c3; else best guess\n\
+         \x20 \"family\": string,         // lowercase key if known: stm32f1, stm32wba, esp32c3; else \"\"\n\
          \x20 \"cpu\": string,            // e.g. \"Cortex-M3\"\n\
          \x20 \"package\": string,        // e.g. \"LQFP64\"\n\
          \x20 \"flash_origin\": string,   // hex, e.g. \"0x08000000\" (ARM); \"\" if unknown / ESP\n\
@@ -122,28 +159,21 @@ pub fn build_prompt(family_hint: &str, package_hint: &str) -> String {
          \x20 \"ram_size\": string,       // e.g. \"20K\"\n\
          \x20 \"probe_chip\": string,     // probe-rs chip name if identifiable, else \"\"\n\
          \x20 \"pins\": [\n\
-         \x20   {{ \"number\": string|number, \"name\": string, \"reserved\": bool,\n\
-         \x20      \"side\": \"top\"|\"bottom\"|\"left\"|\"right\"|\"\",\n\
-         \x20      \"functions\": string, \"raw\": string }}\n\
+         \x20   {{ \"number\": string|number,   // the pin's package position — an INTEGER\n\
+         \x20      \"name\": string,            // e.g. \"PA9\"\n\
+         \x20      \"reserved\": bool,          // power / ground / NC / reset / oscillator\n\
+         \x20      \"signals\": [string, ...]   // verbatim signal names\n\
+         \x20   }}\n\
          \x20 ]\n\
          }}\n\
          \n\
-         Function token grammar — use ONLY these tokens in \"functions\" \
-         (space-separated); put anything you cannot map into \"raw\":\n\
-         \x20 in out\n\
-         \x20 usart{{n}}_tx usart{{n}}_rx usart{{n}}_cts usart{{n}}_rts usart{{n}}_ck\n\
-         \x20 spi{{n}}_nss spi{{n}}_sck spi{{n}}_miso spi{{n}}_mosi\n\
-         \x20 i2c{{n}}_scl i2c{{n}}_sda\n\
-         \x20 adc{{a}}_{{channel}}   tim{{t}}_{{channel}}\n\
-         \x20 swdio swclk   usb_dm usb_dp   can_rx can_tx   mco\n\
-         (n/a/t/channel are integers: usart1_tx, spi2_sck, i2c1_scl, adc1_5, tim2_1)\n\
-         \n\
          Rules:\n\
-         - Map UART to usart (uartN_tx -> usartN_tx).\n\
-         - A general-purpose pin usable as input and output gets \"in out\".\n\
-         - Power / ground / NC / reset / oscillator pins: reserved=true, functions=\"\".\n\
-         - Preserve EVERY alternate function: if it doesn't fit a token, append it to \"raw\".\n\
-         - Never invent pins; include only pins present in the provided text.\n\
+         - \"number\" must be the INTEGER package position, never a BGA-style \
+         letter+digit code.\n\
+         - Power / ground / NC / reset / oscillator pins: reserved=true, \
+         \"signals\": [].\n\
+         - Never invent pins or signals; include only what the text actually \
+         shows.\n\
          - Output the JSON object only.{hint}"
     )
 }
@@ -221,11 +251,9 @@ fn extraction_schema() -> serde_json::Value {
                         "number": { "type": "string" },
                         "name": { "type": "string" },
                         "reserved": { "type": "boolean" },
-                        "side": { "type": "string", "enum": ["top", "bottom", "left", "right", ""] },
-                        "functions": { "type": "string" },
-                        "raw": { "type": "string" },
+                        "signals": { "type": "array", "items": { "type": "string" } },
                     },
-                    "required": ["number", "name", "reserved", "side", "functions", "raw"],
+                    "required": ["number", "name", "reserved", "signals"],
                 },
             },
         },
@@ -351,15 +379,23 @@ pub struct ApplyReport {
 
 /// Patch `form` in place from `chip`. Identity fields are only overwritten when
 /// the extraction has a non-empty value (so a partial extraction never wipes
-/// something the user already typed). Pins are APPENDED, each onto the side the
-/// model named (default Left). Returns the [`ApplyReport`] for review.
+/// something the user already typed).
+///
+/// Pins go through the SAME deterministic pipeline as the XML importer: each
+/// raw signal name is mapped by [`stm32_pin_data::map_signal`] (so the model
+/// can't invent tokens) and the resulting rows are laid out across the four
+/// sides by [`stm32_pin_data::distribute_sides`] (so they never all land on
+/// one side). This REPLACES the form's pins — a datasheet import populates the
+/// pinout. Returns the [`ApplyReport`] for review.
 pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     let mut r = ApplyReport::default();
 
     patch(&mut form.display_name, &chip.display_name, "Display name", &mut r);
     patch(&mut form.family, &chip.family, "Family", &mut r);
     patch(&mut form.cpu, &chip.cpu, "CPU", &mut r);
-    patch(&mut form.package, &chip.package, "Package", &mut r);
+    // NOTE: `package` is deliberately NOT patched from the extraction — it is a
+    // USER input that drives which pin-number column the model reads, so the
+    // model's echo must never override it.
     patch(&mut form.flash_origin, &chip.flash_origin, "Flash origin", &mut r);
     patch(&mut form.flash_size, &chip.flash_size, "Flash size", &mut r);
     patch(&mut form.ram_origin, &chip.ram_origin, "RAM origin", &mut r);
@@ -376,45 +412,95 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
         }
     }
 
+    // ── Pins: deterministic signal→token mapping, then a QFP side layout ────
+    // Nothing is dropped except true noise: peripherals the IDE doesn't model
+    // become generic `af:<name>` tokens, collected here (deduped) so the review
+    // report can say which ones carry no native driver support.
+    let mut generic: std::collections::BTreeSet<String> = Default::default();
+    let mut rows: Vec<PinRow> = Vec::new();
     for p in &chip.pins {
-        let side = side_index(&p.side);
-        // Reserved pins never carry functions.
-        let functions = if p.reserved {
-            String::new()
-        } else {
-            p.functions.trim().to_string()
-        };
         let name = p.name.trim().to_string();
         let number = p.number.trim().to_string();
-        for bad in unknown_function_tokens(&functions) {
-            r.warnings
-                .push(format!("Pin '{name}' has an unknown function token '{bad}'."));
+        let mut tokens: Vec<String> = Vec::new();
+        if !p.reserved {
+            for sig in &p.signals {
+                // `None` = noise (EXTI / EVENTOUT / RCC / RTC / SYS) — dropped.
+                let Some(tok) = stm32_pin_data::map_signal(sig) else {
+                    continue;
+                };
+                for t in tok.split_whitespace() {
+                    if let Some(raw) = t.strip_prefix("af:") {
+                        generic.insert(raw.to_ascii_uppercase());
+                    }
+                    if !tokens.iter().any(|x| x == t) {
+                        tokens.push(t.to_string());
+                    }
+                }
+            }
         }
-        if !p.raw.trim().is_empty() {
-            r.raw_notes
-                .push(format!("{name} (pin {number}): unmapped → {}", p.raw.trim()));
-        }
-        form.pins[side].push(PinRow {
+        rows.push(PinRow {
             number,
             name,
             reserved: p.reserved,
-            functions,
+            functions: tokens.join(" "),
             imported: true, // tag as AI-provided for the pin editor
         });
-        r.pins_added += 1;
+    }
+    r.pins_added = rows.len();
+    if !generic.is_empty() {
+        const MAX_LISTED: usize = 24;
+        let total = generic.len();
+        let mut names: Vec<String> = generic.into_iter().collect();
+        let extra = total.saturating_sub(MAX_LISTED);
+        names.truncate(MAX_LISTED);
+        r.raw_notes.push(format!(
+            "{total} signal type(s) kept as generic alternate functions (no native driver \
+             support — the pin is still configured): {}{}",
+            names.join(", "),
+            if extra > 0 { format!(", and {extra} more") } else { String::new() }
+        ));
+    }
+    // Sort by package position, then split across the four sides QFP-style —
+    // exactly what the XML importer does.
+    rows.sort_by_key(|row| row.number.parse::<usize>().unwrap_or(usize::MAX));
+    form.pins = stm32_pin_data::distribute_sides(&rows);
+
+    // Cross-check: non-integer positions mean the model read the WRONG package
+    // column (BGA columns use A1/H7 codes). One clear diagnostic beats dozens of
+    // per-pin "invalid number" errors from `McuForm::errors`.
+    let bad_numbers = rows
+        .iter()
+        .filter(|row| !row.number.trim().is_empty() && row.number.trim().parse::<usize>().is_err())
+        .count();
+    if bad_numbers > 0 {
+        r.warnings.push(format!(
+            "{bad_numbers} pin(s) have non-integer numbers (e.g. BGA codes like A1/H7) — the wrong \
+             package column was read. Check that Package matches a column in the datasheet's pin \
+             table, then extract again."
+        ));
     }
 
     // Cross-check: pin count vs the package number (LQFP64 → 64).
     if let Some(expected) = package_pin_count(&form.package) {
         if r.pins_added != expected {
+            let hint = if r.pins_added > expected {
+                " — more pins than the package has, so a second package variant or column was \
+                 probably folded in"
+            } else {
+                " — review for gaps (pins marked '-' in that column are correctly skipped)"
+            };
             r.warnings.push(format!(
-                "Package '{}' implies {expected} pins, but {} were extracted — review for gaps.",
+                "Package '{}' implies {expected} pins, but {} were extracted{hint}.",
                 form.package.trim(),
                 r.pins_added
             ));
         }
     }
-    // Cross-check: duplicate pin numbers across all sides.
+    // Cross-check: duplicate pin numbers. The usual cause is MERGING two
+    // package variants that share a base name (e.g. "UFQFPN48" and
+    // "UFQFPN48 SMPS" — their pinout figures both say just "UFQFPN48" inside
+    // the package outline, so they're easy to confuse). One actionable warning
+    // beats one per duplicate.
     let mut seen = std::collections::HashSet::new();
     let mut dups = std::collections::BTreeSet::new();
     for row in form.pins.iter().flatten() {
@@ -423,8 +509,16 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
             dups.insert(n.to_string());
         }
     }
-    for d in dups {
-        r.warnings.push(format!("Pin number {d} appears more than once."));
+    if !dups.is_empty() {
+        let shown: Vec<String> = dups.iter().take(10).cloned().collect();
+        r.warnings.push(format!(
+            "{} pin number(s) appear more than once ({}{}) — the extraction most likely MERGED \
+             two package variants (e.g. \"UFQFPN48\" and \"UFQFPN48 SMPS\"). Set Package to the \
+             exact variant name and extract again.",
+            dups.len(),
+            shown.join(", "),
+            if dups.len() > shown.len() { ", …" } else { "" }
+        ));
     }
 
     r
@@ -439,15 +533,6 @@ fn patch(dst: &mut String, value: &str, label: &str, r: &mut ApplyReport) {
     }
 }
 
-/// `top`/`bottom`/`left`/`right` → the `McuForm::pins` index; default Left (2).
-fn side_index(side: &str) -> usize {
-    match side.trim().to_ascii_lowercase().as_str() {
-        "top" => 0,
-        "bottom" => 1,
-        "right" => 3,
-        _ => 2, // left (and the unknown / empty default)
-    }
-}
 
 /// Lowercase a display name into a valid id (`a–z 0–9 _`); other chars dropped.
 fn slugify(name: &str) -> String {
@@ -513,6 +598,67 @@ pub fn save_api_key(key: &str) -> Result<(), String> {
     std::fs::write(&path, key.trim()).map_err(|e| e.to_string())
 }
 
+// ── Extraction cache (never re-pay for the same document) ───────────────────
+
+/// Bump when the prompt or the JSON contract changes, so stale entries miss
+/// instead of feeding an old shape back in.
+const CACHE_VERSION: u32 = 1;
+
+/// `<user config>/datasheet_cache` — sibling of the stored API key.
+pub fn cache_dir() -> Option<PathBuf> {
+    super::registry::user_mcus_dir().and_then(|d| d.parent().map(|p| p.join("datasheet_cache")))
+}
+
+/// Key for one extraction: prompt version + model + package + the document
+/// itself. Change any of them and it re-extracts; retrying the SAME MCU with
+/// the same settings is free. Pure — tested below.
+pub fn cache_key(model: &str, package: &str, source: &Source) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    CACHE_VERSION.hash(&mut h);
+    model.trim().hash(&mut h);
+    package.trim().hash(&mut h);
+    match source {
+        Source::Text(t) => {
+            0u8.hash(&mut h);
+            t.trim().hash(&mut h);
+        }
+        Source::Pdf(b) => {
+            1u8.hash(&mut h);
+            b.hash(&mut h);
+        }
+    }
+    format!("{:016x}", h.finish())
+}
+
+fn cache_file(key: &str) -> Option<PathBuf> {
+    cache_dir().map(|d| d.join(format!("{key}.json")))
+}
+
+/// The cached model reply for `key`, if any.
+fn load_cached(key: &str) -> Option<String> {
+    std::fs::read_to_string(cache_file(key)?).ok()
+}
+
+/// Store the model reply for `key`. Best-effort — a cache write never fails an
+/// extraction that already succeeded.
+fn save_cached(key: &str, model_text: &str) {
+    let Some(path) = cache_file(key) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, model_text);
+}
+
+/// One extraction plus whether it came from the on-disk cache (so the UI can
+/// say "loaded from cache" instead of implying a fresh API call).
+pub struct Extraction {
+    pub chip: ExtractedChip,
+    pub from_cache: bool,
+}
+
 // ── The one impure entry point ──────────────────────────────────────────────
 
 /// Call Claude and parse the extraction. Blocking — the dialog runs it on a
@@ -523,9 +669,17 @@ pub fn call_claude(
     family_hint: &str,
     package_hint: &str,
     source: &Source,
-) -> Result<ExtractedChip, String> {
+    use_cache: bool,
+) -> Result<Extraction, String> {
     if api_key.trim().is_empty() {
         return Err("No API key set — enter your Anthropic API key first.".to_string());
+    }
+    if package_hint.trim().is_empty() {
+        return Err(
+            "No package set — the pin table has one number column per package, so the target \
+             package (e.g. UFQFPN48) is required to read the right one."
+                .to_string(),
+        );
     }
     match source {
         Source::Text(t) if t.trim().is_empty() => {
@@ -543,6 +697,19 @@ pub fn call_claude(
         }
         _ => {}
     }
+
+    // Cache hit → no API call at all (the whole point: retrying the same
+    // document for the same package/model is free).
+    let key = cache_key(model, package_hint, source);
+    if use_cache {
+        if let Some(cached) = load_cached(&key) {
+            if let Ok(chip) = parse_response(&cached) {
+                return Ok(Extraction { chip, from_cache: true });
+            }
+            // A corrupt / stale entry just falls through to a fresh call.
+        }
+    }
+
     let system = build_prompt(family_hint, package_hint);
     let body = build_request_body(model, &system, source);
 
@@ -572,7 +739,10 @@ pub fn call_claude(
     };
 
     let model_text = parse_api_envelope(&text)?;
-    parse_response(&model_text)
+    let chip = parse_response(&model_text)?;
+    // Only cache a reply we could actually parse.
+    save_cached(&key, &model_text);
+    Ok(Extraction { chip, from_cache: false })
 }
 
 #[cfg(test)]
@@ -580,15 +750,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_carries_grammar_and_hints() {
+    fn prompt_asks_for_verbatim_signals_and_carries_hints() {
         let p = build_prompt("stm32f1", "LQFP64");
-        assert!(p.contains("usart{n}_tx"));
-        assert!(p.contains("adc{a}_{channel}"));
+        // The model reports RAW signal names — the IDE maps them itself.
+        assert!(p.contains("exactly as printed"));
+        assert!(p.contains("\"signals\""));
+        assert!(p.contains("USART1_TX"));
+        assert!(p.contains("INTEGER"));
+        // No token grammar is imposed on the model any more.
+        assert!(!p.contains("usart{n}_tx"));
         assert!(p.contains("Family hint (may be wrong): stm32f1"));
-        assert!(p.contains("Package hint (may be wrong): LQFP64"));
-        // Empty hints add nothing.
+        // Package is AUTHORITATIVE — it names the exact column to read.
+        assert!(p.contains("a REQUIREMENT, not a hint"));
+        assert!(p.contains("EXACTLY the \"LQFP64\" package"));
+        assert!(p.contains("letter+digit codes like A1 / H7"));
+        // Variant discipline: exact name, identified by title/header — never by
+        // the text drawn inside the package outline — and never merged.
+        assert!(p.contains("match the package name EXACTLY, character for character"));
+        assert!(p.contains("\"UFQFPN48\" is NOT \"UFQFPN48 SMPS\""));
+        assert!(p.contains("FIGURE TITLE"));
+        assert!(p.contains("INSIDE the package outline"));
+        assert!(p.contains("Never merge pins from"));
+        // Empty inputs add neither block.
         let p2 = build_prompt("", "");
-        assert!(!p2.contains("hint (may be wrong)"));
+        assert!(!p2.contains("may be wrong"));
+        assert!(!p2.contains("a REQUIREMENT, not a hint"));
+    }
+
+    /// The exact original failure: a BGA column was read, so every position is
+    /// a letter+digit code. One clear diagnostic must call that out.
+    #[test]
+    fn non_integer_positions_flag_the_wrong_package_column() {
+        let chip = ExtractedChip {
+            package: "UFQFPN48".into(),
+            pins: vec![
+                ExtractedPin { number: "A1".into(), name: "VSSSMPS".into(), reserved: true, ..Default::default() },
+                ExtractedPin { number: "H7".into(), name: "PB5".into(), ..Default::default() },
+                ExtractedPin { number: "12".into(), name: "PA1".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let mut form = McuForm::blank();
+        form.package = "UFQFPN48".into();
+        let r = apply_to_form(&chip, &mut form);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("2 pin(s) have non-integer numbers")),
+            "{:?}",
+            r.warnings
+        );
+        // The user's authoritative package is never overwritten by the model.
+        assert_eq!(form.package, "UFQFPN48");
+    }
+
+    /// The cache key must be stable for identical inputs (so a retry is free)
+    /// and change whenever anything that affects the result changes.
+    #[test]
+    fn cache_key_is_stable_and_input_sensitive() {
+        let doc = Source::Text("PIN TABLE".into());
+        let base = cache_key("claude-opus-4-8", "UFQFPN48", &doc);
+        // Same inputs → same key (a retry hits the cache).
+        assert_eq!(base, cache_key("claude-opus-4-8", "UFQFPN48", &doc));
+        // Whitespace around model/package doesn't split the cache.
+        assert_eq!(base, cache_key(" claude-opus-4-8 ", " UFQFPN48 ", &doc));
+        // A different package reads a different column → different key.
+        assert_ne!(base, cache_key("claude-opus-4-8", "UFBGA59", &doc));
+        // A different model or document → different key.
+        assert_ne!(base, cache_key("claude-sonnet-5", "UFQFPN48", &doc));
+        assert_ne!(
+            base,
+            cache_key("claude-opus-4-8", "UFQFPN48", &Source::Text("OTHER".into()))
+        );
+        // Text and PDF sources never collide.
+        assert_ne!(
+            base,
+            cache_key("claude-opus-4-8", "UFQFPN48", &Source::Pdf(b"PIN TABLE".to_vec()))
+        );
     }
 
     #[test]
@@ -652,8 +888,8 @@ mod tests {
           "family": "stm32f1",
           "package": "LQFP64",
           "pins": [
-            { "number": 14, "name": "PA0", "functions": "in out adc1_0" },
-            { "number": "15", "name": "PA1", "raw": "TIM2_CH2_ETR" }
+            { "number": 14, "name": "PA0", "signals": ["GPIO", "ADC1_IN0"] },
+            { "number": "15", "name": "PA1", "signals": ["TIM2_CH2"] }
           ]
         } trailing"#;
         let chip = parse_response(text).unwrap();
@@ -661,39 +897,42 @@ mod tests {
         assert_eq!(chip.pins.len(), 2);
         assert_eq!(chip.pins[0].number, "14"); // number came in as a JSON int
         assert_eq!(chip.pins[1].number, "15"); // and as a string
-        assert_eq!(chip.pins[1].raw, "TIM2_CH2_ETR");
+        assert_eq!(chip.pins[0].signals, vec!["GPIO", "ADC1_IN0"]);
     }
 
+    /// Raw signals are mapped by the SAME code as the XML importer (so the
+    /// model can't invent tokens), and the rows are laid out QFP-style across
+    /// four sides — never all on one.
     #[test]
-    fn apply_patches_identity_and_appends_pins_with_provenance() {
+    fn apply_maps_signals_deterministically_and_lays_out_four_sides() {
+        let pin = |num: &str, name: &str, sigs: &[&str]| ExtractedPin {
+            number: num.into(),
+            name: name.into(),
+            reserved: false,
+            signals: sigs.iter().map(|s| s.to_string()).collect(),
+        };
         let chip = ExtractedChip {
             display_name: "STM32F103RB".into(),
             family: "stm32f1".into(),
-            package: "LQFP4".into(), // deliberately implies 4 pins
+            package: "LQFP8".into(), // implies 8 pins — matches below
             probe_chip: "STM32F103RB".into(),
             pins: vec![
-                ExtractedPin {
-                    number: "14".into(),
-                    name: "PA0".into(),
-                    functions: "in out".into(),
-                    side: "left".into(),
-                    ..Default::default()
-                },
                 ExtractedPin {
                     number: "1".into(),
                     name: "VBAT".into(),
                     reserved: true,
-                    side: "top".into(),
-                    functions: "in".into(), // dropped because reserved
-                    ..Default::default()
+                    signals: vec!["GPIO".into()], // ignored: reserved
                 },
-                ExtractedPin {
-                    number: "42".into(),
-                    name: "PB4".into(),
-                    functions: "in out wat".into(), // 'wat' is unknown
-                    raw: "FSMC_NADV".into(),
-                    ..Default::default()
-                },
+                pin("2", "PA9", &["USART1_TX", "TIM1_CH2", "GPIO"]),
+                pin("3", "PB6", &["I2C1_SCL", "I2C1_SMBA", "GPIO"]),
+                // LPUART / SPI_RDY / RTS_DE now MAP (grammar extension);
+                // SAI still has no token → dropped, but REPORTED.
+                pin("4", "PA2", &["LPUART1_TX", "SPI1_RDY", "USART3_RTS_DE", "SAI1_SD_A", "GPIO"]),
+                // Pure noise → dropped SILENTLY (no report spam).
+                pin("5", "PC14", &["RCC_OSC32_IN", "EVENTOUT", "GPIO"]),
+                pin("6", "PA5", &["ADC1_IN5", "ADC2_IN5", "SPI1_SCK", "GPIO"]),
+                pin("7", "PA13", &["SYS_JTMS-SWDIO", "GPIO"]),
+                pin("8", "PB13", &["SPI2_SCK", "TIM1_CH1N", "GPIO"]),
             ],
             ..Default::default()
         };
@@ -702,21 +941,69 @@ mod tests {
         let r = apply_to_form(&chip, &mut form);
 
         assert_eq!(form.display_name, "STM32F103RB");
-        assert_eq!(form.probe_chip, "STM32F103RB");
         assert_eq!(form.id, "stm32f103rb"); // slugified from display name
-        assert_eq!(r.pins_added, 3);
-        // Sides honoured: PA0 left(2), VBAT top(0), PB4 left(2).
-        assert_eq!(form.pins[0].len(), 1);
-        assert_eq!(form.pins[2].len(), 2);
-        // Reserved pin has no functions.
-        assert!(form.pins[0][0].functions.is_empty());
-        // Appended rows are tagged as AI-provided for review.
-        assert!(form.pins[2][0].imported);
-        // Provenance + cross-checks reported.
-        assert!(r.raw_notes.iter().any(|n| n.contains("FSMC_NADV")));
-        assert!(r.warnings.iter().any(|w| w.contains("unknown function token 'wat'")));
-        assert!(r.warnings.iter().any(|w| w.contains("implies 4 pins")));
+        assert_eq!(r.pins_added, 8);
         assert!(r.patched.iter().any(|p| p == "Display name = STM32F103RB"));
+
+        // Laid out across FOUR sides (8 pins → 2 each), not all on one.
+        let per_side: Vec<usize> = form.pins.iter().map(|s| s.len()).collect();
+        assert_eq!(per_side, vec![2, 2, 2, 2], "should be spread over 4 sides");
+
+        let find = |name: &str| {
+            form.pins
+                .iter()
+                .flatten()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+        // Deterministic mapping (identical to the XML importer's map_signal).
+        assert_eq!(find("PA9").functions, "usart1_tx tim1_2 in out");
+        assert_eq!(find("PB6").functions, "i2c1_scl af:i2c1_smba in out");
+        assert_eq!(find("PA5").functions, "adc1_5 adc2_5 spi1_sck in out");
+        assert_eq!(find("PA13").functions, "swdio in out");
+        assert_eq!(find("PB13").functions, "spi2_sck af:tim1_ch1n in out");
+        // Reserved pin carries no functions; imported rows are tagged.
+        assert!(find("VBAT").reserved && find("VBAT").functions.is_empty());
+        assert!(find("PA9").imported);
+
+        // Grammar extension: LPUART / SPI-RDY / RTS_DE map to real tokens now.
+        assert_eq!(
+            find("PA2").functions,
+            "lpuart1_tx spi1_rdy usart3_rts af:sai1_sd_a in out",
+            "LPUART / SPI_RDY / RTS_DE map natively; SAI is carried generically"
+        );
+        // Signals with no native model are listed once, deduped, in the report…
+        assert!(r.raw_notes.iter().any(|n| n.contains("SAI1_SD_A")));
+        // …not the ones the grammar now covers, and not noise.
+        assert!(
+            !r.raw_notes
+                .iter()
+                .any(|n| n.contains("LPUART1_TX")
+                    || n.contains("SPI1_RDY")
+                    || n.contains("EVENTOUT")
+                    || n.contains("RCC_OSC32_IN")),
+            "mapped signals and noise must not be reported: {:?}",
+            r.raw_notes
+        );
+        // The model can no longer produce invalid tokens, so no token warnings.
+        assert!(!r.warnings.iter().any(|w| w.contains("unknown function token")));
+    }
+
+    #[test]
+    fn pin_count_mismatch_against_the_package_is_flagged() {
+        let chip = ExtractedChip {
+            pins: vec![ExtractedPin {
+                number: "1".into(),
+                name: "PA0".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut form = McuForm::blank();
+        // The package is the USER's input (authoritative), not the model's.
+        form.package = "LQFP64".into();
+        let r = apply_to_form(&chip, &mut form);
+        assert!(r.warnings.iter().any(|w| w.contains("implies 64 pins")));
     }
 
     #[test]
@@ -728,18 +1015,61 @@ mod tests {
         assert_eq!(form.display_name, "KEEP");
     }
 
+    /// Two package variants merged (the real STM32WBA case: "UFQFPN48" and
+    /// "UFQFPN48 SMPS" — same numbers, different names). Both the duplicate
+    /// numbers and the inflated count must point at the real cause.
+    #[test]
+    fn merged_package_variants_are_diagnosed() {
+        let p = |num: &str, name: &str| ExtractedPin {
+            number: num.into(),
+            name: name.into(),
+            ..Default::default()
+        };
+        let chip = ExtractedChip {
+            pins: vec![
+                // Figure 9 (UFQFPN48)…
+                p("1", "PB12"),
+                p("4", "PA7"),
+                // …mixed with Figure 10 (UFQFPN48 SMPS).
+                p("1", "VSSSMPS"),
+                p("4", "PB12"),
+            ],
+            ..Default::default()
+        };
+        let mut form = McuForm::blank();
+        form.package = "UFQFPN48".into();
+        let r = apply_to_form(&chip, &mut form);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("MERGED two package variants") && w.contains("UFQFPN48 SMPS")),
+            "{:?}",
+            r.warnings
+        );
+        // 4 pins for a 48-pin package → the "gaps" wording, not the merge one.
+        assert!(r.warnings.iter().any(|w| w.contains("implies 48 pins")));
+    }
+
     #[test]
     fn duplicate_numbers_are_flagged() {
         let chip = ExtractedChip {
             pins: vec![
                 ExtractedPin { number: "1".into(), name: "A".into(), ..Default::default() },
                 ExtractedPin { number: "1".into(), name: "B".into(), ..Default::default() },
+                ExtractedPin { number: "2".into(), name: "C".into(), ..Default::default() },
             ],
             ..Default::default()
         };
         let mut form = McuForm::blank();
         let r = apply_to_form(&chip, &mut form);
-        assert!(r.warnings.iter().any(|w| w.contains("Pin number 1 appears more than once")));
+        // One consolidated warning naming the duplicates (not one per dupe).
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("1 pin number(s) appear more than once (1)")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     #[test]
@@ -749,7 +1079,7 @@ mod tests {
         assert_eq!(package_pin_count("LQFP64"), Some(64));
         assert_eq!(package_pin_count("TSSOP20"), Some(20));
         assert_eq!(package_pin_count("BGA"), None);
-        assert_eq!(side_index("Right"), 3);
-        assert_eq!(side_index(""), 2);
+        // (signal noise-filtering + mapping now live in `stm32_pin_data` and
+        // are covered by its own tests)
     }
 }

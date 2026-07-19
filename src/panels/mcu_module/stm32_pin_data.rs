@@ -153,10 +153,43 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
     Ok(chips)
 }
 
-/// Map one STM32 signal name to the IDE's function token(s), or `None` to drop
-/// it. `GPIO` yields the two-token `"in out"`; unmappable peripherals (LPUART,
-/// SDMMC, FMC, `TIMx_CHyN`, `ADCx_EXTI…`, JTAG, oscillators, …) return `None`.
-fn map_signal(sig: &str) -> Option<String> {
+/// Signals with no pin function worth modelling: the per-pin interrupt/event
+/// lines every I/O carries, plus debug/JTAG, oscillator + clock-control and RTC
+/// housekeeping. These are the ONLY signals dropped. `pub(crate)` — shared with
+/// the AI datasheet import.
+pub(crate) fn is_noise_signal(sig: &str) -> bool {
+    let s = sig.trim();
+    s.is_empty()
+        || s == "EVENTOUT"
+        || s.contains("EXTI")
+        || s.contains("WKUP")
+        || s.starts_with("RCC_")
+        || s.starts_with("RTC_")
+        || s.starts_with("SYS_")
+        || s.starts_with("DEBUG")
+}
+
+/// Map one STM32 signal name to the IDE's function token(s).
+///
+/// Order matters: a NATIVE token wins first (so `GPIO`, `SYS_JTMS-SWDIO` and
+/// `RCC_MCO` map even though the last two look like "noise"); then true noise
+/// is dropped; **everything else becomes a generic `af:<name>` token** so no
+/// pin function is ever silently lost — SAI, FMC, DCMI, QUADSPI, LTDC, ETH,
+/// SDMMC, `TIMx_CHyN`, `I2Cx_SMBA`, … all survive with their datasheet name.
+/// `pub(crate)` so the AI datasheet import maps signals the SAME way.
+pub(crate) fn map_signal(sig: &str) -> Option<String> {
+    if let Some(tok) = native_token(sig) {
+        return Some(tok);
+    }
+    if is_noise_signal(sig) {
+        return None;
+    }
+    Some(format!("af:{}", sig.trim().to_ascii_lowercase()))
+}
+
+/// The natively-modelled subset — `None` when the IDE has no dedicated
+/// [`PinFunction`] for this signal.
+fn native_token(sig: &str) -> Option<String> {
     // Debug: signals look like `SYS_JTMS-SWDIO` / `SYS_JTCK-SWCLK`.
     if sig.contains("SWDIO") {
         return Some("swdio".into());
@@ -198,17 +231,29 @@ fn map_signal(sig: &str) -> Option<String> {
         return None; // needs an instance number
     }
     match word {
-        // UART maps onto usart; LPUART has no token (word won't match).
+        // Plain UART maps onto usart; LPUART is its own peripheral (below).
         "USART" | "UART" => {
             let role = match tail {
                 "TX" => "tx",
                 "RX" => "rx",
                 "CTS" => "cts",
-                "RTS" => "rts",
+                // RTS_DE is the same pin as RTS (it doubles as the RS485
+                // driver-enable), so both spellings map to RTS.
+                "RTS" | "RTS_DE" | "DE" => "rts",
                 "CK" => "ck",
                 _ => return None,
             };
             Some(format!("usart{n}_{role}"))
+        }
+        "LPUART" => {
+            let role = match tail {
+                "TX" => "tx",
+                "RX" => "rx",
+                "CTS" => "cts",
+                "RTS" | "RTS_DE" | "DE" => "rts",
+                _ => return None,
+            };
+            Some(format!("lpuart{n}_{role}"))
         }
         "SPI" => {
             let role = match tail {
@@ -216,6 +261,7 @@ fn map_signal(sig: &str) -> Option<String> {
                 "SCK" => "sck",
                 "MISO" => "miso",
                 "MOSI" => "mosi",
+                "RDY" => "rdy",
                 _ => return None,
             };
             Some(format!("spi{n}_{role}"))
@@ -286,8 +332,9 @@ fn expand_variants(ref_name: &str) -> Vec<(String, usize)> {
 /// Split pins (sorted by number) across the four sides QFP-style, matching the
 /// bundled F103 layout: left = first quarter, then bottom, then right, and top
 /// last **reversed** (physical counter-clockwise numbering). Returns them in
-/// `McuForm::pins` order `[top, bottom, left, right]`.
-fn distribute_sides(rows: &[PinRow]) -> [Vec<PinRow>; 4] {
+/// `McuForm::pins` order `[top, bottom, left, right]`. `pub(crate)` so the AI
+/// datasheet import lays pins out the SAME way (never "all on one side").
+pub(crate) fn distribute_sides(rows: &[PinRow]) -> [Vec<PinRow>; 4] {
     let n = rows.len();
     let base = n / 4;
     let rem = n % 4;
@@ -304,8 +351,9 @@ fn distribute_sides(rows: &[PinRow]) -> [Vec<PinRow>; 4] {
     [top, bottom, left, right]
 }
 
-/// Cortex core string → Rust target triple.
-fn core_to_target(core: &str) -> &'static str {
+/// Cortex core string → Rust target triple. `pub(crate)` so [`mcu_identity`]
+/// reuses the same mapping.
+pub(crate) fn core_to_target(core: &str) -> &'static str {
     let c = core.to_ascii_lowercase();
     if c.contains("cortex-m0") {
         "thumbv6m-none-eabi"
@@ -485,8 +533,9 @@ mod tests {
         // GPIO → in out; peripheral signals mapped; EXTI/SMBA/CHyN dropped.
         assert_eq!(find(form, "PA9").functions, "tim1_2 usart1_tx in out");
         assert_eq!(find(form, "PA11").functions, "can_rx tim1_4 usart1_cts usb_dm in out");
-        assert_eq!(find(form, "PB6").functions, "i2c1_scl tim4_1 in out"); // SMBA dropped
-        assert_eq!(find(form, "PB13").functions, "spi2_sck in out"); // CH1N dropped
+        // Not-natively-modelled signals are CARRIED as generic `af:` tokens.
+        assert_eq!(find(form, "PB6").functions, "i2c1_scl af:i2c1_smba tim4_1 in out");
+        assert_eq!(find(form, "PB13").functions, "spi2_sck af:tim1_ch1n in out");
         assert_eq!(find(form, "PA13").functions, "swdio in out");
         assert_eq!(find(form, "PA5").functions, "adc1_5 adc2_5 spi1_sck in out");
         // Power pin: reserved, no functions, name kept verbatim.
@@ -529,9 +578,27 @@ mod tests {
         assert_eq!(map_signal("USART2_RX").as_deref(), Some("usart2_rx"));
         assert_eq!(map_signal("UART4_TX").as_deref(), Some("usart4_tx")); // UART→usart
         assert_eq!(map_signal("ADC123_IN10").as_deref(), Some("adc1_10")); // combined→first
-        assert_eq!(map_signal("TIM1_CH1N"), None);
-        assert_eq!(map_signal("LPUART1_TX"), None);
-        assert_eq!(map_signal("FMC_A0"), None);
+        // Anything the IDE doesn't model natively is CARRIED as a generic
+        // alternate function — never dropped.
+        assert_eq!(map_signal("FMC_A0").as_deref(), Some("af:fmc_a0"));
+        assert_eq!(map_signal("SAI1_SD_A").as_deref(), Some("af:sai1_sd_a"));
+        assert_eq!(map_signal("DCMI_D3").as_deref(), Some("af:dcmi_d3"));
+        assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("af:quadspi_clk"));
+        assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("af:tim1_ch1n"));
+        assert_eq!(map_signal("I2C1_SMBA").as_deref(), Some("af:i2c1_smba"));
+        // Only true noise is dropped — and natives still win over it.
+        assert_eq!(map_signal("EVENTOUT"), None);
+        assert_eq!(map_signal("ADC1_EXTI11"), None);
+        assert_eq!(map_signal("RCC_OSC_IN"), None);
+        assert_eq!(map_signal("SYS_JTDI"), None);
+        assert_eq!(map_signal("SYS_JTMS-SWDIO").as_deref(), Some("swdio"));
+        assert_eq!(map_signal("RCC_MCO").as_deref(), Some("mco"));
+        // Grammar extension: LPUART / RTS_DE / SPI_RDY are no longer dropped.
+        assert_eq!(map_signal("LPUART1_TX").as_deref(), Some("lpuart1_tx"));
+        assert_eq!(map_signal("LPUART1_RTS_DE").as_deref(), Some("lpuart1_rts"));
+        assert_eq!(map_signal("USART2_RTS_DE").as_deref(), Some("usart2_rts"));
+        assert_eq!(map_signal("SPI1_RDY").as_deref(), Some("spi1_rdy"));
+        assert_eq!(map_signal("SPI3_RDY").as_deref(), Some("spi3_rdy"));
         assert_eq!(core_to_target("Arm Cortex-M33"), "thumbv8m.main-none-eabihf");
         assert_eq!(core_to_target("Arm Cortex-M0+"), "thumbv6m-none-eabi");
         assert_eq!(expand_variants("STM32F103CBTx"), vec![("STM32F103CBTx".to_string(), 0)]);
