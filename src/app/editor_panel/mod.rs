@@ -321,11 +321,51 @@ impl AppIde {
                         egui::Key::ArrowDown,
                     )
                 });
-                // Escape → clear every extra multi-cursor caret. Peeked (not
-                // consumed) so it doesn't steal Escape from the completion
-                // popup / cargo-complete popup, which run earlier in the frame
-                // and may already have consumed it for themselves this press.
-                let mc_escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                // A PLAIN arrow key moves every caret, not just the primary.
+                //
+                // Peeked, never consumed: egui's TextEdit needs the very same
+                // event to move the primary — we only mirror it onto the
+                // extras. Checked AFTER the Ctrl+Shift consumes above, so an
+                // "add caret" press is already gone from the queue.
+                //
+                // Modified arrows are deliberately excluded: Ctrl+Shift is add
+                // caret, Ctrl is move-line, and Shift extends a SELECTION —
+                // which an extra caret cannot represent (it is a bare position,
+                // not a range), so mirroring it would be a lie.
+                let mc_caret_move = ui.input(|i| {
+                    use multi_cursor::CaretMove;
+                    if !i.modifiers.is_none() {
+                        return None;
+                    }
+                    for (key, dir) in [
+                        (egui::Key::ArrowLeft, CaretMove::Left),
+                        (egui::Key::ArrowRight, CaretMove::Right),
+                        (egui::Key::ArrowUp, CaretMove::Up),
+                        (egui::Key::ArrowDown, CaretMove::Down),
+                    ] {
+                        if i.key_pressed(key) {
+                            return Some(dir);
+                        }
+                    }
+                    None
+                });
+                // Escape → clear every extra multi-cursor caret.
+                //
+                // CONSUMED when it does something, because egui's TextEdit
+                // treats Escape as "surrender focus" — leaving it in the queue
+                // took the primary caret away along with the clones.
+                //
+                // Consumed only when there ARE clones to clear and no
+                // completion popup is open: a plain Escape must keep behaving
+                // normally, and dismissing an open popup wins over dropping the
+                // carets (that popup renders later in the frame and would never
+                // see the key otherwise).
+                let popup_open = self.completion_open || self.cargo_complete.open;
+                let mc_escape_pressed = if self.extra_cursors.is_empty() || popup_open {
+                    false
+                } else {
+                    ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                };
                 // Ctrl+Shift+Tab / Ctrl+Tab → MRU file switching (VS Code style:
                 // hold Ctrl to walk the history, release to commit). Consumed
                 // BEFORE the editor so Tab never inserts indentation. The Shift
@@ -655,6 +695,7 @@ impl AppIde {
                     mc_up_pressed,
                     mc_down_pressed,
                     mc_escape_pressed,
+                    mc_caret_move,
                 );
                 let mc_replayed = mc_shift.is_some();
                 // The primary caret's own edit already landed correctly, but an
