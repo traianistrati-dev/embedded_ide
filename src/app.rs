@@ -392,6 +392,9 @@ struct PersistedState {
     /// Editor-only layout (MCU + Project panels collapsed away).
     #[serde(default)]
     side_panels_collapsed: bool,
+    /// Bottom diagnostics panel reduced to its tab bar.
+    #[serde(default)]
+    diag_collapsed: bool,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -759,6 +762,10 @@ pub struct AppIde {
     /// Collapse the MCU Configurator + Project tree so the editor fills the
     /// window (toggled from the editor toolbar). Persisted across restarts.
     side_panels_collapsed: bool,
+    /// Bottom diagnostics panel reduced to its tab bar (toggled by the caret
+    /// button right of "More"). The bar itself always stays visible — only the
+    /// tab CONTENT is hidden. Persisted across restarts.
+    diag_collapsed: bool,
     /// `true` while the "unsaved changes" prompt is up (close was cancelled).
     exit_prompt: bool,
     /// Set once the user has decided, so the close we send isn't intercepted
@@ -1029,6 +1036,7 @@ impl AppIde {
             pending_discard_file: None,
             git_discard_all_confirm: false,
             side_panels_collapsed: persisted.side_panels_collapsed,
+            diag_collapsed: persisted.diag_collapsed,
             exit_prompt: false,
             allow_close: false,
             close_after_save: false,
@@ -1765,6 +1773,7 @@ impl eframe::App for AppIde {
                     .and_then(|p| p.to_str())
                     .map(String::from),
                 side_panels_collapsed: self.side_panels_collapsed,
+                diag_collapsed: self.diag_collapsed,
             },
         );
     }

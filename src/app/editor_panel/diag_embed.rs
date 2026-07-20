@@ -7,9 +7,6 @@ use crate::app::AppIde;
 use crate::app::BuildPanelTab;
 use crate::app::diag_panel::show_diag_panel;
 use crate::build::BuildState;
-use crate::dfu::DfuState;
-use crate::espflash::EspFlashState;
-use crate::openocd::OpenOcdState;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use eframe::egui;
 
@@ -44,43 +41,33 @@ impl AppIde {
             }
         }
 
-        let cargo_has = !matches!(*self.build_state.lock().unwrap(), BuildState::Idle);
-        let lsp_active = self.lsp_state.lock().unwrap().status.is_active();
-        let dfu_active = !matches!(*self.dfu_state.lock().unwrap(), DfuState::Idle)
-            || !matches!(*self.openocd_state.lock().unwrap(), OpenOcdState::Idle)
-            || !matches!(*self.espflash_state.lock().unwrap(), EspFlashState::Idle)
-            || !self.dfu_log.lock().unwrap().is_empty();
-        // The Serial tab is opened from the toolbar (`build_tab == Serial`) and
-        // stays available while a port is connected.
-        let serial_active = self.build_tab == BuildPanelTab::Serial || self.serial.is_connected();
-        // The Clippy tab stays available while selected or while a run is going.
-        let clippy_active = self.build_tab == BuildPanelTab::Clippy
-            || matches!(*self.clippy_state.lock().unwrap(), BuildState::Building);
-        // The Terminal tab stays available while selected or while a command runs.
-        let terminal_active =
-            self.build_tab == BuildPanelTab::Terminal || self.terminal.is_running();
-        // The Activity tab is shown while selected (its content persists).
-        let activity_active = self.build_tab == BuildPanelTab::Activity;
-        // The Git tab stays available while selected or while an op runs.
-        let git_active = self.build_tab == BuildPanelTab::Git || self.git.is_busy();
-        let show_panel = cargo_has
-            || lsp_active
-            || dfu_active
-            || serial_active
-            || clippy_active
-            || terminal_active
-            || activity_active
-            || git_active;
-
-        if !show_panel {
-            return None;
-        }
+        // The panel used to hide itself whenever no tab had activity. It no
+        // longer does: the tab bar stays put until the user collapses it with
+        // the caret button, and collapsing hides only the tab CONTENT.
         const HANDLE_H: f32 = 6.0;
         const MIN_H: f32 = 56.0;
 
+        let collapsed = self.diag_collapsed;
+        // The editor+panel region: `ui` hasn't given the panel its slice yet.
+        let avail_h = ui.available_height();
         // Keep height in valid range for current window size.
-        let max_h = (ui.available_height() - 60.0).max(MIN_H);
+        let max_h = (avail_h - 60.0).max(MIN_H);
         self.diag_panel_height = self.diag_panel_height.clamp(MIN_H, max_h);
+
+        // Collapsed height = the tab-button row plus the panel frame's vertical
+        // inner margin. Both parts matter: `Panel` never shrinks to fit its
+        // content (it takes the size it is given), and `exact_size` INCLUDES
+        // the frame margins — `Frame::side_top_panel` is `Margin::symmetric(8,
+        // 2)`. Style-derived rather than a magic number so it follows spacing.
+        const PANEL_FRAME_V_MARGIN: f32 = 4.0; // 2 top + 2 bottom
+        let collapsed_h = ui.spacing().interact_size.y
+            + ui.spacing().item_spacing.y * 2.0
+            + PANEL_FRAME_V_MARGIN;
+        let panel_h = if collapsed {
+            collapsed_h
+        } else {
+            self.diag_panel_height + HANDLE_H
+        };
 
         // Panel::bottom takes space from the bottom of the remaining area
         // before the editor is laid out. exact_size gives us full control —
@@ -116,6 +103,10 @@ impl AppIde {
         let mut size_go = false;
         // Flash-tab Size button — same measurement, stays on the Flash tab.
         let mut size_flash_go = false;
+        // Set when ANY tab button is clicked (including the already-selected
+        // one, which is why this can't be a `tab` change comparison) — while
+        // collapsed, that reopens the panel.
+        let mut tab_clicked = false;
         // RTT-tab Run/Attach buttons.
         let mut rtt_go: Option<crate::rtt::RttMode> = None;
         // Debug-tab Start button.
@@ -126,45 +117,50 @@ impl AppIde {
             .unwrap_or_default();
         let project_dir = self.project_dir.clone();
         let panel = egui::Panel::bottom("diag_panel")
-            .exact_size(self.diag_panel_height + HANDLE_H)
+            .exact_size(panel_h)
             .show_inside(ui, |ui| {
                 // ── Drag handle (top edge of panel) ───────
-                let (handle_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), HANDLE_H),
-                    egui::Sense::hover(),
-                );
-                let drag_resp = ui.interact(
-                    handle_rect,
-                    egui::Id::new("diag_panel_resize"),
-                    egui::Sense::drag(),
-                );
-
-                let mid_y = handle_rect.center().y;
-                let line_color = if drag_resp.hovered() || drag_resp.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    egui::Color32::from_rgb(100, 140, 200)
-                } else {
-                    egui::Color32::from_gray(65)
-                };
-
-                // Line + three grip dots
-                ui.painter().hline(
-                    handle_rect.x_range(),
-                    mid_y,
-                    egui::Stroke::new(1.5, line_color),
-                );
-                for dx in [-6.0_f32, 0.0, 6.0] {
-                    ui.painter().circle_filled(
-                        egui::pos2(handle_rect.center().x + dx, mid_y),
-                        1.5,
-                        line_color,
+                // Skipped while collapsed: there is nothing to resize, and a
+                // resize cursor over a fixed bar would be a lie.
+                if !collapsed {
+                    let (handle_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), HANDLE_H),
+                        egui::Sense::hover(),
                     );
-                }
+                    let drag_resp = ui.interact(
+                        handle_rect,
+                        egui::Id::new("diag_panel_resize"),
+                        egui::Sense::drag(),
+                    );
 
-                if drag_resp.dragged() {
-                    // Dragging up → negative delta.y → panel grows
-                    self.diag_panel_height =
-                        (self.diag_panel_height - drag_resp.drag_delta().y).clamp(MIN_H, max_h);
+                    let mid_y = handle_rect.center().y;
+                    let line_color = if drag_resp.hovered() || drag_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        egui::Color32::from_rgb(100, 140, 200)
+                    } else {
+                        egui::Color32::from_gray(65)
+                    };
+
+                    // Line + three grip dots
+                    ui.painter().hline(
+                        handle_rect.x_range(),
+                        mid_y,
+                        egui::Stroke::new(1.5, line_color),
+                    );
+                    for dx in [-6.0_f32, 0.0, 6.0] {
+                        ui.painter().circle_filled(
+                            egui::pos2(handle_rect.center().x + dx, mid_y),
+                            1.5,
+                            line_color,
+                        );
+                    }
+
+                    if drag_resp.dragged() {
+                        // Dragging up → negative delta.y → panel grows
+                        self.diag_panel_height = (self.diag_panel_height
+                            - drag_resp.drag_delta().y)
+                            .clamp(MIN_H, max_h);
+                    }
                 }
 
                 // ── Content ────────────────────────────────
@@ -196,6 +192,8 @@ impl AppIde {
                     &clippy_gen_ranges,
                     &toolchain,
                     &mut self.build_tab,
+                    &mut self.diag_collapsed,
+                    &mut tab_clicked,
                     &mut self.selected_diagnostic,
                     &mut self.lsp_selected_diagnostic,
                     &mut nav,
@@ -220,6 +218,13 @@ impl AppIde {
                     &mut debug_go,
                 );
             });
+        // Clicking a tab on the collapsed bar reopens the panel at 20% of the
+        // editor region, so the tab's content is actually visible. Takes effect
+        // next frame — this frame was already laid out collapsed.
+        if tab_clicked && collapsed {
+            self.diag_collapsed = false;
+            self.diag_panel_height = (avail_h * 0.2).clamp(MIN_H, max_h);
+        }
         // A Git tab button was clicked: spawn the worker (guards inside).
         if let Some(op) = git_op {
             self.run_git_op(op);

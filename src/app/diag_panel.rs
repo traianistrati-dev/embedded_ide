@@ -55,6 +55,12 @@ pub(super) fn show_diag_panel(
     clippy_gen_ranges: &[(usize, usize)],
     toolchain: &ToolchainKind,
     tab: &mut BuildPanelTab,
+    // Panel reduced to this tab bar: the header still renders, the content
+    // below it doesn't. Toggled by the caret button right of "More".
+    collapsed: &mut bool,
+    // Set when ANY tab button is clicked — including one that was already
+    // selected, so the caller can reopen a collapsed panel on any click.
+    tab_clicked: &mut bool,
     cargo_sel: &mut Option<usize>,
     lsp_sel: &mut Option<usize>,
     // Diagnostic-row click target: `(rel_path, 1-based line, band colour)`; the
@@ -135,6 +141,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Cargo;
+                *tab_clicked = true;
             }
         }
 
@@ -177,6 +184,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::RustAnalyzer;
+                *tab_clicked = true;
             }
         }
 
@@ -214,6 +222,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Clippy;
+                *tab_clicked = true;
             }
         }
 
@@ -248,6 +257,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Git;
+                *tab_clicked = true;
             }
         }
 
@@ -302,6 +312,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Dfu;
+                *tab_clicked = true;
             }
         }
 
@@ -331,6 +342,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Rtt;
+                *tab_clicked = true;
             }
         }
 
@@ -367,6 +379,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Debug;
+                *tab_clicked = true;
             }
         }
 
@@ -394,6 +407,7 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Serial;
+                *tab_clicked = true;
             }
         }
 
@@ -403,6 +417,35 @@ pub(super) fn show_diag_panel(
         // ── "More" dropdown (right-aligned) — groups the auxiliary panels
         //    Terminal / Activity / Tools so the main tab bar stays compact. ──
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Collapse / expand toggle. Added FIRST because this layout is
+            // right-to-left — the first widget sits furthest right, i.e. to the
+            // right of the "More" dropdown below.
+            let (icon, tip) = if *collapsed {
+                (
+                    ph::CARET_DOUBLE_UP,
+                    "Expand the panel — show the selected tab's content again.\n\
+                     Clicking any tab above expands it too.",
+                )
+            } else {
+                (
+                    ph::CARET_DOWN,
+                    "Collapse the panel — keep only this tab bar and give the \
+                     space back to the editor.\n\
+                     The bar stays visible; click any tab to reopen.",
+                )
+            };
+            if ui
+                .button(
+                    egui::RichText::new(icon)
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(160, 185, 215)),
+                )
+                .on_hover_text(tip)
+                .clicked()
+            {
+                *collapsed = !*collapsed;
+            }
+
             let grouped = matches!(
                 *tab,
                 BuildPanelTab::Terminal | BuildPanelTab::Activity | BuildPanelTab::RequiredTools
@@ -452,6 +495,7 @@ pub(super) fn show_diag_panel(
                         .clicked()
                     {
                         *tab = BuildPanelTab::Terminal;
+                        *tab_clicked = true;
                         ui.close();
                     }
                     let act_badge = if acts > 0 {
@@ -467,6 +511,7 @@ pub(super) fn show_diag_panel(
                         .clicked()
                     {
                         *tab = BuildPanelTab::Activity;
+                        *tab_clicked = true;
                         ui.close();
                     }
                     let tool_badge = if tools_busy {
@@ -484,12 +529,19 @@ pub(super) fn show_diag_panel(
                         .clicked()
                     {
                         *tab = BuildPanelTab::RequiredTools;
+                        *tab_clicked = true;
                         ui.close();
                     }
                 },
             );
         });
     });
+
+    // Collapsed: the tab bar above is the whole panel — stop before the
+    // content. (The caller sizes the panel to just this row.)
+    if *collapsed {
+        return;
+    }
 
     ui.separator();
 
