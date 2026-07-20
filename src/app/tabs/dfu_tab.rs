@@ -557,7 +557,7 @@ pub fn show_dfu_tab(
                 );
                 if !espflash_port.is_empty() {
                     if ui
-                        .small_button("✕")
+                        .small_button(ph::X)
                         .on_hover_text("Clear — use auto-detect")
                         .clicked()
                     {
@@ -565,7 +565,7 @@ pub fn show_dfu_tab(
                     }
                 }
                 ui.label(
-                    egui::RichText::new("← leave empty for auto-detect")
+                    egui::RichText::new(format!("{} leave empty for auto-detect", ph::ARROW_LEFT))
                         .size(10.0)
                         .color(egui::Color32::from_gray(100))
                         .italics(),

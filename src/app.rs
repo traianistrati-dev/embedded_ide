@@ -1540,7 +1540,7 @@ impl AppIde {
         for (queued, ran) in spans {
             let mut rec = crate::activity::Recorder::new("Check (RA flycheck)");
             rec.add(
-                "waiting in rust-analyzer's queue (didSave → check start)",
+                "waiting in rust-analyzer's queue (didSave -> check start)",
                 queued,
             );
             rec.add("cargo check run", ran);

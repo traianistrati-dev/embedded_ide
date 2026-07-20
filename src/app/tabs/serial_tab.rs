@@ -113,7 +113,7 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                     .range(1..=16)
                     .speed(0.1),
             )
-            .on_hover_text("Bytes per repeating sequence: each group of N bytes\nis coloured as a unit (same sequence → same colour).");
+            .on_hover_text("Bytes per repeating sequence: each group of N bytes\nis coloured as a unit (same sequence -> same colour).");
             ui.label("Row:");
             ui.add(
                 egui::DragValue::new(&mut serial.row_bytes)

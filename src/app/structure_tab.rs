@@ -182,8 +182,35 @@ impl AppIde {
             if let Some(line) = click.line {
                 self.pending_scroll_to_line = Some((id, line));
                 self.highlighted_def_line = Some((id, line));
+            } else if let Some(line) = self.first_error_line(&click.file_rel) {
+                // Clicking the node itself (not a symbol row): a node marked
+                // with the error border is clicked BECAUSE of that error, so
+                // land on it instead of at the top of the file.
+                //
+                // The band MUST come from `diag_highlight_color` — it is a
+                // translucent wash (alpha 26) painted OVER the text. A solid
+                // colour here hid the very line it was pointing at.
+                self.pending_scroll_to_line = Some((id, line));
+                self.highlighted_error_line = Some((
+                    id,
+                    line,
+                    crate::app::diag_highlight_color(crate::lsp::DiagSeverity::Error),
+                ));
             }
         }
+    }
+
+    /// 1-based line of the FIRST error in `rel` (project-root-relative), or
+    /// `None` when the file has none. Errors only — a warning is not what the
+    /// node's red border is pointing at, and jumping to one would be a lie.
+    fn first_error_line(&self, rel: &str) -> Option<usize> {
+        let lsp = self.lsp_state.lock().unwrap();
+        lsp.diagnostics
+            .get(rel)?
+            .iter()
+            .filter(|d| d.severity.is_error())
+            .map(|d| d.line as usize)
+            .min()
     }
 
     /// One step of the call-graph pass: receive the in-flight reply, then fire

@@ -93,9 +93,12 @@ impl AppIde {
                         );
                     }
                     Ok(p) => {
+                        // No raw Unicode arrows/bullets anywhere in the UI: only
+                        // the phosphor glyphs are in the loaded font, a literal
+                        // `→` renders as a tofu square.
                         ui.label(
                             egui::RichText::new(format!(
-                                "{} {} file(s) → {}/src/,  {} file(s) rewritten",
+                                "{} {} file(s) moved to {}/src/,  {} file(s) rewritten",
                                 ph::ARROW_RIGHT,
                                 p.removed.len(),
                                 p.crate_dir,
@@ -120,7 +123,7 @@ impl AppIde {
                                 .show(ui, |ui| {
                                     for w in &p.warnings {
                                         ui.label(
-                                            egui::RichText::new(format!("• {w}"))
+                                            egui::RichText::new(format!("{} {w}", ph::DOT))
                                                 .size(10.5)
                                                 .color(egui::Color32::from_rgb(200, 190, 150)),
                                         );

@@ -775,9 +775,18 @@ pub fn show_project_tree(
         // rightmost, so the caret goes in before anything else.
         let mut toggle = false;
         let header = ui.horizontal(|ui| {
+            // The icon and the name are SEPARATE labels on purpose: phosphor is
+            // registered only in the Proportional family (`add_to_fonts`), so a
+            // glyph inside a `.monospace()` RichText renders as a tofu square.
+            // Same split every other tree row uses.
+            ui.label(
+                egui::RichText::new(ph::PACKAGE)
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(140, 190, 145)),
+            );
             let name_resp = ui.add(
                 egui::Label::new(
-                    egui::RichText::new(format!("{} {lib}", ph::PACKAGE))
+                    egui::RichText::new(lib)
                         .size(11.5)
                         .monospace()
                         .strong()

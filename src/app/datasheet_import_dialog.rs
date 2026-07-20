@@ -202,7 +202,7 @@ impl AppIde {
                             .color(egui::Color32::from_gray(140)),
                     );
                     ui.hyperlink_to(
-                        egui::RichText::new("console.anthropic.com → Settings → API keys")
+                        egui::RichText::new("console.anthropic.com / Settings / API keys")
                             .size(10.0),
                         "https://console.anthropic.com/settings/keys",
                     )
@@ -474,7 +474,7 @@ impl AppIde {
                                 );
                                 for n in &rep.raw_notes {
                                     ui.label(
-                                        egui::RichText::new(format!("• {n}"))
+                                        egui::RichText::new(format!("{} {n}", ph::DOT))
                                             .size(10.0)
                                             .color(egui::Color32::from_gray(160)),
                                     );

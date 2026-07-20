@@ -81,7 +81,7 @@ pub fn show_panel(ui: &mut egui::Ui, id: &str, rows: &[HelpRow], notes: &[&str])
                 for note in notes {
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(format!("• {note}"))
+                            egui::RichText::new(format!("{} {note}", ph::DOT))
                                 .size(10.5)
                                 .color(egui::Color32::from_gray(140)),
                         )

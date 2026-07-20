@@ -109,6 +109,9 @@ enum Route {
 pub struct NodeClick {
     pub file: Option<usize>,
     pub line: Option<usize>,
+    /// The node's project-root-relative path — the key the driver needs to look
+    /// the file's diagnostics up when no `line` was given.
+    pub file_rel: String,
 }
 
 /// Everything one frame of the diagram can report back to the driver.
@@ -832,6 +835,7 @@ fn show_canvas(
                     result.click = Some(NodeClick {
                         file: node.file,
                         line: Some(sym.line),
+                        file_rel: node.file_rel.clone(),
                     });
                     row_clicked = true;
                 }
@@ -862,6 +866,7 @@ fn show_canvas(
             result.click = Some(NodeClick {
                 file: node.file,
                 line: None,
+                file_rel: node.file_rel.clone(),
             });
         }
     }
@@ -1383,6 +1388,7 @@ fn show_canvas(
                     result.click = Some(NodeClick {
                         file: to_n.file,
                         line: to_sym.map(|s| s.line),
+                        file_rel: to_n.file_rel.clone(),
                     });
                 }
             }
