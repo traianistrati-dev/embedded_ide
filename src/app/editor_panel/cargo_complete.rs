@@ -51,6 +51,11 @@ pub(crate) struct CargoCompleteState {
     pub items: Vec<CargoItem>,
     /// Accept deferred from a mouse click (applied at the top of next frame).
     pub pending: Option<CargoAccept>,
+    /// The manifest the popup belongs to. There is more than one now (the
+    /// firmware's and every extracted library's), and this state is per-`AppIde`
+    /// — without it a pending accept would be applied to whichever manifest
+    /// happens to be open next frame, at an offset that means nothing there.
+    pub for_file: Option<crate::app::ProjectFileId>,
     /// The crate whose versions are currently being fetched / cached.
     pub version_crate: String,
     /// Shared background fetch result for `version_crate`.
@@ -82,6 +87,18 @@ impl AppIde {
         ctrl_space_pressed: bool,
     ) {
         let cursor_char_idx = editor_resp.state.cursor.char_range().map(|r| r.primary.index);
+
+        // ── 0. Different manifest than the popup was opened for? ──────────────
+        // Offsets and the item list belong to the file they were computed in;
+        // carrying them into another manifest would splice text at a position
+        // that means nothing there.
+        if self.cargo_complete.for_file != Some(self.selected_file) {
+            self.cargo_complete.open = false;
+            self.cargo_complete.pending = None;
+            self.cargo_complete.items.clear();
+            self.cargo_complete.sel = 0;
+            self.cargo_complete.for_file = Some(self.selected_file);
+        }
 
         // ── 1. Apply a pending accept (keyboard or mouse) ─────────────────────
         if let Some(accept) = self.cargo_complete.pending.take() {
@@ -214,9 +231,15 @@ impl AppIde {
             return;
         };
         let chars: Vec<char> = display_code.chars().collect();
+        // `cargo_context` clamps the cursor; the splices below index with it
+        // directly, so clamp here too or a caret left over from a longer text
+        // panics with "range start index N out of range". (It really happened:
+        // the popup state is shared across manifests of different lengths.)
+        let cursor = cursor.min(chars.len());
         match accept {
             CargoAccept::CrateName(name) => {
                 if let CargoCtx::Name { start, .. } = ctx {
+                    let start = start.min(cursor);
                     let insert = format!("{name} = \"\"");
                     let before: String = chars[..start].iter().collect();
                     let after: String = chars[cursor..].iter().collect();
@@ -234,6 +257,7 @@ impl AppIde {
             }
             CargoAccept::Version(ver) => {
                 if let CargoCtx::Version { start, .. } = ctx {
+                    let start = start.min(cursor);
                     let before: String = chars[..start].iter().collect();
                     let after: String = chars[cursor..].iter().collect();
                     *display_code = format!("{before}{ver}{after}");
@@ -866,5 +890,27 @@ mod tests {
         let items = filter_crates("stm32f1");
         assert!(!items.is_empty());
         assert!(items[0].label.starts_with("stm32f1"));
+    }
+
+    /// A caret left over from a LONGER manifest must not index past the current
+    /// text. Regression: the popup state is shared across manifests (the
+    /// firmware's and every extracted library's), so switching between two of
+    /// different lengths panicked with "range start index N out of range".
+    /// `cargo_context` clamps; the splice in `apply_cargo_accept` did not.
+    #[test]
+    fn a_cursor_past_the_end_is_clamped_not_panicking() {
+        let text = "[dependencies]
+foo = \"1\"
+";
+        // Far past the end — what a stale caret from another file looks like.
+        assert!(cargo_context(text, 10_000).is_some() || cargo_context(text, 10_000).is_none());
+        // And the offsets it reports are always inside the text.
+        if let Some(ctx) = cargo_context(text, 10_000) {
+            let len = text.chars().count();
+            match ctx {
+                CargoCtx::Name { start, .. } => assert!(start <= len, "start {start} > {len}"),
+                CargoCtx::Version { start, .. } => assert!(start <= len, "start {start} > {len}"),
+            }
+        }
     }
 }
