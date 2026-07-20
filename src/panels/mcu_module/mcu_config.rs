@@ -23,54 +23,16 @@ use super::modules::VirtualModule;
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
-const STRUCTURE_HEADER: &str = "@structure_layout";
 
 /// File name written at the project root.
 pub const FILE_NAME: &str = "mcu.config";
 
-/// Manually dragged node positions of the Structure diagram, keyed by the
-/// module's workspace-relative file (`"mw_radar/utils.rs"`, `"main.rs"`) —
-/// stable across graph rebuilds, unlike node indices. BTreeMap so the
-/// serialized section is deterministic (the mtime-stable project writes rely
-/// on unchanged content staying byte-identical).
-pub type StructurePositions = std::collections::BTreeMap<String, (f32, f32)>;
-
-/// Structure-tab view options persisted per project:
-/// `(show_calls, call_depth, path_style as u8, show_externals)`.
-pub type StructureViewPersist = (bool, Option<usize>, u8, bool);
-const VIEW_HEADER: &str = "@structure_view";
-
-/// The `@structure_view` section text (always emitted — tiny and stable).
-pub fn structure_view_section(v: &StructureViewPersist) -> String {
-    let body = ron::to_string(v).unwrap_or_default();
-    format!("{VIEW_HEADER}\n{body}\n")
-}
-
-/// Parse the `@structure_view` section back (absent/garbled → `None`, the
-/// caller keeps its defaults — projects saved before this feature).
-pub fn parse_structure_view(text: &str) -> Option<StructureViewPersist> {
-    section_body(text, VIEW_HEADER)
-        .and_then(|body| ron::from_str::<StructureViewPersist>(body.trim()).ok())
-}
-
-/// The `@structure_layout` section text for `positions` (empty map → "").
-/// Appended to [`serialize`]'s output by the app (the diagram isn't MCU state).
-pub fn structure_layout_section(positions: &StructurePositions) -> String {
-    if positions.is_empty() {
-        return String::new();
-    }
-    let body = ron::ser::to_string_pretty(positions, ron::ser::PrettyConfig::new())
-        .unwrap_or_else(|_| ron::to_string(positions).unwrap_or_else(|_| "{}".into()));
-    format!("{STRUCTURE_HEADER}\n{body}\n")
-}
-
-/// Parse the `@structure_layout` section back (absent/garbled → empty map, so
-/// projects saved before this feature load unchanged).
-pub fn parse_structure_layout(text: &str) -> StructurePositions {
-    section_body(text, STRUCTURE_HEADER)
-        .and_then(|body| ron::from_str::<StructurePositions>(body.trim()).ok())
-        .unwrap_or_default()
-}
+// The Structure tab's `@structure_layout` / `@structure_view` sections used to
+// live here too. They moved to `project_structure.config` (see
+// [`super::structure_config`]) because they change on every node drag, which
+// made this file — real, reviewable configuration — permanently dirty in Git.
+// `section_body` stays shared: both files use the same `@section` layout, and
+// the migration path reads the old sections straight out of this one.
 
 /// Build the `mcu.config` text from the MCU's `modules` and (STM32-only) clock.
 /// Returns an empty string when there is nothing to persist (no modules and no
@@ -114,7 +76,7 @@ pub fn parse(text: &str) -> (Vec<VirtualModule>, Option<Stm32f1Clock>) {
 
 /// The lines belonging to `header`: everything after the header line up to (but
 /// excluding) the next `@`-prefixed section header, or EOF.
-fn section_body(text: &str, header: &str) -> Option<String> {
+pub(super) fn section_body(text: &str, header: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().position(|l| l.trim() == header)?;
     let mut body: Vec<&str> = Vec::new();
@@ -193,24 +155,24 @@ mod tests {
         assert!(c.is_none());
     }
 
+    /// The Structure sections moved to their own file, but a `mcu.config` that
+    /// still carries them (saved before the split) must keep parsing.
     #[test]
-    fn structure_layout_round_trips_and_coexists() {
-        let mut pos = StructurePositions::new();
+    fn legacy_structure_sections_do_not_break_parsing() {
+        use crate::panels::mcu_module::structure_config;
+        let mut pos = structure_config::StructurePositions::new();
         pos.insert("main.rs".into(), (14.0, 14.0));
         pos.insert("mw_radar/utils.rs".into(), (321.5, 208.0));
 
-        // Appended after the MCU sections, every section still parses.
+        // A legacy file: MCU sections followed by the old Structure ones.
         let mut text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()));
         text.push('\n');
-        text.push_str(&structure_layout_section(&pos));
+        text.push_str(&structure_config::serialize(&pos, &(true, Some(2), 0, false)));
 
-        assert_eq!(parse_structure_layout(&text), pos, "positions round-trip");
         let (m, c) = parse(&text);
-        assert_eq!(m.len(), 1, "modules unaffected by the extra section");
-        assert!(c.is_some(), "clock unaffected by the extra section");
-
-        // Absent section (older projects) → empty map; empty map → no section.
-        assert!(parse_structure_layout("@modules\n[]\n").is_empty());
-        assert_eq!(structure_layout_section(&StructurePositions::new()), "");
+        assert_eq!(m.len(), 1, "modules unaffected by the extra sections");
+        assert!(c.is_some(), "clock unaffected by the extra sections");
+        // And the migration reader still finds the positions in there.
+        assert_eq!(structure_config::parse_layout(&text), pos);
     }
 }

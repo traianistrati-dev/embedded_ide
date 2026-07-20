@@ -6,6 +6,7 @@ pub mod datasheet_import;
 pub mod mcu;
 pub mod mcu_catalog;
 pub mod mcu_config;
+pub mod structure_config;
 pub mod mcu_def;
 pub mod mcu_form;
 pub mod mcu_identity;

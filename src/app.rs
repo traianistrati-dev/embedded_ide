@@ -451,8 +451,8 @@ pub struct AppIde {
     structure_layout_calls: usize,
     /// Manually dragged Structure-diagram positions, keyed by the module's
     /// file. Applied over every automatic layout; persisted in the project's
-    /// `mcu.config` (`@structure_layout` section) on Project Save.
-    structure_overrides: crate::panels::mcu_module::mcu_config::StructurePositions,
+    /// `project_structure.config` on Project Save.
+    structure_overrides: crate::panels::mcu_module::structure_config::StructurePositions,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -1186,38 +1186,33 @@ impl AppIde {
     }
 
     /// The `mcu.config` text: the live MCU's sections (virtual modules + clock)
-    /// plus the Structure diagram's dragged positions (`@structure_layout`,
-    /// app-level state — not the MCU's). Written alongside the project by
-    /// `write_project`; empty when there is nothing to persist.
+    /// and nothing else. Written alongside the project by `write_project`;
+    /// empty when there is nothing to persist.
+    ///
+    /// The Structure diagram's positions and view options are NOT here — they
+    /// changed on every node drag and kept this file permanently modified in
+    /// Git. See [`Self::structure_config_text`].
     fn mcu_config_text(&self) -> String {
-        let mut out = self
-            .mcu
+        self.mcu
             .as_ref()
             .map(|m| m.mcu_config_text())
-            .unwrap_or_default();
-        let structure = crate::panels::mcu_module::mcu_config::structure_layout_section(
-            &self.structure_overrides,
-        );
-        if !structure.is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&structure);
-        }
-        // Structure-tab view options (Calls / depth / path style / externals)
-        // — persisted so they survive restarts.
+            .unwrap_or_default()
+    }
+
+    /// The `project_structure.config` text: dragged node positions + view
+    /// options of the Structure tab. Empty when there is nothing to persist, so
+    /// an untouched project carries no such file at all.
+    fn structure_config_text(&self) -> String {
         let v = &self.structure_view;
-        let view_sect = crate::panels::mcu_module::mcu_config::structure_view_section(&(
-            v.show_calls,
-            v.call_depth,
-            v.path_style.to_u8(),
-            v.show_externals,
-        ));
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&view_sect);
-        out
+        crate::panels::mcu_module::structure_config::serialize(
+            &self.structure_overrides,
+            &(
+                v.show_calls,
+                v.call_depth,
+                v.path_style.to_u8(),
+                v.show_externals,
+            ),
+        )
     }
 
     /// Regenerate every editable config file fresh from the selected chip,
@@ -1372,6 +1367,7 @@ impl AppIde {
                             &self.current_project_files(),
                             &self.project_tree.user_src_files,
                             &self.mcu_config_text(),
+                            &self.structure_config_text(),
                             self.project_dir.as_deref(),
                         )
                         .is_ok()
@@ -1790,6 +1786,20 @@ impl eframe::App for AppIde {
     // watching and re-analyzing the workspace on every file write, compounding
     // the "everything gets slower" degradation across restarts.
     fn on_exit(&mut self) {
+        // Persist the Structure diagram's layout. It is deliberately NOT part
+        // of the unsaved-changes snapshot any more (dragging a node must not
+        // make the project look modified), so nothing else would write it when
+        // a drag is the only thing that happened. Written even on "Close
+        // without saving": this is gitignored view state, not project content.
+        if let Some(root) = &self.project_dir {
+            let text = self.structure_config_text();
+            let path = root.join(crate::panels::mcu_module::structure_config::FILE_NAME);
+            if text.trim().is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                let _ = std::fs::write(&path, text);
+            }
+        }
         self.lsp_state.lock().unwrap().kill_child();
         // Orphaned probe-rs processes would keep the debug probe locked for
         // the next app start — kill them synchronously.
@@ -1971,6 +1981,7 @@ impl eframe::App for AppIde {
                 let files = self.current_project_files();
                 let user_files = self.project_tree.user_src_files.clone();
                 let mcu_cfg = self.mcu_config_text();
+                let structure_cfg = self.structure_config_text();
                 let shared: Arc<Mutex<Option<Result<String, String>>>> = Arc::new(Mutex::new(None));
                 let out = Arc::clone(&shared);
                 let ctx = self.egui_ctx.clone();
@@ -1987,6 +1998,7 @@ impl eframe::App for AppIde {
                                 &files,
                                 &user_files,
                                 &mcu_cfg,
+                                &structure_cfg,
                                 None,
                             )
                         })
@@ -2073,6 +2085,7 @@ impl eframe::App for AppIde {
                     &self.current_project_files(),
                     &self.project_tree.user_src_files,
                     &self.mcu_config_text(),
+                    &self.structure_config_text(),
                     self.project_dir.as_deref(),
                 );
             }

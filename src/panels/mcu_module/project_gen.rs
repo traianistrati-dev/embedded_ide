@@ -167,7 +167,17 @@ impl ConfigFile {
                 RustEmbedded => Some((Cmt::Slash, build_rs_embedded())),
                 _ => None,
             },
-            ConfigFile::GitIgnore => Some((Cmt::Hash, "/target\n".to_owned())),
+            // `project_structure.config` is per-user view state (node positions
+            // in the Structure diagram) — it changes on every drag, so it is
+            // ignored rather than committed. `mcu.config` IS committed: it is
+            // real configuration.
+            ConfigFile::GitIgnore => Some((
+                Cmt::Hash,
+                format!(
+                    "/target\n{}\n",
+                    crate::panels::mcu_module::structure_config::FILE_NAME
+                ),
+            )),
         }
     }
 }
@@ -335,6 +345,9 @@ pub fn write_project(
     files: &ProjectFiles,
     user_src_files: &[(String, String)],
     mcu_config: &str,
+    // `project_structure.config` — Structure-tab view state, kept out of
+    // `mcu.config` so node drags don't show up as config changes in Git.
+    structure_config: &str,
     // Where to mirror workspace-member crates FROM (the saved project dir).
     // `None` — or the same path as `dest` — means there is nothing to mirror:
     // we are writing the project itself, not a build copy of it.
@@ -412,6 +425,15 @@ pub fn write_project(
         let _ = fs::remove_file(&mcu_config_path);
     } else {
         write_if_changed(&mcu_config_path, mcu_config.as_bytes())?;
+    }
+
+    // project_structure.config — same deal, but view state rather than config:
+    // gitignored, and removed when there is nothing left to remember.
+    let structure_path = dest.join(crate::panels::mcu_module::structure_config::FILE_NAME);
+    if structure_config.trim().is_empty() {
+        let _ = fs::remove_file(&structure_path);
+    } else {
+        write_if_changed(&structure_path, structure_config.as_bytes())?;
     }
 
     // ── Workspace member crates ──────────────────────────────────────────────

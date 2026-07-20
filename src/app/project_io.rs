@@ -77,19 +77,18 @@ impl AppIde {
         // the first check re-resolves for this project (later saves keep it).
         self.reset_workspace_lock();
 
-        // Restore the Structure diagram's dragged positions (`@structure_layout`
-        // in mcu.config) — read independently of the MCU restore below since
-        // the diagram is chip-agnostic. Missing file/section → automatic layout.
+        // Restore the Structure diagram's dragged positions from
+        // `project_structure.config` — read independently of the MCU restore
+        // below since the diagram is chip-agnostic. Missing file/section →
+        // automatic layout. `load` falls back to `mcu.config`, where this state
+        // lived before it got its own file.
         {
-            use crate::panels::mcu_module::mcu_config;
-            let cfg_text =
-                std::fs::read_to_string(root.join(mcu_config::FILE_NAME)).unwrap_or_default();
-            self.structure_overrides = mcu_config::parse_structure_layout(&cfg_text);
+            use crate::panels::mcu_module::structure_config;
+            let (positions, view) = structure_config::load(root);
+            self.structure_overrides = positions;
             // View options (Calls / depth / path style / externals) — absent
             // section (older projects) keeps the defaults.
-            if let Some((show_calls, depth, style, externals)) =
-                mcu_config::parse_structure_view(&cfg_text)
-            {
+            if let Some((show_calls, depth, style, externals)) = view {
                 self.structure_view.show_calls = show_calls;
                 self.structure_view.call_depth = depth;
                 self.structure_view.path_style =
