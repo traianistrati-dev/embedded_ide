@@ -53,6 +53,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         )
         .is_ok()
         {
@@ -83,6 +84,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         )
         .is_ok()
         {
@@ -121,6 +123,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 self.selected_diagnostic = None;
@@ -206,6 +209,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 if focus_cargo_tab {
@@ -240,6 +244,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 self.build_tab = BuildPanelTab::Rtt;
@@ -271,6 +276,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 self.build_tab = BuildPanelTab::Debug;

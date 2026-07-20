@@ -520,6 +520,9 @@ pub fn show_project_tree(
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
+    // Folder the user asked to turn into a sibling library crate (path relative
+    // to `src/`); the caller opens the Extract dialog.
+    extract_folder: &mut Option<String>,
 ) {
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
@@ -619,6 +622,7 @@ pub fn show_project_tree(
             new_folder_parent_folder,
             "", // parent path at root is empty (relative to src/)
             &mut move_request,
+            extract_folder,
         );
 
         // Apply a file duplication — copy content under the next free
@@ -839,6 +843,7 @@ fn render_tree_node(
     new_folder_parent_folder: &mut Option<String>,
     parent_path: &str,
     move_request: &mut Option<(DraggedItem, String)>,
+    extract_folder: &mut Option<String>,
 ) {
     let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
     // While any inline edit is active (new file/folder input or a rename), don't
@@ -1015,6 +1020,7 @@ fn render_tree_node(
                             new_folder_parent_folder,
                             &folder_path,
                             move_request,
+                            extract_folder,
                         );
                     });
 
@@ -1117,6 +1123,26 @@ fn render_tree_node(
                                 .color(egui::Color32::from_rgb(210, 170, 90)),
                             );
                             return;
+                        }
+                        ui.separator();
+                        // Turn this folder into a sibling crate you can publish.
+                        if ui
+                            .button(
+                                egui::RichText::new(format!(
+                                    "{} Extract to library crate…",
+                                    ph::PACKAGE
+                                ))
+                                .size(11.5),
+                            )
+                            .on_hover_text(
+                                "Move this folder into its own Cargo crate next to src/, \
+                                 wire it up as a workspace member + path dependency, and \
+                                 give it a publishable Cargo.toml.",
+                            )
+                            .clicked()
+                        {
+                            *extract_folder = Some(folder_path.clone());
+                            ui.close();
                         }
                         ui.separator();
                         if ui

@@ -24,6 +24,7 @@ pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
 mod dialogs;
+mod extract_crate_dialog;
 mod mcu_form_dialog;
 mod datasheet_import_dialog;
 
@@ -766,6 +767,8 @@ pub struct AppIde {
     /// button right of "More"). The bar itself always stays visible — only the
     /// tab CONTENT is hidden. Persisted across restarts.
     diag_collapsed: bool,
+    /// Open "Extract to library crate" dialog, if any.
+    extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
     /// `true` while the "unsaved changes" prompt is up (close was cancelled).
     exit_prompt: bool,
     /// Set once the user has decided, so the close we send isn't intercepted
@@ -1037,6 +1040,7 @@ impl AppIde {
             git_discard_all_confirm: false,
             side_panels_collapsed: persisted.side_panels_collapsed,
             diag_collapsed: persisted.diag_collapsed,
+            extract_crate: None,
             exit_prompt: false,
             allow_close: false,
             close_after_save: false,
@@ -1368,6 +1372,7 @@ impl AppIde {
                             &self.current_project_files(),
                             &self.project_tree.user_src_files,
                             &self.mcu_config_text(),
+                            self.project_dir.as_deref(),
                         )
                         .is_ok()
                         {
@@ -1914,6 +1919,10 @@ impl eframe::App for AppIde {
         let open_project_clicked = signals.open_clicked;
         let new_project_clicked = signals.new_clicked;
         let save_project_clicked = signals.save_clicked;
+        // "Extract to library crate…" on a tree folder → open the dialog.
+        if let Some(folder) = signals.extract_folder {
+            self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::new(folder));
+        }
 
         // ── Handle toolbar button clicks ──────────────────────────────────────
 
@@ -1971,7 +1980,15 @@ impl eframe::App for AppIde {
                     let mut rec = crate::activity::Recorder::new("Save (project)");
                     let res = rec
                         .phase("write_project", || {
-                            project_gen::write_project(&dest_thread, &files, &user_files, &mcu_cfg)
+                            // dest IS the project — member crates already live
+                            // there on disk, nothing to mirror.
+                            project_gen::write_project(
+                                &dest_thread,
+                                &files,
+                                &user_files,
+                                &mcu_cfg,
+                                None,
+                            )
                         })
                         .map(|()| {
                             dest_thread
@@ -2042,6 +2059,7 @@ impl eframe::App for AppIde {
         self.show_rename_project_dialog(ui);
         self.show_mcu_form_dialog(ui);
         self.show_git_discard_dialog(ui);
+        self.show_extract_crate_dialog(ui);
         self.show_exit_prompt(ui);
 
         // Write the entire project to the workspace directory when the file
@@ -2055,6 +2073,7 @@ impl eframe::App for AppIde {
                     &self.current_project_files(),
                     &self.project_tree.user_src_files,
                     &self.mcu_config_text(),
+                    self.project_dir.as_deref(),
                 );
             }
         }

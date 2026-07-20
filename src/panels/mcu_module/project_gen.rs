@@ -335,6 +335,10 @@ pub fn write_project(
     files: &ProjectFiles,
     user_src_files: &[(String, String)],
     mcu_config: &str,
+    // Where to mirror workspace-member crates FROM (the saved project dir).
+    // `None` — or the same path as `dest` — means there is nothing to mirror:
+    // we are writing the project itself, not a build copy of it.
+    mirror_from: Option<&Path>,
 ) -> io::Result<()> {
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
@@ -410,7 +414,120 @@ pub fn write_project(
         write_if_changed(&mcu_config_path, mcu_config.as_bytes())?;
     }
 
+    // ── Workspace member crates ──────────────────────────────────────────────
+    // Library crates extracted out of the project (see `extract_crate`) live
+    // NEXT TO src/, so they are not in `user_src_files` and nothing above wrote
+    // them. Builds run in a temp copy of the project, and cargo cannot resolve
+    // a `path` dependency that isn't there — so mirror those directories in.
+    // Disk in the project stays the single source of truth (the IDE holds no
+    // in-memory copy), which is what makes editing them elsewhere safe.
+    if let Some(src_root) = mirror_from {
+        if src_root != dest {
+            for member in workspace_members(&files.cargo_toml) {
+                mirror_dir(&src_root.join(&member), &dest.join(&member));
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Directory names listed in the root manifest's `[workspace] members = [...]`.
+/// Hand-parsed (no toml dependency): track the current `[section]`, then read
+/// every quoted string in the `members` value, which may span lines.
+pub fn workspace_members(cargo_toml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_workspace = false;
+    let mut collecting = false;
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && !collecting {
+            // `[workspace.package]` etc. are not the members list.
+            in_workspace = t == "[workspace]";
+            continue;
+        }
+        if !in_workspace {
+            continue;
+        }
+        if !collecting {
+            let Some(rest) = t.strip_prefix("members") else {
+                continue;
+            };
+            if !rest.trim_start().starts_with('=') {
+                continue;
+            }
+            collecting = true;
+            push_quoted(rest, &mut out);
+        } else {
+            push_quoted(t, &mut out);
+        }
+        if t.contains(']') {
+            collecting = false;
+            in_workspace = false; // one members list is enough
+        }
+    }
+    out
+}
+
+/// Append every `"..."` substring of `s` to `out`.
+fn push_quoted(s: &str, out: &mut Vec<String>) {
+    let mut rest = s;
+    while let Some(open) = rest.find('"') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else { return };
+        let val = &after[..close];
+        if !val.is_empty() {
+            out.push(val.to_owned());
+        }
+        rest = &after[close + 1..];
+    }
+}
+
+/// Recursively copy `src` into `dst`, writing only changed files and deleting
+/// whatever `dst` has that `src` doesn't. `dst` is the throw-away build
+/// workspace, so pruning there is safe. `target/` and `.git/` are skipped —
+/// mirroring build output would copy gigabytes for no benefit.
+fn mirror_dir(src: &Path, dst: &Path) {
+    if !src.is_dir() {
+        return;
+    }
+    if fs::create_dir_all(dst).is_err() {
+        return;
+    }
+    let skip = |name: &std::ffi::OsStr| name == "target" || name == ".git";
+
+    let mut kept: std::collections::HashSet<std::ffi::OsString> = Default::default();
+    if let Ok(entries) = fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if skip(&name) {
+                continue;
+            }
+            kept.insert(name.clone());
+            let from = entry.path();
+            let to = dst.join(&name);
+            if from.is_dir() {
+                mirror_dir(&from, &to);
+            } else if let Ok(bytes) = fs::read(&from) {
+                let _ = write_if_changed(&to, &bytes);
+            }
+        }
+    }
+    // Prune leftovers so a file deleted in the project stops breaking the build.
+    if let Ok(entries) = fs::read_dir(dst) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if skip(&name) || kept.contains(&name) {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+            } else {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// Write `content` to `path` ONLY when it differs from what's already on disk.

@@ -433,6 +433,7 @@ impl AppIde {
             &self.current_project_files(),
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
+            self.project_dir.as_deref(),
         )
         .is_err()
         {

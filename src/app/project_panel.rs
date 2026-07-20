@@ -18,6 +18,8 @@ pub(super) struct ProjectPanelSignals {
     pub open_clicked: bool,
     pub new_clicked: bool,
     pub save_clicked: bool,
+    /// Folder (relative to `src/`) the user asked to extract into its own crate.
+    pub extract_folder: Option<String>,
 }
 
 impl AppIde {
@@ -111,6 +113,7 @@ impl AppIde {
         let mut open_project_clicked = false;
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
+        let mut extract_folder: Option<String> = None;
 
         egui::Panel::right("project_tree")
             .resizable(true)
@@ -230,6 +233,7 @@ impl AppIde {
                             &mut self.renaming_folder,
                             &workspace_dir,
                             save_project_needed,
+                            &mut extract_folder,
                         );
                     }
                     _ => {
@@ -249,6 +253,7 @@ impl AppIde {
             open_clicked: open_project_clicked,
             new_clicked: new_project_clicked,
             save_clicked: save_project_clicked,
+            extract_folder,
         }
     }
 }

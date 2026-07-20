@@ -1,5 +1,6 @@
 //! Project tree viewer — the left panel showing workspace files and MCU selection.
 
+pub mod extract_crate;
 pub mod gui;
 pub mod logic;
 
