@@ -144,10 +144,59 @@ impl AppIde {
         }
     }
 
+    /// Fire the Flash/RAM measurement once, when a flash that was running has
+    /// just finished successfully. Called every frame from `AppIde::ui`.
+    ///
+    /// It runs AFTER the flash rather than alongside it on purpose: the flash
+    /// pipelines build `--release` into the same workspace, and a second cargo
+    /// there would just block on the target-dir lock. Afterwards the build is
+    /// warm, so the measurement is near-instant.
+    pub(crate) fn poll_flash_finished_size(&mut self) {
+        let (dfu_busy, dfu_ok) = {
+            let s = self.dfu_state.lock().unwrap();
+            (s.is_busy(), matches!(*s, crate::dfu::DfuState::Success))
+        };
+        let (ocd_busy, ocd_ok) = {
+            let s = self.openocd_state.lock().unwrap();
+            (
+                s.is_busy(),
+                matches!(*s, crate::openocd::OpenOcdState::Success),
+            )
+        };
+        let (esp_busy, esp_ok) = {
+            let s = self.espflash_state.lock().unwrap();
+            (
+                s.is_busy(),
+                matches!(*s, crate::espflash::EspFlashState::Success),
+            )
+        };
+        let busy = dfu_busy || ocd_busy || esp_busy;
+        let finished = self.flash_was_busy && !busy;
+        self.flash_was_busy = busy;
+        // Only on success — a failed flash usually means the build failed, and
+        // measuring would just repeat the same cargo error in a second place.
+        if finished && (dfu_ok || ocd_ok || esp_ok) {
+            self.start_size_measure_quiet();
+        }
+    }
+
+    /// Measure Flash/RAM usage from the Cargo tab's Size button — brings that
+    /// tab to the front so the result is visible.
+    pub(crate) fn start_size_measure(&mut self) {
+        self.start_size_measure_inner(true);
+    }
+
+    /// Same measurement without switching tabs: the Flash tab's own Size button
+    /// and the automatic run after each flash, both of which must leave the
+    /// Flash tab in view (it renders its own copy of the usage row).
+    pub(crate) fn start_size_measure_quiet(&mut self) {
+        self.start_size_measure_inner(false);
+    }
+
     /// Measure Flash/RAM usage: write the project, `cargo build --release`,
     /// then parse the ELF against the memory.x limits (see `crate::size`).
-    /// Fired from the Cargo tab's Size button. No-op without a chip config.
-    pub(crate) fn start_size_measure(&mut self) {
+    /// No-op without a chip config.
+    fn start_size_measure_inner(&mut self, focus_cargo_tab: bool) {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
@@ -159,7 +208,9 @@ impl AppIde {
             &self.mcu_config_text(),
         ) {
             Ok(()) => {
-                self.build_tab = BuildPanelTab::Cargo;
+                if focus_cargo_tab {
+                    self.build_tab = BuildPanelTab::Cargo;
+                }
                 crate::size::start_measure(
                     build_dir,
                     project.target.clone(),

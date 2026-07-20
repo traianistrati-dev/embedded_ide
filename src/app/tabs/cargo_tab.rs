@@ -291,7 +291,10 @@ pub fn show_cargo_tab(
 /// The Flash/RAM usage strip under the status bar: two labelled bars (with
 /// percentages when memory.x limits are known) + a section breakdown on hover.
 /// Hidden while nothing was measured yet.
-fn render_size_row(ui: &mut egui::Ui, state: &SizeState) {
+///
+/// `pub(super)` because the Flash tab renders the same row (its measurement
+/// runs automatically after every flash) — one renderer, one look.
+pub(super) fn render_size_row(ui: &mut egui::Ui, state: &SizeState) {
     match state {
         SizeState::Idle => {}
         SizeState::Building => {

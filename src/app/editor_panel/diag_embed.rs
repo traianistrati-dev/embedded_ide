@@ -114,6 +114,8 @@ impl AppIde {
         let mut build_go = false;
         // Cargo-tab Size button (Flash/RAM usage measurement).
         let mut size_go = false;
+        // Flash-tab Size button — same measurement, stays on the Flash tab.
+        let mut size_flash_go = false;
         // RTT-tab Run/Attach buttons.
         let mut rtt_go: Option<crate::rtt::RttMode> = None;
         // Debug-tab Start button.
@@ -210,6 +212,7 @@ impl AppIde {
                     &mut build_go,
                     &self.size_state,
                     &mut size_go,
+                    &mut size_flash_go,
                     &mut self.rtt,
                     &mut rtt_go,
                     &rtt_chip,
@@ -228,6 +231,10 @@ impl AppIde {
         // Cargo-tab Size button (Flash/RAM measurement).
         if size_go {
             self.start_size_measure();
+        }
+        // Flash-tab Size button — must not jump to the Cargo tab.
+        if size_flash_go {
+            self.start_size_measure_quiet();
         }
         // RTT-tab Run/Attach buttons.
         if let Some(mode) = rtt_go {

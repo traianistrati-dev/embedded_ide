@@ -497,6 +497,9 @@ pub struct AppIde {
     /// Shared state of the Flash/RAM size measurement (Cargo tab's Size button:
     /// `cargo build --release` + ELF section parse — see `crate::size`).
     size_state: Arc<Mutex<crate::size::SizeState>>,
+    /// Was any flash pipeline busy last frame? Edge-detects "flash finished" to
+    /// re-measure Flash/RAM automatically (see `poll_flash_finished_size`).
+    flash_was_busy: bool,
     /// Shared state for USB DFU detection and flashing
     dfu_state: Arc<Mutex<DfuState>>,
     /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
@@ -925,6 +928,7 @@ impl AppIde {
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             clippy_state: Arc::new(Mutex::new(BuildState::Idle)),
             size_state: Arc::new(Mutex::new(crate::size::SizeState::Idle)),
+            flash_was_busy: false,
             clippy_sel: None,
             selected_diagnostic: None,
             dfu_state,
@@ -1791,6 +1795,11 @@ impl eframe::App for AppIde {
                 self.exit_prompt = true;
             }
         }
+
+        // A flash that just finished re-measures Flash/RAM (Flash tab row).
+        // Here, not in the diag panel: that panel can be hidden, and the edge
+        // would be missed.
+        self.poll_flash_finished_size();
 
         // ── UI-stall detector ─────────────────────────────────────────────────
         // A gap between frames while background work was pending means the

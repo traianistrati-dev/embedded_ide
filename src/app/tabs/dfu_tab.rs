@@ -1,8 +1,10 @@
 //! DFU and Flash programming tab.
+use super::cargo_tab::render_size_row;
 use crate::dfu::{self, DfuState};
 use crate::espflash::{self, EspFlashState};
 use crate::openocd::{self, OpenOcdState};
 use crate::panels::mcu_module::ToolchainKind;
+use crate::size::SizeState;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::collections::HashMap;
@@ -26,6 +28,12 @@ pub fn show_dfu_tab(
     scan_out: &mut bool,
     flash_out: &mut bool,
     can_flash: bool,
+    // Flash/RAM usage: the row is rendered under the Programmer row and is
+    // refreshed automatically after every flash. `size_out` = the manual Size
+    // button (the caller runs `start_size_measure_quiet`, which keeps this tab
+    // in front instead of jumping to Cargo).
+    size_state: &Arc<Mutex<SizeState>>,
+    size_out: &mut bool,
 ) {
     let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
@@ -73,6 +81,8 @@ pub fn show_dfu_tab(
 
     let dfu_busy = state.is_busy();
     let any_busy = dfu_busy || ocd_state.is_busy() || esp_state.is_busy();
+    let size_snapshot = size_state.lock().unwrap().clone();
+    let size_busy = size_snapshot.is_busy();
 
     // ── Programmer selector row: Scan · Flash · ComboBox ──────────────────────
     ui.horizontal(|ui| {
@@ -156,6 +166,37 @@ pub fn show_dfu_tab(
             ToolchainKind::SdccC => {}
         }
 
+        // ── Size — same measurement as the Cargo tab's button ─────────────
+        // It also runs on its own after every flash; this is for re-checking
+        // without programming the board.
+        let size_enabled = !size_busy && !any_busy && can_flash;
+        if ui
+            .add_enabled(
+                size_enabled,
+                egui::Button::new(
+                    egui::RichText::new(if size_busy {
+                        "Measuring…".to_owned()
+                    } else {
+                        format!("{} Size", ph::RULER)
+                    })
+                    .size(10.5)
+                    .color(if size_enabled {
+                        egui::Color32::from_rgb(120, 170, 210)
+                    } else {
+                        egui::Color32::GRAY
+                    }),
+                ),
+            )
+            .on_hover_text(
+                "Measure Flash/RAM usage: `cargo build --release`, then read \
+                 the ELF section sizes against the memory.x limits.\n\
+                 Runs automatically after every flash.",
+            )
+            .clicked()
+        {
+            *size_out = true;
+        }
+
         let combo_label = if progs.is_empty() {
             "— none detected —".to_string()
         } else {
@@ -237,6 +278,13 @@ pub fn show_dfu_tab(
                 }
             });
     });
+
+    // Flash/RAM of the image being programmed — refreshed after every flash.
+    render_size_row(ui, &size_snapshot);
+    if size_busy {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(120));
+    }
 
     // Guidance text for selected programmer
     if let Some(p) = progs.get(dfu_sel_programmer) {

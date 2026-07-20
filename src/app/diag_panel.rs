@@ -90,6 +90,9 @@ pub(super) fn show_diag_panel(
     // caller runs `start_size_measure`).
     size_state: &Arc<Mutex<crate::size::SizeState>>,
     size_go: &mut bool,
+    // Flash-tab Size button — same measurement, but the caller keeps the Flash
+    // tab in front instead of switching to Cargo.
+    size_flash_go: &mut bool,
     // RTT tab: console + Run/Attach signal (caller runs `start_rtt`) + the
     // probe-rs chip name shown in the tab.
     rtt: &mut crate::rtt::RttConsole,
@@ -526,6 +529,8 @@ pub(super) fn show_diag_panel(
                 flash_scan,
                 flash_go,
                 can_flash,
+                size_state,
+                size_flash_go,
             );
         }
         BuildPanelTab::Rtt => {
