@@ -438,7 +438,62 @@ pub fn write_project(
         write_if_changed(&structure_path, structure_config.as_bytes())?;
     }
 
+    // ── Library crates left by ANOTHER project (build workspace only) ────────
+    // The build workspace is a single directory shared by every project ever
+    // opened, so a crate extracted elsewhere stays behind and accumulates —
+    // eventually confusing cargo or rust-analyzer.
+    //
+    // Guarded by an exact path match against `build_workspace_dir()`, and
+    // deliberately NOT extended to the user's project: a crate they created but
+    // have not yet listed in `[workspace] members` is indistinguishable from
+    // debris, and deleting it would be exactly the data loss this feature just
+    // learned to avoid. If the comparison ever fails we simply skip the prune —
+    // the safe direction.
+    if dest == build_workspace_dir() {
+        prune_foreign_crates(dest, &workspace_members(&files.cargo_toml));
+    }
+
     Ok(())
+}
+
+/// Absolute path of the throw-away workspace every build / check / flash / size
+/// run uses. It is a COPY of the project — the only place where deleting files
+/// that don't belong to the current project is safe.
+pub fn build_workspace_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("embedded_ide_0_check")
+}
+
+/// Delete top-level directories of `root` that hold a `Cargo.toml` but are not
+/// workspace `members` — library crates left behind by a DIFFERENT project.
+///
+/// The caller must guarantee `root` is disposable; see the call site. `src`,
+/// `target`, `.cargo` and `.git` are never touched.
+fn prune_foreign_crates(root: &Path, members: &[String]) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if matches!(name.as_str(), "src" | "target" | ".cargo" | ".git") {
+            continue;
+        }
+        // Only crate roots are candidates — a plain folder is not ours to judge.
+        if !path.join("Cargo.toml").is_file() {
+            continue;
+        }
+        // A member may be nested (`crates/foo`); its first segment protects the
+        // whole branch.
+        let is_member = members
+            .iter()
+            .any(|m| m == &name || m.split('/').next() == Some(name.as_str()));
+        if !is_member {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Directory names listed in the root manifest's `[workspace] members = [...]`.
@@ -899,5 +954,45 @@ mod tests {
             &ToolchainKind::RustEmbedded,
         );
         assert_eq!(out, external);
+    }
+
+    /// Only foreign CRATE directories go; everything else in the workspace is
+    /// left alone. (Pruning is guarded to the throw-away build workspace at the
+    /// call site — this covers the decision, not the guard.)
+    #[test]
+    fn prune_removes_only_non_member_crates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let crate_at = |name: &str| {
+            fs::create_dir_all(root.join(name).join("src")).unwrap();
+            fs::write(root.join(name).join("Cargo.toml"), "[package]
+").unwrap();
+        };
+        crate_at("mw_radar");   // current member  -> keep
+        crate_at("stale_lib");  // another project -> remove
+        fs::create_dir_all(root.join("src")).unwrap();       // firmware sources
+        fs::create_dir_all(root.join("target")).unwrap();    // build output
+        fs::create_dir_all(root.join("assets")).unwrap();    // plain folder, no manifest
+
+        prune_foreign_crates(root, &["mw_radar".to_string()]);
+
+        assert!(root.join("mw_radar").is_dir(), "member kept");
+        assert!(!root.join("stale_lib").exists(), "foreign crate removed");
+        assert!(root.join("src").is_dir(), "src kept");
+        assert!(root.join("target").is_dir(), "target kept");
+        assert!(root.join("assets").is_dir(), "a folder without Cargo.toml is not ours to judge");
+    }
+
+    /// A nested member (`crates/foo`) must protect its whole branch.
+    #[test]
+    fn a_nested_member_protects_its_top_level_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("crates")).unwrap();
+        fs::write(root.join("crates").join("Cargo.toml"), "[package]
+").unwrap();
+
+        prune_foreign_crates(root, &["crates/foo".to_string()]);
+        assert!(root.join("crates").is_dir());
     }
 }
