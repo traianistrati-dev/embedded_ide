@@ -33,7 +33,7 @@ mod format;
 mod inlay_hint;
 mod let_annotation;
 mod move_lines;
-mod multi_cursor;
+pub(crate) mod multi_cursor;
 mod rename;
 mod snippet;
 mod toolbar;
@@ -328,13 +328,14 @@ impl AppIde {
                 // extras. Checked AFTER the Ctrl+Shift consumes above, so an
                 // "add caret" press is already gone from the queue.
                 //
-                // Modified arrows are deliberately excluded: Ctrl+Shift is add
-                // caret, Ctrl is move-line, and Shift extends a SELECTION —
-                // which an extra caret cannot represent (it is a bare position,
-                // not a range), so mirroring it would be a lie.
+                // Shift+arrow extends every caret's OWN selection; a plain arrow
+                // moves and collapses. Ctrl-modified arrows are excluded — those
+                // are add-caret (Ctrl+Shift+Up/Down) and move-line (Ctrl+Up/Down),
+                // which mean something else entirely.
                 let mc_caret_move = ui.input(|i| {
                     use multi_cursor::CaretMove;
-                    if !i.modifiers.is_none() {
+                    let m = i.modifiers;
+                    if m.ctrl || m.command || m.alt {
                         return None;
                     }
                     for (key, dir) in [
@@ -344,28 +345,20 @@ impl AppIde {
                         (egui::Key::ArrowDown, CaretMove::Down),
                     ] {
                         if i.key_pressed(key) {
-                            return Some(dir);
+                            return Some((dir, m.shift));
                         }
                     }
                     None
                 });
-                // Escape → clear every extra multi-cursor caret.
-                //
-                // CONSUMED when it does something, because egui's TextEdit
-                // treats Escape as "surrender focus" — leaving it in the queue
-                // took the primary caret away along with the clones.
-                //
-                // Consumed only when there ARE clones to clear and no
-                // completion popup is open: a plain Escape must keep behaving
-                // normally, and dismissing an open popup wins over dropping the
-                // carets (that popup renders later in the frame and would never
-                // see the key otherwise).
+                // Escape, peeked twice for two different jobs:
+                //  * `escape_pressed_raw` — restore editor focus (see below).
+                //  * `mc_escape_pressed`  — drop the extra carets, skipped while
+                //    a completion popup is open, because dismissing that wins
+                //    (it renders later in the frame and would otherwise never
+                //    see the key).
+                let escape_pressed_raw = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 let popup_open = self.completion_open || self.cargo_complete.open;
-                let mc_escape_pressed = if self.extra_cursors.is_empty() || popup_open {
-                    false
-                } else {
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-                };
+                let mc_escape_pressed = !popup_open && escape_pressed_raw;
                 // Ctrl+Shift+Tab / Ctrl+Tab → MRU file switching (VS Code style:
                 // hold Ctrl to walk the history, release to commit). Consumed
                 // BEFORE the editor so Tab never inserts indentation. The Shift
@@ -687,6 +680,27 @@ impl AppIde {
                 // When it does, the line-op shortcuts below are skipped for this
                 // frame: they assume a single cursor/selection, and `editor_resp`
                 // still reflects positions from BEFORE this replay.
+                // ── Escape must never eject the caret from the editor ─────────
+                // egui drops the focused widget on Escape in `Focus::begin_pass`
+                // — raw events, start of the pass, before any widget or app code
+                // — so consuming the key cannot prevent it; the only cure is to
+                // take focus back afterwards.
+                //
+                // In the code editor Escape means "dismiss the popup" or "drop
+                // the extra carets", never "leave the editor", so restore it
+                // whenever the editor was the focused widget LAST frame. That
+                // check matters: without it, an Escape pressed in the Find bar
+                // or a tree rename box would yank focus INTO the editor. The
+                // flag is forced true when we restore, because `has_focus()` is
+                // still false on this very frame — otherwise a second Escape in
+                // a row would find it false and give up.
+                if escape_pressed_raw && self.editor_was_focused {
+                    editor_resp.response.request_focus();
+                    self.editor_was_focused = true;
+                } else {
+                    self.editor_was_focused = editor_resp.response.has_focus();
+                }
+
                 let mc_shift = self.handle_multi_cursor(
                     &mut display_code,
                     &text_before_typing,

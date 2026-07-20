@@ -640,14 +640,21 @@ pub struct AppIde {
     /// Extra caret positions for Ctrl+Shift+Up/Down multi-cursor editing (char
     /// indices into the displayed file, in the order they were added — last
     /// added is popped first by Ctrl+Shift+Down). See `editor_panel::multi_cursor`.
-    extra_cursors: Vec<usize>,
+    extra_cursors: Vec<editor_panel::multi_cursor::ExtraCaret>,
     /// Which file `extra_cursors` belongs to — cleared on a file switch so
     /// stale positions never leak into an unrelated file.
     extra_cursors_file: Option<ProjectFileId>,
     /// The primary caret's char index at the end of the previous frame — lets
     /// multi-cursor replay tell a Backspace (deletes BEFORE the cursor) apart
-    /// from a Delete-key press (deletes AFTER it).
-    mc_prev_primary_idx: Option<usize>,
+    /// from a Delete-key press (deletes AFTER it) — and, since it stores the
+    /// whole `(anchor, head)` selection, typing OVER a selection apart from
+    /// either, because then each caret replaces its OWN span.
+    mc_prev_primary_sel: Option<(usize, usize)>,
+    /// Did the code editor hold keyboard focus last frame? egui surrenders the
+    /// focused widget on Escape before any of our code runs, so this is the
+    /// only way to know whether the caret that just vanished was OURS — and
+    /// therefore whether to take the focus back.
+    editor_was_focused: bool,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -1026,7 +1033,8 @@ impl AppIde {
             build_text_snapshot: HashMap::new(),
             extra_cursors: Vec::new(),
             extra_cursors_file: None,
-            mc_prev_primary_idx: None,
+            mc_prev_primary_sel: None,
+            editor_was_focused: false,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
