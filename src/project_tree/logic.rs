@@ -12,6 +12,47 @@ pub struct ProjectTreeState {
     pub user_src_folders: Vec<String>,
 }
 
+/// Name for a duplicate of `path` (relative to `src/`): the first free
+/// `<stem>_<n>` in the SAME folder, keeping the extension —
+/// `my_file.rs` → `my_file_1.rs`, and `foo/a.rs` → `foo/a_1.rs`.
+///
+/// A trailing `_<digits>` on the source is stripped first, so duplicating a
+/// duplicate keeps counting on the same base (`my_file_1.rs` → `my_file_2.rs`)
+/// instead of growing `my_file_1_1.rs`. `exists` decides what's taken, so the
+/// caller can answer from the in-memory file list.
+pub fn duplicate_path(path: &str, exists: impl Fn(&str) -> bool) -> String {
+    let (dir, file) = match path.rfind('/') {
+        Some(i) => (&path[..=i], &path[i + 1..]),
+        None => ("", path),
+    };
+    // Split on the LAST dot; a leading dot is part of the name (".gitignore"),
+    // not an extension.
+    let (stem, ext) = match file.rfind('.') {
+        Some(i) if i > 0 => (&file[..i], &file[i..]),
+        _ => (file, ""),
+    };
+    let base = strip_copy_suffix(stem);
+    (1..)
+        .map(|n| format!("{dir}{base}_{n}{ext}"))
+        .find(|cand| !exists(cand))
+        .expect("an unbounded counter always reaches a free name")
+}
+
+/// `my_file_3` → `my_file`; anything else unchanged. Requires a non-empty
+/// all-digit tail AND a non-empty base, so `_1` and `foo_` stay as they are.
+fn strip_copy_suffix(stem: &str) -> &str {
+    match stem.rfind('_') {
+        Some(i)
+            if i > 0
+                && i + 1 < stem.len()
+                && stem[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            &stem[..i]
+        }
+        _ => stem,
+    }
+}
+
 impl ProjectTreeState {
     /// Create a new empty project tree state.
     pub fn new() -> Self {
@@ -428,6 +469,52 @@ fn generate_pin_content(pin_num: usize, pin_name: &str, func: &PinFunction) -> S
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod duplicate_name_tests {
+    use super::duplicate_path;
+
+    /// Nothing taken → the plain `_1` form the user asked for.
+    #[test]
+    fn first_duplicate_gets_suffix_1() {
+        assert_eq!(duplicate_path("my_file.rs", |_| false), "my_file_1.rs");
+    }
+
+    #[test]
+    fn counts_up_past_taken_names() {
+        let taken = ["my_file_1.rs", "my_file_2.rs"];
+        let p = duplicate_path("my_file.rs", |c| taken.contains(&c));
+        assert_eq!(p, "my_file_3.rs");
+    }
+
+    /// Duplicating a duplicate must not grow `_1_1`.
+    #[test]
+    fn duplicate_of_a_duplicate_keeps_the_same_base() {
+        let taken = ["my_file.rs", "my_file_1.rs"];
+        let p = duplicate_path("my_file_1.rs", |c| taken.contains(&c));
+        assert_eq!(p, "my_file_2.rs");
+    }
+
+    #[test]
+    fn stays_in_the_source_folder() {
+        assert_eq!(duplicate_path("drivers/uart.rs", |_| false), "drivers/uart_1.rs");
+    }
+
+    /// A trailing `_` or an all-digit stem is NOT a copy suffix.
+    #[test]
+    fn only_a_real_numeric_tail_is_stripped() {
+        assert_eq!(duplicate_path("foo_.rs", |_| false), "foo__1.rs");
+        assert_eq!(duplicate_path("foo_bar.rs", |_| false), "foo_bar_1.rs");
+        assert_eq!(duplicate_path("_1.rs", |_| false), "_1_1.rs");
+    }
+
+    /// A leading dot is a name, not an extension — and a file may have none.
+    #[test]
+    fn handles_dotfiles_and_extensionless_names() {
+        assert_eq!(duplicate_path(".gitignore", |_| false), ".gitignore_1");
+        assert_eq!(duplicate_path("Makefile", |_| false), "Makefile_1");
+    }
+}
 
 #[cfg(test)]
 mod tests {

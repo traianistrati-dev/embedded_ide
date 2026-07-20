@@ -593,6 +593,7 @@ pub fn show_project_tree(
 
         // Track deletions and renames to apply after rendering
         let mut to_delete: Option<usize> = None;
+        let mut to_duplicate: Option<usize> = None;
         let mut do_rename_file: Option<usize> = None;
         let mut cancel_rename_file = false;
 
@@ -608,6 +609,7 @@ pub fn show_project_tree(
             &mut do_rename_file,
             &mut cancel_rename_file,
             &mut to_delete,
+            &mut to_duplicate,
             renaming_folder,
             workspace_dir,
             save_needed,
@@ -618,6 +620,24 @@ pub fn show_project_tree(
             "", // parent path at root is empty (relative to src/)
             &mut move_request,
         );
+
+        // Apply a file duplication — copy content under the next free
+        // `<stem>_<n>` name in the same folder, and select the new file so it
+        // is obvious what happened.
+        if let Some(idx) = to_duplicate {
+            let (src_path, content) = user_src_files[idx].clone();
+            let new_path = crate::project_tree::logic::duplicate_path(&src_path, |cand| {
+                user_src_files.iter().any(|(p, _)| p == cand)
+            });
+            let dest = workspace_dir.join("src").join(&new_path);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&dest, &content);
+            user_src_files.push((new_path, content));
+            *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
+            *save_needed = true;
+        }
 
         // Apply file deletion
         if let Some(idx) = to_delete {
@@ -809,6 +829,7 @@ fn render_tree_node(
     do_rename_file: &mut Option<usize>,
     cancel_rename_file: &mut bool,
     to_delete: &mut Option<usize>,
+    to_duplicate: &mut Option<usize>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
@@ -835,6 +856,7 @@ fn render_tree_node(
             TreeNode::File(idx) => {
                 let full_path = &user_src_files[*idx].0;
                 let file_name = full_path.split('/').last().unwrap_or(full_path).to_string();
+                let can_duplicate = generated_file_reason(full_path).is_none();
                 user_file_row(
                     ui,
                     indent,
@@ -845,6 +867,8 @@ fn render_tree_node(
                     renaming_file,
                     do_rename_file,
                     cancel_rename_file,
+                    to_duplicate,
+                    can_duplicate,
                 );
             }
             TreeNode::Folder(children) => {
@@ -981,6 +1005,7 @@ fn render_tree_node(
                             do_rename_file,
                             cancel_rename_file,
                             to_delete,
+                            to_duplicate,
                             renaming_folder,
                             workspace_dir,
                             save_needed,
@@ -1076,6 +1101,22 @@ fn render_tree_node(
                             *new_src_name = None;
                             *new_file_parent_folder = None;
                             ui.close();
+                        }
+                        // `pins/` and `pins/configs/` are rebuilt every frame by
+                        // the pin/peripheral sync — renaming or deleting them
+                        // would be undone, or would break codegen. Same guard
+                        // that already refuses moving them.
+                        if let Some(reason) = generated_folder_reason(&folder_path) {
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} Read-only — {reason}",
+                                    ph::LOCK_SIMPLE
+                                ))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(210, 170, 90)),
+                            );
+                            return;
                         }
                         ui.separator();
                         if ui
@@ -1196,6 +1237,11 @@ fn user_file_row(
     renaming: &mut Option<(usize, String)>,
     do_rename: &mut Option<usize>,
     cancel_rename: &mut bool,
+    // Set by the Duplicate menu entry; the caller copies the file (it owns the
+    // file list). Offered only for files that are safe to rename/delete — a
+    // copy inside `pins/` would be pruned by the next pin sync.
+    to_duplicate: &mut Option<usize>,
+    can_duplicate: bool,
 ) {
     let hi = egui::Color32::from_rgb(100, 180, 255);
     let normal = egui::Color32::from_rgb(200, 205, 215);
@@ -1266,6 +1312,15 @@ fn user_file_row(
                 // Reset the focus flag so the edit box grabs focus next frame.
                 let fid = egui::Id::new(("__rename_file__", idx));
                 ui.memory_mut(|m| m.data.insert_temp(fid, true));
+                ui.close();
+            }
+            if can_duplicate
+                && ui
+                    .button(egui::RichText::new(format!("{} Duplicate", ph::COPY)).size(11.5))
+                    .on_hover_text("Copy this file next to it as <name>_1")
+                    .clicked()
+            {
+                *to_duplicate = Some(idx);
                 ui.close();
             }
             ui.separator();
