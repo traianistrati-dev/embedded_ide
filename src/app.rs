@@ -543,6 +543,9 @@ pub struct AppIde {
     /// Was any flash pipeline busy last frame? Edge-detects "flash finished" to
     /// re-measure Flash/RAM automatically (see `poll_flash_finished_size`).
     flash_was_busy: bool,
+    /// Which bottom tab was active last frame — edge-detects "this tab was just
+    /// opened", which the Git tab uses to refresh its status automatically.
+    last_build_tab: BuildPanelTab,
     /// Shared state for USB DFU detection and flashing
     dfu_state: Arc<Mutex<DfuState>>,
     /// Live output lines from the DFU flash operation (build + objcopy + dfu-util)
@@ -978,6 +981,7 @@ impl AppIde {
             clippy_state: Arc::new(Mutex::new(BuildState::Idle)),
             size_state: Arc::new(Mutex::new(crate::size::SizeState::Idle)),
             flash_was_busy: false,
+            last_build_tab: BuildPanelTab::RustAnalyzer,
             clippy_sel: None,
             selected_diagnostic: None,
             dfu_state,

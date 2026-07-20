@@ -41,6 +41,18 @@ impl AppIde {
             }
         }
 
+        // ── Tab just opened? ──────────────────────────────────────────────
+        // The Git tab shows the working tree's state, which goes stale the
+        // moment you edit anything — so re-read it every time the tab is
+        // entered, not just on its first open. Detected as a TRANSITION so
+        // re-clicking an already-open tab doesn't spawn a git process per
+        // click; the tab's own Refresh button covers that. The switch happens
+        // inside the panel closure below, so this sees it one frame later —
+        // invisible in practice, and it keeps the check out of the render path.
+        let entered_git = self.build_tab != self.last_build_tab
+            && self.build_tab == BuildPanelTab::Git;
+        self.last_build_tab = self.build_tab;
+
         // The panel used to hide itself whenever no tab had activity. It no
         // longer does: the tab bar stays put until the user collapses it with
         // the caret button, and collapsing hides only the tab CONTENT.
@@ -226,8 +238,12 @@ impl AppIde {
             self.diag_panel_height = (avail_h * 0.2).clamp(MIN_H, max_h);
         }
         // A Git tab button was clicked: spawn the worker (guards inside).
+        // An automatic refresh on entering the tab loses to an explicit button
+        // press — `run_git_op` is a no-op while an op is already running.
         if let Some(op) = git_op {
             self.run_git_op(op);
+        } else if entered_git {
+            self.run_git_op(crate::git::GitOp::Refresh);
         }
         // Cargo-tab Build button.
         if build_go {
