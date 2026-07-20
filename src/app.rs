@@ -756,6 +756,16 @@ pub struct AppIde {
     /// Collapse the MCU Configurator + Project tree so the editor fills the
     /// window (toggled from the editor toolbar). Persisted across restarts.
     side_panels_collapsed: bool,
+    /// `true` while the "unsaved changes" prompt is up (close was cancelled).
+    exit_prompt: bool,
+    /// Set once the user has decided, so the close we send isn't intercepted
+    /// again by our own handler.
+    allow_close: bool,
+    /// Close the window as soon as the in-flight Save finishes.
+    close_after_save: bool,
+    /// A Save requested from somewhere other than the toolbar (the exit
+    /// prompt); OR-ed into `save_clicked` for one frame.
+    request_save: bool,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -1015,6 +1025,10 @@ impl AppIde {
             pending_discard_file: None,
             git_discard_all_confirm: false,
             side_panels_collapsed: persisted.side_panels_collapsed,
+            exit_prompt: false,
+            allow_close: false,
+            close_after_save: false,
+            request_save: false,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -1766,6 +1780,18 @@ impl eframe::App for AppIde {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // ── Closing with unsaved work? Ask before losing it ───────────────────
+        // Cancel the close and put a prompt up; `allow_close` marks the close
+        // WE send after the user decided, so we don't intercept ourselves.
+        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if self.unsaved_files().is_empty() {
+                self.allow_close = true; // nothing to lose — let it go
+            } else {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.exit_prompt = true;
+            }
+        }
+
         // ── UI-stall detector ─────────────────────────────────────────────────
         // A gap between frames while background work was pending means the
         // event loop slept through finished work (the "one-minute save"
@@ -1897,7 +1923,12 @@ impl eframe::App for AppIde {
         //     remember the chosen folder so later saves go there directly.
         // Ignore a fresh Save while one is still running (button left enabled,
         // but the click is a no-op until the worker finishes).
-        if save_project_clicked
+        // `request_save` lets the exit prompt drive the same save path as the
+        // toolbar button (taken so it fires exactly once).
+        // `take` first: `||` short-circuits, and leaving the flag set would fire
+        // a second save on the next frame.
+        let save_requested = std::mem::take(&mut self.request_save) || save_project_clicked;
+        if save_requested
             && self.save_in_progress.is_none()
             && self.selected_build_cfg().is_some()
         {
@@ -1965,12 +1996,23 @@ impl eframe::App for AppIde {
                     self.project_name = Some(name);
                     // A new project now has a home — later saves go here.
                     self.project_dir = self.save_dest.take();
+                    // "Save and close": the files are on disk now, so finish
+                    // the close the prompt put on hold.
+                    if self.close_after_save {
+                        self.close_after_save = false;
+                        self.exit_prompt = false;
+                        self.allow_close = true;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 }
                 Err(e) => {
                     self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
                     self.export_status_until =
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
                     self.save_dest = None;
+                    // Don't close on a failed save — leave the prompt up so the
+                    // user sees the error and can still discard deliberately.
+                    self.close_after_save = false;
                 }
             }
         }
@@ -1982,6 +2024,7 @@ impl eframe::App for AppIde {
         self.show_rename_project_dialog(ui);
         self.show_mcu_form_dialog(ui);
         self.show_git_discard_dialog(ui);
+        self.show_exit_prompt(ui);
 
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).

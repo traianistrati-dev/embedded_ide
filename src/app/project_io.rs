@@ -403,6 +403,34 @@ impl AppIde {
         snap
     }
 
+    /// Project-relative paths whose in-memory content differs from disk — what
+    /// closing the app right now would lose. Empty = everything is saved.
+    ///
+    /// For a project that was NEVER saved there is nothing to diff against, so
+    /// it counts as unsaved only when the user actually built something
+    /// (configured a pin, added a module or a source file). Otherwise a
+    /// pristine start-up state would nag on every exit.
+    pub(super) fn unsaved_files(&self) -> Vec<String> {
+        let snapshot = self.git_disk_snapshot();
+        match &self.project_dir {
+            Some(dir) => crate::git::unsaved_changes(dir, &snapshot),
+            None => {
+                use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+                let has_content = !self.project_tree.user_src_files.is_empty()
+                    || self.mcu.as_ref().is_some_and(|m| {
+                        !m.modules.is_empty()
+                            || m.iter_all_pins()
+                                .any(|p| p.selected_function != PinFunction::Unset)
+                    });
+                if has_content {
+                    snapshot.into_iter().map(|(p, _)| p).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
     /// Reverse ONE hunk of a changed file — the Git diff view's per-hunk revert
     /// (Phase B). Reconstructs that hunk's patch from the open diff and applies
     /// it in reverse on disk, then refreshes the file's in-memory buffer so the

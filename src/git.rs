@@ -814,7 +814,8 @@ pub fn fetch_baseline(
 
 /// Project-relative paths whose in-memory `snapshot` content differs from the
 /// file on disk (or the file is missing) — i.e. edits a commit would MISS.
-fn unsaved_changes(project_dir: &Path, snapshot: &[(String, String)]) -> Vec<String> {
+/// `pub(crate)` so the exit prompt can ask the same question.
+pub(crate) fn unsaved_changes(project_dir: &Path, snapshot: &[(String, String)]) -> Vec<String> {
     snapshot
         .iter()
         .filter(|(rel, content)| {

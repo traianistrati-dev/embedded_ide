@@ -11,6 +11,118 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 impl AppIde {
+    /// "Unsaved changes" modal shown when the window close was intercepted
+    /// (see `AppIde::ui`). Save and close / Close without saving / Cancel.
+    ///
+    /// Saving is asynchronous, so "Save and close" only *starts* the save
+    /// (`request_save`) and arms `close_after_save`; the window is closed where
+    /// the save worker's result is applied. The prompt stays up meanwhile so
+    /// the app can't be closed twice or exited mid-write.
+    pub(super) fn show_exit_prompt(&mut self, ui: &egui::Ui) {
+        if !self.exit_prompt {
+            return;
+        }
+        let unsaved = self.unsaved_files();
+        // Saved from another route (Ctrl+S) while the prompt was up — nothing
+        // left to warn about, so just go.
+        if unsaved.is_empty() && self.save_in_progress.is_none() {
+            self.exit_prompt = false;
+            self.allow_close = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        let saving = self.save_in_progress.is_some();
+        // Save writes the WHOLE project from the current build config; without
+        // one (chip not supported for export) there is nothing to save to.
+        let can_save = self.selected_build_cfg().is_some();
+        let mut save_and_close = false;
+        let mut discard = false;
+        let mut cancel = false;
+
+        egui::Window::new("Unsaved changes")
+            .id(egui::Id::new("exit_unsaved_confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} file{} changed since the last save:",
+                        unsaved.len(),
+                        if unsaved.len() == 1 { "" } else { "s" }
+                    ))
+                    .size(12.0),
+                );
+                ui.add_space(4.0);
+                // A long list would grow the modal past the window — cap it.
+                const MAX_LISTED: usize = 8;
+                for path in unsaved.iter().take(MAX_LISTED) {
+                    ui.label(egui::RichText::new(format!("  {path}")).monospace().size(11.0));
+                }
+                if unsaved.len() > MAX_LISTED {
+                    ui.label(
+                        egui::RichText::new(format!("  … and {} more", unsaved.len() - MAX_LISTED))
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    );
+                }
+                ui.add_space(10.0);
+
+                if saving {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Saving — the app closes when it's done…");
+                    });
+                    return;
+                }
+                ui.horizontal(|ui| {
+                    let resp = ui
+                        .add_enabled(
+                            can_save,
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Save and close", ph::EXPORT))
+                                    .color(egui::Color32::from_rgb(120, 200, 140)),
+                            ),
+                        )
+                        .on_disabled_hover_text("This chip has no export configuration to save");
+                    if resp.clicked() {
+                        save_and_close = true;
+                    }
+                    if ui
+                        .button(
+                            egui::RichText::new(format!("{} Close without saving", ph::TRASH))
+                                .color(egui::Color32::from_rgb(230, 130, 90)),
+                        )
+                        .clicked()
+                    {
+                        discard = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if save_and_close {
+            self.request_save = true;
+            self.close_after_save = true;
+            // The save trigger sits EARLIER in the frame than this dialog, so
+            // it runs next frame — make sure there is one.
+            ui.ctx().request_repaint();
+        }
+        if discard {
+            self.exit_prompt = false;
+            self.allow_close = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if cancel {
+            self.exit_prompt = false;
+            self.close_after_save = false;
+        }
+    }
+
     /// Confirmation modal for discarding a whole file's changes (Phase A). On
     /// confirm it queues `pending_discard_file` (applied at the next editor
     /// render, so the open editor's `display_code` refreshes). No-op closed.
