@@ -24,10 +24,7 @@ pub(crate) fn is_ide_managed(path: &str) -> bool {
             | "build.rs"
             | ".gitignore"
     ) || path == crate::panels::mcu_module::mcu_config::FILE_NAME
-        || path
-            .strip_prefix("src/")
-            .and_then(crate::project_tree::gui::generated_file_reason)
-            .is_some()
+        || crate::project_tree::gui::generated_file_reason(path).is_some()
 }
 
 pub fn show_git_tab(

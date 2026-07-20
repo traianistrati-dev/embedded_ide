@@ -220,9 +220,12 @@ impl AppIde {
         use notify::EventKind::*;
         use notify::event::{ModifyKind, RenameMode};
 
-        let workspace_src = std::env::temp_dir()
-            .join("embedded_ide_0_check")
-            .join("src");
+        // Paths are made relative to the workspace ROOT (tree paths are
+        // project-root-relative). The WATCH itself still covers only `src/`:
+        // watching the root would pull in `target/`, which churns constantly
+        // during a build and would flood the channel.
+        let workspace_root = std::env::temp_dir().join("embedded_ide_0_check");
+        let workspace_src = workspace_root.join("src");
 
         // If the watcher hasn't started watching yet (dir didn't exist on
         // startup), try to attach now that write_project may have created it.
@@ -241,11 +244,11 @@ impl AppIde {
             match event.kind {
                 Create(_) => {
                     for abs in &event.paths {
-                        let Ok(rel) = abs.strip_prefix(&workspace_src) else {
+                        let Ok(rel) = abs.strip_prefix(&workspace_root) else {
                             continue;
                         };
                         let rel = rel.to_string_lossy().replace('\\', "/");
-                        if rel == "main.rs" {
+                        if rel == "src/main.rs" {
                             continue;
                         }
                         // Directories must be tracked as FOLDERS, and unreadable
@@ -272,7 +275,7 @@ impl AppIde {
                 }
                 Remove(_) => {
                     for abs in &event.paths {
-                        let Ok(rel) = abs.strip_prefix(&workspace_src) else {
+                        let Ok(rel) = abs.strip_prefix(&workspace_root) else {
                             continue;
                         };
                         let rel = rel.to_string_lossy().replace('\\', "/");
@@ -282,10 +285,10 @@ impl AppIde {
                 Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
                     let old = &event.paths[0];
                     let new = &event.paths[1];
-                    let Ok(old_rel) = old.strip_prefix(&workspace_src) else {
+                    let Ok(old_rel) = old.strip_prefix(&workspace_root) else {
                         continue;
                     };
-                    let Ok(new_rel) = new.strip_prefix(&workspace_src) else {
+                    let Ok(new_rel) = new.strip_prefix(&workspace_root) else {
                         continue;
                     };
                     let old_rel = old_rel.to_string_lossy().replace('\\', "/");
@@ -397,7 +400,7 @@ impl AppIde {
             ));
         }
         for (rel, content) in &self.project_tree.user_src_files {
-            snap.push((format!("src/{rel}"), content.clone()));
+            snap.push((rel.clone(), content.clone()));
         }
         snap
     }
@@ -466,20 +469,20 @@ impl AppIde {
         match crate::git::apply_reverse_patch(&dir, &patch) {
             Ok(()) => {
                 // Refresh the in-memory buffer from the now-reverted disk file.
-                // Only user `src/` files reach here (managed ones are refused).
+                // Only user files reach here (managed ones are refused), and
+                // `path` is already project-root-relative — the same key the
+                // tree uses.
                 let mut changed = false;
-                if let Some(rel) = path.strip_prefix("src/") {
-                    if let Ok(disk) = std::fs::read_to_string(dir.join(path)) {
-                        let disk = disk.replace("\r\n", "\n");
-                        if let Some(entry) = self
-                            .project_tree
-                            .user_src_files
-                            .iter_mut()
-                            .find(|(p, _)| p == rel)
-                        {
-                            entry.1 = disk;
-                            changed = true;
-                        }
+                if let Ok(disk) = std::fs::read_to_string(dir.join(path)) {
+                    let disk = disk.replace("\r\n", "\n");
+                    if let Some(entry) = self
+                        .project_tree
+                        .user_src_files
+                        .iter_mut()
+                        .find(|(p, _)| p == path)
+                    {
+                        entry.1 = disk;
+                        changed = true;
                     }
                 }
                 {
@@ -538,12 +541,12 @@ impl AppIde {
             // Untracked → delete the file (irreversible) + drop its buffer/tree.
             match std::fs::remove_file(dir.join(path)) {
                 Ok(()) => {
-                    if let Some(rel) = path.strip_prefix("src/") {
+                    {
                         if let Some(idx) = self
                             .project_tree
                             .user_src_files
                             .iter()
-                            .position(|(p, _)| p == rel)
+                            .position(|(p, _)| p == path)
                         {
                             self.project_tree.user_src_files.remove(idx);
                             // Remap the index-based selection across the removal.
@@ -571,12 +574,12 @@ impl AppIde {
             match crate::git::restore_file_to_head(&dir, path) {
                 Ok(content) => {
                     let mut c = false;
-                    if let Some(rel) = path.strip_prefix("src/") {
+                    {
                         if let Some(entry) = self
                             .project_tree
                             .user_src_files
                             .iter_mut()
-                            .find(|(p, _)| p == rel)
+                            .find(|(p, _)| p == path)
                         {
                             entry.1 = content;
                             c = true;

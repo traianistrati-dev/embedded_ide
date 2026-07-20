@@ -13,8 +13,7 @@ use std::sync::{Arc, Mutex};
 /// block (`gen_ranges`) — that code is owned by the MCU Configurator, so the fix
 /// can't be applied (it would be reverted) and its button is disabled.
 fn fix_locked(file: &str, start: usize, end: usize, gen_ranges: &[(usize, usize)]) -> bool {
-    let rel = file.strip_prefix("src/").unwrap_or(file);
-    rel == "main.rs" && gen_ranges.iter().any(|&(b, e)| start < e && end > b)
+    file == "src/main.rs" && gen_ranges.iter().any(|&(b, e)| start < e && end > b)
 }
 
 /// Out-params: `run_clicked` = press "Run clippy"; `apply_one` = apply the

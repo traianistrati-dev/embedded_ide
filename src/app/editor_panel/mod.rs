@@ -79,7 +79,18 @@ impl AppIde {
                 None => self.generated_code.clone(),
             }
         };
-        let display_syntax = self.selected_file.syntax();
+        let display_syntax = {
+            let path = match self.selected_file {
+                ProjectFileId::UserFile(i) => self
+                    .project_tree
+                    .user_src_files
+                    .get(i)
+                    .map(|(p, _)| p.as_str())
+                    .unwrap_or_default(),
+                _ => "",
+            };
+            self.selected_file.syntax(path)
+        };
         // The file `display_code` was built for. Captured before the bottom diag
         // panel (rendered below) can switch `selected_file` on a diagnostic
         // click, so a queued scroll-to-line only fires once the editor actually

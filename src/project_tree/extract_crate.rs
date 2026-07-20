@@ -1,6 +1,9 @@
 //! "Extract to library crate" — turn a folder of `src/` into a sibling Cargo
 //! crate that can be published to crates.io.
 //!
+//! Paths in and out are relative to the PROJECT ROOT (`src/mw_radar/frame.rs`),
+//! matching `user_src_files`.
+//!
 //! Everything here is pure: [`plan_extract`] takes the current file set and
 //! returns an [`ExtractPlan`] describing every write, removal and rewrite. The
 //! caller performs the I/O. That split is what makes the tricky parts (module
@@ -47,12 +50,15 @@ impl Default for CrateMeta {
 pub struct ExtractPlan {
     /// Directory of the new crate, relative to the project root.
     pub crate_dir: String,
+    /// The folder that was extracted (root-relative, e.g. `src/mw_radar`) —
+    /// the caller removes it from the tree and from disk.
+    pub source_folder: String,
     /// Files to create, as paths relative to the PROJECT ROOT.
     pub new_files: Vec<(String, String)>,
-    /// Paths (relative to `src/`) to drop from `user_src_files`.
+    /// Project-root-relative paths to drop from `user_src_files`.
     pub removed: Vec<String>,
     /// Updated content for files that kept referring to the moved module, as
-    /// `(path relative to src/, new content)`.
+    /// `(project-root-relative path, new content)`.
     pub rewritten: Vec<(String, String)>,
     /// New `main.rs`, when it referenced the moved module.
     pub rewritten_main: Option<String>,
@@ -68,8 +74,8 @@ pub fn crate_ident(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// Build the plan for extracting `folder` (a path relative to `src/`, no
-/// trailing slash) into a crate described by `meta`.
+/// Build the plan for extracting `folder` (a path relative to the PROJECT
+/// ROOT, e.g. `src/mw_radar`, no trailing slash) into a crate from `meta`.
 ///
 /// `Err` when the request cannot work at all — an empty folder, a bad name, or
 /// a directory that already exists in the manifest.
@@ -110,6 +116,7 @@ pub fn plan_extract(
 
     let mut plan = ExtractPlan {
         crate_dir: crate_dir.clone(),
+        source_folder: folder.to_owned(),
         ..Default::default()
     };
 
@@ -120,8 +127,14 @@ pub fn plan_extract(
     let mut top_level_mods: Vec<String> = Vec::new();
     for (path, content) in &moved {
         let rel = &path[prefix.len()..];
+        let mut body = (*content).clone();
         let dest_rel = if rel == "mod.rs" {
             has_mod_rs = true;
+            // A promoted `mod.rs` becomes the crate root, and a crate root is
+            // where `#![no_std]` has to live — an inner attribute is invalid
+            // anywhere else. Without this the library silently pulled in `std`
+            // and only failed at link time for the bare-metal target.
+            body = with_no_std(&body, meta.no_std);
             "lib.rs".to_owned()
         } else {
             rel.to_owned()
@@ -132,7 +145,7 @@ pub fn plan_extract(
             }
         }
         plan.new_files
-            .push((format!("{crate_dir}/src/{dest_rel}"), (*content).clone()));
+            .push((format!("{crate_dir}/src/{dest_rel}"), body));
         plan.removed.push((*path).clone());
 
         // References the moved code cannot keep: they pointed at the app crate.
@@ -204,6 +217,25 @@ pub fn plan_extract(
     Ok(plan)
 }
 
+/// Prepend `#![no_std]` to a crate root that doesn't already declare it.
+///
+/// Inner attributes must come before any item, so it goes at the very top —
+/// after a leading `//!` doc block, which is also allowed to precede items and
+/// which the user would not want pushed down.
+fn with_no_std(src: &str, want: bool) -> String {
+    if !want || src.lines().any(|l| l.trim_start().starts_with("#![no_std]")) {
+        return src.to_owned();
+    }
+    let insert_at = src
+        .lines()
+        .take_while(|l| l.trim_start().starts_with("//!") || l.trim().is_empty())
+        .map(|l| l.len() + 1)
+        .sum::<usize>()
+        .min(src.len());
+    let (head, tail) = src.split_at(insert_at);
+    format!("{head}#![no_std]\n\n{}", tail.trim_start_matches('\n'))
+}
+
 /// The top-level module name a path inside the folder contributes: `foo.rs` →
 /// `foo`, `bar/baz.rs` → `bar`. `mod.rs` contributes nothing.
 fn top_level_module_of(rel: &str) -> Option<String> {
@@ -257,6 +289,16 @@ fn member_cargo_toml(meta: &CrateMeta) -> String {
          # readme      = \"README.md\"\n\
          # keywords    = [\"embedded\", \"no-std\"]\n\
          # categories  = [\"embedded\", \"no-std\"]\n\
+         \n\
+         [lib]\n\
+         # The bare-metal target has no `test` crate, so a test/bench/doctest\n\
+         # harness cannot be built for it — leaving these on gives\n\
+         # \"can't find crate for `test`\". Same reason the firmware's [[bin]]\n\
+         # sets them. Test this crate on the host instead:\n\
+         #   cargo test -p {name} --target <host-triple>\n\
+         test    = false\n\
+         bench   = false\n\
+         doctest = false\n\
          \n\
          [dependencies]\n\
          # Depend on TRAITS, not on a concrete HAL, so this crate stays usable\n\
@@ -340,23 +382,42 @@ mod tests {
     fn files() -> Vec<(String, String)> {
         vec![
             (
-                "mw_radar/frame.rs".to_owned(),
+                "src/mw_radar/frame.rs".to_owned(),
                 "pub struct Frame;\n".to_owned(),
             ),
             (
-                "mw_radar/parser.rs".to_owned(),
+                "src/mw_radar/parser.rs".to_owned(),
                 "pub fn parse() {}\n".to_owned(),
             ),
             (
-                "app.rs".to_owned(),
+                "src/app.rs".to_owned(),
                 "mod mw_radar;\nuse crate::mw_radar::frame::Frame;\n".to_owned(),
             ),
         ]
     }
 
+    /// The bare-metal target ships no `test` crate. `cargo check --workspace`
+    /// makes the library a PRIMARY package, and a lib target with the default
+    /// `test = true` then fails with "can't find crate for `test`" — exactly
+    /// what the firmware's `[[bin]] test = false` has always prevented.
+    #[test]
+    fn member_manifest_disables_the_test_harness() {
+        let p = plan_extract("src/mw_radar", &files(), "", "", &meta()).unwrap();
+        let toml = p
+            .new_files
+            .iter()
+            .find(|(a, _)| a == "mw_radar/Cargo.toml")
+            .map(|(_, c)| c.clone())
+            .expect("member manifest");
+        assert!(toml.contains("[lib]"), "{toml}");
+        assert!(toml.contains("test    = false"), "{toml}");
+        assert!(toml.contains("bench   = false"), "{toml}");
+        assert!(toml.contains("doctest = false"), "{toml}");
+    }
+
     #[test]
     fn moves_files_under_the_new_crate_src() {
-        let p = plan_extract("mw_radar", &files(), "", "", &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &files(), "", "", &meta()).unwrap();
         let paths: Vec<&str> = p.new_files.iter().map(|(a, _)| a.as_str()).collect();
         assert!(paths.contains(&"mw_radar/src/frame.rs"));
         assert!(paths.contains(&"mw_radar/src/parser.rs"));
@@ -367,7 +428,7 @@ mod tests {
     /// Without a `mod.rs` we must synthesize a crate root, or nothing compiles.
     #[test]
     fn generates_lib_rs_declaring_every_module() {
-        let p = plan_extract("mw_radar", &files(), "", "", &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &files(), "", "", &meta()).unwrap();
         let lib = p
             .new_files
             .iter()
@@ -379,22 +440,27 @@ mod tests {
         assert!(lib.contains("pub mod parser;"), "{lib}");
     }
 
-    /// An existing `mod.rs` IS the crate root — don't generate a second one.
+    /// An existing `mod.rs` IS the crate root — don't generate a second one,
+    /// and it must still get `#![no_std]` (a promoted mod.rs used to keep its
+    /// content verbatim, so the library silently linked `std`).
     #[test]
     fn existing_mod_rs_becomes_lib_rs() {
         let mut f = files();
         f.push((
-            "mw_radar/mod.rs".to_owned(),
+            "src/mw_radar/mod.rs".to_owned(),
             "pub mod frame;\npub mod parser;\n".to_owned(),
         ));
-        let p = plan_extract("mw_radar", &f, "", "", &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &f, "", "", &meta()).unwrap();
         let libs: Vec<_> = p
             .new_files
             .iter()
             .filter(|(a, _)| a == "mw_radar/src/lib.rs")
             .collect();
         assert_eq!(libs.len(), 1, "exactly one crate root");
-        assert_eq!(libs[0].1, "pub mod frame;\npub mod parser;\n");
+        assert_eq!(
+            libs[0].1,
+            "#![no_std]\n\npub mod frame;\npub mod parser;\n"
+        );
         assert!(
             p.warnings.iter().any(|w| w.contains("super::")),
             "must warn that super:: breaks: {:?}",
@@ -404,11 +470,11 @@ mod tests {
 
     #[test]
     fn rewrites_references_and_drops_the_mod_declaration() {
-        let p = plan_extract("mw_radar", &files(), "", "", &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &files(), "", "", &meta()).unwrap();
         let (_, app) = p
             .rewritten
             .iter()
-            .find(|(a, _)| a == "app.rs")
+            .find(|(a, _)| a == "src/app.rs")
             .expect("app.rs rewritten");
         assert_eq!(app, "use mw_radar::frame::Frame;\n");
     }
@@ -416,7 +482,7 @@ mod tests {
     #[test]
     fn rewrites_main_rs_too() {
         let main = "mod mw_radar;\nfn main() { crate::mw_radar::parser::parse(); }\n";
-        let p = plan_extract("mw_radar", &files(), main, "", &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &files(), main, "", &meta()).unwrap();
         assert_eq!(
             p.rewritten_main.unwrap(),
             "fn main() { mw_radar::parser::parse(); }\n"
@@ -428,12 +494,12 @@ mod tests {
     #[test]
     fn warns_about_crate_references_inside_the_moved_code() {
         let f = vec![(
-            "mw_radar/frame.rs".to_owned(),
+            "src/mw_radar/frame.rs".to_owned(),
             "use crate::pins::configs::usart1;\n".to_owned(),
         )];
-        let p = plan_extract("mw_radar", &f, "", "", &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &f, "", "", &meta()).unwrap();
         assert!(
-            p.warnings.iter().any(|w| w.contains("frame.rs:1")),
+            p.warnings.iter().any(|w| w.contains("src/mw_radar/frame.rs:1")),
             "{:?}",
             p.warnings
         );
@@ -444,7 +510,7 @@ mod tests {
     #[test]
     fn root_manifest_uses_a_dependency_subtable() {
         let root = "[package]\nname = \"p\"\n\n[dependencies]\ncortex-m = \"0.7\"\n";
-        let p = plan_extract("mw_radar", &files(), "", root, &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &files(), "", root, &meta()).unwrap();
         assert!(p.root_cargo_toml.contains("[dependencies.mw_radar]"));
         assert!(p.root_cargo_toml.contains("path = \"mw_radar\""));
         assert_eq!(
@@ -460,10 +526,10 @@ mod tests {
     #[test]
     fn patching_the_root_manifest_is_idempotent() {
         let root = "[package]\nname = \"p\"\n";
-        let once = plan_extract("mw_radar", &files(), "", root, &meta())
+        let once = plan_extract("src/mw_radar", &files(), "", root, &meta())
             .unwrap()
             .root_cargo_toml;
-        let twice = plan_extract("mw_radar", &files(), "", &once, &meta())
+        let twice = plan_extract("src/mw_radar", &files(), "", &once, &meta())
             .unwrap()
             .root_cargo_toml;
         assert_eq!(once.trim_end(), twice.trim_end());
@@ -472,7 +538,7 @@ mod tests {
     #[test]
     fn extends_an_existing_members_list() {
         let root = "[workspace]\nmembers = [\"other\"]\n";
-        let p = plan_extract("mw_radar", &files(), "", root, &meta()).unwrap();
+        let p = plan_extract("src/mw_radar", &files(), "", root, &meta()).unwrap();
         assert!(
             p.root_cargo_toml.contains("members = [\"other\", \"mw_radar\"]"),
             "{}",
@@ -487,8 +553,45 @@ mod tests {
             name: "mw radar".to_owned(),
             ..meta()
         };
-        assert!(plan_extract("mw_radar", &files(), "", "", &bad).is_err());
-        assert!(plan_extract("nope", &files(), "", "", &meta()).is_err());
+        assert!(plan_extract("src/mw_radar", &files(), "", "", &bad).is_err());
+        assert!(plan_extract("src/nope", &files(), "", "", &meta()).is_err());
+    }
+
+    /// `#![no_std]` is an inner attribute: it must precede every item, but a
+    /// leading `//!` doc block is allowed above it and must not be displaced.
+    #[test]
+    fn no_std_goes_after_the_doc_header_and_is_never_duplicated() {
+        let mut f = files();
+        f.push((
+            "src/mw_radar/mod.rs".to_owned(),
+            "//! Radar driver.\n//! Second line.\n\npub mod frame;\n".to_owned(),
+        ));
+        let p = plan_extract("src/mw_radar", &f, "", "", &meta()).unwrap();
+        let lib = p
+            .new_files
+            .iter()
+            .find(|(a, _)| a == "mw_radar/src/lib.rs")
+            .map(|(_, c)| c.clone())
+            .unwrap();
+        assert_eq!(
+            lib,
+            "//! Radar driver.\n//! Second line.\n\n#![no_std]\n\npub mod frame;\n"
+        );
+
+        // Already declared → untouched.
+        let mut g = files();
+        g.push((
+            "src/mw_radar/mod.rs".to_owned(),
+            "#![no_std]\npub mod frame;\n".to_owned(),
+        ));
+        let p2 = plan_extract("src/mw_radar", &g, "", "", &meta()).unwrap();
+        let lib2 = p2
+            .new_files
+            .iter()
+            .find(|(a, _)| a == "mw_radar/src/lib.rs")
+            .map(|(_, c)| c.clone())
+            .unwrap();
+        assert_eq!(lib2.matches("#![no_std]").count(), 1, "{lib2}");
     }
 
     /// crates.io names may contain `-`; `use` paths may not.
@@ -498,8 +601,8 @@ mod tests {
             name: "mw-radar".to_owned(),
             ..meta()
         };
-        let p = plan_extract("mw_radar", &files(), "", "", &m).unwrap();
-        let (_, app) = p.rewritten.iter().find(|(a, _)| a == "app.rs").unwrap();
+        let p = plan_extract("src/mw_radar", &files(), "", "", &m).unwrap();
+        let (_, app) = p.rewritten.iter().find(|(a, _)| a == "src/app.rs").unwrap();
         assert_eq!(app, "use mw_radar::frame::Frame;\n");
         assert!(p.new_files.iter().any(|(a, _)| a == "mw-radar/Cargo.toml"));
     }

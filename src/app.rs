@@ -80,13 +80,17 @@ impl ProjectFileId {
         }
     }
 
-    fn syntax(self) -> Syntax {
+    /// `path` is the file's project-root-relative path, needed for `UserFile`:
+    /// a library crate's `Cargo.toml` is a user file too, and highlighting it
+    /// as Rust would render its `#` comments as ordinary text.
+    fn syntax(self, path: &str) -> Syntax {
         match self {
             // TOML (Cargo.toml, .cargo/config.toml) and .gitignore use `#` line
             // comments — give them a syntax whose comment marker is `#` so those
             // lines render in the comment (gray) colour, matching `//` comments
             // in .rs files (same theme → same Comment token colour).
             Self::CargoToml | Self::CargoConfig | Self::GitIgnore => Syntax::simple("#"),
+            Self::UserFile(_) if !path.ends_with(".rs") => Syntax::simple("#"),
             // main.rs / build.rs are Rust; memory.x uses C-style `/* */`, which
             // Rust highlighting already renders as comments.
             _ => Syntax::rust(),
@@ -118,10 +122,39 @@ pub fn diag_highlight_color(sev: lsp::DiagSeverity) -> egui::Color32 {
     }
 }
 
+/// Lift persisted paths from `src/`-relative to PROJECT-ROOT-relative.
+///
+/// Paths in `user_src_files` used to be relative to `src/`; they are now
+/// relative to the project root, so a library crate's files can live in the
+/// same flat list. eframe persists this list across restarts, so state written
+/// by an older build must be lifted on load — otherwise every file points at
+/// the wrong place and `write_project` recreates them at the root.
+///
+/// Driven by an explicit `paths_root_relative` flag rather than by sniffing the
+/// paths: a user folder literally named `src` would make any heuristic guess
+/// wrong, and guessing wrong here silently relocates the user's whole project.
+fn migrate_to_root_relative(files: Vec<(String, String)>, already: bool) -> Vec<(String, String)> {
+    if already {
+        return files;
+    }
+    files
+        .into_iter()
+        .map(|(p, c)| (format!("src/{p}"), c))
+        .collect()
+}
+
+fn migrate_folders_to_root_relative(folders: Vec<String>, already: bool) -> Vec<String> {
+    if already {
+        return folders;
+    }
+    folders.into_iter().map(|f| format!("src/{f}")).collect()
+}
+
 /// Resolve a diagnostic's project-relative path (as reported by rustc /
-/// rust-analyzer) to the editor file it should open — including user source
-/// files under `src/`. `user_files` is `(name, content)` where `name` is the
-/// path below `src/` (e.g. `pins.rs`).
+/// rust-analyzer) to the editor file it should open. `user_files` names are
+/// relative to the PROJECT ROOT (`src/pins.rs`, `mw_radar/src/lib.rs`), which
+/// is exactly the form cargo reports spans in — so library diagnostics resolve
+/// through the same path as the firmware's.
 pub fn resolve_diag_file(path: &str, user_files: &[(String, String)]) -> Option<ProjectFileId> {
     match path {
         "src/main.rs" => Some(ProjectFileId::MainRs),
@@ -132,7 +165,7 @@ pub fn resolve_diag_file(path: &str, user_files: &[(String, String)]) -> Option<
         ".gitignore" => Some(ProjectFileId::GitIgnore),
         _ => user_files
             .iter()
-            .position(|(name, _)| path == format!("src/{name}") || path == name)
+            .position(|(name, _)| path == name)
             .map(ProjectFileId::UserFile),
     }
 }
@@ -379,10 +412,16 @@ struct SaveWall {
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct PersistedState {
-    /// `(path_relative_to_src, content)` for every user-created file.
+    /// `(path_relative_to_project_root, content)` for every user-created file —
+    /// `src/app.rs`, `mw_radar/src/lib.rs`. See `paths_root_relative`.
     user_src_files: Vec<(String, String)>,
-    /// Explicitly-created empty folders inside src/.
+    /// Explicitly-created empty folders, project-root-relative.
     user_src_folders: Vec<String>,
+    /// `false` (the serde default, i.e. state written by an older build) means
+    /// the two lists above are still `src/`-relative and get lifted on load.
+    /// Always written as `true`.
+    #[serde(default)]
+    paths_root_relative: bool,
     /// Display name of the last opened/exported project folder.
     #[serde(default)]
     project_name: Option<String>,
@@ -1020,8 +1059,14 @@ impl AppIde {
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
             project_tree: ProjectTreeState {
-                user_src_files: persisted.user_src_files,
-                user_src_folders: persisted.user_src_folders,
+                user_src_files: migrate_to_root_relative(
+                    persisted.user_src_files,
+                    persisted.paths_root_relative,
+                ),
+                user_src_folders: migrate_folders_to_root_relative(
+                    persisted.user_src_folders,
+                    persisted.paths_root_relative,
+                ),
             },
             new_src_name: None,
             new_src_folder_name: None,
@@ -1163,15 +1208,15 @@ impl AppIde {
         }
         let mut applied = 0usize;
         for (file, group) in by_file {
-            let rel = file.strip_prefix("src/").unwrap_or(file);
-            let is_main = rel == "main.rs";
+            // Paths are project-root-relative, exactly as cargo reports them.
+            let is_main = file == "src/main.rs";
             let target: Option<&mut String> = if is_main {
                 Some(&mut self.generated_code)
             } else {
                 self.project_tree
                     .user_src_files
                     .iter_mut()
-                    .find(|(p, _)| p == rel)
+                    .find(|(p, _)| p == file)
                     .map(|(_, c)| c)
             };
             let Some(buf) = target else { continue };
@@ -1368,7 +1413,6 @@ impl AppIde {
                             &self.project_tree.user_src_files,
                             &self.mcu_config_text(),
                             &self.structure_config_text(),
-                            self.project_dir.as_deref(),
                         )
                         .is_ok()
                         {
@@ -1574,12 +1618,12 @@ impl AppIde {
         for (rel, es) in by_file {
             if rel == "src/main.rs" {
                 self.generated_code = apply_text_edits(&self.generated_code, es);
-            } else if let Some(sub) = rel.strip_prefix("src/") {
+            } else {
                 if let Some(entry) = self
                     .project_tree
                     .user_src_files
                     .iter_mut()
-                    .find(|(p, _)| p == sub)
+                    .find(|(p, _)| *p == rel)
                 {
                     entry.1 = apply_text_edits(&entry.1, es);
                 }
@@ -1629,14 +1673,14 @@ impl AppIde {
             Some(&h) if h == hash => return false, // unchanged since last flush
             Some(_) => {}                          // known-stale → write directly
             None => {
-                let dest = workspace.join("src").join(rel);
+                let dest = workspace.join(rel);
                 if std::fs::read(&dest).is_ok_and(|d| d == content.as_bytes()) {
                     cache.insert(rel.to_string(), hash);
                     return false;
                 }
             }
         }
-        let dest = workspace.join("src").join(rel);
+        let dest = workspace.join(rel);
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1717,7 +1761,7 @@ impl AppIde {
             let t_sync = std::time::Instant::now();
             let mut synced = 0usize;
             for (rel, content) in &files {
-                let workspace_rel = format!("src/{rel}");
+                let workspace_rel = rel;
                 if lsp_state
                     .lock()
                     .unwrap()
@@ -1767,6 +1811,7 @@ impl eframe::App for AppIde {
             &PersistedState {
                 user_src_files: self.project_tree.user_src_files.clone(),
                 user_src_folders: self.project_tree.user_src_folders.clone(),
+                paths_root_relative: true,
                 project_name: self.project_name.clone(),
                 project_dir: self
                     .project_dir
@@ -1991,15 +2036,12 @@ impl eframe::App for AppIde {
                     let mut rec = crate::activity::Recorder::new("Save (project)");
                     let res = rec
                         .phase("write_project", || {
-                            // dest IS the project — member crates already live
-                            // there on disk, nothing to mirror.
                             project_gen::write_project(
                                 &dest_thread,
                                 &files,
                                 &user_files,
                                 &mcu_cfg,
                                 &structure_cfg,
-                                None,
                             )
                         })
                         .map(|()| {
@@ -2086,7 +2128,6 @@ impl eframe::App for AppIde {
                     &self.project_tree.user_src_files,
                     &self.mcu_config_text(),
                     &self.structure_config_text(),
-                    self.project_dir.as_deref(),
                 );
             }
         }
@@ -2113,6 +2154,62 @@ impl eframe::App for AppIde {
 }
 
 #[cfg(test)]
+mod path_migration_tests {
+    use super::{migrate_folders_to_root_relative, migrate_to_root_relative};
+
+    fn old() -> Vec<(String, String)> {
+        vec![
+            ("app.rs".into(), "a".into()),
+            ("pins/mod.rs".into(), "b".into()),
+        ]
+    }
+
+    /// State from an older build (flag absent → `false`) gets lifted.
+    #[test]
+    fn old_state_is_prefixed_with_src() {
+        let got = migrate_to_root_relative(old(), false);
+        assert_eq!(got[0].0, "src/app.rs");
+        assert_eq!(got[1].0, "src/pins/mod.rs");
+        assert_eq!(got[0].1, "a", "content untouched");
+    }
+
+    /// Already-migrated state must pass through byte-identical — running the
+    /// migration twice would produce `src/src/…` and lose the whole project.
+    #[test]
+    fn migrated_state_is_left_alone() {
+        let already = vec![
+            ("src/app.rs".to_string(), "a".to_string()),
+            ("mw_radar/src/lib.rs".to_string(), "c".to_string()),
+        ];
+        assert_eq!(migrate_to_root_relative(already.clone(), true), already);
+    }
+
+    /// A user folder literally named `src` is why this is flag-driven and not
+    /// a path heuristic: sniffing would call this already-migrated.
+    #[test]
+    fn a_user_folder_named_src_still_migrates() {
+        let tricky = vec![("src/deep.rs".to_string(), "x".to_string())];
+        assert_eq!(
+            migrate_to_root_relative(tricky, false)[0].0,
+            "src/src/deep.rs",
+            "the flag decides, not the shape of the path"
+        );
+    }
+
+    #[test]
+    fn folders_migrate_the_same_way() {
+        assert_eq!(
+            migrate_folders_to_root_relative(vec!["pins".into()], false),
+            vec!["src/pins".to_string()]
+        );
+        assert_eq!(
+            migrate_folders_to_root_relative(vec!["src/pins".into()], true),
+            vec!["src/pins".to_string()]
+        );
+    }
+}
+
+#[cfg(test)]
 mod flush_cache_tests {
     use super::AppIde;
     use std::collections::HashMap;
@@ -2124,19 +2221,19 @@ mod flush_cache_tests {
         let mut cache: HashMap<String, u64> = HashMap::new();
 
         // 1. First write for a new path → file created, hash cached.
-        AppIde::write_workspace_file(&mut cache, &dir, "foo/bar.rs", "hello");
+        AppIde::write_workspace_file(&mut cache, &dir, "src/foo/bar.rs", "hello");
         let dest = dir.join("src").join("foo").join("bar.rs");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
-        assert!(cache.contains_key("foo/bar.rs"));
+        assert!(cache.contains_key("src/foo/bar.rs"));
 
         // 2. Same content again → cache hit; even if we corrupt the file on disk,
         //    the cached hash means we skip writing (proving no disk touch).
         std::fs::write(&dest, "CORRUPTED").unwrap();
-        AppIde::write_workspace_file(&mut cache, &dir, "foo/bar.rs", "hello");
+        AppIde::write_workspace_file(&mut cache, &dir, "src/foo/bar.rs", "hello");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "CORRUPTED"); // untouched
 
         // 3. Changed content (cache has a stale entry) → written directly.
-        AppIde::write_workspace_file(&mut cache, &dir, "foo/bar.rs", "world");
+        AppIde::write_workspace_file(&mut cache, &dir, "src/foo/bar.rs", "world");
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "world");
 
         let _ = std::fs::remove_dir_all(&dir);

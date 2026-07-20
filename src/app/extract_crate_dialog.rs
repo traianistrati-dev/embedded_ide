@@ -11,7 +11,7 @@ use egui_phosphor::regular as ph;
 
 /// Open dialog state: which folder, and the manifest fields being edited.
 pub(crate) struct ExtractCrateDialog {
-    /// Folder path relative to `src/`.
+    /// Folder path relative to the project root (e.g. `src/mw_radar`).
     pub folder: String,
     pub meta: CrateMeta,
     /// Set when applying failed (writing files, no project on disk, …).
@@ -177,13 +177,14 @@ impl AppIde {
         }
     }
 
-    /// Perform the plan: write the new crate, drop the moved files, apply the
-    /// rewrites, patch the root manifest.
+    /// Perform the plan: register the new crate, drop the moved files, apply
+    /// the rewrites, patch the root manifest.
     ///
-    /// The new crate is written straight into the project directory because it
-    /// lives OUTSIDE `src/` — `user_src_files` cannot hold it, and the disk copy
-    /// is the single source of truth from here on (the build workspace gets it
-    /// mirrored by `write_project`).
+    /// The new files go into `user_src_files` — paths there are relative to the
+    /// PROJECT ROOT, so a library crate fits in the same list. This is not
+    /// optional bookkeeping: `write_project` prunes every `.rs` under the root
+    /// that is not in that list, so a crate known only to the disk would be
+    /// DELETED by the next save or build.
     fn apply_extract_crate(&mut self, plan: ExtractPlan) -> Result<(), String> {
         let Some(root) = self.project_dir.clone() else {
             return Err(
@@ -200,6 +201,27 @@ impl AppIde {
             }
             std::fs::write(&dest, content)
                 .map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
+        }
+
+        // Take ownership of the new crate in the tree model.
+        for (rel, content) in &plan.new_files {
+            if let Some(e) = self
+                .project_tree
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == rel)
+            {
+                e.1 = content.clone(); // re-extraction over an existing crate
+            } else {
+                self.project_tree
+                    .user_src_files
+                    .push((rel.clone(), content.clone()));
+            }
+        }
+        for dir in [plan.crate_dir.clone(), format!("{}/src", plan.crate_dir)] {
+            if !self.project_tree.user_src_folders.contains(&dir) {
+                self.project_tree.user_src_folders.push(dir);
+            }
         }
 
         // Remember what was selected: the indices below shift under it.
@@ -228,24 +250,19 @@ impl AppIde {
         // next save would prune them anyway, but leaving them there means a
         // stale copy compiles in the meantime).
         for path in &plan.removed {
-            let _ = std::fs::remove_file(root.join("src").join(path));
+            let _ = std::fs::remove_file(root.join(path));
         }
         self.project_tree
             .user_src_files
             .retain(|(p, _)| !plan.removed.contains(p));
         // The folder is empty now — and its subfolders with it.
-        let folder = plan
-            .removed
-            .first()
-            .and_then(|p| p.split('/').next())
-            .unwrap_or_default()
-            .to_owned();
+        let folder = plan.source_folder.clone();
         if !folder.is_empty() {
             let sub = format!("{folder}/");
             self.project_tree
                 .user_src_folders
                 .retain(|f| f != &folder && !f.starts_with(&sub));
-            let _ = std::fs::remove_dir_all(root.join("src").join(&folder));
+            let _ = std::fs::remove_dir_all(root.join(&folder));
         }
 
         self.cargo_toml = plan.root_cargo_toml;

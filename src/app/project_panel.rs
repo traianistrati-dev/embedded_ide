@@ -201,7 +201,11 @@ impl AppIde {
                 }
 
                 // Owned (project params, toolchain) so no `self` borrow is held
-                // across the `&mut self` arguments below.
+                // across the `&mut self` arguments below. The manifest is the
+                // authority on which directories are library crates — a stray
+                // top-level folder must not be presented as one.
+                let lib_crates =
+                    crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
                 let build_cfg = self.selected_build_cfg();
                 match (project_files, build_cfg) {
                     (Some(_), Some((project, toolchain))) => {
@@ -234,6 +238,7 @@ impl AppIde {
                             &workspace_dir,
                             save_project_needed,
                             &mut extract_folder,
+                            &lib_crates,
                         );
                     }
                     _ => {

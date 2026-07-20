@@ -348,10 +348,6 @@ pub fn write_project(
     // `project_structure.config` — Structure-tab view state, kept out of
     // `mcu.config` so node drags don't show up as config changes in Git.
     structure_config: &str,
-    // Where to mirror workspace-member crates FROM (the saved project dir).
-    // `None` — or the same path as `dest` — means there is nothing to mirror:
-    // we are writing the project itself, not a build copy of it.
-    mirror_from: Option<&Path>,
 ) -> io::Result<()> {
     fs::create_dir_all(dest.join("src"))?;
     fs::create_dir_all(dest.join(".cargo"))?;
@@ -364,12 +360,17 @@ pub fn write_project(
     //
     // Build the authoritative set of paths that SHOULD exist inside src/:
     // main.rs (always generated) + every user source file.
-    let expected_in_src: std::collections::HashSet<String> = user_src_files
+    // Paths are relative to the PROJECT ROOT, so the keep-set covers the
+    // firmware's src/ AND every library crate's sources in one pass. Pruning
+    // walks from the root but skips `target/` — a member crate may have built
+    // there, and walking it would be slow and pointless.
+    let expected: std::collections::HashSet<String> = user_src_files
         .iter()
         .map(|(p, _)| p.clone())
-        .chain(std::iter::once("main.rs".to_string()))
+        .chain(std::iter::once("src/main.rs".to_string()))
+        .chain(std::iter::once("build.rs".to_string()))
         .collect();
-    remove_stale_rs(&dest.join("src"), &dest.join("src"), &expected_in_src);
+    remove_stale_rs(dest, dest, &expected);
 
     // NOTE: Cargo.lock is intentionally NOT deleted here. Re-resolving the
     // dependency graph on every save made saving slow (cargo re-solves the
@@ -408,9 +409,10 @@ pub fn write_project(
         write_if_changed(&dest.join("build.rs"), files.build_rs.as_bytes())?;
     }
 
-    // User source files (same for all toolchains)
+    // User source files — root-relative, so this also writes the sources of
+    // every extracted library crate.
     for (rel_path, content) in user_src_files {
-        let full = dest.join("src").join(rel_path);
+        let full = dest.join(rel_path);
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -434,21 +436,6 @@ pub fn write_project(
         let _ = fs::remove_file(&structure_path);
     } else {
         write_if_changed(&structure_path, structure_config.as_bytes())?;
-    }
-
-    // ── Workspace member crates ──────────────────────────────────────────────
-    // Library crates extracted out of the project (see `extract_crate`) live
-    // NEXT TO src/, so they are not in `user_src_files` and nothing above wrote
-    // them. Builds run in a temp copy of the project, and cargo cannot resolve
-    // a `path` dependency that isn't there — so mirror those directories in.
-    // Disk in the project stays the single source of truth (the IDE holds no
-    // in-memory copy), which is what makes editing them elsewhere safe.
-    if let Some(src_root) = mirror_from {
-        if src_root != dest {
-            for member in workspace_members(&files.cargo_toml) {
-                mirror_dir(&src_root.join(&member), &dest.join(&member));
-            }
-        }
     }
 
     Ok(())
@@ -505,52 +492,6 @@ fn push_quoted(s: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Recursively copy `src` into `dst`, writing only changed files and deleting
-/// whatever `dst` has that `src` doesn't. `dst` is the throw-away build
-/// workspace, so pruning there is safe. `target/` and `.git/` are skipped —
-/// mirroring build output would copy gigabytes for no benefit.
-fn mirror_dir(src: &Path, dst: &Path) {
-    if !src.is_dir() {
-        return;
-    }
-    if fs::create_dir_all(dst).is_err() {
-        return;
-    }
-    let skip = |name: &std::ffi::OsStr| name == "target" || name == ".git";
-
-    let mut kept: std::collections::HashSet<std::ffi::OsString> = Default::default();
-    if let Ok(entries) = fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if skip(&name) {
-                continue;
-            }
-            kept.insert(name.clone());
-            let from = entry.path();
-            let to = dst.join(&name);
-            if from.is_dir() {
-                mirror_dir(&from, &to);
-            } else if let Ok(bytes) = fs::read(&from) {
-                let _ = write_if_changed(&to, &bytes);
-            }
-        }
-    }
-    // Prune leftovers so a file deleted in the project stops breaking the build.
-    if let Ok(entries) = fs::read_dir(dst) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if skip(&name) || kept.contains(&name) {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                let _ = fs::remove_dir_all(&path);
-            } else {
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
-}
 
 /// Write `content` to `path` ONLY when it differs from what's already on disk.
 /// Keeping unchanged files' mtimes stable is critical: a changed mtime makes
@@ -578,6 +519,11 @@ fn remove_stale_rs(root: &Path, dir: &Path, keep: &std::collections::HashSet<Str
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Build output and VCS metadata are not ours to prune.
+            let name = entry.file_name();
+            if name == "target" || name == ".git" {
+                continue;
+            }
             remove_stale_rs(root, &path, keep);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             if let Ok(rel) = path.strip_prefix(root) {

@@ -121,20 +121,17 @@ impl AppIde {
         }
     }
 
-    /// Current in-memory content of a workspace-relative file (`src/main.rs` or a
-    /// user source file under `src/`).
+    /// Current in-memory content of a project-root-relative file
+    /// (`src/main.rs`, `src/app.rs`, `mw_radar/src/lib.rs`, …).
     pub(super) fn file_content_for(&self, rel: &str) -> String {
         if rel == "src/main.rs" {
-            self.generated_code.clone()
-        } else if let Some(sub) = rel.strip_prefix("src/") {
-            self.project_tree
-                .user_src_files
-                .iter()
-                .find(|(p, _)| p == sub)
-                .map(|(_, c)| c.clone())
-                .unwrap_or_default()
-        } else {
-            String::new()
+            return self.generated_code.clone();
         }
+        self.project_tree
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == rel)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default()
     }
 }

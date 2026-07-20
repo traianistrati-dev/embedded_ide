@@ -20,7 +20,7 @@ fn bp_path_of(id: ProjectFileId, user_files: &[(String, String)]) -> Option<Stri
         ProjectFileId::MainRs => Some("src/main.rs".to_owned()),
         ProjectFileId::UserFile(i) => {
             let name = &user_files.get(i)?.0;
-            name.ends_with(".rs").then(|| format!("src/{name}"))
+            name.ends_with(".rs").then(|| name.clone())
         }
         _ => None,
     }

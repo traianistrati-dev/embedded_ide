@@ -212,7 +212,7 @@ impl AppIde {
             .insert("src/main.rs".to_owned(), self.generated_code.clone());
         for (rel, content) in &self.project_tree.user_src_files {
             self.build_text_snapshot
-                .insert(format!("src/{rel}"), content.clone());
+                .insert(rel.clone(), content.clone());
         }
     }
 

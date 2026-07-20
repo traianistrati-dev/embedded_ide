@@ -394,7 +394,7 @@ impl AppIde {
             self.generated_code.clone(),
         )];
         for (i, (name, content)) in self.project_tree.user_src_files.iter().enumerate() {
-            v.push((ProjectFileId::UserFile(i), format!("src/{name}"), content.clone()));
+            v.push((ProjectFileId::UserFile(i), name.clone(), content.clone()));
         }
         v.push((ProjectFileId::CargoToml, "Cargo.toml".into(), self.cargo_toml.clone()));
         v.push((

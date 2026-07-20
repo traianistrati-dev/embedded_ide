@@ -53,7 +53,7 @@ impl Default for DiffGutter {
 fn git_path_of(id: ProjectFileId, user_files: &[(String, String)]) -> Option<String> {
     Some(match id {
         ProjectFileId::MainRs => "src/main.rs".to_owned(),
-        ProjectFileId::UserFile(i) => format!("src/{}", user_files.get(i)?.0),
+        ProjectFileId::UserFile(i) => user_files.get(i)?.0.clone(),
         ProjectFileId::CargoToml => "Cargo.toml".to_owned(),
         ProjectFileId::CargoConfig => ".cargo/config.toml".to_owned(),
         ProjectFileId::MemoryX => "memory.x".to_owned(),

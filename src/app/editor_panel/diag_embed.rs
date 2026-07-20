@@ -374,8 +374,7 @@ impl AppIde {
                             .filter_map(|d| d.rename.clone())
                             .filter(|rn| {
                                 // Skip renames inside main.rs's GENERATED block.
-                                let rel = rn.file.strip_prefix("src/").unwrap_or(&rn.file);
-                                !(rel == "main.rs"
+                                !(rn.file == "src/main.rs"
                                     && clippy_gen_ranges
                                         .iter()
                                         .any(|&(b, e)| rn.byte < e && rn.byte + 1 > b))
@@ -434,7 +433,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         )
         .is_err()
         {

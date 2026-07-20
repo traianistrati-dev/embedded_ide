@@ -271,11 +271,23 @@ fn run_cargo(
     }
 
     // ── Step 2: cargo check / clippy ─────────────────────────────────────────
+    //
+    // `--workspace` matters for CLIPPY specifically: clippy lints only the
+    // packages named on the command line, and builds everything else with plain
+    // rustc — so lints from an extracted library crate would never appear.
+    // (`check` already reports them: `--cap-lints allow` applies to registry
+    // dependencies, not to workspace path deps.) Harmless when there is no
+    // workspace section — the root package is then the only member.
     let cargo_started = std::time::Instant::now();
-    let cargo_cmd = format!("cargo {subcommand} --message-format=json --color=never");
+    let cargo_cmd = format!("cargo {subcommand} --workspace --message-format=json --color=never");
     let mut child = match no_window(&mut Command::new("cargo"))
         .current_dir(dir)
-        .args([subcommand, "--message-format=json", "--color=never"])
+        .args([
+            subcommand,
+            "--workspace",
+            "--message-format=json",
+            "--color=never",
+        ])
         .stdout(Stdio::piped())
         // Capture stderr so we can detect disk-full and other fatal OS errors.
         // Without this, cargo crashes silently (no build-finished JSON) and the

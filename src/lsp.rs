@@ -489,11 +489,25 @@ impl LspState {
         self.fresh_check_gen < self.edit_gen
     }
 
+    /// Whether a workspace file may be handed to rust-analyzer as a text
+    /// document. Every `textDocument/*` message we send declares
+    /// `languageId: "rust"`, so opening anything else makes RA parse it as Rust
+    /// and report a "Syntax Error: expected an item" on every line — which is
+    /// what a library crate's `Cargo.toml` did once library files joined
+    /// `user_src_files`. RA still reads manifests itself, through cargo
+    /// metadata; it just must not receive them as source documents.
+    ///
+    /// Guarded here rather than at the call sites so no future caller can
+    /// reintroduce it.
+    fn is_rust_document(rel_path: &str) -> bool {
+        rel_path.ends_with(".rs")
+    }
+
     /// Send `textDocument/didOpen` for `rel_path` and record the text.
     ///
     /// `rel_path` is relative to the workspace root, e.g. `"src/main.rs"`.
     pub fn did_open(&mut self, rel_path: &str, text: &str) {
-        if self.sender.is_none() {
+        if self.sender.is_none() || !Self::is_rust_document(rel_path) {
             return;
         }
         self.open_files.insert(
@@ -529,7 +543,10 @@ impl LspState {
     /// workspace root. Returns `true` when a message actually went out
     /// (didOpen or didChange); `false` when the text was already in sync.
     pub fn did_change(&mut self, rel_path: &str, text: &str, force: bool) -> bool {
-        if self.sender.is_none() {
+        // Not just tidiness: the auto-open below returns `true` unconditionally,
+        // so without this a non-Rust file would report "synced" on every flush
+        // for ever — and each one re-triggers a cargo flycheck.
+        if self.sender.is_none() || !Self::is_rust_document(rel_path) {
             return false;
         }
         // Auto-open the file on first access.

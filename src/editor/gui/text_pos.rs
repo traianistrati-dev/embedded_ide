@@ -83,7 +83,7 @@ pub fn selected_file_rel_path(
 ) -> Option<String> {
     match selected {
         ProjectFileId::MainRs => Some("src/main.rs".to_owned()),
-        ProjectFileId::UserFile(i) => user_files.get(*i).map(|(p, _)| format!("src/{p}")),
+        ProjectFileId::UserFile(i) => user_files.get(*i).map(|(p, _)| p.clone()),
         _ => None,
     }
 }

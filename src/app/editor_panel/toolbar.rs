@@ -54,7 +54,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         )
         .is_ok()
         {
@@ -86,7 +85,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         )
         .is_ok()
         {
@@ -126,7 +124,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 self.selected_diagnostic = None;
@@ -213,7 +210,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 if focus_cargo_tab {
@@ -249,7 +245,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 self.build_tab = BuildPanelTab::Rtt;
@@ -282,7 +277,6 @@ impl AppIde {
             &self.project_tree.user_src_files,
             &self.mcu_config_text(),
             &self.structure_config_text(),
-            self.project_dir.as_deref(),
         ) {
             Ok(()) => {
                 self.build_tab = BuildPanelTab::Debug;
@@ -479,7 +473,7 @@ impl AppIde {
                         .project_tree
                         .user_src_files
                         .get(i)
-                        .map(|(name, _)| format!("src/{name}"))
+                        .map(|(name, _)| name.clone())
                         .unwrap_or_else(|| "src/???".to_string()),
                     other => other.label().to_string(),
                 };

@@ -1,6 +1,7 @@
 //! Project tree GUI — file browser with create/rename/delete operations.
 
 use crate::app::ProjectFileId;
+use crate::project_tree::logic::SRC_ROOT;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::{build, lsp};
 use eframe::egui;
@@ -75,26 +76,29 @@ fn drag_armed(ui: &egui::Ui, resp: &egui::Response) -> bool {
 /// every frame by the pin/peripheral sync, so moving them breaks codegen.
 fn generated_folder_reason(path: &str) -> Option<&'static str> {
     match path {
-        "pins" => Some("the `pins/` folder is auto-generated from your pin configuration"),
-        "pins/configs" => Some("`pins/configs/` is auto-generated from the Virtual Modules (USART/SPI/I2C)"),
+        "src/pins" => Some("the `pins/` folder is auto-generated from your pin configuration"),
+        "src/pins/configs" => Some("`pins/configs/` is auto-generated from the Virtual Modules (USART/SPI/I2C)"),
         _ => None,
     }
 }
 
-/// If `path` (relative to `src/`) is an auto-generated file that must NOT be
-/// moved, return a short human explanation; otherwise `None`. These are rebuilt
-/// each frame from the MCU / pin configuration (see
+/// If `path` (relative to the PROJECT ROOT) is an auto-generated file that must
+/// NOT be moved, return a short human explanation; otherwise `None`. These are
+/// rebuilt each frame from the MCU / pin configuration (see
 /// `ProjectTreeState::sync_pin_files` / `sync_config_files`), so moving one
 /// would be silently undone or would break the generated module tree.
+///
+/// Only the firmware's `src/` has generated files — a library crate's paths
+/// never match, which is exactly why extracted libraries carry no restrictions.
 pub(crate) fn generated_file_reason(path: &str) -> Option<&'static str> {
-    if path == "pins/mod.rs" || path == "pins/configs/mod.rs" {
+    if path == "src/pins/mod.rs" || path == "src/pins/configs/mod.rs" {
         return Some("it's an auto-generated module file (rebuilt from your pin / peripheral configuration)");
     }
-    if path.starts_with("pins/configs/") {
+    if path.starts_with("src/pins/configs/") {
         return Some("it's an auto-generated peripheral init file — edit it via the MCU Configurator (Virtual Modules)");
     }
-    // Generated pin files sit directly under pins/ as `pin<…>.rs`.
-    if let Some(fname) = path.strip_prefix("pins/") {
+    // Generated pin files sit directly under src/pins/ as `pin<…>.rs`.
+    if let Some(fname) = path.strip_prefix("src/pins/") {
         if !fname.contains('/') && fname.starts_with("pin") && fname.ends_with(".rs") {
             return Some("it's an auto-generated pin file (rebuilt from your pin configuration)");
         }
@@ -156,7 +160,7 @@ fn apply_move(
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
 ) {
-    if target_folder == "pins/configs" || target_folder.starts_with("pins/configs/") {
+    if target_folder == "src/pins/configs" || target_folder.starts_with("src/pins/configs/") {
         set_tree_notice(
             ui.ctx(),
             "Can't move into `pins/configs/` — it's auto-managed by the MCU Configurator.".to_string(),
@@ -217,8 +221,8 @@ fn apply_file_move(
         return;
     }
 
-    let old_dest = workspace_dir.join("src").join(&old_path);
-    let new_dest = workspace_dir.join("src").join(&new_path);
+    let old_dest = workspace_dir.join(&old_path);
+    let new_dest = workspace_dir.join(&new_path);
     if let Some(parent) = new_dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -275,8 +279,8 @@ fn apply_folder_move(
         return;
     }
 
-    let old_dest = workspace_dir.join("src").join(src);
-    let new_dest = workspace_dir.join("src").join(&new_path);
+    let old_dest = workspace_dir.join(src);
+    let new_dest = workspace_dir.join(&new_path);
     if let Some(parent) = new_dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -400,12 +404,12 @@ fn inline_new_item(
                 if collides {
                     set_tree_notice(ui.ctx(), format!("`{clean}` already exists here."));
                 } else if is_folder {
-                    let dest = workspace_dir.join("src").join(&full);
+                    let dest = workspace_dir.join(&full);
                     let _ = std::fs::create_dir_all(&dest);
                     user_src_folders.push(full);
                     *save_needed = true;
                 } else {
-                    let dest = workspace_dir.join("src").join(&full);
+                    let dest = workspace_dir.join(&full);
                     if let Some(p) = dest.parent() {
                         let _ = std::fs::create_dir_all(p);
                     }
@@ -520,9 +524,12 @@ pub fn show_project_tree(
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     save_needed: &mut bool,
-    // Folder the user asked to turn into a sibling library crate (path relative
-    // to `src/`); the caller opens the Extract dialog.
+    // Folder the user asked to turn into a sibling library crate (project-root
+    // relative); the caller opens the Extract dialog.
     extract_folder: &mut Option<String>,
+    // Directory names of the `[workspace] members` — the extracted library
+    // crates, each rendered as its own collapsible section below the project.
+    lib_crates: &[String],
 ) {
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
@@ -538,6 +545,22 @@ pub fn show_project_tree(
     // `(dragged_item, target_folder_rel_to_src)` — applied after the tree closure
     // so it doesn't clash with the `&mut` borrows used for rendering.
     let mut move_request: Option<(DraggedItem, String)> = None;
+    // File-row signals, shared by the `src/` section AND every library-crate
+    // section below it, applied once after all of them have rendered — the
+    // indices they carry are only valid while `user_src_files` is unchanged.
+    let mut to_delete: Option<usize> = None;
+    let mut to_duplicate: Option<usize> = None;
+    let mut do_rename_file: Option<usize> = None;
+    let mut cancel_rename_file = false;
+
+    // Paths are project-root-relative, so the full tree has `src` and every
+    // library crate as top-level nodes. Built once (owned — it does not borrow
+    // `user_src_files`); each section renders its own subtree.
+    let full_tree = build_tree(user_src_files, user_src_folders);
+    let subtree_of = |name: &str| match full_tree.get(name) {
+        Some(TreeNode::Folder(children)) => children.clone(),
+        _ => BTreeMap::new(),
+    };
 
     // .cargo/  — fixed folder, no context menu → dark-red + bold.
     egui::CollapsingHeader::new(
@@ -580,25 +603,20 @@ pub fn show_project_tree(
             lsp_state,
         );
 
-        // Inline "new file / new folder" input at the src/ root ("" parent),
-        // rendered right under main.rs where the item will be added.
+        // Inline "new file / new folder" input at the src/ root, rendered right
+        // under main.rs where the item will be added.
         inline_new_item(
-            ui, 8.0, "", false, new_src_name, new_file_parent_folder,
+            ui, 8.0, SRC_ROOT, false, new_src_name, new_file_parent_folder,
             user_src_files, user_src_folders, selected, workspace_dir, save_needed,
         );
         inline_new_item(
-            ui, 8.0, "", true, new_src_folder_name, new_folder_parent_folder,
+            ui, 8.0, SRC_ROOT, true, new_src_folder_name, new_folder_parent_folder,
             user_src_files, user_src_folders, selected, workspace_dir, save_needed,
         );
 
-        // Build hierarchical tree from files and folders
-        let tree = build_tree(user_src_files, user_src_folders);
-
-        // Track deletions and renames to apply after rendering
-        let mut to_delete: Option<usize> = None;
-        let mut to_duplicate: Option<usize> = None;
-        let mut do_rename_file: Option<usize> = None;
-        let mut cancel_rename_file = false;
+        // This header IS `src/`, so it renders that subtree; library crates get
+        // their own sections further down.
+        let tree = subtree_of(SRC_ROOT);
 
         // Recursively render the tree
         render_tree_node(
@@ -620,63 +638,11 @@ pub fn show_project_tree(
             new_src_folder_name,
             new_file_parent_folder,
             new_folder_parent_folder,
-            "", // parent path at root is empty (relative to src/)
+            SRC_ROOT, // this header IS src/, so children hang off it
             &mut move_request,
             extract_folder,
         );
 
-        // Apply a file duplication — copy content under the next free
-        // `<stem>_<n>` name in the same folder, and select the new file so it
-        // is obvious what happened.
-        if let Some(idx) = to_duplicate {
-            let (src_path, content) = user_src_files[idx].clone();
-            let new_path = crate::project_tree::logic::duplicate_path(&src_path, |cand| {
-                user_src_files.iter().any(|(p, _)| p == cand)
-            });
-            let dest = workspace_dir.join("src").join(&new_path);
-            if let Some(parent) = dest.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&dest, &content);
-            user_src_files.push((new_path, content));
-            *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
-            *save_needed = true;
-        }
-
-        // Apply file deletion
-        if let Some(idx) = to_delete {
-            if *selected == ProjectFileId::UserFile(idx) {
-                *selected = ProjectFileId::MainRs;
-            }
-            let dest = workspace_dir.join("src").join(&user_src_files[idx].0);
-            let _ = std::fs::remove_file(&dest);
-            user_src_files.remove(idx);
-            *save_needed = true;
-        }
-
-        // Apply file rename
-        if let Some(confirm_idx) = do_rename_file {
-            if let Some((_, new_name)) = renaming_file.take() {
-                let old_path = user_src_files[confirm_idx].0.clone();
-                let clean = new_name.trim().to_string();
-                if !clean.is_empty() {
-                    let new_path = if let Some(slash) = old_path.rfind('/') {
-                        format!("{}/{clean}", &old_path[..slash])
-                    } else {
-                        clean
-                    };
-                    if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path) {
-                        let old_dest = workspace_dir.join("src").join(&old_path);
-                        let new_dest = workspace_dir.join("src").join(&new_path);
-                        let _ = std::fs::rename(&old_dest, &new_dest);
-                        user_src_files[confirm_idx].0 = new_path;
-                        *save_needed = true;
-                    }
-                }
-            }
-        } else if cancel_rename_file {
-            *renaming_file = None;
-        }
     });
 
     // Hover: tint + pointing hand — the src/ header is a drop target and hosts
@@ -697,7 +663,7 @@ pub fn show_project_tree(
         );
     }
     if let Some(p) = src_ch.header_response.dnd_release_payload::<DraggedItem>() {
-        move_request = Some(((*p).clone(), String::new()));
+        move_request = Some(((*p).clone(), SRC_ROOT.to_owned()));
     }
 
     // Apply a drag-drop move now that the tree closure's borrows have ended.
@@ -776,6 +742,184 @@ pub fn show_project_tree(
             build_result,
             lsp_state,
         );
+    }
+
+    // ── Library crates ───────────────────────────────────────────────────────
+    // Crates extracted out of the project (see `extract_crate`) live NEXT TO
+    // src/ and are listed as `[workspace] members`. They render exactly like
+    // the project's own files — delete / rename / new file / new folder all
+    // work — because no generated-path guard can match a path outside `src/`.
+    let libs: Vec<String> = lib_crates
+        .iter()
+        .filter(|c| full_tree.contains_key(c.as_str()))
+        .cloned()
+        .collect();
+    if !libs.is_empty() {
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(
+            egui::RichText::new("LIBRARIES")
+                .size(9.0)
+                .color(egui::Color32::from_gray(110)),
+        );
+    }
+    for lib in &libs {
+        let id = ui.make_persistent_id(("lib_crate_section", lib.as_str()));
+        let mut state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+        let open = state.is_open();
+
+        // Custom header so the caret sits on the RIGHT (`mw_radar ^`).
+        // `CollapsingState::show_header` would paint egui's own arrow on the
+        // left; and in a right_to_left layout the FIRST widget added is the
+        // rightmost, so the caret goes in before anything else.
+        let mut toggle = false;
+        let header = ui.horizontal(|ui| {
+            let name_resp = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{} {lib}", ph::PACKAGE))
+                        .size(11.5)
+                        .monospace()
+                        .strong()
+                        .color(egui::Color32::from_rgb(140, 190, 145)),
+                )
+                .selectable(false)
+                .sense(egui::Sense::click()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let icon = if open { ph::CARET_DOWN } else { ph::CARET_DOUBLE_UP };
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(icon).size(11.0)).frame(false))
+                    .on_hover_text(if open {
+                        "Collapse this library"
+                    } else {
+                        "Expand this library"
+                    })
+                    .clicked()
+                {
+                    toggle = true;
+                }
+            });
+            name_resp
+        });
+        if toggle || header.inner.clicked() {
+            state.set_open(!open);
+        }
+        row_hover_feedback(ui, header.response.rect, header.response.contains_pointer());
+
+        state.show_body_indented(&header.response, ui, |ui| {
+            inline_new_item(
+                ui, 8.0, lib, false, new_src_name, new_file_parent_folder,
+                user_src_files, user_src_folders, selected, workspace_dir, save_needed,
+            );
+            inline_new_item(
+                ui, 8.0, lib, true, new_src_folder_name, new_folder_parent_folder,
+                user_src_files, user_src_folders, selected, workspace_dir, save_needed,
+            );
+            let tree = subtree_of(lib);
+            render_tree_node(
+                ui,
+                &tree,
+                user_src_files,
+                user_src_folders,
+                selected,
+                8.0,
+                renaming_file,
+                &mut do_rename_file,
+                &mut cancel_rename_file,
+                &mut to_delete,
+                &mut to_duplicate,
+                renaming_folder,
+                workspace_dir,
+                save_needed,
+                new_src_name,
+                new_src_folder_name,
+                new_file_parent_folder,
+                new_folder_parent_folder,
+                lib,
+                &mut move_request,
+                extract_folder,
+            );
+        });
+        state.store(ui.ctx());
+
+        header.response.context_menu(|ui| {
+            if ui
+                .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
+                .clicked()
+            {
+                begin_inline_new(ui, false, lib, new_src_name, new_file_parent_folder);
+                *new_src_folder_name = None;
+                *new_folder_parent_folder = None;
+                ui.close();
+            }
+            if ui
+                .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
+                .clicked()
+            {
+                begin_inline_new(ui, true, lib, new_src_folder_name, new_folder_parent_folder);
+                *new_src_name = None;
+                *new_file_parent_folder = None;
+                ui.close();
+            }
+        });
+    }
+
+    // ── Apply the file-row signals ───────────────────────────────────────────
+    // Once, after EVERY section: the indices are positions in `user_src_files`,
+    // and mutating it mid-render would invalidate the ones a later section
+    // produced.
+
+    // Duplication — copy under the next free `<stem>_<n>` name in the same
+    // folder, and select the new file so it is obvious what happened.
+    if let Some(idx) = to_duplicate {
+        let (src_path, content) = user_src_files[idx].clone();
+        let new_path = crate::project_tree::logic::duplicate_path(&src_path, |cand| {
+            user_src_files.iter().any(|(p, _)| p == cand)
+        });
+        let dest = workspace_dir.join(&new_path);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&dest, &content);
+        user_src_files.push((new_path, content));
+        *selected = ProjectFileId::UserFile(user_src_files.len() - 1);
+        *save_needed = true;
+    }
+
+    // Deletion
+    if let Some(idx) = to_delete {
+        if *selected == ProjectFileId::UserFile(idx) {
+            *selected = ProjectFileId::MainRs;
+        }
+        let dest = workspace_dir.join(&user_src_files[idx].0);
+        let _ = std::fs::remove_file(&dest);
+        user_src_files.remove(idx);
+        *save_needed = true;
+    }
+
+    // Rename
+    if let Some(confirm_idx) = do_rename_file {
+        if let Some((_, new_name)) = renaming_file.take() {
+            let old_path = user_src_files[confirm_idx].0.clone();
+            let clean = new_name.trim().to_string();
+            if !clean.is_empty() {
+                let new_path = if let Some(slash) = old_path.rfind('/') {
+                    format!("{}/{clean}", &old_path[..slash])
+                } else {
+                    clean
+                };
+                if new_path != old_path && !user_src_files.iter().any(|(p, _)| p == &new_path) {
+                    let old_dest = workspace_dir.join(&old_path);
+                    let new_dest = workspace_dir.join(&new_path);
+                    let _ = std::fs::rename(&old_dest, &new_dest);
+                    user_src_files[confirm_idx].0 = new_path;
+                    *save_needed = true;
+                }
+            }
+        }
+    } else if cancel_rename_file {
+        *renaming_file = None;
     }
 
     // While a tree item is being dragged (payload armed via the hold gate), give
@@ -928,8 +1072,8 @@ fn render_tree_node(
                                 || user_src_files.iter().any(|(p, _)| p == &new_path);
                             if !clean.is_empty() && new_path != folder_path && !collides {
                                 // Best-effort rename on disk (live workspace).
-                                let old_dest = workspace_dir.join("src").join(&folder_path);
-                                let new_dest = workspace_dir.join("src").join(&new_path);
+                                let old_dest = workspace_dir.join(&folder_path);
+                                let new_dest = workspace_dir.join(&new_path);
                                 let _ = std::fs::rename(&old_dest, &new_dest);
                                 // Update the folder itself and any nested folders.
                                 let old_prefix = format!("{folder_path}/");
@@ -1184,13 +1328,13 @@ fn render_tree_node(
                             }
                             for i in to_rm.into_iter().rev() {
                                 // user_src_files paths are relative to src/.
-                                let dest = workspace_dir.join("src").join(&user_src_files[i].0);
+                                let dest = workspace_dir.join(&user_src_files[i].0);
                                 let _ = std::fs::remove_file(&dest);
                             }
                             // Drop the entries directly instead of relying on fs-watcher polling.
                             user_src_files.retain(|(p, _)| !p.starts_with(&prefix));
                             user_src_folders.retain(|f| f != &folder_path);
-                            let dest = workspace_dir.join("src").join(&folder_path);
+                            let dest = workspace_dir.join(&folder_path);
                             let _ = std::fs::remove_dir_all(&dest);
                             *save_needed = true;
                             ui.close();

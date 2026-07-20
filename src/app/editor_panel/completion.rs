@@ -690,7 +690,7 @@ impl AppIde {
                     .find(|(n, _)| *n == parent_rel)?
                     .1
                     .as_str();
-                (format!("src/{parent_rel}"), text)
+                (parent_rel.clone(), text)
             }
             None => ("src/main.rs".to_owned(), self.generated_code.as_str()),
         };

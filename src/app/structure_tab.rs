@@ -109,7 +109,7 @@ impl AppIde {
             graph
                 .nodes
                 .iter()
-                .map(|n| lsp.error_count_for(&format!("src/{}", n.file_rel)) > 0)
+                .map(|n| lsp.error_count_for(&n.file_rel) > 0)
                 .collect()
         };
         // Reference counts per symbol row (shown right-aligned in the rows) —
@@ -255,7 +255,7 @@ impl AppIde {
                         None => &self.generated_code,
                         Some(i) => &self.project_tree.user_src_files[i].1,
                     };
-                    let rel = format!("src/{}", node.file_rel);
+                    let rel = node.file_rel.clone();
                     let synced = lsp.last_sent_matches(&rel, content);
                     let seed_open = !synced && !lsp.is_file_open(&rel);
                     if !(synced || seed_open) {

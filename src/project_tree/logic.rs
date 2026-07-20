@@ -53,6 +53,19 @@ fn strip_copy_suffix(stem: &str) -> &str {
     }
 }
 
+/// The firmware crate's source directory, as a path prefix.
+///
+/// Every path in `user_src_files` / `user_src_folders` is relative to the
+/// PROJECT ROOT, not to `src/`. That is what lets library crates extracted out
+/// of the project (`mw_radar/src/lib.rs`) live in the very same list — one flat
+/// file set, grouped into sections only when the tree is drawn.
+pub const SRC_ROOT: &str = "src";
+
+/// `src/<rest>` — the root-relative path of a firmware source file.
+pub fn src_path(rest: &str) -> String {
+    format!("{SRC_ROOT}/{rest}")
+}
+
 impl ProjectTreeState {
     /// Create a new empty project tree state.
     pub fn new() -> Self {
@@ -62,16 +75,30 @@ impl ProjectTreeState {
         }
     }
 
-    /// Load project tree state from a project directory.
+    /// Load project tree state from a project directory: the firmware's `src/`
+    /// plus every workspace-member crate's directory (extracted libraries), all
+    /// with paths relative to `root`.
     pub fn load_from_dir(root: &Path) -> Self {
-        let src_dir = root.join("src");
-        if !src_dir.exists() {
-            return Self::new();
-        }
-
         let mut files = Vec::new();
         let mut folders = Vec::new();
-        Self::scan_src_dir(&src_dir, &src_dir, &mut files, &mut folders);
+
+        let src_dir = root.join(SRC_ROOT);
+        if src_dir.exists() {
+            Self::scan_src_dir(root, &src_dir, &mut files, &mut folders);
+        }
+
+        // Library crates: read the members out of the root manifest rather than
+        // guessing from directory names, so only real crates are picked up.
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
+        for member in crate::panels::mcu_module::project_gen::workspace_members(&manifest) {
+            let dir = root.join(&member);
+            if dir.is_dir() {
+                if !folders.contains(&member) {
+                    folders.push(member.clone());
+                }
+                Self::scan_src_dir(root, &dir, &mut files, &mut folders);
+            }
+        }
 
         Self {
             user_src_files: files,
@@ -79,8 +106,8 @@ impl ProjectTreeState {
         }
     }
 
-    /// Recursively scan a directory for files and folders (relative to root).
-    /// Skips `main.rs` and loads all file types.
+    /// Recursively scan `dir`, recording paths relative to `root` (the PROJECT
+    /// ROOT). Skips the generated `src/main.rs` and build/VCS directories.
     fn scan_src_dir(
         root: &Path,
         dir: &Path,
@@ -92,21 +119,23 @@ impl ProjectTreeState {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
             if path.is_dir() {
-                let Ok(rel) = path.strip_prefix(root) else {
+                // A library crate can carry its own build output; never pull
+                // gigabytes of `target/` into the tree.
+                let name = rel.rsplit('/').next().unwrap_or_default();
+                if name == "target" || name == ".git" {
                     continue;
-                };
-                let rel = rel.to_string_lossy().replace('\\', "/");
+                }
                 if !folders.contains(&rel) {
                     folders.push(rel);
                 }
                 Self::scan_src_dir(root, &path, files, folders);
             } else if path.is_file() {
-                let Ok(rel) = path.strip_prefix(root) else {
-                    continue;
-                };
-                let rel = rel.to_string_lossy().replace('\\', "/");
-                if rel == "main.rs" {
+                if rel == src_path("main.rs") {
                     continue; // always generated — skip
                 }
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -156,7 +185,7 @@ impl ProjectTreeState {
     /// Synchronize pin files in the pins/ directory.
     /// Removes old pin files, creates new ones, and rebuilds pins/mod.rs.
     pub fn sync_pin_files(&mut self, all_pins: &[(usize, String, PinFunction)]) {
-        const MOD_PATH: &str = "pins/mod.rs";
+        const MOD_PATH: &str = "src/pins/mod.rs";
 
         // Build the authoritative set of configured pins
         let configured: Vec<(String, usize, &str, &PinFunction)> = Vec::new();
@@ -175,7 +204,7 @@ impl ProjectTreeState {
         let active_slugs: Vec<&str> = configured.iter().map(|(s, ..)| s.as_str()).collect();
 
         // 1. Ensure pins/ folder is registered
-        let folder = "pins".to_string();
+        let folder = src_path("pins");
         if !self.user_src_folders.contains(&folder) {
             self.user_src_folders.push(folder);
         }
@@ -188,7 +217,7 @@ impl ProjectTreeState {
 
         // 3. Drop pin files that are no longer configured
         self.user_src_files.retain(|(path, _)| {
-            let Some(fname) = path.strip_prefix("pins/") else {
+            let Some(fname) = path.strip_prefix("src/pins/") else {
                 return true;
             };
             if fname == "mod.rs" {
@@ -203,7 +232,7 @@ impl ProjectTreeState {
 
         // 4. Create or update pin files (with GENERATED marker preservation)
         for (slug, num, name, func) in &configured {
-            let file_path = format!("pins/{slug}.rs");
+            let file_path = src_path(&format!("pins/{slug}.rs"));
             let generated_content = generate_pin_content(*num, name, func);
             let wrapped_content = format!(
                 "// <<< GENERATED>>>\n{}\n// <<< GENERATED END >>>\n",
@@ -231,7 +260,7 @@ impl ProjectTreeState {
         let has_configs = self
             .user_src_files
             .iter()
-            .any(|(p, _)| p.starts_with("pins/configs/"));
+            .any(|(p, _)| p.starts_with("src/pins/configs/"));
         let mut generated_section: String = configured
             .iter()
             .map(|(slug, ..)| format!("pub mod {slug};\n"))
@@ -285,15 +314,15 @@ impl ProjectTreeState {
     /// dropped. Call this BEFORE `sync_pin_files` so the latter can add
     /// `pub mod configs;` to `pins/mod.rs`.
     pub fn sync_config_files(&mut self, files: &[(String, String)]) {
-        const DIR: &str = "pins/configs";
-        const MOD_PATH: &str = "pins/configs/mod.rs";
+        const DIR: &str = "src/pins/configs";
+        const MOD_PATH: &str = "src/pins/configs/mod.rs";
         const GEN_BEGIN: &str = "// <<< GENERATED>>>";
         const GEN_END: &str = "// <<< GENERATED END >>>";
 
         if files.is_empty() {
             // No configured peripherals → drop the entire configs/ subtree.
             self.user_src_files
-                .retain(|(p, _)| !p.starts_with("pins/configs/"));
+                .retain(|(p, _)| !p.starts_with("src/pins/configs/"));
             self.user_src_folders.retain(|f| f != DIR);
             return;
         }
@@ -316,7 +345,7 @@ impl ProjectTreeState {
 
         // 3. Drop config files no longer configured.
         self.user_src_files.retain(|(path, _)| {
-            let Some(rest) = path.strip_prefix("pins/configs/") else {
+            let Some(rest) = path.strip_prefix("src/pins/configs/") else {
                 return true;
             };
             rest == "mod.rs" || active.iter().any(|a| a == rest.trim_end_matches(".rs"))
@@ -327,7 +356,7 @@ impl ProjectTreeState {
         //    (use block + get_config/init) is editable. On update we re-splice
         //    just that constants block, so the user's edits to the rest survive.
         for (name, body) in files {
-            let file_path = format!("pins/configs/{name}");
+            let file_path = src_path(&format!("pins/configs/{name}"));
             if let Some((_, content)) = self
                 .user_src_files
                 .iter_mut()
@@ -362,8 +391,8 @@ impl ProjectTreeState {
 
     /// Initialize the pins/ scaffold (folder + empty mod.rs).
     pub fn init_pins_scaffold(&mut self) {
-        let folder = "pins".to_string();
-        let mod_path = "pins/mod.rs".to_string();
+        let folder = src_path("pins");
+        let mod_path = src_path("pins/mod.rs");
         if !self.user_src_folders.contains(&folder) {
             self.user_src_folders.push(folder);
         }
@@ -604,8 +633,8 @@ mod tests {
         let state = ProjectTreeState::load_from_dir(parent);
 
         assert_eq!(state.user_src_files.len(), 1);
-        assert_file_exists(&state, "utils.rs");
-        assert_file_content(&state, "utils.rs", "pub fn helper() {}");
+        assert_file_exists(&state, "src/utils.rs");
+        assert_file_content(&state, "src/utils.rs", "pub fn helper() {}");
     }
 
     #[test]
@@ -618,8 +647,8 @@ mod tests {
         let parent = src.parent().unwrap();
         let state = ProjectTreeState::load_from_dir(parent);
 
-        assert_file_exists(&state, "helpers/math.rs");
-        assert_file_exists(&state, "helpers/strings.rs");
+        assert_file_exists(&state, "src/helpers/math.rs");
+        assert_file_exists(&state, "src/helpers/strings.rs");
     }
 
     #[test]
@@ -632,9 +661,9 @@ mod tests {
         let parent = src.parent().unwrap();
         let state = ProjectTreeState::load_from_dir(parent);
 
-        assert_file_exists(&state, "file.rs");
-        assert_file_exists(&state, "config.txt");
-        assert_file_exists(&state, "data.json");
+        assert_file_exists(&state, "src/file.rs");
+        assert_file_exists(&state, "src/config.txt");
+        assert_file_exists(&state, "src/data.json");
     }
 
     #[test]
@@ -646,8 +675,8 @@ mod tests {
         let parent = src.parent().unwrap();
         let state = ProjectTreeState::load_from_dir(parent);
 
-        assert_file_not_exists(&state, "main.rs");
-        assert_file_exists(&state, "utils.rs");
+        assert_file_not_exists(&state, "src/main.rs");
+        assert_file_exists(&state, "src/utils.rs");
     }
 
     #[test]
@@ -661,8 +690,8 @@ mod tests {
         let parent = src.parent().unwrap();
         let state = ProjectTreeState::load_from_dir(parent);
 
-        assert_folder_exists(&state, "helpers");
-        assert_folder_exists(&state, "core");
+        assert_folder_exists(&state, "src/helpers");
+        assert_folder_exists(&state, "src/core");
     }
 
     #[test]
@@ -685,11 +714,11 @@ mod tests {
     #[test]
     fn test_handle_create_event() {
         let mut state = ProjectTreeState::new();
-        state.handle_fs_events(vec![("utils.rs".to_string(), FsEventKind::Create)]);
+        state.handle_fs_events(vec![("src/utils.rs".to_string(), FsEventKind::Create)]);
 
         assert_eq!(state.user_src_files.len(), 1);
-        assert_file_exists(&state, "utils.rs");
-        assert_file_content(&state, "utils.rs", "");
+        assert_file_exists(&state, "src/utils.rs");
+        assert_file_content(&state, "src/utils.rs", "");
     }
 
     #[test]
@@ -697,12 +726,12 @@ mod tests {
         let mut state = ProjectTreeState::new();
         state
             .user_src_files
-            .push(("utils.rs".to_string(), "existing content".to_string()));
+            .push(("src/utils.rs".to_string(), "existing content".to_string()));
 
-        state.handle_fs_events(vec![("utils.rs".to_string(), FsEventKind::Create)]);
+        state.handle_fs_events(vec![("src/utils.rs".to_string(), FsEventKind::Create)]);
 
         assert_eq!(state.user_src_files.len(), 1);
-        assert_file_content(&state, "utils.rs", "existing content");
+        assert_file_content(&state, "src/utils.rs", "existing content");
     }
 
     #[test]
@@ -710,9 +739,9 @@ mod tests {
         let mut state = ProjectTreeState::new();
         state
             .user_src_files
-            .push(("utils.rs".to_string(), "content".to_string()));
+            .push(("src/utils.rs".to_string(), "content".to_string()));
 
-        state.handle_fs_events(vec![("utils.rs".to_string(), FsEventKind::Remove)]);
+        state.handle_fs_events(vec![("src/utils.rs".to_string(), FsEventKind::Remove)]);
 
         assert!(state.user_src_files.is_empty());
     }
@@ -720,21 +749,21 @@ mod tests {
     #[test]
     fn test_handle_remove_folder_event() {
         let mut state = ProjectTreeState::new();
-        state.user_src_folders.push("helpers".to_string());
+        state.user_src_folders.push("src/helpers".to_string());
         state
             .user_src_files
-            .push(("helpers/math.rs".to_string(), "".to_string()));
+            .push(("src/helpers/math.rs".to_string(), "".to_string()));
         state
             .user_src_files
-            .push(("utils.rs".to_string(), "".to_string()));
+            .push(("src/utils.rs".to_string(), "".to_string()));
 
         // When a folder is removed, the folder entry itself is removed
-        state.handle_fs_events(vec![("helpers".to_string(), FsEventKind::Remove)]);
+        state.handle_fs_events(vec![("src/helpers".to_string(), FsEventKind::Remove)]);
 
-        assert!(!state.user_src_folders.contains(&"helpers".to_string()));
+        assert!(!state.user_src_folders.contains(&"src/helpers".to_string()));
         // Note: child files are not automatically removed by the current implementation
         // In practice, they are removed by individual Remove events from filesystem watcher
-        assert_file_exists(&state, "utils.rs");
+        assert_file_exists(&state, "src/utils.rs");
     }
 
     #[test]
@@ -814,7 +843,7 @@ mod tests {
         let mut state = ProjectTreeState::new();
         state.sync_pin_files(&[]);
 
-        assert_folder_exists(&state, "pins");
+        assert_folder_exists(&state, "src/pins");
     }
 
     #[test]
@@ -822,7 +851,7 @@ mod tests {
         let mut state = ProjectTreeState::new();
         state.sync_pin_files(&[]);
 
-        assert_file_exists(&state, "pins/mod.rs");
+        assert_file_exists(&state, "src/pins/mod.rs");
     }
 
     #[test]
@@ -831,11 +860,11 @@ mod tests {
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
 
-        assert_file_exists(&state, "pins/pin1_pa0_out.rs");
+        assert_file_exists(&state, "src/pins/pin1_pa0_out.rs");
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0_out.rs")
+            .find(|(p, _)| p == "src/pins/pin1_pa0_out.rs")
             .unwrap();
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0,"));
     }
@@ -863,16 +892,16 @@ mod tests {
         state.sync_pin_files(&pins);
 
         // File names carry the selected function type (e.g. pin2_pc13_out.rs).
-        assert_file_exists(&state, "pins/pin2_pc13_out.rs");
-        assert_file_exists(&state, "pins/pin10_pa0_in.rs");
-        assert_file_exists(&state, "pins/pin11_pa1_adc.rs");
-        assert_file_exists(&state, "pins/pin30_pa9_pwm.rs");
+        assert_file_exists(&state, "src/pins/pin2_pc13_out.rs");
+        assert_file_exists(&state, "src/pins/pin10_pa0_in.rs");
+        assert_file_exists(&state, "src/pins/pin11_pa1_adc.rs");
+        assert_file_exists(&state, "src/pins/pin30_pa9_pwm.rs");
 
         // mod.rs declares the type-suffixed modules.
         let mod_file = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/mod.rs")
+            .find(|(p, _)| p == "src/pins/mod.rs")
             .unwrap();
         assert!(mod_file.1.contains("pub mod pin2_pc13_out;"));
         assert!(mod_file.1.contains("pub mod pin30_pa9_pwm;"));
@@ -885,21 +914,21 @@ mod tests {
         // Add old pins (using the type-suffixed naming convention)
         state
             .user_src_files
-            .push(("pins/pin1_pa0_out.rs".to_string(), "".to_string()));
+            .push(("src/pins/pin1_pa0_out.rs".to_string(), "".to_string()));
         state
             .user_src_files
-            .push(("pins/pin2_pa1_out.rs".to_string(), "".to_string()));
-        state.user_src_folders.push("pins".to_string());
+            .push(("src/pins/pin2_pa1_out.rs".to_string(), "".to_string()));
+        state.user_src_folders.push("src/pins".to_string());
         state
             .user_src_files
-            .push(("pins/mod.rs".to_string(), "".to_string()));
+            .push(("src/pins/mod.rs".to_string(), "".to_string()));
 
         // Sync with only pin1 configured
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
 
-        assert_file_exists(&state, "pins/pin1_pa0_out.rs");
-        assert_file_not_exists(&state, "pins/pin2_pa1_out.rs");
+        assert_file_exists(&state, "src/pins/pin1_pa0_out.rs");
+        assert_file_not_exists(&state, "src/pins/pin2_pa1_out.rs");
     }
 
     #[test]
@@ -912,8 +941,8 @@ mod tests {
         );
         state
             .user_src_files
-            .push(("pins/mod.rs".to_string(), mod_content));
-        state.user_src_folders.push("pins".to_string());
+            .push(("src/pins/mod.rs".to_string(), mod_content));
+        state.user_src_folders.push("src/pins".to_string());
 
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
@@ -921,7 +950,7 @@ mod tests {
         let mod_file = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/mod.rs")
+            .find(|(p, _)| p == "src/pins/mod.rs")
             .unwrap();
         assert!(mod_file.1.contains("pub mod custom_utils;"));
         assert!(mod_file.1.contains("pub fn helper() {}"));
@@ -933,11 +962,11 @@ mod tests {
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::Unset)];
         state.sync_pin_files(&pins);
 
-        assert_file_not_exists(&state, "pins/pin1_pa0.rs");
+        assert_file_not_exists(&state, "src/pins/pin1_pa0.rs");
         let mod_file = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/mod.rs")
+            .find(|(p, _)| p == "src/pins/mod.rs")
             .unwrap();
         assert!(mod_file.1.trim().is_empty() || !mod_file.1.contains("pub mod"));
     }
@@ -947,8 +976,8 @@ mod tests {
         let mut state = ProjectTreeState::new();
         state
             .user_src_files
-            .push(("pins/mod.rs".to_string(), "".to_string()));
-        state.user_src_folders.push("pins".to_string());
+            .push(("src/pins/mod.rs".to_string(), "".to_string()));
+        state.user_src_folders.push("src/pins".to_string());
 
         let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
         state.sync_pin_files(&pins);
@@ -956,7 +985,7 @@ mod tests {
         let mod_file = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/mod.rs")
+            .find(|(p, _)| p == "src/pins/mod.rs")
             .unwrap();
         assert!(mod_file.1.contains("// <<< GENERATED>>>"));
         assert!(mod_file.1.contains("pub mod pin1_pa0_out;"));
@@ -967,8 +996,8 @@ mod tests {
         let mut state = ProjectTreeState::new();
         state.init_pins_scaffold();
 
-        assert_folder_exists(&state, "pins");
-        assert_file_exists(&state, "pins/mod.rs");
+        assert_folder_exists(&state, "src/pins");
+        assert_file_exists(&state, "src/pins/mod.rs");
     }
 
     #[test]
@@ -994,7 +1023,7 @@ mod tests {
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0_out.rs")
+            .find(|(p, _)| p == "src/pins/pin1_pa0_out.rs")
             .unwrap();
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"));
 
@@ -1006,11 +1035,11 @@ mod tests {
         )];
         state.sync_pin_files(&pins);
 
-        assert_file_not_exists(&state, "pins/pin1_pa0_out.rs");
+        assert_file_not_exists(&state, "src/pins/pin1_pa0_out.rs");
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0_adc.rs")
+            .find(|(p, _)| p == "src/pins/pin1_pa0_adc.rs")
             .unwrap();
         // After function change, the file should be regenerated with new type
         assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Analog>;"));
@@ -1031,7 +1060,7 @@ mod tests {
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0_out.rs")
+            .find(|(p, _)| p == "src/pins/pin1_pa0_out.rs")
             .unwrap();
         // GPIO pins should have PinType line without function comment
         assert!(
@@ -1051,7 +1080,7 @@ mod tests {
         let entry = state
             .user_src_files
             .iter()
-            .find(|(p, _)| p == "pins/pin1_pa0_adc.rs")
+            .find(|(p, _)| p == "src/pins/pin1_pa0_adc.rs")
             .unwrap();
         // ADC should have a comment with the function label on PinType line
         assert!(
@@ -1069,7 +1098,7 @@ mod tests {
     #[test]
     fn config_file_constants_regenerate_body_preserved() {
         let mut state = ProjectTreeState::new();
-        let path = "pins/configs/usart1.rs";
+        let path = "src/pins/configs/usart1.rs";
         let v1 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
         state.sync_config_files(&[("usart1.rs".to_string(), v1.to_string())]);
         assert!(state.user_src_files.iter().any(|(p, _)| p == path));

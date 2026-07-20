@@ -144,14 +144,16 @@ pub fn map_reference(graph: &ModuleGraph, loc: &ReferenceLoc) -> Option<(usize, 
 }
 
 /// Find the module node whose file the absolute `path` ends with
-/// (`…/src/mw_radar/utils.rs` → the `mw_radar::utils` node). Separators are
-/// normalized so Windows `\` paths match the `/`-relative `file_rel`.
+/// (`…/mw_radar/src/utils.rs` → the `mw_radar::utils` node). `file_rel` is
+/// project-root-relative, so only the workspace root is stripped here — do NOT
+/// re-add a `src/` segment or nothing matches. Separators are normalized so
+/// Windows `\` paths match.
 pub fn node_for_path(graph: &ModuleGraph, path: &str) -> Option<usize> {
     let norm = path.replace('\\', "/");
     graph
         .nodes
         .iter()
-        .position(|n| norm.ends_with(&format!("/src/{}", n.file_rel)))
+        .position(|n| norm.ends_with(&format!("/{}", n.file_rel)))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -176,11 +178,11 @@ fn main() {
 ";
         let files = vec![
             (
-                "a.rs".into(),
+                "src/a.rs".into(),
                 "pub fn helper() -> u8 {\n    0\n}\npub struct Cfg;\n".into(),
             ),
             (
-                "b.rs".into(),
+                "src/b.rs".into(),
                 "use crate::a::helper;\npub fn run() {\n    helper();\n}\n".into(),
             ),
         ];

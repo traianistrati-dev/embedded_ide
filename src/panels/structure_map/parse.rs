@@ -47,6 +47,12 @@ pub struct ModuleNode {
     pub name: String,
     /// Workspace-relative file (`"mw_radar/utils.rs"`); `"main.rs"` for the root.
     pub file_rel: String,
+    /// The crate this module belongs to, as its path prefix: empty for the
+    /// firmware (the graph's root crate), `"mw_radar"` for an extracted
+    /// library. `crate::` and `super::` resolve against THIS, not the graph
+    /// root — otherwise a library's `use crate::data::…` would look for a
+    /// firmware module named `data`.
+    pub krate: String,
     /// Index into `user_src_files`; `None` = main.rs.
     pub file: Option<usize>,
     /// Number of `fn` items (incl. methods) — a size badge, not a precise count.
@@ -101,17 +107,23 @@ pub struct ModuleGraph {
 
 impl ModuleGraph {
     /// The FOCUS SET for the call-edge display, as a membership mask. A plain
-    /// module focuses itself alone; a PACKAGE ROOT (a `mod.rs` file, e.g.
-    /// selecting `mw_radar/mod.rs`) focuses the whole package subtree — the
-    /// root plus every `pkg::…` descendant — so the diagram shows all interior
-    /// links of the package at once, plus its outside connections.
+    /// module focuses itself alone; a PACKAGE ROOT focuses the whole package
+    /// subtree — the root plus every `pkg::…` descendant — so the diagram shows
+    /// all interior links of the package at once, plus its outside connections.
+    ///
+    /// A package root is a `mod.rs` OR an extracted library's `lib.rs`: the
+    /// crate root is a facade of `pub mod` declarations with no symbols of its
+    /// own, so without this, selecting `mw_radar` focused a node that has
+    /// nothing to draw and the whole library looked inert.
     pub fn focus_set(&self, focus: usize) -> Vec<bool> {
         let mut set = vec![false; self.nodes.len()];
         let Some(node) = self.nodes.get(focus) else {
             return set;
         };
         set[focus] = true;
-        if node.file_rel.ends_with("/mod.rs") && !node.path.is_empty() {
+        let is_package_root =
+            node.file_rel.ends_with("/mod.rs") || node.file_rel.ends_with("/lib.rs");
+        if is_package_root && !node.path.is_empty() {
             let prefix = format!("{}::", node.path);
             for (i, n) in self.nodes.iter().enumerate() {
                 if n.path.starts_with(&prefix) {
@@ -125,16 +137,50 @@ impl ModuleGraph {
 
 /// `"foo/bar.rs"` → `"foo::bar"`, `"foo/mod.rs"` → `"foo"`, `"utils.rs"` → `"utils"`.
 pub fn module_path_of(rel: &str) -> String {
-    let no_ext = rel.strip_suffix(".rs").unwrap_or(rel);
+    let (krate, rest) = split_crate(rel);
+    let no_ext = rest.strip_suffix(".rs").unwrap_or(rest);
     let no_mod = no_ext.strip_suffix("/mod").unwrap_or(no_ext);
-    no_mod.replace('/', "::")
+    // A crate-root file adds nothing below the crate itself.
+    let inner = if no_mod == "lib" || no_mod == "main" {
+        String::new()
+    } else {
+        no_mod.replace('/', "::")
+    };
+    match (krate.is_empty(), inner.is_empty()) {
+        (true, _) => inner,
+        (false, true) => krate,
+        (false, false) => format!("{krate}::{inner}"),
+    }
+}
+
+/// Split a project-root-relative path into `(crate root path segment, path
+/// inside the crate's src/)`.
+///
+/// The firmware IS the graph's root crate, so its files get an empty prefix and
+/// keep bare module paths (`pins::configs`). A library crate extracted next to
+/// `src/` gets its own name as the prefix, so `mw_radar/src/data.rs` becomes
+/// `mw_radar::data` and `mw_radar/src/lib.rs` becomes `mw_radar` — which is
+/// exactly what makes `mod data;` inside lib.rs resolve to a real node, and
+/// what you would write to reach it from the firmware.
+pub fn split_crate(rel: &str) -> (String, &str) {
+    if let Some(rest) = rel.strip_prefix("src/") {
+        return (String::new(), rest);
+    }
+    if let Some((krate, rest)) = rel.split_once("/src/") {
+        let name = krate.rsplit('/').next().unwrap_or(krate).replace('-', "_");
+        return (name, rest);
+    }
+    (String::new(), rel)
 }
 
 /// Build the graph from main.rs plus the user source files
 /// (`(rel_path, content)`, as in `project_tree.user_src_files`).
 pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGraph {
     // ── Nodes ─────────────────────────────────────────────────────────────
-    let mut nodes = vec![make_node(String::new(), "main", "main.rs", None, main_rs)];
+    // `file_rel` is project-root-relative, like every other path the app
+    // handles — the Structure tab feeds it straight to the LSP error lookup and
+    // to click-to-open, so a bare "main.rs" would resolve to nothing.
+    let mut nodes = vec![make_node(String::new(), "main", "src/main.rs", None, main_rs)];
     for (i, (rel, content)) in user_files.iter().enumerate() {
         if !rel.ends_with(".rs") {
             continue; // defensive: only Rust files become modules
@@ -166,6 +212,7 @@ pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGrap
 
     for (idx, text) in texts {
         let cur_path = nodes[idx].path.clone();
+        let krate = nodes[idx].krate.clone();
         for raw_line in text.lines() {
             // Naive comment strip — may also cut a "://" inside a string, which
             // only loses potential edges on that line (acceptable noise).
@@ -187,7 +234,7 @@ pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGrap
 
             // Path chains (`use crate::a::b`, `super::x::y`, `a::b::c(...)`).
             for chain in scan_chains(line) {
-                if let Some(target) = resolve(&chain, &cur_path, &by_path) {
+                if let Some(target) = resolve(&chain, &cur_path, &krate, &by_path) {
                     if target != idx {
                         deps.insert((idx, target));
                     }
@@ -224,6 +271,7 @@ fn make_node(
 ) -> ModuleNode {
     let (fn_count, ty_count, symbols, impl_spans) = scan_items(content);
     ModuleNode {
+        krate: split_crate(file_rel).0,
         path,
         name: name.to_owned(),
         file_rel: file_rel.to_owned(),
@@ -285,13 +333,14 @@ pub fn add_external_nodes(
 
     for (idx, text) in texts {
         let cur_path = graph.nodes[idx].path.clone();
+        let krate = graph.nodes[idx].krate.clone();
         for raw_line in text.lines() {
             let line = raw_line.split("//").next().unwrap_or("");
             for chain in scan_chains(line) {
                 if matches!(chain[0].as_str(), "crate" | "super" | "self") {
                     continue; // local by definition
                 }
-                if resolve(&chain, &cur_path, &by_path).is_some() {
+                if resolve(&chain, &cur_path, &krate, &by_path).is_some() {
                     continue; // resolves to a project module
                 }
                 let first = &chain[0];
@@ -307,6 +356,7 @@ pub fn add_external_nodes(
                         path: first.clone(),
                         name: first.clone(),
                         file_rel: format!("[extern] {first}"),
+                        krate: String::new(),
                         file: None,
                         fn_count: 0,
                         ty_count: 0,
@@ -562,6 +612,7 @@ fn scan_chains(line: &str) -> Vec<Vec<String>> {
 fn resolve(
     chain: &[String],
     cur_path: &str,
+    krate: &str,
     by_path: &HashMap<String, usize>,
 ) -> Option<usize> {
     let cur_segs: Vec<&str> = if cur_path.is_empty() {
@@ -569,15 +620,22 @@ fn resolve(
     } else {
         cur_path.split("::").collect()
     };
+    // Everything above this is another crate — `crate::` lands here and
+    // `super::` may not climb past it.
+    let root_segs: Vec<&str> = if krate.is_empty() {
+        Vec::new()
+    } else {
+        vec![krate]
+    };
 
     match chain[0].as_str() {
-        "crate" => longest_match(&[], &chain[1..], 0, by_path),
+        "crate" => longest_match(&root_segs, &chain[1..], root_segs.len(), by_path),
         "super" => {
             let mut supers = 0;
             while supers < chain.len() && chain[supers] == "super" {
                 supers += 1;
             }
-            if supers > cur_segs.len() {
+            if supers > cur_segs.len().saturating_sub(root_segs.len()) {
                 return None; // walked above the crate root
             }
             let base = &cur_segs[..cur_segs.len() - supers];
@@ -920,5 +978,72 @@ pub fn other(
         let a = idx(&g, "a");
         let b = idx(&g, "b");
         assert!(g.deps.contains(&(a, b)) && g.deps.contains(&(b, a)));
+    }
+
+    /// An extracted library's `lib.rs` IS that crate's root, so `mod data;`
+    /// inside it must link to the `data` node. Regression: `lib.rs` was treated
+    /// as a module named `lib`, so `mod data;` resolved to `lib::data` — which
+    /// does not exist — and the whole library rendered as a `lib` node floating
+    /// unconnected next to its own modules.
+    #[test]
+    fn library_lib_rs_is_the_crate_root_and_owns_its_modules() {
+        let files = vec![
+            (
+                "mw_radar/src/lib.rs".to_string(),
+                "#![no_std]\npub mod data;\npub mod radar;\n".to_string(),
+            ),
+            (
+                "mw_radar/src/data.rs".to_string(),
+                "pub enum ParameterID { A }\n".to_string(),
+            ),
+            (
+                "mw_radar/src/radar.rs".to_string(),
+                "use crate::data::ParameterID;\npub fn go() {}\n".to_string(),
+            ),
+        ];
+        let g = build_graph("fn main() {}", &files);
+
+        let root = idx(&g, "mw_radar");
+        let data = idx(&g, "mw_radar::data");
+        let radar = idx(&g, "mw_radar::radar");
+        assert!(
+            g.contains.contains(&(root, data)) && g.contains.contains(&(root, radar)),
+            "lib.rs must own its modules, got {:?}",
+            g.contains
+        );
+        // `crate::` inside a library means THAT library, not the firmware.
+        assert!(
+            g.deps.contains(&(radar, data)),
+            "use crate::data must resolve inside the library, got {:?}",
+            g.deps
+        );
+    }
+
+    /// A module path is relative to its CRATE root, not the project root.
+    /// Regression: after paths became project-root-relative, every node kept a
+    /// leading `src` segment — and the diagram colours packages by that first
+    /// segment, so the whole graph turned one colour.
+    #[test]
+    fn module_path_strips_the_crate_source_root() {
+        // The firmware is the graph's root crate — bare module paths.
+        assert_eq!(module_path_of("src/app.rs"), "app");
+        assert_eq!(module_path_of("src/pins/configs/usart1.rs"), "pins::configs::usart1");
+        assert_eq!(module_path_of("src/pins/mod.rs"), "pins");
+        // A library crate is namespaced under its own name — which is both how
+        // you reach it from the firmware and what makes its `mod x;` resolve.
+        assert_eq!(module_path_of("mw_radar/src/lib.rs"), "mw_radar");
+        assert_eq!(module_path_of("mw_radar/src/frame.rs"), "mw_radar::frame");
+        assert_eq!(module_path_of("mw_radar/src/proto/mod.rs"), "mw_radar::proto");
+        // crates.io allows `-`; a module path does not.
+        assert_eq!(module_path_of("mw-radar/src/frame.rs"), "mw_radar::frame");
+    }
+
+    /// Different packages must stay distinguishable by their first segment —
+    /// that is exactly what the colour palette keys on.
+    #[test]
+    fn first_segment_identifies_the_package() {
+        let first = |p: &str| module_path_of(p).split("::").next().unwrap().to_owned();
+        assert_eq!(first("src/pins/mod.rs"), "pins");
+        assert_ne!(first("src/pins/mod.rs"), first("src/drivers/uart.rs"));
     }
 }
