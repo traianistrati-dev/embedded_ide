@@ -79,18 +79,20 @@ impl AppIde {
                 None => self.generated_code.clone(),
             }
         };
-        let display_syntax = {
-            let path = match self.selected_file {
-                ProjectFileId::UserFile(i) => self
-                    .project_tree
-                    .user_src_files
-                    .get(i)
-                    .map(|(p, _)| p.as_str())
-                    .unwrap_or_default(),
-                _ => "",
-            };
-            self.selected_file.syntax(path)
+        // The selected file's project-root-relative path, needed wherever a
+        // `UserFile` has to be classified by extension — a user file can now be
+        // a library crate's `Cargo.toml`, not just Rust source.
+        let selected_path = match self.selected_file {
+            ProjectFileId::UserFile(i) => self
+                .project_tree
+                .user_src_files
+                .get(i)
+                .map(|(p, _)| p.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
         };
+        let display_syntax = self.selected_file.syntax(&selected_path);
+        let selected_is_manifest = self.selected_file.is_cargo_manifest(&selected_path);
         // The file `display_code` was built for. Captured before the bottom diag
         // panel (rendered below) can switch `selected_file` on a diagnostic
         // click, so a queued scroll-to-line only fires once the editor actually
@@ -519,7 +521,7 @@ impl AppIde {
                     ProjectFileId::CargoToml
                         | ProjectFileId::CargoConfig
                         | ProjectFileId::GitIgnore
-                );
+                ) && !selected_is_manifest;
                 // While our LSP completion popup is open (or Ctrl+Space was just
                 // pressed to open it), hide the crate's built-in keyword popup so
                 // the two don't overlap — the LSP popup is the one that wins.
@@ -732,7 +734,7 @@ impl AppIde {
                     self.selected_file,
                     ProjectFileId::MainRs | ProjectFileId::UserFile(_)
                 );
-                let is_cargo = self.selected_file == ProjectFileId::CargoToml;
+                let is_cargo = selected_is_manifest;
                 let mut menu_action: Option<context_menu::EditorAction> = None;
                 editor_resp.response.context_menu(|ui| {
                     menu_action = context_menu::editor_menu(ui, is_rs, is_cargo);
@@ -989,7 +991,11 @@ impl AppIde {
                     }
                 }
 
-                if self.selected_file == ProjectFileId::CargoToml {
+                // Any Cargo manifest — the firmware's, or an extracted
+                // library's (a plain user file at `<crate>/Cargo.toml`). Gating
+                // on the `CargoToml` id alone left library manifests on the
+                // rust-analyzer path, so Ctrl+Space there did nothing.
+                if selected_is_manifest {
                     // Cargo.toml gets crate-name + crates.io-version completion
                     // instead of the rust-analyzer driver.
                     self.handle_cargo_completion(

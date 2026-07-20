@@ -246,11 +246,22 @@ impl AppIde {
         }
     }
 
-    /// Persist the edited Cargo.toml text into the backing field (the per-frame
-    /// snapshot reads it back), mirroring the editor write-back.
+    /// Persist the edited manifest text into its backing store, mirroring the
+    /// editor write-back.
+    ///
+    /// Needed because the write-back runs EARLIER in the frame than the
+    /// completion, so an accepted suggestion would otherwise be dropped. A
+    /// library crate's manifest is an ordinary user file — handling only
+    /// `CargoToml` here silently lost every completion accepted there.
     fn persist_cargo_toml(&mut self, display_code: &str) {
-        if self.selected_file == ProjectFileId::CargoToml {
-            self.cargo_toml = display_code.to_owned();
+        match self.selected_file {
+            ProjectFileId::CargoToml => self.cargo_toml = display_code.to_owned(),
+            ProjectFileId::UserFile(i) => {
+                if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
+                    entry.1 = display_code.to_owned();
+                }
+            }
+            _ => {}
         }
     }
 

@@ -83,6 +83,15 @@ impl ProjectFileId {
     /// `path` is the file's project-root-relative path, needed for `UserFile`:
     /// a library crate's `Cargo.toml` is a user file too, and highlighting it
     /// as Rust would render its `#` comments as ordinary text.
+    /// Is this a Cargo manifest — the firmware's, or an extracted library's
+    /// (which is an ordinary user file at `<crate>/Cargo.toml`)? `path` is the
+    /// file's project-root-relative path, only consulted for `UserFile`.
+    pub(crate) fn is_cargo_manifest(self, path: &str) -> bool {
+        matches!(self, Self::CargoToml)
+            || (matches!(self, Self::UserFile(_))
+                && (path == "Cargo.toml" || path.ends_with("/Cargo.toml")))
+    }
+
     fn syntax(self, path: &str) -> Syntax {
         match self {
             // TOML (Cargo.toml, .cargo/config.toml) and .gitignore use `#` line
