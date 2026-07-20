@@ -105,16 +105,35 @@ pub fn diags_for_file(
     }
     // 2. Case-insensitive suffix match for Windows drive-letter mismatches.
     //    The key may be a full URI like "file:///c:/.../{rel_path}".
+    //
+    //    ONLY absolute/URI keys are eligible. Keys are project-root-relative
+    //    now, and more than one crate lives under the root — a bare suffix
+    //    match would serve `mw_radar/src/utils.rs`'s diagnostics for a lookup
+    //    of `src/utils.rs`, painting a library's errors onto the firmware file
+    //    with the same sub-path.
     let rel_lc = rel_path.to_lowercase();
     let suffix_slash = format!("/{rel_lc}");
     let suffix_bslash = format!("\\{}", rel_lc.replace('/', "\\"));
     for (k, v) in map {
+        if !is_absolute_or_uri(k) {
+            continue;
+        }
         let k_lc = k.to_lowercase();
-        if k_lc.ends_with(&suffix_slash) || k_lc.ends_with(&suffix_bslash) || k_lc == rel_lc {
+        if k_lc.ends_with(&suffix_slash) || k_lc.ends_with(&suffix_bslash) {
             return v.clone();
         }
     }
     Vec::new()
+}
+
+/// `true` for a full URI (`file:///…`) or an absolute filesystem path — the
+/// only key shapes the suffix fallback above is meant for.
+fn is_absolute_or_uri(key: &str) -> bool {
+    key.contains("://")
+        || key.starts_with('/')
+        || key.starts_with('\\')
+        // Windows drive letter: `C:\…` / `c:/…`
+        || key.as_bytes().get(1) == Some(&b':')
 }
 
 // ── Inline diagnostics helpers ────────────────────────────────────────────────
@@ -216,5 +235,58 @@ pub fn lsp_kind_icon(kind: u8) -> &'static str {
         22 => "str",    // Struct
         25 => "typ",    // TypeParameter
         _ => "   ",
+    }
+}
+
+#[cfg(test)]
+mod diags_for_file_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn diag() -> lsp::LspDiagnostic {
+        lsp::LspDiagnostic {
+            severity: lsp::DiagSeverity::Error,
+            message: "boom".into(),
+            line: 1,
+            col: 1,
+            end_line: 1,
+            end_col: 2,
+            code: None,
+            source: "rustc".into(),
+        }
+    }
+
+    /// The whole point of the suffix fallback: a full URI key still resolves.
+    #[test]
+    fn uri_keys_still_match_by_suffix() {
+        let mut map = HashMap::new();
+        map.insert(
+            "file:///c:/tmp/ws/src/utils.rs".to_string(),
+            vec![diag()],
+        );
+        assert_eq!(diags_for_file(&map, "src/utils.rs").len(), 1);
+    }
+
+    /// Regression: with more than one crate under the project root, a RELATIVE
+    /// key must never satisfy a suffix match — `mw_radar/src/utils.rs` would
+    /// otherwise paint the library's errors onto the firmware's `src/utils.rs`.
+    #[test]
+    fn another_crates_relative_key_does_not_match() {
+        let mut map = HashMap::new();
+        map.insert("mw_radar/src/utils.rs".to_string(), vec![diag()]);
+        assert!(
+            diags_for_file(&map, "src/utils.rs").is_empty(),
+            "a different crate's file must not supply diagnostics"
+        );
+        // …while its own exact lookup still works.
+        assert_eq!(diags_for_file(&map, "mw_radar/src/utils.rs").len(), 1);
+    }
+
+    #[test]
+    fn exact_match_wins() {
+        let mut map = HashMap::new();
+        map.insert("src/utils.rs".to_string(), vec![diag()]);
+        assert_eq!(diags_for_file(&map, "src/utils.rs").len(), 1);
+        assert!(diags_for_file(&map, "src/other.rs").is_empty());
     }
 }

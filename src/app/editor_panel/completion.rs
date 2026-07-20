@@ -610,6 +610,20 @@ impl AppIde {
                             .filter(|d| {
                                 d.source == "rust-analyzer" || d.is_rustc_error_code() || !flycheck_stale
                             })
+                            // A flycheck (rustc/clippy) diagnostic carries the
+                            // line/col from the LAST completed cargo check. If
+                            // that line is now blank, commented out, or past the
+                            // end of the file, whatever it complained about is
+                            // gone — the squiggle is provably stale, so don't
+                            // paint it. Numbered hard errors (`E0308`, …) reach
+                            // here despite `flycheck_stale` by design (RA does
+                            // not publish them natively for nested files), which
+                            // is exactly why they used to stick to commented
+                            // lines until the next Save.
+                            .filter(|d| {
+                                d.source == "rust-analyzer"
+                                    || !line_is_gone(&display_code, d.line)
+                            })
                             .collect()
                     } else {
                         Vec::new()
@@ -730,6 +744,23 @@ fn mod_declared_in(parent_text: &str, stem: &str) -> bool {
 /// insensitive) come first, keeping each group in the server's original order,
 /// then the rest — so the popup leads with what the user has already typed.
 /// An empty prefix returns the list unchanged (the server's relevance order).
+/// `true` when 1-based `line` of `text` can no longer hold the code a compiler
+/// diagnostic was computed for: it is blank, a pure `//` line comment, or past
+/// the end of the file.
+///
+/// Used to drop flycheck diagnostics whose position went stale — commenting a
+/// line out is the common case, and rustc never reports `mismatched types` on a
+/// comment.
+fn line_is_gone(text: &str, line: u32) -> bool {
+    match text.lines().nth(line.saturating_sub(1) as usize) {
+        Some(l) => {
+            let t = l.trim_start();
+            t.is_empty() || t.starts_with("//")
+        }
+        None => true, // the line was deleted outright
+    }
+}
+
 fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::CompletionItem> {
     if prefix.is_empty() {
         return items;
@@ -744,7 +775,7 @@ fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::Co
 
 #[cfg(test)]
 mod tests {
-    use super::{mod_declared_in, order_by_prefix};
+    use super::{line_is_gone, mod_declared_in, order_by_prefix};
     use crate::lsp::CompletionItem;
 
     /// The unlinked-file detector: every accepted `mod` declaration shape
@@ -799,5 +830,22 @@ mod tests {
         // Empty prefix preserves the server's order.
         let got = order_by_prefix(items(&["b", "a", "c"]), "");
         assert_eq!(labels(got), ["b", "a", "c"]);
+    }
+
+    /// Regression: a rustc diagnostic keeps the line it was computed for, so
+    /// after commenting that line out the squiggle used to sit on the comment
+    /// until the next Save re-ran cargo check.
+    #[test]
+    fn a_commented_or_deleted_line_counts_as_gone() {
+        let text = "fn a() {}
+    // was: foo(bar);
+
+fn b() {}
+";
+        assert!(!line_is_gone(text, 1), "real code stays");
+        assert!(line_is_gone(text, 2), "commented out");
+        assert!(line_is_gone(text, 3), "blank");
+        assert!(!line_is_gone(text, 4), "real code stays");
+        assert!(line_is_gone(text, 99), "past EOF - the line was deleted");
     }
 }

@@ -1708,10 +1708,20 @@ impl AppIde {
             .store(true, std::sync::atomic::Ordering::Release);
 
         // Same-frame snapshot of every file, so what reaches disk + RA is
-        // exactly what the user saved. "main.rs" first, in the bare-rel shape
-        // `write_workspace_file` expects (it prepends `src/`).
+        // exactly what the user saved. Every path here is PROJECT-ROOT-relative
+        // — the shape `write_workspace_file` writes and `did_change` sends to
+        // rust-analyzer. It used to be `src/`-relative with the prefix added by
+        // those two; main.rs was the one hardcoded entry, so when the prefixes
+        // moved out it silently became `<root>/main.rs`: cargo still compiled
+        // the real `src/main.rs`, but RA analysed a stray copy keyed `main.rs`,
+        // so nothing that looks diagnostics up by `src/main.rs` — inline
+        // squiggles, the Structure error badge, the RA tab's jump-to-error —
+        // found anything.
         let files: Vec<(String, String)> =
-            std::iter::once(("main.rs".to_owned(), self.generated_code.clone()))
+            std::iter::once((
+                crate::project_tree::logic::src_path("main.rs"),
+                self.generated_code.clone(),
+            ))
                 .chain(
                     self.project_tree
                         .user_src_files
