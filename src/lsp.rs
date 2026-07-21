@@ -128,8 +128,8 @@ pub struct CompletionItem {
     /// True when `insert_text` is an LSP snippet (`insertTextFormat == 2`,
     /// e.g. `foo(${1:a})$0`) — expanded on accept by `snippet::expand`.
     pub insert_is_snippet: bool,
-    /// Plain-text documentation (stripped from LSP `documentation` markdown).
-    /// Shown as a tooltip when the item is hovered.
+    /// Raw markdown documentation, exactly as rust-analyzer sent it (fences
+    /// included). Parsed for display by `editor_panel::doc_md`.
     pub documentation: String,
 }
 
@@ -2235,18 +2235,20 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
     let insert_is_snippet = v["insertTextFormat"].as_u64() == Some(2);
 
     // `documentation` can be a plain string or { kind: "markdown", value: "..." }.
-    // Strip leading `\`\`\`rust … \`\`\`` fences that rust-analyzer wraps code in.
+    // Kept as raw markdown: the completion detail panel parses it itself
+    // (`editor_panel::doc_md`) so it can draw code examples in monospace.
+    // Flattening the ``` fences here used to lose that distinction before the
+    // UI ever saw it — and with it the only way to tell a rustdoc hidden line
+    // (`# use std::fmt;` inside a fence) from a heading.
     let documentation = {
         let doc = &v["documentation"];
-        let raw = if let Some(s) = doc.as_str() {
-            s.to_owned()
+        if let Some(s) = doc.as_str() {
+            s.trim().to_owned()
         } else if let Some(s) = doc["value"].as_str() {
-            s.to_owned()
+            s.trim().to_owned()
         } else {
             String::new()
-        };
-        // Strip markdown code fences (```rust … ```) so text reads cleanly.
-        strip_md_fences(&raw)
+        }
     };
 
     Some(CompletionItem {
@@ -2257,33 +2259,6 @@ fn parse_completion_item(v: &serde_json::Value) -> Option<CompletionItem> {
         insert_is_snippet,
         documentation,
     })
-}
-
-/// Remove ` ```lang … ``` ` fences from a markdown string so it reads as
-/// plain text in a tooltip.
-fn strip_md_fences(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_fence = false;
-    for line in s.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            continue; // skip the fence line itself
-        }
-        if !in_fence {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(line);
-        } else {
-            // Inside a code fence: keep the code but strip leading indent.
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(trimmed);
-        }
-    }
-    out.trim().to_owned()
 }
 
 #[cfg(test)]

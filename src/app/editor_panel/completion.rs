@@ -5,6 +5,7 @@
 //! (`.`, `::`, Ctrl+Space), renders the completion popup, and finally draws
 //! the inline diagnostic overlays.
 
+use super::doc_md;
 use crate::app::{AppIde, ProjectFileId};
 use crate::editor::gui::{show_diagnostics_overlay, show_inlay_hint};
 use crate::editor::gui::text_pos::{
@@ -317,6 +318,39 @@ impl AppIde {
                     self.completion_note = None;
                     // Clamp selection into the visible filtered range.
                     self.completion_sel = self.completion_sel.min(filtered.len() - 1);
+
+                    // ── Wheel moves the SELECTION, not just the viewport ──────
+                    // The selected row calls `scroll_to_me` every frame, so a
+                    // freely scrolling viewport snaps straight back and the
+                    // wheel looks dead. Moving the selection instead makes the
+                    // list follow it.
+                    //
+                    // ONE notch = ONE item. This reads the raw `MouseWheel`
+                    // EVENTS, not `smooth_scroll_delta`: egui only exposes the
+                    // smoothed delta, which keeps decaying across several
+                    // frames, so stepping from it flew through three-plus items
+                    // per notch however it was scaled. One event = one notch.
+                    let notches: i32 = ui.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|e| match e {
+                                egui::Event::MouseWheel { delta, .. } if delta.y.abs() > 0.0 => {
+                                    Some(delta.y.signum() as i32)
+                                }
+                                _ => None,
+                            })
+                            .sum()
+                    });
+                    if notches != 0 {
+                        let last = filtered.len() - 1;
+                        self.completion_sel = if notches > 0 {
+                            // Positive y scrolls the CONTENT down, i.e. moves
+                            // towards the items above.
+                            self.completion_sel.saturating_sub(notches as usize)
+                        } else {
+                            (self.completion_sel + (-notches) as usize).min(last)
+                        };
+                    }
                     let sel = self.completion_sel;
 
                     // ── Popup screen position ────────────────────────────
@@ -429,24 +463,86 @@ impl AppIde {
                                                 row_resp.scroll_to_me(None);
                                             }
 
-                                            // Hover tooltip: documentation first,
-                                            // then full detail as fallback.
-                                            if !item.documentation.is_empty() {
-                                                row_resp.on_hover_text(
-                                                    egui::RichText::new(&item.documentation)
-                                                        .size(11.5),
-                                                );
-                                            } else if !item.detail.is_empty() {
-                                                row_resp.on_hover_text(
-                                                    egui::RichText::new(&item.detail)
-                                                        .monospace()
-                                                        .size(11.0),
-                                                );
-                                            }
+                                            // No hover tooltip: the panel to the
+                                            // right already shows the FOCUSED
+                                            // item's signature and docs. Two
+                                            // popups describing two different
+                                            // items at once was the confusing
+                                            // part.
                                         }
                                     }); // ScrollArea
                             }); // Frame
                         }); // Area
+
+                    // ── Detail panel, to the RIGHT of the focused item ────────
+                    // Was hover-only, which meant you had to leave the keyboard
+                    // to read the signature of the item you were already on.
+                    // Same anchor as the list + its width, so the two read as
+                    // one widget.
+                    if let Some(item) = filtered.get(sel) {
+                        if !item.detail.is_empty() || !item.documentation.is_empty() {
+                            const LIST_W: f32 = 440.0;
+                            egui::Area::new(egui::Id::new("lsp_completion_detail"))
+                                .fixed_pos(popup_pos + egui::vec2(LIST_W + 6.0, 0.0))
+                                .order(egui::Order::Foreground)
+                                .show(ui.ctx(), |ui| {
+                                    egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
+                                        ui.set_max_width(380.0);
+                                        // As tall as actually fits below the
+                                        // anchor — the old fixed 300 px cut
+                                        // documentation off for no reason,
+                                        // while the hover tooltip it replaced
+                                        // was screen-bounded and read better.
+                                        let room = (ui.ctx().content_rect().bottom()
+                                            - popup_pos.y
+                                            - 24.0)
+                                            .max(120.0);
+                                        // `max_height` ALONE is not enough, and
+                                        // silently does nothing here: ScrollArea
+                                        // takes `available_rect_before_wrap()
+                                        // .at_most(max_size)`, and an `Area`
+                                        // sizes its Ui from LAST frame's
+                                        // measured size. That latches — the
+                                        // panel can never grow past the height
+                                        // it first happened to measure (a short
+                                        // item's docs), so every later item was
+                                        // capped at that. `min_scrolled_height`
+                                        // is applied after the `at_most`, so it
+                                        // is the one knob that escapes the
+                                        // latch; `auto_shrink` still collapses
+                                        // the final rect when docs are short.
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("lsp_completion_detail_scroll")
+                                            .max_height(room)
+                                            .min_scrolled_height(room)
+                                            .auto_shrink([false, true])
+                                            .show(ui, |ui| {
+                                                // Signature first: monospace and
+                                                // tinted like a type, since that
+                                                // is what it usually is.
+                                                if !item.detail.is_empty() {
+                                                    ui.label(
+                                                        egui::RichText::new(&item.detail)
+                                                            .monospace()
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_rgb(
+                                                                150, 200, 255,
+                                                            )),
+                                                    );
+                                                }
+                                                if !item.detail.is_empty()
+                                                    && !item.documentation.is_empty()
+                                                {
+                                                    ui.separator();
+                                                }
+                                                if !item.documentation.is_empty() {
+                                                    render_doc(ui, &item.documentation);
+                                                }
+                                            });
+                                    });
+                                });
+                        }
+                    }
                 }
             }
             // all_items is empty: either RA hasn't responded yet, or
@@ -771,6 +867,94 @@ fn order_by_prefix(items: Vec<lsp::CompletionItem>, prefix: &str) -> Vec<lsp::Co
         .partition(|it| it.label.to_lowercase().starts_with(&pl));
     starts.extend(rest);
     starts
+}
+
+/// Draw rustdoc markdown in the completion detail panel.
+///
+/// Code examples get monospace on a tinted band: once the ` ``` ` fences are
+/// stripped they are otherwise indistinguishable from the prose around them,
+/// which is what made multi-paragraph docs hard to read. Parsing (including
+/// which lines are code at all) lives in `doc_md`.
+fn render_doc(ui: &mut egui::Ui, md: &str) {
+    // Prose stays the muted grey it always was; code borrows the editor's
+    // warmer tone so the two are separable at a glance.
+    const BODY: egui::Color32 = egui::Color32::from_rgb(200, 205, 215);
+    const HEADING: egui::Color32 = egui::Color32::from_rgb(238, 242, 250);
+    const CODE: egui::Color32 = egui::Color32::from_rgb(206, 214, 160);
+    const COMMENT: egui::Color32 = egui::Color32::from_rgb(126, 137, 150);
+    const CODE_BG: egui::Color32 = egui::Color32::from_rgb(38, 41, 48);
+
+    let lines = doc_md::parse_doc(md);
+    let mut i = 0;
+    while i < lines.len() {
+        match lines[i].kind {
+            doc_md::DocKind::Blank => {
+                ui.add_space(4.0);
+                i += 1;
+            }
+
+            // Consecutive code/comment lines form ONE band — a frame per line
+            // would draw a stack of separate boxes instead of a block.
+            doc_md::DocKind::Code | doc_md::DocKind::Comment => {
+                let start = i;
+                while i < lines.len()
+                    && matches!(
+                        lines[i].kind,
+                        doc_md::DocKind::Code | doc_md::DocKind::Comment
+                    )
+                {
+                    i += 1;
+                }
+                egui::Frame::new()
+                    .fill(CODE_BG)
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .corner_radius(3.0)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        for line in &lines[start..i] {
+                            let color = if line.kind == doc_md::DocKind::Comment {
+                                COMMENT
+                            } else {
+                                CODE
+                            };
+                            ui.label(
+                                egui::RichText::new(&line.text)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(color),
+                            );
+                        }
+                    });
+            }
+
+            // egui has no font-weight axis (`FontId` is size + family only), so
+            // heading levels separate by SIZE and brightness rather than by
+            // 700/900 weight. `strong()` only shifts colour.
+            doc_md::DocKind::Heading(level) => {
+                if i > 0 {
+                    ui.add_space(2.0);
+                }
+                let size = if level <= 1 { 13.0 } else { 12.0 };
+                ui.label(
+                    egui::RichText::new(&lines[i].text)
+                        .size(size)
+                        .strong()
+                        .color(HEADING),
+                );
+                i += 1;
+            }
+
+            doc_md::DocKind::Body => {
+                ui.label(
+                    egui::RichText::new(&lines[i].text)
+                        .size(11.0)
+                        .color(BODY),
+                );
+                i += 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

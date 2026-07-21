@@ -25,6 +25,7 @@ mod completion;
 mod context_menu;
 mod delete_line;
 mod diag_embed;
+mod doc_md;
 pub(crate) mod diff_gutter;
 mod duplicate_line;
 pub(crate) mod file_cycle;
