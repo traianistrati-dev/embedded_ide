@@ -22,9 +22,183 @@ pub fn identifier_at(text: &str, cursor: usize) -> String {
     chars[start..end].iter().collect()
 }
 
+/// 1-based line numbers where `name` still appears in `content` as a WHOLE
+/// word (not as part of a longer identifier).
+///
+/// Used to audit a finished rename. rust-analyzer's reference search does not
+/// reach every syntactic position — notably expressions inside a **const
+/// generic argument**, `Parser::<'a, R, 0, { CommandID::None.raw() }>`, which
+/// it lowers as a separate anonymous const body. Those occurrences are left
+/// behind, and the rename otherwise reports success, so the stale name is only
+/// discovered later as a compile error.
+///
+/// Deliberately textual and advisory: a hit may legitimately be a DIFFERENT
+/// symbol that shares the name (another type's `raw()`, a field, a word in a
+/// comment). It drives a warning the user can inspect — never an automatic
+/// edit.
+pub fn whole_word_lines(content: &str, name: &str) -> Vec<usize> {
+    if name.is_empty() {
+        return Vec::new();
+    }
+    let is_id = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    for (n, line) in content.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut from = 0usize;
+        while let Some(rel) = line[from..].find(name) {
+            let start = from + rel;
+            let end = start + name.len();
+            // Boundaries are checked on CHARS, so a multi-byte neighbour can't
+            // be mistaken for a word break.
+            let before_ok = start == 0
+                || !line[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_id);
+            let after_ok = end >= bytes.len() || !line[end..].chars().next().is_some_and(is_id);
+            if before_ok && after_ok {
+                out.push(n + 1);
+                break; // at most one hit per line, like the project search
+            }
+            from = end;
+        }
+    }
+    out
+}
+
+/// Replace `old` with `new` as a WHOLE WORD, but only on the given 1-based
+/// `lines`. Returns the new text and how many occurrences changed.
+///
+/// Scoped to the exact lines the user was shown and approved — a whole-file
+/// replace could touch occurrences that were never in the reviewed list.
+/// Line endings are preserved by rebuilding from the original separators.
+pub fn replace_whole_word_on_lines(
+    content: &str,
+    old: &str,
+    new: &str,
+    lines: &[usize],
+) -> (String, usize) {
+    if old.is_empty() || lines.is_empty() {
+        return (content.to_owned(), 0);
+    }
+    let is_id = |c: char| c.is_alphanumeric() || c == '_';
+    let mut count = 0usize;
+    let mut out = String::with_capacity(content.len());
+    // `split_inclusive` keeps each line's own terminator, so a file with no
+    // trailing newline stays that way.
+    for (idx, line) in content.split_inclusive('\n').enumerate() {
+        if !lines.contains(&(idx + 1)) {
+            out.push_str(line);
+            continue;
+        }
+        let mut rest = line;
+        while let Some(rel) = rest.find(old) {
+            let (before, after_start) = rest.split_at(rel);
+            let after = &after_start[old.len()..];
+            let before_ok = before.chars().next_back().is_none_or(|c| !is_id(c));
+            let after_ok = after.chars().next().is_none_or(|c| !is_id(c));
+            out.push_str(before);
+            if before_ok && after_ok {
+                out.push_str(new);
+                count += 1;
+            } else {
+                out.push_str(old);
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+    }
+    (out, count)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::identifier_at;
+    use super::{identifier_at, replace_whole_word_on_lines, whole_word_lines};
+
+    #[test]
+    fn line_scoped_replace_only_touches_listed_lines() {
+        let src = "a.raw();\nb.raw();\nc.raw();\n";
+        let (out, n) = replace_whole_word_on_lines(src, "raw", "as_u16", &[2]);
+        assert_eq!(out, "a.raw();\nb.as_u16();\nc.raw();\n");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn line_scoped_replace_skips_partial_words() {
+        let src = "raw_notes + draw() + raw();\n";
+        let (out, n) = replace_whole_word_on_lines(src, "raw", "as_u16", &[1]);
+        assert_eq!(out, "raw_notes + draw() + as_u16();\n");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn line_scoped_replace_handles_repeats_on_one_line() {
+        let (out, n) = replace_whole_word_on_lines("raw(); raw();\n", "raw", "x", &[1]);
+        assert_eq!(out, "x(); x();\n");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn line_scoped_replace_rewrites_the_const_generic_case() {
+        let src =
+            "let p = super::Parser::<'a, R, 0, { super::CommandID::None.raw() }>::new(&H, &T);\n";
+        let (out, n) = replace_whole_word_on_lines(src, "raw", "as_u16", &[1]);
+        assert!(out.contains("{ super::CommandID::None.as_u16() }"));
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn line_scoped_replace_preserves_a_missing_trailing_newline() {
+        let (out, _) = replace_whole_word_on_lines("raw()", "raw", "x", &[1]);
+        assert_eq!(out, "x()");
+        let (out2, _) = replace_whole_word_on_lines("raw()\n", "raw", "x", &[1]);
+        assert_eq!(out2, "x()\n");
+    }
+
+    #[test]
+    fn line_scoped_replace_is_a_no_op_without_targets() {
+        let (out, n) = replace_whole_word_on_lines("raw();\n", "raw", "x", &[]);
+        assert_eq!(out, "raw();\n");
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn leftover_scan_matches_only_whole_words() {
+        let src = "\
+let a = x.raw();
+let b = raw_notes;
+let c = draw();
+let d = obj.raw;
+";
+        // `raw_notes` and `draw` must NOT count; `.raw()` and `.raw` must.
+        assert_eq!(whole_word_lines(src, "raw"), vec![1, 4]);
+    }
+
+    #[test]
+    fn leftover_scan_finds_const_generic_position() {
+        // The exact shape rust-analyzer's rename misses.
+        let src =
+            "let p = super::Parser::<'a, R, 0, { super::CommandID::None.raw() }>::new(&H, &T);";
+        assert_eq!(whole_word_lines(src, "raw"), vec![1]);
+    }
+
+    #[test]
+    fn leftover_scan_reports_each_line_once() {
+        assert_eq!(whole_word_lines("raw(); raw(); raw();", "raw"), vec![1]);
+    }
+
+    #[test]
+    fn leftover_scan_survives_non_ascii_neighbours() {
+        // A multi-byte char next to the match must not panic or be read as a
+        // word character.
+        assert_eq!(whole_word_lines("// măsurat: raw() → ok", "raw"), vec![1]);
+    }
+
+    #[test]
+    fn leftover_scan_is_empty_for_a_clean_rename() {
+        assert!(whole_word_lines("let a = x.as_u16();", "raw").is_empty());
+        assert!(whole_word_lines("anything", "").is_empty());
+    }
 
     #[test]
     fn finds_identifier_around_cursor() {
@@ -108,6 +282,8 @@ impl AppIde {
             if new_name.is_empty() {
                 return;
             }
+            // Kept for the post-rename leftover audit (see `whole_word_lines`).
+            self.rename_new_name = new_name.clone();
             // Sync the current file to RA first (it may hold debounced-stale text),
             // then request the rename; the response is applied in init_frame.
             let rel = self.rename_rel.clone();

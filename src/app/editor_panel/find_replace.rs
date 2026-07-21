@@ -71,11 +71,52 @@ pub struct FindReplace {
     results: Vec<ProjectMatch>,
     /// `(start, end)` char range to select in the editor after it renders.
     pub pending_select: Option<(usize, usize)>,
+    /// Set only while the results list holds occurrences a rename could not
+    /// reach: the name to rename them TO. Drives the "Rename these too" button,
+    /// so that action can never appear for an ordinary search.
+    leftover_new_name: Option<String>,
 }
 
 impl FindReplace {
+    /// Show occurrences a rename left behind, as a normal project-search result
+    /// list the user can click through.
+    ///
+    /// Reuses this bar rather than inventing a notice widget: the leftovers are
+    /// exactly a "find in project" result, and they need to be NAVIGABLE — a
+    /// toast saying "2 occurrences remain" would make the user hunt for them.
+    /// Focus is deliberately NOT taken, so the warning can't swallow the next
+    /// keystroke.
+    pub fn show_rename_leftovers(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+        results: Vec<ProjectMatch>,
+    ) {
+        self.open = true;
+        self.mode = FindMode::FindProject;
+        self.query = old_name.to_owned();
+        self.focus_query = false;
+        self.focus_replace = false;
+        self.current = 0;
+        self.status = format!(
+            "{} rust-analyzer could not reach",
+            match results.len() {
+                1 => "1 occurrence".to_string(),
+                n => format!("{n} occurrences"),
+            }
+        );
+        self.results = results;
+        self.leftover_new_name = Some(new_name.to_owned());
+    }
+
+    /// The pending leftover rename target, if the results list is showing one.
+    fn leftover_target(&self) -> Option<&str> {
+        self.leftover_new_name.as_deref()
+    }
+
     /// Open (or re-target) the bar in `mode`, focusing the query field.
     pub fn open_with(&mut self, mode: FindMode) {
+        self.leftover_new_name = None;
         self.open = true;
         self.mode = mode;
         self.focus_query = true;
@@ -153,6 +194,7 @@ impl AppIde {
         let mut do_prev = false;
         let mut do_search = false;
         let mut do_replace_all = false;
+        let mut do_leftover_rename = false;
         let mut query_changed = false;
         let mut close = false;
         let mut clicked_result: Option<usize> = None;
@@ -242,6 +284,40 @@ impl AppIde {
                 });
             }
 
+            // ── Leftover-rename row ──
+            // Shown ONLY after a rename that rust-analyzer could not complete.
+            // The action is textual, so it stays behind an explicit click with
+            // the affected lines listed right below it — never automatic.
+            if let Some(new_name) = self.find.leftover_target().map(str::to_owned) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(
+                        egui::RichText::new(format!("{} Rename incomplete", ph::WARNING))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(230, 180, 90)),
+                    );
+                    if ui
+                        .button(format!("Rename these to \"{new_name}\""))
+                        .on_hover_text(
+                            "rust-analyzer cannot see inside a const-generic argument \
+                             (Parser::<.., { X::y() }>) — it reports no reference there, so \
+                             these were left behind.\n\nThis replaces the whole word on the \
+                             lines listed below. Review them first: a line may hold a \
+                             DIFFERENT symbol that happens to share the name.",
+                        )
+                        .clicked()
+                    {
+                        do_leftover_rename = true;
+                    }
+                    ui.label(
+                        egui::RichText::new("review the lines first")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140))
+                            .italics(),
+                    );
+                });
+            }
+
             // ── Results list (project modes) ──
             if mode.is_project() && !self.find.results.is_empty() {
                 ui.add_space(4.0);
@@ -282,6 +358,11 @@ impl AppIde {
                 self.selected_file = file;
                 self.pending_scroll_to_line = Some((file, line));
             }
+        }
+
+        if do_leftover_rename {
+            self.apply_leftover_rename(displayed_file, display_code);
+            return;
         }
 
         match mode {
@@ -387,6 +468,34 @@ impl AppIde {
     /// Every file the project search/replace spans: `(id, display_path, content)`.
     /// Config files that don't apply to the toolchain (empty `memory.x` /
     /// `build.rs` for ESP) are skipped.
+    /// Audit a just-finished rename: every project file is scanned for the OLD
+    /// name as a whole word, and anything still there is surfaced in the find
+    /// bar. Nothing is edited — see [`super::rename::whole_word_lines`] for why
+    /// this must stay advisory.
+    pub(in crate::app) fn report_rename_leftovers(&mut self, old_name: &str, new_name: &str) {
+        if old_name.is_empty() || new_name.is_empty() || old_name == new_name {
+            return;
+        }
+        let mut results = Vec::new();
+        for (id, path, content) in self.searchable_files() {
+            let lines: Vec<&str> = content.lines().collect();
+            for line_no in super::rename::whole_word_lines(&content, old_name) {
+                results.push(ProjectMatch {
+                    file: id,
+                    path: path.clone(),
+                    line: line_no,
+                    preview: lines
+                        .get(line_no - 1)
+                        .map(|l| l.trim().chars().take(140).collect())
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        if !results.is_empty() {
+            self.find.show_rename_leftovers(old_name, new_name, results);
+        }
+    }
+
     fn searchable_files(&self) -> Vec<(ProjectFileId, String, String)> {
         let mut v = vec![(
             ProjectFileId::MainRs,
@@ -410,6 +519,55 @@ impl AppIde {
         }
         v.push((ProjectFileId::GitIgnore, ".gitignore".into(), self.gitignore.clone()));
         v
+    }
+
+    /// Rename the leftover occurrences the user just approved — only the lines
+    /// currently listed in the results, only as whole words.
+    ///
+    /// `display_code` is re-synced afterwards for the same reason
+    /// [`Self::run_project_replace`] does it: the editor writes its buffer back
+    /// at end of frame and would otherwise revert the edit in the open file.
+    fn apply_leftover_rename(
+        &mut self,
+        displayed_file: ProjectFileId,
+        display_code: &mut String,
+    ) {
+        let Some(new_name) = self.find.leftover_new_name.clone() else {
+            return;
+        };
+        let old_name = self.find.query.clone();
+
+        // Group the approved lines per file before editing anything.
+        let mut per_file: Vec<(ProjectFileId, Vec<usize>)> = Vec::new();
+        for m in &self.find.results {
+            match per_file.iter_mut().find(|(id, _)| *id == m.file) {
+                Some((_, lines)) => lines.push(m.line),
+                None => per_file.push((m.file, vec![m.line])),
+            }
+        }
+
+        let mut total = 0usize;
+        let mut files = 0usize;
+        for (id, lines) in per_file {
+            let content = self.searchable_content(id);
+            let (updated, n) = super::rename::replace_whole_word_on_lines(
+                &content, &old_name, &new_name, &lines,
+            );
+            if n > 0 {
+                self.set_searchable_content(id, updated);
+                total += n;
+                files += 1;
+            }
+        }
+
+        if displayed_file != ProjectFileId::MainRs || total > 0 {
+            *display_code = self.searchable_content(displayed_file);
+        }
+
+        self.find.results.clear();
+        self.find.leftover_new_name = None;
+        self.find.query = new_name;
+        self.find.status = format!("Renamed {total} leftover(s) in {files} file(s)");
     }
 
     /// In-memory content of a searchable file by id.

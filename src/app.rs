@@ -676,6 +676,12 @@ pub struct AppIde {
     rename_active: bool,
     /// The new name being typed in the rename popup (pre-filled with the symbol).
     rename_input: String,
+    /// The symbol's name BEFORE the rename, captured when the popup opens, so
+    /// the applied edits can be audited for occurrences RA did not reach.
+    rename_old_name: String,
+    /// The name submitted in the rename popup, so leftovers can be offered the
+    /// same target.
+    rename_new_name: String,
     /// File + 0-based (line, char) where the rename was triggered.
     rename_rel: String,
     rename_line: u32,
@@ -1057,6 +1063,8 @@ impl AppIde {
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rename_active: false,
             rename_input: String::new(),
+            rename_old_name: String::new(),
+            rename_new_name: String::new(),
             rename_rel: String::new(),
             rename_line: 0,
             rename_char: 0,
@@ -1519,6 +1527,14 @@ impl AppIde {
                 self.rename_in_flight = false;
                 if !edits.is_empty() {
                     self.apply_rename_edits(edits);
+                    // RA's reference search does not reach every position (a
+                    // const-generic argument body is the known case), and it
+                    // reports success regardless — so the stale name would
+                    // otherwise surface much later as a compile error. Audit
+                    // and show what is left; never edit it automatically.
+                    let old = std::mem::take(&mut self.rename_old_name);
+                    let new = std::mem::take(&mut self.rename_new_name);
+                    self.report_rename_leftovers(&old, &new);
                 }
                 // Continue an "Apply all" / queued batch: fire the next rename. When
                 // the queue is drained, re-run clippy once so the list reflects all

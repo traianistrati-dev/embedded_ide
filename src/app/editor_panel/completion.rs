@@ -242,6 +242,9 @@ impl AppIde {
                     let (line, col) = lsp_cursor_pos(&display_code, idx);
                     self.rename_active = true;
                     self.rename_focus = true;
+                    // Kept so the finished rename can be audited for
+                    // occurrences rust-analyzer did not reach.
+                    self.rename_old_name = word.clone();
                     self.rename_input = word;
                     self.rename_rel = rel;
                     self.rename_line = line;
