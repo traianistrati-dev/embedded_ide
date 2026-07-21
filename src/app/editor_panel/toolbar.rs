@@ -317,9 +317,11 @@ impl AppIde {
                     .selectable_label(
                         collapsed,
                         egui::RichText::new(if collapsed {
-                            format!("{} Panels", ph::ARROWS_OUT_SIMPLE)
+                            // format!("{} Panels", ph::ARROWS_OUT_SIMPLE)
+                            ph::CARET_DOUBLE_LEFT
                         } else {
-                            format!("{} Panels", ph::ARROWS_IN_SIMPLE)
+                            // format!("{} Panels", ph::ARROWS_IN_SIMPLE)
+                            ph::CARET_RIGHT
                         })
                         .size(11.0)
                         .color(if collapsed {

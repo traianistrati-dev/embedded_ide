@@ -20,6 +20,10 @@ pub(super) struct ProjectPanelSignals {
     pub save_clicked: bool,
     /// Folder (relative to `src/`) the user asked to extract into its own crate.
     pub extract_folder: Option<String>,
+    /// The LIBRARIES "+" button was clicked — create an empty library crate.
+    pub new_library: bool,
+    /// `(crate dir, is_rename)` when a library's pen / trash icon was clicked.
+    pub library_action: Option<(String, bool)>,
 }
 
 impl AppIde {
@@ -114,6 +118,8 @@ impl AppIde {
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
         let mut extract_folder: Option<String> = None;
+        let mut new_library = false;
+        let mut library_action: Option<(String, bool)> = None;
 
         egui::Panel::right("project_tree")
             .resizable(true)
@@ -239,6 +245,9 @@ impl AppIde {
                             save_project_needed,
                             &mut extract_folder,
                             &lib_crates,
+                            &mut self.tree_split_ratio,
+                            &mut new_library,
+                            &mut library_action,
                         );
                     }
                     _ => {
@@ -259,6 +268,8 @@ impl AppIde {
             new_clicked: new_project_clicked,
             save_clicked: save_project_clicked,
             extract_folder,
+            new_library,
+            library_action,
         }
     }
 }

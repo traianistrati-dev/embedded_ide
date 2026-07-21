@@ -444,6 +444,11 @@ struct PersistedState {
     /// Bottom diagnostics panel reduced to its tab bar.
     #[serde(default)]
     diag_collapsed: bool,
+    /// Share of the project tree's height given to the main project, above the
+    /// LIBRARIES section. `0.0` (the serde default) means "never set" and is
+    /// replaced by the 60% default on load.
+    #[serde(default)]
+    tree_split_ratio: f32,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -825,8 +830,13 @@ pub struct AppIde {
     /// button right of "More"). The bar itself always stays visible — only the
     /// tab CONTENT is hidden. Persisted across restarts.
     diag_collapsed: bool,
+    /// Share of the project tree's height for the main project vs LIBRARIES,
+    /// dragged via the splitter between them. Persisted across restarts.
+    tree_split_ratio: f32,
     /// Open "Extract to library crate" dialog, if any.
     extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
+    /// Open delete/rename confirmation for a library crate, if any.
+    library_action: Option<extract_crate_dialog::LibraryActionDialog>,
     /// `true` while the "unsaved changes" prompt is up (close was cancelled).
     exit_prompt: bool,
     /// Set once the user has decided, so the close we send isn't intercepted
@@ -1106,7 +1116,15 @@ impl AppIde {
             git_discard_all_confirm: false,
             side_panels_collapsed: persisted.side_panels_collapsed,
             diag_collapsed: persisted.diag_collapsed,
+            // 0.0 = absent from an older build's state; clamp keeps a corrupt
+            // value from collapsing one half to nothing.
+            tree_split_ratio: if persisted.tree_split_ratio <= 0.0 {
+                0.6
+            } else {
+                persisted.tree_split_ratio.clamp(0.15, 0.85)
+            },
             extract_crate: None,
+            library_action: None,
             exit_prompt: false,
             allow_close: false,
             close_after_save: false,
@@ -1851,6 +1869,7 @@ impl eframe::App for AppIde {
                     .map(String::from),
                 side_panels_collapsed: self.side_panels_collapsed,
                 diag_collapsed: self.diag_collapsed,
+                tree_split_ratio: self.tree_split_ratio,
             },
         );
     }
@@ -2007,7 +2026,19 @@ impl eframe::App for AppIde {
         let save_project_clicked = signals.save_clicked;
         // "Extract to library crate…" on a tree folder → open the dialog.
         if let Some(folder) = signals.extract_folder {
-            self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::new(folder));
+            self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::extract(folder));
+        }
+        // LIBRARIES "+" → the same dialog, in create-an-empty-library mode.
+        if signals.new_library {
+            self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::new_library());
+        }
+        // A library's pen / trash icon → the confirmation dialog.
+        if let Some((dir, is_rename)) = signals.library_action {
+            self.library_action = Some(extract_crate_dialog::LibraryActionDialog {
+                rename_to: is_rename.then(|| dir.clone()),
+                dir,
+                error: None,
+            });
         }
 
         // ── Handle toolbar button clicks ──────────────────────────────────────
@@ -2145,6 +2176,7 @@ impl eframe::App for AppIde {
         self.show_mcu_form_dialog(ui);
         self.show_git_discard_dialog(ui);
         self.show_extract_crate_dialog(ui);
+        self.show_library_action_dialog(ui);
         self.show_exit_prompt(ui);
 
         // Write the entire project to the workspace directory when the file

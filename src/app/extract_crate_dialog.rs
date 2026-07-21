@@ -9,21 +9,26 @@ use crate::project_tree::extract_crate::{self, CrateMeta, ExtractPlan};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
-/// Open dialog state: which folder, and the manifest fields being edited.
+/// Open dialog state: the manifest fields being edited, plus which job this is.
+///
+/// One dialog for both jobs because they collect exactly the same thing — a
+/// [`CrateMeta`]. `folder` is what distinguishes them: `Some` extracts that
+/// folder, `None` creates an empty library.
 pub(crate) struct ExtractCrateDialog {
-    /// Folder path relative to the project root (e.g. `src/mw_radar`).
-    pub folder: String,
+    /// Folder to extract (project-root-relative, e.g. `src/mw_radar`), or
+    /// `None` for a brand-new empty library.
+    pub folder: Option<String>,
     pub meta: CrateMeta,
     /// Set when applying failed (writing files, no project on disk, …).
     pub error: Option<String>,
 }
 
 impl ExtractCrateDialog {
-    pub(crate) fn new(folder: String) -> Self {
+    pub(crate) fn extract(folder: String) -> Self {
         // Default the crate name to the folder's own name.
         let name = folder.rsplit('/').next().unwrap_or(&folder).to_owned();
         Self {
-            folder,
+            folder: Some(folder),
             meta: CrateMeta {
                 name,
                 ..Default::default()
@@ -31,27 +36,284 @@ impl ExtractCrateDialog {
             error: None,
         }
     }
+
+    pub(crate) fn new_library() -> Self {
+        Self {
+            folder: None,
+            meta: CrateMeta::default(),
+            error: None,
+        }
+    }
+}
+
+/// Confirmation for deleting or renaming an existing library crate.
+pub(crate) struct LibraryActionDialog {
+    /// The crate's directory, project-root-relative (`mw_radar`).
+    pub dir: String,
+    /// `Some(new_name)` renames; `None` deletes.
+    pub rename_to: Option<String>,
+    pub error: Option<String>,
 }
 
 impl AppIde {
+    /// Delete / rename confirmation for a library crate.
+    pub(super) fn show_library_action_dialog(&mut self, ui: &egui::Ui) {
+        let Some(dlg) = &mut self.library_action else {
+            return;
+        };
+        let dir = dlg.dir.clone();
+        let is_rename = dlg.rename_to.is_some();
+        let mut close = false;
+        let mut confirmed = false;
+
+        // Both plans are pure and cheap, so they are recomputed every frame and
+        // the preview can never disagree with what the button will do.
+        let del_plan = (!is_rename).then(|| {
+            extract_crate::plan_delete_crate(
+                &dir,
+                &self.project_tree.user_src_files,
+                &self.generated_code,
+                &self.cargo_toml,
+            )
+        });
+        let ren_plan = dlg.rename_to.as_ref().map(|n| {
+            extract_crate::plan_rename_crate(
+                &dir,
+                n,
+                &self.project_tree.user_src_files,
+                &self.generated_code,
+                &self.cargo_toml,
+            )
+        });
+
+        egui::Window::new(if is_rename {
+            format!("Rename library `{dir}`")
+        } else {
+            format!("Delete library `{dir}`?")
+        })
+        .id(egui::Id::new("library_action_dialog"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            ui.set_width(460.0);
+            if let Some(name) = &mut dlg.rename_to {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("New name").size(11.0));
+                    ui.text_edit_singleline(name);
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "The folder, its Cargo.toml name, the workspace entry and every \
+                         `use` of the old name are updated together.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(160)),
+                );
+            } else if let Some(p) = &del_plan {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} {}/ and its {} file(s) are deleted from disk, and the \
+                         workspace entry + path dependency are removed.",
+                        ph::WARNING,
+                        dir,
+                        p.removed_files.len()
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(230, 160, 90)),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("This cannot be undone from the IDE.")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(230, 130, 90)),
+                );
+                if !p.warnings.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Still used here — the build will break:")
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(230, 180, 80)),
+                    );
+                    for w in &p.warnings {
+                        ui.label(
+                            egui::RichText::new(format!("{} {w}", ph::DOT))
+                                .size(10.0)
+                                .color(egui::Color32::from_rgb(200, 190, 150)),
+                        );
+                    }
+                }
+            }
+
+            let err = dlg
+                .error
+                .clone()
+                .or_else(|| match &ren_plan {
+                    Some(Err(e)) => Some(e.clone()),
+                    _ => None,
+                });
+            if let Some(e) = &err {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("{} {e}", ph::X_CIRCLE))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(230, 90, 80)),
+                );
+            }
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let (label, color) = if is_rename {
+                    ("Rename", egui::Color32::from_rgb(120, 200, 140))
+                } else {
+                    ("Delete", egui::Color32::from_rgb(230, 110, 90))
+                };
+                let can = !matches!(&ren_plan, Some(Err(_)));
+                if ui
+                    .add_enabled(
+                        can,
+                        egui::Button::new(egui::RichText::new(label).color(color)),
+                    )
+                    .clicked()
+                {
+                    confirmed = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+
+        if confirmed {
+            let outcome = match (del_plan, ren_plan) {
+                (Some(p), _) => Some(self.apply_delete_crate(p)),
+                (_, Some(Ok(p))) => Some(self.apply_rename_crate(p)),
+                _ => None,
+            };
+            match outcome {
+                Some(Ok(())) => close = true,
+                Some(Err(e)) => {
+                    if let Some(d) = &mut self.library_action {
+                        d.error = Some(e);
+                    }
+                }
+                None => {}
+            }
+        }
+        if close {
+            self.library_action = None;
+        }
+    }
+
+    fn apply_delete_crate(
+        &mut self,
+        plan: extract_crate::DeleteCratePlan,
+    ) -> Result<(), String> {
+        let root = self.require_project_dir()?;
+        std::fs::remove_dir_all(root.join(&plan.crate_dir))
+            .map_err(|e| format!("Could not delete {}: {e}", plan.crate_dir))?;
+        self.project_tree
+            .user_src_files
+            .retain(|(p, _)| !plan.removed_files.contains(p));
+        let sub = format!("{}/", plan.crate_dir);
+        self.project_tree
+            .user_src_folders
+            .retain(|f| f != &plan.crate_dir && !f.starts_with(&sub));
+        self.cargo_toml = plan.root_cargo_toml;
+        self.reselect_after_tree_change();
+        self.request_save = true;
+        Ok(())
+    }
+
+    fn apply_rename_crate(
+        &mut self,
+        plan: extract_crate::RenameCratePlan,
+    ) -> Result<(), String> {
+        let root = self.require_project_dir()?;
+        std::fs::rename(root.join(&plan.old_dir), root.join(&plan.new_dir))
+            .map_err(|e| format!("Could not rename {}: {e}", plan.old_dir))?;
+        for (old, new) in &plan.moved {
+            if let Some(e) = self
+                .project_tree
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == old)
+            {
+                e.0 = new.clone();
+            }
+        }
+        let sub = format!("{}/", plan.old_dir);
+        for f in &mut self.project_tree.user_src_folders {
+            if *f == plan.old_dir {
+                *f = plan.new_dir.clone();
+            } else if let Some(rest) = f.strip_prefix(&sub) {
+                *f = format!("{}/{rest}", plan.new_dir);
+            }
+        }
+        for (path, content) in &plan.rewritten {
+            if let Some(e) = self
+                .project_tree
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == path)
+            {
+                e.1 = content.clone();
+            }
+        }
+        if let Some(main) = plan.rewritten_main {
+            self.generated_code = main;
+        }
+        self.cargo_toml = plan.root_cargo_toml;
+        self.cached_project_files = None;
+        self.request_save = true;
+        Ok(())
+    }
+
+    /// Drop a selection that pointed into files just removed.
+    fn reselect_after_tree_change(&mut self) {
+        if let ProjectFileId::UserFile(i) = self.selected_file {
+            if i >= self.project_tree.user_src_files.len() {
+                self.selected_file = ProjectFileId::MainRs;
+            }
+        }
+        self.cached_project_files = None;
+    }
+
     pub(super) fn show_extract_crate_dialog(&mut self, ui: &egui::Ui) {
         let Some(dlg) = &mut self.extract_crate else {
             return;
         };
-        // Recomputed every frame so the preview and the Extract button always
-        // agree with what is actually in the fields.
-        let plan = extract_crate::plan_extract(
-            &dlg.folder,
-            &self.project_tree.user_src_files,
-            &self.generated_code,
-            &self.cargo_toml,
-            &dlg.meta,
-        );
+        // Recomputed every frame so the preview and the button always agree
+        // with what is actually in the fields. Exactly one of the two plans is
+        // built, decided by whether a source folder was given.
         let folder = dlg.folder.clone();
+        let extract_plan = folder.as_ref().map(|f| {
+            extract_crate::plan_extract(
+                f,
+                &self.project_tree.user_src_files,
+                &self.generated_code,
+                &self.cargo_toml,
+                &dlg.meta,
+            )
+        });
+        let new_plan = if folder.is_none() {
+            Some(extract_crate::plan_new_crate(&dlg.meta, &self.cargo_toml))
+        } else {
+            None
+        };
+        let error_text = match (&extract_plan, &new_plan) {
+            (Some(Err(e)), _) | (_, Some(Err(e))) => Some(e.clone()),
+            _ => None,
+        };
+        let title = match &folder {
+            Some(f) => format!("Extract `{f}/` to a library crate"),
+            None => "New library crate".to_owned(),
+        };
         let mut close = false;
         let mut confirmed = false;
 
-        egui::Window::new(format!("Extract `{folder}/` to a library crate"))
+        egui::Window::new(title)
             .id(egui::Id::new("extract_crate_dialog"))
             .collapsible(false)
             .resizable(false)
@@ -84,15 +346,29 @@ impl AppIde {
                     .on_hover_text("Adds `#![no_std]` to the generated lib.rs.");
                 ui.add_space(8.0);
 
-                match &plan {
-                    Err(e) => {
-                        ui.label(
-                            egui::RichText::new(format!("{} {e}", ph::WARNING))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(230, 130, 90)),
-                        );
-                    }
-                    Ok(p) => {
+                if let Some(e) = &error_text {
+                    ui.label(
+                        egui::RichText::new(format!("{} {e}", ph::WARNING))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(230, 130, 90)),
+                    );
+                }
+                if let Some(p) = new_plan.as_ref().and_then(|r| r.as_ref().ok()) {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} creates {}/Cargo.toml + {}/src/lib.rs, and adds it \
+                             to the workspace",
+                            ph::ARROW_RIGHT,
+                            p.crate_dir,
+                            p.crate_dir,
+                        ))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(140, 190, 240)),
+                    );
+                }
+                match extract_plan.as_ref() {
+                    None | Some(Err(_)) => {}
+                    Some(Ok(p)) => {
                         // No raw Unicode arrows/bullets anywhere in the UI: only
                         // the phosphor glyphs are in the loaded font, a literal
                         // `→` renders as a tofu square.
@@ -144,12 +420,13 @@ impl AppIde {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    let can = plan.is_ok();
+                    let can = error_text.is_none();
+                    let label = if folder.is_some() { "Extract" } else { "Create" };
                     if ui
                         .add_enabled(
                             can,
                             egui::Button::new(
-                                egui::RichText::new(format!("{} Extract", ph::PACKAGE))
+                                egui::RichText::new(format!("{} {label}", ph::PACKAGE))
                                     .color(egui::Color32::from_rgb(120, 200, 140)),
                             ),
                         )
@@ -164,20 +441,92 @@ impl AppIde {
             });
 
         if confirmed {
-            if let Ok(p) = plan {
-                match self.apply_extract_crate(p) {
-                    Ok(()) => close = true,
-                    Err(e) => {
-                        if let Some(d) = &mut self.extract_crate {
-                            d.error = Some(e);
-                        }
+            let outcome = match (extract_plan, new_plan) {
+                (Some(Ok(p)), _) => Some(self.apply_extract_crate(p)),
+                (_, Some(Ok(p))) => Some(self.apply_new_crate(p)),
+                _ => None,
+            };
+            match outcome {
+                Some(Ok(())) => close = true,
+                Some(Err(e)) => {
+                    if let Some(d) = &mut self.extract_crate {
+                        d.error = Some(e);
                     }
                 }
+                None => {}
             }
         }
         if close {
             self.extract_crate = None;
         }
+    }
+
+    /// Create an empty library crate: write it, register it, wire the manifest.
+    fn apply_new_crate(&mut self, plan: extract_crate::NewCratePlan) -> Result<(), String> {
+        let root = self.require_project_dir()?;
+        self.write_and_register(&root, &plan.new_files)?;
+        for dir in [plan.crate_dir.clone(), format!("{}/src", plan.crate_dir)] {
+            if !self.project_tree.user_src_folders.contains(&dir) {
+                self.project_tree.user_src_folders.push(dir);
+            }
+        }
+        self.cargo_toml = plan.root_cargo_toml;
+        self.cached_project_files = None;
+        // Open the new lib.rs so there is somewhere obvious to start typing.
+        let lib = format!("{}/src/lib.rs", plan.crate_dir);
+        if let Some(i) = self
+            .project_tree
+            .user_src_files
+            .iter()
+            .position(|(p, _)| *p == lib)
+        {
+            self.selected_file = ProjectFileId::UserFile(i);
+        }
+        self.request_save = true;
+        Ok(())
+    }
+
+    /// The project directory, or the reason there isn't one.
+    fn require_project_dir(&self) -> Result<std::path::PathBuf, String> {
+        self.project_dir.clone().ok_or_else(|| {
+            "Save the project first — the crate is written next to it on disk.".to_owned()
+        })
+    }
+
+    /// Write `files` to disk AND take ownership of them in the tree.
+    ///
+    /// Both halves are mandatory: `write_project` prunes every `.rs` under the
+    /// root that is not in `user_src_files`, so a crate known only to the disk
+    /// is DELETED by the next save or build.
+    fn write_and_register(
+        &mut self,
+        root: &std::path::Path,
+        files: &[(String, String)],
+    ) -> Result<(), String> {
+        for (rel, content) in files {
+            let dest = root.join(rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
+            }
+            std::fs::write(&dest, content)
+                .map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
+        }
+        for (rel, content) in files {
+            if let Some(e) = self
+                .project_tree
+                .user_src_files
+                .iter_mut()
+                .find(|(p, _)| p == rel)
+            {
+                e.1 = content.clone(); // overwriting an existing crate
+            } else {
+                self.project_tree
+                    .user_src_files
+                    .push((rel.clone(), content.clone()));
+            }
+        }
+        Ok(())
     }
 
     /// Perform the plan: register the new crate, drop the moved files, apply
@@ -189,38 +538,8 @@ impl AppIde {
     /// that is not in that list, so a crate known only to the disk would be
     /// DELETED by the next save or build.
     fn apply_extract_crate(&mut self, plan: ExtractPlan) -> Result<(), String> {
-        let Some(root) = self.project_dir.clone() else {
-            return Err(
-                "Save the project first — the new crate is written next to it on disk."
-                    .to_owned(),
-            );
-        };
-
-        for (rel, content) in &plan.new_files {
-            let dest = root.join(rel);
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
-            }
-            std::fs::write(&dest, content)
-                .map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
-        }
-
-        // Take ownership of the new crate in the tree model.
-        for (rel, content) in &plan.new_files {
-            if let Some(e) = self
-                .project_tree
-                .user_src_files
-                .iter_mut()
-                .find(|(p, _)| p == rel)
-            {
-                e.1 = content.clone(); // re-extraction over an existing crate
-            } else {
-                self.project_tree
-                    .user_src_files
-                    .push((rel.clone(), content.clone()));
-            }
-        }
+        let root = self.require_project_dir()?;
+        self.write_and_register(&root, &plan.new_files)?;
         for dir in [plan.crate_dir.clone(), format!("{}/src", plan.crate_dir)] {
             if !self.project_tree.user_src_folders.contains(&dir) {
                 self.project_tree.user_src_folders.push(dir);

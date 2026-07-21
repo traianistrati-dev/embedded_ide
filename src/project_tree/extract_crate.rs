@@ -74,19 +74,10 @@ pub fn crate_ident(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// Build the plan for extracting `folder` (a path relative to the PROJECT
-/// ROOT, e.g. `src/mw_radar`, no trailing slash) into a crate from `meta`.
-///
-/// `Err` when the request cannot work at all — an empty folder, a bad name, or
-/// a directory that already exists in the manifest.
-pub fn plan_extract(
-    folder: &str,
-    user_files: &[(String, String)],
-    main_rs: &str,
-    root_cargo_toml: &str,
-    meta: &CrateMeta,
-) -> Result<ExtractPlan, String> {
-    let name = meta.name.trim();
+/// The trimmed crate name, or why it cannot be one. Shared by extraction and
+/// by creating an empty library so both reject the same things.
+fn validate_crate_name(raw: &str) -> Result<&str, String> {
+    let name = raw.trim();
     if name.is_empty() {
         return Err("Crate name is required.".to_owned());
     }
@@ -99,6 +90,223 @@ pub fn plan_extract(
     if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         return Err("Crate name cannot start with a digit.".to_owned());
     }
+    Ok(name)
+}
+
+/// A brand-new, empty library crate: the manifest plus a `lib.rs` stub.
+#[derive(Clone, Debug)]
+pub struct NewCratePlan {
+    pub crate_dir: String,
+    /// Files to create, as paths relative to the PROJECT ROOT.
+    pub new_files: Vec<(String, String)>,
+    /// Root `Cargo.toml` with the workspace member + path dependency added.
+    pub root_cargo_toml: String,
+}
+
+/// Plan an empty library crate next to `src/`.
+///
+/// Same manifest as an extracted crate (so a library created here and one
+/// extracted from existing code are indistinguishable afterwards), and the same
+/// idempotent root-manifest patch — including the `[dependencies]` entry, so
+/// the firmware can `use` it straight away.
+pub fn plan_new_crate(meta: &CrateMeta, root_cargo_toml: &str) -> Result<NewCratePlan, String> {
+    let name = validate_crate_name(&meta.name)?;
+    let dir = name.to_owned();
+    let ident = crate_ident(name);
+
+    let mut lib = String::new();
+    if meta.no_std {
+        lib.push_str("#![no_std]\n\n");
+    }
+    lib.push_str(&format!(
+        "//! `{name}` — library crate of this project.\n\
+         //!\n\
+         //! Reach it from the firmware as `{ident}::…`.\n\n\
+         // Declare your modules here, one per file in this folder:\n\
+         //   pub mod driver;\n"
+    ));
+
+    Ok(NewCratePlan {
+        new_files: vec![
+            (format!("{dir}/Cargo.toml"), member_cargo_toml(meta)),
+            (format!("{dir}/src/lib.rs"), lib),
+        ],
+        root_cargo_toml: patch_root_manifest(root_cargo_toml, &dir, name),
+        crate_dir: dir,
+    })
+}
+
+/// Removing a library crate: what to delete and the manifest without it.
+#[derive(Clone, Debug, Default)]
+pub struct DeleteCratePlan {
+    pub crate_dir: String,
+    /// Project-root-relative paths to drop from `user_src_files`.
+    pub removed_files: Vec<String>,
+    pub root_cargo_toml: String,
+    /// Files that still mention the crate — the build will break until they are
+    /// fixed, so the user is told before confirming.
+    pub warnings: Vec<String>,
+}
+
+/// Plan removing library `dir`: its files, its workspace membership and its
+/// path dependency.
+pub fn plan_delete_crate(
+    dir: &str,
+    user_files: &[(String, String)],
+    main_rs: &str,
+    root_cargo_toml: &str,
+) -> DeleteCratePlan {
+    let prefix = format!("{dir}/");
+    let ident = crate_ident(dir);
+    let uses = format!("{ident}::");
+
+    let mut warnings = Vec::new();
+    for (path, content) in user_files
+        .iter()
+        .filter(|(p, _)| !p.starts_with(&prefix))
+        .chain(std::iter::once(&("src/main.rs".to_owned(), main_rs.to_owned())))
+    {
+        if content.contains(&uses) {
+            warnings.push(format!("{path} still refers to `{ident}::…`"));
+        }
+    }
+
+    DeleteCratePlan {
+        crate_dir: dir.to_owned(),
+        removed_files: user_files
+            .iter()
+            .filter(|(p, _)| p.starts_with(&prefix))
+            .map(|(p, _)| p.clone())
+            .collect(),
+        root_cargo_toml: unpatch_root_manifest(root_cargo_toml, dir, dir),
+        warnings,
+    }
+}
+
+/// Renaming a library crate.
+#[derive(Clone, Debug, Default)]
+pub struct RenameCratePlan {
+    pub old_dir: String,
+    pub new_dir: String,
+    /// `(old path, new path)` for every file of the crate.
+    pub moved: Vec<(String, String)>,
+    /// Sources outside the crate whose `old::` references were rewritten.
+    pub rewritten: Vec<(String, String)>,
+    pub rewritten_main: Option<String>,
+    pub root_cargo_toml: String,
+}
+
+/// Plan renaming library `dir` to `new_name`.
+///
+/// Rewrites `old_ident::` to `new_ident::` everywhere outside the crate —
+/// without that the rename would silently break every use site.
+pub fn plan_rename_crate(
+    dir: &str,
+    new_name: &str,
+    user_files: &[(String, String)],
+    main_rs: &str,
+    root_cargo_toml: &str,
+) -> Result<RenameCratePlan, String> {
+    let new_name = validate_crate_name(new_name)?;
+    if new_name == dir {
+        return Err("That is already the crate's name.".to_owned());
+    }
+    let (old_ident, new_ident) = (crate_ident(dir), crate_ident(new_name));
+    let prefix = format!("{dir}/");
+
+    let mut plan = RenameCratePlan {
+        old_dir: dir.to_owned(),
+        new_dir: new_name.to_owned(),
+        // Members and the dependency are re-pointed in one pass.
+        root_cargo_toml: unpatch_root_manifest(root_cargo_toml, dir, new_name),
+        ..Default::default()
+    };
+    plan.root_cargo_toml = patch_root_manifest(&plan.root_cargo_toml, new_name, new_name);
+
+    for (path, content) in user_files {
+        if let Some(rest) = path.strip_prefix(&prefix) {
+            let new_path = format!("{new_name}/{rest}");
+            // The crate's own manifest carries its name.
+            let body = if rest == "Cargo.toml" {
+                content.replacen(
+                    &format!("\"{dir}\""),
+                    &format!("\"{new_name}\""),
+                    1,
+                )
+            } else {
+                content.clone()
+            };
+            plan.moved.push((path.clone(), new_path.clone()));
+            if body != *content {
+                plan.rewritten.push((new_path, body));
+            }
+        } else {
+            let new = content.replace(&format!("{old_ident}::"), &format!("{new_ident}::"));
+            if new != *content {
+                plan.rewritten.push((path.clone(), new));
+            }
+        }
+    }
+    let new_main = main_rs.replace(&format!("{old_ident}::"), &format!("{new_ident}::"));
+    if new_main != main_rs {
+        plan.rewritten_main = Some(new_main);
+    }
+    Ok(plan)
+}
+
+/// Drop `dir` from `[workspace] members` and remove its `[dependencies.<name>]`
+/// block. `name` is normally the same as `dir`; renaming passes the NEW name so
+/// the old entries go and [`patch_root_manifest`] can add the new ones.
+fn unpatch_root_manifest(existing: &str, dir: &str, _name: &str) -> String {
+    let mut out = String::with_capacity(existing.len());
+    let mut skipping = false;
+    for line in existing.lines() {
+        let t = line.trim();
+        // A `[dependencies.<dir>]` block runs until the next section header.
+        if skipping {
+            if t.starts_with('[') {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        if t == format!("[dependencies.{dir}]") {
+            skipping = true;
+            continue;
+        }
+        if t.starts_with("members") && t.contains(&format!("\"{dir}\"")) {
+            let cleaned = drop_member(line, dir);
+            out.push_str(&cleaned);
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Remove `"dir"` (and its separator) from a `members = [...]` line.
+fn drop_member(line: &str, dir: &str) -> String {
+    let quoted = format!("\"{dir}\"");
+    line.replace(&format!("{quoted}, "), "")
+        .replace(&format!(", {quoted}"), "")
+        .replace(&quoted, "")
+}
+
+/// Build the plan for extracting `folder` (a path relative to the PROJECT
+/// ROOT, e.g. `src/mw_radar`, no trailing slash) into a crate from `meta`.
+///
+/// `Err` when the request cannot work at all — an empty folder, a bad name, or
+/// a directory that already exists in the manifest.
+pub fn plan_extract(
+    folder: &str,
+    user_files: &[(String, String)],
+    main_rs: &str,
+    root_cargo_toml: &str,
+    meta: &CrateMeta,
+) -> Result<ExtractPlan, String> {
+    let name = validate_crate_name(&meta.name)?;
 
     let prefix = format!("{folder}/");
     let moved: Vec<&(String, String)> = user_files
@@ -324,13 +532,17 @@ fn patch_root_manifest(existing: &str, crate_dir: &str, name: &str) -> String {
 
     let members = crate::panels::mcu_module::project_gen::workspace_members(existing);
     if !members.iter().any(|m| m == crate_dir) {
-        if members.is_empty() {
+        // Whether a `members` list EXISTS, not whether it has entries. An empty
+        // one (`members = []`, what unpatching the last crate leaves behind)
+        // must be extended in place — treating it as "no workspace" appended a
+        // SECOND `[workspace]` table, which is a TOML redefinition error, and
+        // every rename stacked another one.
+        if has_members_list(existing) {
+            out = extend_members_list(&out, crate_dir);
+        } else {
             out.push_str(&format!(
                 "\n\n[workspace]\nmembers = [\"{crate_dir}\"]\n"
             ));
-        } else {
-            // A members list exists — extend it in place.
-            out = extend_members_list(&out, crate_dir);
         }
     }
     if !out.contains(&format!("[dependencies.{name}]")) {
@@ -339,6 +551,26 @@ fn patch_root_manifest(existing: &str, crate_dir: &str, name: &str) -> String {
         ));
     }
     out
+}
+
+/// `true` when the manifest already has a `members = …` line under
+/// `[workspace]` — even an empty one.
+fn has_members_list(cargo_toml: &str) -> bool {
+    let mut in_workspace = false;
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_workspace = t == "[workspace]";
+            continue;
+        }
+        if in_workspace
+            && t.strip_prefix("members")
+                .is_some_and(|r| r.trim_start().starts_with('='))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Insert `crate_dir` into an existing `members = [...]` array.
@@ -592,6 +824,188 @@ mod tests {
             .map(|(_, c)| c.clone())
             .unwrap();
         assert_eq!(lib2.matches("#![no_std]").count(), 1, "{lib2}");
+    }
+
+    /// A new empty library must be indistinguishable from an extracted one:
+    /// same manifest (including the `[lib]` harness switches) and the same
+    /// idempotent root patch.
+    #[test]
+    fn a_new_crate_matches_an_extracted_one() {
+        let root = "[package]\nname = \"p\"\n\n[dependencies]\ncortex-m = \"0.7\"\n";
+        let p = plan_new_crate(&meta(), root).unwrap();
+
+        let manifest = p
+            .new_files
+            .iter()
+            .find(|(a, _)| a == "mw_radar/Cargo.toml")
+            .map(|(_, c)| c.clone())
+            .expect("manifest");
+        assert!(manifest.contains("name        = \"mw_radar\""), "{manifest}");
+        assert!(manifest.contains("test    = false"), "{manifest}");
+
+        let lib = p
+            .new_files
+            .iter()
+            .find(|(a, _)| a == "mw_radar/src/lib.rs")
+            .map(|(_, c)| c.clone())
+            .expect("lib.rs stub");
+        assert!(lib.starts_with("#![no_std]"), "{lib}");
+
+        // Wired into the workspace AND usable from the firmware immediately.
+        assert!(p.root_cargo_toml.contains("[workspace]"));
+        assert!(p.root_cargo_toml.contains("[dependencies.mw_radar]"));
+        assert_eq!(
+            p.root_cargo_toml.matches("[dependencies]").count(),
+            1,
+            "must not open a second [dependencies] table"
+        );
+    }
+
+    #[test]
+    fn a_new_crate_rejects_the_same_names_extraction_does() {
+        let bad = CrateMeta {
+            name: "mw radar".to_owned(),
+            ..meta()
+        };
+        assert!(plan_new_crate(&bad, "").is_err());
+        let digit = CrateMeta {
+            name: "1radar".to_owned(),
+            ..meta()
+        };
+        assert!(plan_new_crate(&digit, "").is_err());
+    }
+
+    /// Deleting must undo everything the extraction wired up, or the manifest
+    /// keeps pointing at a directory that is gone and cargo refuses to load.
+    #[test]
+    fn deleting_unwires_the_crate_from_the_manifest() {
+        let root = "[package]\nname = \"p\"\n\n[dependencies]\ncortex-m = \"0.7\"\n\
+                    \n[workspace]\nmembers = [\"mw_radar\"]\n\
+                    \n[dependencies.mw_radar]\npath = \"mw_radar\"\n";
+        let files = vec![
+            ("mw_radar/Cargo.toml".to_owned(), String::new()),
+            ("mw_radar/src/lib.rs".to_owned(), String::new()),
+            ("src/app.rs".to_owned(), "use mw_radar::frame;\n".to_owned()),
+        ];
+        let p = plan_delete_crate("mw_radar", &files, "", root);
+
+        assert_eq!(p.removed_files.len(), 2, "only the crate's own files");
+        assert!(!p.root_cargo_toml.contains("[dependencies.mw_radar]"));
+        assert!(p.root_cargo_toml.contains("members = []"), "{}", p.root_cargo_toml);
+        assert!(
+            p.root_cargo_toml.contains("cortex-m"),
+            "unrelated dependencies survive:\n{}",
+            p.root_cargo_toml
+        );
+        // The user is told what will stop compiling.
+        assert!(
+            p.warnings.iter().any(|w| w.contains("src/app.rs")),
+            "{:?}",
+            p.warnings
+        );
+    }
+
+    /// A rename that did not fix the use sites would silently break the build.
+    #[test]
+    fn renaming_moves_the_files_and_rewrites_use_sites() {
+        let root = "[workspace]\nmembers = [\"mw_radar\"]\n\
+                    \n[dependencies.mw_radar]\npath = \"mw_radar\"\n";
+        let files = vec![
+            (
+                "mw_radar/Cargo.toml".to_owned(),
+                "[package]\nname        = \"mw_radar\"\n".to_owned(),
+            ),
+            ("mw_radar/src/lib.rs".to_owned(), "pub mod frame;\n".to_owned()),
+            (
+                "src/app.rs".to_owned(),
+                "use mw_radar::frame::Frame;\n".to_owned(),
+            ),
+        ];
+        let p = plan_rename_crate("mw_radar", "radar_hal", &files, "fn main(){}", root).unwrap();
+
+        assert_eq!(p.new_dir, "radar_hal");
+        assert!(p.moved.contains(&(
+            "mw_radar/src/lib.rs".to_owned(),
+            "radar_hal/src/lib.rs".to_owned()
+        )));
+        // The member manifest's own `name` follows.
+        let manifest = p
+            .rewritten
+            .iter()
+            .find(|(a, _)| a == "radar_hal/Cargo.toml")
+            .map(|(_, c)| c.clone())
+            .expect("manifest rewritten");
+        assert!(manifest.contains("\"radar_hal\""), "{manifest}");
+        // And every use site outside the crate.
+        let app = p
+            .rewritten
+            .iter()
+            .find(|(a, _)| a == "src/app.rs")
+            .map(|(_, c)| c.clone())
+            .expect("use site rewritten");
+        assert_eq!(app, "use radar_hal::frame::Frame;\n");
+        // Root manifest re-pointed, with no leftovers.
+        assert!(p.root_cargo_toml.contains("[dependencies.radar_hal]"));
+        assert!(!p.root_cargo_toml.contains("[dependencies.mw_radar]"));
+        assert!(!p.root_cargo_toml.contains("\"mw_radar\""));
+    }
+
+    /// Regression: renaming unpatches then patches, and the unpatch leaves
+    /// `members = []`. Treating an EMPTY list as "no workspace section" made
+    /// the patch append a second `[workspace]` table — a TOML redefinition
+    /// error — and every further rename or new library stacked another one.
+    #[test]
+    fn there_is_never_more_than_one_workspace_table() {
+        let root = "[package]\nname = \"p\"\n\n[workspace]\nmembers = [\"mw_radar\"]\n\
+                    \n[dependencies.mw_radar]\npath = \"mw_radar\"\n";
+        let files = vec![(
+            "mw_radar/Cargo.toml".to_owned(),
+            "[package]\nname = \"mw_radar\"\n".to_owned(),
+        )];
+
+        let after_rename = plan_rename_crate("mw_radar", "radar_hal", &files, "", root)
+            .unwrap()
+            .root_cargo_toml;
+        assert_eq!(
+            after_rename.matches("[workspace]").count(),
+            1,
+            "one workspace table:\n{after_rename}"
+        );
+        assert!(after_rename.contains("members = [\"radar_hal\"]"), "{after_rename}");
+
+        // …and adding another library after that still does not duplicate it.
+        let meta2 = CrateMeta {
+            name: "test11".to_owned(),
+            ..meta()
+        };
+        let after_new = plan_new_crate(&meta2, &after_rename).unwrap().root_cargo_toml;
+        assert_eq!(
+            after_new.matches("[workspace]").count(),
+            1,
+            "still one workspace table:\n{after_new}"
+        );
+        assert!(
+            after_new.contains("\"radar_hal\"") && after_new.contains("\"test11\""),
+            "both members kept:\n{after_new}"
+        );
+    }
+
+    /// The same trap, reached by deleting the last library and adding one.
+    #[test]
+    fn an_emptied_members_list_is_reused_not_replaced() {
+        let root = "[workspace]\nmembers = [\"only\"]\n\n[dependencies.only]\npath = \"only\"\n";
+        let emptied = plan_delete_crate("only", &[], "", root).root_cargo_toml;
+        assert!(emptied.contains("members = []"), "{emptied}");
+
+        let out = plan_new_crate(&meta(), &emptied).unwrap().root_cargo_toml;
+        assert_eq!(out.matches("[workspace]").count(), 1, "{out}");
+        assert!(out.contains("members = [\"mw_radar\"]"), "{out}");
+    }
+
+    #[test]
+    fn renaming_rejects_a_bad_or_unchanged_name() {
+        assert!(plan_rename_crate("mw_radar", "mw radar", &[], "", "").is_err());
+        assert!(plan_rename_crate("mw_radar", "mw_radar", &[], "", "").is_err());
     }
 
     /// crates.io names may contain `-`; `use` paths may not.

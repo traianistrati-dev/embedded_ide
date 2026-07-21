@@ -530,6 +530,13 @@ pub fn show_project_tree(
     // Directory names of the `[workspace] members` — the extracted library
     // crates, each rendered as its own collapsible section below the project.
     lib_crates: &[String],
+    // Share of the height given to the project half; dragged via the splitter.
+    split_ratio: &mut f32,
+    // Set when the LIBRARIES "+" button is clicked; the caller opens the dialog.
+    new_library: &mut bool,
+    // `(crate dir, is_rename)` when a library's pen / trash icon is clicked;
+    // the caller opens the confirmation dialog.
+    library_action: &mut Option<(String, bool)>,
 ) {
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
@@ -540,6 +547,30 @@ pub fn show_project_tree(
     // Transient "can't move" banner from a refused drag-drop (auto-cleared).
     show_tree_notice(ui);
     ui.add_space(2.0);
+
+    // ── Split: project above, LIBRARIES below ────────────────────────────────
+    // Only when there IS a library. Otherwise the project keeps the whole
+    // height — reserving 40% for an empty section would just shrink the tree.
+    let has_libs = lib_crates
+        .iter()
+        .any(|c| user_src_files.iter().any(|(p, _)| p.starts_with(&format!("{c}/"))));
+    const SPLIT_HANDLE_H: f32 = 6.0;
+    let total_h = ui.available_height();
+    // The LIBRARIES header always renders — it carries the "+" button, which is
+    // how the FIRST library gets created — so its row must be left visible even
+    // when the section below it is empty.
+    let libs_header_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 3.0;
+    let project_h = if has_libs {
+        (total_h - SPLIT_HANDLE_H) * *split_ratio
+    } else {
+        (total_h - libs_header_h).max(0.0)
+    };
+    // `ScrollSource::drag` is ON by default and would swallow the tree's own
+    // hold-to-drag file move — the two gestures are the same input.
+    let no_drag_scroll = egui::scroll_area::ScrollSource {
+        drag: false,
+        ..Default::default()
+    };
 
     // Collected during the tree render below; an item dragged onto a folder sets
     // `(dragged_item, target_folder_rel_to_src)` — applied after the tree closure
@@ -562,186 +593,230 @@ pub fn show_project_tree(
         _ => BTreeMap::new(),
     };
 
-    // .cargo/  — fixed folder, no context menu → dark-red + bold.
-    egui::CollapsingHeader::new(
-        egui::RichText::new(".cargo/")
-            .size(11.5)
-            .monospace()
-            .strong()
-            .color(egui::Color32::from_rgb(100, 50, 50)),
-    )
-    .default_open(true)
-    .show(ui, |ui| {
-        file_row(
+    // The project's own files scroll independently of the libraries below.
+    egui::ScrollArea::vertical()
+        .id_salt("tree_project_scroll")
+        .max_height(project_h)
+        .scroll_source(no_drag_scroll)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+        // .cargo/  — fixed folder, no context menu → dark-red + bold.
+        egui::CollapsingHeader::new(
+            egui::RichText::new(".cargo/")
+                .size(11.5)
+                .monospace()
+                .strong()
+                .color(egui::Color32::from_rgb(100, 50, 50)),
+        )
+        .default_open(true)
+        .show(ui, |ui| {
+            file_row(
+                ui,
+                8.0,
+                "config.toml",
+                ProjectFileId::CargoConfig,
+                selected,
+                build_result,
+                lsp_state,
+            );
+        });
+
+        // src/  — fixed root, cannot be renamed/deleted → muted-red + bold.
+        let src_ch = egui::CollapsingHeader::new(
+            egui::RichText::new("src/")
+                .size(11.5)
+                .monospace()
+                .strong()
+                .color(egui::Color32::from_rgb(200, 100, 100)),
+        )
+        .default_open(true)
+        .show(ui, |ui| {
+            file_row(
+                ui,
+                8.0,
+                "main.rs",
+                ProjectFileId::MainRs,
+                selected,
+                build_result,
+                lsp_state,
+            );
+
+            // Inline "new file / new folder" input at the src/ root, rendered right
+            // under main.rs where the item will be added.
+            inline_new_item(
+                ui, 8.0, SRC_ROOT, false, new_src_name, new_file_parent_folder,
+                user_src_files, user_src_folders, selected, workspace_dir, save_needed,
+            );
+            inline_new_item(
+                ui, 8.0, SRC_ROOT, true, new_src_folder_name, new_folder_parent_folder,
+                user_src_files, user_src_folders, selected, workspace_dir, save_needed,
+            );
+
+            // This header IS `src/`, so it renders that subtree; library crates get
+            // their own sections further down.
+            let tree = subtree_of(SRC_ROOT);
+
+            // Recursively render the tree
+            render_tree_node(
+                ui,
+                &tree,
+                user_src_files,
+                user_src_folders,
+                selected,
+                8.0,
+                renaming_file,
+                &mut do_rename_file,
+                &mut cancel_rename_file,
+                &mut to_delete,
+                &mut to_duplicate,
+                renaming_folder,
+                workspace_dir,
+                save_needed,
+                new_src_name,
+                new_src_folder_name,
+                new_file_parent_folder,
+                new_folder_parent_folder,
+                SRC_ROOT, // this header IS src/, so children hang off it
+                &mut move_request,
+                extract_folder,
+            );
+
+        });
+
+        // Hover: tint + pointing hand — the src/ header is a drop target and hosts
+        // the New File / New Folder context menu.
+        row_hover_feedback(
             ui,
-            8.0,
-            "config.toml",
-            ProjectFileId::CargoConfig,
-            selected,
-            build_result,
-            lsp_state,
-        );
-    });
-
-    // src/  — fixed root, cannot be renamed/deleted → muted-red + bold.
-    let src_ch = egui::CollapsingHeader::new(
-        egui::RichText::new("src/")
-            .size(11.5)
-            .monospace()
-            .strong()
-            .color(egui::Color32::from_rgb(200, 100, 100)),
-    )
-    .default_open(true)
-    .show(ui, |ui| {
-        file_row(
-            ui,
-            8.0,
-            "main.rs",
-            ProjectFileId::MainRs,
-            selected,
-            build_result,
-            lsp_state,
-        );
-
-        // Inline "new file / new folder" input at the src/ root, rendered right
-        // under main.rs where the item will be added.
-        inline_new_item(
-            ui, 8.0, SRC_ROOT, false, new_src_name, new_file_parent_folder,
-            user_src_files, user_src_folders, selected, workspace_dir, save_needed,
-        );
-        inline_new_item(
-            ui, 8.0, SRC_ROOT, true, new_src_folder_name, new_folder_parent_folder,
-            user_src_files, user_src_folders, selected, workspace_dir, save_needed,
-        );
-
-        // This header IS `src/`, so it renders that subtree; library crates get
-        // their own sections further down.
-        let tree = subtree_of(SRC_ROOT);
-
-        // Recursively render the tree
-        render_tree_node(
-            ui,
-            &tree,
-            user_src_files,
-            user_src_folders,
-            selected,
-            8.0,
-            renaming_file,
-            &mut do_rename_file,
-            &mut cancel_rename_file,
-            &mut to_delete,
-            &mut to_duplicate,
-            renaming_folder,
-            workspace_dir,
-            save_needed,
-            new_src_name,
-            new_src_folder_name,
-            new_file_parent_folder,
-            new_folder_parent_folder,
-            SRC_ROOT, // this header IS src/, so children hang off it
-            &mut move_request,
-            extract_folder,
-        );
-
-    });
-
-    // Hover: tint + pointing hand — the src/ header is a drop target and hosts
-    // the New File / New Folder context menu.
-    row_hover_feedback(
-        ui,
-        src_ch.header_response.rect,
-        src_ch.header_response.contains_pointer(),
-    );
-
-    // Dropping a dragged item on the `src/` header moves it to the src/ root.
-    if src_ch.header_response.dnd_hover_payload::<DraggedItem>().is_some() {
-        ui.painter().rect_stroke(
             src_ch.header_response.rect,
-            3.0,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 170, 240)),
-            egui::StrokeKind::Inside,
+            src_ch.header_response.contains_pointer(),
         );
-    }
-    if let Some(p) = src_ch.header_response.dnd_release_payload::<DraggedItem>() {
-        move_request = Some(((*p).clone(), SRC_ROOT.to_owned()));
-    }
 
-    // Apply a drag-drop move now that the tree closure's borrows have ended.
-    if let Some((item, target)) = move_request.take() {
-        apply_move(
-            ui,
-            &item,
-            &target,
-            user_src_files,
-            user_src_folders,
-            workspace_dir,
-            save_needed,
-        );
-    }
-
-    src_ch.header_response.context_menu(|ui| {
-        if ui
-            .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
-            .clicked()
-        {
-            begin_inline_new(ui, false, "", new_src_name, new_file_parent_folder);
-            *new_src_folder_name = None;
-            *new_folder_parent_folder = None;
-            ui.close();
+        // Dropping a dragged item on the `src/` header moves it to the src/ root.
+        if src_ch.header_response.dnd_hover_payload::<DraggedItem>().is_some() {
+            ui.painter().rect_stroke(
+                src_ch.header_response.rect,
+                3.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 170, 240)),
+                egui::StrokeKind::Inside,
+            );
         }
-        if ui
-            .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
-            .clicked()
-        {
-            begin_inline_new(ui, true, "", new_src_folder_name, new_folder_parent_folder);
-            *new_src_name = None;
-            *new_file_parent_folder = None;
-            ui.close();
+        if let Some(p) = src_ch.header_response.dnd_release_payload::<DraggedItem>() {
+            move_request = Some(((*p).clone(), SRC_ROOT.to_owned()));
         }
-        // Git actions live in the bottom "Git" tab (commit/push/pull), not
-        // here — kept out of the tree menu on purpose (moved 2026-07-07).
-    });
 
-    ui.add_space(2.0);
-    file_row(
-        ui,
-        4.0,
-        ".gitignore",
-        ProjectFileId::GitIgnore,
-        selected,
-        build_result,
-        lsp_state,
-    );
-    if *toolchain == ToolchainKind::RustEmbedded {
+        // Apply a drag-drop move now that the tree closure's borrows have ended.
+        if let Some((item, target)) = move_request.take() {
+            apply_move(
+                ui,
+                &item,
+                &target,
+                user_src_files,
+                user_src_folders,
+                workspace_dir,
+                save_needed,
+            );
+        }
+
+        src_ch.header_response.context_menu(|ui| {
+            if ui
+                .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
+                .clicked()
+            {
+                begin_inline_new(ui, false, "", new_src_name, new_file_parent_folder);
+                *new_src_folder_name = None;
+                *new_folder_parent_folder = None;
+                ui.close();
+            }
+            if ui
+                .button(egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5))
+                .clicked()
+            {
+                begin_inline_new(ui, true, "", new_src_folder_name, new_folder_parent_folder);
+                *new_src_name = None;
+                *new_file_parent_folder = None;
+                ui.close();
+            }
+            // Git actions live in the bottom "Git" tab (commit/push/pull), not
+            // here — kept out of the tree menu on purpose (moved 2026-07-07).
+        });
+
+        ui.add_space(2.0);
         file_row(
             ui,
             4.0,
-            "build.rs",
-            ProjectFileId::BuildRs,
+            ".gitignore",
+            ProjectFileId::GitIgnore,
             selected,
             build_result,
             lsp_state,
         );
-    }
-    file_row(
-        ui,
-        4.0,
-        "Cargo.toml",
-        ProjectFileId::CargoToml,
-        selected,
-        build_result,
-        lsp_state,
-    );
-    if *toolchain == ToolchainKind::RustEmbedded {
+        if *toolchain == ToolchainKind::RustEmbedded {
+            file_row(
+                ui,
+                4.0,
+                "build.rs",
+                ProjectFileId::BuildRs,
+                selected,
+                build_result,
+                lsp_state,
+            );
+        }
         file_row(
             ui,
             4.0,
-            "memory.x",
-            ProjectFileId::MemoryX,
+            "Cargo.toml",
+            ProjectFileId::CargoToml,
             selected,
             build_result,
             lsp_state,
         );
+        if *toolchain == ToolchainKind::RustEmbedded {
+            file_row(
+                ui,
+                4.0,
+                "memory.x",
+                ProjectFileId::MemoryX,
+                selected,
+                build_result,
+                lsp_state,
+            );
+        }
+        });
+
+    // ── Splitter ─────────────────────────────────────────────────────────────
+    // Same pattern as the bottom diagnostics panel's handle: allocate a thin
+    // strip, interact with it for drags, and paint a line plus grip dots.
+    if has_libs {
+        let (handle_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), SPLIT_HANDLE_H),
+            egui::Sense::hover(),
+        );
+        let drag = ui.interact(
+            handle_rect,
+            egui::Id::new("tree_split_handle"),
+            egui::Sense::drag(),
+        );
+        let line_color = if drag.hovered() || drag.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            egui::Color32::from_rgb(100, 140, 200)
+        } else {
+            egui::Color32::from_gray(65)
+        };
+        let mid_y = handle_rect.center().y;
+        ui.painter()
+            .hline(handle_rect.x_range(), mid_y, egui::Stroke::new(1.0, line_color));
+        for dx in [-6.0_f32, 0.0, 6.0] {
+            ui.painter().circle_filled(
+                egui::pos2(handle_rect.center().x + dx, mid_y),
+                1.5,
+                line_color,
+            );
+        }
+        if drag.dragged() && total_h > 0.0 {
+            // Clamped so neither half can be dragged away entirely.
+            *split_ratio =
+                (*split_ratio + drag.drag_delta().y / total_h).clamp(0.15, 0.85);
+        }
     }
 
     // ── Library crates ───────────────────────────────────────────────────────
@@ -754,15 +829,31 @@ pub fn show_project_tree(
         .filter(|c| full_tree.contains_key(c.as_str()))
         .cloned()
         .collect();
-    if !libs.is_empty() {
-        ui.add_space(6.0);
-        ui.separator();
+    ui.add_space(4.0);
+    ui.separator();
+    ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("LIBRARIES")
                 .size(9.0)
                 .color(egui::Color32::from_gray(110)),
         );
-    }
+        // right_to_left: the first widget added lands furthest right.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new(egui::RichText::new(ph::PLUS).size(11.0)).frame(false))
+                .on_hover_text("New library crate (Cargo.toml + src/lib.rs, wired into the workspace)")
+                .clicked()
+            {
+                *new_library = true;
+            }
+        });
+    });
+
+    egui::ScrollArea::vertical()
+        .id_salt("tree_libraries_scroll")
+        .scroll_source(no_drag_scroll)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
     for lib in &libs {
         let id = ui.make_persistent_id(("lib_crate_section", lib.as_str()));
         let mut state =
@@ -795,6 +886,8 @@ pub fn show_project_tree(
                 .selectable(false)
                 .sense(egui::Sense::click()),
             );
+            // right_to_left: the FIRST widget added sits furthest right, so the
+            // caret goes in first and the two action icons land to its left.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let icon = if open { ph::CARET_DOWN } else { ph::CARET_DOUBLE_UP };
                 if ui
@@ -807,6 +900,34 @@ pub fn show_project_tree(
                     .clicked()
                 {
                     toggle = true;
+                }
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(ph::PENCIL_SIMPLE)
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(170)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Rename this library (asks first)")
+                    .clicked()
+                {
+                    *library_action = Some((lib.clone(), true));
+                }
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(ph::TRASH)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(210, 110, 95)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Delete this library (asks first)")
+                    .clicked()
+                {
+                    *library_action = Some((lib.clone(), false));
                 }
             });
             name_resp
@@ -873,6 +994,8 @@ pub fn show_project_tree(
             }
         });
     }
+
+        });
 
     // ── Apply the file-row signals ───────────────────────────────────────────
     // Once, after EVERY section: the indices are positions in `user_src_files`,
