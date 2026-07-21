@@ -104,6 +104,9 @@ impl AppIde {
         // Git History (read-only): commit selected / commit file clicked.
         let mut git_commit_load: Option<String> = None;
         let mut git_commit_file_load: Option<(String, String)> = None;
+        // History "Restore this file" → confirmed, then applied.
+        let mut git_restore_from_commit: Option<(String, String)> = None;
+        let mut git_restore_all_from_commit: Option<String> = None;
         // Set when the user clicks a file's discard button in the Git tab.
         let mut git_discard: Option<(String, bool)> = None;
         // Set when the user clicks "Discard all" in the Git tab.
@@ -219,6 +222,8 @@ impl AppIde {
                     &mut git_revert_hunk,
                     &mut git_commit_load,
                     &mut git_commit_file_load,
+                    &mut git_restore_from_commit,
+                    &mut git_restore_all_from_commit,
                     &mut git_discard,
                     &mut git_discard_all,
                     &mut flash_scan,
@@ -241,6 +246,27 @@ impl AppIde {
         if tab_clicked && collapsed {
             self.diag_collapsed = false;
             self.diag_panel_height = (avail_h * 0.2).clamp(MIN_H, max_h);
+        }
+        // "Restore this file" → open the confirm; the write happens once the
+        // user agrees (queued like the discard confirm, applied next frame so
+        // the editor's working copy refreshes with it).
+        if let Some((sha, path)) = git_restore_from_commit {
+            self.git_restore_confirm = Some((sha, path));
+        }
+        if let Some(sha) = git_restore_all_from_commit {
+            self.git_restore_all_confirm = Some(sha);
+        }
+        // A whole-tree restore rewrote the files on disk; the in-memory buffers
+        // are now stale and WOULD overwrite them at the next save, so reload.
+        let reload = {
+            let mut st = self.git.state.lock().unwrap();
+            std::mem::take(&mut st.reload_project)
+        };
+        if reload {
+            if let Some(dir) = project_dir.clone() {
+                self.load_project_from_dir(&dir);
+                *source_rewritten = true;
+            }
         }
         // History view: load a commit's file list / one file's diff. Both are
         // read-only git reads, guarded against a concurrent op inside.
@@ -348,6 +374,12 @@ impl AppIde {
         // revert, so the open editor keeps the restored content).
         if let Some(path) = self.pending_discard_file.take() {
             if self.apply_discard_file(&path) {
+                *source_rewritten = true;
+            }
+        }
+        // Same for a confirmed restore-from-history.
+        if let Some((sha, path)) = self.pending_restore.take() {
+            if self.apply_restore_from_commit(&sha, &path) {
                 *source_rewritten = true;
             }
         }

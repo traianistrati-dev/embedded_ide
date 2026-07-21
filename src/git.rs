@@ -248,6 +248,9 @@ pub struct GitState {
     pub log: Vec<Commit>,
     /// Files touched by `commit_files_sha`.
     pub commit_files: Vec<CommitFile>,
+    /// Set by a whole-tree restore: the IDE must reload from disk, or its
+    /// in-memory buffers would overwrite the files that were just restored.
+    pub reload_project: bool,
     /// Which commit `commit_files` belongs to — guards against showing one
     /// commit's file list next to another's diff while a load is in flight.
     pub commit_files_sha: String,
@@ -709,13 +712,28 @@ pub fn apply_reverse_patch(dir: &Path, patch: &str) -> Result<(), String> {
 /// refresh the file's in-memory buffer to match. `git show HEAD:<path>`
 /// (LF-normalised, like [`fetch_baseline`]) → write. Synchronous; fast/local.
 pub fn restore_file_to_head(dir: &Path, path: &str) -> Result<String, String> {
-    let out = run_git(dir, &["show".into(), format!("HEAD:{path}")])
+    restore_file_at(dir, "HEAD", path)
+}
+
+/// Write `path` as it was at `rev` (a sha, `HEAD`, a tag…) into the worktree
+/// and return the content, so the caller can refresh its in-memory buffer.
+///
+/// Only this one file is touched — nothing about HEAD or any other file moves,
+/// which is what makes restoring from history reversible: the result shows up
+/// as an ordinary uncommitted change.
+pub fn restore_file_at(dir: &Path, rev: &str, path: &str) -> Result<String, String> {
+    let out = run_git(dir, &["show".into(), format!("{rev}:{path}")])
         .map_err(|e| format!("couldn't run git show: {e}"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     let content = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-    std::fs::write(dir.join(path), &content).map_err(|e| format!("write failed: {e}"))?;
+    let dest = dir.join(path);
+    // The file may have been DELETED since `rev` — then its folder is gone too.
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    std::fs::write(&dest, &content).map_err(|e| format!("write failed: {e}"))?;
     Ok(content)
 }
 
@@ -921,6 +939,111 @@ pub fn run_commit_file_diff(
                 }
             }
             _ => st.push(GitLine::Notice, format!("[error] couldn't diff {path} at {sha}")),
+        }
+        st.busy = None;
+        drop(st);
+        ctx.request_repaint();
+    });
+}
+
+/// Make the TRACKED worktree match `rev`, without moving HEAD.
+///
+/// Two steps, because `checkout` alone leaves a mix:
+///   1. `git checkout <rev> -- .` restores every file that exists in `rev`;
+///   2. files tracked at HEAD but ABSENT from `rev` (added afterwards) are
+///      removed — without this you get old code plus orphan files.
+///
+/// Safety, by construction:
+/// * **HEAD does not move.** Everything this does is one uncommitted change,
+///   so "Discard all" (`reset --hard` + `clean`) undoes the whole operation.
+/// * **Untracked files are never touched.** They exist in no commit, so
+///   deleting them could not be undone; leaving them is the only safe choice.
+///
+/// Sets `reload_project` on success: the IDE holds these files in memory and
+/// would otherwise overwrite the restored ones at the next save.
+pub fn run_restore_tree(
+    sha: String,
+    project_dir: PathBuf,
+    state: Arc<Mutex<GitState>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut st = state.lock().unwrap();
+        if st.busy.is_some() {
+            return;
+        }
+        st.busy = Some("restore");
+        st.diff = None;
+    }
+    std::thread::spawn(move || {
+        let short = sha[..sha.len().min(7)].to_owned();
+        let mut ok = true;
+
+        let checkout = run_git(
+            &project_dir,
+            &["checkout".into(), sha.clone(), "--".into(), ".".into()],
+        );
+        match checkout {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                ok = false;
+                let mut st = state.lock().unwrap();
+                push_output(&mut st, &o);
+                st.lines.push((
+                    GitLine::Notice,
+                    format!("[error] checkout {short} failed — nothing was changed"),
+                ));
+            }
+            Err(e) => {
+                ok = false;
+                state
+                    .lock()
+                    .unwrap()
+                    .lines
+                    .push((GitLine::Notice, format!("[error] couldn't launch git: {e}")));
+            }
+        }
+
+        // Files added between `sha` and HEAD — they are tracked, so removing
+        // them is recoverable from HEAD.
+        if ok {
+            let added = run_git(
+                &project_dir,
+                &[
+                    "diff".into(),
+                    "--name-only".into(),
+                    "--diff-filter=A".into(),
+                    sha.clone(),
+                    "HEAD".into(),
+                ],
+            );
+            if let Ok(o) = added {
+                let paths: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                if !paths.is_empty() {
+                    let mut args = vec!["rm".into(), "-f".into(), "--quiet".into(), "--".into()];
+                    args.extend(paths.iter().cloned());
+                    let _ = run_git(&project_dir, &args);
+                    state.lock().unwrap().lines.push((
+                        GitLine::Notice,
+                        format!("[info] removed {} file(s) added after {short}", paths.len()),
+                    ));
+                }
+            }
+        }
+
+        let mut st = state.lock().unwrap();
+        if ok {
+            st.lines.push((
+                GitLine::Notice,
+                format!("[ok] worktree restored to {short} — review it in Changes, or Discard all to undo"),
+            ));
+            st.op_gen += 1;
+            st.reload_project = true;
         }
         st.busy = None;
         drop(st);

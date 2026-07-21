@@ -823,6 +823,13 @@ pub struct AppIde {
     pending_discard_file: Option<String>,
     /// `true` while the "Discard ALL changes" confirm dialog is open (Phase C).
     git_discard_all_confirm: bool,
+    /// `(sha, path)` awaiting confirmation for History's "Restore this file".
+    git_restore_confirm: Option<(String, String)>,
+    /// Sha awaiting confirmation for History's "Restore ALL files".
+    git_restore_all_confirm: Option<String>,
+    /// Confirmed restore, applied at the next editor render so `display_code`
+    /// refreshes with it (same deferral as `pending_discard_file`).
+    pending_restore: Option<(String, String)>,
     /// Collapse the MCU Configurator + Project tree so the editor fills the
     /// window (toggled from the editor toolbar). Persisted across restarts.
     side_panels_collapsed: bool,
@@ -1114,6 +1121,9 @@ impl AppIde {
             git_discard_confirm: None,
             pending_discard_file: None,
             git_discard_all_confirm: false,
+            git_restore_confirm: None,
+            git_restore_all_confirm: None,
+            pending_restore: None,
             side_panels_collapsed: persisted.side_panels_collapsed,
             diag_collapsed: persisted.diag_collapsed,
             // 0.0 = absent from an older build's state; clamp keeps a corrupt
@@ -2175,6 +2185,8 @@ impl eframe::App for AppIde {
         self.show_rename_project_dialog(ui);
         self.show_mcu_form_dialog(ui);
         self.show_git_discard_dialog(ui);
+        self.show_git_restore_dialog(ui);
+        self.show_git_restore_all_dialog(ui);
         self.show_extract_crate_dialog(ui);
         self.show_library_action_dialog(ui);
         self.show_exit_prompt(ui);

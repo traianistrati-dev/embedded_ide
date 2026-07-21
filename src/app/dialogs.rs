@@ -123,6 +123,170 @@ impl AppIde {
         }
     }
 
+    /// Confirmation for History's "Restore ALL files" — the whole tracked
+    /// worktree back to a commit.
+    ///
+    /// States the three rules plainly rather than listing files: the rules are
+    /// what makes the operation safe, and a file list would bury them.
+    pub(super) fn show_git_restore_all_dialog(&mut self, ui: &egui::Ui) {
+        let Some(sha) = self.git_restore_all_confirm.clone() else {
+            return;
+        };
+        let short = &sha[..sha.len().min(7)];
+        let unsaved = self.git.state.lock().unwrap().unsaved.clone();
+        let mut keep = true;
+        let mut confirmed = false;
+
+        egui::Window::new("Restore ALL files from this commit?")
+            .id(egui::Id::new("git_restore_all_confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_width(500.0);
+                ui.add_space(2.0);
+                for (icon, text, color) in [
+                    (
+                        ph::ARROW_COUNTER_CLOCKWISE,
+                        format!("Tracked files become their version at {short}."),
+                        egui::Color32::from_rgb(220, 210, 190),
+                    ),
+                    (
+                        ph::TRASH,
+                        "Files added AFTER it are removed.".to_owned(),
+                        egui::Color32::from_rgb(230, 160, 90),
+                    ),
+                    (
+                        ph::CHECK_CIRCLE,
+                        "Untracked files are left alone.".to_owned(),
+                        egui::Color32::from_rgb(150, 200, 160),
+                    ),
+                ] {
+                    ui.label(
+                        egui::RichText::new(format!("{icon}  {text}"))
+                            .size(11.5)
+                            .color(color),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "The branch does NOT move. All of this becomes one uncommitted \
+                         change — review it in Changes, then commit it or undo the whole \
+                         thing with \"Discard all\".",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(165)),
+                );
+                if !unsaved.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} {} file(s) have unsaved editor changes — the project is \
+                             reloaded from disk afterwards, so those are LOST.",
+                            ph::WARNING,
+                            unsaved.len()
+                        ))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(235, 130, 90)),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new(format!("{} Restore all", ph::ARROW_COUNTER_CLOCKWISE))
+                                .color(egui::Color32::from_rgb(230, 160, 70)),
+                        )
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+
+        if confirmed {
+            if let Some(dir) = self.project_dir.clone() {
+                crate::git::run_restore_tree(
+                    sha,
+                    dir,
+                    std::sync::Arc::clone(&self.git.state),
+                    self.egui_ctx.clone(),
+                );
+            }
+            keep = false;
+        }
+        if !keep {
+            self.git_restore_all_confirm = None;
+        }
+    }
+
+    /// Confirmation for History's "Restore this file": overwrite one file with
+    /// its content at a commit.
+    pub(super) fn show_git_restore_dialog(&mut self, ui: &egui::Ui) {
+        let Some((sha, path)) = self.git_restore_confirm.clone() else {
+            return;
+        };
+        let short = &sha[..sha.len().min(7)];
+        let mut keep = true;
+        let mut confirmed = false;
+        egui::Window::new("Restore file from history?")
+            .id(egui::Id::new("git_restore_confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(&path).monospace().strong());
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Its current content is replaced by the version at {short}. \
+                         Uncommitted changes to THIS file are lost."
+                    ))
+                    .size(12.0),
+                );
+                ui.add_space(4.0);
+                // The reassuring half — this is why the operation is safe.
+                ui.label(
+                    egui::RichText::new(
+                        "Nothing else moves: the branch stays where it is, and the result \
+                         is an ordinary uncommitted change you can review or discard.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(160)),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new(format!(
+                                "{} Restore",
+                                ph::ARROW_COUNTER_CLOCKWISE
+                            ))
+                            .color(egui::Color32::from_rgb(230, 160, 70)),
+                        )
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+        if confirmed {
+            self.pending_restore = Some((sha, path));
+            keep = false;
+        }
+        if !keep {
+            self.git_restore_confirm = None;
+        }
+    }
+
     /// Confirmation modal for discarding a whole file's changes (Phase A). On
     /// confirm it queues `pending_discard_file` (applied at the next editor
     /// render, so the open editor's `display_code` refreshes). No-op closed.

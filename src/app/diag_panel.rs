@@ -81,6 +81,10 @@ pub(super) fn show_diag_panel(
     // Git History view (read-only): a selected commit / one of its files.
     git_commit_load: &mut Option<String>,
     git_commit_file_load: &mut Option<(String, String)>,
+    // `(sha, path)` when History's "Restore this file" is clicked.
+    git_restore_from_commit: &mut Option<(String, String)>,
+    // Sha when History's "Restore ALL files" is clicked.
+    git_restore_all_from_commit: &mut Option<String>,
     // `(git path, is_untracked)` when the user clicks a file's discard button;
     // the caller confirms then restores/deletes the whole file (Phase A).
     git_discard: &mut Option<(String, bool)>,
@@ -613,6 +617,8 @@ pub(super) fn show_diag_panel(
                 git_revert_hunk,
                 git_commit_load,
                 git_commit_file_load,
+                git_restore_from_commit,
+                git_restore_all_from_commit,
                 git_discard,
                 git_discard_all,
             );

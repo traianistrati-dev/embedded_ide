@@ -517,6 +517,63 @@ impl AppIde {
     /// (disk + buffer + tree selection remap). Returns true when the open file's
     /// buffer was updated in place (the caller then refreshes `display_code`).
     /// IDE-managed files are refused; the caller confirms via a dialog first.
+    /// Restore ONE file to its content at `sha` (History view).
+    ///
+    /// Scoped on purpose: only this file's buffer is refreshed, so unsaved
+    /// edits elsewhere survive and no project reload is needed. HEAD does not
+    /// move — the result is an ordinary uncommitted change, visible in the
+    /// Changes view and undoable with Discard.
+    ///
+    /// Returns `true` when a buffer changed, so the caller can refresh the
+    /// editor's working copy (otherwise the end-of-frame write-back would put
+    /// the old text straight back).
+    pub(super) fn apply_restore_from_commit(&mut self, sha: &str, path: &str) -> bool {
+        let Some(dir) = self.project_dir.clone() else {
+            return false;
+        };
+        if crate::app::tabs::git_tab::is_ide_managed(path) {
+            self.git_note(format!(
+                "[skip] {path} is IDE-managed — it is regenerated from the MCU configuration"
+            ));
+            return false;
+        }
+        let content = match crate::git::restore_file_at(&dir, sha, path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.git_note(format!("[error] restore {path}: {e}"));
+                return false;
+            }
+        };
+
+        // Update the in-memory buffer — and ADD the file when it isn't tracked
+        // any more (it was deleted after `sha`). Writing it to disk WITHOUT
+        // registering it would let `write_project`'s stale-file prune delete it
+        // again at the next save.
+        if let Some(e) = self
+            .project_tree
+            .user_src_files
+            .iter_mut()
+            .find(|(p, _)| p == path)
+        {
+            e.1 = content;
+        } else {
+            self.project_tree
+                .user_src_files
+                .push((path.to_owned(), content));
+        }
+        self.cached_project_files = None;
+        {
+            let mut st = self.git.state.lock().unwrap();
+            st.op_gen += 1; // refresh the editor gutter's HEAD baseline marks
+            st.lines.push((
+                crate::git::GitLine::Notice,
+                format!("[ok] restored {path} from {}", &sha[..sha.len().min(7)]),
+            ));
+        }
+        self.request_save = true;
+        true
+    }
+
     pub(super) fn apply_discard_file(&mut self, path: &str) -> bool {
         let Some(dir) = self.project_dir.clone() else {
             return false;

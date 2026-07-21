@@ -43,6 +43,11 @@ pub fn show_git_tab(
     // files is clicked. The caller spawns the `git diff-tree` / `git show`.
     commit_load: &mut Option<String>,
     commit_file_load: &mut Option<(String, String)>,
+    // `(sha, path)` when "Restore this file" is clicked; the caller confirms
+    // first, then rewrites just that file.
+    restore_from_commit: &mut Option<(String, String)>,
+    // Sha when "Restore ALL files" is clicked; the caller confirms first.
+    restore_all_from_commit: &mut Option<String>,
     // Set to `(git path, is_untracked)` when the user clicks a file's discard
     // button — the caller confirms, then restores it to HEAD (tracked) or
     // deletes it (untracked) (Phase A).
@@ -96,6 +101,10 @@ pub fn show_git_tab(
     // Set when a commit / a commit's file is picked; loaded after the borrows end.
     let mut load_commit: Option<String> = None;
     let mut load_commit_file: Option<(String, String)> = None;
+    // "Restore this file" in the History diff header.
+    let mut restore_req: Option<(String, String)> = None;
+    // "Restore all files" for the selected commit.
+    let mut restore_all_req: Option<String> = None;
 
     // ── Changes | History switch ─────────────────────────────────────────────
     // History is strictly READ-ONLY (log / diff-tree / show); nothing in it can
@@ -508,7 +517,32 @@ pub fn show_git_tab(
                     });
                     ui.separator();
                 }
-                render_commit_diff(ui, diff.as_ref(), body_h);
+                if !showing.is_empty() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                busy.is_none(),
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{} Restore ALL files from this commit",
+                                        ph::ARROW_COUNTER_CLOCKWISE
+                                    ))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(230, 160, 70)),
+                                )
+                                .small(),
+                            )
+                            .on_hover_text(
+                                "Make the tracked files match this commit. The branch does                                  not move — it becomes one uncommitted change (asks first).",
+                            )
+                            .clicked()
+                        {
+                            restore_all_req = Some(showing.to_owned());
+                        }
+                    });
+                    ui.separator();
+                }
+                render_commit_diff(ui, diff.as_ref(), showing, &mut restore_req, body_h);
             });
         });
         // Applied after the borrows end.
@@ -517,6 +551,8 @@ pub fn show_git_tab(
         }
         *commit_load = load_commit;
         *commit_file_load = load_commit_file;
+        *restore_from_commit = restore_req;
+        *restore_all_from_commit = restore_all_req;
         return;
     }
 
@@ -777,7 +813,13 @@ pub fn show_git_tab(
 /// under a commit header would look like "undo this part of that commit" and do
 /// something entirely different. Keeping History on its own renderer makes that
 /// impossible by construction rather than by remembering to pass a flag.
-fn render_commit_diff(ui: &mut egui::Ui, diff: Option<&crate::git::FileDiff>, body_h: f32) {
+fn render_commit_diff(
+    ui: &mut egui::Ui,
+    diff: Option<&crate::git::FileDiff>,
+    sha: &str,
+    restore_req: &mut Option<(String, String)>,
+    body_h: f32,
+) {
     let Some(d) = diff else {
         ui.label(
             egui::RichText::new("select a commit, then one of its files")
@@ -804,6 +846,22 @@ fn render_commit_diff(ui: &mut egui::Ui, diff: Option<&crate::git::FileDiff>, bo
                 .size(11.0)
                 .color(egui::Color32::from_rgb(230, 110, 95)),
         );
+        // The ONE write History offers. Scoped to this file, HEAD untouched —
+        // the result is a normal uncommitted change you can inspect or discard.
+        if !sha.is_empty()
+            && ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Restore this file", ph::ARROW_COUNTER_CLOCKWISE))
+                            .size(10.5),
+                    )
+                    .small(),
+                )
+                .on_hover_text("Bring this file back to its content at this commit (asks first)")
+                .clicked()
+        {
+            *restore_req = Some((sha.to_owned(), d.path.clone()));
+        }
     });
     egui::ScrollArea::vertical()
         .id_salt("git_commit_diff")
