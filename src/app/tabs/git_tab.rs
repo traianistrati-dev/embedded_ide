@@ -55,6 +55,11 @@ pub fn show_git_tab(
     // Set true when the user clicks "Discard all" — the caller confirms, then
     // resets every file to HEAD + deletes untracked files (Phase C).
     discard_all_out: &mut bool,
+    // Workspace-member crate names (extracted libraries), for the Library view.
+    libraries: &[String],
+    // Set to `(library, remote url, branch)` when "Push to its repository" is
+    // clicked; the caller spawns `git subtree push`.
+    lib_push_out: &mut Option<(String, String, String)>,
 ) {
     let Some(project_dir) = project_dir else {
         ui.add_space(8.0);
@@ -114,6 +119,7 @@ pub fn show_git_tab(
         for (v, label) in [
             (GitView::Changes, "Changes"),
             (GitView::History, "History"),
+            (GitView::Library, "Library"),
         ] {
             if ui
                 .selectable_label(git.view == v, egui::RichText::new(label).size(11.0))
@@ -143,6 +149,15 @@ pub fn show_git_tab(
         }
     });
     ui.separator();
+
+    // ── Library view: publish a workspace member to its own repository ───────
+    // `git subtree push` grafts the library's history onto a separate remote
+    // while the parent repo keeps the real files — so cloning the project still
+    // works and the cargo workspace member stays valid. Push-only by design.
+    if git.view == GitView::Library {
+        show_library_panel(ui, git, libraries, &status, busy.is_some(), is_repo, project_dir, lib_push_out);
+        return;
+    }
 
     // ── Header row: branch / upstream / ahead-behind / refresh ───────────────
     ui.horizontal(|ui| {
@@ -889,4 +904,204 @@ fn render_commit_diff(
                 ui.label(egui::RichText::new(text).size(10.5).monospace().color(color));
             }
         });
+}
+
+/// The Library view: publish one workspace-member crate to its own repository.
+///
+/// Only `git subtree push` is offered. The reverse direction (`subtree pull`)
+/// is deliberately absent — it can conflict and merge foreign history back into
+/// the project, which is a different decision than "put my library on GitHub".
+#[allow(clippy::too_many_arguments)]
+fn show_library_panel(
+    ui: &mut egui::Ui,
+    git: &mut GitConsole,
+    libraries: &[String],
+    status: &crate::git::GitStatus,
+    busy: bool,
+    is_repo: bool,
+    project_dir: &std::path::Path,
+    lib_push_out: &mut Option<(String, String, String)>,
+) {
+    ui.add_space(6.0);
+    if !is_repo {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} The project is not a git repository yet — initialise it in the Changes \
+                 view first. A library's history is pushed OUT of the project repo, so that \
+                 repo has to exist.",
+                ph::WARNING
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(220, 170, 90)),
+        );
+        return;
+    }
+    if libraries.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "No library crates in this project. Use \"Extract to library crate\" on a \
+                 folder in the project tree first.",
+            )
+            .size(11.0)
+            .color(egui::Color32::from_gray(150)),
+        );
+        return;
+    }
+
+    // Selecting a library re-reads ITS stored URL: the value lives in the
+    // parent repo's .git/config, not in IDE state, so it survives restarts and
+    // is visible to plain `git remote -v`.
+    let mut just_selected = None;
+    if git.lib_selected.is_none() {
+        just_selected = libraries.first().cloned();
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Library:").size(11.0));
+        let current = git.lib_selected.clone().unwrap_or_default();
+        egui::ComboBox::from_id_salt("git_lib_pick")
+            .selected_text(egui::RichText::new(&current).size(11.0))
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for l in libraries {
+                    if ui
+                        .selectable_label(current == *l, egui::RichText::new(l).size(11.0))
+                        .clicked()
+                        && current != *l
+                    {
+                        just_selected = Some(l.clone());
+                    }
+                }
+            });
+    });
+    if let Some(lib) = just_selected {
+        git.lib_remote_draft =
+            crate::git::library_remote_url(project_dir, &lib).unwrap_or_default();
+        git.lib_selected = Some(lib);
+        git.lib_note = None;
+    }
+    let Some(lib) = git.lib_selected.clone() else {
+        return;
+    };
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Repository URL:").size(11.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut git.lib_remote_draft)
+                .desired_width(330.0)
+                .hint_text("https://github.com/you/mw_radar.git"),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Branch:").size(11.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut git.lib_branch_draft)
+                .desired_width(120.0)
+                .hint_text("main"),
+        );
+        ui.label(
+            egui::RichText::new(format!(
+                "stored as remote \"{}\"",
+                crate::git::library_remote_name(&lib)
+            ))
+            .size(10.0)
+            .color(egui::Color32::from_gray(140))
+            .italics(),
+        );
+    });
+
+    // `subtree push` publishes COMMITTED history only. Uncommitted work in the
+    // library would be silently left out — which looks identical to a push that
+    // did nothing — so say it before the click, not after.
+    let dirty = crate::git::uncommitted_under_prefix(status, &lib);
+    if !dirty.is_empty() {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "{} {} uncommitted file(s) in {lib}/ will NOT be pushed — commit them in the \
+                 Changes view first:",
+                ph::WARNING,
+                dirty.len()
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(230, 180, 90)),
+        );
+        for p in dirty.iter().take(6) {
+            ui.label(
+                egui::RichText::new(format!("    {p}"))
+                    .size(10.0)
+                    .monospace()
+                    .color(egui::Color32::from_gray(150)),
+            );
+        }
+        if dirty.len() > 6 {
+            ui.label(
+                egui::RichText::new(format!("    … and {} more", dirty.len() - 6))
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
+            );
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let can_push = !busy && status.has_commits;
+        if ui
+            .add_enabled(
+                can_push,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Push {lib} to its repository", ph::UPLOAD_SIMPLE))
+                        .size(11.5),
+                ),
+            )
+            .on_disabled_hover_text(if status.has_commits {
+                "A git operation is already running."
+            } else {
+                "The project repo has no commits yet — commit once in the Changes view first."
+            })
+            .clicked()
+        {
+            match crate::git::validate_remote_url(&git.lib_remote_draft) {
+                Ok(()) => {
+                    git.lib_note = None;
+                    *lib_push_out = Some((
+                        lib.clone(),
+                        git.lib_remote_draft.trim().to_string(),
+                        git.lib_branch_draft.trim().to_string(),
+                    ));
+                }
+                Err(e) => git.lib_note = Some(e),
+            }
+        }
+        ui.label(
+            egui::RichText::new("push only — the project keeps the files")
+                .size(10.0)
+                .color(egui::Color32::from_gray(140))
+                .italics(),
+        );
+    });
+
+    if let Some(note) = &git.lib_note {
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(note)
+                .size(11.0)
+                .color(egui::Color32::from_rgb(220, 120, 100)),
+        );
+    }
+
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "Pushes the history of {lib}/ to a separate repository. The project repo keeps the \
+             real files, so cloning it still works and the cargo workspace member stays valid — \
+             nothing here changes your working tree.",
+        ))
+        .size(10.0)
+        .color(egui::Color32::from_gray(145)),
+    );
 }

@@ -111,6 +111,11 @@ impl AppIde {
         let mut git_discard: Option<(String, bool)> = None;
         // Set when the user clicks "Discard all" in the Git tab.
         let mut git_discard_all = false;
+        // Git tab's Library view: the workspace members it can publish, and the
+        // `(library, url, branch)` set when Push is clicked.
+        let git_libraries =
+            crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+        let mut git_lib_push: Option<(String, String, String)> = None;
         // Flash-tab Programmer-row buttons (moved off the top toolbar).
         let mut flash_scan = false;
         let mut flash_go = false;
@@ -226,6 +231,8 @@ impl AppIde {
                     &mut git_restore_all_from_commit,
                     &mut git_discard,
                     &mut git_discard_all,
+                    &git_libraries,
+                    &mut git_lib_push,
                     &mut flash_scan,
                     &mut flash_go,
                     can_flash,
@@ -368,6 +375,21 @@ impl AppIde {
         // "Discard all" was clicked (Phase C) → open the strong confirm dialog.
         if git_discard_all {
             self.git_discard_all_confirm = true;
+        }
+        // Library push (git subtree push) — no confirm dialog: it is push-only
+        // and cannot touch the working tree.
+        if let Some((lib, url, branch)) = git_lib_push {
+            if let Some(dir) = self.project_dir.clone() {
+                crate::git::run_subtree_push(
+                    lib,
+                    url,
+                    branch,
+                    dir,
+                    std::sync::Arc::clone(&self.git.state),
+                    std::sync::Arc::clone(&self.activity),
+                    self.egui_ctx.clone(),
+                );
+            }
         }
         // A confirmed whole-file discard, queued by the dialog on the previous
         // frame — apply it here (same `source_rewritten` refresh as the hunk
