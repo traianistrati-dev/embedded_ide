@@ -101,6 +101,9 @@ impl AppIde {
         let mut git_open: Option<(String, usize)> = None;
         // Set when the user clicks a hunk's revert button in the Git diff view.
         let mut git_revert_hunk: Option<(String, usize)> = None;
+        // Git History (read-only): commit selected / commit file clicked.
+        let mut git_commit_load: Option<String> = None;
+        let mut git_commit_file_load: Option<(String, String)> = None;
         // Set when the user clicks a file's discard button in the Git tab.
         let mut git_discard: Option<(String, bool)> = None;
         // Set when the user clicks "Discard all" in the Git tab.
@@ -214,6 +217,8 @@ impl AppIde {
                     &mut git_op,
                     &mut git_open,
                     &mut git_revert_hunk,
+                    &mut git_commit_load,
+                    &mut git_commit_file_load,
                     &mut git_discard,
                     &mut git_discard_all,
                     &mut flash_scan,
@@ -236,6 +241,25 @@ impl AppIde {
         if tab_clicked && collapsed {
             self.diag_collapsed = false;
             self.diag_panel_height = (avail_h * 0.2).clamp(MIN_H, max_h);
+        }
+        // History view: load a commit's file list / one file's diff. Both are
+        // read-only git reads, guarded against a concurrent op inside.
+        if let (Some(sha), Some(dir)) = (git_commit_load, project_dir.as_ref()) {
+            crate::git::run_commit_files(
+                sha,
+                dir.clone(),
+                std::sync::Arc::clone(&self.git.state),
+                self.egui_ctx.clone(),
+            );
+        }
+        if let (Some((sha, path)), Some(dir)) = (git_commit_file_load, project_dir.as_ref()) {
+            crate::git::run_commit_file_diff(
+                sha,
+                path,
+                dir.clone(),
+                std::sync::Arc::clone(&self.git.state),
+                self.egui_ctx.clone(),
+            );
         }
         // A Git tab button was clicked: spawn the worker (guards inside).
         // An automatic refresh on entering the tab loses to an explicit button

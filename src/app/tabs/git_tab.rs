@@ -6,7 +6,7 @@
 //! Commits are STRICTLY what's on disk — the amber banner warns when the
 //! editors hold unsaved edits a commit would miss.
 
-use crate::git::{GitConsole, GitLine, GitOp};
+use crate::git::{GitConsole, GitLine, GitOp, GitView};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
@@ -39,6 +39,10 @@ pub fn show_git_tab(
     // Set to `(git path, hunk row index)` when the user clicks a hunk's revert
     // button — the caller reverses just that hunk (Phase B).
     revert_hunk: &mut Option<(String, usize)>,
+    // History view (read-only): set when a commit is selected / one of its
+    // files is clicked. The caller spawns the `git diff-tree` / `git show`.
+    commit_load: &mut Option<String>,
+    commit_file_load: &mut Option<(String, String)>,
     // Set to `(git path, is_untracked)` when the user clicks a file's discard
     // button — the caller confirms, then restores it to HEAD (tracked) or
     // deletes it (untracked) (Phase A).
@@ -61,7 +65,7 @@ pub fn show_git_tab(
     };
 
     // Snapshot the shared state for this frame (short lock).
-    let (busy, loaded, is_repo, git_missing, status, unsaved, commit_ok, diff, remote_url) = {
+    let (busy, loaded, is_repo, git_missing, status, unsaved, commit_ok, diff, remote_url, log, commit_files, commit_files_sha) = {
         let mut st = git.state.lock().unwrap();
         let commit_ok = std::mem::take(&mut st.commit_succeeded);
         (
@@ -74,6 +78,9 @@ pub fn show_git_tab(
             commit_ok,
             st.diff.clone(),
             st.remote_url.clone(),
+            st.log.clone(),
+            st.commit_files.clone(),
+            st.commit_files_sha.clone(),
         )
     };
     if commit_ok {
@@ -83,6 +90,50 @@ pub fn show_git_tab(
     if !loaded && busy.is_none() {
         *op_out = Some(GitOp::Refresh);
     }
+    let log_is_empty = log.is_empty();
+    // Set when the view switches — the two halves share `state.diff`.
+    let mut state_diff_clear = false;
+    // Set when a commit / a commit's file is picked; loaded after the borrows end.
+    let mut load_commit: Option<String> = None;
+    let mut load_commit_file: Option<(String, String)> = None;
+
+    // ── Changes | History switch ─────────────────────────────────────────────
+    // History is strictly READ-ONLY (log / diff-tree / show); nothing in it can
+    // touch the worktree.
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        for (v, label) in [
+            (GitView::Changes, "Changes"),
+            (GitView::History, "History"),
+        ] {
+            if ui
+                .selectable_label(git.view == v, egui::RichText::new(label).size(11.0))
+                .clicked()
+                && git.view != v
+            {
+                git.view = v;
+                // The two views share `state.diff`; carrying one's diff into the
+                // other would show a working-tree diff under a commit header.
+                state_diff_clear = true;
+                if v == GitView::History && log_is_empty {
+                    *op_out = Some(GitOp::Log);
+                }
+            }
+        }
+        if git.view == GitView::History {
+            ui.separator();
+            if ui
+                .add_enabled(
+                    busy.is_none(),
+                    egui::Button::new(egui::RichText::new(format!("{} Reload", ph::ARROWS_CLOCKWISE)).size(11.0)),
+                )
+                .clicked()
+            {
+                *op_out = Some(GitOp::Log);
+            }
+        }
+    });
+    ui.separator();
 
     // ── Header row: branch / upstream / ahead-behind / refresh ───────────────
     ui.horizontal(|ui| {
@@ -358,6 +409,117 @@ pub fn show_git_tab(
             });
         });
 
+    // ── History body: commits (left) + files + diff (right) ──────────────────
+    if git.view == GitView::History {
+        let body_h = ui.available_height().max(40.0);
+        ui.horizontal_top(|ui| {
+            let total = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(total * 0.38, body_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("git_history")
+                        .max_height(body_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if log.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(if busy.is_some() {
+                                        "loading history…"
+                                    } else {
+                                        "no commits yet"
+                                    })
+                                    .size(11.0)
+                                    .italics()
+                                    .color(egui::Color32::from_gray(120)),
+                                );
+                            }
+                            for c in &log {
+                                let sel = git.selected_commit.as_deref() == Some(c.sha.as_str());
+                                let resp = ui.add(
+                                    egui::Button::selectable(
+                                        sel,
+                                        egui::RichText::new(format!(
+                                            "{}  {}",
+                                            c.short, c.subject
+                                        ))
+                                        .size(11.0)
+                                        .monospace(),
+                                    )
+                                    .truncate(),
+                                );
+                                if resp
+                                    .on_hover_text(format!(
+                                        "{}
+{} · {}{}",
+                                        c.sha,
+                                        c.author,
+                                        c.date,
+                                        if c.refs.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!("
+{}", c.refs)
+                                        }
+                                    ))
+                                    .clicked()
+                                {
+                                    git.selected_commit = Some(c.sha.clone());
+                                    load_commit = Some(c.sha.clone());
+                                }
+                                // Second line: author + date, dimmed.
+                                ui.label(
+                                    egui::RichText::new(format!("      {} · {}", c.date, c.author))
+                                        .size(9.5)
+                                        .color(egui::Color32::from_gray(115)),
+                                );
+                            }
+                        });
+                },
+            );
+            ui.separator();
+            ui.vertical(|ui| {
+                // Files of the selected commit — clicking one loads its diff.
+                let showing = git.selected_commit.as_deref().unwrap_or("");
+                if !showing.is_empty() && commit_files_sha == showing {
+                    ui.horizontal_wrapped(|ui| {
+                        for f in &commit_files {
+                            let col = match f.status {
+                                'A' => egui::Color32::from_rgb(120, 200, 130),
+                                'D' => egui::Color32::from_rgb(230, 110, 95),
+                                'R' => egui::Color32::from_rgb(160, 170, 230),
+                                _ => egui::Color32::from_rgb(220, 180, 90),
+                            };
+                            let open = diff.as_ref().is_some_and(|d| d.path == f.path);
+                            if ui
+                                .add(egui::Button::selectable(
+                                    open,
+                                    egui::RichText::new(format!("{} {}", f.status, f.path))
+                                        .size(10.5)
+                                        .monospace()
+                                        .color(col),
+                                ))
+                                .clicked()
+                            {
+                                load_commit_file = Some((showing.to_owned(), f.path.clone()));
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
+                render_commit_diff(ui, diff.as_ref(), body_h);
+            });
+        });
+        // Applied after the borrows end.
+        if state_diff_clear {
+            git.state.lock().unwrap().diff = None;
+        }
+        *commit_load = load_commit;
+        *commit_file_load = load_commit_file;
+        return;
+    }
+
     // ── Body: changes list (left) + output scrollback (right) ────────────────
     let body_h = ui.available_height().max(40.0);
     ui.horizontal_top(|ui| {
@@ -606,4 +768,67 @@ pub fn show_git_tab(
             }
         });
     });
+}
+
+/// Read-only diff view for the History tab.
+///
+/// Deliberately NOT the Changes pane's renderer: that one carries per-hunk
+/// revert buttons, and those reverse-patch the CURRENT worktree — pressing one
+/// under a commit header would look like "undo this part of that commit" and do
+/// something entirely different. Keeping History on its own renderer makes that
+/// impossible by construction rather than by remembering to pass a flag.
+fn render_commit_diff(ui: &mut egui::Ui, diff: Option<&crate::git::FileDiff>, body_h: f32) {
+    let Some(d) = diff else {
+        ui.label(
+            egui::RichText::new("select a commit, then one of its files")
+                .size(11.0)
+                .italics()
+                .color(egui::Color32::from_gray(120)),
+        );
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{} {}", ph::GIT_DIFF, d.path))
+                .size(11.5)
+                .strong()
+                .color(egui::Color32::from_rgb(150, 195, 235)),
+        );
+        ui.label(
+            egui::RichText::new(format!("+{}", d.added))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(120, 200, 130)),
+        );
+        ui.label(
+            egui::RichText::new(format!("-{}", d.removed))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(230, 110, 95)),
+        );
+    });
+    egui::ScrollArea::vertical()
+        .id_salt("git_commit_diff")
+        .max_height(body_h)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for row in &d.rows {
+                use crate::git::DiffRow;
+                let (text, color) = match row {
+                    DiffRow::Hunk(h) => (h.clone(), egui::Color32::from_rgb(140, 150, 190)),
+                    DiffRow::Ctx(_, n, t) => (
+                        format!("{n:>5}   {t}"),
+                        egui::Color32::from_gray(150),
+                    ),
+                    DiffRow::Del(o, t) => (
+                        format!("{o:>5} - {t}"),
+                        egui::Color32::from_rgb(230, 130, 120),
+                    ),
+                    DiffRow::Add(n, t) => (
+                        format!("{n:>5} + {t}"),
+                        egui::Color32::from_rgb(130, 205, 140),
+                    ),
+                };
+                ui.label(egui::RichText::new(text).size(10.5).monospace().color(color));
+            }
+        });
 }

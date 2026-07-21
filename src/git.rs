@@ -138,6 +138,79 @@ pub enum DiffRow {
     Add(u32, String),
 }
 
+/// One entry of the commit log (History view).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Commit {
+    /// Full hash — what every follow-up command is addressed by.
+    pub sha: String,
+    pub short: String,
+    pub author: String,
+    /// `--date=short`, i.e. `YYYY-MM-DD`.
+    pub date: String,
+    pub subject: String,
+    /// Decorations (`HEAD -> main`, `tag: v1`), already stripped of brackets.
+    pub refs: String,
+}
+
+/// One file touched by a commit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommitFile {
+    /// git's `--name-status` letter: `A`dded, `M`odified, `D`eleted, `R`enamed…
+    pub status: char,
+    pub path: String,
+}
+
+/// Field separator for the log format — `\x1f` (unit separator) cannot appear
+/// in a commit subject or an author name, unlike any printable delimiter.
+const LOG_SEP: char = '\u{1f}';
+
+/// The `--pretty=format:` string matching [`parse_log`].
+pub const LOG_FORMAT: &str = "%H\u{1f}%h\u{1f}%an\u{1f}%ad\u{1f}%s\u{1f}%D";
+
+/// Parse `git log --pretty=format:LOG_FORMAT --date=short` output.
+///
+/// Malformed lines are skipped rather than failing the whole log: one odd
+/// commit message must not blank the entire History view.
+pub fn parse_log(text: &str) -> Vec<Commit> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split(LOG_SEP).collect();
+            if f.len() < 6 {
+                return None;
+            }
+            Some(Commit {
+                sha: f[0].to_owned(),
+                short: f[1].to_owned(),
+                author: f[2].to_owned(),
+                date: f[3].to_owned(),
+                subject: f[4].to_owned(),
+                refs: f[5].to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Parse `git diff-tree --name-status -r` output (`M\tsrc/main.rs`).
+///
+/// Renames arrive as `R100\told\tnew`; the NEW path is what the user can open,
+/// so that is the one kept.
+pub fn parse_name_status(text: &str) -> Vec<CommitFile> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let status = parts.next()?.chars().next()?;
+            let first = parts.next()?;
+            let path = parts.next().unwrap_or(first);
+            Some(CommitFile {
+                status,
+                path: path.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// A parsed per-file diff (disk vs HEAD) shown in the Git tab's right pane.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FileDiff {
@@ -171,6 +244,13 @@ pub struct GitState {
     /// scrollback shows instead). Cleared when any operation runs — a commit
     /// or pull makes the open diff stale.
     pub diff: Option<FileDiff>,
+    /// Commit log for the History view, newest first.
+    pub log: Vec<Commit>,
+    /// Files touched by `commit_files_sha`.
+    pub commit_files: Vec<CommitFile>,
+    /// Which commit `commit_files` belongs to — guards against showing one
+    /// commit's file list next to another's diff while a load is in flight.
+    pub commit_files_sha: String,
     /// Bumped after every operation that can move HEAD or rewrite the worktree
     /// (commit / pull / init) — the editor's gutter-diff baseline cache keys on
     /// it, so marks refresh right after a commit.
@@ -191,8 +271,22 @@ impl GitState {
 }
 
 /// UI-side handle: shared state + the commit-message and remote-URL drafts.
+/// Which half of the Git tab is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum GitView {
+    /// Working-tree changes: commit box, file checkboxes, hunk revert.
+    #[default]
+    Changes,
+    /// Commit log — strictly READ-ONLY (log / diff-tree / show).
+    History,
+}
+
 pub struct GitConsole {
     pub state: Arc<Mutex<GitState>>,
+    /// Changes vs History.
+    pub view: GitView,
+    /// Selected commit in the History list, by full sha.
+    pub selected_commit: Option<String>,
     pub commit_msg: String,
     /// Draft for the "Set remote origin" field (shown while no remote exists).
     pub remote_url_draft: String,
@@ -206,6 +300,8 @@ impl Default for GitConsole {
     fn default() -> Self {
         Self {
             state: Arc::new(Mutex::new(GitState::default())),
+            view: GitView::default(),
+            selected_commit: None,
             commit_msg: String::new(),
             remote_url_draft: String::new(),
             excluded: std::collections::HashSet::new(),
@@ -309,7 +405,16 @@ fn commands_for(
         GitOp::Push => vec![push],
         GitOp::Pull => vec![s(&["pull"])],
         GitOp::Fetch => vec![s(&["fetch"])],
-        GitOp::Log => vec![s(&["log", "--oneline", "--decorate", "-20"])],
+        // Structured for the History view — parsed by `parse_log`, not dumped
+        // into the console. `--date=short` keeps the column narrow.
+        GitOp::Log => vec![s(&[
+            "log",
+            "--no-color",
+            &format!("--pretty=format:{LOG_FORMAT}"),
+            "--date=short",
+            "-n",
+            "200",
+        ])],
         GitOp::SetRemote => vec![vec!["remote".into(), "add".into(), "origin".into(), remote.to_owned()]],
     }
 }
@@ -377,7 +482,18 @@ pub fn run_op(
             match run_git(&project_dir, &args) {
                 Ok(out) => {
                     let mut st = state.lock().unwrap();
-                    push_output(&mut st, &out);
+                    // The log is DATA, not console output: parsed into the
+                    // History view instead of flooding the scrollback with 200
+                    // separator-delimited lines.
+                    if op == GitOp::Log && out.status.success() {
+                        st.log = parse_log(&String::from_utf8_lossy(&out.stdout));
+                        st.commit_files.clear();
+                        st.commit_files_sha.clear();
+                        let n = st.log.len();
+                        st.push(GitLine::Notice, format!("[info] loaded {n} commit(s)"));
+                    } else {
+                        push_output(&mut st, &out);
+                    }
                     let code = out.status.code();
                     rec.cmd_phase(
                         format!("git {}", args.first().map(String::as_str).unwrap_or("")),
@@ -705,6 +821,113 @@ pub struct DiffHunk {
     pub new_len: usize,
 }
 
+/// Load the file list of `sha` into `state.commit_files` (History view).
+///
+/// `--root` matters: without it the INITIAL commit reports no files at all,
+/// because it has no parent to diff against.
+pub fn run_commit_files(
+    sha: String,
+    project_dir: PathBuf,
+    state: Arc<Mutex<GitState>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut st = state.lock().unwrap();
+        if st.busy.is_some() {
+            return;
+        }
+        st.busy = Some("show");
+        st.diff = None;
+    }
+    std::thread::spawn(move || {
+        let out = run_git(
+            &project_dir,
+            &[
+                "diff-tree".into(),
+                "--no-commit-id".into(),
+                "--name-status".into(),
+                "-r".into(),
+                "--root".into(),
+                "--first-parent".into(),
+                sha.clone(),
+            ],
+        );
+        let mut st = state.lock().unwrap();
+        match out {
+            Ok(o) if o.status.success() => {
+                st.commit_files = parse_name_status(&String::from_utf8_lossy(&o.stdout));
+                st.commit_files_sha = sha;
+                if st.commit_files.is_empty() {
+                    // A merge shows nothing against its first parent.
+                    st.push(
+                        GitLine::Notice,
+                        "[info] no file changes against the first parent (merge commit?)".to_owned(),
+                    );
+                }
+            }
+            _ => st.push(GitLine::Notice, format!("[error] couldn't read commit {sha}")),
+        }
+        st.busy = None;
+        drop(st);
+        ctx.request_repaint();
+    });
+}
+
+/// Load one file's diff AS OF `sha` into `state.diff` (History view).
+///
+/// Read-only by construction: `git show` never touches the worktree. The tab
+/// hides the hunk-revert buttons for this diff — they reverse-patch the CURRENT
+/// files, which is not what "undo part of an old commit" would mean.
+pub fn run_commit_file_diff(
+    sha: String,
+    path: String,
+    project_dir: PathBuf,
+    state: Arc<Mutex<GitState>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut st = state.lock().unwrap();
+        if st.busy.is_some() {
+            return;
+        }
+        st.busy = Some("show");
+    }
+    std::thread::spawn(move || {
+        let out = run_git(
+            &project_dir,
+            &[
+                "show".into(),
+                "--no-color".into(),
+                "--first-parent".into(),
+                "--format=".into(), // suppress the commit header — diff only
+                sha.clone(),
+                "--".into(),
+                path.clone(),
+            ],
+        );
+        let mut st = state.lock().unwrap();
+        match out {
+            Ok(o) if o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let (rows, added, removed) = parse_unified_diff(&text);
+                if rows.is_empty() {
+                    st.push(
+                        GitLine::Notice,
+                        format!("[info] no textual diff for {path} (binary file?)"),
+                    );
+                    st.diff = None;
+                } else {
+                    st.diff = Some(FileDiff { path, rows, added, removed });
+                }
+            }
+            _ => st.push(GitLine::Notice, format!("[error] couldn't diff {path} at {sha}")),
+        }
+        st.busy = None;
+        drop(st);
+        ctx.request_repaint();
+    });
+}
+
 /// Line-diff `old` → `new` into gutter hunks. Pure — tested below.
 pub fn compute_hunks(old: &str, new: &str) -> Vec<DiffHunk> {
     use similar::DiffOp;
@@ -950,6 +1173,59 @@ mod tests {
         assert!(!st.has_commits);
         let st = parse_porcelain_v2("# branch.oid 7c46695deadbeef\n# branch.head main\n");
         assert!(st.has_commits);
+    }
+
+    /// The History view parses the log instead of showing it raw. The fields are
+    /// `\x1f`-separated precisely so a subject containing spaces, tabs or pipes
+    /// cannot break the columns.
+    #[test]
+    fn log_lines_parse_into_commits() {
+        let text = "abc123\u{1f}abc\u{1f}Ana\u{1f}2026-07-20\u{1f}feat: add radar\u{1f}HEAD -> main\n\
+                    def456\u{1f}def\u{1f}Bogdan\u{1f}2026-07-19\u{1f}fix: off by one\u{1f}\n";
+        let log = parse_log(text);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].sha, "abc123");
+        assert_eq!(log[0].subject, "feat: add radar");
+        assert_eq!(log[0].refs, "HEAD -> main");
+        assert_eq!(log[1].author, "Bogdan");
+        assert_eq!(log[1].refs, "", "an undecorated commit has no refs");
+    }
+
+    /// A subject with the delimiters people actually type must survive intact.
+    #[test]
+    fn a_subject_with_tabs_and_pipes_survives() {
+        let text = "a\u{1f}a\u{1f}A\u{1f}2026-01-01\u{1f}fix: a\tb | c\u{1f}\n";
+        assert_eq!(parse_log(text)[0].subject, "fix: a\tb | c");
+    }
+
+    /// One malformed line must not blank the whole History view.
+    #[test]
+    fn a_malformed_log_line_is_skipped_not_fatal() {
+        let text = "garbage\nabc\u{1f}abc\u{1f}A\u{1f}2026-01-01\u{1f}s\u{1f}\n";
+        assert_eq!(parse_log(text).len(), 1);
+    }
+
+    #[test]
+    fn name_status_keeps_the_new_path_of_a_rename() {
+        let text = "M\tsrc/main.rs\nA\tsrc/new.rs\nD\tsrc/old.rs\nR100\tsrc/a.rs\tsrc/b.rs\n";
+        let files = parse_name_status(text);
+        assert_eq!(files.len(), 4);
+        assert_eq!(
+            files[0],
+            CommitFile {
+                status: 'M',
+                path: "src/main.rs".into()
+            }
+        );
+        assert_eq!(files[2].status, 'D');
+        assert_eq!(
+            files[3],
+            CommitFile {
+                status: 'R',
+                path: "src/b.rs".into()
+            },
+            "a rename is listed under the path you can still open"
+        );
     }
 
     #[test]
