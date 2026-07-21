@@ -44,6 +44,9 @@ fn human_size(bytes: u64) -> String {
 
 /// Session-only state for the import sub-dialog.
 pub(crate) struct DatasheetImport {
+    /// Which AI backend to use. Remembered across sessions in the user config
+    /// folder, since it also selects which stored key applies.
+    provider: ds::Provider,
     api_key: String,
     show_key: bool,
     model: String,
@@ -72,10 +75,12 @@ pub(crate) struct DatasheetImport {
 
 impl DatasheetImport {
     fn new(form: &McuForm) -> Self {
+        let provider = ds::load_last_provider();
         Self {
-            api_key: ds::load_api_key(),
+            provider,
+            api_key: ds::load_api_key(provider),
             show_key: false,
-            model: ds::DEFAULT_MODEL.to_string(),
+            model: provider.default_model().to_string(),
             text: String::new(),
             pdf: None,
             family_hint: form.family.clone(),
@@ -167,14 +172,49 @@ impl AppIde {
                 );
                 ui.add_space(6.0);
 
-                // ── API key ──────────────────────────────────────────────────
+                // ── Provider ─────────────────────────────────────────────────
+                // Switching providers swaps in that provider's own key and
+                // default model — carrying either across would just produce an
+                // auth failure with a confusing message.
                 ui.horizontal(|ui| {
-                    ui.label("Anthropic API key:");
+                    ui.label("AI provider:");
+                    let before = di.provider;
+                    egui::ComboBox::from_id_salt("ds_provider")
+                        .selected_text(di.provider.label())
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for p in ds::Provider::ALL {
+                                ui.selectable_value(&mut di.provider, p, p.label());
+                            }
+                        });
+                    if di.provider != before {
+                        di.api_key = ds::load_api_key(di.provider);
+                        di.model = di.provider.default_model().to_string();
+                        di.key_note = None;
+                        ds::save_last_provider(di.provider);
+                    }
+                    ui.label(
+                        egui::RichText::new("all three read the PDF natively")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140))
+                            .italics(),
+                    )
+                    .on_hover_text(
+                        "Only providers that accept a PDF directly are offered. A pin \
+                         table is a 2D layout — backends that can only be fed text \
+                         extracted locally scramble the columns and return confident, \
+                         wrong pinouts.",
+                    );
+                });
+
+                // ── API key ──────────────────────────────────────────────────
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} API key:", di.provider.label()));
                     ui.add(
                         egui::TextEdit::singleline(&mut di.api_key)
                             .password(!di.show_key)
-                            .desired_width(260.0)
-                            .hint_text("sk-ant-…"),
+                            .desired_width(260.0),
                     );
                     ui.checkbox(&mut di.show_key, "show");
                     if ui
@@ -186,10 +226,11 @@ impl AppIde {
                     }
                 });
                 ui.label(
-                    egui::RichText::new(
-                        "Stored in your user config folder; the ANTHROPIC_API_KEY \
+                    egui::RichText::new(format!(
+                        "Stored per provider in your user config folder; the {} \
                          environment variable overrides it. Never written to the project.",
-                    )
+                        di.provider.env_var()
+                    ))
                     .size(10.0)
                     .color(egui::Color32::from_gray(140))
                     .italics(),
@@ -202,13 +243,12 @@ impl AppIde {
                             .color(egui::Color32::from_gray(140)),
                     );
                     ui.hyperlink_to(
-                        egui::RichText::new("console.anthropic.com / Settings / API keys")
-                            .size(10.0),
-                        "https://console.anthropic.com/settings/keys",
+                        egui::RichText::new(di.provider.console_url()).size(10.0),
+                        di.provider.console_url(),
                     )
                     .on_hover_text(
-                        "Opens the Anthropic Console. Sign in, click \"Create Key\", \
-                         copy the key (shown once) and paste it above.",
+                        "Opens the provider's console. Sign in, create a key, copy it \
+                         (usually shown once) and paste it above.",
                     );
                     ui.label(
                         egui::RichText::new("(needs billing set up on the account).")
@@ -227,7 +267,7 @@ impl AppIde {
                     ui.add(
                         egui::TextEdit::singleline(&mut di.model).desired_width(200.0),
                     )
-                    .on_hover_text("Anthropic model id — e.g. claude-opus-4-8");
+                    .on_hover_text(di.provider.model_hint());
                     if !di.family_hint.trim().is_empty() {
                         ui.label(
                             egui::RichText::new(format!("family: {}", di.family_hint.trim()))
@@ -489,7 +529,7 @@ impl AppIde {
 
         // ── Deferred side effects ────────────────────────────────────────────
         if do_save_key {
-            di.key_note = Some(match ds::save_api_key(&di.api_key) {
+            di.key_note = Some(match ds::save_api_key(di.provider, &di.api_key) {
                 Ok(()) => format!("{} Saved to the config folder.", ph::CHECK_CIRCLE),
                 Err(e) => format!("{} Could not save key: {e}", ph::X_CIRCLE),
             });
@@ -509,7 +549,8 @@ impl AppIde {
             di.job = Some(shared.clone());
             di.error = None;
             di.report = None;
-            let (key, model, family, package) = (
+            let (provider, key, model, family, package) = (
+                di.provider,
                 di.api_key.clone(),
                 di.model.clone(),
                 di.family_hint.clone(),
@@ -521,7 +562,8 @@ impl AppIde {
             };
             let use_cache = !di.force_reextract;
             std::thread::spawn(move || {
-                let res = ds::call_claude(&key, &model, &family, &package, &source, use_cache);
+                let res =
+                    ds::call_ai(provider, &key, &model, &family, &package, &source, use_cache);
                 *shared.lock().unwrap() = ImportJob::Done(res);
             });
             ui.ctx().request_repaint();

@@ -22,18 +22,115 @@ use std::path::PathBuf;
 use super::mcu_form::{McuForm, PinRow};
 use super::stm32_pin_data;
 
-/// Default model. Datasheet extraction rewards accuracy over cost, so the most
-/// capable model is the sensible default; the dialog lets the user override it.
-pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
-
 /// Generation cap. A large pinout (176-pin package with full AF lists) fits
 /// comfortably under this; higher avoids a truncated — and therefore
 /// unparseable — JSON object. Output is billed per token actually generated.
 const MAX_TOKENS: u32 = 16000;
 
-/// The Anthropic Messages endpoint. Raw HTTP (via `ureq`) because Rust has no
-/// official Anthropic SDK — consistent with the rest of the crate's HTTP use.
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+// ── Providers ───────────────────────────────────────────────────────────────
+
+/// Which AI backend performs the extraction.
+///
+/// Deliberately only three, and deliberately these three: reading a pin table
+/// needs the model to see the PDF's 2D LAYOUT. Providers without native PDF
+/// input can only be fed locally-extracted text, which flattens a pin table
+/// into a column-scrambled stream — the model then produces confident,
+/// plausible, WRONG pinouts. A silent quality cliff is worse than an absent
+/// option, so backends that cannot take a PDF are not offered at all.
+///
+/// An enum rather than `dyn Trait`: the set is closed, no state is carried, and
+/// keeping the per-provider request/response shapes as plain `match` arms over
+/// pure functions is what makes them unit-testable without a network.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum Provider {
+    #[default]
+    Anthropic,
+    Gemini,
+    OpenAi,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 3] = [Provider::Anthropic, Provider::Gemini, Provider::OpenAi];
+
+    /// Shown in the dialog's provider picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "Anthropic (Claude)",
+            Provider::Gemini => "Google (Gemini)",
+            Provider::OpenAi => "OpenAI",
+        }
+    }
+
+    /// Stable identifier used in the key filename and the cache key. Never
+    /// change these: `anthropic` keeps the pre-existing `anthropic_api_key`
+    /// file working untouched.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::Gemini => "gemini",
+            Provider::OpenAi => "openai",
+        }
+    }
+
+    /// Model used until the user overrides it. Extraction rewards accuracy over
+    /// cost, so each is the provider's most capable current model — and each is
+    /// only a default: model ids move, and the dialog's field is editable.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "claude-opus-4-8",
+            Provider::Gemini => "gemini-3.5-flash",
+            Provider::OpenAi => "gpt-5.6",
+        }
+    }
+
+    /// Environment variable consulted before the stored key file.
+    pub fn env_var(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "ANTHROPIC_API_KEY",
+            Provider::Gemini => "GEMINI_API_KEY",
+            Provider::OpenAi => "OPENAI_API_KEY",
+        }
+    }
+
+    /// Where the user gets a key — shown under the key field.
+    pub fn console_url(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "https://console.anthropic.com/settings/keys",
+            Provider::Gemini => "https://aistudio.google.com/apikey",
+            Provider::OpenAi => "https://platform.openai.com/api-keys",
+        }
+    }
+
+    /// Example model id for the field's tooltip.
+    pub fn model_hint(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "Anthropic model id — e.g. claude-opus-4-8",
+            Provider::Gemini => "Gemini model id — e.g. gemini-3.5-flash",
+            Provider::OpenAi => "OpenAI model id — e.g. gpt-5.6",
+        }
+    }
+
+    /// Restore from [`Self::slug`]; unknown text falls back to the default.
+    pub fn from_slug(s: &str) -> Provider {
+        Provider::ALL
+            .into_iter()
+            .find(|p| p.slug() == s.trim())
+            .unwrap_or_default()
+    }
+
+    /// The endpoint for one extraction. Gemini names the model in the PATH,
+    /// which is why this takes it.
+    fn endpoint(self, model: &str) -> String {
+        match self {
+            Provider::Anthropic => "https://api.anthropic.com/v1/messages".to_string(),
+            Provider::Gemini => format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                model.trim()
+            ),
+            Provider::OpenAi => "https://api.openai.com/v1/responses".to_string(),
+        }
+    }
+}
 
 // ── Extraction result (the JSON contract the model must return) ─────────────
 
@@ -198,9 +295,28 @@ const PDF_INSTRUCTION: &str =
      memory map, and full pin / alternate-function table following the system \
      instructions and the required JSON schema.";
 
-/// Build the Messages API request body (pure — no network). Includes a strict
-/// `output_config.format` json-schema so the reply is guaranteed valid JSON.
-pub fn build_request_body(model: &str, system: &str, source: &Source) -> String {
+/// Build the provider's request body (pure — no network).
+///
+/// All three are asked for schema-constrained JSON via their own native
+/// mechanism, so the reply is valid by construction rather than by parsing
+/// luck. The shapes have nothing in common beyond that intent, which is why
+/// this is a `match` and not a shared builder with holes punched in it.
+pub fn build_request_body(
+    provider: Provider,
+    model: &str,
+    system: &str,
+    source: &Source,
+) -> String {
+    match provider {
+        Provider::Anthropic => anthropic_body(model, system, source),
+        Provider::Gemini => gemini_body(system, source),
+        Provider::OpenAi => openai_body(model, system, source),
+    }
+}
+
+/// Anthropic Messages API: `system` is top-level, the PDF is a `document`
+/// content block, and `output_config.format` constrains the decoder.
+fn anthropic_body(model: &str, system: &str, source: &Source) -> String {
     let content = match source {
         Source::Text(t) => serde_json::json!(t),
         Source::Pdf(bytes) => serde_json::json!([
@@ -215,26 +331,96 @@ pub fn build_request_body(model: &str, system: &str, source: &Source) -> String 
             { "type": "text", "text": PDF_INSTRUCTION },
         ]),
     };
-    let body = serde_json::json!({
+    serde_json::json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": system,
         "output_config": {
-            "format": { "type": "json_schema", "schema": extraction_schema() },
+            "format": { "type": "json_schema", "schema": extraction_schema(true) },
         },
         "messages": [ { "role": "user", "content": content } ],
-    });
-    body.to_string()
+    })
+    .to_string()
+}
+
+/// Gemini `generateContent`: the model is in the URL (not the body), the PDF is
+/// an `inlineData` part, and JSON is requested through `responseMimeType` +
+/// `responseSchema`.
+///
+/// The schema is emitted WITHOUT `additionalProperties`: `responseSchema` takes
+/// an OpenAPI-flavoured subset of JSON Schema, and an unsupported keyword is
+/// rejected outright with a 400 rather than ignored. Nothing is lost — the
+/// response is schema-constrained regardless.
+fn gemini_body(system: &str, source: &Source) -> String {
+    let parts = match source {
+        Source::Text(t) => serde_json::json!([{ "text": t }]),
+        Source::Pdf(bytes) => serde_json::json!([
+            {
+                "inlineData": {
+                    "mimeType": "application/pdf",
+                    "data": base64_encode(bytes),
+                },
+            },
+            { "text": PDF_INSTRUCTION },
+        ]),
+    };
+    serde_json::json!({
+        "systemInstruction": { "parts": [{ "text": system }] },
+        "contents": [ { "role": "user", "parts": parts } ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": extraction_schema(false),
+            "maxOutputTokens": MAX_TOKENS,
+        },
+    })
+    .to_string()
+}
+
+/// OpenAI Responses API: the system prompt is `instructions`, the PDF is an
+/// `input_file` whose `file_data` is a data: URI (not bare base64), and
+/// `text.format` carries the strict json_schema.
+fn openai_body(model: &str, system: &str, source: &Source) -> String {
+    let content = match source {
+        Source::Text(t) => serde_json::json!([{ "type": "input_text", "text": t }]),
+        Source::Pdf(bytes) => serde_json::json!([
+            {
+                "type": "input_file",
+                "filename": "datasheet.pdf",
+                "file_data": format!(
+                    "data:application/pdf;base64,{}",
+                    base64_encode(bytes)
+                ),
+            },
+            { "type": "input_text", "text": PDF_INSTRUCTION },
+        ]),
+    };
+    serde_json::json!({
+        "model": model,
+        "instructions": system,
+        "max_output_tokens": MAX_TOKENS,
+        "input": [ { "role": "user", "content": content } ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "mcu_extraction",
+                "strict": true,
+                "schema": extraction_schema(true),
+            },
+        },
+    })
+    .to_string()
 }
 
 /// The strict JSON schema the model must fill — mirrors [`ExtractedChip`]. Every
-/// property is required and `additionalProperties` is false (structured-output
-/// rules); `number` is a string and `side` is an enum, so the reply needs no
-/// post-massaging beyond serde.
-fn extraction_schema() -> serde_json::Value {
-    serde_json::json!({
+/// property is required; `number` is a string and `side` is an enum, so the
+/// reply needs no post-massaging beyond serde.
+///
+/// `additional_properties` emits the `additionalProperties: false` keyword,
+/// which Anthropic and OpenAI's strict mode REQUIRE and Gemini's
+/// `responseSchema` subset rejects. See [`gemini_body`].
+fn extraction_schema(additional_properties: bool) -> serde_json::Value {
+    let mut root = serde_json::json!({
         "type": "object",
-        "additionalProperties": false,
         "properties": {
             "display_name": { "type": "string" },
             "family": { "type": "string" },
@@ -249,7 +435,6 @@ fn extraction_schema() -> serde_json::Value {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "additionalProperties": false,
                     "properties": {
                         "number": { "type": "string" },
                         "name": { "type": "string" },
@@ -264,7 +449,13 @@ fn extraction_schema() -> serde_json::Value {
             "display_name", "family", "cpu", "package", "flash_origin",
             "flash_size", "ram_origin", "ram_size", "probe_chip", "pins"
         ],
-    })
+    });
+
+    if additional_properties {
+        root["additionalProperties"] = serde_json::json!(false);
+        root["properties"]["pins"]["items"]["additionalProperties"] = serde_json::json!(false);
+    }
+    root
 }
 
 /// Standard base64 (RFC 4648) with padding — small enough to keep dependency-
@@ -295,31 +486,87 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 
 // ── Response parsing ────────────────────────────────────────────────────────
 
-/// Pull the assistant text out of a Claude Messages API response envelope, or
-/// surface the API error message.
-pub fn parse_api_envelope(resp_json: &str) -> Result<String, String> {
+/// Pull the model's reply text out of the provider's response envelope, or
+/// surface the API error message. All three report failures under a top-level
+/// `error.message`, so only the success path differs.
+pub fn parse_api_envelope(provider: Provider, resp_json: &str) -> Result<String, String> {
     let v: serde_json::Value =
         serde_json::from_str(resp_json).map_err(|e| format!("response was not JSON: {e}"))?;
     if let Some(err) = v.get("error") {
+        // Gemini nests it; Anthropic/OpenAI use a plain string message.
         let msg = err
             .get("message")
             .and_then(|m| m.as_str())
+            .or_else(|| err.as_str())
             .unwrap_or("unknown API error");
         return Err(format!("API error: {msg}"));
     }
-    v.get("content")
-        .and_then(|c| c.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|block| {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    block.get("text").and_then(|t| t.as_str())
-                } else {
-                    None
-                }
+
+    let text = match provider {
+        // { "content": [ { "type": "text", "text": … } ] }
+        Provider::Anthropic => v
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter().find_map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        block.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
             })
-        })
-        .map(str::to_string)
-        .ok_or_else(|| "no text content in API response".to_string())
+            .map(str::to_string),
+
+        // { "candidates": [ { "content": { "parts": [ { "text": … } ] } } ] }
+        // Parts are CONCATENATED: a long JSON object can be split across
+        // several, and taking only the first would truncate the extraction
+        // into unparseable garbage.
+        Provider::Gemini => v
+            .get("candidates")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|cand| cand.pointer("/content/parts"))
+            .and_then(|parts| parts.as_array())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect::<String>()
+            })
+            .filter(|s| !s.is_empty()),
+
+        // { "output": [ { "type": "message",
+        //                 "content": [ { "type": "output_text", "text": … } ] } ] }
+        // Reasoning models put other item types in `output` first, so this
+        // scans for the message rather than indexing [0].
+        Provider::OpenAi => v
+            .get("output")
+            .and_then(|o| o.as_array())
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    item.get("content")
+                        .and_then(|c| c.as_array())
+                        .and_then(|blocks| {
+                            blocks.iter().find_map(|b| {
+                                if b.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                    b.get("text").and_then(|t| t.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                })
+            })
+            .map(str::to_string),
+    };
+
+    text.ok_or_else(|| {
+        format!(
+            "no text content in the {} API response",
+            provider.label()
+        )
+    })
 }
 
 /// Extract the first balanced `{ … }` JSON object from arbitrary model text
@@ -586,33 +833,61 @@ fn package_pin_count(package: &str) -> Option<usize> {
 
 // ── API key storage (never in the project — env var or the user config folder)
 
-/// Path to the stored key: `<user config>/anthropic_api_key` (the parent of the
-/// `mcus/` folder). `None` only if no config dir can be resolved.
-pub fn api_key_path() -> Option<PathBuf> {
-    super::registry::user_mcus_dir().and_then(|d| d.parent().map(|p| p.join("anthropic_api_key")))
+/// Path to one provider's stored key: `<user config>/<slug>_api_key` (the
+/// parent of the `mcus/` folder). `None` only if no config dir can be resolved.
+///
+/// Anthropic's slug yields `anthropic_api_key` — the exact name used before
+/// providers existed, so keys already on disk keep working with no migration.
+pub fn api_key_path(provider: Provider) -> Option<PathBuf> {
+    super::registry::user_mcus_dir()
+        .and_then(|d| d.parent().map(|p| p.join(format!("{}_api_key", provider.slug()))))
 }
 
-/// Load the API key: the `ANTHROPIC_API_KEY` env var takes precedence, else the
-/// stored file, else empty. Trimmed.
-pub fn load_api_key() -> String {
-    if let Ok(k) = std::env::var("ANTHROPIC_API_KEY") {
+/// Load a provider's API key: its env var takes precedence, else the stored
+/// file, else empty. Trimmed. Keys are never written into the project.
+pub fn load_api_key(provider: Provider) -> String {
+    if let Ok(k) = std::env::var(provider.env_var()) {
         if !k.trim().is_empty() {
             return k.trim().to_string();
         }
     }
-    api_key_path()
+    api_key_path(provider)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
-/// Persist the API key to the user config folder (created if missing).
-pub fn save_api_key(key: &str) -> Result<(), String> {
-    let path = api_key_path().ok_or("could not resolve the user config folder")?;
+/// Persist a provider's API key to the user config folder (created if missing).
+pub fn save_api_key(provider: Provider, key: &str) -> Result<(), String> {
+    let path = api_key_path(provider).ok_or("could not resolve the user config folder")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&path, key.trim()).map_err(|e| e.to_string())
+}
+
+/// Where the last-used provider is remembered, so the dialog reopens on the one
+/// you actually use instead of resetting to Anthropic every time.
+fn last_provider_path() -> Option<PathBuf> {
+    super::registry::user_mcus_dir().and_then(|d| d.parent().map(|p| p.join("ai_provider")))
+}
+
+pub fn load_last_provider() -> Provider {
+    last_provider_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| Provider::from_slug(&s))
+        .unwrap_or_default()
+}
+
+/// Best-effort — failing to remember the choice must never break an import.
+pub fn save_last_provider(provider: Provider) {
+    let Some(path) = last_provider_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, provider.slug());
 }
 
 // ── Extraction cache (never re-pay for the same document) ───────────────────
@@ -626,13 +901,18 @@ pub fn cache_dir() -> Option<PathBuf> {
     super::registry::user_mcus_dir().and_then(|d| d.parent().map(|p| p.join("datasheet_cache")))
 }
 
-/// Key for one extraction: prompt version + model + package + the document
-/// itself. Change any of them and it re-extracts; retrying the SAME MCU with
-/// the same settings is free. Pure — tested below.
-pub fn cache_key(model: &str, package: &str, source: &Source) -> String {
+/// Key for one extraction: prompt version + PROVIDER + model + package + the
+/// document itself. Change any of them and it re-extracts; retrying the SAME
+/// MCU with the same settings is free. Pure — tested below.
+///
+/// The provider is part of the key because a model id alone is not unique
+/// across backends, and two providers' answers for the same document are not
+/// interchangeable.
+pub fn cache_key(provider: Provider, model: &str, package: &str, source: &Source) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     CACHE_VERSION.hash(&mut h);
+    provider.slug().hash(&mut h);
     model.trim().hash(&mut h);
     package.trim().hash(&mut h);
     match source {
@@ -720,9 +1000,10 @@ pub struct Extraction {
 
 // ── The one impure entry point ──────────────────────────────────────────────
 
-/// Call Claude and parse the extraction. Blocking — the dialog runs it on a
-/// background thread. All the pure pieces above are composed here.
-pub fn call_claude(
+/// Call the selected provider and parse the extraction. Blocking — the dialog
+/// runs it on a background thread. All the pure pieces above are composed here.
+pub fn call_ai(
+    provider: Provider,
     api_key: &str,
     model: &str,
     family_hint: &str,
@@ -731,7 +1012,13 @@ pub fn call_claude(
     use_cache: bool,
 ) -> Result<Extraction, String> {
     if api_key.trim().is_empty() {
-        return Err("No API key set — enter your Anthropic API key first.".to_string());
+        return Err(format!(
+            "No API key set — enter your {} API key first.",
+            provider.label()
+        ));
+    }
+    if model.trim().is_empty() {
+        return Err("No model set — enter a model id first.".to_string());
     }
     if package_hint.trim().is_empty() {
         return Err(
@@ -759,7 +1046,7 @@ pub fn call_claude(
 
     // Cache hit → no API call at all (the whole point: retrying the same
     // document for the same package/model is free).
-    let key = cache_key(model, package_hint, source);
+    let key = cache_key(provider, model, package_hint, source);
     if use_cache {
         if let Some(cached) = load_cached(&key) {
             if let Ok(chip) = parse_response(&cached) {
@@ -770,14 +1057,21 @@ pub fn call_claude(
     }
 
     let system = build_prompt(family_hint, package_hint);
-    let body = build_request_body(model, &system, source);
+    let body = build_request_body(provider, model, &system, source);
 
-    let resp = ureq::post(API_URL)
-        .set("x-api-key", api_key.trim())
-        .set("anthropic-version", "2023-06-01")
+    // Each provider authenticates differently; only the timeout and the JSON
+    // content type are shared.
+    let req = ureq::post(&provider.endpoint(model))
         .set("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(180))
-        .send_string(&body);
+        .timeout(std::time::Duration::from_secs(180));
+    let req = match provider {
+        Provider::Anthropic => req
+            .set("x-api-key", api_key.trim())
+            .set("anthropic-version", "2023-06-01"),
+        Provider::Gemini => req.set("x-goog-api-key", api_key.trim()),
+        Provider::OpenAi => req.set("authorization", &format!("Bearer {}", api_key.trim())),
+    };
+    let resp = req.send_string(&body);
 
     let text = match resp {
         Ok(r) => r.into_string().map_err(|e| e.to_string())?,
@@ -797,7 +1091,7 @@ pub fn call_claude(
         Err(e) => return Err(format!("network error: {e}")),
     };
 
-    let model_text = parse_api_envelope(&text)?;
+    let model_text = parse_api_envelope(provider, &text)?;
     let chip = parse_response(&model_text)?;
     // Only cache a reply we could actually parse.
     save_cached(&key, &model_text);
@@ -865,30 +1159,40 @@ mod tests {
     /// and change whenever anything that affects the result changes.
     #[test]
     fn cache_key_is_stable_and_input_sensitive() {
+        use Provider::*;
         let doc = Source::Text("PIN TABLE".into());
-        let base = cache_key("claude-opus-4-8", "UFQFPN48", &doc);
+        let base = cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &doc);
         // Same inputs → same key (a retry hits the cache).
-        assert_eq!(base, cache_key("claude-opus-4-8", "UFQFPN48", &doc));
+        assert_eq!(base, cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &doc));
         // Whitespace around model/package doesn't split the cache.
-        assert_eq!(base, cache_key(" claude-opus-4-8 ", " UFQFPN48 ", &doc));
+        assert_eq!(base, cache_key(Anthropic, " claude-opus-4-8 ", " UFQFPN48 ", &doc));
         // A different package reads a different column → different key.
-        assert_ne!(base, cache_key("claude-opus-4-8", "UFBGA59", &doc));
+        assert_ne!(base, cache_key(Anthropic, "claude-opus-4-8", "UFBGA59", &doc));
         // A different model or document → different key.
-        assert_ne!(base, cache_key("claude-sonnet-5", "UFQFPN48", &doc));
+        assert_ne!(base, cache_key(Anthropic, "claude-sonnet-5", "UFQFPN48", &doc));
         assert_ne!(
             base,
-            cache_key("claude-opus-4-8", "UFQFPN48", &Source::Text("OTHER".into()))
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &Source::Text("OTHER".into()))
         );
         // Text and PDF sources never collide.
         assert_ne!(
             base,
-            cache_key("claude-opus-4-8", "UFQFPN48", &Source::Pdf(b"PIN TABLE".to_vec()))
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &Source::Pdf(b"PIN TABLE".to_vec()))
         );
+        // Same model NAME on a different provider is a different extraction —
+        // model ids are not unique across backends.
+        assert_ne!(base, cache_key(Gemini, "claude-opus-4-8", "UFQFPN48", &doc));
+        assert_ne!(base, cache_key(OpenAi, "claude-opus-4-8", "UFQFPN48", &doc));
     }
 
     #[test]
-    fn request_body_is_well_formed() {
-        let body = build_request_body("claude-opus-4-8", "SYS", &Source::Text("PASTE".into()));
+    fn anthropic_request_body_is_well_formed() {
+        let body = build_request_body(
+            Provider::Anthropic,
+            "claude-opus-4-8",
+            "SYS",
+            &Source::Text("PASTE".into()),
+        );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["model"], "claude-opus-4-8");
         assert_eq!(v["system"], "SYS");
@@ -903,8 +1207,13 @@ mod tests {
     }
 
     #[test]
-    fn pdf_request_embeds_a_base64_document_block() {
-        let body = build_request_body("claude-opus-4-8", "SYS", &Source::Pdf(b"%PDF-1.4".to_vec()));
+    fn anthropic_pdf_request_embeds_a_base64_document_block() {
+        let body = build_request_body(
+            Provider::Anthropic,
+            "claude-opus-4-8",
+            "SYS",
+            &Source::Pdf(b"%PDF-1.4".to_vec()),
+        );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let content = &v["messages"][0]["content"];
         assert_eq!(content[0]["type"], "document");
@@ -912,6 +1221,98 @@ mod tests {
         assert_eq!(content[0]["source"]["media_type"], "application/pdf");
         assert_eq!(content[0]["source"]["data"], base64_encode(b"%PDF-1.4"));
         assert_eq!(content[1]["type"], "text");
+    }
+
+    #[test]
+    fn gemini_request_uses_inline_data_and_a_response_schema() {
+        let body = build_request_body(
+            Provider::Gemini,
+            "gemini-3.5-flash",
+            "SYS",
+            &Source::Pdf(b"%PDF-1.4".to_vec()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The model goes in the URL, never the body.
+        assert!(v.get("model").is_none());
+        assert_eq!(v["systemInstruction"]["parts"][0]["text"], "SYS");
+        let parts = &v["contents"][0]["parts"];
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "application/pdf");
+        assert_eq!(parts[0]["inlineData"]["data"], base64_encode(b"%PDF-1.4"));
+        assert!(parts[1]["text"].is_string());
+        assert_eq!(v["generationConfig"]["responseMimeType"], "application/json");
+        assert!(v["generationConfig"]["responseSchema"]["properties"]["pins"].is_object());
+    }
+
+    #[test]
+    fn gemini_schema_omits_additional_properties() {
+        // `responseSchema` takes an OpenAPI-flavoured SUBSET of JSON Schema and
+        // rejects unknown keywords with a 400 — so this must not leak in.
+        let body = build_request_body(
+            Provider::Gemini,
+            "gemini-3.5-flash",
+            "SYS",
+            &Source::Text("PASTE".into()),
+        );
+        assert!(
+            !body.contains("additionalProperties"),
+            "additionalProperties leaked into the Gemini schema"
+        );
+        // …while the providers that REQUIRE it still get it.
+        for p in [Provider::Anthropic, Provider::OpenAi] {
+            let b = build_request_body(p, "m", "SYS", &Source::Text("PASTE".into()));
+            assert!(b.contains("additionalProperties"), "{p:?} lost the keyword");
+        }
+    }
+
+    #[test]
+    fn openai_request_uses_input_file_with_a_data_uri() {
+        let body = build_request_body(
+            Provider::OpenAi,
+            "gpt-5.6",
+            "SYS",
+            &Source::Pdf(b"%PDF-1.4".to_vec()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["model"], "gpt-5.6");
+        assert_eq!(v["instructions"], "SYS");
+        let content = &v["input"][0]["content"];
+        assert_eq!(content[0]["type"], "input_file");
+        // file_data is a data: URI, NOT bare base64 — the API rejects bare.
+        assert_eq!(
+            content[0]["file_data"],
+            format!("data:application/pdf;base64,{}", base64_encode(b"%PDF-1.4"))
+        );
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(v["text"]["format"]["type"], "json_schema");
+        assert_eq!(v["text"]["format"]["strict"], true);
+        assert!(v["text"]["format"]["name"].is_string());
+    }
+
+    #[test]
+    fn endpoints_are_provider_shaped() {
+        // Gemini is the odd one: the model is part of the path.
+        assert!(Provider::Gemini
+            .endpoint("gemini-3.5-flash")
+            .ends_with("/models/gemini-3.5-flash:generateContent"));
+        assert!(Provider::Anthropic.endpoint("x").ends_with("/v1/messages"));
+        assert!(Provider::OpenAi.endpoint("x").ends_with("/v1/responses"));
+    }
+
+    #[test]
+    fn anthropic_key_file_name_is_unchanged() {
+        // Keys already on disk must keep working — this slug IS the old
+        // filename (`anthropic_api_key`).
+        assert_eq!(Provider::Anthropic.slug(), "anthropic");
+    }
+
+    #[test]
+    fn provider_slug_round_trips_and_tolerates_junk() {
+        for p in Provider::ALL {
+            assert_eq!(Provider::from_slug(p.slug()), p);
+        }
+        assert_eq!(Provider::from_slug(" gemini "), Provider::Gemini);
+        // An unreadable/stale file must not break the dialog.
+        assert_eq!(Provider::from_slug("wat"), Provider::default());
     }
 
     #[test]
@@ -926,9 +1327,52 @@ mod tests {
     #[test]
     fn envelope_extracts_text_and_surfaces_errors() {
         let ok = r#"{"content":[{"type":"text","text":"hello"}]}"#;
-        assert_eq!(parse_api_envelope(ok).unwrap(), "hello");
+        assert_eq!(parse_api_envelope(Provider::Anthropic, ok).unwrap(), "hello");
         let err = r#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#;
-        assert!(parse_api_envelope(err).unwrap_err().contains("bad key"));
+        assert!(parse_api_envelope(Provider::Anthropic, err)
+            .unwrap_err()
+            .contains("bad key"));
+    }
+
+    #[test]
+    fn gemini_envelope_concatenates_every_part() {
+        // A long extraction arrives split across parts; taking only the first
+        // would truncate the JSON into something unparseable.
+        let ok = r#"{"candidates":[{"content":{"parts":[
+            {"text":"{\"a\":"},{"text":"1}"}]}}]}"#;
+        assert_eq!(
+            parse_api_envelope(Provider::Gemini, ok).unwrap(),
+            "{\"a\":1}"
+        );
+        let err = r#"{"error":{"code":400,"message":"bad schema"}}"#;
+        assert!(parse_api_envelope(Provider::Gemini, err)
+            .unwrap_err()
+            .contains("bad schema"));
+    }
+
+    #[test]
+    fn openai_envelope_skips_non_message_output_items() {
+        // Reasoning models emit other item types before the message.
+        let ok = r#"{"output":[
+            {"type":"reasoning","summary":[]},
+            {"type":"message","content":[{"type":"output_text","text":"hello"}]}]}"#;
+        assert_eq!(parse_api_envelope(Provider::OpenAi, ok).unwrap(), "hello");
+        let err = r#"{"error":{"message":"bad key"}}"#;
+        assert!(parse_api_envelope(Provider::OpenAi, err)
+            .unwrap_err()
+            .contains("bad key"));
+    }
+
+    #[test]
+    fn empty_envelopes_name_the_provider() {
+        for (p, body) in [
+            (Provider::Anthropic, "{}"),
+            (Provider::Gemini, r#"{"candidates":[]}"#),
+            (Provider::OpenAi, r#"{"output":[]}"#),
+        ] {
+            let e = parse_api_envelope(p, body).unwrap_err();
+            assert!(e.contains(p.label()), "{p:?} error was unhelpful: {e}");
+        }
     }
 
     #[test]
