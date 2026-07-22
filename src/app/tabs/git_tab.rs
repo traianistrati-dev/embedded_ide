@@ -912,27 +912,33 @@ pub fn show_git_tab(
                     });
             } else {
                 // ── Output scrollback ─────────────────────────────────────
-                egui::ScrollArea::vertical()
-                    .id_salt("git_output")
-                    .max_height(body_h)
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        let lines = git.state.lock().unwrap().lines.clone();
-                        for (kind, text) in &lines {
-                            let col = match kind {
-                                GitLine::Cmd => egui::Color32::from_rgb(150, 195, 235),
-                                GitLine::Out => egui::Color32::from_gray(190),
-                                GitLine::Err => egui::Color32::from_rgb(220, 150, 90),
-                                GitLine::Notice => egui::Color32::from_gray(130),
-                            };
-                            ui.label(egui::RichText::new(text).monospace().size(10.5).color(col));
-                        }
-                    });
+                render_git_output(ui, git, "git_output", body_h);
             }
         });
     });
+}
+
+/// The git console scrollback. Shared by the Changes body and the Library view
+/// — every view that can RUN something must be able to show what it printed.
+fn render_git_output(ui: &mut egui::Ui, git: &GitConsole, id: &str, max_h: f32) {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(max_h)
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let lines = git.state.lock().unwrap().lines.clone();
+            for (kind, text) in &lines {
+                let col = match kind {
+                    GitLine::Cmd => egui::Color32::from_rgb(150, 195, 235),
+                    GitLine::Out => egui::Color32::from_gray(190),
+                    GitLine::Err => egui::Color32::from_rgb(220, 150, 90),
+                    GitLine::Notice => egui::Color32::from_gray(130),
+                };
+                ui.label(egui::RichText::new(text).monospace().size(10.5).color(col));
+            }
+        });
 }
 
 /// Read-only diff view for the History tab.
@@ -1218,4 +1224,34 @@ fn show_library_panel(
         .size(10.0)
         .color(egui::Color32::from_gray(145)),
     );
+
+    // ── Output ──────────────────────────────────────────────────────────────
+    // This view runs a command, so it must show what that command printed.
+    // Without it a push looked like it did nothing: the work happened on the
+    // worker, the notice landed in the scrollback, and this view rendered
+    // none of it.
+    ui.add_space(4.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        if busy {
+            crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    " pushing {lib} {} splitting the history can take a while on a large repo",
+                    ph::DOTS_THREE
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(220, 180, 70)),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("Output")
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(130)),
+            );
+        }
+    });
+    let out_h = (ui.available_height() - 4.0).max(60.0);
+    render_git_output(ui, git, "git_library_output", out_h);
 }

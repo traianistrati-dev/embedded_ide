@@ -795,17 +795,51 @@ pub fn run_subtree_push(
                         format!("[OK] {lib} pushed to {} ({branch})", remote_url.trim()),
                     );
                 } else {
-                    // `git subtree` is a contrib command; some minimal git
-                    // builds omit it, and the raw error is cryptic.
-                    let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
-                    if err.contains("is not a git command") {
+                    // Translate the two failures whose raw text explains
+                    // nothing. Both stdout and stderr matter: `subtree` prints
+                    // its "No new revisions" on STDOUT and still exits 1.
+                    let all = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    )
+                    .to_lowercase();
+                    if all.contains("is not a git command") {
+                        // `subtree` is a contrib command; minimal builds omit it.
                         st.push(
                             GitLine::Err,
                             "[error] this git build has no 'subtree' command (it ships with \
                              Git for Windows; on Linux install the git-subtree package)",
                         );
+                    } else if all.contains("no new revisions were found") {
+                        // The trap: subtree pushes COMMITTED history. A library
+                        // that is only on disk has none, and git says so in a
+                        // way that sounds like "already up to date".
+                        st.push(
+                            GitLine::Err,
+                            format!(
+                                "[error] nothing to push — no commits touch {lib}/ yet. \
+                                 Commit the library in the Changes view first, then push."
+                            ),
+                        );
+                    } else if all.contains("authentication")
+                        || all.contains("could not read username")
+                        || all.contains("permission denied")
+                        || all.contains("403")
+                    {
+                        st.push(
+                            GitLine::Err,
+                            "[error] the remote rejected the credentials — check the URL and \
+                             that you have push access to that repository",
+                        );
                     } else {
-                        st.push(GitLine::Err, format!("[error] pushing {lib} failed"));
+                        st.push(
+                            GitLine::Err,
+                            format!(
+                                "[error] pushing {lib} failed (exit {})",
+                                out.status.code().unwrap_or(-1)
+                            ),
+                        );
                     }
                 }
             }
