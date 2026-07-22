@@ -242,6 +242,7 @@ impl AppIde {
                             &mut self.renaming_file,
                             &mut self.renaming_folder,
                             &workspace_dir,
+                            self.project_dir.as_deref(),
                             save_project_needed,
                             &mut extract_folder,
                             &lib_crates,

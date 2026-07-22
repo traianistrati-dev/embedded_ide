@@ -21,6 +21,7 @@ pub mod openocd;
 pub mod panels;
 pub mod project_tree;
 pub mod required_tools;
+pub mod reveal;
 pub mod rtt;
 pub mod serial;
 pub mod serial_matrix;

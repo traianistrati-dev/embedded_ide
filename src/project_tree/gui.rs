@@ -311,6 +311,56 @@ fn inline_focus_id(is_folder: bool) -> egui::Id {
     })
 }
 
+/// The "Show in Explorer" + "Copy path" pair, shared by the file and folder
+/// context menus and by the LIBRARIES header.
+///
+/// `project_dir` is the SAVED project folder — deliberately not the tree's
+/// `workspace_dir`, which falls back to the temp check-workspace when nothing
+/// has been saved yet. Revealing that would open `%TEMP%\embedded_ide_0_check`
+/// and look like it worked, so with no saved project the entries are shown
+/// disabled with the reason.
+///
+/// `rel` is project-root-relative, as everything in the tree is.
+fn reveal_menu_items(ui: &mut egui::Ui, project_dir: Option<&std::path::Path>, rel: &str) {
+    let abs = project_dir.map(|d| d.join(rel));
+    let enabled = abs.is_some();
+    let disabled_hint = "Save the project first (Ctrl+S) — it has no folder on disk yet";
+
+    let reveal = ui
+        .add_enabled(
+            enabled,
+            egui::Button::new(
+                egui::RichText::new(format!("{} Show in Explorer", ph::FOLDER_OPEN)).size(11.5),
+            ),
+        )
+        .on_disabled_hover_text(disabled_hint);
+    if reveal.clicked() {
+        if let Some(p) = &abs {
+            // Errors are surfaced through the tooltip-free path: a failure here
+            // means the file manager could not be launched at all, which is
+            // rare and not worth a modal. It is logged for the Activity tab.
+            if let Err(e) = crate::reveal::open(p) {
+                eprintln!("[reveal] {e}");
+            }
+        }
+        ui.close();
+    }
+
+    let copy = ui
+        .add_enabled(
+            enabled,
+            egui::Button::new(egui::RichText::new(format!("{} Copy path", ph::COPY)).size(11.5)),
+        )
+        .on_disabled_hover_text(disabled_hint);
+    if copy.clicked() {
+        if let Some(p) = &abs {
+            // The absolute path is what you paste into a terminal.
+            ui.ctx().copy_text(p.to_string_lossy().to_string());
+        }
+        ui.close();
+    }
+}
+
 /// Arm the inline new-item input for `parent` (`""` = src/ root): set the
 /// pending name + parent state and request focus next frame. Called from the
 /// "New File" / "New Folder" context-menu entries.
@@ -523,6 +573,10 @@ pub fn show_project_tree(
     renaming_file: &mut Option<(usize, String)>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
+    // The SAVED project folder, or `None` before the first save. Distinct from
+    // `workspace_dir`, which falls back to the temp check-workspace — revealing
+    // that would silently open the wrong folder.
+    project_dir: Option<&std::path::Path>,
     save_needed: &mut bool,
     // Folder the user asked to turn into a sibling library crate (project-root
     // relative); the caller opens the Extract dialog.
@@ -671,6 +725,7 @@ pub fn show_project_tree(
                 &mut to_duplicate,
                 renaming_folder,
                 workspace_dir,
+                project_dir,
                 save_needed,
                 new_src_name,
                 new_src_folder_name,
@@ -736,6 +791,9 @@ pub fn show_project_tree(
                 *new_file_parent_folder = None;
                 ui.close();
             }
+            ui.separator();
+            // The src/ ROOT of the firmware crate.
+            reveal_menu_items(ui, project_dir, SRC_ROOT);
             // Git actions live in the bottom "Git" tab (commit/push/pull), not
             // here — kept out of the tree menu on purpose (moved 2026-07-07).
         });
@@ -929,6 +987,32 @@ pub fn show_project_tree(
                 {
                     *library_action = Some((lib.clone(), false));
                 }
+                // Added LAST so it sits to the LEFT of the trash icon: in a
+                // `right_to_left` layout the first widget added is the
+                // rightmost, so "before delete" means last.
+                let abs = project_dir.map(|d| d.join(lib));
+                if ui
+                    .add_enabled(
+                        abs.is_some(),
+                        egui::Button::new(
+                            egui::RichText::new(ph::FOLDER_OPEN)
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(170)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Open this library's folder")
+                    .on_disabled_hover_text(
+                        "Save the project first (Ctrl+S) — it has no folder on disk yet",
+                    )
+                    .clicked()
+                {
+                    if let Some(p) = &abs {
+                        if let Err(e) = crate::reveal::open(p) {
+                            eprintln!("[reveal] {e}");
+                        }
+                    }
+                }
             });
             name_resp
         });
@@ -961,6 +1045,7 @@ pub fn show_project_tree(
                 &mut to_duplicate,
                 renaming_folder,
                 workspace_dir,
+                project_dir,
                 save_needed,
                 new_src_name,
                 new_src_folder_name,
@@ -992,6 +1077,8 @@ pub fn show_project_tree(
                 *new_file_parent_folder = None;
                 ui.close();
             }
+            ui.separator();
+            reveal_menu_items(ui, project_dir, lib);
         });
     }
 
@@ -1112,6 +1199,7 @@ fn render_tree_node(
     to_duplicate: &mut Option<usize>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
     save_needed: &mut bool,
     new_src_name: &mut Option<String>,
     new_src_folder_name: &mut Option<String>,
@@ -1135,9 +1223,9 @@ fn render_tree_node(
     for (name, node) in tree {
         match node {
             TreeNode::File(idx) => {
-                let full_path = &user_src_files[*idx].0;
-                let file_name = full_path.split('/').last().unwrap_or(full_path).to_string();
-                let can_duplicate = generated_file_reason(full_path).is_none();
+                let full_path = user_src_files[*idx].0.clone();
+                let file_name = full_path.split('/').last().unwrap_or(&full_path).to_string();
+                let can_duplicate = generated_file_reason(&full_path).is_none();
                 user_file_row(
                     ui,
                     indent,
@@ -1150,6 +1238,8 @@ fn render_tree_node(
                     cancel_rename_file,
                     to_duplicate,
                     can_duplicate,
+                    &full_path,
+                    project_dir,
                 );
             }
             TreeNode::Folder(children) => {
@@ -1289,6 +1379,7 @@ fn render_tree_node(
                             to_duplicate,
                             renaming_folder,
                             workspace_dir,
+                            project_dir,
                             save_needed,
                             new_src_name,
                             new_src_folder_name,
@@ -1384,6 +1475,11 @@ fn render_tree_node(
                             *new_file_parent_folder = None;
                             ui.close();
                         }
+                        ui.separator();
+                        // Above the read-only guard below on purpose: a
+                        // generated folder can't be renamed or deleted, but
+                        // opening it is still perfectly reasonable.
+                        reveal_menu_items(ui, project_dir, &folder_path);
                         // `pins/` and `pins/configs/` are rebuilt every frame by
                         // the pin/peripheral sync — renaming or deleting them
                         // would be undone, or would break codegen. Same guard
@@ -1544,6 +1640,10 @@ fn user_file_row(
     // copy inside `pins/` would be pruned by the next pin sync.
     to_duplicate: &mut Option<usize>,
     can_duplicate: bool,
+    // Project-root-relative path of this file + the saved project folder, for
+    // the Show-in-Explorer / Copy-path entries.
+    rel_path: &str,
+    project_dir: Option<&std::path::Path>,
 ) {
     let hi = egui::Color32::from_rgb(100, 180, 255);
     let normal = egui::Color32::from_rgb(200, 205, 215);
@@ -1625,6 +1725,8 @@ fn user_file_row(
                 *to_duplicate = Some(idx);
                 ui.close();
             }
+            ui.separator();
+            reveal_menu_items(ui, project_dir, rel_path);
             ui.separator();
             if ui
                 .button(
