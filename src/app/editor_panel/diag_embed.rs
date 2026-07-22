@@ -111,11 +111,10 @@ impl AppIde {
         let mut git_discard: Option<(String, bool)> = None;
         // Set when the user clicks "Discard all" in the Git tab.
         let mut git_discard_all = false;
-        // Git tab's Library view: the workspace members it can publish, and the
-        // `(library, url, branch)` set when Push is clicked.
+        // The Git tab's repository picker: each workspace member can have its
+        // own git repo rooted at its folder.
         let git_libraries =
             crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
-        let mut git_lib_push: Option<(String, String, String)> = None;
         // Flash-tab Programmer-row buttons (moved off the top toolbar).
         let mut flash_scan = false;
         let mut flash_go = false;
@@ -232,7 +231,6 @@ impl AppIde {
                     &mut git_discard,
                     &mut git_discard_all,
                     &git_libraries,
-                    &mut git_lib_push,
                     &mut flash_scan,
                     &mut flash_go,
                     can_flash,
@@ -277,19 +275,19 @@ impl AppIde {
         }
         // History view: load a commit's file list / one file's diff. Both are
         // read-only git reads, guarded against a concurrent op inside.
-        if let (Some(sha), Some(dir)) = (git_commit_load, project_dir.as_ref()) {
+        if let (Some(sha), Some(dir)) = (git_commit_load, self.git_dir()) {
             crate::git::run_commit_files(
                 sha,
-                dir.clone(),
+                dir,
                 std::sync::Arc::clone(&self.git.state),
                 self.egui_ctx.clone(),
             );
         }
-        if let (Some((sha, path)), Some(dir)) = (git_commit_file_load, project_dir.as_ref()) {
+        if let (Some((sha, path)), Some(dir)) = (git_commit_file_load, self.git_dir()) {
             crate::git::run_commit_file_diff(
                 sha,
                 path,
-                dir.clone(),
+                dir,
                 std::sync::Arc::clone(&self.git.state),
                 self.egui_ctx.clone(),
             );
@@ -375,21 +373,6 @@ impl AppIde {
         // "Discard all" was clicked (Phase C) → open the strong confirm dialog.
         if git_discard_all {
             self.git_discard_all_confirm = true;
-        }
-        // Library push (git subtree push) — no confirm dialog: it is push-only
-        // and cannot touch the working tree.
-        if let Some((lib, url, branch)) = git_lib_push {
-            if let Some(dir) = self.project_dir.clone() {
-                crate::git::run_subtree_push(
-                    lib,
-                    url,
-                    branch,
-                    dir,
-                    std::sync::Arc::clone(&self.git.state),
-                    std::sync::Arc::clone(&self.activity),
-                    self.egui_ctx.clone(),
-                );
-            }
         }
         // A confirmed whole-file discard, queued by the dialog on the previous
         // frame — apply it here (same `source_rewritten` refresh as the hunk

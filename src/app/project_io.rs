@@ -313,12 +313,30 @@ impl AppIde {
 }
 
 impl AppIde {
+    /// The directory git commands run in: the project root, or a library's own
+    /// repository when the Git tab is pointed at one.
+    pub(super) fn git_dir(&self) -> Option<std::path::PathBuf> {
+        let root = self.project_dir.as_ref()?;
+        Some(self.git.target.dir(root))
+    }
+
+    /// A path as git reported it — relative to the ACTIVE repo root — turned
+    /// into the project-root-relative key the IDE's buffers and tree use.
+    ///
+    /// These are the same string only while the target is the project. Inside a
+    /// library repo git says `src/lib.rs` where the IDE stores
+    /// `mw_radar/src/lib.rs`, and using the raw value would look up a file that
+    /// does not exist (silently reverting nothing).
+    pub(super) fn git_path_to_project(&self, git_path: &str) -> String {
+        format!("{}{}", self.git.target.prefix(), git_path)
+    }
+
     /// Start a git operation on a worker thread (signal handler for the Git
     /// tab's buttons and the tree's context menu). Guards: needs a saved
     /// project (`project_dir`), no overlap with a running op, and no save in
     /// flight (git would read a half-written tree).
     pub(super) fn run_git_op(&mut self, op: crate::git::GitOp) {
-        let Some(dir) = self.project_dir.clone() else {
+        let Some(dir) = self.git_dir() else {
             return; // the tab shows the "save first" hint instead
         };
         if self.git.is_busy() {
@@ -367,7 +385,7 @@ impl AppIde {
             remote,
             add_paths,
             dir,
-            self.git_disk_snapshot(),
+            crate::git::snapshot_for_target(self.git_disk_snapshot(), &self.git.target),
             std::sync::Arc::clone(&self.git.state),
             std::sync::Arc::clone(&self.activity),
             self.egui_ctx.clone(),
@@ -440,10 +458,13 @@ impl AppIde {
     /// caller then refreshes the editor's `display_code`). IDE-managed files are
     /// refused (main.rs is better reverted hunk-by-hunk in the editor gutter).
     pub(super) fn apply_hunk_revert(&mut self, path: &str, hunk_row: usize) -> bool {
-        let Some(dir) = self.project_dir.clone() else {
+        let Some(dir) = self.git_dir() else {
             return false;
         };
-        if crate::app::tabs::git_tab::is_ide_managed(path) {
+        // `path` came from git and is relative to the ACTIVE repo; the tree and
+        // the IDE-managed rules are keyed from the project root.
+        let key = self.git_path_to_project(path);
+        if crate::app::tabs::git_tab::is_ide_managed(&key) {
             self.git.state.lock().unwrap().lines.push((
                 crate::git::GitLine::Notice,
                 format!("[skip] {path} is IDE-managed — change it via the UI (for main.rs, use the editor gutter to revert hunks)"),
@@ -479,7 +500,7 @@ impl AppIde {
                         .project_tree
                         .user_src_files
                         .iter_mut()
-                        .find(|(p, _)| p == path)
+                        .find(|(p, _)| *p == key)
                     {
                         entry.1 = disk;
                         changed = true;
@@ -528,10 +549,13 @@ impl AppIde {
     /// editor's working copy (otherwise the end-of-frame write-back would put
     /// the old text straight back).
     pub(super) fn apply_restore_from_commit(&mut self, sha: &str, path: &str) -> bool {
-        let Some(dir) = self.project_dir.clone() else {
+        let Some(dir) = self.git_dir() else {
             return false;
         };
-        if crate::app::tabs::git_tab::is_ide_managed(path) {
+        // git reports paths from the ACTIVE repo root; buffers are keyed from
+        // the project root.
+        let key = self.git_path_to_project(path);
+        if crate::app::tabs::git_tab::is_ide_managed(&key) {
             self.git_note(format!(
                 "[skip] {path} is IDE-managed — it is regenerated from the MCU configuration"
             ));
@@ -553,13 +577,11 @@ impl AppIde {
             .project_tree
             .user_src_files
             .iter_mut()
-            .find(|(p, _)| p == path)
+            .find(|(p, _)| *p == key)
         {
             e.1 = content;
         } else {
-            self.project_tree
-                .user_src_files
-                .push((path.to_owned(), content));
+            self.project_tree.user_src_files.push((key.clone(), content));
         }
         self.cached_project_files = None;
         {
@@ -575,10 +597,11 @@ impl AppIde {
     }
 
     pub(super) fn apply_discard_file(&mut self, path: &str) -> bool {
-        let Some(dir) = self.project_dir.clone() else {
+        let Some(dir) = self.git_dir() else {
             return false;
         };
-        if crate::app::tabs::git_tab::is_ide_managed(path) {
+        let key = self.git_path_to_project(path);
+        if crate::app::tabs::git_tab::is_ide_managed(&key) {
             self.git_note(format!(
                 "[skip] {path} is IDE-managed — change it via the UI (for main.rs, use the editor gutter)"
             ));
@@ -603,7 +626,7 @@ impl AppIde {
                             .project_tree
                             .user_src_files
                             .iter()
-                            .position(|(p, _)| p == path)
+                            .position(|(p, _)| *p == key)
                         {
                             self.project_tree.user_src_files.remove(idx);
                             // Remap the index-based selection across the removal.
@@ -636,7 +659,7 @@ impl AppIde {
                             .project_tree
                             .user_src_files
                             .iter_mut()
-                            .find(|(p, _)| p == path)
+                            .find(|(p, _)| *p == key)
                         {
                             entry.1 = content;
                             c = true;
@@ -663,7 +686,7 @@ impl AppIde {
     /// mcu.config) so every in-memory buffer matches the reset tree. The caller
     /// confirms first and gates on `has_commits`.
     pub(super) fn apply_discard_all(&mut self) {
-        let Some(dir) = self.project_dir.clone() else {
+        let Some(dir) = self.git_dir() else {
             return;
         };
         match crate::git::discard_all_to_head(&dir) {

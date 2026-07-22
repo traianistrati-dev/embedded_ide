@@ -272,7 +272,7 @@ pub struct GitState {
 }
 
 impl GitState {
-    fn push(&mut self, kind: GitLine, line: impl Into<String>) {
+    pub(crate) fn push(&mut self, kind: GitLine, line: impl Into<String>) {
         self.lines.push((kind, line.into()));
         if self.lines.len() > MAX_LINES {
             let excess = self.lines.len() - MAX_LINES;
@@ -290,9 +290,76 @@ pub enum GitView {
     Changes,
     /// Commit log — strictly READ-ONLY (log / diff-tree / show).
     History,
-    /// Publish a workspace-member library to its OWN repository via
-    /// `git subtree push`. Push-only: nothing here modifies the worktree.
-    Library,
+}
+
+/// Which repository the Git tab operates on.
+///
+/// A library can have its OWN git repo rooted at `<project>/<lib>`. Both repos
+/// share one working tree — the parent keeps tracking the files as normal files
+/// (verified: `git add -A` in the parent keeps mode 100644, and a clone of the
+/// parent still gets the real contents), so this is double tracking, not a
+/// submodule. The consequence to remember is that a library edit shows up as a
+/// change in BOTH repos and has to be committed in each.
+///
+/// Every git operation already takes its directory as a parameter, so pointing
+/// this at a library makes the whole tab — status, commit, push, history, diff,
+/// restore — work against that repo with no per-operation special cases.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum RepoTarget {
+    #[default]
+    Project,
+    /// Workspace-member crate directory, relative to the project root.
+    Library(String),
+}
+
+impl RepoTarget {
+    /// Resolve to an absolute directory under `project_dir`.
+    pub fn dir(&self, project_dir: &Path) -> PathBuf {
+        match self {
+            RepoTarget::Project => project_dir.to_path_buf(),
+            RepoTarget::Library(lib) => project_dir.join(lib),
+        }
+    }
+
+    /// The path prefix this repo's files carry in PROJECT-relative form —
+    /// `""` for the project, `"mw_radar/"` for a library.
+    ///
+    /// The IDE stores file paths relative to the PROJECT root, but a library
+    /// repo's paths are relative to the LIBRARY root. Without stripping this,
+    /// the unsaved-changes comparison looks for `mw_radar/mw_radar/src/lib.rs`,
+    /// every read fails, and `unsaved_changes` counts a failed read as
+    /// "differs" — leaving the amber "unsaved changes" banner permanently lit.
+    pub fn prefix(&self) -> String {
+        match self {
+            RepoTarget::Project => String::new(),
+            RepoTarget::Library(lib) => format!("{}/", lib.trim_end_matches('/')),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            RepoTarget::Project => "Project".to_string(),
+            RepoTarget::Library(lib) => lib.clone(),
+        }
+    }
+}
+
+/// Re-key a project-relative snapshot for `target`: keep only the entries that
+/// belong to that repo, with the prefix removed. Pure — tested below.
+pub fn snapshot_for_target(
+    snapshot: Vec<(String, String)>,
+    target: &RepoTarget,
+) -> Vec<(String, String)> {
+    let prefix = target.prefix();
+    if prefix.is_empty() {
+        // The project repo also contains the library's files, so nothing is
+        // filtered out here — the parent legitimately tracks them.
+        return snapshot;
+    }
+    snapshot
+        .into_iter()
+        .filter_map(|(p, c)| p.strip_prefix(&prefix).map(|r| (r.to_string(), c)))
+        .collect()
 }
 
 pub struct GitConsole {
@@ -313,16 +380,9 @@ pub struct GitConsole {
     /// commit. Stored inverted so freshly appearing changes default to
     /// checked (commit-everything stays the no-touch default).
     pub excluded: std::collections::HashSet<String>,
-    /// Library-publish panel: which workspace member is selected, plus the
-    /// drafts for its own repository. The URL is only a DRAFT here — once
-    /// pushed it lives in the parent repo's `.git/config` (see
-    /// [`library_remote_name`]), which is why it is re-read on selection.
-    pub lib_selected: Option<String>,
-    pub lib_remote_draft: String,
-    pub lib_branch_draft: String,
-    /// Validation / guidance for the library panel (never a git error — those
-    /// go to the scrollback).
-    pub lib_note: Option<String>,
+    /// Which repository the whole tab operates on — the project, or a
+    /// library's own repo. Session-only: reopening starts on the project.
+    pub target: RepoTarget,
 }
 
 impl Default for GitConsole {
@@ -336,15 +396,42 @@ impl Default for GitConsole {
             changing_remote: false,
             remote_note: None,
             excluded: std::collections::HashSet::new(),
-            lib_selected: None,
-            lib_remote_draft: String::new(),
-            lib_branch_draft: "main".to_string(),
-            lib_note: None,
+            target: RepoTarget::default(),
         }
     }
 }
 
 impl GitConsole {
+    /// Point the tab at another repository.
+    ///
+    /// Everything cached belongs to the PREVIOUS repo — status, log, diff, the
+    /// commit-message draft, the exclusion set, the remote URL — so it is all
+    /// dropped. `loaded = false` makes the tab re-run its automatic status
+    /// refresh for the new target on the next frame.
+    pub fn switch_target(&mut self, target: RepoTarget) {
+        if self.target == target {
+            return;
+        }
+        self.target = target;
+        self.selected_commit = None;
+        self.commit_msg.clear();
+        self.excluded.clear();
+        self.changing_remote = false;
+        self.remote_note = None;
+        self.remote_url_draft.clear();
+        let mut st = self.state.lock().unwrap();
+        st.lines.clear();
+        st.status = GitStatus::default();
+        st.log.clear();
+        st.commit_files.clear();
+        st.commit_files_sha.clear();
+        st.diff = None;
+        st.unsaved.clear();
+        st.remote_url = None;
+        st.is_repo = false;
+        st.loaded = false;
+    }
+
     pub fn is_busy(&self) -> bool {
         self.state.lock().unwrap().busy.is_some()
     }
@@ -639,30 +726,40 @@ pub fn parse_remote_url(raw: &str) -> RemoteInfo {
     }
 }
 
-// ── Library subtree push (publish a workspace member to its own repo) ────────
-
-/// Name of the git remote this IDE manages for one library's own repository.
-///
-/// The URL lives in the parent repo's `.git/config` under this name, so git
-/// itself is the storage — nothing new to persist, nothing that can be
-/// committed by accident, and `git remote -v` shows it.
-pub fn library_remote_name(lib: &str) -> String {
-    format!("{lib}-remote")
+/// Normalise a directory path for comparison: forward slashes, no trailing
+/// separator, no Windows verbatim prefix. Pure — tested below.
+pub fn normalize_dir(p: &str) -> String {
+    let s = p.trim().replace('\\', "/");
+    let s = s.strip_prefix("//?/").unwrap_or(&s);
+    s.trim_end_matches('/').to_string()
 }
 
-/// The stored remote URL for `lib`, if one was configured.
-pub fn library_remote_url(dir: &Path, lib: &str) -> Option<String> {
-    let args = [
-        "remote".to_string(),
-        "get-url".to_string(),
-        library_remote_name(lib),
-    ];
-    let out = run_git(dir, &args).ok()?;
-    if !out.status.success() {
-        return None;
+/// True when `dir` is the ROOT of a git repository, given the output of
+/// `git rev-parse --show-toplevel` run inside it.
+///
+/// This distinction is what makes per-library repositories work at all: git
+/// commands run in a subdirectory operate on the ENCLOSING repository. Run
+/// inside `mw_radar/` before it has its own `.git`, `git status` succeeds and
+/// `git remote get-url origin` returns the PARENT's URL — so the library would
+/// look like it already had a repository (and the same remote as the project),
+/// and the Init button that creates its own would never appear.
+///
+/// Compared case-insensitively: Windows paths differ only in case here, and a
+/// false "not a root" would hide a real repository.
+pub fn is_repo_root(toplevel_stdout: &str, dir: &Path) -> bool {
+    let top = normalize_dir(toplevel_stdout);
+    if top.is_empty() {
+        return false;
     }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!url.is_empty()).then_some(url)
+    // Canonicalise both when possible so `..`, symlinks and short names match.
+    let canon = |s: &str| {
+        std::fs::canonicalize(s)
+            .map(|p| normalize_dir(&p.to_string_lossy()))
+            .unwrap_or_else(|_| normalize_dir(s))
+    };
+    let a = canon(&top);
+    let b = canon(&dir.to_string_lossy());
+    a.eq_ignore_ascii_case(&b)
 }
 
 /// Reject a remote URL we would only fail on later, with a reason the user can
@@ -671,7 +768,7 @@ pub fn library_remote_url(dir: &Path, lib: &str) -> Option<String> {
 pub fn validate_remote_url(url: &str) -> Result<(), String> {
     let u = url.trim();
     if u.is_empty() {
-        return Err("Enter the library repository URL first.".into());
+        return Err("Enter the repository URL first.".into());
     }
     if u.split_whitespace().count() > 1 {
         return Err("The URL must not contain spaces.".into());
@@ -694,170 +791,6 @@ pub fn validate_remote_url(url: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Files with uncommitted changes under `prefix`, from a porcelain-v2 status.
-///
-/// `git subtree push` publishes **committed history only**. Uncommitted work in
-/// the library is silently left out, which looks exactly like a push that did
-/// nothing — so it is worth saying out loud before running.
-pub fn uncommitted_under_prefix(status: &GitStatus, prefix: &str) -> Vec<String> {
-    let dir = format!("{}/", prefix.trim_end_matches('/'));
-    status
-        .changes
-        .iter()
-        .filter(|c| c.path.starts_with(&dir))
-        .map(|c| c.path.clone())
-        .collect()
-}
-
-/// Spawn the worker that publishes `lib` to its own repository.
-///
-/// Point C of the separate-repo analysis: the parent repo keeps the real files
-/// (clone works, the cargo workspace member stays valid, consumers do nothing
-/// extra) and the library's history is grafted onto its own remote. This is
-/// push-only — the reverse direction (`subtree pull`) is deliberately not
-/// wired, since it can conflict and was not asked for.
-#[allow(clippy::too_many_arguments)]
-pub fn run_subtree_push(
-    lib: String,
-    remote_url: String,
-    branch: String,
-    project_dir: PathBuf,
-    state: Arc<Mutex<GitState>>,
-    activity: Arc<Mutex<crate::activity::ActivityLog>>,
-    ctx: egui::Context,
-) {
-    {
-        let mut st = state.lock().unwrap();
-        if st.busy.is_some() {
-            return; // one op at a time
-        }
-        st.busy = Some("Push library");
-        st.diff = None;
-    }
-
-    std::thread::spawn(move || {
-        let mut rec = crate::activity::Recorder::new(format!("Git (push library {lib})"));
-        let remote = library_remote_name(&lib);
-        let branch = if branch.trim().is_empty() {
-            "main".to_string()
-        } else {
-            branch.trim().to_string()
-        };
-
-        // Record the URL under our managed remote name. `set-url` fails when the
-        // remote doesn't exist yet, so try `add` first and fall back — this way
-        // changing the URL later just works.
-        let add = vec![
-            "remote".to_string(),
-            "add".to_string(),
-            remote.clone(),
-            remote_url.trim().to_string(),
-        ];
-        let added = matches!(run_git(&project_dir, &add), Ok(o) if o.status.success());
-        if !added {
-            let set = vec![
-                "remote".to_string(),
-                "set-url".to_string(),
-                remote.clone(),
-                remote_url.trim().to_string(),
-            ];
-            let _ = run_git(&project_dir, &set);
-        }
-
-        let args = vec![
-            "subtree".to_string(),
-            "push".to_string(),
-            format!("--prefix={lib}"),
-            remote.clone(),
-            branch.clone(),
-        ];
-        state
-            .lock()
-            .unwrap()
-            .push(GitLine::Cmd, format!("> git {}", args.join(" ")));
-
-        let t = std::time::Instant::now();
-        let mut ok = false;
-        match run_git(&project_dir, &args) {
-            Ok(out) => {
-                {
-                    let mut st = state.lock().unwrap();
-                    push_output(&mut st, &out);
-                }
-                ok = out.status.success();
-                rec.add(format!("git subtree push {lib}"), t.elapsed());
-                let mut st = state.lock().unwrap();
-                if ok {
-                    st.push(
-                        GitLine::Notice,
-                        format!("[OK] {lib} pushed to {} ({branch})", remote_url.trim()),
-                    );
-                } else {
-                    // Translate the two failures whose raw text explains
-                    // nothing. Both stdout and stderr matter: `subtree` prints
-                    // its "No new revisions" on STDOUT and still exits 1.
-                    let all = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    )
-                    .to_lowercase();
-                    if all.contains("is not a git command") {
-                        // `subtree` is a contrib command; minimal builds omit it.
-                        st.push(
-                            GitLine::Err,
-                            "[error] this git build has no 'subtree' command (it ships with \
-                             Git for Windows; on Linux install the git-subtree package)",
-                        );
-                    } else if all.contains("no new revisions were found") {
-                        // The trap: subtree pushes COMMITTED history. A library
-                        // that is only on disk has none, and git says so in a
-                        // way that sounds like "already up to date".
-                        st.push(
-                            GitLine::Err,
-                            format!(
-                                "[error] nothing to push — no commits touch {lib}/ yet. \
-                                 Commit the library in the Changes view first, then push."
-                            ),
-                        );
-                    } else if all.contains("authentication")
-                        || all.contains("could not read username")
-                        || all.contains("permission denied")
-                        || all.contains("403")
-                    {
-                        st.push(
-                            GitLine::Err,
-                            "[error] the remote rejected the credentials — check the URL and \
-                             that you have push access to that repository",
-                        );
-                    } else {
-                        st.push(
-                            GitLine::Err,
-                            format!(
-                                "[error] pushing {lib} failed (exit {})",
-                                out.status.code().unwrap_or(-1)
-                            ),
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                let mut st = state.lock().unwrap();
-                st.git_missing = e.kind() == std::io::ErrorKind::NotFound;
-                st.push(GitLine::Err, format!("[error] could not run git: {e}"));
-            }
-        }
-
-        {
-            let mut st = state.lock().unwrap();
-            st.busy = None;
-            let _ = ok;
-        }
-        activity.lock().unwrap().push(rec.finish());
-        ctx.request_repaint();
-    });
 }
 
 /// Spawn the worker for `op`. `snapshot` is the in-memory project content
@@ -963,12 +896,21 @@ pub fn run_op(
             ],
         ) {
             Ok(out) => {
-                let parsed = out
-                    .status
-                    .success()
-                    .then(|| parse_porcelain_v2(&String::from_utf8_lossy(&out.stdout)));
+                // `git status` SUCCEEDS in any subdirectory of a repository, so
+                // success alone would report a library as "already a repo" —
+                // the enclosing project's. Only the repo ROOT counts here.
+                let own_repo = out.status.success()
+                    && run_git(&project_dir, &["rev-parse".into(), "--show-toplevel".into()])
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| {
+                            is_repo_root(&String::from_utf8_lossy(&o.stdout), &project_dir)
+                        })
+                        .unwrap_or(false);
+                let parsed =
+                    own_repo.then(|| parse_porcelain_v2(&String::from_utf8_lossy(&out.stdout)));
                 let mut st = state.lock().unwrap();
-                st.is_repo = out.status.success();
+                st.is_repo = own_repo;
                 if let Some(p) = parsed {
                     st.status = p;
                 } else {
@@ -989,11 +931,19 @@ pub fn run_op(
             }
         }
         // Which remote is configured (drives the tab's "Set remote" field).
-        let remote_url = run_git(&project_dir, &["remote".into(), "get-url".into(), "origin".into()])
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .filter(|u| !u.is_empty());
+        // Only when this directory owns the repository — otherwise git answers
+        // with the PARENT's origin and the library would appear to share the
+        // project's URL.
+        let owns = state.lock().unwrap().is_repo;
+        let remote_url = owns
+            .then(|| {
+                run_git(&project_dir, &["remote".into(), "get-url".into(), "origin".into()])
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                    .filter(|u| !u.is_empty())
+            })
+            .flatten();
 
         let unsaved = unsaved_changes(&project_dir, &snapshot);
         {
@@ -1942,6 +1892,69 @@ index abc..def 100644
     }
 
     #[test]
+    fn normalize_dir_squares_separators_and_prefixes() {
+        assert_eq!(normalize_dir("C:\\a\\b\\"), "C:/a/b");
+        assert_eq!(normalize_dir("//?/C:/a/b"), "C:/a/b");
+        assert_eq!(normalize_dir("  /srv/git/  "), "/srv/git");
+        assert_eq!(normalize_dir(""), "");
+    }
+
+    #[test]
+    fn repo_root_check_rejects_a_subdirectory_of_a_repo() {
+        // THE bug this exists for: `git status` and `git remote get-url` both
+        // succeed inside `mw_radar/` before it has its own `.git`, answering
+        // for the PARENT — so the library looked like it already had a repo,
+        // sharing the project's URL, and Init never appeared.
+        let top = "C:/proj\n";
+        assert!(is_repo_root(top, Path::new("C:/proj")));
+        assert!(!is_repo_root(top, Path::new("C:/proj/mw_radar")));
+        // Separator style and trailing slashes must not decide it.
+        assert!(is_repo_root("C:/proj\n", Path::new("C:\\proj\\")));
+        // Empty output (not a repo at all) is never a root.
+        assert!(!is_repo_root("", Path::new("C:/proj")));
+    }
+
+    #[test]
+    fn repo_target_resolves_dir_and_prefix() {
+        let root = Path::new("C:/proj");
+        assert_eq!(RepoTarget::Project.dir(root), root.to_path_buf());
+        assert_eq!(
+            RepoTarget::Library("mw_radar".into()).dir(root),
+            root.join("mw_radar")
+        );
+        assert_eq!(RepoTarget::Project.prefix(), "");
+        assert_eq!(RepoTarget::Library("mw_radar".into()).prefix(), "mw_radar/");
+        // A trailing slash in the member name must not double up.
+        assert_eq!(RepoTarget::Library("mw_radar/".into()).prefix(), "mw_radar/");
+    }
+
+    #[test]
+    fn snapshot_is_rekeyed_to_the_library_root() {
+        // The IDE keys files from the PROJECT root; a library repo's paths are
+        // relative to the LIBRARY root. Without stripping, every read fails and
+        // `unsaved_changes` treats a failed read as "differs" — the amber
+        // banner would be permanently lit.
+        let snap = vec![
+            ("mw_radar/src/lib.rs".to_owned(), "a".to_owned()),
+            ("mw_radar/Cargo.toml".to_owned(), "b".to_owned()),
+            ("src/main.rs".to_owned(), "c".to_owned()),
+            // A sibling that merely starts with the same letters must not match.
+            ("mw_radar_extra/src/lib.rs".to_owned(), "d".to_owned()),
+        ];
+        let lib = snapshot_for_target(snap.clone(), &RepoTarget::Library("mw_radar".into()));
+        assert_eq!(
+            lib,
+            vec![
+                ("src/lib.rs".to_owned(), "a".to_owned()),
+                ("Cargo.toml".to_owned(), "b".to_owned()),
+            ]
+        );
+        // The project repo legitimately tracks the library's files too, so
+        // nothing is filtered out there.
+        assert_eq!(snapshot_for_target(snap.clone(), &RepoTarget::Project), snap);
+    }
+
+    #[test]
     fn remote_https_yields_name_host_and_browsable_url() {
         let r = parse_remote_url("https://github.com/traian/mw_radar.git");
         assert_eq!(r.name, "traian/mw_radar");
@@ -2036,14 +2049,6 @@ index abc..def 100644
     }
 
     #[test]
-    fn library_remote_name_is_stable_and_namespaced() {
-        // The URL is stored by git under this name, so it must not collide
-        // with the project's own `origin`.
-        assert_eq!(library_remote_name("mw_radar"), "mw_radar-remote");
-        assert_ne!(library_remote_name("mw_radar"), "origin");
-    }
-
-    #[test]
     fn remote_url_validation_accepts_every_form_git_takes() {
         for ok in [
             "https://github.com/user/mw_radar.git",
@@ -2066,35 +2071,6 @@ index abc..def 100644
         assert!(validate_remote_url("mw_radar").is_err());
         // Spaces would split into extra git arguments.
         assert!(validate_remote_url("https://host/a repo.git").is_err());
-    }
-
-    #[test]
-    fn uncommitted_under_prefix_selects_only_that_library() {
-        let ch = |p: &str| GitChange {
-            code: ".M".to_string(),
-            path: p.to_string(),
-        };
-        let status = GitStatus {
-            changes: vec![
-                ch("mw_radar/src/lib.rs"),
-                ch("mw_radar/Cargo.toml"),
-                ch("src/main.rs"),
-                // A sibling whose name merely STARTS with the prefix must not
-                // be swept in — hence matching on "mw_radar/" not "mw_radar".
-                ch("mw_radar_extra/src/lib.rs"),
-            ],
-            ..Default::default()
-        };
-        assert_eq!(
-            uncommitted_under_prefix(&status, "mw_radar"),
-            vec![
-                "mw_radar/src/lib.rs".to_owned(),
-                "mw_radar/Cargo.toml".to_owned()
-            ]
-        );
-        // A trailing slash in the prefix must not double up.
-        assert_eq!(uncommitted_under_prefix(&status, "mw_radar/").len(), 2);
-        assert!(uncommitted_under_prefix(&status, "nope").is_empty());
     }
 
     #[test]

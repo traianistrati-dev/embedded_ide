@@ -91,10 +91,8 @@ pub(super) fn show_diag_panel(
     // True when the user clicks "Discard all"; the caller confirms then resets
     // the whole tree to HEAD (Phase C).
     git_discard_all: &mut bool,
-    // Workspace-member crate names, for the Git tab's Library view.
+    // Workspace-member crate names — the Git tab's repository picker.
     git_libraries: &[String],
-    // `(library, remote url, branch)` when "Push to its repository" is clicked.
-    git_lib_push: &mut Option<(String, String, String)>,
     // Flash-tab Programmer-row buttons: set `flash_scan`/`flash_go` on click;
     // `can_flash` = a buildable chip config exists (gates the Flash button).
     flash_scan: &mut bool,
@@ -626,7 +624,6 @@ pub(super) fn show_diag_panel(
                 git_discard,
                 git_discard_all,
                 git_libraries,
-                git_lib_push,
             );
         }
         BuildPanelTab::Clippy => {

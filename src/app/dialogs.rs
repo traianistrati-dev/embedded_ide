@@ -209,7 +209,7 @@ impl AppIde {
             });
 
         if confirmed {
-            if let Some(dir) = self.project_dir.clone() {
+            if let Some(dir) = self.git_dir() {
                 crate::git::run_restore_tree(
                     sha,
                     dir,
