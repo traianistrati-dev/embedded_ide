@@ -37,6 +37,13 @@ pub enum GitOp {
     /// `git remote add origin <url>` — the URL comes from the tab's draft
     /// field (like the commit message).
     SetRemote,
+    /// `git remote set-url origin <url>` — repoint an EXISTING origin. `add`
+    /// errors out when origin already exists, so changing the repository needs
+    /// its own op. Followed by a `branch --unset-upstream`: the old upstream
+    /// ref points into the previous repo, and leaving it makes the next Push
+    /// fail with a confusing "no such ref" — the first Push after a change
+    /// re-creates it with `-u`.
+    ChangeRemote,
 }
 
 impl GitOp {
@@ -52,6 +59,7 @@ impl GitOp {
             GitOp::Fetch => "fetch",
             GitOp::Log => "log",
             GitOp::SetRemote => "set remote",
+            GitOp::ChangeRemote => "change remote",
         }
     }
 }
@@ -294,8 +302,13 @@ pub struct GitConsole {
     /// Selected commit in the History list, by full sha.
     pub selected_commit: Option<String>,
     pub commit_msg: String,
-    /// Draft for the "Set remote origin" field (shown while no remote exists).
+    /// Draft for the "Set remote origin" field (shown while no remote exists),
+    /// reused by the Change-repository editor.
     pub remote_url_draft: String,
+    /// The Change-repository editor is open.
+    pub changing_remote: bool,
+    /// Validation message for that editor (git errors go to the scrollback).
+    pub remote_note: Option<String>,
     /// Changed-file paths UNchecked in the tab — excluded from the next
     /// commit. Stored inverted so freshly appearing changes default to
     /// checked (commit-everything stays the no-touch default).
@@ -320,6 +333,8 @@ impl Default for GitConsole {
             selected_commit: None,
             commit_msg: String::new(),
             remote_url_draft: String::new(),
+            changing_remote: false,
+            remote_note: None,
             excluded: std::collections::HashSet::new(),
             lib_selected: None,
             lib_remote_draft: String::new(),
@@ -436,6 +451,23 @@ fn commands_for(
             "200",
         ])],
         GitOp::SetRemote => vec![vec!["remote".into(), "add".into(), "origin".into(), remote.to_owned()]],
+        // Repoint origin, then drop the stale upstream — it names a branch in
+        // the OLD repository, and leaving it makes the next Push fail. Only
+        // when one actually exists: `--unset-upstream` errors out otherwise,
+        // and a failing command aborts the sequence with a scary
+        // "[exit 1] — sequence stopped" for what is a no-op.
+        GitOp::ChangeRemote => {
+            let mut v = vec![vec![
+                "remote".into(),
+                "set-url".into(),
+                "origin".into(),
+                remote.to_owned(),
+            ]];
+            if has_upstream {
+                v.push(vec!["branch".into(), "--unset-upstream".into()]);
+            }
+            v
+        }
     }
 }
 
@@ -460,6 +492,150 @@ fn push_output(st: &mut GitState, out: &std::process::Output) {
     }
     for line in String::from_utf8_lossy(&out.stderr).lines() {
         st.push(GitLine::Err, line);
+    }
+}
+
+// ── Remote URL display (name, browsable link, credential masking) ───────────
+
+/// A git remote URL split into the parts that are safe and useful to SHOW.
+///
+/// A remote URL can legitimately carry credentials — `https://user:ghp_xxx@…`
+/// is accepted by git and stored verbatim in `.git/config`. Rendering one
+/// as-is would leak a token into any screenshot of the tab, so the raw string
+/// never reaches the UI: everything here is masked at construction.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct RemoteInfo {
+    /// `owner/repo` — what a human recognises. Falls back to the last path
+    /// segment, then to the host.
+    pub name: String,
+    /// `github.com`, `gitlab.company.com`, … Empty for a local path.
+    pub host: String,
+    /// Browsable `https://` URL, or `None` when there is nothing a browser can
+    /// open (a local path). **Never** carries credentials.
+    pub web_url: Option<String>,
+    /// The full URL with credentials masked — for the tooltip.
+    pub safe_url: String,
+}
+
+/// Split a git remote URL into displayable parts. Pure — tested below.
+///
+/// Handles the four forms git accepts: `https://…`, `ssh://…`, `git://…`, the
+/// scp-style `git@host:owner/repo.git`, and local paths.
+pub fn parse_remote_url(raw: &str) -> RemoteInfo {
+    let url = raw.trim();
+    if url.is_empty() {
+        return RemoteInfo::default();
+    }
+
+    // A Windows drive letter (`C:\repos\x`) must not be read as a scheme
+    // separator, and neither must a bare local path.
+    let is_local = url.starts_with('/')
+        || url.starts_with("file://")
+        || (url.len() > 2 && url.as_bytes()[1] == b':' && !url.contains("//"));
+    if is_local {
+        let path = url.trim_start_matches("file://");
+        let name = path
+            .rsplit(['/', '\\'])
+            .find(|s| !s.is_empty())
+            .unwrap_or(path)
+            .trim_end_matches(".git")
+            .to_string();
+        return RemoteInfo {
+            name,
+            host: String::new(),
+            web_url: None, // a local path is not browsable
+            safe_url: path.to_string(),
+        };
+    }
+
+    // scheme://[userinfo@]host[:port]/path   or   [user@]host:path (scp-style)
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s.to_ascii_lowercase(), r),
+        None => ("ssh".to_string(), url), // scp-style implies ssh
+    };
+    let scp_style = !url.contains("://");
+
+    let (userinfo, hostpath) = match rest.split_once('@') {
+        Some((u, h)) => (Some(u), h),
+        None => (None, rest),
+    };
+
+    // scp-style separates host from path with `:`; URL forms use `/`.
+    let (hostport, path) = if scp_style {
+        match hostpath.split_once(':') {
+            Some((h, p)) => (h, p),
+            None => (hostpath, ""),
+        }
+    } else {
+        match hostpath.split_once('/') {
+            Some((h, p)) => (h, p),
+            None => (hostpath, ""),
+        }
+    };
+
+    // An SSH port is meaningless to a browser; an HTTPS one is not.
+    let https_scheme = scheme == "https" || scheme == "http";
+    let (host, port) = match hostport.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (hostport, None),
+    };
+
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    let name = if path.is_empty() {
+        host.to_string()
+    } else {
+        // Keep the last two segments: `owner/repo` identifies a fork, a bare
+        // `repo` does not. Deeper GitLab groups collapse to the tail.
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        match segs.len() {
+            0 => host.to_string(),
+            1 => segs[0].to_string(),
+            n => format!("{}/{}", segs[n - 2], segs[n - 1]),
+        }
+    };
+
+    // Credentials: for http(s) ANY userinfo is a secret (a bare token is a
+    // valid username). For ssh a plain `git@` is the conventional user and
+    // harmless — mask only the `user:password` form.
+    let masked_user = match userinfo {
+        None => None,
+        Some(u) if https_scheme || u.contains(':') => Some("***".to_string()),
+        Some(u) => Some(u.to_string()),
+    };
+    let safe_url = {
+        let cred = masked_user
+            .as_ref()
+            .map(|u| format!("{u}@"))
+            .unwrap_or_default();
+        let sep = if scp_style { ":" } else { "/" };
+        let tail = if path.is_empty() {
+            String::new()
+        } else {
+            format!("{sep}{path}")
+        };
+        if scp_style {
+            format!("{cred}{hostport}{tail}")
+        } else {
+            format!("{scheme}://{cred}{hostport}{tail}")
+        }
+    };
+
+    // The browsable form is always https and always credential-free.
+    let web_url = if host.is_empty() || path.is_empty() {
+        None
+    } else {
+        let port_part = match port {
+            Some(p) if https_scheme => format!(":{p}"),
+            _ => String::new(), // drop SSH ports
+        };
+        Some(format!("https://{host}{port_part}/{path}"))
+    };
+
+    RemoteInfo {
+        name,
+        host: host.to_string(),
+        web_url,
+        safe_url,
     }
 }
 
@@ -1701,6 +1877,128 @@ index abc..def 100644
         let restored = revert_hunk(current, baseline, hunks.last().unwrap());
         assert!(restored.ends_with("b\n"));
         assert!(restored.contains("a\n"), "separator restored, not glued: {restored:?}");
+    }
+
+    #[test]
+    fn change_remote_repoints_origin_and_clears_a_stale_upstream() {
+        // With an upstream: it names a branch in the OLD repo, so it must go
+        // or the next Push fails.
+        let with = commands_for(
+            GitOp::ChangeRemote,
+            "",
+            "https://github.com/u/new.git",
+            true,
+            &None,
+        );
+        assert_eq!(with.len(), 2);
+        assert_eq!(with[0][0], "remote");
+        assert_eq!(with[0][1], "set-url"); // NOT `add` — origin already exists
+        assert_eq!(with[1], vec!["branch", "--unset-upstream"]);
+
+        // Without one, `--unset-upstream` would fail and abort the sequence
+        // with a misleading error for what is a no-op.
+        let without = commands_for(
+            GitOp::ChangeRemote,
+            "",
+            "https://github.com/u/new.git",
+            false,
+            &None,
+        );
+        assert_eq!(without.len(), 1);
+    }
+
+    #[test]
+    fn remote_https_yields_name_host_and_browsable_url() {
+        let r = parse_remote_url("https://github.com/traian/mw_radar.git");
+        assert_eq!(r.name, "traian/mw_radar");
+        assert_eq!(r.host, "github.com");
+        assert_eq!(
+            r.web_url.as_deref(),
+            Some("https://github.com/traian/mw_radar")
+        );
+        assert_eq!(r.safe_url, "https://github.com/traian/mw_radar");
+    }
+
+    #[test]
+    fn remote_scp_style_ssh_becomes_a_browsable_https_url() {
+        // `git@github.com:owner/repo.git` has no scheme and uses `:` — the
+        // form most likely to be mis-parsed.
+        let r = parse_remote_url("git@github.com:traian/mw_radar.git");
+        assert_eq!(r.name, "traian/mw_radar");
+        assert_eq!(r.host, "github.com");
+        assert_eq!(
+            r.web_url.as_deref(),
+            Some("https://github.com/traian/mw_radar")
+        );
+        // A bare `git@` is the conventional ssh user, not a secret.
+        assert_eq!(r.safe_url, "git@github.com:traian/mw_radar");
+    }
+
+    #[test]
+    fn embedded_token_never_reaches_the_display_or_the_link() {
+        // The security case: git accepts and STORES this verbatim, so a
+        // screenshot of the tab would leak the token.
+        let r = parse_remote_url("https://traian:ghp_SECRET123@github.com/traian/mw_radar.git");
+        assert!(!r.safe_url.contains("ghp_SECRET123"), "{}", r.safe_url);
+        assert!(!r.safe_url.contains("traian:"), "{}", r.safe_url);
+        assert_eq!(r.safe_url, "https://***@github.com/traian/mw_radar");
+        // The browsable link must be credential-free too.
+        let web = r.web_url.unwrap();
+        assert_eq!(web, "https://github.com/traian/mw_radar");
+        assert!(!web.contains('@'));
+        assert_eq!(r.name, "traian/mw_radar");
+    }
+
+    #[test]
+    fn bare_token_as_username_is_masked_too() {
+        // No colon, but on https a lone userinfo IS the token.
+        let r = parse_remote_url("https://ghp_SECRET123@github.com/o/r.git");
+        assert!(!r.safe_url.contains("ghp_SECRET123"), "{}", r.safe_url);
+        assert_eq!(r.safe_url, "https://***@github.com/o/r");
+    }
+
+    #[test]
+    fn ssh_port_is_dropped_from_the_web_url_but_https_port_is_kept() {
+        // 2222 is an SSH port — meaningless to a browser.
+        let ssh = parse_remote_url("ssh://git@gitlab.corp.com:2222/team/lib.git");
+        assert_eq!(
+            ssh.web_url.as_deref(),
+            Some("https://gitlab.corp.com/team/lib")
+        );
+        // 8443 is the actual https port — keep it or the link 404s.
+        let https = parse_remote_url("https://gitlab.corp.com:8443/team/lib.git");
+        assert_eq!(
+            https.web_url.as_deref(),
+            Some("https://gitlab.corp.com:8443/team/lib")
+        );
+    }
+
+    #[test]
+    fn nested_group_paths_collapse_to_the_last_two_segments() {
+        let r = parse_remote_url("https://gitlab.com/corp/team/sub/mw_radar.git");
+        assert_eq!(r.name, "sub/mw_radar");
+        // The LINK must still target the full path, not the shortened name.
+        assert_eq!(
+            r.web_url.as_deref(),
+            Some("https://gitlab.com/corp/team/sub/mw_radar")
+        );
+    }
+
+    #[test]
+    fn local_paths_have_a_name_but_are_not_browsable() {
+        for p in ["C:\\repos\\mw_radar", "/srv/git/mw_radar.git"] {
+            let r = parse_remote_url(p);
+            assert_eq!(r.name, "mw_radar", "{p}");
+            // Nothing for a browser to open — the UI must not offer a link.
+            assert!(r.web_url.is_none(), "{p}");
+        }
+    }
+
+    #[test]
+    fn empty_remote_is_inert() {
+        let r = parse_remote_url("   ");
+        assert_eq!(r, RemoteInfo::default());
+        assert!(r.web_url.is_none());
     }
 
     #[test]

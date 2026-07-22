@@ -209,11 +209,12 @@ pub fn show_git_tab(
                     egui::Color32::from_gray(120)
                 };
                 ui.label(egui::RichText::new(ab).size(11.0).color(col));
-            } else if let Some(url) = &remote_url {
+            } else if remote_url.is_some() {
                 // Remote configured but no upstream yet — the first Push will
-                // create it (`push -u origin HEAD`).
+                // create it (`push -u origin HEAD`). The URL itself is shown
+                // by the repo row below, for every state.
                 ui.label(
-                    egui::RichText::new(format!("remote: {url} (first Push sets the upstream)"))
+                    egui::RichText::new("(first Push sets the upstream)")
                         .size(10.5)
                         .color(egui::Color32::from_gray(130)),
                 );
@@ -278,9 +279,122 @@ pub fn show_git_tab(
                 egui::RichText::new(project_dir.to_string_lossy())
                     .size(10.0)
                     .color(egui::Color32::from_gray(100)),
-            );
+            )
+            .on_hover_text("Local folder — git runs here");
         });
     });
+
+    // ── Repository row: WHERE this project pushes ───────────────────────────
+    // Shown in every state (the old header only revealed the URL in the brief
+    // window between `remote add` and the first push, so day to day you could
+    // not tell which repository you were pushing to — `origin/main` names the
+    // remote, not the address).
+    if is_repo {
+        if let Some(raw) = &remote_url {
+            let info = crate::git::parse_remote_url(raw);
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("{} repo", ph::GIT_FORK))
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(130)),
+                );
+                // The NAME is what identifies the repository; the scheme,
+                // credentials and `.git` suffix are noise. `safe_url` in the
+                // tooltip is credential-masked — the raw string never renders.
+                match &info.web_url {
+                    Some(web) => {
+                        ui.hyperlink_to(
+                            egui::RichText::new(&info.name).size(11.5).strong(),
+                            web,
+                        )
+                        .on_hover_text(format!("{}\n\nOpens in your browser", info.safe_url));
+                    }
+                    None => {
+                        // A local path has nothing a browser can open.
+                        ui.label(egui::RichText::new(&info.name).size(11.5).strong())
+                            .on_hover_text(&info.safe_url);
+                    }
+                }
+                if !info.host.is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("on {}", info.host))
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(125)),
+                    );
+                }
+                if ui
+                    .add_enabled(
+                        busy.is_none(),
+                        egui::Button::new(egui::RichText::new(format!("{} Change", ph::PENCIL_SIMPLE)).size(10.5)),
+                    )
+                    .on_hover_text("Point this project at a different repository")
+                    .clicked()
+                {
+                    // Pre-fill with the CURRENT url so a small edit (a typo, a
+                    // rename) doesn't mean retyping the whole address.
+                    git.remote_url_draft = raw.clone();
+                    git.changing_remote = true;
+                }
+            });
+
+            if git.changing_remote {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("New URL:").size(11.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut git.remote_url_draft)
+                            .desired_width(330.0)
+                            .hint_text("https://github.com/user/repo.git"),
+                    );
+                    let changed = git.remote_url_draft.trim() != raw.trim();
+                    if ui
+                        .add_enabled(
+                            busy.is_none() && changed,
+                            egui::Button::new(egui::RichText::new("Save").size(11.0)),
+                        )
+                        .on_disabled_hover_text("Edit the URL first")
+                        .clicked()
+                    {
+                        match crate::git::validate_remote_url(&git.remote_url_draft) {
+                            Ok(()) => {
+                                *op_out = Some(GitOp::ChangeRemote);
+                                git.changing_remote = false;
+                                git.remote_note = None;
+                            }
+                            Err(e) => git.remote_note = Some(e),
+                        }
+                    }
+                    if ui.button(egui::RichText::new("Cancel").size(11.0)).clicked() {
+                        git.changing_remote = false;
+                        git.remote_note = None;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Only re-points where this project pushes — your files and history \
+                             are untouched. The upstream is cleared, so the next Push re-creates it.",
+                        )
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140))
+                        .italics(),
+                    );
+                });
+                if let Some(note) = &git.remote_note {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(note)
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(220, 120, 100)),
+                        );
+                    });
+                }
+            }
+        }
+    }
 
     // ── Unsaved-changes warning (commit uses ONLY what's on disk) ────────────
     if !unsaved.is_empty() {
