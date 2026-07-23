@@ -17,7 +17,7 @@
 //! reopen. Full peripheral-driver generation (like the STM32F1 config files)
 //! is a later step.
 
-use super::super::clock::graph::{graph_to_wba, is_wba_graph, WbaClock, WbaSys};
+use super::super::clock::graph::is_wba_graph;
 use super::super::clock::model::ClockConfig;
 use super::embassy_common;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
@@ -33,80 +33,17 @@ pub use embassy_common::{invariant_header, splice_section};
 /// **the PLL is unavailable in voltage range 2** (embassy panics) — RANGE1 is
 /// emitted for any PLL use; HSE-32 as sysclk also exceeds range 2's window.
 fn clock_block(clock: &ClockConfig) -> String {
-    let c: WbaClock = match clock {
-        ClockConfig::Graph(gc) if is_wba_graph(&gc.graph) => graph_to_wba(&gc.graph),
-        _ => WbaClock::default(),
+    use super::rcc::{self, ReadSpec};
+    let spec = ReadSpec::wba();
+    let v = match clock {
+        ClockConfig::Graph(gc) if is_wba_graph(&gc.graph) => rcc::read_rcc_values(&gc.graph, &spec),
+        _ => spec.reset.clone(),
     };
-    if c == WbaClock::default() {
+    if v == spec.reset {
         return "    let p = embassy_stm32::init(Default::default()); // HSI16, all buses /1\n"
             .to_string();
     }
-
-    let mhz = c.sysclk_hz() / 1_000_000;
-    let sys_desc = match c.sys {
-        WbaSys::Hsi => "HSI16".to_string(),
-        WbaSys::Hse => "HSE32".to_string(),
-        WbaSys::Pll => format!(
-            "{} /{} x{} /{} via PLL1R",
-            if c.pll_src_hse { "HSE32" } else { "HSI16" },
-            c.pll_m,
-            c.pll_n,
-            c.pll_r
-        ),
-    };
-    let mut b = String::new();
-    b.push_str(&format!(
-        "    // Clock (from the Clock tab): SYSCLK {mhz} MHz ({sys_desc}) · \
-         AHB /{} · APB1 /{} APB2 /{} APB7 /{}\n",
-        c.ahb, c.apb1, c.apb2, c.apb7
-    ));
-    b.push_str("    let mut config = embassy_stm32::Config::default();\n");
-    b.push_str("    {\n        use embassy_stm32::rcc;\n");
-    let hse_used = c.sys == WbaSys::Hse || (c.sys == WbaSys::Pll && c.pll_src_hse);
-    if hse_used {
-        b.push_str(
-            "        config.rcc.hse = Some(rcc::Hse { prescaler: rcc::HsePrescaler::DIV1 });\n",
-        );
-    }
-    if c.sys == WbaSys::Pll {
-        b.push_str(&format!(
-            "        config.rcc.pll1 = Some(rcc::Pll {{\n\
-             \x20           source: rcc::PllSource::{src},\n\
-             \x20           prediv: rcc::PllPreDiv::DIV{m},\n\
-             \x20           mul: rcc::PllMul::MUL{n},\n\
-             \x20           divp: None,\n\
-             \x20           divq: None,\n\
-             \x20           divr: Some(rcc::PllDiv::DIV{r}),\n\
-             \x20           frac: None,\n\
-             \x20       }});\n",
-            src = if c.pll_src_hse { "HSE" } else { "HSI" },
-            m = c.pll_m,
-            n = c.pll_n,
-            r = c.pll_r,
-        ));
-    }
-    let sys = match c.sys {
-        WbaSys::Hsi => "HSI",
-        WbaSys::Hse => "HSE",
-        WbaSys::Pll => "PLL1_R",
-    };
-    b.push_str(&format!("        config.rcc.sys = rcc::Sysclk::{sys};\n"));
-    // Range 1 is REQUIRED for the PLL (embassy panics in range 2) and for any
-    // sysclk beyond range 2's window (HSE 32 MHz). Plain HSI16 keeps range 2.
-    if c.sys != WbaSys::Hsi {
-        b.push_str("        config.rcc.voltage_scale = rcc::VoltageScale::RANGE1;\n");
-    }
-    b.push_str(&format!(
-        "        config.rcc.ahb_pre = rcc::AHBPrescaler::DIV{};\n",
-        c.ahb
-    ));
-    for (field, v) in [("apb1_pre", c.apb1), ("apb2_pre", c.apb2), ("apb7_pre", c.apb7)] {
-        b.push_str(&format!(
-            "        config.rcc.{field} = rcc::APBPrescaler::DIV{v};\n"
-        ));
-    }
-    b.push_str("    }\n    let p = embassy_stm32::init(config);\n");
-    b
+    rcc::emit_rcc_block(&rcc::RccDescriptor::wba(), &v)
 }
 
 /// The WBA generated section — the shared embassy shape with the WBA RCC clock

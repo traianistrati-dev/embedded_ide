@@ -265,6 +265,17 @@ pub fn build_prompt(family_hint: &str, package: &str) -> String {
          }}\n\
          \n\
          Rules:\n\
+         - IDENTITY FROM THE PINOUT FIGURE TITLE. The pinout diagram's title — \
+         e.g. \"Figure 5. STM32G031Fx TSSOP20 pinout\" — is usually the most \
+         reliable source of the chip family AND the package, especially when \
+         the surrounding text is sparse or the part number appears nowhere \
+         else. Read \"display_name\" and \"package\" from it: that title gives \
+         display_name \"STM32G031Fx\" (or the exact part if the title names one) \
+         and package \"TSSOP20\". A title ending in a wildcard like \"Fx\", \
+         \"xx\" or \"(x)\" means a FAMILY that shares this pinout across several \
+         flash/pin variants — keep the wildcard in display_name rather than \
+         inventing a specific part. Never return empty identity when a pinout \
+         figure title is present.\n\
          - \"number\" must be the INTEGER package position, never a BGA-style \
          letter+digit code.\n\
          - Power / ground / NC / reset / oscillator pins: reserved=true, \
@@ -290,10 +301,51 @@ pub enum Source {
 pub const MAX_PDF_BYTES: usize = 20 * 1024 * 1024;
 
 /// The short user-message text that accompanies a PDF document block.
+/// PDF instruction for a CLOCK-tree extraction.
+const CLOCK_PDF_INSTRUCTION: &str =
+    "This is a microcontroller datasheet (PDF). Extract the main clock-tree \
+     SPINE (sources, PLL chain, SYSCLK mux, AHB and APB dividers) following the \
+     system instructions and the required JSON schema. Do not model the \
+     peripheral kernel clocks.";
+
 const PDF_INSTRUCTION: &str =
     "This is a microcontroller datasheet (PDF). Extract the chip identity, \
      memory map, and full pin / alternate-function table following the system \
      instructions and the required JSON schema.";
+
+/// Which extraction this request is for — selects the JSON schema and the PDF
+/// instruction. The provider plumbing (auth, PDF encoding, structured-output
+/// mechanism) is identical for both; only these two pieces differ.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ExtractKind {
+    /// The pin / alternate-function table (`ExtractedChip`).
+    Pins,
+    /// The clock tree spine (`clock::graph::extract::ExtractedClock`).
+    Clock,
+}
+
+impl ExtractKind {
+    /// The structured-output schema. `additional_properties` follows the
+    /// per-provider rule (Gemini false, Anthropic/OpenAI true).
+    fn schema(self, additional_properties: bool) -> serde_json::Value {
+        match self {
+            ExtractKind::Pins => extraction_schema(additional_properties),
+            ExtractKind::Clock => {
+                crate::panels::mcu_module::clock::graph::extract::clock_extraction_schema(
+                    additional_properties,
+                )
+            }
+        }
+    }
+
+    /// The short text accompanying a PDF document block.
+    fn pdf_instruction(self) -> &'static str {
+        match self {
+            ExtractKind::Pins => PDF_INSTRUCTION,
+            ExtractKind::Clock => CLOCK_PDF_INSTRUCTION,
+        }
+    }
+}
 
 /// Build the provider's request body (pure — no network).
 ///
@@ -306,17 +358,18 @@ pub fn build_request_body(
     model: &str,
     system: &str,
     source: &Source,
+    kind: ExtractKind,
 ) -> String {
     match provider {
-        Provider::Anthropic => anthropic_body(model, system, source),
-        Provider::Gemini => gemini_body(system, source),
-        Provider::OpenAi => openai_body(model, system, source),
+        Provider::Anthropic => anthropic_body(model, system, source, kind),
+        Provider::Gemini => gemini_body(system, source, kind),
+        Provider::OpenAi => openai_body(model, system, source, kind),
     }
 }
 
 /// Anthropic Messages API: `system` is top-level, the PDF is a `document`
 /// content block, and `output_config.format` constrains the decoder.
-fn anthropic_body(model: &str, system: &str, source: &Source) -> String {
+fn anthropic_body(model: &str, system: &str, source: &Source, kind: ExtractKind) -> String {
     let content = match source {
         Source::Text(t) => serde_json::json!(t),
         Source::Pdf(bytes) => serde_json::json!([
@@ -328,7 +381,7 @@ fn anthropic_body(model: &str, system: &str, source: &Source) -> String {
                     "data": base64_encode(bytes),
                 },
             },
-            { "type": "text", "text": PDF_INSTRUCTION },
+            { "type": "text", "text": kind.pdf_instruction() },
         ]),
     };
     serde_json::json!({
@@ -336,7 +389,7 @@ fn anthropic_body(model: &str, system: &str, source: &Source) -> String {
         "max_tokens": MAX_TOKENS,
         "system": system,
         "output_config": {
-            "format": { "type": "json_schema", "schema": extraction_schema(true) },
+            "format": { "type": "json_schema", "schema": kind.schema(true) },
         },
         "messages": [ { "role": "user", "content": content } ],
     })
@@ -351,7 +404,7 @@ fn anthropic_body(model: &str, system: &str, source: &Source) -> String {
 /// an OpenAPI-flavoured subset of JSON Schema, and an unsupported keyword is
 /// rejected outright with a 400 rather than ignored. Nothing is lost — the
 /// response is schema-constrained regardless.
-fn gemini_body(system: &str, source: &Source) -> String {
+fn gemini_body(system: &str, source: &Source, kind: ExtractKind) -> String {
     let parts = match source {
         Source::Text(t) => serde_json::json!([{ "text": t }]),
         Source::Pdf(bytes) => serde_json::json!([
@@ -361,7 +414,7 @@ fn gemini_body(system: &str, source: &Source) -> String {
                     "data": base64_encode(bytes),
                 },
             },
-            { "text": PDF_INSTRUCTION },
+            { "text": kind.pdf_instruction() },
         ]),
     };
     serde_json::json!({
@@ -369,7 +422,7 @@ fn gemini_body(system: &str, source: &Source) -> String {
         "contents": [ { "role": "user", "parts": parts } ],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": extraction_schema(false),
+            "responseSchema": kind.schema(false),
             "maxOutputTokens": MAX_TOKENS,
         },
     })
@@ -379,7 +432,7 @@ fn gemini_body(system: &str, source: &Source) -> String {
 /// OpenAI Responses API: the system prompt is `instructions`, the PDF is an
 /// `input_file` whose `file_data` is a data: URI (not bare base64), and
 /// `text.format` carries the strict json_schema.
-fn openai_body(model: &str, system: &str, source: &Source) -> String {
+fn openai_body(model: &str, system: &str, source: &Source, kind: ExtractKind) -> String {
     let content = match source {
         Source::Text(t) => serde_json::json!([{ "type": "input_text", "text": t }]),
         Source::Pdf(bytes) => serde_json::json!([
@@ -391,7 +444,7 @@ fn openai_body(model: &str, system: &str, source: &Source) -> String {
                     base64_encode(bytes)
                 ),
             },
-            { "type": "input_text", "text": PDF_INSTRUCTION },
+            { "type": "input_text", "text": kind.pdf_instruction() },
         ]),
     };
     serde_json::json!({
@@ -404,7 +457,7 @@ fn openai_body(model: &str, system: &str, source: &Source) -> String {
                 "type": "json_schema",
                 "name": "mcu_extraction",
                 "strict": true,
-                "schema": extraction_schema(true),
+                "schema": kind.schema(true),
             },
         },
     })
@@ -932,14 +985,65 @@ fn cache_file(key: &str) -> Option<PathBuf> {
     cache_dir().map(|d| d.join(format!("{key}.json")))
 }
 
+/// Sidecar next to the `.json` reply holding a human label for the cache list.
+/// The reply file is hash-named, so without this the cache is unreadable.
+fn cache_label_file(key: &str) -> Option<PathBuf> {
+    cache_dir().map(|d| d.join(format!("{key}.label")))
+}
+
+/// A one-line human label for a cached extraction — what the datasheet the
+/// entry came from was. Pure so it is testable and stays stable.
+///
+/// `chip.display_name` is the best name (it is what the model actually
+/// identified); the package prefers the chip's own over the requested hint.
+pub fn cache_label(
+    provider: Provider,
+    model: &str,
+    package_hint: &str,
+    source: &Source,
+    chip: &ExtractedChip,
+) -> String {
+    let name = if !chip.display_name.trim().is_empty() {
+        chip.display_name.trim()
+    } else {
+        "(unnamed chip)"
+    };
+    let pkg = if !chip.package.trim().is_empty() {
+        chip.package.trim()
+    } else {
+        package_hint.trim()
+    };
+    let src = match source {
+        Source::Text(_) => "text".to_string(),
+        Source::Pdf(b) => format!("PDF {}", human_bytes(b.len() as u64)),
+    };
+    let mut s = name.to_string();
+    if !pkg.is_empty() {
+        s.push_str(&format!(" · {pkg}"));
+    }
+    s.push_str(&format!(" · {}/{} · {src}", provider.label(), model.trim()));
+    s
+}
+
+/// Compact byte size (`1.2 MB`, `840 KB`, `12 B`).
+fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// The cached model reply for `key`, if any.
 fn load_cached(key: &str) -> Option<String> {
     std::fs::read_to_string(cache_file(key)?).ok()
 }
 
-/// Store the model reply for `key`. Best-effort — a cache write never fails an
-/// extraction that already succeeded.
-fn save_cached(key: &str, model_text: &str) {
+/// Store the model reply for `key`, plus a human `label` sidecar. Best-effort —
+/// a cache write never fails an extraction that already succeeded.
+fn save_cached(key: &str, model_text: &str, label: &str) {
     let Some(path) = cache_file(key) else {
         return;
     };
@@ -947,6 +1051,53 @@ fn save_cached(key: &str, model_text: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, model_text);
+    if let Some(lpath) = cache_label_file(key) {
+        let _ = std::fs::write(lpath, label);
+    }
+}
+
+/// One cached extraction, for the dialog's list.
+pub struct CacheEntry {
+    /// Human label (from the `.label` sidecar), or the hash key if it is
+    /// missing (an entry saved before labels existed).
+    pub label: String,
+    pub bytes: u64,
+    /// File mtime, for newest-first ordering.
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Every cached extraction, newest first, each with its human label. Only the
+/// reply `.json` files count as entries; the `.label` sidecars are read for
+/// their text, not listed on their own.
+pub fn cache_entries() -> Vec<CacheEntry> {
+    let Some(dir) = cache_dir() else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let key = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let meta = e.metadata().ok();
+        let label = cache_label_file(&key)
+            .and_then(|l| std::fs::read_to_string(l).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("(unlabelled · {key})"));
+        out.push(CacheEntry {
+            label,
+            bytes: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            modified: meta.and_then(|m| m.modified().ok()),
+        });
+    }
+    // Newest first; entries without an mtime sink to the bottom.
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
 }
 
 /// How many cached extractions exist and how much disk they use — shown next
@@ -982,10 +1133,18 @@ pub fn clear_cache() -> Result<usize, String> {
     let mut removed = 0usize;
     for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
         let p = e.path();
-        if p.extension().and_then(|x| x.to_str()) == Some("json")
-            && std::fs::remove_file(&p).is_ok()
-        {
-            removed += 1;
+        // Count the reply files; the `.label` sidecars are removed with them
+        // but not double-counted.
+        match p.extension().and_then(|x| x.to_str()) {
+            Some("json") => {
+                if std::fs::remove_file(&p).is_ok() {
+                    removed += 1;
+                }
+            }
+            Some("label") => {
+                let _ = std::fs::remove_file(&p);
+            }
+            _ => {}
         }
     }
     Ok(removed)
@@ -998,7 +1157,127 @@ pub struct Extraction {
     pub from_cache: bool,
 }
 
-// ── The one impure entry point ──────────────────────────────────────────────
+// ── The impure entry points ──────────────────────────────────────────────────
+
+/// POST a prepared request body to `provider` and return the model's reply
+/// text (the assistant message, unwrapped from the provider envelope).
+///
+/// The transport — auth header per provider, 180 s timeout, HTTP-error message
+/// extraction, `parse_api_envelope` — is identical for the pin and clock
+/// extractions, so both share this.
+fn post_and_parse(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    body: &str,
+) -> Result<String, String> {
+    let req = ureq::post(&provider.endpoint(model))
+        .set("content-type", "application/json")
+        .timeout(std::time::Duration::from_secs(180));
+    let req = match provider {
+        Provider::Anthropic => req
+            .set("x-api-key", api_key.trim())
+            .set("anthropic-version", "2023-06-01"),
+        Provider::Gemini => req.set("x-goog-api-key", api_key.trim()),
+        Provider::OpenAi => req.set("authorization", &format!("Bearer {}", api_key.trim())),
+    };
+    let text = match req.send_string(body) {
+        Ok(r) => r.into_string().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(code, r)) => {
+            let raw = r.into_string().unwrap_or_default();
+            let msg = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| format!("HTTP {code}"));
+            return Err(format!("API error (HTTP {code}): {msg}"));
+        }
+        Err(e) => return Err(format!("network error: {e}")),
+    };
+    parse_api_envelope(provider, &text)
+}
+
+/// A clock-tree extraction result plus whether it came from the cache.
+pub struct ClockExtraction {
+    pub clock: crate::panels::mcu_module::clock::graph::GraphClock,
+    pub from_cache: bool,
+}
+
+/// Extract the CLOCK TREE from a datasheet: same providers, key storage, PDF
+/// handling and cache as the pin importer, but the clock prompt/schema and the
+/// [`clock::graph::extract`] conversion + numeric self-check.
+///
+/// Blocking — the dialog runs it on a worker thread.
+pub fn call_ai_clock(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    source: &Source,
+    use_cache: bool,
+) -> Result<ClockExtraction, String> {
+    use crate::panels::mcu_module::clock::graph::extract as ce;
+
+    if api_key.trim().is_empty() {
+        return Err(format!(
+            "No API key set — enter your {} API key first.",
+            provider.label()
+        ));
+    }
+    if model.trim().is_empty() {
+        return Err("No model set — enter a model id first.".to_string());
+    }
+    match source {
+        Source::Text(t) if t.trim().is_empty() => {
+            return Err("Nothing to extract — paste the clock-tree text first.".to_string());
+        }
+        Source::Pdf(b) if b.is_empty() => return Err("The selected PDF is empty.".to_string()),
+        Source::Pdf(b) if b.len() > MAX_PDF_BYTES => {
+            return Err(format!(
+                "PDF is {:.1} MB — over the {} MB limit. Paste the relevant pages instead.",
+                b.len() as f64 / (1024.0 * 1024.0),
+                MAX_PDF_BYTES / (1024 * 1024)
+            ));
+        }
+        _ => {}
+    }
+
+    // Cache: keyed like the pin path but with a "clock" package tag so a clock
+    // and a pin extraction of the same PDF never collide.
+    let key = cache_key(provider, model, "clock-tree", source);
+    let build_from =
+        |model_text: &str| -> Result<crate::panels::mcu_module::clock::graph::GraphClock, String> {
+            let ex = ce::parse_clock_reply(model_text)?;
+            ce::to_graph_clock(&ex)
+        };
+    if use_cache {
+        if let Some(cached) = load_cached(&key) {
+            if let Ok(gc) = build_from(&cached) {
+                return Ok(ClockExtraction { clock: gc, from_cache: true });
+            }
+        }
+    }
+
+    let system = ce::build_clock_prompt();
+    let body = build_request_body(provider, model, &system, source, ExtractKind::Clock);
+    let model_text = post_and_parse(provider, api_key, model, &body)?;
+    // Convert + self-check before caching, so only a usable reply is stored.
+    let gc = build_from(&model_text)?;
+    let label = format!(
+        "clock tree · {}/{} · {}",
+        provider.label(),
+        model.trim(),
+        match source {
+            Source::Text(_) => "text".to_string(),
+            Source::Pdf(b) => format!("PDF {}", human_bytes(b.len() as u64)),
+        }
+    );
+    save_cached(&key, &model_text, &label);
+    Ok(ClockExtraction { clock: gc, from_cache: false })
+}
 
 /// Call the selected provider and parse the extraction. Blocking — the dialog
 /// runs it on a background thread. All the pure pieces above are composed here.
@@ -1057,44 +1336,13 @@ pub fn call_ai(
     }
 
     let system = build_prompt(family_hint, package_hint);
-    let body = build_request_body(provider, model, &system, source);
-
-    // Each provider authenticates differently; only the timeout and the JSON
-    // content type are shared.
-    let req = ureq::post(&provider.endpoint(model))
-        .set("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(180));
-    let req = match provider {
-        Provider::Anthropic => req
-            .set("x-api-key", api_key.trim())
-            .set("anthropic-version", "2023-06-01"),
-        Provider::Gemini => req.set("x-goog-api-key", api_key.trim()),
-        Provider::OpenAi => req.set("authorization", &format!("Bearer {}", api_key.trim())),
-    };
-    let resp = req.send_string(&body);
-
-    let text = match resp {
-        Ok(r) => r.into_string().map_err(|e| e.to_string())?,
-        Err(ureq::Error::Status(code, r)) => {
-            let raw = r.into_string().unwrap_or_default();
-            let msg = serde_json::from_str::<serde_json::Value>(&raw)
-                .ok()
-                .and_then(|v| {
-                    v.get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| format!("HTTP {code}"));
-            return Err(format!("API error (HTTP {code}): {msg}"));
-        }
-        Err(e) => return Err(format!("network error: {e}")),
-    };
-
-    let model_text = parse_api_envelope(provider, &text)?;
+    let body = build_request_body(provider, model, &system, source, ExtractKind::Pins);
+    let model_text = post_and_parse(provider, api_key, model, &body)?;
     let chip = parse_response(&model_text)?;
-    // Only cache a reply we could actually parse.
-    save_cached(&key, &model_text);
+    // Only cache a reply we could actually parse; the label names the chip so
+    // the cache list is readable.
+    let label = cache_label(provider, model, package_hint, source, &chip);
+    save_cached(&key, &model_text, &label);
     Ok(Extraction { chip, from_cache: false })
 }
 
@@ -1124,6 +1372,11 @@ mod tests {
         assert!(p.contains("FIGURE TITLE"));
         assert!(p.contains("INSIDE the package outline"));
         assert!(p.contains("Never merge pins from"));
+        // Identity can be read from the pinout figure title (the case where the
+        // part number appears nowhere else) — including a family wildcard.
+        assert!(p.contains("IDENTITY FROM THE PINOUT FIGURE TITLE"));
+        assert!(p.contains("STM32G031Fx TSSOP20 pinout"));
+        assert!(p.contains("wildcard"));
         // Empty inputs add neither block.
         let p2 = build_prompt("", "");
         assert!(!p2.contains("may be wrong"));
@@ -1157,6 +1410,46 @@ mod tests {
 
     /// The cache key must be stable for identical inputs (so a retry is free)
     /// and change whenever anything that affects the result changes.
+    #[test]
+    fn cache_label_names_the_chip_package_provider_and_source() {
+        let chip = ExtractedChip {
+            display_name: "STM32G031Fx".into(),
+            package: "TSSOP20".into(),
+            ..Default::default()
+        };
+        let label = cache_label(
+            Provider::Gemini,
+            "gemini-3.5-flash",
+            "LQFP48", // hint is IGNORED when the chip has its own package
+            &Source::Pdf(vec![0u8; 2 * 1024 * 1024]),
+            &chip,
+        );
+        assert!(label.contains("STM32G031Fx"), "{label}");
+        assert!(label.contains("TSSOP20"), "{label}");
+        assert!(!label.contains("LQFP48"), "chip package must win: {label}");
+        assert!(label.contains("Google (Gemini)/gemini-3.5-flash"), "{label}");
+        assert!(label.contains("PDF 2.0 MB"), "{label}");
+    }
+
+    #[test]
+    fn cache_label_falls_back_to_hint_and_marks_text_source() {
+        // Chip gave no package → the requested hint fills in; text source.
+        let chip = ExtractedChip {
+            display_name: "STM32F103RB".into(),
+            package: "".into(),
+            ..Default::default()
+        };
+        let label = cache_label(
+            Provider::Anthropic,
+            "claude-opus-4-8",
+            "LQFP64",
+            &Source::Text("pins…".into()),
+            &chip,
+        );
+        assert!(label.contains("STM32F103RB · LQFP64"), "{label}");
+        assert!(label.contains("· text"), "{label}");
+    }
+
     #[test]
     fn cache_key_is_stable_and_input_sensitive() {
         use Provider::*;
@@ -1192,6 +1485,7 @@ mod tests {
             "claude-opus-4-8",
             "SYS",
             &Source::Text("PASTE".into()),
+            ExtractKind::Pins,
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["model"], "claude-opus-4-8");
@@ -1213,6 +1507,7 @@ mod tests {
             "claude-opus-4-8",
             "SYS",
             &Source::Pdf(b"%PDF-1.4".to_vec()),
+            ExtractKind::Pins,
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let content = &v["messages"][0]["content"];
@@ -1230,6 +1525,7 @@ mod tests {
             "gemini-3.5-flash",
             "SYS",
             &Source::Pdf(b"%PDF-1.4".to_vec()),
+            ExtractKind::Pins,
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         // The model goes in the URL, never the body.
@@ -1252,6 +1548,7 @@ mod tests {
             "gemini-3.5-flash",
             "SYS",
             &Source::Text("PASTE".into()),
+            ExtractKind::Pins,
         );
         assert!(
             !body.contains("additionalProperties"),
@@ -1259,7 +1556,7 @@ mod tests {
         );
         // …while the providers that REQUIRE it still get it.
         for p in [Provider::Anthropic, Provider::OpenAi] {
-            let b = build_request_body(p, "m", "SYS", &Source::Text("PASTE".into()));
+            let b = build_request_body(p, "m", "SYS", &Source::Text("PASTE".into()), ExtractKind::Pins);
             assert!(b.contains("additionalProperties"), "{p:?} lost the keyword");
         }
     }
@@ -1271,6 +1568,7 @@ mod tests {
             "gpt-5.6",
             "SYS",
             &Source::Pdf(b"%PDF-1.4".to_vec()),
+            ExtractKind::Pins,
         );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["model"], "gpt-5.6");

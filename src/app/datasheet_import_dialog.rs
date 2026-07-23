@@ -29,6 +29,14 @@ struct PdfPick {
     bytes: Vec<u8>,
 }
 
+/// Cache entry labels (newest first), each with its size — for the list.
+fn cache_entry_labels() -> Vec<String> {
+    ds::cache_entries()
+        .into_iter()
+        .map(|e| format!("{}  ({})", e.label, human_size(e.bytes)))
+        .collect()
+}
+
 /// Compact human-readable byte size for the cache row.
 fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -66,6 +74,10 @@ pub(crate) struct DatasheetImport {
     /// `(entries, bytes)` on disk — refreshed on open, after an extraction and
     /// after clearing, so the row never re-scans the folder per frame.
     cache_stats: (usize, u64),
+    /// Human labels of the cached extractions, newest first — shown in a
+    /// collapsible list. Refreshed with `cache_stats`.
+    cache_entries: Vec<String>,
+    cache_list_open: bool,
     cache_note: Option<String>,
     job: Option<Arc<Mutex<ImportJob>>>,
     report: Option<ds::ApplyReport>,
@@ -88,6 +100,8 @@ impl DatasheetImport {
             force_reextract: false,
             last_from_cache: false,
             cache_stats: ds::cache_stats(),
+            cache_entries: cache_entry_labels(),
+            cache_list_open: false,
             cache_note: None,
             job: None,
             report: None,
@@ -134,6 +148,7 @@ impl AppIde {
                         di.error = None;
                         // A fresh extraction just wrote a new cache entry.
                         di.cache_stats = ds::cache_stats();
+                        di.cache_entries = cache_entry_labels();
                         di.cache_note = None;
                     }
                     Some(Err(e)) => {
@@ -338,6 +353,44 @@ impl AppIde {
                         );
                     }
                 });
+                // ── Cached-file names (collapsible) ──────────────────────────
+                // The reply files are hash-named, so this lists the human label
+                // (chip · package · provider/model · source) written beside
+                // each one, newest first.
+                if !di.cache_entries.is_empty() {
+                    let caret = if di.cache_list_open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{caret} cached datasheets ({})",
+                                    di.cache_entries.len()
+                                ))
+                                .size(10.0)
+                                .color(egui::Color32::from_gray(150)),
+                            )
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        di.cache_list_open = !di.cache_list_open;
+                    }
+                    if di.cache_list_open {
+                        egui::ScrollArea::vertical()
+                            .id_salt("ds_cache_list")
+                            .max_height(120.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                for label in &di.cache_entries {
+                                    ui.label(
+                                        egui::RichText::new(format!("• {label}"))
+                                            .size(10.0)
+                                            .color(egui::Color32::from_gray(165)),
+                                    );
+                                }
+                            });
+                    }
+                }
 
                 // ── PDF picker ───────────────────────────────────────────────
                 ui.add_space(6.0);
@@ -543,6 +596,7 @@ impl AppIde {
                 Err(e) => format!("{} {e}", ph::X_CIRCLE),
             });
             di.cache_stats = ds::cache_stats();
+            di.cache_entries = cache_entry_labels();
         }
         if do_extract && di.job.is_none() {
             let shared = Arc::new(Mutex::new(ImportJob::Running));

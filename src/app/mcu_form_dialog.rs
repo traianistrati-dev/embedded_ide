@@ -18,6 +18,7 @@ impl AppIde {
     /// Open the form blank, or seeded from an existing definition (Clone/Edit).
     pub(crate) fn open_mcu_form(&mut self, seed: Option<McuForm>) {
         self.mcu_form = Some(seed.unwrap_or_else(McuForm::blank));
+        self.mcu_form_clock_note = None;
     }
 
     /// Render the form window. No-op while it is closed.
@@ -28,6 +29,10 @@ impl AppIde {
         let mut keep_open = true;
         let mut do_save = false;
         let mut want_open_import = false;
+        let mut want_open_clock_import = false;
+        // Clock Import/Export feedback — a local so the window closure never
+        // borrows `self`; written back after `.show()`.
+        let mut clock_note = self.mcu_form_clock_note.take();
 
         egui::Window::new(if form.editing {
             "Edit MCU definition"
@@ -224,7 +229,108 @@ impl AppIde {
                                     ui.selectable_value(&mut form.clock, c, c.label());
                                 }
                             });
+                        // A graph attached from a .ron overrides the dropdown
+                        // (the dropdown shows None while it is in effect).
+                        if form.imported_clock.is_some()
+                            && form.clock == mcu_form::ClockChoice::None
+                        {
+                            ui.label(
+                                egui::RichText::new(format!("{} imported .ron", ph::FILE))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(150, 200, 150)),
+                            );
+                        }
                     });
+                    // Import / export the clock tree as a standalone .ron — the
+                    // data form a new family (or an AI extraction) is authored
+                    // in, without a recompile.
+                    ui.horizontal(|ui| {
+                        use crate::panels::mcu_module::clock::graph as cg;
+                        if ui
+                            .button(format!("{} Import clock .ron…", ph::DOWNLOAD_SIMPLE))
+                            .on_hover_text(
+                                "Load a clock tree (GraphClock or bare ClockGraph) from a .ron                                  file and attach it to this chip. It is validated before import.",
+                            )
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("RON", &["ron"])
+                                .pick_file()
+                            {
+                                clock_note = Some(match std::fs::read_to_string(&path) {
+                                    Ok(text) => match cg::parse_clock_ron(&text) {
+                                        Ok(gc) => {
+                                            let n = gc.graph.nodes.len();
+                                            form.set_imported_clock(gc);
+                                            Ok(format!("Imported clock ({n} nodes)."))
+                                        }
+                                        Err(e) => Err(e),
+                                    },
+                                    Err(e) => Err(format!("Could not read the file: {e}")),
+                                });
+                            }
+                        }
+                        if ui
+                            .button(format!("{} Extract from datasheet (AI)…", ph::SPARKLE))
+                            .on_hover_text(
+                                "Extract the clock tree from a datasheet PDF or pasted text with                                  an AI, verified against the datasheet's own default SYSCLK.",
+                            )
+                            .clicked()
+                        {
+                            want_open_clock_import = true;
+                        }
+                        let effective = form.effective_clock();
+                        let is_graph =
+                            matches!(effective, crate::panels::mcu_module::mcu_def::ClockDef::Graph(_));
+                        if ui
+                            .add_enabled(
+                                is_graph,
+                                egui::Button::new(format!("{} Export clock .ron…", ph::UPLOAD_SIMPLE)),
+                            )
+                            .on_disabled_hover_text(
+                                "Pick a clock tree (or import one) first — only graph clocks can                                  be exported.",
+                            )
+                            .on_hover_text("Save this chip's clock tree as a .ron template.")
+                            .clicked()
+                        {
+                            if let crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc) = &effective
+                            {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("RON", &["ron"])
+                                    .set_file_name("clock.ron")
+                                    .save_file()
+                                {
+                                    let text = cg::export_clock_ron(gc);
+                                    clock_note = Some(match std::fs::write(&path, text) {
+                                        Ok(()) => Ok(format!(
+                                            "Exported to {}",
+                                            path.file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default()
+                                        )),
+                                        Err(e) => Err(format!("Could not write the file: {e}")),
+                                    });
+                                }
+                            }
+                        }
+                        if form.imported_clock.is_some() {
+                            if ui
+                                .button(format!("{} Clear import", ph::X))
+                                .on_hover_text("Drop the imported clock and use the dropdown again")
+                                .clicked()
+                            {
+                                form.imported_clock = None;
+                                clock_note = None;
+                            }
+                        }
+                    });
+                    if let Some(note) = &clock_note {
+                        let (msg, col) = match note {
+                            Ok(m) => (m.as_str(), egui::Color32::from_rgb(150, 200, 150)),
+                            Err(m) => (m.as_str(), egui::Color32::from_rgb(220, 120, 100)),
+                        };
+                        ui.label(egui::RichText::new(msg).size(10.5).color(col));
+                    }
 
                     ui.add_space(6.0);
                     section(ui, "Pins");
@@ -334,6 +440,10 @@ impl AppIde {
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
         }
 
+        // The clock Import/Export note survives across frames while the form
+        // is open (a save/close clears it via `open_mcu_form`).
+        self.mcu_form_clock_note = clock_note;
+
         // Keep the (mutated) form unless it was closed / saved.
         if keep_open {
             // Open / render the AI import sub-dialog while we still hold the
@@ -342,10 +452,15 @@ impl AppIde {
                 self.open_datasheet_import(&form);
             }
             self.show_datasheet_import(ui, &mut form);
+            if want_open_clock_import && self.clock_import.is_none() {
+                self.open_clock_import();
+            }
+            self.show_clock_import(ui, &mut form);
             self.mcu_form = Some(form);
         } else {
-            // The form closed — close its import sub-dialog too.
+            // The form closed — close its import sub-dialogs too.
             self.datasheet_import = None;
+            self.clock_import = None;
         }
     }
 }

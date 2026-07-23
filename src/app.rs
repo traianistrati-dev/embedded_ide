@@ -27,6 +27,7 @@ mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
 mod datasheet_import_dialog;
+mod clock_import_dialog;
 
 mod diag_panel;
 
@@ -883,9 +884,14 @@ pub struct AppIde {
     /// `Some` while the "New MCU definition" form is open (the editable chip
     /// authoring dialog — see `app::mcu_form_dialog`). Session-only.
     mcu_form: Option<crate::panels::mcu_module::mcu_form::McuForm>,
+    /// Transient result of the New-MCU form's Import/Export clock buttons.
+    /// `Ok` = a green confirmation, `Err` = a red parse/validation error.
+    mcu_form_clock_note: Option<Result<String, String>>,
     /// `Some` while the "Import from datasheet (AI)" sub-dialog of the MCU form
     /// is open (see `app::datasheet_import_dialog`). Session-only.
     datasheet_import: Option<datasheet_import_dialog::DatasheetImport>,
+    /// "Extract clock tree from datasheet (AI)" sub-dialog (clock Layer 3).
+    clock_import: Option<clock_import_dialog::ClockImport>,
     /// `Some((git path, is_untracked))` while the Git "discard file" confirm
     /// dialog is open (Phase A). Session-only.
     git_discard_confirm: Option<(String, bool)>,
@@ -1195,7 +1201,9 @@ impl AppIde {
             pending_mcu_id: None,
             mcu_import_status: None,
             mcu_form: None,
+            mcu_form_clock_note: None,
             datasheet_import: None,
+            clock_import: None,
             git_discard_confirm: None,
             pending_discard_file: None,
             git_discard_all_confirm: false,

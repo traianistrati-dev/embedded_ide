@@ -374,6 +374,29 @@ impl McuForm {
         w
     }
 
+    /// The clock the form currently resolves to — an imported graph (kept while
+    /// the family dropdown is "None"), otherwise the chosen family's tree.
+    ///
+    /// Shared by `to_definition` (what gets saved) and the dialog's "Export
+    /// clock" button (what gets written to a `.ron`), so the two never diverge.
+    pub fn effective_clock(&self) -> ClockDef {
+        match (&self.imported_clock, self.clock) {
+            // The preserved imported graph, unless the user actively switched
+            // to a family model.
+            (Some(g), ClockChoice::None) => g.clone(),
+            _ => self.clock.to_def(),
+        }
+    }
+
+    /// Attach a hand/AI-authored clock graph (from a `.ron` import). Stored as
+    /// `imported_clock` with the family dropdown reset to None, so
+    /// `effective_clock` returns it — the exact path a foreign graph already
+    /// travels when a chip `.ron` is loaded.
+    pub fn set_imported_clock(&mut self, gc: crate::panels::mcu_module::clock::graph::GraphClock) {
+        self.imported_clock = Some(ClockDef::Graph(gc));
+        self.clock = ClockChoice::None;
+    }
+
     /// Build the [`McuDefinition`]. Call only when [`errors`] is empty; blank
     /// scratch pin rows are dropped and numbers are parsed here.
     pub fn to_definition(&self) -> McuDefinition {
@@ -416,12 +439,7 @@ impl McuForm {
                 left: side(&self.pins[2]),
                 right: side(&self.pins[3]),
             },
-            clock: match (&self.imported_clock, self.clock) {
-                // The preserved imported graph, unless the user actively
-                // switched to a family model.
-                (Some(g), ClockChoice::None) => g.clone(),
-                _ => self.clock.to_def(),
-            },
+            clock: self.effective_clock(),
             // Each graph family ships its own ceilings so its preset isn't
             // flagged against the F103 defaults. (F4's real per-chip ceiling is
             // set by the XML converter; this is the F411-class default.)

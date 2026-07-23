@@ -8,6 +8,8 @@
 pub mod config;
 pub mod esp32c3;
 pub mod eval;
+pub mod extract;
+pub mod import;
 pub mod layout;
 pub mod model;
 pub mod render;
@@ -17,6 +19,7 @@ pub mod stm32wba;
 pub mod validate;
 
 pub use config::GraphClock;
+pub use import::{export_clock_ron, parse_clock_ron};
 pub use esp32c3::{esp32c3_graph, esp32c3_layout};
 pub use eval::evaluate;
 pub use layout::{stm32f1_layout, ClockLayout, ValueSrc};
