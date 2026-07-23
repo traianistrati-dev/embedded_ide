@@ -581,6 +581,10 @@ pub struct AppIde {
     /// (UI stays responsive; the header shows a "Saving…" spinner).
     #[allow(clippy::type_complexity)]
     save_in_progress: Option<Arc<Mutex<Option<Result<String, String>>>>>,
+    /// Increments on every user Save. All the actions one Ctrl+S produces
+    /// (project write → LSP flush → wall clock) carry this id, so the Activity
+    /// tab shows ONE group per save instead of one per action.
+    save_session: u64,
     /// Destination folder of the running save — becomes `project_dir` on success.
     save_dest: Option<std::path::PathBuf>,
     // ── Build ────────────────────────────────────────────────────────────────
@@ -1075,6 +1079,7 @@ impl AppIde {
             save_wall: None,
             export_msg: String::new(),
             save_in_progress: None,
+            save_session: 0,
             save_dest: None,
             egui_ctx: cc.egui_ctx.clone(),
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
@@ -1714,7 +1719,8 @@ impl AppIde {
             return;
         }
 
-        let mut rec = crate::activity::Recorder::new("Save (wall clock)");
+        let mut rec =
+            crate::activity::Recorder::new("Save (wall clock)").in_session(self.save_session);
         if let Some(t) = w.worker_done {
             rec.add("click → project written to disk", t - w.started);
         }
@@ -1853,12 +1859,15 @@ impl AppIde {
         let activity = Arc::clone(&self.activity);
         let in_flight = Arc::clone(&self.lsp_flush_in_flight);
         let ctx = self.egui_ctx.clone();
+        // The flush is part of the Save that requested it.
+        let session = self.save_session;
 
         std::thread::spawn(move || {
             // Clears `lsp_flush_in_flight` on EVERY exit path, unwinding
             // included. Declared first so it outlives everything below.
             let _flag = crate::activity::FlagGuard::set(in_flight);
-            let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
+            let mut rec =
+                crate::activity::Recorder::new("Save (LSP flush)").in_session(session);
             let workspace = std::env::temp_dir().join("embedded_ide_0_check");
 
             // ── Disk writes (hash-cached) ─────────────────────────────────
@@ -2191,6 +2200,9 @@ impl eframe::App for AppIde {
                     .pick_folder(),
             };
             if let Some(dest) = dest {
+                // One id for every action this Save spawns.
+                self.save_session += 1;
+                let session = self.save_session;
                 // Run the disk write on a worker thread so the UI stays responsive
                 // (the header shows a "Saving…" spinner until it completes).
                 let files = self.current_project_files();
@@ -2206,7 +2218,8 @@ impl eframe::App for AppIde {
                     // Reports a failure if this thread dies before setting the
                     // result — otherwise the UI hangs on "Saving…".
                     let _slot = SaveSlotGuard(Arc::clone(&out));
-                    let mut rec = crate::activity::Recorder::new("Save (project)");
+                    let mut rec =
+                        crate::activity::Recorder::new("Save (project)").in_session(session);
                     let res = rec
                         .phase("write_project", || {
                             project_gen::write_project(

@@ -41,6 +41,15 @@ pub struct Action {
     /// in-flight flag would otherwise have hung the status bar forever, so this
     /// makes the failure visible instead of silent.
     pub aborted: bool,
+    /// Which user Save this belongs to. ONE Ctrl+S produces several actions
+    /// (project write → LSP flush → wall clock), and they all carry the same
+    /// id so the tab can group them. `None` = standalone (Build / Flash /
+    /// Clippy / Git).
+    ///
+    /// An explicit id, not a name prefix: every one of those actions is called
+    /// "Save (…)", so grouping on the name gave each its own group — and not a
+    /// timestamp either, because two quick saves must stay separate.
+    pub session: Option<u64>,
 }
 
 /// Newest-first list of recorded actions (capped).
@@ -70,6 +79,7 @@ pub struct Recorder {
     started: Instant,
     started_wall: std::time::SystemTime,
     phases: Vec<Phase>,
+    session: Option<u64>,
 }
 
 impl Recorder {
@@ -79,11 +89,19 @@ impl Recorder {
             started: Instant::now(),
             started_wall: std::time::SystemTime::now(),
             phases: Vec::new(),
+            session: None,
         }
     }
 
     /// Time the closure `f`, record it as a phase named `label`, and return its
     /// result. In-process phases (no subprocess) — `cmd`/`exit` are `None`.
+    /// Tag this action as part of user Save `id`, so the tab groups it with the
+    /// other actions of the same Ctrl+S.
+    pub fn in_session(mut self, id: u64) -> Self {
+        self.session = Some(id);
+        self
+    }
+
     pub fn phase<T>(&mut self, label: impl Into<String>, f: impl FnOnce() -> T) -> T {
         let t = Instant::now();
         let out = f();
@@ -143,6 +161,7 @@ impl Recorder {
             started_at: self.started_wall,
             ended_at: std::time::SystemTime::now(),
             aborted: false,
+            session: self.session,
         }
     }
 
@@ -172,6 +191,7 @@ impl Recorder {
             started_at: self.started_wall,
             ended_at: std::time::SystemTime::now(),
             aborted: false,
+            session: self.session,
         }
     }
 }

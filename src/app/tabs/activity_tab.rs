@@ -44,15 +44,30 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
         .id_salt("activity_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // The bottom panel sits inside the EDITOR panel, and a side panel
+            // STORES the rect its content measured (`PanelState`, panel.rs) as
+            // next frame's starting width. Content wider than the panel
+            // therefore ratchets it wider every frame up to `max_width` — the
+            // editor kept growing and the MCU zone got squeezed beside it.
+            //
+            // Both halves are needed: pin the width, AND make text wrap rather
+            // than extend, since the editor sets `wrap_mode = Extend` and that
+            // would otherwise let a long command line measure past the pin.
+            ui.set_max_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             for (i, action) in log.actions.iter().enumerate() {
-                // ── Save-group separator ─────────────────────────────────
-                // The list is newest-first, so a "Save (…)" action marks the
-                // START of the group ABOVE it. One user Save produces several
-                // actions (project write → LSP flush → flycheck) and they used
-                // to run together into one wall of rows; this makes each Save's
-                // span readable at a glance.
-                let starts_group = action.kind.starts_with("Save");
-                if starts_group && i > 0 {
+                // ── Group separator ──────────────────────────────────────
+                // A rule between GROUPS, where a group is one user Save (all
+                // its actions share a session id) or one standalone action.
+                // Keying on the name was wrong: every action of a Save is
+                // called "Save (…)", so one Ctrl+S drew three separate blocks.
+                // `i > 0` FIRST: `i - 1` underflows on usize at the top of the
+                // list. A standalone action (session `None`) always starts its
+                // own group — two consecutive Builds are two groups, not one.
+                let starts_group = i > 0
+                    && (action.session.is_none()
+                        || log.actions[i - 1].session != action.session);
+                if starts_group {
                     ui.add_space(3.0);
                     // Idle gap between this action's end and the previous
                     // (newer) one's start — where the time actually went when
@@ -76,11 +91,14 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
 
                 // Header: "Save (project)  ·  total 41.0s  ·  12:03:44.120 → 12:03:44.180"
                 let slow = action.total.as_secs_f64() >= 1.0;
+                // `→` renders as a tofu box — the app's fonts only carry
+                // phosphor's glyph range plus ASCII (see the glyph-font note).
                 let head = format!(
-                    "{}  ·  total {}  ·  {} → {}",
+                    "{}  ·  total {}  ·  {} {} {}",
                     action.kind,
                     fmt_dur(action.total),
                     fmt_clock(action.started_at),
+                    ph::ARROW_RIGHT,
                     fmt_clock(action.ended_at),
                 );
                 egui::CollapsingHeader::new(
