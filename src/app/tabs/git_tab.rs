@@ -521,6 +521,29 @@ pub fn show_git_tab(
                 {
                     *op_out = Some(GitOp::Commit);
                 }
+                // Only meaningful for a library: the project repo tracks the
+                // same files, so committing here otherwise leaves the identical
+                // change uncommitted over there.
+                if let crate::git::RepoTarget::Library(lib) = git.target.clone() {
+                    let preview = crate::git::mirror_message(
+                        if git.commit_msg.trim().is_empty() {
+                            "feat: …"
+                        } else {
+                            git.commit_msg.trim()
+                        },
+                        &lib,
+                    );
+                    ui.checkbox(
+                        &mut git.mirror_to_project,
+                        egui::RichText::new("+ project").size(11.0),
+                    )
+                    .on_hover_text(format!(
+                        "Also commit this change to the PROJECT repository, which tracks \
+                         {lib}/ too.\n\nIts message names the library:\n    {preview}\n\n\
+                         Only {lib}/ is committed there — anything else you have staged is \
+                         left alone."
+                    ));
+                }
                 if ui
                     .add_enabled(
                         can_commit && remoted,

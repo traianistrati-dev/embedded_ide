@@ -118,6 +118,36 @@ pub fn apply_commit_prefix(msg: &str, prefix: &str) -> String {
     }
 }
 
+/// Turn a library's commit message into the project's mirrored one by naming
+/// the library after the conventional-commit type:
+/// `"feat: bla bla"` + `mw_radar` → `"feat: mw_radar bla bla"`.
+///
+/// A message with no recognised type just gets the name in front. Already
+/// mentioning the library at the start is left alone, so re-running never
+/// stutters (`feat: mw_radar mw_radar …`).
+pub fn mirror_message(msg: &str, lib: &str) -> String {
+    let lib = lib.trim().trim_end_matches('/');
+    let msg = msg.trim();
+    if lib.is_empty() {
+        return msg.to_string();
+    }
+    // Split off a leading `feat:` / `fix:` / … if there is one.
+    let (kind, rest) = COMMIT_TYPES
+        .iter()
+        .find_map(|(p, _)| msg.strip_prefix(p).map(|r| (Some(*p), r.trim_start())))
+        .unwrap_or((None, msg));
+
+    if rest == lib || rest.starts_with(&format!("{lib} ")) {
+        return msg.to_string(); // already scoped to this library
+    }
+    match kind {
+        Some(k) if rest.is_empty() => format!("{k} {lib}"),
+        Some(k) => format!("{k} {lib} {rest}"),
+        None if rest.is_empty() => lib.to_string(),
+        None => format!("{lib} {rest}"),
+    }
+}
+
 /// Parsed `git status --porcelain=v2 --branch`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GitStatus {
@@ -383,6 +413,10 @@ pub struct GitConsole {
     /// Which repository the whole tab operates on — the project, or a
     /// library's own repo. Session-only: reopening starts on the project.
     pub target: RepoTarget,
+    /// While committing a LIBRARY, also commit the same change to the project
+    /// repo (which tracks the same files). Off by default — it writes a second
+    /// commit, so it stays an explicit choice.
+    pub mirror_to_project: bool,
 }
 
 impl Default for GitConsole {
@@ -397,6 +431,7 @@ impl Default for GitConsole {
             remote_note: None,
             excluded: std::collections::HashSet::new(),
             target: RepoTarget::default(),
+            mirror_to_project: false,
         }
     }
 }
@@ -803,6 +838,10 @@ pub fn run_op(
     add_paths: Option<Vec<String>>,
     project_dir: PathBuf,
     snapshot: Vec<(String, String)>,
+    // `(library dir name, project root)` to also commit this change into the
+    // project repository — set only when committing a library that the project
+    // tracks as well. `None` for an ordinary commit.
+    mirror: Option<(String, PathBuf)>,
     state: Arc<Mutex<GitState>>,
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
     ctx: egui::Context,
@@ -878,6 +917,83 @@ pub fn run_op(
                 }
             }
             ctx.request_repaint();
+        }
+
+        // ── Mirror the commit into the project repository ─────────────────
+        // With a library tracked by BOTH repos, a commit made here leaves the
+        // same change uncommitted in the project — this closes that gap in one
+        // step instead of making the user repeat it by hand.
+        //
+        // `add -A -- <lib>` is REQUIRED before the commit: a pathspec-limited
+        // `git commit -- <lib>` silently skips files git does not track yet, so
+        // a newly added library file would never reach the project repo.
+        // The pathspec on the commit then keeps it scoped — verified that work
+        // the user had staged elsewhere is left untouched.
+        if sequence_ok && matches!(op, GitOp::Commit | GitOp::CommitPush) {
+            if let Some((lib, proj_dir)) = &mirror {
+                let mirrored = mirror_message(&msg, lib);
+                let steps = [
+                    vec!["add".to_string(), "-A".to_string(), "--".to_string(), lib.clone()],
+                    vec![
+                        "commit".to_string(),
+                        "-m".to_string(),
+                        mirrored.clone(),
+                        "--".to_string(),
+                        lib.clone(),
+                    ],
+                ];
+                for args in steps {
+                    state
+                        .lock()
+                        .unwrap()
+                        .push(GitLine::Cmd, format!("> git {}", args.join(" ")));
+                    match run_git(proj_dir, &args) {
+                        Ok(out) => {
+                            let text = format!(
+                                "{}{}",
+                                String::from_utf8_lossy(&out.stdout),
+                                String::from_utf8_lossy(&out.stderr)
+                            );
+                            // "nothing to commit" is a NO-OP, not a failure: the
+                            // project may already hold this change. Reporting it
+                            // as an error would flag every such commit.
+                            if !out.status.success()
+                                && (text.contains("nothing to commit")
+                                    || text.contains("no changes added to commit"))
+                            {
+                                state.lock().unwrap().push(
+                                    GitLine::Notice,
+                                    format!("[info] project already up to date for {lib}/"),
+                                );
+                                break;
+                            }
+                            let mut st = state.lock().unwrap();
+                            push_output(&mut st, &out);
+                            if !out.status.success() {
+                                st.push(
+                                    GitLine::Err,
+                                    format!("[error] mirroring the commit into the project failed"),
+                                );
+                                break;
+                            }
+                            if args.first().map(String::as_str) == Some("commit") {
+                                st.push(
+                                    GitLine::Notice,
+                                    format!("[OK] also committed to the project: {mirrored}"),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            state
+                                .lock()
+                                .unwrap()
+                                .push(GitLine::Err, format!("[error] could not run git: {e}"));
+                            break;
+                        }
+                    }
+                }
+                ctx.request_repaint();
+            }
         }
 
         // ── Always refresh the status + the unsaved comparison ────────────
@@ -1889,6 +2005,53 @@ index abc..def 100644
             &None,
         );
         assert_eq!(without.len(), 1);
+    }
+
+    #[test]
+    fn mirror_message_names_the_library_after_the_type() {
+        // The shape the user asked for.
+        assert_eq!(
+            mirror_message("feat: bla bla", "mw_radar"),
+            "feat: mw_radar bla bla"
+        );
+        assert_eq!(
+            mirror_message("fix: parser off by one", "mw_radar"),
+            "fix: mw_radar parser off by one"
+        );
+    }
+
+    #[test]
+    fn mirror_message_without_a_known_type_just_prefixes() {
+        assert_eq!(mirror_message("bla bla", "mw_radar"), "mw_radar bla bla");
+    }
+
+    #[test]
+    fn mirror_message_does_not_stutter_when_already_scoped() {
+        // Re-running (or a message the user already scoped) must not produce
+        // "feat: mw_radar mw_radar …".
+        assert_eq!(
+            mirror_message("feat: mw_radar bla", "mw_radar"),
+            "feat: mw_radar bla"
+        );
+        assert_eq!(mirror_message("mw_radar bla", "mw_radar"), "mw_radar bla");
+        // A DIFFERENT name that merely starts the same must still be scoped.
+        assert_eq!(
+            mirror_message("feat: mw_radar_extra bla", "mw_radar"),
+            "feat: mw_radar mw_radar_extra bla"
+        );
+    }
+
+    #[test]
+    fn mirror_message_handles_empty_and_type_only() {
+        assert_eq!(mirror_message("feat:", "mw_radar"), "feat: mw_radar");
+        assert_eq!(mirror_message("  ", "mw_radar"), "mw_radar");
+        // No library → unchanged.
+        assert_eq!(mirror_message("feat: bla", ""), "feat: bla");
+        // A trailing slash on the member name must not leak into the message.
+        assert_eq!(
+            mirror_message("feat: bla", "mw_radar/"),
+            "feat: mw_radar bla"
+        );
     }
 
     #[test]

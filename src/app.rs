@@ -254,6 +254,9 @@ enum McuTab {
     /// F12 "Go to definition" snippet (external / crate / std files). The tab
     /// appears only while `definition_view` is set.
     Definition,
+    /// A second project file, opened READ-ONLY beside the editor so it can be
+    /// consulted while typing. Appears only while `reference_file` is set.
+    Reference,
 }
 
 impl McuTab {
@@ -265,6 +268,7 @@ impl McuTab {
             Self::System => "System",
             Self::Structure => "Structure",
             Self::Definition => "Definition",
+            Self::Reference => "Reference",
         }
     }
 
@@ -272,7 +276,7 @@ impl McuTab {
     /// Peripherals / Clock / System), `true` = the chip-agnostic "Project"
     /// group (Structure / Definition).
     fn is_project_group(self) -> bool {
-        matches!(self, Self::Structure | Self::Definition)
+        matches!(self, Self::Structure | Self::Definition | Self::Reference)
     }
 }
 
@@ -774,6 +778,14 @@ pub struct AppIde {
     /// The fetched definition snippet — its presence shows the "Definition" tab
     /// in the MCU Configurator (next to Structure).
     definition_view: Option<DefinitionView>,
+    /// Project-relative path of a second file shown READ-ONLY in the
+    /// "Reference" tab. Opened from the project tree; independent of
+    /// `selected_file`, so the editor keeps whatever it had.
+    ///
+    /// A PATH, not a `user_src_files` index: indices shift when a file is
+    /// deleted, which would silently point this at the WRONG file. A path
+    /// either resolves or doesn't.
+    reference_file: Option<String>,
     /// MCU tab to return to when the Definition tab closes / clears.
     definition_return_tab: McuTab,
     /// Last active tab of each tab-bar group (two-level navigation): clicking
@@ -1098,6 +1110,7 @@ impl AppIde {
             definition_in_flight: false,
             def_scroll_pending: false,
             definition_view: None,
+            reference_file: None,
             definition_return_tab: McuTab::Pins,
             mcu_group_last: McuTab::Pins,
             project_group_last: McuTab::Structure,
@@ -2065,6 +2078,19 @@ impl eframe::App for AppIde {
                 dir,
                 error: None,
             });
+        }
+        // "Open beside editor" → show the file READ-ONLY in the Reference tab.
+        // The editor keeps whatever it had open, which is the whole point.
+        if let Some(idx) = signals.open_reference {
+            self.reference_file = self
+                .project_tree
+                .user_src_files
+                .get(idx)
+                .map(|(p, _)| p.clone());
+            self.active_tab = McuTab::Reference;
+            // The tab lives in the middle zone — reopen it if it was collapsed
+            // away, or the file would silently go nowhere.
+            self.side_panels_collapsed = false;
         }
 
         // ── Handle toolbar button clicks ──────────────────────────────────────

@@ -591,6 +591,8 @@ pub fn show_project_tree(
     // `(crate dir, is_rename)` when a library's pen / trash icon is clicked;
     // the caller opens the confirmation dialog.
     library_action: &mut Option<(String, bool)>,
+    // `user_src_files` index of a file to open READ-ONLY in the Reference tab.
+    open_reference: &mut Option<usize>,
 ) {
     ui.label(
         egui::RichText::new(format!("package: {pkg_name}"))
@@ -723,6 +725,7 @@ pub fn show_project_tree(
                 &mut cancel_rename_file,
                 &mut to_delete,
                 &mut to_duplicate,
+                open_reference,
                 renaming_folder,
                 workspace_dir,
                 project_dir,
@@ -1043,6 +1046,7 @@ pub fn show_project_tree(
                 &mut cancel_rename_file,
                 &mut to_delete,
                 &mut to_duplicate,
+                open_reference,
                 renaming_folder,
                 workspace_dir,
                 project_dir,
@@ -1197,6 +1201,7 @@ fn render_tree_node(
     cancel_rename_file: &mut bool,
     to_delete: &mut Option<usize>,
     to_duplicate: &mut Option<usize>,
+    open_reference: &mut Option<usize>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     project_dir: Option<&std::path::Path>,
@@ -1237,6 +1242,7 @@ fn render_tree_node(
                     do_rename_file,
                     cancel_rename_file,
                     to_duplicate,
+                    open_reference,
                     can_duplicate,
                     &full_path,
                     project_dir,
@@ -1377,6 +1383,7 @@ fn render_tree_node(
                             cancel_rename_file,
                             to_delete,
                             to_duplicate,
+                            open_reference,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -1639,6 +1646,7 @@ fn user_file_row(
     // file list). Offered only for files that are safe to rename/delete — a
     // copy inside `pins/` would be pruned by the next pin sync.
     to_duplicate: &mut Option<usize>,
+    open_reference: &mut Option<usize>,
     can_duplicate: bool,
     // Project-root-relative path of this file + the saved project folder, for
     // the Show-in-Explorer / Copy-path entries.
@@ -1723,6 +1731,17 @@ fn user_file_row(
                     .clicked()
             {
                 *to_duplicate = Some(idx);
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(egui::RichText::new(format!("{} Open beside editor", ph::COLUMNS)).size(11.5))
+                .on_hover_text(
+                    "Show this file READ-ONLY in the Reference tab, so you can consult it                      while editing another one",
+                )
+                .clicked()
+            {
+                *open_reference = Some(idx);
                 ui.close();
             }
             ui.separator();

@@ -386,6 +386,15 @@ impl AppIde {
             add_paths,
             dir,
             crate::git::snapshot_for_target(self.git_disk_snapshot(), &self.git.target),
+            // Mirror only when committing a LIBRARY and the option is on; the
+            // project root is where the second commit runs.
+            match (&self.git.target, self.git.mirror_to_project) {
+                (crate::git::RepoTarget::Library(lib), true) => self
+                    .project_dir
+                    .clone()
+                    .map(|root| (lib.clone(), root)),
+                _ => None,
+            },
             std::sync::Arc::clone(&self.git.state),
             std::sync::Arc::clone(&self.activity),
             self.egui_ctx.clone(),

@@ -5,7 +5,7 @@
 //! change, re-syncs the generated `pins/` files.
 
 use super::tabs::show_peripherals_tab;
-use super::{AppIde, McuTab};
+use super::{AppIde, McuTab, ProjectFileId};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
@@ -107,6 +107,9 @@ impl AppIde {
                     if self.definition_view.is_some() {
                         t.push(McuTab::Definition);
                     }
+                    if self.reference_file.is_some() {
+                        t.push(McuTab::Reference);
+                    }
                     t
                 } else {
                     vec![
@@ -124,6 +127,8 @@ impl AppIde {
                             egui::Color32::WHITE
                         } else if tab == McuTab::Definition {
                             egui::Color32::from_rgb(120, 180, 240)
+                        } else if tab == McuTab::Reference {
+                            egui::Color32::from_rgb(150, 200, 150)
                         } else {
                             egui::Color32::from_rgb(160, 160, 170)
                         });
@@ -143,6 +148,18 @@ impl AppIde {
                     if self.active_tab == McuTab::Definition {
                         self.active_tab = self.definition_return_tab;
                     }
+                }
+                // Same for the Reference tab.
+                if project_active
+                    && self.reference_file.is_some()
+                    && self.active_tab == McuTab::Reference
+                    && ui
+                        .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
+                        .on_hover_text("Close the reference file")
+                        .clicked()
+                {
+                    self.reference_file = None;
+                    self.active_tab = McuTab::Structure;
                 }
             });
 
@@ -396,6 +413,7 @@ impl AppIde {
                 // MCU selected), so it doesn't gate on `self.mcu`.
                 McuTab::Structure => self.show_structure_tab(ui),
                 McuTab::Definition => self.show_definition_tab(ui),
+                McuTab::Reference => self.show_reference_tab(ui),
             }
         });
     }
@@ -405,6 +423,145 @@ impl AppIde {
     /// file is shown (scrollable above and below the target); rows are
     /// virtualized and the target line is scrolled near the top once on open,
     /// drawn coloured so it stands out from the surrounding code.
+    /// A second project file, READ-ONLY, beside the editor.
+    ///
+    /// Deliberately not a second editor: it exists to be consulted while typing
+    /// somewhere else, and making it editable would mean a second write-back
+    /// path into `user_src_files` — the exact hazard the editor panel's
+    /// ordering rules already guard against. Text stays selectable (so you can
+    /// copy from it) but nothing here can change a buffer.
+    fn show_reference_tab(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self.reference_file.clone() else {
+            ui.label(egui::RichText::new("No file open.").color(egui::Color32::GRAY));
+            return;
+        };
+        let Some((id, code)) = self.reference_content(&path) else {
+            // The file was deleted or renamed while it was open here.
+            ui.label(
+                egui::RichText::new(format!("{path} is no longer in the project."))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(220, 170, 90)),
+            );
+            return;
+        };
+
+        // Header: which file, plus a jump to open it in the editor.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(&path)
+                    .size(11.0)
+                    .monospace()
+                    .color(egui::Color32::from_rgb(150, 200, 150)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Open in editor").size(10.5))
+                            .frame(false),
+                    )
+                    .on_hover_text("Edit this file in the main editor instead")
+                    .clicked()
+                {
+                    self.selected_file = id;
+                }
+                ui.label(
+                    egui::RichText::new("read-only")
+                        .size(10.0)
+                        .italics()
+                        .color(egui::Color32::from_gray(130)),
+                );
+            });
+        });
+        ui.separator();
+
+        // A distinctly darker, green-tinted background so this can never be
+        // mistaken for the editor at a glance.
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(26, 32, 28))
+            .inner_margin(egui::Margin::same(4))
+            .corner_radius(3.0)
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                let is_rust = path.ends_with(".rs");
+                let row_h = ui
+                    .painter()
+                    .layout_no_wrap(
+                        "X".to_owned(),
+                        egui::FontId::monospace(12.0),
+                        egui::Color32::WHITE,
+                    )
+                    .size()
+                    .y;
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let lines: Vec<&str> = code.lines().collect();
+                egui::ScrollArea::both()
+                    .id_salt("reference_file_view")
+                    .auto_shrink([false, false])
+                    .show_rows(ui, row_h, lines.len(), |ui, range| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        for i in range {
+                            let raw = lines[i];
+                            let shown = if raw.is_empty() { " " } else { raw };
+                            ui.horizontal(|ui| {
+                                // Line numbers: this view is for pointing at a
+                                // spot in another file, so they earn their room.
+                                ui.label(
+                                    egui::RichText::new(format!("{:>4}", i + 1))
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(egui::Color32::from_gray(90)),
+                                );
+                                if is_rust {
+                                    // Same highlighter as the editor, so the two
+                                    // views read alike.
+                                    let job = crate::editor::gui::code_editor::rust_layout_job(
+                                        shown,
+                                        &egui_code_editor::ColorTheme::GRUVBOX,
+                                        12.0,
+                                        &egui_code_editor::Syntax::rust(),
+                                        &[],
+                                    );
+                                    ui.add(egui::Label::new(job).selectable(true));
+                                } else {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(shown).monospace().size(12.0),
+                                        )
+                                        .selectable(true),
+                                    );
+                                }
+                            });
+                        }
+                    });
+            });
+    }
+
+    /// Resolve the reference file's path to `(id, content)`, or `None` when it
+    /// is no longer in the project (deleted or renamed since it was opened).
+    fn reference_content(&self, path: &str) -> Option<(ProjectFileId, String)> {
+        match path {
+            "src/main.rs" => Some((ProjectFileId::MainRs, self.generated_code.clone())),
+            "Cargo.toml" => Some((ProjectFileId::CargoToml, self.cargo_toml.clone())),
+            ".cargo/config.toml" => {
+                Some((ProjectFileId::CargoConfig, self.cargo_config.clone()))
+            }
+            "memory.x" => Some((ProjectFileId::MemoryX, self.memory_x.clone())),
+            "build.rs" => Some((ProjectFileId::BuildRs, self.build_rs.clone())),
+            ".gitignore" => Some((ProjectFileId::GitIgnore, self.gitignore.clone())),
+            _ => self
+                .project_tree
+                .user_src_files
+                .iter()
+                .position(|(p, _)| p == path)
+                .map(|i| {
+                    (
+                        ProjectFileId::UserFile(i),
+                        self.project_tree.user_src_files[i].1.clone(),
+                    )
+                }),
+        }
+    }
+
     fn show_definition_tab(&mut self, ui: &mut egui::Ui) {
         let Some(def) = &self.definition_view else {
             ui.label(egui::RichText::new("No definition.").color(egui::Color32::GRAY));

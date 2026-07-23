@@ -90,7 +90,7 @@ fn fade(color: egui::Color32) -> egui::Color32 {
 ///
 /// The job text equals the source exactly (every char appended in order), which
 /// egui requires for correct cursor / selection mapping.
-fn rust_layout_job(
+pub(crate) fn rust_layout_job(
     text: &str,
     theme: &ColorTheme,
     fontsize: f32,
