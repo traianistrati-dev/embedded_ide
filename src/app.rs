@@ -305,6 +305,20 @@ enum BuildPanelTab {
     RequiredTools,
 }
 
+/// Which of the two code editors a keystroke / completion belongs to.
+///
+/// Only ONE completion popup can exist at a time — it belongs to one caret at
+/// one moment — so the completion state stays a single set, tagged with its
+/// owner rather than duplicated per editor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum EditorSlot {
+    /// The main editor (left panel).
+    #[default]
+    Main,
+    /// The second editor in the "Reference" tab.
+    Reference,
+}
+
 /// The source snippet shown in the F12 "Definition" tab (MCU Configurator,
 /// next to Structure — moved from the bottom panel on 2026-07-10).
 struct DefinitionView {
@@ -617,6 +631,9 @@ pub struct AppIde {
     /// Key handlers (Tab / Enter / Arrow) use this so they always operate
     /// on the same slice the user sees, not the full unfiltered LSP list.
     completion_filtered_items: Vec<lsp::CompletionItem>,
+    /// Which editor asked for the open completion — decides where the popup is
+    /// anchored and, crucially, WHICH buffer an accept writes into.
+    completion_owner: EditorSlot,
     /// Cargo.toml dependency-completion popup (crate names + live crates.io
     /// versions). Independent of rust-analyzer.
     cargo_complete: editor_panel::cargo_complete::CargoCompleteState,
@@ -664,6 +681,13 @@ pub struct AppIde {
     /// only way to know whether the caret that just vanished was OURS — and
     /// therefore whether to take the focus back.
     editor_was_focused: bool,
+    /// The SECOND (Reference) editor had keyboard focus last frame. Set where
+    /// that editor renders; read by the main editor's keyboard-scope gate,
+    /// which runs earlier in the frame — hence "last frame".
+    reference_was_focused: bool,
+    /// Ctrl+Space arrived while the Reference editor owned the keyboard.
+    /// Consumed by that editor when it renders, later in the same frame.
+    reference_ctrl_space: bool,
     // ── rust-analyzer LSP ────────────────────────────────────────────────────
     /// Shared LSP client state (updated from background threads)
     lsp_state: Arc<Mutex<lsp::LspState>>,
@@ -1059,6 +1083,7 @@ impl AppIde {
             completion_trigger_idx: 0,
             completion_pending_insert: None,
             completion_filtered_items: Vec::new(),
+            completion_owner: EditorSlot::Main,
             cargo_complete: editor_panel::cargo_complete::CargoCompleteState::default(),
             last_caret_idx: None,
             pending_scroll_to_line: None,
@@ -1070,6 +1095,8 @@ impl AppIde {
             extra_cursors_file: None,
             mc_prev_primary_sel: None,
             editor_was_focused: false,
+            reference_was_focused: false,
+            reference_ctrl_space: false,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),

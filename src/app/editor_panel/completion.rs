@@ -31,7 +31,8 @@ impl AppIde {
     ///
     /// `display_code` is the current editor text (already written back); it is
     /// taken by value because nothing after this stage reads it again.
-    pub(super) fn handle_editor_completion(
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::app) fn handle_editor_completion(
         &mut self,
         ui: &mut egui::Ui,
         editor_resp: &TextEditOutput,
@@ -48,7 +49,18 @@ impl AppIde {
         highlight: Option<(u32, egui::Color32)>,
         // 1-based line of the F12 definition to highlight (yellow), if in this file.
         def_line: Option<u32>,
+        // Which editor drew `editor_resp`, and which project file it holds.
+        //
+        // The MAIN editor passes `(Main, self.selected_file)` — identical to the
+        // behaviour before a second editor existed. The Reference editor passes
+        // its own file and gets ONLY completion: rename, go-to-definition,
+        // diagnostic overlays and type hints all anchor popups or write results
+        // through state that belongs to the main editor, so they are skipped
+        // rather than left half-wired.
+        slot: crate::app::EditorSlot,
+        owner_file: ProjectFileId,
     ) {
+        let is_main = slot == crate::app::EditorSlot::Main;
         // ── LSP completion: post-editor apply + trigger + popup ───────
         let cursor_char_idx = editor_resp
             .state
@@ -124,11 +136,13 @@ impl AppIde {
 
                 // Persist the change in memory so the write-back picks it up; the
                 // debounced LSP flush (3 s idle / Project Save) handles disk + RA.
-                if let ProjectFileId::UserFile(i) = self.selected_file {
+                // Keyed on the OWNER: an accept driven from the Reference editor
+                // must land in ITS file, never in whatever the main editor shows.
+                if let ProjectFileId::UserFile(i) = owner_file {
                     if let Some(entry) = self.project_tree.user_src_files.get_mut(i) {
                         entry.1 = display_code.clone();
                     }
-                } else if self.selected_file == ProjectFileId::MainRs {
+                } else if owner_file == ProjectFileId::MainRs {
                     self.generated_code = display_code.clone();
                 }
             }
@@ -137,13 +151,13 @@ impl AppIde {
         // Trigger detection
         // LSP completions are available for any .rs file open in RA.
         let lsp_file_tracked = matches!(
-            self.selected_file,
+            owner_file,
             ProjectFileId::MainRs | ProjectFileId::UserFile(_)
         );
         // Compute the relative path for the currently edited file.
         // Used for all LSP requests (did_change, request_completion, etc.)
         let current_rel_path: Option<String> =
-            selected_file_rel_path(&self.selected_file, &self.project_tree.user_src_files);
+            selected_file_rel_path(&owner_file, &self.project_tree.user_src_files);
         {
             let lsp_ready = lsp_file_tracked
                 && current_rel_path.is_some()
@@ -165,6 +179,7 @@ impl AppIde {
                         self.completion_trigger_idx = idx;
                         self.completion_sel = 0;
                         self.completion_open = true;
+                        self.completion_owner = slot;
                         self.completion_note = None;
                     }
                 }
@@ -188,6 +203,7 @@ impl AppIde {
                         self.completion_trigger_idx = idx;
                         self.completion_sel = 0;
                         self.completion_open = true;
+                        self.completion_owner = slot;
                     }
                 }
 
@@ -214,13 +230,20 @@ impl AppIde {
                         self.completion_trigger_idx = idx;
                         self.completion_sel = 0;
                         self.completion_open = true;
+                        self.completion_owner = slot;
                     }
                 }
             }
 
             // Close popup if cursor moved back past the trigger point,
             // or too far ahead (user navigated away from the trigger word).
-            if self.completion_open {
+            //
+            // OWNER-gated: both editors run this every frame over the shared
+            // state, and `completion_trigger_idx` belongs to the one that
+            // opened the popup. Comparing it against the OTHER editor's caret
+            // yields a meaningless delta — almost always negative — which
+            // closed the popup one frame after it opened.
+            if self.completion_open && self.completion_owner == slot {
                 if let Some(idx) = cursor_char_idx {
                     let cursor = idx as isize;
                     let trigger = self.completion_trigger_idx as isize;
@@ -235,7 +258,10 @@ impl AppIde {
         }
 
         // ── Rename (Ctrl+R): capture the symbol + open the rename popup ──
-        if ctrl_r_pressed && lsp_file_tracked {
+        // Main editor only: `rename_rel` / `rename_popup_pos` are singletons
+        // anchored to it, so a rename driven from the second editor would put
+        // its popup over the wrong code.
+        if is_main && ctrl_r_pressed && lsp_file_tracked {
             if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
                 let word = super::rename::identifier_at(&display_code, idx);
                 if !word.is_empty() {
@@ -271,10 +297,13 @@ impl AppIde {
         }
 
         // ── F12 / Ctrl+F12: go to definition / implementation ─────────────────
+        // Main editor only: the jump navigates `selected_file`, which IS the
+        // main editor — triggering it from the second one would move the other
+        // view out from under the user.
         // Both funnel through the same result slot and navigation pipeline;
         // Ctrl+F12 resolves the `impl … for …` site where F12 on a trait
         // method would land on the trait's declaration.
-        if (f12_pressed || ctrl_f12_pressed) && lsp_file_tracked {
+        if is_main && (f12_pressed || ctrl_f12_pressed) && lsp_file_tracked {
             if let (Some(idx), Some(rel)) = (cursor_char_idx, current_rel_path.clone()) {
                 let (line, col) = lsp_cursor_pos(&display_code, idx);
                 let mut lsp = self.lsp_state.lock().unwrap();
@@ -290,7 +319,11 @@ impl AppIde {
         }
 
         // ── LSP completion popup ───────────────────────────────────────
-        if self.completion_open {
+        // Rendered ONLY by the editor that asked. Both editors run this
+        // function each frame over the same shared state, so without the owner
+        // check the popup would be drawn twice — once anchored to the wrong
+        // caret — and both would fight over the selection index.
+        if self.completion_open && self.completion_owner == slot {
             let all_items = self.lsp_state.lock().unwrap().completion_items.clone();
 
             if !all_items.is_empty() {
@@ -477,20 +510,45 @@ impl AppIde {
                             }); // Frame
                         }); // Area
 
-                    // ── Detail panel, to the RIGHT of the focused item ────────
+                    // ── Detail panel, beside the focused item ─────────────────
                     // Was hover-only, which meant you had to leave the keyboard
                     // to read the signature of the item you were already on.
-                    // Same anchor as the list + its width, so the two read as
-                    // one widget.
+                    // Same anchor as the list, so the two read as one widget.
                     if let Some(item) = filtered.get(sel) {
                         if !item.detail.is_empty() || !item.documentation.is_empty() {
                             const LIST_W: f32 = 440.0;
+                            const DETAIL_W: f32 = 380.0;
+                            const GAP: f32 = 6.0;
+                            // Prefer the right, FLIP to the left when it would
+                            // not fit.
+                            //
+                            // Fixing it to the right does NOT push it off
+                            // screen — `Area` constrains itself back in
+                            // (context.rs `constrain_window_rect_to_area`
+                            // slides it left). That is the problem: it slid on
+                            // top of the LIST, so the panel looked like it had
+                            // vanished. Choosing the side ourselves is the only
+                            // way to land somewhere that doesn't collide. The
+                            // second editor (narrow middle zone) hits this
+                            // almost immediately.
+                            let screen = ui.ctx().content_rect();
+                            let right_x = popup_pos.x + LIST_W + GAP;
+                            let left_x = popup_pos.x - GAP - DETAIL_W;
+                            let detail_x = if right_x + DETAIL_W <= screen.right() {
+                                right_x
+                            } else if left_x >= screen.left() {
+                                left_x
+                            } else {
+                                // Neither side fits: hug the right edge rather
+                                // than hang off it, so the text stays readable.
+                                (screen.right() - DETAIL_W).max(screen.left())
+                            };
                             egui::Area::new(egui::Id::new("lsp_completion_detail"))
-                                .fixed_pos(popup_pos + egui::vec2(LIST_W + 6.0, 0.0))
+                                .fixed_pos(egui::pos2(detail_x, popup_pos.y))
                                 .order(egui::Order::Foreground)
                                 .show(ui.ctx(), |ui| {
                                     egui::Frame::popup(&ui.ctx().global_style()).show(ui, |ui| {
-                                        ui.set_max_width(380.0);
+                                        ui.set_max_width(DETAIL_W);
                                         // As tall as actually fits below the
                                         // anchor — the old fixed 300 px cut
                                         // documentation off for no reason,
@@ -626,7 +684,8 @@ impl AppIde {
         // back with nothing (most often: the file has no `mod …;` declaration,
         // so rust-analyzer does not analyze it at all). Cleared by its timeout,
         // by typing, or by the next successful popup.
-        if let Some((note, at)) = self.completion_note.clone() {
+        if let Some((note, at)) = self.completion_note.clone().filter(|_| self.completion_owner == slot)
+        {
             if at.elapsed().as_secs_f32() > 6.0 || editor_resp.response.changed() {
                 self.completion_note = None;
             } else {
@@ -666,7 +725,11 @@ impl AppIde {
         }
 
         // ── Diagnostic overlays ───────────────────────────────────────
-        if lsp_file_tracked && self.inline_errors_enabled {
+        // Main editor only (see the slot doc): the second editor deliberately
+        // shows no squiggles — `diags_for_file` would resolve fine, but the
+        // click-to-navigate path and the highlight band are wired to the main
+        // view.
+        if is_main && lsp_file_tracked && self.inline_errors_enabled {
             // Only draw the inline overlay when RA holds the CURRENT text for the
             // displayed file (per-file, not a global check). With pending edits
             // the diagnostics are stale — their line/col cling to a row that was
@@ -753,14 +816,19 @@ impl AppIde {
         }
 
         // ── Inferred-type ghost hint (cursor line only) ────────────────
+        // Main editor only: the Tab that accepts a hint is consumed in
+        // `mod.rs` for the main editor's caret (`inlay_accept_pending`).
         // Independent of the inline-errors toggle: request/clear the hint for
         // the caret's untyped `let`, then draw it as dim ghost text at the END
         // of the line (Tab to insert — handled in `mod.rs`, applied in
         // `init_frame`). End-of-line, not inline after the name: an overlay
         // can't push the real code aside, so an inline hint overlapped the ` =
         // initializer` — drawing after the line keeps both readable.
-        let inlay_line =
-            self.update_inlay_hint(&display_code, cursor_char_idx, current_rel_path.as_deref());
+        let inlay_line = if is_main {
+            self.update_inlay_hint(&display_code, cursor_char_idx, current_rel_path.as_deref())
+        } else {
+            None
+        };
         if let (Some(line), Some(hint)) = (inlay_line, self.inlay_hint.as_ref()) {
             // Only draw a hint that still belongs to the caret's current line.
             if hint.line == line {

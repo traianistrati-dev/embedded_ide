@@ -75,6 +75,11 @@ pub struct FindReplace {
     /// reach: the name to rename them TO. Drives the "Rename these too" button,
     /// so that action can never appear for an ordinary search.
     leftover_new_name: Option<String>,
+    /// One of the bar's text fields had keyboard focus when the bar last
+    /// rendered. Feeds the editor panel's keyboard-scope gate: the bar is part
+    /// of the MAIN editor's editing scope, so Ctrl+F / Ctrl+Shift+F must keep
+    /// working while typing a query.
+    pub had_focus: bool,
 }
 
 impl FindReplace {
@@ -181,13 +186,17 @@ impl AppIde {
         displayed_file: ProjectFileId,
     ) {
         if !self.find.open {
+            self.find.had_focus = false;
             return;
         }
         // Esc closes the bar.
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.find.open = false;
+            self.find.had_focus = false;
             return;
         }
+        // Re-observed from this frame's widgets below.
+        self.find.had_focus = false;
 
         let mode = self.find.mode;
         let mut do_next = false;
@@ -221,6 +230,7 @@ impl AppIde {
                     q.request_focus();
                     self.find.focus_query = false;
                 }
+                self.find.had_focus |= q.has_focus();
                 query_changed = q.changed();
                 let enter = q.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
@@ -277,6 +287,7 @@ impl AppIde {
                         r.request_focus();
                         self.find.focus_replace = false;
                     }
+                    self.find.had_focus |= r.has_focus();
                     let renter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.button("Replace All").clicked() || renter {
                         do_replace_all = true;

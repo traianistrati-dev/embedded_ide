@@ -169,12 +169,76 @@ impl AppIde {
                 // Mouse clicks on popup items set `completion_pending_insert` last
                 // frame; apply them here so the same accept path is used for both
                 // keyboard and mouse.
+                // -- Keyboard-scope gate -------------------------------
+                // Every editor shortcut below is consumed GLOBALLY, before
+                // any widget sees the key. That was fine while this was the
+                // only text field that mattered; with another text input
+                // focused (the second Reference editor, the Git commit box,
+                // the rename popup, the terminal) those consumes fired on
+                // the WRONG file and stole the keystroke from the focused
+                // field: Ctrl+Space in the second editor opened the MAIN
+                // editor's completion, and accepting it would have edited
+                // the other file.
+                //
+                // Scope rule: shortcuts stay active unless some OTHER
+                // text-editing widget owns the keyboard. "Is a text edit"
+                // is detected by the focused id having a stored
+                // `TextEditState`; a focused button, or no focus at all,
+                // keeps the shortcuts live (the pre-second-editor status
+                // quo). The editor's and the find bar's own focus come
+                // from LAST frame (those widgets render after this code) -
+                // a one-frame lag on a focus change is invisible here.
+                // The second editor owns the keyboard: shortcuts must not fire
+                // here, but Ctrl+Space is FORWARDED to it (it renders later in
+                // the frame, so it cannot consume the key itself — the event is
+                // swallowed below before any TextEdit sees it).
+                let reference_owns_kbd = self.reference_was_focused;
+                let editor_kbd_active = !reference_owns_kbd
+                    && (self.editor_was_focused
+                        || self.find.had_focus
+                        || match ui.ctx().memory(|m| m.focused()) {
+                            None => true,
+                            Some(fid) => egui::TextEdit::load_state(ui.ctx(), fid).is_none(),
+                        });
+                // Close a popup whose OWNER no longer holds the keyboard: it
+                // would eat Enter/Escape for a caret the user has left.
+                //
+                // Scoped BY OWNER, not by `editor_kbd_active`. This panel runs
+                // every frame including while the Reference editor has focus —
+                // which is exactly when ITS popup is up — so an unscoped close
+                // killed that popup one frame after it opened (reported as
+                // "the list appears and disappears").
+                let owner_lost_kbd = match self.completion_owner {
+                    crate::app::EditorSlot::Main => !editor_kbd_active,
+                    crate::app::EditorSlot::Reference => !reference_owns_kbd,
+                };
+                if owner_lost_kbd {
+                    self.completion_open = false;
+                    self.completion_note = None;
+                }
+                // These two exist only for the main editor.
+                if !editor_kbd_active {
+                    self.cargo_complete.open = false;
+                    self.code_action_popup_open = false;
+                }
+
+                // A deferred accept (mouse click, or a keyboard accept routed
+                // from the other editor) — claim it only when the MAIN editor
+                // owns the popup, or this would insert the Reference editor's
+                // choice into the file shown here.
                 let mut lsp_accepted: Option<lsp::CompletionItem> =
-                    self.completion_pending_insert.take();
+                    if self.completion_owner == crate::app::EditorSlot::Main {
+                        self.completion_pending_insert.take()
+                    } else {
+                        None
+                    };
                 if lsp_accepted.is_some() {
                     self.completion_open = false;
                 }
 
+                // Popup nav/accept keys are consumed HERE for both editors —
+                // this block runs before either renders, and `lsp_accepted` /
+                // `completion_pending_insert` carry the choice to the owner.
                 if self.completion_open {
                     let has_items = !self.completion_filtered_items.is_empty();
                     if has_items {
@@ -195,7 +259,17 @@ impl AppIde {
                                 // Use the filtered list — guaranteed same items as shown.
                                 let sel = self.completion_sel.min(count.saturating_sub(1));
                                 if let Some(item) = self.completion_filtered_items.get(sel) {
-                                    lsp_accepted = Some(item.clone());
+                                    // Apply here only if the MAIN editor owns
+                                    // the popup; otherwise hand it to the
+                                    // Reference editor through the same
+                                    // deferred slot mouse accepts already use —
+                                    // it renders later this frame and applies it
+                                    // to ITS buffer.
+                                    if self.completion_owner == crate::app::EditorSlot::Main {
+                                        lsp_accepted = Some(item.clone());
+                                    } else {
+                                        self.completion_pending_insert = Some(item.clone());
+                                    }
                                 }
                                 self.completion_open = false;
                             }
@@ -265,7 +339,8 @@ impl AppIde {
                             crate::editor::gui::text_pos::lsp_cursor_pos(&display_code, idx);
                         l == hint_line && c >= hint_char
                     });
-                    if !popup_up
+                    if editor_kbd_active
+                        && !popup_up
                         && caret_ok
                         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
                     {
@@ -283,6 +358,8 @@ impl AppIde {
                 // open/closed). All Ctrl+Space events are consumed here, but
                 // only the initial (non-repeat) press triggers.
                 let mut ctrl_space_pressed = false;
+                // Forwarded to the Reference editor's own render pass.
+                let mut ref_ctrl_space = false;
                 ui.input_mut(|i| {
                     i.events.retain(|e| match e {
                         egui::Event::Key {
@@ -293,30 +370,35 @@ impl AppIde {
                             ..
                         } if modifiers.ctrl => {
                             if !*repeat {
-                                ctrl_space_pressed = true;
+                                if editor_kbd_active {
+                                    ctrl_space_pressed = true;
+                                } else if reference_owns_kbd {
+                                    ref_ctrl_space = true;
+                                }
                             }
                             false // swallow presses AND repeats
                         }
                         _ => true,
                     });
                 });
+                self.reference_ctrl_space = ref_ctrl_space;
                 // Ctrl+/ → toggle line comments on the selection (consumed before
                 // the editor so `/` is never typed into the text).
-                let mut ctrl_slash_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
+                let mut ctrl_slash_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
                 // Ctrl+Shift+Up / Down → multi-cursor add/undo (see
                 // `multi_cursor` module docs). Consumed BEFORE Ctrl+Up/Down
                 // below: `consume_key` is lenient about Shift (see that
                 // comment), so checking the Shift variant first stops the
                 // plain Ctrl+Up/Down (move line) shortcut from also matching
                 // the same key-down event.
-                let mc_up_pressed = ui.input_mut(|i| {
+                let mc_up_pressed = editor_kbd_active && ui.input_mut(|i| {
                     i.consume_key(
                         egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
                         egui::Key::ArrowUp,
                     )
                 });
-                let mc_down_pressed = ui.input_mut(|i| {
+                let mc_down_pressed = editor_kbd_active && ui.input_mut(|i| {
                     i.consume_key(
                         egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
                         egui::Key::ArrowDown,
@@ -351,6 +433,7 @@ impl AppIde {
                     }
                     None
                 });
+                let mc_caret_move = mc_caret_move.filter(|_| editor_kbd_active);
                 // Escape, peeked twice for two different jobs:
                 //  * `escape_pressed_raw` — restore editor focus (see below).
                 //  * `mc_escape_pressed`  — drop the extra carets, skipped while
@@ -359,18 +442,20 @@ impl AppIde {
                 //    see the key).
                 let escape_pressed_raw = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 let popup_open = self.completion_open || self.cargo_complete.open;
-                let mc_escape_pressed = !popup_open && escape_pressed_raw;
+                let mc_escape_pressed =
+                    editor_kbd_active && !popup_open && escape_pressed_raw;
                 // Ctrl+Shift+Tab / Ctrl+Tab → MRU file switching (VS Code style:
                 // hold Ctrl to walk the history, release to commit). Consumed
                 // BEFORE the editor so Tab never inserts indentation. The Shift
                 // variant must be checked first (consume_key is Shift-lenient).
-                let mut cycle_prev_pressed = ui.input_mut(|i| {
+                let mut cycle_prev_pressed = editor_kbd_active && ui.input_mut(|i| {
                     i.consume_key(
                         egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
                         egui::Key::Tab,
                     )
                 });
-                let mut cycle_next_pressed = !cycle_prev_pressed
+                let mut cycle_next_pressed = editor_kbd_active
+                    && !cycle_prev_pressed
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab));
                 // Ctrl+Left / Ctrl+Right (+Shift = select) → word movement.
                 // Consumed BEFORE the editor so egui's own word jump never
@@ -378,7 +463,10 @@ impl AppIde {
                 // `name:Type` is ONE word and the jump swallowed both sides
                 // (see `word_select`). The Shift variants are checked first —
                 // `consume_key` is Shift-lenient (see the multi-cursor note).
-                let word_move: Option<(bool, bool)> = ui.input_mut(|i| {
+                let word_move: Option<(bool, bool)> = if !editor_kbd_active {
+                    None
+                } else {
+                    ui.input_mut(|i| {
                     let cs = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
                     if i.consume_key(cs, egui::Key::ArrowRight) {
                         Some((true, true))
@@ -391,17 +479,18 @@ impl AppIde {
                     } else {
                         None
                     }
-                });
+                    })
+                };
                 // Ctrl+Up / Ctrl+Down → move the selected lines up / down.
-                let mut ctrl_up_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
-                let mut ctrl_down_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
+                let mut ctrl_up_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowUp));
+                let mut ctrl_down_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::ArrowDown));
                 // Ctrl+C state (peeked, not consumed — the editor still copies any
                 // selection). When the pointer is over a diagnostic, the overlay
                 // overwrites the clipboard with the error message instead.
-                let copy_requested =
-                    ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+                let copy_requested = editor_kbd_active
+                    && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
                 // Ctrl+Shift+X → cut the whole line(s) at the cursor/selection;
                 // plain Ctrl+X keeps egui's native cut-the-*selection* behaviour.
                 // egui maps BOTH to `Event::Cut` (Shift is ignored for the cut
@@ -410,7 +499,7 @@ impl AppIde {
                 // the native selection-cut doesn't fire, and do the whole-line cut
                 // ourselves; no Shift → leave the native cut alone. The `consume_key`
                 // is a fallback for platforms that send the key instead of a Cut.
-                let mut cut_line_pressed = ui.input_mut(|i| {
+                let mut cut_line_pressed = editor_kbd_active && ui.input_mut(|i| {
                     let cut_event = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
                     let line = cut_event && i.modifiers.shift;
                     if line {
@@ -421,14 +510,14 @@ impl AppIde {
                     line || key
                 });
                 // Ctrl+D → duplicate the line(s) at the cursor / selection.
-                let mut ctrl_d_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::D));
+                let mut ctrl_d_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::D));
                 // Shift+Alt+F → re-indent the whole file by block nesting.
                 // (Moved off Ctrl+Shift+F, which now opens project-wide search.)
                 // Unlike the Ctrl-based shortcuts, Alt+Shift doesn't suppress the
                 // character event, so egui also delivers `Event::Text("F")` — strip
                 // it too, or the formatter would type an "F" into the code.
-                let mut format_pressed = ui.input_mut(|i| {
+                let mut format_pressed = editor_kbd_active && ui.input_mut(|i| {
                     let pressed =
                         i.consume_key(egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::F);
                     if pressed {
@@ -439,18 +528,18 @@ impl AppIde {
                     pressed
                 });
                 // Ctrl+R → rename the symbol at the cursor project-wide.
-                let mut ctrl_r_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R));
+                let mut ctrl_r_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::R));
                 // Ctrl+F12 → go to the IMPLEMENTATION of the symbol at the
                 // cursor (the `impl … for …` site, where plain F12 on a trait
                 // method lands on the trait's declaration). Consumed before
                 // plain F12 so the Ctrl variant never falls through.
-                let mut ctrl_f12_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F12));
+                let mut ctrl_f12_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::F12));
                 // Ctrl+[ / Ctrl+] → select the innermost `{ … }` block around
                 // the caret and copy it (refactored off the old implicit
                 // trigger — selecting a `{`/`}` — which hijacked Ctrl+C).
-                let mut select_block_pressed = ui.input_mut(|i| {
+                let mut select_block_pressed = editor_kbd_active && ui.input_mut(|i| {
                     i.consume_key(egui::Modifiers::CTRL, egui::Key::OpenBracket)
                         || i.consume_key(egui::Modifiers::CTRL, egui::Key::CloseBracket)
                 });
@@ -458,11 +547,12 @@ impl AppIde {
                 // at the cursor. Consumed before the editor so it never inserts
                 // a newline. Ignored while the code-action popup is already open
                 // (its own Enter handling wins there).
-                let ctrl_enter_pressed = !self.code_action_popup_open
+                let ctrl_enter_pressed = editor_kbd_active
+                    && !self.code_action_popup_open
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
                 // F12 → show the definition of the symbol at the cursor.
-                let mut f12_pressed =
-                    ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
+                let mut f12_pressed = editor_kbd_active
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12));
 
                 // Find / Replace bar shortcuts (consumed before the editor so the
                 // keys never reach the TextEdit). Shift variants are checked first
@@ -474,22 +564,24 @@ impl AppIde {
                     .last_caret_idx
                     .map(|idx| rename::identifier_at(&display_code, idx))
                     .unwrap_or_default();
-                ui.input_mut(|i| {
-                    use find_replace::FindMode as M;
-                    let ctrl = egui::Modifiers::CTRL;
-                    let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
-                    if i.consume_key(ctrl_shift, egui::Key::F) {
-                        self.find.open_with(M::FindProject);
-                    } else if i.consume_key(ctrl_shift, egui::Key::H) {
-                        self.find
-                            .open_replace_with_word(M::ReplaceProject, &word_under_cursor);
-                    } else if i.consume_key(ctrl, egui::Key::F) {
-                        self.find.open_with(M::FindFile);
-                    } else if i.consume_key(ctrl, egui::Key::H) {
-                        self.find
-                            .open_replace_with_word(M::ReplaceFile, &word_under_cursor);
-                    }
-                });
+                if editor_kbd_active {
+                    ui.input_mut(|i| {
+                        use find_replace::FindMode as M;
+                        let ctrl = egui::Modifiers::CTRL;
+                        let ctrl_shift = egui::Modifiers::CTRL | egui::Modifiers::SHIFT;
+                        if i.consume_key(ctrl_shift, egui::Key::F) {
+                            self.find.open_with(M::FindProject);
+                        } else if i.consume_key(ctrl_shift, egui::Key::H) {
+                            self.find
+                                .open_replace_with_word(M::ReplaceProject, &word_under_cursor);
+                        } else if i.consume_key(ctrl, egui::Key::F) {
+                            self.find.open_with(M::FindFile);
+                        } else if i.consume_key(ctrl, egui::Key::H) {
+                            self.find
+                                .open_replace_with_word(M::ReplaceFile, &word_under_cursor);
+                        }
+                    });
+                }
 
                 // Ctrl + `+` / `-` / `0` → zoom the editor text in / out / reset.
                 // (egui's global keyboard zoom is disabled in `app::new`, so these
@@ -1086,6 +1178,8 @@ impl AppIde {
                         ctrl_f12_pressed,
                         highlight,
                         def_line,
+                        crate::app::EditorSlot::Main,
+                        displayed_file,
                     );
                 }
                 // Rename input popup (shown while active; sends the request on

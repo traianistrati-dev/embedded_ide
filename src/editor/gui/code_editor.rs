@@ -268,15 +268,25 @@ pub(crate) fn rust_layout_job(
 
 // ── Layout-job memo ───────────────────────────────────────────────────────────
 
+/// How many layout jobs to keep memoized. Was ONE while a single editor was
+/// ever visible — but with a second (Reference) editor open on a different
+/// file, one slot THRASHES: each editor misses the other's key every frame, so
+/// both files get fully re-tokenized at the repaint rate. That is precisely the
+/// cost this memo exists to remove, so the capacity has to exceed the number of
+/// simultaneously visible editors.
+const LAYOUT_MEMO_SLOTS: usize = 4;
+
 thread_local! {
-    /// One-entry memo for [`rust_layout_job`]. egui's `TextEdit` calls the
+    /// Small memo for [`rust_layout_job`]. egui's `TextEdit` calls the
     /// layouter EVERY frame, and while any spinner is on screen the app
     /// repaints continuously — so the whole file was re-tokenized at 60+ FPS
     /// for the entire duration of Saving/Checking/Flashing (the dominant
-    /// per-frame CPU / energy cost). One entry suffices: a single editor is
-    /// visible; switching files or zooming recomputes once. UI-thread only.
-    static LAYOUT_MEMO: std::cell::RefCell<(u64, egui::text::LayoutJob)> =
-        std::cell::RefCell::new((0, egui::text::LayoutJob::default()));
+    /// per-frame CPU / energy cost). UI-thread only.
+    ///
+    /// Most-recently-used first; the tail is dropped when full, so switching
+    /// files or zooming costs one recompute rather than evicting a live editor.
+    static LAYOUT_MEMO: std::cell::RefCell<Vec<(u64, egui::text::LayoutJob)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// [`rust_layout_job`] memoized on (text, font size, dead ranges, theme name).
@@ -300,10 +310,18 @@ fn cached_rust_layout_job(
 
     LAYOUT_MEMO.with(|m| {
         let mut m = m.borrow_mut();
-        if m.0 != key {
-            *m = (key, rust_layout_job(text, theme, fontsize, syntax, dead_ranges));
+        if let Some(pos) = m.iter().position(|(k, _)| *k == key) {
+            // Promote to front so two alternating editors both stay resident.
+            if pos != 0 {
+                let hit = m.remove(pos);
+                m.insert(0, hit);
+            }
+            return m[0].1.clone();
         }
-        m.1.clone()
+        let job = rust_layout_job(text, theme, fontsize, syntax, dead_ranges);
+        m.insert(0, (key, job.clone()));
+        m.truncate(LAYOUT_MEMO_SLOTS);
+        job
     })
 }
 
@@ -405,6 +423,37 @@ fn show_rust_editor(
 /// key handling) for this frame — set while our LSP completion popup is open so
 /// the two don't stack on top of each other (the LSP popup wins).
 #[allow(clippy::too_many_arguments)]
+/// The Rust editor WITHOUT the keyword completer or dead-code fading — the
+/// second (Reference) editor.
+///
+/// Same widget, highlighter and gutter as the main editor, so the two views
+/// read alike. LSP completion IS wired for this editor (through
+/// `handle_editor_completion`, tagged with `EditorSlot::Reference`); what is
+/// missing here is the crate's built-in KEYWORD completer.
+///
+/// **Do not "unify" this with [`show_rust_with_completer`].** `AppIde` holds a
+/// single `Completer`, and it stores `completer.text_edit_id` — two editors
+/// going through that path would overwrite each other's id every frame and the
+/// keyword popup would attach to whichever rendered last.
+pub fn show_rust_editor_plain(
+    ui: &mut egui::Ui,
+    text: &mut dyn egui::TextBuffer,
+    fontsize: f32,
+    rows: usize,
+    id: &str,
+) -> TextEditOutput {
+    show_rust_editor(
+        ui,
+        text,
+        &ColorTheme::GRUVBOX,
+        fontsize,
+        rows,
+        &Syntax::rust(),
+        id,
+        &[],
+    )
+}
+
 pub fn show_rust_with_completer(
     ui: &mut egui::Ui,
     text: &mut dyn egui::TextBuffer,
@@ -454,6 +503,30 @@ mod tests {
         assert_ne!(zoomed, cached, "font size must change the job");
         let edited = cached_rust_layout_job("fn main() {}", &theme, 13.0, &syn, &[]);
         assert_ne!(edited, cached, "text must change the job");
+    }
+
+    /// Two editors alternating on DIFFERENT files must both stay memoized.
+    ///
+    /// With the old single-slot memo each one evicted the other every frame, so
+    /// both files were fully re-tokenized at the repaint rate — the exact cost
+    /// the memo exists to remove. Guards the second (Reference) editor.
+    #[test]
+    fn two_alternating_files_both_stay_memoized() {
+        let theme = ColorTheme::GRUVBOX;
+        let syn = Syntax::rust();
+        let a = "fn a() { let x = 1; }";
+        let b = "fn b() { let y = 2; }";
+
+        // Prime both, then alternate the way two visible editors would.
+        let ja = cached_rust_layout_job(a, &theme, 13.0, &syn, &[]);
+        let jb = cached_rust_layout_job(b, &theme, 13.0, &syn, &[]);
+        for _ in 0..4 {
+            assert_eq!(cached_rust_layout_job(a, &theme, 13.0, &syn, &[]), ja);
+            assert_eq!(cached_rust_layout_job(b, &theme, 13.0, &syn, &[]), jb);
+        }
+        // Both must be resident simultaneously — not one evicting the other.
+        let resident = LAYOUT_MEMO.with(|m| m.borrow().len());
+        assert!(resident >= 2, "only {resident} entr(y/ies) memoized");
     }
 
     /// Collect (segment_text, is_lifetime_blue) from a highlighted job so tests

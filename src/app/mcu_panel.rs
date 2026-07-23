@@ -24,6 +24,19 @@ impl AppIde {
             if self.definition_view.is_none() && self.active_tab == McuTab::Definition {
                 self.active_tab = self.definition_return_tab;
             }
+            // The second editor only renders while ITS tab is active. Without
+            // this, both of its flags would keep their last value forever:
+            // `reference_was_focused` would go on stealing the main editor's
+            // shortcuts, and a completion it owns would keep swallowing
+            // Enter/Escape for a popup nobody can see.
+            if self.active_tab != McuTab::Reference || self.reference_file.is_none() {
+                self.reference_was_focused = false;
+                self.reference_ctrl_space = false;
+                if self.completion_owner == crate::app::EditorSlot::Reference {
+                    self.completion_open = false;
+                    self.completion_note = None;
+                }
+            }
             // Track each group's last-used tab so group clicks restore it.
             if self.active_tab.is_project_group() {
                 self.project_group_last = self.active_tab;
@@ -121,7 +134,17 @@ impl AppIde {
                 };
                 for tab in tabs.drain(..) {
                     let is_active = self.active_tab == tab;
-                    let label = egui::RichText::new(tab.label())
+                    // The second editor is named after its FILE — "Reference"
+                    // says nothing about which one is open.
+                    let text = if tab == McuTab::Reference {
+                        self.reference_file
+                            .as_deref()
+                            .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+                            .unwrap_or_else(|| tab.label().to_string())
+                    } else {
+                        tab.label().to_string()
+                    };
+                    let label = egui::RichText::new(text)
                         .size(13.0)
                         .color(if is_active {
                             egui::Color32::WHITE
@@ -423,20 +446,27 @@ impl AppIde {
     /// file is shown (scrollable above and below the target); rows are
     /// virtualized and the target line is scrolled near the top once on open,
     /// drawn coloured so it stands out from the surrounding code.
-    /// A second project file, READ-ONLY, beside the editor.
+    /// The second editor: another project file, EDITABLE, beside the main one.
     ///
-    /// Deliberately not a second editor: it exists to be consulted while typing
-    /// somewhere else, and making it editable would mean a second write-back
-    /// path into `user_src_files` — the exact hazard the editor panel's
-    /// ordering rules already guard against. Text stays selectable (so you can
-    /// copy from it) but nothing here can change a buffer.
+    /// Level 1 of the two-editor design — plain editing (type, select, undo)
+    /// with syntax highlighting, but deliberately NO language features here:
+    /// completion, rename, code actions, inline diagnostics and multi-cursor
+    /// all read singleton state on `AppIde` that belongs to the main editor, so
+    /// wiring them to a second view means splitting ~300 references into a
+    /// per-editor struct. That refactor is Level 2 and is not needed for the
+    /// case this serves: change something small in another file while looking
+    /// at this one.
+    ///
+    /// Undo and the caret come free and correctly separated: egui keys
+    /// `TextEditState` by widget id, and the id here is derived from the file
+    /// path (same rule as the main editor).
     fn show_reference_tab(&mut self, ui: &mut egui::Ui) {
         let Some(path) = self.reference_file.clone() else {
             ui.label(egui::RichText::new("No file open.").color(egui::Color32::GRAY));
             return;
         };
-        let Some((id, code)) = self.reference_content(&path) else {
-            // The file was deleted or renamed while it was open here.
+        let Some((id, mut code)) = self.reference_content(&path) else {
+            // Deleted or renamed while it was open here.
             ui.label(
                 egui::RichText::new(format!("{path} is no longer in the project."))
                     .size(11.0)
@@ -445,7 +475,14 @@ impl AppIde {
             return;
         };
 
-        // Header: which file, plus a jump to open it in the editor.
+        // The same file in BOTH editors: the widget ids differ (`reference_…`
+        // vs `code_editor:…`), so egui keeps two independent carets and undo
+        // stacks over ONE buffer. Typing in either then makes the other's view
+        // and undo history stale, and both write back to the same slot in the
+        // same frame. Editing is refused rather than left to that race —
+        // "Open in editor" is the way to edit it.
+        let clash = self.selected_file == id;
+
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(&path)
@@ -459,81 +496,123 @@ impl AppIde {
                         egui::Button::new(egui::RichText::new("Open in editor").size(10.5))
                             .frame(false),
                     )
-                    .on_hover_text("Edit this file in the main editor instead")
+                    .on_hover_text("Switch the MAIN editor to this file")
                     .clicked()
                 {
                     self.selected_file = id;
                 }
-                ui.label(
-                    egui::RichText::new("read-only")
-                        .size(10.0)
-                        .italics()
-                        .color(egui::Color32::from_gray(130)),
-                );
+                if clash {
+                    ui.label(
+                        egui::RichText::new("read-only — already open in the main editor")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(220, 180, 90)),
+                    );
+                }
             });
         });
         ui.separator();
 
-        // A distinctly darker, green-tinted background so this can never be
-        // mistaken for the editor at a glance.
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(26, 32, 28))
-            .inner_margin(egui::Margin::same(4))
-            .corner_radius(3.0)
-            .show(ui, |ui| {
-                ui.set_min_size(ui.available_size());
-                let is_rust = path.ends_with(".rs");
-                let row_h = ui
-                    .painter()
-                    .layout_no_wrap(
-                        "X".to_owned(),
-                        egui::FontId::monospace(12.0),
-                        egui::Color32::WHITE,
-                    )
-                    .size()
-                    .y;
-                ui.spacing_mut().item_spacing.y = 1.0;
-                let lines: Vec<&str> = code.lines().collect();
-                egui::ScrollArea::both()
-                    .id_salt("reference_file_view")
-                    .auto_shrink([false, false])
-                    .show_rows(ui, row_h, lines.len(), |ui, range| {
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                        for i in range {
-                            let raw = lines[i];
-                            let shown = if raw.is_empty() { " " } else { raw };
-                            ui.horizontal(|ui| {
-                                // Line numbers: this view is for pointing at a
-                                // spot in another file, so they earn their room.
-                                ui.label(
-                                    egui::RichText::new(format!("{:>4}", i + 1))
-                                        .monospace()
-                                        .size(11.0)
-                                        .color(egui::Color32::from_gray(90)),
-                                );
-                                if is_rust {
-                                    // Same highlighter as the editor, so the two
-                                    // views read alike.
-                                    let job = crate::editor::gui::code_editor::rust_layout_job(
-                                        shown,
-                                        &egui_code_editor::ColorTheme::GRUVBOX,
-                                        12.0,
-                                        &egui_code_editor::Syntax::rust(),
-                                        &[],
-                                    );
-                                    ui.add(egui::Label::new(job).selectable(true));
-                                } else {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(shown).monospace().size(12.0),
-                                        )
-                                        .selectable(true),
-                                    );
-                                }
-                            });
-                        }
-                    });
+        let font_size = self.editor_font_size;
+        let rows = ((ui.available_height() / (font_size * 1.3)).floor() as usize).max(6);
+        // Distinct id space from the main editor, and per FILE so the caret and
+        // undo stack follow the file rather than the slot.
+        let editor_id = format!("reference_editor:{path}");
+        let before = code.clone();
+
+        if clash {
+            // Read-only: render the same highlighter through a disabled editor
+            // so it still looks like code.
+            ui.add_enabled_ui(false, |ui| {
+                crate::editor::gui::code_editor::show_rust_editor_plain(
+                    ui,
+                    &mut code,
+                    font_size,
+                    rows,
+                    &editor_id,
+                );
             });
+            // Disabled widgets can't hold focus; make sure a stale `true` from
+            // an earlier frame doesn't keep stealing the main editor's keys.
+            self.reference_was_focused = false;
+            return;
+        }
+
+        let clip = ui.clip_rect();
+        let out = crate::editor::gui::code_editor::show_rust_editor_plain(
+            ui,
+            &mut code,
+            font_size,
+            rows,
+            &editor_id,
+        );
+        // Focus is read AFTER rendering and used by the main editor's
+        // keyboard-scope gate NEXT frame — that panel runs earlier, so
+        // last-frame focus is the only thing available to it.
+        self.reference_was_focused = out.response.has_focus();
+
+        // Write-back BEFORE completion runs: `handle_editor_completion` may
+        // apply an accepted item, and it persists through `owner_file` itself.
+        // Mirrors the main editor's rule — persist to the file the view was
+        // BUILT for, never to whatever is selected now.
+        if code != before {
+            self.apply_reference_edit(id, code.clone());
+        }
+
+        // Completion for this editor. Everything else the handler can do
+        // (rename, F12, diagnostics, type hints) is skipped by the slot — see
+        // its `slot` parameter doc.
+        let ctrl_space = std::mem::take(&mut self.reference_ctrl_space);
+        // Claim a deferred accept meant for THIS editor. Both routes land here:
+        // a mouse click in the popup (which renders from this call) and a
+        // keyboard accept, which `mod.rs` consumes before either editor draws
+        // and parks here rather than applying to the main editor's buffer.
+        let accepted = if self.completion_owner == crate::app::EditorSlot::Reference {
+            self.completion_pending_insert.take()
+        } else {
+            None
+        };
+        if accepted.is_some() {
+            self.completion_open = false;
+        }
+        self.handle_editor_completion(
+            ui,
+            &out,
+            clip,
+            code,
+            accepted,
+            ctrl_space,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            crate::app::EditorSlot::Reference,
+            id,
+        );
+    }
+
+    /// Persist an edit made in the second editor.
+    ///
+    /// Only real project buffers are written; `main.rs` is refused because the
+    /// MCU Configurator regenerates it from the pin model, so an edit made here
+    /// outside the editor's own guarded path could be silently overwritten.
+    fn apply_reference_edit(&mut self, id: ProjectFileId, code: String) {
+        match id {
+            ProjectFileId::UserFile(i) => {
+                if let Some(e) = self.project_tree.user_src_files.get_mut(i) {
+                    e.1 = code;
+                }
+            }
+            ProjectFileId::CargoToml => self.cargo_toml = code,
+            ProjectFileId::CargoConfig => self.cargo_config = code,
+            ProjectFileId::MemoryX => self.memory_x = code,
+            ProjectFileId::BuildRs => self.build_rs = code,
+            ProjectFileId::GitIgnore => self.gitignore = code,
+            // main.rs is owned by codegen — edit it in the main editor.
+            ProjectFileId::MainRs => {}
+        }
+        self.cached_project_files = None;
     }
 
     /// Resolve the reference file's path to `(id, content)`, or `None` when it
