@@ -427,6 +427,31 @@ fn apply_text_edits(text: &str, mut edits: Vec<lsp::RenameEdit>) -> String {
     s
 }
 
+/// Guarantees the async save always reports SOMETHING.
+///
+/// `save_in_progress` is cleared only when the shared slot holds a result, so a
+/// worker that dies without filling it (panic, or a poisoned mutex on the way)
+/// left the status bar stuck on "Saving…" — and a visible spinner keeps the app
+/// repainting, so it also burned CPU until restart. Dropping this guard writes
+/// a failure if nothing else did.
+struct SaveSlotGuard(Arc<Mutex<Option<Result<String, String>>>>);
+
+impl Drop for SaveSlotGuard {
+    fn drop(&mut self) {
+        // NEVER `unwrap` here: a panic inside Drop while already unwinding
+        // aborts the process. A poisoned lock still has to be reported.
+        let mut slot = match self.0.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if slot.is_none() {
+            *slot = Some(Err(
+                "the save worker stopped unexpectedly — see the Activity tab".to_string(),
+            ));
+        }
+    }
+}
+
 /// Milestones of one user-perceived save (all `Instant`s; durations are
 /// computed FROM THE CLICK, so they overlap rather than add up). Finished —
 /// and logged as "Save (wall clock)" — when the flycheck the save triggered
@@ -1796,8 +1821,9 @@ impl AppIde {
     }
 
     fn spawn_lsp_flush(&mut self) {
-        self.lsp_flush_in_flight
-            .store(true, std::sync::atomic::Ordering::Release);
+        // The flag is set here and cleared by a `FlagGuard` inside the worker
+        // (see below) — NOT by a store on the worker's last line, which a panic
+        // would skip, hanging the status bar at "Saving…" forever.
 
         // Same-frame snapshot of every file, so what reaches disk + RA is
         // exactly what the user saved. Every path here is PROJECT-ROOT-relative
@@ -1829,6 +1855,9 @@ impl AppIde {
         let ctx = self.egui_ctx.clone();
 
         std::thread::spawn(move || {
+            // Clears `lsp_flush_in_flight` on EVERY exit path, unwinding
+            // included. Declared first so it outlives everything below.
+            let _flag = crate::activity::FlagGuard::set(in_flight);
             let mut rec = crate::activity::Recorder::new("Save (LSP flush)");
             let workspace = std::env::temp_dir().join("embedded_ide_0_check");
 
@@ -1909,7 +1938,7 @@ impl AppIde {
             }
 
             activity.lock().unwrap().push(rec.finish());
-            in_flight.store(false, std::sync::atomic::Ordering::Release);
+            // `_flag` clears the in-flight flag as it drops, just below.
             // Wake `init_frame`: a save made during this flush left
             // `lsp_flush_requested` set and must fire now.
             ctx.request_repaint();
@@ -2174,6 +2203,9 @@ impl eframe::App for AppIde {
                 let dest_thread = dest.clone();
                 let activity = Arc::clone(&self.activity);
                 std::thread::spawn(move || {
+                    // Reports a failure if this thread dies before setting the
+                    // result — otherwise the UI hangs on "Saving…".
+                    let _slot = SaveSlotGuard(Arc::clone(&out));
                     let mut rec = crate::activity::Recorder::new("Save (project)");
                     let res = rec
                         .phase("write_project", || {

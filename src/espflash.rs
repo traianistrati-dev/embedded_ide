@@ -87,6 +87,7 @@ pub fn start_flash(
     state: Arc<Mutex<EspFlashState>>,
     log: Arc<Mutex<Vec<String>>>,
     ctx: eframe::egui::Context,
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -96,6 +97,9 @@ pub fn start_flash(
     ctx.request_repaint();
 
     thread::spawn(move || {
+        // Commits on drop, so a failed build / missing espflash still logs.
+        let mut act = crate::activity::Committing::new("Flash (ESP / espflash)", activity);
+        let t_build = std::time::Instant::now();
         // ── Phase 1: cargo build --release ────────────────────────────────────
         push_log(
             &log,
@@ -171,6 +175,8 @@ pub fn start_flash(
         }
 
         push_log(&log, &ctx, "[OK] Build OK");
+        act.rec().add("cargo build --release", t_build.elapsed());
+        let t_flash = std::time::Instant::now();
 
         // ── Phase 2: espflash flash ────────────────────────────────────────────
         set(&state, &ctx, EspFlashState::Flashing);
@@ -279,7 +285,15 @@ pub fn start_flash(
             let _ = h.join();
         }
 
-        match child.wait() {
+        let esp_status = child.wait();
+        act.rec().cmd_phase(
+            "espflash flash",
+            format!("espflash flash --chip {chip}"),
+            t_flash.elapsed(),
+            esp_status.as_ref().ok().and_then(|s| s.code()),
+        );
+
+        match esp_status {
             Err(e) => set(
                 &state,
                 &ctx,

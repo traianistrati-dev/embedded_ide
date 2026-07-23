@@ -3,7 +3,7 @@
 //! goes. Populated by [`crate::activity`]; newest action first, each showing its
 //! phases with durations, the exact command line, and exit code.
 
-use crate::activity::{fmt_dur, ActivityLog};
+use crate::activity::{fmt_clock, fmt_dur, ActivityLog};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
@@ -45,18 +45,53 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for (i, action) in log.actions.iter().enumerate() {
-                // Header: "Flash (DFU)   total 41.0s   @123.4s"
+                // ── Save-group separator ─────────────────────────────────
+                // The list is newest-first, so a "Save (…)" action marks the
+                // START of the group ABOVE it. One user Save produces several
+                // actions (project write → LSP flush → flycheck) and they used
+                // to run together into one wall of rows; this makes each Save's
+                // span readable at a glance.
+                let starts_group = action.kind.starts_with("Save");
+                if starts_group && i > 0 {
+                    ui.add_space(3.0);
+                    // Idle gap between this action's end and the previous
+                    // (newer) one's start — where the time actually went when
+                    // nothing was logged.
+                    let gap = log.actions[i - 1]
+                        .started_at
+                        .duration_since(action.ended_at)
+                        .ok();
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Separator::default().horizontal());
+                        if let Some(g) = gap {
+                            ui.label(
+                                egui::RichText::new(format!("idle {}", fmt_dur(g)))
+                                    .size(9.5)
+                                    .color(egui::Color32::from_gray(110)),
+                            );
+                        }
+                    });
+                    ui.add_space(3.0);
+                }
+
+                // Header: "Save (project)  ·  total 41.0s  ·  12:03:44.120 → 12:03:44.180"
                 let slow = action.total.as_secs_f64() >= 1.0;
                 let head = format!(
-                    "{}  ·  total {}",
+                    "{}  ·  total {}  ·  {} → {}",
                     action.kind,
                     fmt_dur(action.total),
+                    fmt_clock(action.started_at),
+                    fmt_clock(action.ended_at),
                 );
                 egui::CollapsingHeader::new(
                     egui::RichText::new(head)
                         .size(11.5)
                         .strong()
-                        .color(if slow {
+                        .color(if action.aborted {
+                            // A worker that died without finishing — this is
+                            // what used to hang the status bar at "Saving…".
+                            egui::Color32::from_rgb(235, 100, 90)
+                        } else if slow {
                             egui::Color32::from_rgb(220, 180, 60)
                         } else {
                             egui::Color32::from_rgb(150, 200, 130)

@@ -123,6 +123,7 @@ pub fn start_flash(
     state: Arc<Mutex<OpenOcdState>>,
     log: Arc<Mutex<Vec<String>>>,
     ctx: eframe::egui::Context,
+    activity: Arc<Mutex<crate::activity::ActivityLog>>,
 ) {
     if state.lock().unwrap().is_busy() {
         return;
@@ -132,6 +133,10 @@ pub fn start_flash(
     ctx.request_repaint();
 
     thread::spawn(move || {
+        // Commits the breakdown on drop, so every early return (build failure,
+        // openocd missing, target rejected) still lands in the Activity tab.
+        let mut act = crate::activity::Committing::new("Flash (SWD / OpenOCD)", activity);
+        let t_build = std::time::Instant::now();
         // ── Phase 1: cargo build --release (with auto-clean retry) ───────────
         push_log(
             &log,
@@ -189,6 +194,8 @@ pub fn start_flash(
         }
 
         push_log(&log, &ctx, "[OK] Build OK");
+        act.rec().add("cargo build --release", t_build.elapsed());
+        let t_flash = std::time::Instant::now();
 
         // ── Phase 2: openocd flash ─────────────────────────────────────────────
         set(&state, &ctx, OpenOcdState::Flashing);
@@ -290,7 +297,17 @@ pub fn start_flash(
             let _ = h.join();
         }
 
-        match child.wait() {
+        let ocd_status = child.wait();
+        act.rec().cmd_phase(
+            "openocd program+verify+reset",
+            format!(
+                "openocd -f {interface_cfg} -f {target_cfg} -c \"program … verify reset exit\""
+            ),
+            t_flash.elapsed(),
+            ocd_status.as_ref().ok().and_then(|s| s.code()),
+        );
+
+        match ocd_status {
             Err(e) => set(
                 &state,
                 &ctx,

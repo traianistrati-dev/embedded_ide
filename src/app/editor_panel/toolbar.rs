@@ -68,6 +68,7 @@ impl AppIde {
                 Arc::clone(&self.openocd_state),
                 Arc::clone(&self.dfu_log),
                 self.egui_ctx.clone(),
+                std::sync::Arc::clone(&self.activity),
             );
         }
     }
@@ -104,6 +105,7 @@ impl AppIde {
                 Arc::clone(&self.espflash_state),
                 Arc::clone(&self.dfu_log),
                 self.egui_ctx.clone(),
+                std::sync::Arc::clone(&self.activity),
             );
         }
     }

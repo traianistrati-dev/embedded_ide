@@ -32,6 +32,15 @@ pub struct Action {
     pub total: Duration,
     /// Seconds since the app started, for a rough chronological label.
     pub at: f64,
+    /// Wall-clock start/end, so the tab can show when it ran and how long the
+    /// gap to the next action was. `SystemTime` (not `Instant`) because these
+    /// are displayed as clock times.
+    pub started_at: std::time::SystemTime,
+    pub ended_at: std::time::SystemTime,
+    /// The worker died before committing normally (panic / early return). Its
+    /// in-flight flag would otherwise have hung the status bar forever, so this
+    /// makes the failure visible instead of silent.
+    pub aborted: bool,
 }
 
 /// Newest-first list of recorded actions (capped).
@@ -59,6 +68,7 @@ impl ActivityLog {
 pub struct Recorder {
     kind: String,
     started: Instant,
+    started_wall: std::time::SystemTime,
     phases: Vec<Phase>,
 }
 
@@ -67,6 +77,7 @@ impl Recorder {
         Self {
             kind: kind.into(),
             started: Instant::now(),
+            started_wall: std::time::SystemTime::now(),
             phases: Vec::new(),
         }
     }
@@ -129,7 +140,24 @@ impl Recorder {
             phases: self.phases,
             total: self.started.elapsed(),
             at: crate::activity::since_start(),
+            started_at: self.started_wall,
+            ended_at: std::time::SystemTime::now(),
+            aborted: false,
         }
+    }
+
+    /// Finalise an action whose worker did NOT reach its normal end (panic or
+    /// early return). Logged so a hung in-flight flag has a visible cause.
+    pub fn finish_aborted(self, why: impl Into<String>) -> Action {
+        let mut a = self.finish();
+        a.aborted = true;
+        a.phases.push(Phase {
+            label: format!("ABORTED — {}", why.into()),
+            dur: Duration::ZERO,
+            cmd: None,
+            exit: None,
+        });
+        a
     }
 
     /// Finalise with an explicit total — for actions whose span was measured
@@ -141,6 +169,9 @@ impl Recorder {
             phases: self.phases,
             total,
             at: crate::activity::since_start(),
+            started_at: self.started_wall,
+            ended_at: std::time::SystemTime::now(),
+            aborted: false,
         }
     }
 }
@@ -238,5 +269,108 @@ mod tests {
         assert_eq!(log.actions.len(), MAX_ACTIONS);
         // Last pushed is at the front.
         assert_eq!(log.actions[0].kind, format!("a{}", MAX_ACTIONS + 4));
+    }
+}
+
+/// Local clock time `HH:MM:SS.mmm` for a `SystemTime`. Pure — tested below.
+///
+/// Deliberately hand-rolled: the crate has no `chrono`/`time` dependency, and
+/// the tab only needs a within-the-day stamp to line actions up against each
+/// other. UTC-based, so it can be off from the wall clock by the timezone
+/// offset — fine for measuring gaps, which is what it is for.
+pub fn fmt_clock(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ms = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis())
+        .unwrap_or(0);
+    let day = secs % 86_400;
+    format!("{:02}:{:02}:{:02}.{:03}", day / 3600, (day % 3600) / 60, day % 60, ms)
+}
+
+/// Clears a "work in flight" flag when dropped — **including while unwinding
+/// from a panic**.
+///
+/// Why this exists: the status bar shows "Saving…" while
+/// `lsp_flush_in_flight` is set, and the worker cleared it on its LAST line.
+/// A panic anywhere in that thread (a poisoned mutex is enough — every
+/// `.lock().unwrap()` in the app panics once any other thread died holding
+/// one) skipped that line, so the flag stayed set FOREVER: the status bar hung
+/// at "Saving…", and because a visible spinner keeps requesting repaints the
+/// app never went idle again — sustained CPU with nothing running. Rare and
+/// baffling, exactly as reported.
+///
+/// `panic = "unwind"` (the default) is what makes the Drop fix work at all.
+pub struct FlagGuard {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FlagGuard {
+    /// Set `flag` and clear it again when the returned guard drops.
+    pub fn set(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        Self { flag }
+    }
+}
+
+impl Drop for FlagGuard {
+    fn drop(&mut self) {
+        self.flag
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::fmt_clock;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn clock_formats_within_the_day_and_wraps() {
+        // 01:02:03.004 after midnight.
+        let t = UNIX_EPOCH + Duration::from_millis(((1 * 3600) + (2 * 60) + 3) * 1000 + 4);
+        assert_eq!(fmt_clock(t), "01:02:03.004");
+        // Exactly one day later must read the same — it is a within-day stamp.
+        assert_eq!(fmt_clock(t + Duration::from_secs(86_400)), "01:02:03.004");
+        assert_eq!(fmt_clock(UNIX_EPOCH), "00:00:00.000");
+    }
+}
+
+#[cfg(test)]
+mod flag_guard_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn guard_clears_on_normal_drop() {
+        let f = Arc::new(AtomicBool::new(false));
+        {
+            let _g = FlagGuard::set(Arc::clone(&f));
+            assert!(f.load(Ordering::Acquire), "flag must be set inside the scope");
+        }
+        assert!(!f.load(Ordering::Acquire), "flag must clear on drop");
+    }
+
+    #[test]
+    fn guard_clears_even_when_the_worker_panics() {
+        // THE case this type exists for: a panicking worker used to leave the
+        // flag set, hanging the status bar at "Saving…" for the rest of the
+        // session and keeping the app repainting.
+        let f = Arc::new(AtomicBool::new(false));
+        let f2 = Arc::clone(&f);
+        let joined = std::thread::spawn(move || {
+            let _g = FlagGuard::set(f2);
+            panic!("simulated worker panic");
+        })
+        .join();
+        assert!(joined.is_err(), "the thread was supposed to panic");
+        assert!(
+            !f.load(Ordering::Acquire),
+            "flag must be cleared by unwinding, or the UI hangs forever"
+        );
     }
 }
