@@ -943,6 +943,57 @@ pub fn save_last_provider(provider: Provider) {
     let _ = std::fs::write(path, provider.slug());
 }
 
+/// Which extraction dialog a persisted supplementary prompt belongs to. The two
+/// have different base prompts, so their extra guidance is stored separately.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum PromptSlot {
+    Pins,
+    Clock,
+}
+
+fn extra_prompt_path(slot: PromptSlot) -> Option<PathBuf> {
+    let name = match slot {
+        PromptSlot::Pins => "datasheet_extra_prompt",
+        PromptSlot::Clock => "clock_extra_prompt",
+    };
+    super::registry::user_mcus_dir().and_then(|d| d.parent().map(|p| p.join(name)))
+}
+
+/// The user's persisted supplementary prompt for `slot` (empty if none).
+pub fn load_extra_prompt(slot: PromptSlot) -> String {
+    extra_prompt_path(slot)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the supplementary prompt for `slot`. Best-effort.
+pub fn save_extra_prompt(slot: PromptSlot, text: &str) {
+    let Some(path) = extra_prompt_path(slot) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// Append the user's supplementary guidance to a base prompt, clearly
+/// delimited. Empty `extra` returns the base unchanged.
+///
+/// The block explicitly says it does NOT override the shape or rules, so a
+/// vague addition can't silently erode the extraction contract — and structured
+/// output enforces the JSON shape regardless of what the user writes here.
+pub fn with_extra_prompt(base: &str, extra: &str) -> String {
+    let extra = extra.trim();
+    if extra.is_empty() {
+        return base.to_string();
+    }
+    format!(
+        "{base}\n\nADDITIONAL USER GUIDANCE (extra hints for THIS datasheet; it does NOT \
+         override the JSON shape or the rules above):\n{extra}"
+    )
+}
+
 // ── Extraction cache (never re-pay for the same document) ───────────────────
 
 /// Bump when the prompt or the JSON contract changes, so stale entries miss
@@ -961,13 +1012,22 @@ pub fn cache_dir() -> Option<PathBuf> {
 /// The provider is part of the key because a model id alone is not unique
 /// across backends, and two providers' answers for the same document are not
 /// interchangeable.
-pub fn cache_key(provider: Provider, model: &str, package: &str, source: &Source) -> String {
+pub fn cache_key(
+    provider: Provider,
+    model: &str,
+    package: &str,
+    extra_prompt: &str,
+    source: &Source,
+) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     CACHE_VERSION.hash(&mut h);
     provider.slug().hash(&mut h);
     model.trim().hash(&mut h);
     package.trim().hash(&mut h);
+    // MANDATORY: without this, changing the supplementary prompt returns the
+    // stale cached reply for the same document — the field would look inert.
+    extra_prompt.trim().hash(&mut h);
     match source {
         Source::Text(t) => {
             0u8.hash(&mut h);
@@ -1216,6 +1276,7 @@ pub fn call_ai_clock(
     provider: Provider,
     api_key: &str,
     model: &str,
+    extra_prompt: &str,
     source: &Source,
     use_cache: bool,
 ) -> Result<ClockExtraction, String> {
@@ -1247,7 +1308,7 @@ pub fn call_ai_clock(
 
     // Cache: keyed like the pin path but with a "clock" package tag so a clock
     // and a pin extraction of the same PDF never collide.
-    let key = cache_key(provider, model, "clock-tree", source);
+    let key = cache_key(provider, model, "clock-tree", extra_prompt, source);
     let build_from =
         |model_text: &str| -> Result<crate::panels::mcu_module::clock::graph::GraphClock, String> {
             let ex = ce::parse_clock_reply(model_text)?;
@@ -1261,7 +1322,7 @@ pub fn call_ai_clock(
         }
     }
 
-    let system = ce::build_clock_prompt();
+    let system = with_extra_prompt(&ce::build_clock_prompt(), extra_prompt);
     let body = build_request_body(provider, model, &system, source, ExtractKind::Clock);
     let model_text = post_and_parse(provider, api_key, model, &body)?;
     // Convert + self-check before caching, so only a usable reply is stored.
@@ -1281,12 +1342,14 @@ pub fn call_ai_clock(
 
 /// Call the selected provider and parse the extraction. Blocking — the dialog
 /// runs it on a background thread. All the pure pieces above are composed here.
+#[allow(clippy::too_many_arguments)]
 pub fn call_ai(
     provider: Provider,
     api_key: &str,
     model: &str,
     family_hint: &str,
     package_hint: &str,
+    extra_prompt: &str,
     source: &Source,
     use_cache: bool,
 ) -> Result<Extraction, String> {
@@ -1325,7 +1388,7 @@ pub fn call_ai(
 
     // Cache hit → no API call at all (the whole point: retrying the same
     // document for the same package/model is free).
-    let key = cache_key(provider, model, package_hint, source);
+    let key = cache_key(provider, model, package_hint, extra_prompt, source);
     if use_cache {
         if let Some(cached) = load_cached(&key) {
             if let Ok(chip) = parse_response(&cached) {
@@ -1335,7 +1398,7 @@ pub fn call_ai(
         }
     }
 
-    let system = build_prompt(family_hint, package_hint);
+    let system = with_extra_prompt(&build_prompt(family_hint, package_hint), extra_prompt);
     let body = build_request_body(provider, model, &system, source, ExtractKind::Pins);
     let model_text = post_and_parse(provider, api_key, model, &body)?;
     let chip = parse_response(&model_text)?;
@@ -1454,28 +1517,45 @@ mod tests {
     fn cache_key_is_stable_and_input_sensitive() {
         use Provider::*;
         let doc = Source::Text("PIN TABLE".into());
-        let base = cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &doc);
+        let base = cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &doc);
         // Same inputs → same key (a retry hits the cache).
-        assert_eq!(base, cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &doc));
+        assert_eq!(base, cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &doc));
         // Whitespace around model/package doesn't split the cache.
-        assert_eq!(base, cache_key(Anthropic, " claude-opus-4-8 ", " UFQFPN48 ", &doc));
+        assert_eq!(base, cache_key(Anthropic, " claude-opus-4-8 ", " UFQFPN48 ", "", &doc));
         // A different package reads a different column → different key.
-        assert_ne!(base, cache_key(Anthropic, "claude-opus-4-8", "UFBGA59", &doc));
+        assert_ne!(base, cache_key(Anthropic, "claude-opus-4-8", "UFBGA59", "", &doc));
         // A different model or document → different key.
-        assert_ne!(base, cache_key(Anthropic, "claude-sonnet-5", "UFQFPN48", &doc));
+        assert_ne!(base, cache_key(Anthropic, "claude-sonnet-5", "UFQFPN48", "", &doc));
         assert_ne!(
             base,
-            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &Source::Text("OTHER".into()))
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &Source::Text("OTHER".into()))
         );
         // Text and PDF sources never collide.
         assert_ne!(
             base,
-            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", &Source::Pdf(b"PIN TABLE".to_vec()))
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &Source::Pdf(b"PIN TABLE".to_vec()))
         );
         // Same model NAME on a different provider is a different extraction —
         // model ids are not unique across backends.
-        assert_ne!(base, cache_key(Gemini, "claude-opus-4-8", "UFQFPN48", &doc));
-        assert_ne!(base, cache_key(OpenAi, "claude-opus-4-8", "UFQFPN48", &doc));
+        assert_ne!(base, cache_key(Gemini, "claude-opus-4-8", "UFQFPN48", "", &doc));
+        assert_ne!(base, cache_key(OpenAi, "claude-opus-4-8", "UFQFPN48", "", &doc));
+        // A different supplementary prompt must re-extract, not reuse the reply.
+        assert_ne!(
+            base,
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "ignore SMPS", &doc)
+        );
+        // Whitespace around the extra prompt doesn't split the cache.
+        assert_eq!(base, cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "  ", &doc));
+    }
+
+    #[test]
+    fn with_extra_prompt_appends_only_when_nonempty() {
+        assert_eq!(with_extra_prompt("BASE", ""), "BASE");
+        assert_eq!(with_extra_prompt("BASE", "   "), "BASE");
+        let out = with_extra_prompt("BASE", "prefer the non-SMPS variant");
+        assert!(out.starts_with("BASE"));
+        assert!(out.contains("ADDITIONAL USER GUIDANCE"));
+        assert!(out.contains("prefer the non-SMPS variant"));
     }
 
     #[test]

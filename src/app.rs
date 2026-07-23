@@ -887,6 +887,9 @@ pub struct AppIde {
     /// Transient result of the New-MCU form's Import/Export clock buttons.
     /// `Ok` = a green confirmation, `Err` = a red parse/validation error.
     mcu_form_clock_note: Option<Result<String, String>>,
+    /// New/Edit MCU definition window maximized vs normal size.
+    mcu_form_maximized: bool,
+    mcu_form_prev_maximized: bool,
     /// `Some` while the "Import from datasheet (AI)" sub-dialog of the MCU form
     /// is open (see `app::datasheet_import_dialog`). Session-only.
     datasheet_import: Option<datasheet_import_dialog::DatasheetImport>,
@@ -1202,6 +1205,8 @@ impl AppIde {
             mcu_import_status: None,
             mcu_form: None,
             mcu_form_clock_note: None,
+            mcu_form_maximized: false,
+            mcu_form_prev_maximized: false,
             datasheet_import: None,
             clock_import: None,
             git_discard_confirm: None,

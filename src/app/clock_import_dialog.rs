@@ -34,6 +34,11 @@ pub(crate) struct ClockImport {
     text: String,
     pdf: Option<PdfPick>,
     force_reextract: bool,
+    /// Persisted supplementary prompt appended to the base clock prompt.
+    extra_prompt: String,
+    prompt_open: bool,
+    maximized: bool,
+    prev_maximized: bool,
     job: Option<Arc<Mutex<ClockJob>>>,
     error: Option<String>,
     /// Green confirmation after a successful extraction (kept until the dialog
@@ -53,6 +58,10 @@ impl ClockImport {
             text: String::new(),
             pdf: None,
             force_reextract: false,
+            extra_prompt: ds::load_extra_prompt(ds::PromptSlot::Clock),
+            prompt_open: false,
+            maximized: false,
+            prev_maximized: false,
             job: None,
             error: None,
             note: None,
@@ -118,13 +127,19 @@ impl AppIde {
         let mut do_extract = false;
         let mut do_save_key = false;
 
-        egui::Window::new(format!("{} Extract clock tree from datasheet (AI)", ph::SPARKLE))
-            .collapsible(false)
-            .resizable(true)
-            .default_width(520.0)
-            .default_height(440.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
+        let just_restored = di.prev_maximized && !di.maximized;
+        di.prev_maximized = di.maximized;
+        super::datasheet_import_dialog::window_frame(
+            ui.ctx(),
+            format!("{} Extract clock tree from datasheet (AI)", ph::SPARKLE),
+            di.maximized,
+            just_restored,
+            520.0,
+            440.0,
+            40.0,
+        )
             .show(ui.ctx(), |ui| {
+                super::datasheet_import_dialog::maximize_button(ui, &mut di.maximized);
                 ui.label(
                     egui::RichText::new(
                         "Extracts the clock SPINE (sources → PLL → SYSCLK → AHB → APB) as a \
@@ -179,6 +194,16 @@ impl AppIde {
                     ui.add(egui::TextEdit::singleline(&mut di.model).desired_width(200.0))
                         .on_hover_text(di.provider.model_hint());
                 });
+
+                // ── Prompt (base read-only + supplementary) ──────────────
+                let base = crate::panels::mcu_module::clock::graph::extract::build_clock_prompt();
+                super::datasheet_import_dialog::prompt_section(
+                    ui,
+                    "clk_prompt",
+                    &mut di.prompt_open,
+                    &base,
+                    &mut di.extra_prompt,
+                );
 
                 ui.add_space(4.0);
                 ui.separator();
@@ -287,8 +312,13 @@ impl AppIde {
             di.job = Some(shared.clone());
             di.error = None;
             di.note = None;
-            let (provider, key, model) =
-                (di.provider, di.api_key.clone(), di.model.clone());
+            ds::save_extra_prompt(ds::PromptSlot::Clock, &di.extra_prompt);
+            let (provider, key, model, extra) = (
+                di.provider,
+                di.api_key.clone(),
+                di.model.clone(),
+                di.extra_prompt.clone(),
+            );
             let source = match &di.pdf {
                 Some(pdf) => Source::Pdf(pdf.bytes.clone()),
                 None => Source::Text(di.text.clone()),
@@ -296,7 +326,7 @@ impl AppIde {
             let use_cache = !di.force_reextract;
             let ctx = ui.ctx().clone();
             std::thread::spawn(move || {
-                let res = ds::call_ai_clock(provider, &key, &model, &source, use_cache);
+                let res = ds::call_ai_clock(provider, &key, &model, &extra, &source, use_cache);
                 *shared.lock().unwrap() = ClockJob::Done(res);
                 ctx.request_repaint();
             });

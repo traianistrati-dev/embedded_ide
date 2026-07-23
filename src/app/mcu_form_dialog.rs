@@ -33,18 +33,21 @@ impl AppIde {
         // Clock Import/Export feedback — a local so the window closure never
         // borrows `self`; written back after `.show()`.
         let mut clock_note = self.mcu_form_clock_note.take();
+        // Window maximize state, via a local (the closure can't borrow `self`).
+        let mut maximized = self.mcu_form_maximized;
+        let just_restored = self.mcu_form_prev_maximized && !maximized;
+        self.mcu_form_prev_maximized = maximized;
 
-        egui::Window::new(if form.editing {
+        let title = if form.editing {
             "Edit MCU definition"
         } else {
             "New MCU definition"
-        })
-        .collapsible(false)
-        .resizable(true)
-        .default_width(680.0)
-        .default_height(560.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        };
+        super::datasheet_import_dialog::window_frame(
+            ui.ctx(), title, maximized, just_restored, 680.0, 560.0, 0.0,
+        )
         .show(ui.ctx(), |ui| {
+            super::datasheet_import_dialog::maximize_button(ui, &mut maximized);
             let errors = form.errors();
             let warnings = form.warnings();
 
@@ -443,6 +446,7 @@ impl AppIde {
         // The clock Import/Export note survives across frames while the form
         // is open (a save/close clears it via `open_mcu_form`).
         self.mcu_form_clock_note = clock_note;
+        self.mcu_form_maximized = maximized;
 
         // Keep the (mutated) form unless it was closed / saved.
         if keep_open {

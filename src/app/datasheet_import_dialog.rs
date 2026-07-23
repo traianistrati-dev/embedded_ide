@@ -29,6 +29,141 @@ struct PdfPick {
     bytes: Vec<u8>,
 }
 
+/// Apply maximize / restore to a dialog window.
+///
+/// Maximized → the window is pinned to (almost) the whole screen via
+/// `fixed_rect`. Restored → the caller's normal size + centre anchor. Minimize
+/// is the window's own collapse triangle (`.collapsible(true)`), so only the
+/// maximize toggle is custom.
+pub(super) fn window_frame(
+    ctx: &egui::Context,
+    title: impl Into<egui::WidgetText>,
+    maximized: bool,
+    // `true` on the single frame maximize flips back to restored — egui keeps
+    // the maximized rect in area memory, so `default_size` alone won't shrink
+    // it; a one-frame `fixed_rect` at the default size forces the restore.
+    just_restored: bool,
+    default_w: f32,
+    default_h: f32,
+    anchor_y: f32,
+) -> egui::Window<'static> {
+    let win = egui::Window::new(title).collapsible(true).resizable(true);
+    if maximized {
+        // fixed_rect also fixes position, so don't add an anchor here.
+        win.fixed_rect(ctx.content_rect().shrink(12.0))
+    } else if just_restored {
+        let screen = ctx.content_rect();
+        let size = egui::vec2(default_w, default_h);
+        let centre = screen.center() + egui::vec2(0.0, anchor_y);
+        win.fixed_rect(egui::Rect::from_center_size(centre, size))
+    } else {
+        win.default_width(default_w)
+            .default_height(default_h)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, anchor_y])
+    }
+}
+
+/// A maximize/restore toggle button, right-aligned — put it on the window's
+/// first row. Flips `maximized`.
+pub(super) fn maximize_button(ui: &mut egui::Ui, maximized: &mut bool) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let (icon, tip) = if *maximized {
+            (ph::ARROWS_IN, "Restore window")
+        } else {
+            (ph::ARROWS_OUT, "Maximize window")
+        };
+        if ui
+            .add(egui::Button::new(egui::RichText::new(icon).size(13.0)).frame(false))
+            .on_hover_text(tip)
+            .clicked()
+        {
+            *maximized = !*maximized;
+        }
+    });
+}
+
+/// The collapsible "Prompt" section shared by both AI import dialogs: a
+/// READ-ONLY view of the base prompt (so the user sees the contract they must
+/// not repeat) plus an editable, persisted supplementary field.
+///
+/// The base is read-only ON PURPOSE — it carries the JSON shape and the
+/// extraction rules; letting the user delete those would silently degrade
+/// quality. Additions can only help (or, at worst, confuse — the JSON schema
+/// still enforces the shape).
+pub(super) fn prompt_section(
+    ui: &mut egui::Ui,
+    id: &str,
+    open: &mut bool,
+    base: &str,
+    extra: &mut String,
+) {
+    let caret = if *open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
+    if ui
+        .add(
+            egui::Button::new(
+                egui::RichText::new(format!("{caret} Prompt"))
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(170)),
+            )
+            .frame(false),
+        )
+        .on_hover_text("View the base prompt and add your own extra instructions")
+        .clicked()
+    {
+        *open = !*open;
+    }
+    if !*open {
+        return;
+    }
+    ui.label(
+        egui::RichText::new("Additional instructions (saved, appended to the base prompt):")
+            .size(10.5)
+            .color(egui::Color32::from_gray(150)),
+    );
+    // Drag the bottom-right grip to enlarge the field.
+    egui::Resize::default()
+        .id_salt(format!("{id}_extra_resize"))
+        .default_height(44.0)
+        .min_height(28.0)
+        .show(ui, |ui| {
+            ui.add_sized(
+                ui.available_size(),
+                egui::TextEdit::multiline(extra)
+                    .id_salt(format!("{id}_extra"))
+                    .desired_width(f32::INFINITY)
+                    .hint_text("e.g. prefer the non-SMPS variant · the PLL table is on page 200"),
+            );
+        });
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new("Base prompt (read-only — carries the required JSON shape and rules):")
+            .size(10.0)
+            .color(egui::Color32::from_gray(130)),
+    );
+    // Also resizable, so a long base prompt can be read without a cramped box.
+    egui::Resize::default()
+        .id_salt(format!("{id}_base_resize"))
+        .default_height(120.0)
+        .min_height(48.0)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(format!("{id}_base"))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Read-only but selectable (the `&str` buffer can't be
+                    // edited), so the base prompt stays copyable.
+                    let mut base_ref = base;
+                    ui.add_sized(
+                        ui.available_size(),
+                        egui::TextEdit::multiline(&mut base_ref)
+                            .id_salt(format!("{id}_base_view"))
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                });
+        });
+}
+
 /// Cache entry labels (newest first), each with its size — for the list.
 fn cache_entry_labels() -> Vec<String> {
     ds::cache_entries()
@@ -79,6 +214,14 @@ pub(crate) struct DatasheetImport {
     cache_entries: Vec<String>,
     cache_list_open: bool,
     cache_note: Option<String>,
+    /// Persisted supplementary prompt appended to the base extraction prompt.
+    extra_prompt: String,
+    /// Whether the collapsible "Prompt" section is expanded.
+    prompt_open: bool,
+    /// Window maximized (fills the screen) vs normal size.
+    maximized: bool,
+    /// Previous frame's `maximized`, to detect the restore transition.
+    prev_maximized: bool,
     job: Option<Arc<Mutex<ImportJob>>>,
     report: Option<ds::ApplyReport>,
     error: Option<String>,
@@ -103,6 +246,10 @@ impl DatasheetImport {
             cache_entries: cache_entry_labels(),
             cache_list_open: false,
             cache_note: None,
+            extra_prompt: ds::load_extra_prompt(ds::PromptSlot::Pins),
+            prompt_open: false,
+            maximized: false,
+            prev_maximized: false,
             job: None,
             report: None,
             error: None,
@@ -169,13 +316,19 @@ impl AppIde {
         let mut dismiss_report = false;
         let mut do_clear_cache = false;
 
-        egui::Window::new(format!("{} Import from datasheet (AI)", ph::SPARKLE))
-            .collapsible(false)
-            .resizable(true)
-            .default_width(560.0)
-            .default_height(540.0)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 30.0])
+        let just_restored = di.prev_maximized && !di.maximized;
+        di.prev_maximized = di.maximized;
+        window_frame(
+            ui.ctx(),
+            format!("{} Import from datasheet (AI)", ph::SPARKLE),
+            di.maximized,
+            just_restored,
+            560.0,
+            540.0,
+            30.0,
+        )
             .show(ui.ctx(), |ui| {
+                maximize_button(ui, &mut di.maximized);
                 ui.label(
                     egui::RichText::new(
                         "Paste a pin / alternate-function table from the datasheet. \
@@ -318,6 +471,16 @@ impl AppIde {
                         );
                     }
                 });
+
+                // ── Prompt (base read-only + supplementary) ──────────────────
+                let base = ds::build_prompt(di.family_hint.trim(), di.package.trim());
+                prompt_section(
+                    ui,
+                    "ds_pin_prompt",
+                    &mut di.prompt_open,
+                    &base,
+                    &mut di.extra_prompt,
+                );
 
                 // ── Cache stats + clear ──────────────────────────────────────
                 ui.horizontal(|ui| {
@@ -603,12 +766,15 @@ impl AppIde {
             di.job = Some(shared.clone());
             di.error = None;
             di.report = None;
-            let (provider, key, model, family, package) = (
+            // Persist the supplementary prompt so it survives across sessions.
+            ds::save_extra_prompt(ds::PromptSlot::Pins, &di.extra_prompt);
+            let (provider, key, model, family, package, extra) = (
                 di.provider,
                 di.api_key.clone(),
                 di.model.clone(),
                 di.family_hint.clone(),
                 di.package.trim().to_string(),
+                di.extra_prompt.clone(),
             );
             let source = match &di.pdf {
                 Some(pdf) => Source::Pdf(pdf.bytes.clone()),
@@ -616,8 +782,9 @@ impl AppIde {
             };
             let use_cache = !di.force_reextract;
             std::thread::spawn(move || {
-                let res =
-                    ds::call_ai(provider, &key, &model, &family, &package, &source, use_cache);
+                let res = ds::call_ai(
+                    provider, &key, &model, &family, &package, &extra, &source, use_cache,
+                );
                 *shared.lock().unwrap() = ImportJob::Done(res);
             });
             ui.ctx().request_repaint();
