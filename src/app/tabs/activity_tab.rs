@@ -40,7 +40,13 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
         return;
     }
 
-    egui::ScrollArea::vertical()
+    // `both`, not `vertical` — this is the structural half of the fix. With
+    // the horizontal direction DISABLED, `auto_shrink([false, false])` makes
+    // the scroll area `inner_size.max(content_size)` (scroll_area.rs:1152):
+    // it EXPANDS to whatever the content measures, which then ratchets the
+    // enclosing panel wider. Enabling horizontal keeps `inner_size` fixed and
+    // turns any future overflow into a scrollbar instead of growth.
+    egui::ScrollArea::both()
         .id_salt("activity_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -76,8 +82,14 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
                         .started_at
                         .duration_since(action.ended_at)
                         .ok();
+                    // Label FIRST, rule after — a horizontal `Separator` takes
+                    // the whole of `available_size_before_wrap().x`
+                    // (separator.rs:117), so putting it first left the label
+                    // hanging past the edge. The content then measured wider
+                    // than the panel and ratcheted it (see the width note
+                    // above), which is why this only showed up once a SECOND
+                    // Save created the first group separator.
                     ui.horizontal(|ui| {
-                        ui.add(egui::Separator::default().horizontal());
                         if let Some(g) = gap {
                             ui.label(
                                 egui::RichText::new(format!("idle {}", fmt_dur(g)))
@@ -85,6 +97,7 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
                                     .color(egui::Color32::from_gray(110)),
                             );
                         }
+                        ui.add(egui::Separator::default().horizontal());
                     });
                     ui.add_space(3.0);
                 }
