@@ -256,6 +256,23 @@ pub(crate) struct DatasheetImport {
     report: Option<ds::ApplyReport>,
     error: Option<String>,
     key_note: Option<String>,
+    /// When set, the same Extract click also runs a CLOCK extraction on the
+    /// same source (one click fills pins AND the Clock tab). Default on.
+    also_clock: bool,
+    /// The parallel clock-extraction worker: `None` while unstarted/finished,
+    /// `Some(result)` once the thread is done. A plain `Option<Result>` slot
+    /// rather than reusing the standalone dialog's enum keeps the two dialogs
+    /// decoupled.
+    clock_job: Option<Arc<Mutex<Option<Result<ds::ClockExtraction, String>>>>>,
+    /// Green confirmation / red error from the combined clock extraction.
+    clock_note: Option<String>,
+    clock_error: Option<String>,
+    /// The package-detection pre-pass worker (fills `detected_packages`).
+    pkg_job: Option<Arc<Mutex<Option<Result<Vec<String>, String>>>>>,
+    /// Packages found in the datasheet — shown as one-click chips that set
+    /// `package`, so the user picks the exact name instead of typing it.
+    detected_packages: Vec<String>,
+    pkg_error: Option<String>,
 }
 
 impl DatasheetImport {
@@ -285,6 +302,13 @@ impl DatasheetImport {
             report: None,
             error: None,
             key_note: None,
+            also_clock: true,
+            clock_job: None,
+            clock_note: None,
+            clock_error: None,
+            pkg_job: None,
+            detected_packages: Vec::new(),
+            pkg_error: None,
         }
     }
 }
@@ -340,12 +364,75 @@ impl AppIde {
                     .request_repaint_after(std::time::Duration::from_millis(120));
             }
         }
-        let running = di.job.is_some();
+
+        // ── Poll the parallel clock worker (combined import) ──────────────────
+        if let Some(job) = &di.clock_job {
+            let done = job.lock().unwrap().is_some();
+            if done {
+                let result = job.lock().unwrap().take();
+                di.clock_job = None;
+                match result {
+                    Some(Ok(ex)) => {
+                        let sysclk =
+                            crate::panels::mcu_module::clock::graph::evaluate(&ex.clock.graph)
+                                .get("sysclk")
+                                .copied()
+                                .unwrap_or(0);
+                        form.set_imported_clock(ex.clock);
+                        di.clock_note = Some(format!(
+                            "{} Clock tree imported ({} MHz SYSCLK){} — review it in the Clock tab.",
+                            ph::CHECK_CIRCLE,
+                            sysclk / 1_000_000,
+                            if ex.from_cache { " · from cache" } else { "" }
+                        ));
+                        di.clock_error = None;
+                    }
+                    Some(Err(e)) => {
+                        di.clock_error = Some(e);
+                        di.clock_note = None;
+                    }
+                    None => {}
+                }
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(120));
+            }
+        }
+
+        // ── Poll the package-detection pre-pass ───────────────────────────────
+        if let Some(job) = &di.pkg_job {
+            let done = job.lock().unwrap().is_some();
+            if done {
+                let result = job.lock().unwrap().take();
+                di.pkg_job = None;
+                match result {
+                    Some(Ok(list)) => {
+                        // A single-package datasheet needs no choice — fill it,
+                        // unless the user already typed something.
+                        if list.len() == 1 && di.package.trim().is_empty() {
+                            di.package = list[0].clone();
+                        }
+                        di.detected_packages = list;
+                        di.pkg_error = None;
+                    }
+                    Some(Err(e)) => {
+                        di.pkg_error = Some(e);
+                        di.detected_packages.clear();
+                    }
+                    None => {}
+                }
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(120));
+            }
+        }
+        let running = di.job.is_some() || di.clock_job.is_some() || di.pkg_job.is_some();
 
         let mut do_extract = false;
         let mut do_save_key = false;
         let mut dismiss_report = false;
         let mut do_clear_cache = false;
+        let mut do_detect = false;
 
         let force_default = !di.shown_once || (di.prev_maximized && !di.maximized);
         di.prev_maximized = di.maximized;
@@ -501,6 +588,66 @@ impl AppIde {
                     );
                 }
             });
+
+            // ── Detect packages (pre-pass) ───────────────────────────────
+            // A cheap AI call lists the datasheet's package names so the user
+            // PICKS the exact one (character-for-character matters) instead of
+            // typing it — the historical #1 failure mode.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let has_source = di.pdf.is_some() || !di.text.trim().is_empty();
+                let can_detect = !running && !di.api_key.trim().is_empty() && has_source;
+                if ui
+                    .add_enabled(
+                        can_detect,
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{} Detect from datasheet",
+                                ph::MAGNIFYING_GLASS
+                            ))
+                            .size(10.5),
+                        )
+                        .small(),
+                    )
+                    .on_hover_text(
+                        "Ask the AI which packages this datasheet describes, then pick one \
+                         below — no need to type the exact name. Cached, so re-detecting the \
+                         same document is free.",
+                    )
+                    .on_disabled_hover_text("needs an API key and a PDF or pasted text")
+                    .clicked()
+                {
+                    do_detect = true;
+                }
+                if di.pkg_job.is_some() {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new("scanning…")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(160)),
+                    );
+                }
+                for name in &di.detected_packages {
+                    let selected = di.package.trim() == name.trim();
+                    if ui
+                        .selectable_label(
+                            selected,
+                            egui::RichText::new(name).size(10.5).monospace(),
+                        )
+                        .on_hover_text("Use this package")
+                        .clicked()
+                    {
+                        di.package = name.clone();
+                    }
+                }
+            });
+            if let Some(err) = &di.pkg_error {
+                ui.label(
+                    egui::RichText::new(format!("{} {err}", ph::WARNING))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(220, 170, 70)),
+                );
+            }
 
             // ── Prompt (base read-only + supplementary) ──────────────────
             let base = ds::build_prompt(di.family_hint.trim(), di.package.trim());
@@ -692,6 +839,13 @@ impl AppIde {
                             .color(egui::Color32::from_gray(160)),
                     );
                 }
+                ui.checkbox(&mut di.also_clock, "+ clock tree")
+                    .on_hover_text(
+                        "Also run a clock-tree extraction on the SAME source, filling the \
+                             Clock tab in the same click.\nBest with a full-datasheet PDF — a \
+                             pins-only paste may not contain the clock section (the clock \
+                             extraction then just reports it couldn't verify a SYSCLK).",
+                    );
                 ui.checkbox(&mut di.force_reextract, "re-extract")
                     .on_hover_text(
                         "Off: an identical document + package + model reuses the cached \
@@ -709,6 +863,26 @@ impl AppIde {
                     egui::RichText::new(format!("{} {err}", ph::X_CIRCLE))
                         .size(11.0)
                         .color(egui::Color32::from_rgb(230, 110, 90)),
+                );
+            }
+
+            // ── Combined clock-extraction outcome ─────────────────────────
+            // Advisory: a clock failure is amber (non-fatal — the pins still
+            // applied), a success is a green confirmation.
+            if let Some(note) = &di.clock_note {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(note)
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(120, 210, 120)),
+                );
+            }
+            if let Some(err) = &di.clock_error {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("{} Clock not imported: {err}", ph::WARNING))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(220, 170, 70)),
                 );
             }
 
@@ -793,11 +967,35 @@ impl AppIde {
             di.cache_stats = ds::cache_stats();
             di.cache_entries = cache_entry_labels();
         }
+        if do_detect && di.pkg_job.is_none() {
+            let shared: Arc<Mutex<Option<Result<Vec<String>, String>>>> =
+                Arc::new(Mutex::new(None));
+            di.pkg_job = Some(shared.clone());
+            di.pkg_error = None;
+            let (provider, key, model) = (di.provider, di.api_key.clone(), di.model.clone());
+            let source = match &di.pdf {
+                Some(pdf) => Source::Pdf(pdf.bytes.clone()),
+                None => Source::Text(di.text.clone()),
+            };
+            // Detection reuses the cache; a manual re-detect is rare enough that
+            // it isn't worth its own force flag — Clear-cache covers it.
+            let use_cache = !di.force_reextract;
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let res = ds::call_ai_packages(provider, &key, &model, &source, use_cache)
+                    .map(|l| l.packages);
+                *shared.lock().unwrap() = Some(res);
+                ctx.request_repaint();
+            });
+            ui.ctx().request_repaint();
+        }
         if do_extract && di.job.is_none() {
             let shared = Arc::new(Mutex::new(ImportJob::Running));
             di.job = Some(shared.clone());
             di.error = None;
             di.report = None;
+            di.clock_note = None;
+            di.clock_error = None;
             // Persist the supplementary prompt so it survives across sessions.
             ds::save_extra_prompt(ds::PromptSlot::Pins, &di.extra_prompt);
             let (provider, key, model, family, package, extra) = (
@@ -813,12 +1011,38 @@ impl AppIde {
                 None => Source::Text(di.text.clone()),
             };
             let use_cache = !di.force_reextract;
+            let ctx = ui.ctx().clone();
+
+            // Combined: fire a parallel CLOCK extraction on the SAME source, so
+            // one click fills both the pinout and the Clock tab. It uses the
+            // clock prompt slot's own supplementary text (loaded fresh, since
+            // this dialog only edits the pins slot) and the clock schema +
+            // numeric self-check — kept a SEPARATE request so a clock failure
+            // never discards good pins, and vice versa.
+            if di.also_clock {
+                let clk_shared: Arc<Mutex<Option<Result<ds::ClockExtraction, String>>>> =
+                    Arc::new(Mutex::new(None));
+                di.clock_job = Some(clk_shared.clone());
+                let clock_extra = ds::load_extra_prompt(ds::PromptSlot::Clock);
+                let (cp, ck, cm) = (provider, key.clone(), model.clone());
+                let csource = source.clone();
+                let cctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let res = ds::call_ai_clock(cp, &ck, &cm, &clock_extra, &csource, use_cache);
+                    *clk_shared.lock().unwrap() = Some(res);
+                    cctx.request_repaint();
+                });
+            }
+
             std::thread::spawn(move || {
                 let res = ds::call_ai(
                     provider, &key, &model, &family, &package, &extra, &source, use_cache,
                 );
                 *shared.lock().unwrap() = ImportJob::Done(res);
+                ctx.request_repaint();
             });
+            // Kick one repaint so the poll's `request_repaint_after` cycle (and
+            // the spinner) starts on the next frame, not on the next input.
             ui.ctx().request_repaint();
         }
 

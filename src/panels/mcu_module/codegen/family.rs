@@ -12,9 +12,7 @@
 //! here — they are pure data (a `.ron` definition).
 
 use super::common::USER_TAIL;
-use super::{embassy_common, f4, stm32, wba};
-use crate::panels::mcu_module::clock::graph::is_f4_graph;
-use crate::panels::mcu_module::clock::model::ClockConfig;
+use super::{embassy_common, rcc, stm32, wba};
 use crate::panels::mcu_module::codegen_esp;
 use crate::panels::mcu_module::mcu::Mcu;
 use crate::panels::mcu_module::modules;
@@ -173,22 +171,6 @@ impl FamilyBackend for WbaBackend {
 // pin-data XML importer adds from data-only into buildable projects.
 struct StmEmbassyBackend;
 
-/// The clock line for families without a dedicated RCC mapping: embassy's own
-/// reset default (HSI). The user can set `embassy_stm32::Config` by hand.
-const EMBASSY_DEFAULT_CLOCK: &str =
-    "    let p = embassy_stm32::init(Default::default()); // reset clock (HSI). \
-     Set embassy_stm32::Config for RCC if needed.\n";
-
-/// Render the clock block for a generic STM32 chip: the F4 RCC mapping when the
-/// Clock tab holds an F4 graph, else the reset default. Extend with `is_g0` /
-/// `is_g4` / … as more per-family RCC mappings land.
-fn stm_clock_block(clock: &ClockConfig) -> String {
-    match clock {
-        ClockConfig::Graph(gc) if is_f4_graph(&gc.graph) => f4::clock_block(clock),
-        _ => EMBASSY_DEFAULT_CLOCK.to_string(),
-    }
-}
-
 impl FamilyBackend for StmEmbassyBackend {
     fn family_id(&self) -> &'static str {
         "stm32" // label only — `handles` does the real matching
@@ -204,16 +186,25 @@ impl FamilyBackend for StmEmbassyBackend {
         format!(
             "{header}{section}\n{tail}",
             header = embassy_common::invariant_header(&mcu.name, &mcu.id),
-            section =
-                embassy_common::make_generated_section(&mcu.name, &all, &stm_clock_block(&mcu.clock)),
+            // The RCC block is selected by FAMILY (data), not by sniffing the
+            // graph's shape — `rcc::rcc_recipe` maps f4/wba (and any future
+            // family) to its ReadSpec + descriptor; others get the reset default.
+            section = embassy_common::make_generated_section(
+                &mcu.name,
+                &all,
+                &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+            ),
             tail = USER_TAIL,
         )
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
-        let section =
-            embassy_common::make_generated_section(&mcu.name, &all, &stm_clock_block(&mcu.clock));
+        let section = embassy_common::make_generated_section(
+            &mcu.name,
+            &all,
+            &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+        );
         embassy_common::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
 }

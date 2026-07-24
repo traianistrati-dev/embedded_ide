@@ -5,6 +5,7 @@
 //! - `stm32f1` — bridge that builds the F103 tree as a graph and proves the
 //!               evaluator matches the hardcoded `compute.rs`.
 
+pub mod auto_layout;
 pub mod config;
 pub mod esp32c3;
 pub mod eval;
@@ -15,9 +16,11 @@ pub mod model;
 pub mod render;
 pub mod stm32f1;
 pub mod stm32f4;
+pub mod stm32g4;
 pub mod stm32wba;
 pub mod validate;
 
+pub use auto_layout::auto_layout;
 pub use config::GraphClock;
 pub use import::{export_clock_ron, parse_clock_ron};
 pub use esp32c3::{esp32c3_graph, esp32c3_layout};
@@ -30,6 +33,7 @@ pub use stm32f4::{
     graph_to_f4, is_f4_graph, stm32f4_graph, stm32f4_layout, stm32f4_limits,
     stm32f4_limits_default, F4Clock, F4Sys,
 };
+pub use stm32g4::{is_g4_graph, stm32g4_graph};
 pub use stm32wba::{
     graph_to_wba, is_wba_graph, stm32wba_graph, stm32wba_layout, stm32wba_limits, WbaClock,
     WbaSys,

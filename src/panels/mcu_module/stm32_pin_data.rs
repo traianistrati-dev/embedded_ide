@@ -442,6 +442,38 @@ fn hal_dep_for(family: &str, line: &str, name: &str) -> String {
     format!("# TODO: add the HAL / PAC dependency for family {family}")
 }
 
+/// The HAL dependency line derived from a chip NAME alone — the path taken by
+/// the AI datasheet import and the form's "Auto-fill from name", which (unlike
+/// the XML importer) have no `<Line>` attribute to hand to [`hal_dep_for`].
+/// STM32F1 keys `stm32f1xx-hal` on its `stm32f1NN` device feature, recovered
+/// here from the part number; every other STM32 family uses the embassy
+/// per-chip feature; non-STM32 families get the editable TODO line.
+pub fn hal_dep_for_name(family: &str, name: &str) -> String {
+    if family == "stm32f1" {
+        return match f1_line_from_name(name) {
+            Some(line) => hal_dep_for(family, &line, name),
+            // An F1 family with a name we can't pin to a device feature — leave
+            // an editable TODO rather than an empty `features = ["", "rt"]`.
+            None => format!("# TODO: set the stm32f1xx-hal device feature for {name}"),
+        };
+    }
+    // `line` is unused outside the F1 branch of `hal_dep_for`.
+    hal_dep_for(family, "", name)
+}
+
+/// The `stm32f1xx-hal` device feature (`stm32f103`) implied by an STM32F1 part
+/// name, or `None` when the name isn't a recognisable F1 part number. The HAL
+/// keys the feature on the 3-digit line (`stm32f100/101/103/…`) — the
+/// `stm32f1` prefix plus the next two digits.
+fn f1_line_from_name(name: &str) -> Option<String> {
+    let slug = slugify(name); // lower-case a–z0–9 only → ASCII, byte-indexable
+    let ok = slug.len() >= 9
+        && slug.starts_with("stm32f1")
+        && slug.as_bytes()[7].is_ascii_digit()
+        && slug.as_bytes()[8].is_ascii_digit();
+    ok.then(|| slug[..9].to_string())
+}
+
 /// The embassy-stm32 chip feature for a concrete part: the part number without
 /// the trailing package + temperature code (open-pin-data names end in a
 /// `<PackageLetter>x` pair — `STM32F411RETx` → `stm32f411re`).
@@ -643,6 +675,21 @@ mod tests {
         assert!(g0.contains("\"stm32g0b1re\""), "{g0}");
         // Non-STM32 falls back to a TODO the user completes.
         assert!(hal_dep_for("rp2040", "", "RP2040").contains("TODO"));
+    }
+
+    #[test]
+    fn hal_dep_from_name_recovers_the_f1_device_feature() {
+        // F1: the device feature is the stm32f1NN line pulled from the part
+        // number (the AI / auto-fill path has no XML <Line> attribute).
+        let f1 = hal_dep_for_name("stm32f1", "STM32F103RBT6");
+        assert!(f1.contains("stm32f1xx-hal"), "{f1}");
+        assert!(f1.contains("\"stm32f103\""), "{f1}");
+        // Other STM32 families → embassy-stm32 with the per-chip feature.
+        let g0 = hal_dep_for_name("stm32g0", "STM32G0B1RETx");
+        assert!(g0.contains("embassy-stm32") && g0.contains("\"stm32g0b1re\""), "{g0}");
+        // An F1 family with an unusable name → editable TODO, never `["", "rt"]`.
+        let bad = hal_dep_for_name("stm32f1", "STM32");
+        assert!(bad.contains("TODO") && !bad.contains("\"\""), "{bad}");
     }
 
     #[test]

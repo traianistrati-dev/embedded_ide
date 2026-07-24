@@ -37,6 +37,14 @@ pub fn draw_graph_clock(
     let mut changed = false;
     let is_stm32f1 = family == "stm32f1";
 
+    // A graph without a hand-authored diagram (AI-imported clock, or any future
+    // family) gets one computed from its topology — filled ONCE and kept on the
+    // live model, so it isn't recomputed per frame and a later drag-refine can
+    // persist. Does NOT set `changed`: the layout is cosmetic, codegen ignores it.
+    if gc.layout.is_empty() {
+        gc.layout = super::graph::auto_layout(&gc.graph);
+    }
+
     // ── Presets (thin top bar) ───────────────────────────────────────────────
     // Presets are typed `Stm32f1Clock` configs; applying one expands it to
     // graph node states and adopts them by id (no-op on non-F103 graphs).

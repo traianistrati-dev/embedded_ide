@@ -17,7 +17,6 @@
 //! reopen. Full peripheral-driver generation (like the STM32F1 config files)
 //! is a later step.
 
-use super::super::clock::graph::is_wba_graph;
 use super::super::clock::model::ClockConfig;
 use super::embassy_common;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
@@ -26,30 +25,16 @@ use crate::panels::mcu_module::pins::logic::pin::Pin;
 // family); re-exported so `family.rs` and the tests keep their `wba::…` paths.
 pub use embassy_common::{invariant_header, splice_section};
 
-/// The Clock-tab selections mapped onto `embassy_stm32::Config` (RCC).
-/// The reset state (HSI16, everything /1) stays `Default::default()`; anything
-/// else emits an explicit config block. Facts verified against embassy-stm32
-/// v0.4.0 `src/rcc/wba.rs`: the field is `pll1`, sysclk variant `PLL1_R`, and
-/// **the PLL is unavailable in voltage range 2** (embassy panics) — RANGE1 is
-/// emitted for any PLL use; HSE-32 as sysclk also exceeds range 2's window.
-fn clock_block(clock: &ClockConfig) -> String {
-    use super::rcc::{self, ReadSpec};
-    let spec = ReadSpec::wba();
-    let v = match clock {
-        ClockConfig::Graph(gc) if is_wba_graph(&gc.graph) => rcc::read_rcc_values(&gc.graph, &spec),
-        _ => spec.reset.clone(),
-    };
-    if v == spec.reset {
-        return "    let p = embassy_stm32::init(Default::default()); // HSI16, all buses /1\n"
-            .to_string();
-    }
-    rcc::emit_rcc_block(&rcc::RccDescriptor::wba(), &v)
-}
-
 /// The WBA generated section — the shared embassy shape with the WBA RCC clock
-/// block spliced in.
+/// block spliced in. The RCC mapping is now the FAMILY-keyed
+/// [`super::rcc::graph_clock_block`] (`"stm32wba"` → `ReadSpec::wba()` +
+/// `RccDescriptor::wba()`), so this no longer sniffs the graph's shape.
 pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock: &ClockConfig) -> String {
-    embassy_common::make_generated_section(mcu_name, pins, &clock_block(clock))
+    embassy_common::make_generated_section(
+        mcu_name,
+        pins,
+        &super::rcc::graph_clock_block("stm32wba", clock),
+    )
 }
 
 #[cfg(test)]

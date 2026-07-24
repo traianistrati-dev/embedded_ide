@@ -290,6 +290,9 @@ pub fn build_prompt(family_hint: &str, package: &str) -> String {
 }
 
 /// Where the chip description comes from: pasted text, or a datasheet PDF.
+/// `Clone` so one picked source can feed two extractions (pins + clock) in
+/// parallel worker threads — see the combined import in `datasheet_import_dialog`.
+#[derive(Clone)]
 pub enum Source {
     Text(String),
     Pdf(Vec<u8>),
@@ -313,6 +316,12 @@ const PDF_INSTRUCTION: &str =
      memory map, and full pin / alternate-function table following the system \
      instructions and the required JSON schema.";
 
+/// PDF instruction for the PACKAGE-LIST pre-pass.
+const PACKAGES_PDF_INSTRUCTION: &str =
+    "This is a microcontroller datasheet (PDF). List the DISTINCT packages it \
+     describes (pin-table column headers and pinout figure titles) following the \
+     system instructions and the required JSON schema. Do not extract pins.";
+
 /// Which extraction this request is for — selects the JSON schema and the PDF
 /// instruction. The provider plumbing (auth, PDF encoding, structured-output
 /// mechanism) is identical for both; only these two pieces differ.
@@ -322,6 +331,9 @@ pub enum ExtractKind {
     Pins,
     /// The clock tree spine (`clock::graph::extract::ExtractedClock`).
     Clock,
+    /// Just the list of package names, for the pick-a-package pre-pass
+    /// (`ExtractedPackages`).
+    Packages,
 }
 
 impl ExtractKind {
@@ -335,6 +347,7 @@ impl ExtractKind {
                     additional_properties,
                 )
             }
+            ExtractKind::Packages => packages_schema(additional_properties),
         }
     }
 
@@ -343,6 +356,7 @@ impl ExtractKind {
         match self {
             ExtractKind::Pins => PDF_INSTRUCTION,
             ExtractKind::Clock => CLOCK_PDF_INSTRUCTION,
+            ExtractKind::Packages => PACKAGES_PDF_INSTRUCTION,
         }
     }
 }
@@ -511,6 +525,59 @@ fn extraction_schema(additional_properties: bool) -> serde_json::Value {
     root
 }
 
+// ── Package-list pre-pass ───────────────────────────────────────────────────
+
+/// The distinct package names a datasheet describes — the cheap pre-pass that
+/// lets the user PICK the exact package (which drives the pin extraction) from a
+/// list instead of typing it character-for-character (the #1 failure mode).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ExtractedPackages {
+    pub packages: Vec<String>,
+}
+
+/// System prompt for the package-list pre-pass. Deliberately narrow: it only
+/// enumerates package names, so the model doesn't spend effort (or output) on
+/// pins here.
+pub fn build_packages_prompt() -> String {
+    "You are a datasheet-extraction assistant for an embedded-Rust IDE.\n\
+     List EVERY distinct package the microcontroller datasheet describes, so the \
+     user can pick the exact one to extract pins for. Return a SINGLE JSON object \
+     and nothing else — no markdown, no prose, no code fences.\n\
+     \n\
+     JSON shape:\n\
+     { \"packages\": [string, ...] }   // e.g. [\"UFQFPN32\", \"WLCSP41\", \"UFQFPN48\", \"UFQFPN48 SMPS\", \"UFBGA59\"]\n\
+     \n\
+     Rules:\n\
+     - a package name comes from a pin-table COLUMN HEADER or a pinout FIGURE \
+     TITLE (e.g. \"Figure 9. UFQFPN48 pinout\"), NEVER from the text drawn inside \
+     the package outline (that is the base family and is identical across \
+     variants);\n\
+     - copy each name EXACTLY as printed, character for character. Names that \
+     share a prefix are DIFFERENT packages — list BOTH \"UFQFPN48\" and \
+     \"UFQFPN48 SMPS\";\n\
+     - include EVERY package the datasheet shows — QFP / QFN / CSP AND BGA;\n\
+     - each name at most once, in the order the datasheet presents them;\n\
+     - list only packages the datasheet actually shows — never invent one."
+        .to_string()
+}
+
+/// The structured-output schema for [`build_packages_prompt`]. `additional_
+/// properties` follows the same per-provider rule as [`extraction_schema`].
+fn packages_schema(additional_properties: bool) -> serde_json::Value {
+    let mut root = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "packages": { "type": "array", "items": { "type": "string" } },
+        },
+        "required": ["packages"],
+    });
+    if additional_properties {
+        root["additionalProperties"] = serde_json::json!(false);
+    }
+    root
+}
+
 /// Standard base64 (RFC 4648) with padding — small enough to keep dependency-
 /// free (the crate has no base64 dep). Used to inline a PDF into the request.
 pub fn base64_encode(bytes: &[u8]) -> String {
@@ -665,6 +732,12 @@ pub fn parse_response(model_text: &str) -> Result<ExtractedChip, String> {
     serde_json::from_str(json).map_err(|e| format!("could not parse extraction JSON: {e}"))
 }
 
+/// Parse the package-list pre-pass reply into [`ExtractedPackages`].
+pub fn parse_packages_reply(model_text: &str) -> Result<ExtractedPackages, String> {
+    let json = extract_json_object(model_text)?;
+    serde_json::from_str(json).map_err(|e| format!("could not parse packages JSON: {e}"))
+}
+
 // ── Applying the extraction to the form ─────────────────────────────────────
 
 /// What [`apply_to_form`] changed — the review surface shown after an import.
@@ -694,8 +767,6 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     let mut r = ApplyReport::default();
 
     patch(&mut form.display_name, &chip.display_name, "Display name", &mut r);
-    patch(&mut form.family, &chip.family, "Family", &mut r);
-    patch(&mut form.cpu, &chip.cpu, "CPU", &mut r);
     // NOTE: `package` is deliberately NOT patched from the extraction — it is a
     // USER input that drives which pin-number column the model reads, so the
     // model's echo must never override it.
@@ -704,6 +775,23 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     patch(&mut form.ram_origin, &chip.ram_origin, "RAM origin", &mut r);
     patch(&mut form.ram_size, &chip.ram_size, "RAM size", &mut r);
     patch(&mut form.probe_chip, &chip.probe_chip, "Probe chip", &mut r);
+
+    // Identity + the build-critical fields the model doesn't reliably return.
+    // `auto_fill_identity` derives family, CPU, toolchain, target AND the HAL
+    // dependency line DETERMINISTICALLY from the (just-patched) part name — the
+    // same helper the form's "Auto-fill from name" button uses. Without it an
+    // AI-imported non-F1 STM32 kept the blank form's `stm32f1xx-hal` + F1 target
+    // and wouldn't compile. It only fires for recognised STM32 names; for
+    // anything else (ESP, unknown) we fall back to the model's own family/cpu.
+    if form.auto_fill_identity() {
+        r.patched.push(format!("Family = {}", form.family));
+        r.patched.push(format!("CPU = {}", form.cpu));
+        r.patched.push(format!("Target = {}", form.target));
+        r.patched.push(format!("HAL dependency = {}", form.hal_dep));
+    } else {
+        patch(&mut form.family, &chip.family, "Family", &mut r);
+        patch(&mut form.cpu, &chip.cpu, "CPU", &mut r);
+    }
 
     // Derive an id from the display name if the user hasn't set one — the id is
     // the file name + registry key and must be a–z 0–9 _ only.
@@ -1340,6 +1428,88 @@ pub fn call_ai_clock(
     Ok(ClockExtraction { clock: gc, from_cache: false })
 }
 
+/// A package-list pre-pass result plus whether it came from the cache.
+pub struct PackageList {
+    pub packages: Vec<String>,
+    pub from_cache: bool,
+}
+
+/// The pick-a-package pre-pass: a cheap call that returns the datasheet's
+/// distinct package names, so the user selects the exact one (which drives the
+/// pin extraction) instead of typing it. Same providers / key storage / PDF
+/// handling / cache as the other two; keyed with a `"package-list"` tag so it
+/// never collides with a pin or clock extraction of the same document.
+///
+/// Blocking — the dialog runs it on a worker thread.
+pub fn call_ai_packages(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    source: &Source,
+    use_cache: bool,
+) -> Result<PackageList, String> {
+    if api_key.trim().is_empty() {
+        return Err(format!(
+            "No API key set — enter your {} API key first.",
+            provider.label()
+        ));
+    }
+    if model.trim().is_empty() {
+        return Err("No model set — enter a model id first.".to_string());
+    }
+    match source {
+        Source::Text(t) if t.trim().is_empty() => {
+            return Err("Nothing to scan — paste the datasheet text or pick a PDF first.".to_string());
+        }
+        Source::Pdf(b) if b.is_empty() => return Err("The selected PDF is empty.".to_string()),
+        Source::Pdf(b) if b.len() > MAX_PDF_BYTES => {
+            return Err(format!(
+                "PDF is {:.1} MB — over the {} MB limit. Paste the relevant pages instead.",
+                b.len() as f64 / (1024.0 * 1024.0),
+                MAX_PDF_BYTES / (1024 * 1024)
+            ));
+        }
+        _ => {}
+    }
+
+    let key = cache_key(provider, model, "package-list", "", source);
+    let build_from = |model_text: &str| -> Result<Vec<String>, String> {
+        let mut v: Vec<String> = parse_packages_reply(model_text)?
+            .packages
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        v.dedup(); // the prompt already asks for uniqueness; drop adjacent repeats
+        if v.is_empty() {
+            return Err("no packages found in the datasheet".to_string());
+        }
+        Ok(v)
+    };
+    if use_cache {
+        if let Some(cached) = load_cached(&key) {
+            if let Ok(v) = build_from(&cached) {
+                return Ok(PackageList { packages: v, from_cache: true });
+            }
+        }
+    }
+
+    let body = build_request_body(provider, model, &build_packages_prompt(), source, ExtractKind::Packages);
+    let model_text = post_and_parse(provider, api_key, model, &body)?;
+    let v = build_from(&model_text)?;
+    let label = format!(
+        "packages · {}/{} · {}",
+        provider.label(),
+        model.trim(),
+        match source {
+            Source::Text(_) => "text".to_string(),
+            Source::Pdf(b) => format!("PDF {}", human_bytes(b.len() as u64)),
+        }
+    );
+    save_cached(&key, &model_text, &label);
+    Ok(PackageList { packages: v, from_cache: false })
+}
+
 /// Call the selected provider and parse the extraction. Blocking — the dialog
 /// runs it on a background thread. All the pure pieces above are composed here.
 #[allow(clippy::too_many_arguments)]
@@ -1412,6 +1582,22 @@ pub fn call_ai(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packages_prepass_prompt_schema_and_parse() {
+        let p = build_packages_prompt();
+        assert!(p.contains("\"packages\""));
+        assert!(p.contains("EXACTLY")); // exact, character-for-character names
+        assert!(p.contains("UFQFPN48 SMPS")); // variant discipline demonstrated
+        // Schema: additionalProperties present for strict providers, absent for
+        // Gemini's responseSchema subset (same rule as the pin schema).
+        assert_eq!(packages_schema(true)["additionalProperties"], serde_json::json!(false));
+        assert!(packages_schema(false).get("additionalProperties").is_none());
+        // Parse tolerates a fenced reply and keeps variant names distinct.
+        let reply = "```json\n{ \"packages\": [\"UFQFPN48\", \"UFQFPN48 SMPS\", \"UFBGA59\"] }\n```";
+        let ex = parse_packages_reply(reply).unwrap();
+        assert_eq!(ex.packages, ["UFQFPN48", "UFQFPN48 SMPS", "UFBGA59"]);
+    }
 
     #[test]
     fn prompt_asks_for_verbatim_signals_and_carries_hints() {
@@ -1894,6 +2080,43 @@ mod tests {
         let chip = ExtractedChip::default(); // everything empty
         apply_to_form(&chip, &mut form);
         assert_eq!(form.display_name, "KEEP");
+    }
+
+    /// A non-F1 STM32 import must derive the build-critical fields from the part
+    /// name, not leave the blank form's F1 defaults — otherwise the generated
+    /// project won't compile. Regression guard for the `hal_dep`/`target` gap.
+    #[test]
+    fn apply_derives_target_and_hal_for_non_f1_stm32() {
+        let chip = ExtractedChip {
+            display_name: "STM32G0B1RE".into(),
+            family: "".into(), // model didn't say — name-derivation must fill it
+            pins: vec![ExtractedPin { number: "1".into(), name: "PA0".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let mut form = McuForm::blank(); // starts as stm32f1 / thumbv7m / stm32f1xx-hal
+        let r = apply_to_form(&chip, &mut form);
+        assert_eq!(form.family, "stm32g0");
+        assert_eq!(form.cpu, "Cortex-M0+");
+        assert_eq!(form.target, "thumbv6m-none-eabi");
+        assert!(form.hal_dep.contains("embassy-stm32"), "{}", form.hal_dep);
+        assert!(form.hal_dep.contains("stm32g0b1re"), "{}", form.hal_dep);
+        assert!(r.patched.iter().any(|p| p.starts_with("HAL dependency = ")));
+    }
+
+    /// A non-STM32 (ESP) name isn't recognised by the deterministic derivation,
+    /// so the model's own family/cpu must survive as the fallback.
+    #[test]
+    fn apply_keeps_model_identity_for_non_stm32() {
+        let chip = ExtractedChip {
+            display_name: "ESP32-C3".into(),
+            family: "esp32c3".into(),
+            cpu: "RISC-V".into(),
+            ..Default::default()
+        };
+        let mut form = McuForm::blank();
+        apply_to_form(&chip, &mut form);
+        assert_eq!(form.family, "esp32c3");
+        assert_eq!(form.cpu, "RISC-V");
     }
 
     /// Two package variants merged (the real STM32WBA case: "UFQFPN48" and

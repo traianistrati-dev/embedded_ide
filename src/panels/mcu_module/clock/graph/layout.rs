@@ -153,6 +153,21 @@ pub struct ClockLayout {
     pub widgets: Vec<Widget>,
 }
 
+impl ClockLayout {
+    /// `true` when the layout carries no drawable primitives at all — the cue
+    /// to auto-generate one from the graph topology (see
+    /// [`super::auto_layout::auto_layout`]). An AI-imported clock lands here.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+            && self.outputs.is_empty()
+            && self.tags.is_empty()
+            && self.labels_above.is_empty()
+            && self.mux_titles.is_empty()
+            && self.wires.is_empty()
+            && self.widgets.is_empty()
+    }
+}
+
 const M: u32 = 1_000_000;
 
 /// The STM32F103 Figure-2 static layout (ported verbatim from the original
