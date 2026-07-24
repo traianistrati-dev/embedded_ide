@@ -112,7 +112,11 @@ pub(super) fn prompt_section(
     base: &str,
     extra: &mut String,
 ) {
-    let caret = if *open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
+    let caret = if *open {
+        ph::CARET_DOWN
+    } else {
+        ph::CARET_RIGHT
+    };
     if ui
         .add(
             egui::Button::new(
@@ -355,134 +359,132 @@ impl AppIde {
             540.0,
             30.0,
         )
-            .show(ui.ctx(), |ui| {
-                maximize_button(ui, &mut di.maximized);
-                ui.label(
-                    egui::RichText::new(
-                        "Paste a pin / alternate-function table from the datasheet. \
+        .show(ui.ctx(), |ui| {
+            maximize_button(ui, &mut di.maximized);
+            ui.label(
+                egui::RichText::new(
+                    "Paste a pin / alternate-function table from the datasheet. \
                          The AI fills the form for you to review — nothing is saved \
                          automatically.",
-                    )
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(160)),
-                );
-                ui.add_space(6.0);
+                )
+                .size(11.0)
+                .color(egui::Color32::from_gray(160)),
+            );
+            ui.add_space(6.0);
 
-                // ── Provider ─────────────────────────────────────────────────
-                // Switching providers swaps in that provider's own key and
-                // default model — carrying either across would just produce an
-                // auth failure with a confusing message.
-                ui.horizontal(|ui| {
-                    ui.label("AI provider:");
-                    let before = di.provider;
-                    egui::ComboBox::from_id_salt("ds_provider")
-                        .selected_text(di.provider.label())
-                        .width(180.0)
-                        .show_ui(ui, |ui| {
-                            for p in ds::Provider::ALL {
-                                ui.selectable_value(&mut di.provider, p, p.label());
-                            }
-                        });
-                    if di.provider != before {
-                        di.api_key = ds::load_api_key(di.provider);
-                        di.model = di.provider.default_model().to_string();
-                        di.key_note = None;
-                        ds::save_last_provider(di.provider);
-                    }
-                    ui.label(
-                        egui::RichText::new("all three read the PDF natively")
-                            .size(10.0)
-                            .color(egui::Color32::from_gray(140))
-                            .italics(),
-                    )
-                    .on_hover_text(
-                        "Only providers that accept a PDF directly are offered. A pin \
+            // ── Provider ─────────────────────────────────────────────────
+            // Switching providers swaps in that provider's own key and
+            // default model — carrying either across would just produce an
+            // auth failure with a confusing message.
+            ui.horizontal(|ui| {
+                ui.label("AI provider:");
+                let before = di.provider;
+                egui::ComboBox::from_id_salt("ds_provider")
+                    .selected_text(di.provider.label())
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for p in ds::Provider::ALL {
+                            ui.selectable_value(&mut di.provider, p, p.label());
+                        }
+                    });
+                if di.provider != before {
+                    di.api_key = ds::load_api_key(di.provider);
+                    di.model = di.provider.default_model().to_string();
+                    di.key_note = None;
+                    ds::save_last_provider(di.provider);
+                }
+                ui.label(
+                    egui::RichText::new("all three read the PDF natively")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140))
+                        .italics(),
+                )
+                .on_hover_text(
+                    "Only providers that accept a PDF directly are offered. A pin \
                          table is a 2D layout — backends that can only be fed text \
                          extracted locally scramble the columns and return confident, \
                          wrong pinouts.",
-                    );
-                });
-
-                // ── API key ──────────────────────────────────────────────────
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} API key:", di.provider.label()));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut di.api_key)
-                            .password(!di.show_key)
-                            .desired_width(260.0),
-                    );
-                    ui.checkbox(&mut di.show_key, "show");
-                    if ui
-                        .button("Save key")
-                        .on_hover_text("Store in the user config folder (never in the project)")
-                        .clicked()
-                    {
-                        do_save_key = true;
-                    }
-                });
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Stored per provider in your user config folder; the {} \
-                         environment variable overrides it. Never written to the project.",
-                        di.provider.env_var()
-                    ))
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(140))
-                    .italics(),
                 );
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 3.0;
-                    ui.label(
-                        egui::RichText::new(format!("{} No key? Create one at", ph::KEY))
-                            .size(10.0)
-                            .color(egui::Color32::from_gray(140)),
-                    );
-                    ui.hyperlink_to(
-                        egui::RichText::new(di.provider.console_url()).size(10.0),
-                        di.provider.console_url(),
-                    )
-                    .on_hover_text(
-                        "Opens the provider's console. Sign in, create a key, copy it \
-                         (usually shown once) and paste it above.",
-                    );
-                    ui.label(
-                        egui::RichText::new("(needs billing set up on the account).")
-                            .size(10.0)
-                            .color(egui::Color32::from_gray(140)),
-                    );
-                });
-                if let Some(note) = &di.key_note {
-                    ui.label(egui::RichText::new(note).size(10.5));
+            });
+
+            // ── API key ──────────────────────────────────────────────────
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(format!("{} API key:", di.provider.label()));
+                ui.add(
+                    egui::TextEdit::singleline(&mut di.api_key)
+                        .password(!di.show_key)
+                        .desired_width(260.0),
+                );
+                ui.checkbox(&mut di.show_key, "show");
+                if ui
+                    .button("Save key")
+                    .on_hover_text("Store in the user config folder (never in the project)")
+                    .clicked()
+                {
+                    do_save_key = true;
                 }
+            });
+            ui.label(
+                egui::RichText::new(format!(
+                    "Stored per provider in your user config folder; the {} \
+                         environment variable overrides it. Never written to the project.",
+                    di.provider.env_var()
+                ))
+                .size(10.0)
+                .color(egui::Color32::from_gray(140))
+                .italics(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.label(
+                    egui::RichText::new(format!("{} No key? Create one at", ph::KEY))
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140)),
+                );
+                ui.hyperlink_to(
+                    egui::RichText::new(di.provider.console_url()).size(10.0),
+                    di.provider.console_url(),
+                )
+                .on_hover_text(
+                    "Opens the provider's console. Sign in, create a key, copy it \
+                         (usually shown once) and paste it above.",
+                );
+                ui.label(
+                    egui::RichText::new("(needs billing set up on the account).")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140)),
+                );
+            });
+            if let Some(note) = &di.key_note {
+                ui.label(egui::RichText::new(note).size(10.5));
+            }
 
-                // ── Model ────────────────────────────────────────────────────
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Model:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut di.model).desired_width(200.0),
-                    )
+            // ── Model ────────────────────────────────────────────────────
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Model:");
+                ui.add(egui::TextEdit::singleline(&mut di.model).desired_width(200.0))
                     .on_hover_text(di.provider.model_hint());
-                    if !di.family_hint.trim().is_empty() {
-                        ui.label(
-                            egui::RichText::new(format!("family: {}", di.family_hint.trim()))
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(140)),
-                        );
-                    }
-                });
+                if !di.family_hint.trim().is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!("family: {}", di.family_hint.trim()))
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                }
+            });
 
-                // ── Package (REQUIRED — picks the pin-number column) ─────────
-                ui.horizontal(|ui| {
-                    ui.label("Package *:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut di.package)
-                            .desired_width(140.0)
-                            .hint_text("UFQFPN48"),
-                    )
-                    .on_hover_text(
-                        "Must match a package name in the datasheet EXACTLY.\n\
+            // ── Package (REQUIRED — picks the pin-number column) ─────────
+            ui.horizontal(|ui| {
+                ui.label("Package *:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut di.package)
+                        .desired_width(140.0)
+                        .hint_text("UFQFPN48"),
+                )
+                .on_hover_text(
+                    "Must match a package name in the datasheet EXACTLY.\n\
                          The datasheet lists one column / pinout figure per package \
                          (UFQFPN32, WLCSP41, UFQFPN48, UFQFPN48 SMPS, UFBGA59…) — \
                          this tells the model which one to read.\n\n\
@@ -490,286 +492,288 @@ impl AppIde {
                          DIFFERENT pinouts (both figures just say \"UFQFPN48\" inside \
                          the chip outline). Type the full variant name, e.g. copy it \
                          from the figure title.",
-                    );
-                    if di.package.trim().is_empty() {
-                        ui.label(
-                            egui::RichText::new("required — without it the wrong column gets read")
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(230, 170, 70)),
-                        );
-                    }
-                });
-
-                // ── Prompt (base read-only + supplementary) ──────────────────
-                let base = ds::build_prompt(di.family_hint.trim(), di.package.trim());
-                prompt_section(
-                    ui,
-                    "ds_pin_prompt",
-                    &mut di.prompt_open,
-                    &base,
-                    &mut di.extra_prompt,
                 );
-
-                // ── Cache stats + clear ──────────────────────────────────────
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let (n, bytes) = di.cache_stats;
+                if di.package.trim().is_empty() {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "Cache: {n} extraction(s) · {}",
-                            human_size(bytes)
-                        ))
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(140)),
+                        egui::RichText::new("required — without it the wrong column gets read")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(230, 170, 70)),
                     );
-                    if ui
-                        .add_enabled(
-                            n > 0,
-                            egui::Button::new(egui::RichText::new("Clear").size(10.0)).small(),
-                        )
-                        .on_hover_text(
-                            "Delete every cached extraction. Re-importing the same datasheet \
-                             will call (and bill) the API again.",
-                        )
-                        .on_disabled_hover_text("nothing cached yet")
-                        .clicked()
-                    {
-                        do_clear_cache = true;
-                    }
-                    if let Some(note) = &di.cache_note {
-                        ui.label(
-                            egui::RichText::new(note)
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(150)),
-                        );
-                    }
-                });
-                // ── Cached-file names (collapsible) ──────────────────────────
-                // The reply files are hash-named, so this lists the human label
-                // (chip · package · provider/model · source) written beside
-                // each one, newest first.
-                if !di.cache_entries.is_empty() {
-                    let caret = if di.cache_list_open { ph::CARET_DOWN } else { ph::CARET_RIGHT };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(format!(
-                                    "{caret} cached datasheets ({})",
-                                    di.cache_entries.len()
-                                ))
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(150)),
-                            )
-                            .frame(false),
-                        )
-                        .clicked()
-                    {
-                        di.cache_list_open = !di.cache_list_open;
-                    }
-                    if di.cache_list_open {
-                        egui::ScrollArea::vertical()
-                            .id_salt("ds_cache_list")
-                            .max_height(120.0)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                for label in &di.cache_entries {
-                                    ui.label(
-                                        egui::RichText::new(format!("• {label}"))
-                                            .size(10.0)
-                                            .color(egui::Color32::from_gray(165)),
-                                    );
-                                }
-                            });
-                    }
-                }
-
-                // ── PDF picker ───────────────────────────────────────────────
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(format!("{} Choose PDF…", ph::FILE_PDF))
-                        .on_hover_text("Send a datasheet PDF instead of pasted text")
-                        .clicked()
-                    {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("PDF", &["pdf"])
-                            .pick_file()
-                        {
-                            match std::fs::read(&path) {
-                                Ok(bytes) => {
-                                    let name = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| "datasheet.pdf".into());
-                                    di.pdf = Some(PdfPick { name, bytes });
-                                    di.error = None;
-                                }
-                                Err(e) => di.error = Some(format!("Could not read PDF: {e}")),
-                            }
-                        }
-                    }
-                    if let Some(pdf) = &di.pdf {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} {} ({:.1} MB) — used instead of the text",
-                                ph::CHECK_CIRCLE,
-                                pdf.name,
-                                pdf.bytes.len() as f64 / (1024.0 * 1024.0),
-                            ))
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(120, 190, 120)),
-                        );
-                        if ui.button("Remove").clicked() {
-                            di.pdf = None;
-                        }
-                    } else {
-                        ui.label(
-                            egui::RichText::new("or paste text below")
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(140)),
-                        );
-                    }
-                });
-
-                // ── Paste area ───────────────────────────────────────────────
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Datasheet text:").size(11.0));
-                let paste_enabled = di.pdf.is_none();
-                egui::ScrollArea::vertical()
-                    .id_salt("ds_paste")
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        ui.add_enabled(
-                            paste_enabled,
-                            egui::TextEdit::multiline(&mut di.text)
-                                .desired_rows(8)
-                                .desired_width(f32::INFINITY)
-                                .font(egui::TextStyle::Monospace)
-                                .hint_text(
-                                    "Paste the pin table / alternate-function list here…",
-                                ),
-                        );
-                    });
-
-                // ── Actions ──────────────────────────────────────────────────
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let has_input = di.pdf.is_some() || !di.text.trim().is_empty();
-                    let can_extract = !running
-                        && has_input
-                        && !di.api_key.trim().is_empty()
-                        && !di.package.trim().is_empty();
-                    if ui
-                        .add_enabled(
-                            can_extract,
-                            egui::Button::new(
-                                egui::RichText::new(format!("{} Extract", ph::MAGIC_WAND))
-                                    .color(if can_extract {
-                                        egui::Color32::from_rgb(150, 200, 255)
-                                    } else {
-                                        egui::Color32::GRAY
-                                    }),
-                            ),
-                        )
-                        .on_hover_text("Send the text to Claude and fill the form")
-                        .on_disabled_hover_text(
-                            "needs an API key, a Package, and either pasted text or a PDF",
-                        )
-                        .clicked()
-                    {
-                        do_extract = true;
-                    }
-                    if running {
-                        ui.spinner();
-                        ui.label(
-                            egui::RichText::new("extracting…")
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(160)),
-                        );
-                    }
-                    ui.checkbox(&mut di.force_reextract, "re-extract")
-                        .on_hover_text(
-                            "Off: an identical document + package + model reuses the cached \
-                             result — instant and free.\nOn: force a fresh (billed) API call, \
-                             e.g. after editing the pasted text.",
-                        );
-                    if ui.button("Close").clicked() {
-                        keep_open = false;
-                    }
-                });
-
-                if let Some(err) = &di.error {
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(format!("{} {err}", ph::X_CIRCLE))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(230, 110, 90)),
-                    );
-                }
-
-                // ── Review report ────────────────────────────────────────────
-                if let Some(rep) = &di.report {
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} Applied{} — {} pin(s). Review the form and fix \
-                             anything flagged before Save.",
-                            ph::CHECK_CIRCLE,
-                            if di.last_from_cache {
-                                " from cache (no API call)"
-                            } else {
-                                ""
-                            },
-                            rep.pins_added
-                        ))
-                        .size(11.5)
-                        .strong()
-                        .color(egui::Color32::from_rgb(120, 210, 120)),
-                    );
-                    egui::ScrollArea::vertical()
-                        .id_salt("ds_report")
-                        .max_height(150.0)
-                        .show(ui, |ui| {
-                            if !rep.patched.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Filled: {}",
-                                        rep.patched.join(" · ")
-                                    ))
-                                    .size(10.5)
-                                    .color(egui::Color32::from_gray(170)),
-                                );
-                            }
-                            for w in &rep.warnings {
-                                ui.label(
-                                    egui::RichText::new(format!("{} {w}", ph::WARNING))
-                                        .size(10.5)
-                                        .color(egui::Color32::from_rgb(220, 170, 70)),
-                                );
-                            }
-                            if !rep.raw_notes.is_empty() {
-                                ui.add_space(2.0);
-                                ui.label(
-                                    egui::RichText::new("Unmapped alternate functions (kept for you to place):")
-                                        .size(10.5)
-                                        .italics()
-                                        .color(egui::Color32::from_gray(150)),
-                                );
-                                for n in &rep.raw_notes {
-                                    ui.label(
-                                        egui::RichText::new(format!("{} {n}", ph::DOT))
-                                            .size(10.0)
-                                            .color(egui::Color32::from_gray(160)),
-                                    );
-                                }
-                            }
-                        });
-                    if ui.button("Dismiss report").clicked() {
-                        dismiss_report = true;
-                    }
                 }
             });
+
+            // ── Prompt (base read-only + supplementary) ──────────────────
+            let base = ds::build_prompt(di.family_hint.trim(), di.package.trim());
+            prompt_section(
+                ui,
+                "ds_pin_prompt",
+                &mut di.prompt_open,
+                &base,
+                &mut di.extra_prompt,
+            );
+
+            // ── Cache stats + clear ──────────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (n, bytes) = di.cache_stats;
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Cache: {n} extraction(s) · {}",
+                        human_size(bytes)
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
+                );
+                if ui
+                    .add_enabled(
+                        n > 0,
+                        egui::Button::new(egui::RichText::new("Clear").size(10.0)).small(),
+                    )
+                    .on_hover_text(
+                        "Delete every cached extraction. Re-importing the same datasheet \
+                             will call (and bill) the API again.",
+                    )
+                    .on_disabled_hover_text("nothing cached yet")
+                    .clicked()
+                {
+                    do_clear_cache = true;
+                }
+                if let Some(note) = &di.cache_note {
+                    ui.label(
+                        egui::RichText::new(note)
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(150)),
+                    );
+                }
+            });
+            // ── Cached-file names (collapsible) ──────────────────────────
+            // The reply files are hash-named, so this lists the human label
+            // (chip · package · provider/model · source) written beside
+            // each one, newest first.
+            if !di.cache_entries.is_empty() {
+                let caret = if di.cache_list_open {
+                    ph::CARET_DOWN
+                } else {
+                    ph::CARET_RIGHT
+                };
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{caret} cached datasheets ({})",
+                                di.cache_entries.len()
+                            ))
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(150)),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    di.cache_list_open = !di.cache_list_open;
+                }
+                if di.cache_list_open {
+                    egui::ScrollArea::vertical()
+                        .id_salt("ds_cache_list")
+                        .max_height(120.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for label in &di.cache_entries {
+                                ui.label(
+                                    egui::RichText::new(format!("• {label}"))
+                                        .size(10.0)
+                                        .color(egui::Color32::from_gray(165)),
+                                );
+                            }
+                        });
+                }
+            }
+
+            // ── PDF picker ───────────────────────────────────────────────
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{} Choose PDF…", ph::FILE_PDF))
+                    .on_hover_text("Send a datasheet PDF instead of pasted text")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PDF", &["pdf"])
+                        .pick_file()
+                    {
+                        match std::fs::read(&path) {
+                            Ok(bytes) => {
+                                let name = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "datasheet.pdf".into());
+                                di.pdf = Some(PdfPick { name, bytes });
+                                di.error = None;
+                            }
+                            Err(e) => di.error = Some(format!("Could not read PDF: {e}")),
+                        }
+                    }
+                }
+                if let Some(pdf) = &di.pdf {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} {} ({:.1} MB) — used instead of the text",
+                            ph::CHECK_CIRCLE,
+                            pdf.name,
+                            pdf.bytes.len() as f64 / (1024.0 * 1024.0),
+                        ))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(120, 190, 120)),
+                    );
+                    if ui.button("Remove").clicked() {
+                        di.pdf = None;
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new("or paste text below")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                }
+            });
+
+            // ── Paste area ───────────────────────────────────────────────
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Datasheet text:").size(11.0));
+            let paste_enabled = di.pdf.is_none();
+            egui::ScrollArea::vertical()
+                .id_salt("ds_paste")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    ui.add_enabled(
+                        paste_enabled,
+                        egui::TextEdit::multiline(&mut di.text)
+                            .desired_rows(8)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("Paste the pin table / alternate-function list here…"),
+                    );
+                });
+
+            // ── Actions ──────────────────────────────────────────────────
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let has_input = di.pdf.is_some() || !di.text.trim().is_empty();
+                let can_extract = !running
+                    && has_input
+                    && !di.api_key.trim().is_empty()
+                    && !di.package.trim().is_empty();
+                if ui
+                    .add_enabled(
+                        can_extract,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Extract", ph::MAGIC_WAND)).color(
+                                if can_extract {
+                                    egui::Color32::from_rgb(150, 200, 255)
+                                } else {
+                                    egui::Color32::GRAY
+                                },
+                            ),
+                        ),
+                    )
+                    .on_hover_text("Send the text to Claude and fill the form")
+                    .on_disabled_hover_text(
+                        "needs an API key, a Package, and either pasted text or a PDF",
+                    )
+                    .clicked()
+                {
+                    do_extract = true;
+                }
+                if running {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new("extracting…")
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(160)),
+                    );
+                }
+                ui.checkbox(&mut di.force_reextract, "re-extract")
+                    .on_hover_text(
+                        "Off: an identical document + package + model reuses the cached \
+                             result — instant and free.\nOn: force a fresh (billed) API call, \
+                             e.g. after editing the pasted text.",
+                    );
+                if ui.button("Close").clicked() {
+                    keep_open = false;
+                }
+            });
+
+            if let Some(err) = &di.error {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("{} {err}", ph::X_CIRCLE))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(230, 110, 90)),
+                );
+            }
+
+            // ── Review report ────────────────────────────────────────────
+            if let Some(rep) = &di.report {
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Applied{} — {} pin(s). Review the form and fix \
+                             anything flagged before Save.",
+                        ph::CHECK_CIRCLE,
+                        if di.last_from_cache {
+                            " from cache (no API call)"
+                        } else {
+                            ""
+                        },
+                        rep.pins_added
+                    ))
+                    .size(11.5)
+                    .strong()
+                    .color(egui::Color32::from_rgb(120, 210, 120)),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("ds_report")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        if !rep.patched.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("Filled: {}", rep.patched.join(" · ")))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_gray(170)),
+                            );
+                        }
+                        for w in &rep.warnings {
+                            ui.label(
+                                egui::RichText::new(format!("{} {w}", ph::WARNING))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(220, 170, 70)),
+                            );
+                        }
+                        if !rep.raw_notes.is_empty() {
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Unmapped alternate functions (kept for you to place):",
+                                )
+                                .size(10.5)
+                                .italics()
+                                .color(egui::Color32::from_gray(150)),
+                            );
+                            for n in &rep.raw_notes {
+                                ui.label(
+                                    egui::RichText::new(format!("{} {n}", ph::DOT))
+                                        .size(10.0)
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                            }
+                        }
+                    });
+                if ui.button("Dismiss report").clicked() {
+                    dismiss_report = true;
+                }
+            }
+        });
 
         // ── Deferred side effects ────────────────────────────────────────────
         if do_save_key {

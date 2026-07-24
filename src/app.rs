@@ -1187,8 +1187,16 @@ impl AppIde {
             lsp_selected_diagnostic: None,
             diag_panel_height: 180.0,
             project_tree: ProjectTreeState {
+                // `.replace`: buffers persisted by older builds may carry CRLF
+                // read straight from a Windows checkout; in-memory text must be
+                // pure LF (see `scan_src_dir`) or the git gutter shows a
+                // permanent phantom diff.
                 user_src_files: migrate_to_root_relative(
-                    persisted.user_src_files,
+                    persisted
+                        .user_src_files
+                        .into_iter()
+                        .map(|(p, c)| (p, c.replace("\r\n", "\n")))
+                        .collect(),
                     persisted.paths_root_relative,
                 ),
                 user_src_folders: migrate_folders_to_root_relative(

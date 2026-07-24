@@ -138,7 +138,17 @@ impl ProjectTreeState {
                 if rel == src_path("main.rs") {
                     continue; // always generated — skip
                 }
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                // Normalize to LF at the door. The in-memory buffers must be
+                // pure LF: the git gutter's baseline (`git show HEAD:…`) is
+                // LF-normalized, so CRLF read from a Windows checkout made
+                // EVERY line "differ" — the whole body showed as a phantom
+                // permanently-added band, and real edits produced marks at
+                // wrong positions (the diff could only anchor on the rare LF
+                // lines). Codegen emits LF, so this also stops files being
+                // written back with mixed endings.
+                let content = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .replace("\r\n", "\n");
                 files.push((rel, content));
             }
         }

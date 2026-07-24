@@ -47,7 +47,12 @@ impl AppIde {
         //   2. Fallback: match the Cargo.toml HAL crate (first token of each
         //      definition's `hal_dep`) for older projects without the marker.
         let main_rs_path = root.join("src").join("main.rs");
-        let main_rs_source = std::fs::read_to_string(&main_rs_path).ok();
+        // LF-normalized, like every user file (see `scan_src_dir`): the git
+        // gutter compares this text against an LF baseline, and a CRLF body
+        // from a Windows checkout showed as a permanent phantom diff.
+        let main_rs_source = std::fs::read_to_string(&main_rs_path)
+            .ok()
+            .map(|s| s.replace("\r\n", "\n"));
 
         let detected_id: Option<String> = main_rs_source
             .as_deref()
@@ -169,7 +174,8 @@ impl AppIde {
             use crate::panels::mcu_module::project_gen::{gen_config, splice_config, ConfigFile};
             let load = |file: ConfigFile, path: std::path::PathBuf| -> String {
                 match std::fs::read_to_string(&path) {
-                    Ok(disk) => splice_config(file, &disk, &cfg, &tc),
+                    // LF-normalized like every buffer (phantom-gutter rule).
+                    Ok(disk) => splice_config(file, &disk.replace("\r\n", "\n"), &cfg, &tc),
                     Err(_) => gen_config(file, &cfg, &tc),
                 }
             };
@@ -262,7 +268,10 @@ impl AppIde {
                         let content = if is_dir {
                             None
                         } else {
-                            std::fs::read_to_string(abs).ok()
+                            // LF-normalized (phantom-gutter rule).
+                            std::fs::read_to_string(abs)
+                                .ok()
+                                .map(|s| s.replace("\r\n", "\n"))
                         };
                         apply_fs_create(
                             &mut self.project_tree.user_src_files,
