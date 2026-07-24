@@ -96,10 +96,14 @@ pub fn stm32g4_graph() -> ClockGraph {
 }
 
 /// Recognise a G4 graph (for the New MCU form's clock-choice dropdown). G4 uses
-/// the PLL `pllr` output (like WBA) but, unlike the others, has neither F4's
-/// `pllp` output node nor WBA's extra `apb7` bus — that pair pins it uniquely.
+/// the PLL `pllr` output (like WBA/G0) with two APB buses but none of F4's
+/// `pllp`, WBA's `apb7`, or G0's single-bus layout — `pllr + apb2 + !pllp +
+/// !apb7` pins it uniquely.
 pub fn is_g4_graph(g: &ClockGraph) -> bool {
-    g.node("pllr").is_some() && g.node("pllp").is_none() && g.node("apb7").is_none()
+    g.node("pllr").is_some()
+        && g.node("apb2").is_some()
+        && g.node("pllp").is_none()
+        && g.node("apb7").is_none()
 }
 
 #[cfg(test)]

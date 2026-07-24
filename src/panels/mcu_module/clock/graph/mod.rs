@@ -16,6 +16,7 @@ pub mod model;
 pub mod render;
 pub mod stm32f1;
 pub mod stm32f4;
+pub mod stm32g0;
 pub mod stm32g4;
 pub mod stm32wba;
 pub mod validate;
@@ -33,6 +34,7 @@ pub use stm32f4::{
     graph_to_f4, is_f4_graph, stm32f4_graph, stm32f4_layout, stm32f4_limits,
     stm32f4_limits_default, F4Clock, F4Sys,
 };
+pub use stm32g0::{is_g0_graph, stm32g0_graph};
 pub use stm32g4::{is_g4_graph, stm32g4_graph};
 pub use stm32wba::{
     graph_to_wba, is_wba_graph, stm32wba_graph, stm32wba_layout, stm32wba_limits, WbaClock,

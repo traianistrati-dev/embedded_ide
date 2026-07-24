@@ -61,16 +61,20 @@ pub enum ClockChoice {
     /// STM32G4 tree (data-driven graph — ships the 150 MHz HSI→PLL preset). No
     /// hand-authored layout: the diagram is auto-generated from the topology.
     Stm32g4,
+    /// STM32G0 tree (data-driven graph — ships the 64 MHz HSI→PLL preset,
+    /// single APB bus). Auto-generated layout.
+    Stm32g0,
 }
 
 impl ClockChoice {
-    pub const ALL: [ClockChoice; 6] = [
+    pub const ALL: [ClockChoice; 7] = [
         ClockChoice::None,
         ClockChoice::Stm32f1,
         ClockChoice::Esp32c3,
         ClockChoice::Stm32wba,
         ClockChoice::Stm32f4,
         ClockChoice::Stm32g4,
+        ClockChoice::Stm32g0,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -78,14 +82,15 @@ impl ClockChoice {
             ClockChoice::Stm32f1 => "STM32F1 tree",
             ClockChoice::Esp32c3 => "ESP32-C3 tree",
             ClockChoice::Stm32wba => "STM32WBA tree",
-            ClockChoice::Stm32f4 => "STM32F4 tree",
+            ClockChoice::Stm32f4 => "STM32F2/F4/F7 tree",
             ClockChoice::Stm32g4 => "STM32G4 tree",
+            ClockChoice::Stm32g0 => "STM32G0 tree",
         }
     }
     fn to_def(self) -> ClockDef {
         use crate::panels::mcu_module::clock::graph::{
-            stm32f4_graph, stm32f4_layout, stm32g4_graph, stm32wba_graph, stm32wba_layout,
-            GraphClock,
+            stm32f4_graph, stm32f4_layout, stm32g0_graph, stm32g4_graph, stm32wba_graph,
+            stm32wba_layout, GraphClock,
         };
         match self {
             ClockChoice::None => ClockDef::None,
@@ -105,16 +110,23 @@ impl ClockChoice {
                 graph: stm32g4_graph(),
                 layout: Default::default(),
             }),
+            ClockChoice::Stm32g0 => ClockDef::Graph(GraphClock {
+                graph: stm32g0_graph(),
+                layout: Default::default(),
+            }),
         }
     }
     fn from_def(d: &ClockDef) -> ClockChoice {
-        use crate::panels::mcu_module::clock::graph::{is_f4_graph, is_g4_graph, is_wba_graph};
+        use crate::panels::mcu_module::clock::graph::{
+            is_f4_graph, is_g0_graph, is_g4_graph, is_wba_graph,
+        };
         match d {
             ClockDef::Stm32f1(_) => ClockChoice::Stm32f1,
             ClockDef::Esp32c3 => ClockChoice::Esp32c3,
             ClockDef::Graph(gc) if is_wba_graph(&gc.graph) => ClockChoice::Stm32wba,
             ClockDef::Graph(gc) if is_f4_graph(&gc.graph) => ClockChoice::Stm32f4,
             ClockDef::Graph(gc) if is_g4_graph(&gc.graph) => ClockChoice::Stm32g4,
+            ClockDef::Graph(gc) if is_g0_graph(&gc.graph) => ClockChoice::Stm32g0,
             // A foreign graph maps to None here but is PRESERVED via
             // `McuForm::imported_clock`; plain none stays none.
             ClockDef::Graph(_) | ClockDef::None => ClockChoice::None,
