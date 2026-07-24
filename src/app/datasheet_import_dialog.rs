@@ -32,26 +32,30 @@ struct PdfPick {
 /// Apply maximize / restore to a dialog window.
 ///
 /// Maximized → the window is pinned to (almost) the whole screen via
-/// `fixed_rect`. Restored → the caller's normal size + centre anchor. Minimize
-/// is the window's own collapse triangle (`.collapsible(true)`), so only the
-/// maximize toggle is custom.
+/// `fixed_rect`. Restored → the caller's normal size + centre anchor. The only
+/// window control is the custom maximize/restore button — no collapse triangle.
 pub(super) fn window_frame(
     ctx: &egui::Context,
     title: impl Into<egui::WidgetText>,
     maximized: bool,
-    // `true` on the single frame maximize flips back to restored — egui keeps
-    // the maximized rect in area memory, so `default_size` alone won't shrink
-    // it; a one-frame `fixed_rect` at the default size forces the restore.
-    just_restored: bool,
+    // Force the window back to `default_w × default_h`, centred, for ONE frame.
+    // Needed because egui PERSISTS a window's rect in area memory, so
+    // `default_size` alone is ignored once a rect is stored — both after a
+    // maximize→restore and, crucially, when REOPENING a dialog that was left
+    // maximized (the "opens huge" bug). A one-frame `fixed_rect` overrides the
+    // stored rect, then we release to resizable.
+    force_default_size: bool,
     default_w: f32,
     default_h: f32,
     anchor_y: f32,
 ) -> egui::Window<'static> {
-    let win = egui::Window::new(title).collapsible(true).resizable(true);
+    // `collapsible(false)` — no collapse triangle (the user removed it); the
+    // custom maximize/restore button is the only window control.
+    let win = egui::Window::new(title).collapsible(false).resizable(true);
     if maximized {
         // fixed_rect also fixes position, so don't add an anchor here.
         win.fixed_rect(ctx.content_rect().shrink(12.0))
-    } else if just_restored {
+    } else if force_default_size {
         let screen = ctx.content_rect();
         let size = egui::vec2(default_w, default_h);
         let centre = screen.center() + egui::vec2(0.0, anchor_y);
@@ -65,21 +69,32 @@ pub(super) fn window_frame(
 
 /// A maximize/restore toggle button, right-aligned — put it on the window's
 /// first row. Flips `maximized`.
+///
+/// The row height is ALLOCATED explicitly. A bare
+/// `with_layout(right_to_left, …)` at the top of a window grabs the whole
+/// remaining HEIGHT as its cross-axis, so the button ended up vertically
+/// centred in a huge empty band with all content pushed to the bottom (the
+/// reported bug). `allocate_ui_with_layout` with a one-row height pins it.
 pub(super) fn maximize_button(ui: &mut egui::Ui, maximized: &mut bool) {
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let (icon, tip) = if *maximized {
-            (ph::ARROWS_IN, "Restore window")
-        } else {
-            (ph::ARROWS_OUT, "Maximize window")
-        };
-        if ui
-            .add(egui::Button::new(egui::RichText::new(icon).size(13.0)).frame(false))
-            .on_hover_text(tip)
-            .clicked()
-        {
-            *maximized = !*maximized;
-        }
-    });
+    let row_h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let (icon, tip) = if *maximized {
+                (ph::ARROWS_IN, "Restore window")
+            } else {
+                (ph::ARROWS_OUT, "Maximize window")
+            };
+            if ui
+                .add(egui::Button::new(egui::RichText::new(icon).size(13.0)).frame(false))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                *maximized = !*maximized;
+            }
+        },
+    );
 }
 
 /// The collapsible "Prompt" section shared by both AI import dialogs: a
@@ -115,22 +130,29 @@ pub(super) fn prompt_section(
     if !*open {
         return;
     }
+    // Full window width: the fields sit in a vertical-only `Resize` (drag the
+    // bottom edge to grow the HEIGHT), and their WIDTH is pinned to the row's
+    // available width. `Resize` can't track width itself — `default_size` is
+    // read only on first creation — so the non-resizable x axis follows the
+    // inner content, and the content is sized to `w` explicitly.
+    let w = ui.available_width();
+
     ui.label(
         egui::RichText::new("Additional instructions (saved, appended to the base prompt):")
             .size(10.5)
             .color(egui::Color32::from_gray(150)),
     );
-    // Drag the bottom-right grip to enlarge the field.
     egui::Resize::default()
         .id_salt(format!("{id}_extra_resize"))
-        .default_height(44.0)
+        .resizable([false, true]) // height only
+        .default_size(egui::vec2(w, 44.0))
         .min_height(28.0)
         .show(ui, |ui| {
             ui.add_sized(
-                ui.available_size(),
+                egui::vec2(w, ui.available_height()),
                 egui::TextEdit::multiline(extra)
                     .id_salt(format!("{id}_extra"))
-                    .desired_width(f32::INFINITY)
+                    .desired_width(w)
                     .hint_text("e.g. prefer the non-SMPS variant · the PLL table is on page 200"),
             );
         });
@@ -140,10 +162,10 @@ pub(super) fn prompt_section(
             .size(10.0)
             .color(egui::Color32::from_gray(130)),
     );
-    // Also resizable, so a long base prompt can be read without a cramped box.
     egui::Resize::default()
         .id_salt(format!("{id}_base_resize"))
-        .default_height(120.0)
+        .resizable([false, true]) // height only
+        .default_size(egui::vec2(w, 120.0))
         .min_height(48.0)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -151,13 +173,14 @@ pub(super) fn prompt_section(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     // Read-only but selectable (the `&str` buffer can't be
-                    // edited), so the base prompt stays copyable.
+                    // edited), so the base prompt stays copyable. Natural
+                    // (content) height so the ScrollArea scrolls the full text;
+                    // width pinned to the row.
                     let mut base_ref = base;
-                    ui.add_sized(
-                        ui.available_size(),
+                    ui.add(
                         egui::TextEdit::multiline(&mut base_ref)
                             .id_salt(format!("{id}_base_view"))
-                            .desired_width(f32::INFINITY)
+                            .desired_width(w)
                             .font(egui::TextStyle::Monospace),
                     );
                 });
@@ -222,6 +245,9 @@ pub(crate) struct DatasheetImport {
     maximized: bool,
     /// Previous frame's `maximized`, to detect the restore transition.
     prev_maximized: bool,
+    /// `false` until the window has rendered once — the first frame forces the
+    /// default size, so a dialog left maximized last time reopens normal.
+    shown_once: bool,
     job: Option<Arc<Mutex<ImportJob>>>,
     report: Option<ds::ApplyReport>,
     error: Option<String>,
@@ -250,6 +276,7 @@ impl DatasheetImport {
             prompt_open: false,
             maximized: false,
             prev_maximized: false,
+            shown_once: false,
             job: None,
             report: None,
             error: None,
@@ -316,13 +343,14 @@ impl AppIde {
         let mut dismiss_report = false;
         let mut do_clear_cache = false;
 
-        let just_restored = di.prev_maximized && !di.maximized;
+        let force_default = !di.shown_once || (di.prev_maximized && !di.maximized);
         di.prev_maximized = di.maximized;
+        di.shown_once = true;
         window_frame(
             ui.ctx(),
             format!("{} Import from datasheet (AI)", ph::SPARKLE),
             di.maximized,
-            just_restored,
+            force_default,
             560.0,
             540.0,
             30.0,

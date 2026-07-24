@@ -19,6 +19,10 @@ impl AppIde {
     pub(crate) fn open_mcu_form(&mut self, seed: Option<McuForm>) {
         self.mcu_form = Some(seed.unwrap_or_else(McuForm::blank));
         self.mcu_form_clock_note = None;
+        // Reopen at the normal size — reset both the maximize STATE and the
+        // first-frame force (which overrides egui's persisted window rect).
+        self.mcu_form_maximized = false;
+        self.mcu_form_shown_once = false;
     }
 
     /// Render the form window. No-op while it is closed.
@@ -35,8 +39,10 @@ impl AppIde {
         let mut clock_note = self.mcu_form_clock_note.take();
         // Window maximize state, via a local (the closure can't borrow `self`).
         let mut maximized = self.mcu_form_maximized;
-        let just_restored = self.mcu_form_prev_maximized && !maximized;
+        let force_default =
+            !self.mcu_form_shown_once || (self.mcu_form_prev_maximized && !maximized);
         self.mcu_form_prev_maximized = maximized;
+        self.mcu_form_shown_once = true;
 
         let title = if form.editing {
             "Edit MCU definition"
@@ -44,7 +50,7 @@ impl AppIde {
             "New MCU definition"
         };
         super::datasheet_import_dialog::window_frame(
-            ui.ctx(), title, maximized, just_restored, 680.0, 560.0, 0.0,
+            ui.ctx(), title, maximized, force_default, 680.0, 560.0, 0.0,
         )
         .show(ui.ctx(), |ui| {
             super::datasheet_import_dialog::maximize_button(ui, &mut maximized);

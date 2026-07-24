@@ -39,6 +39,7 @@ pub(crate) struct ClockImport {
     prompt_open: bool,
     maximized: bool,
     prev_maximized: bool,
+    shown_once: bool,
     job: Option<Arc<Mutex<ClockJob>>>,
     error: Option<String>,
     /// Green confirmation after a successful extraction (kept until the dialog
@@ -62,6 +63,7 @@ impl ClockImport {
             prompt_open: false,
             maximized: false,
             prev_maximized: false,
+            shown_once: false,
             job: None,
             error: None,
             note: None,
@@ -127,13 +129,14 @@ impl AppIde {
         let mut do_extract = false;
         let mut do_save_key = false;
 
-        let just_restored = di.prev_maximized && !di.maximized;
+        let force_default = !di.shown_once || (di.prev_maximized && !di.maximized);
         di.prev_maximized = di.maximized;
+        di.shown_once = true;
         super::datasheet_import_dialog::window_frame(
             ui.ctx(),
             format!("{} Extract clock tree from datasheet (AI)", ph::SPARKLE),
             di.maximized,
-            just_restored,
+            force_default,
             520.0,
             440.0,
             40.0,

@@ -890,6 +890,9 @@ pub struct AppIde {
     /// New/Edit MCU definition window maximized vs normal size.
     mcu_form_maximized: bool,
     mcu_form_prev_maximized: bool,
+    /// `false` until the form window has rendered once this open — forces its
+    /// default size on the first frame so it never reopens huge.
+    mcu_form_shown_once: bool,
     /// `Some` while the "Import from datasheet (AI)" sub-dialog of the MCU form
     /// is open (see `app::datasheet_import_dialog`). Session-only.
     datasheet_import: Option<datasheet_import_dialog::DatasheetImport>,
@@ -1207,6 +1210,7 @@ impl AppIde {
             mcu_form_clock_note: None,
             mcu_form_maximized: false,
             mcu_form_prev_maximized: false,
+            mcu_form_shown_once: false,
             datasheet_import: None,
             clock_import: None,
             git_discard_confirm: None,
