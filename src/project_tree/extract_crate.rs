@@ -527,9 +527,14 @@ fn member_cargo_toml(meta: &CrateMeta) -> String {
 /// generated block already opened a `[dependencies]` table, and a second one is
 /// a TOML redefinition error that cargo rejects outright. Idempotent — running
 /// the extraction twice must not duplicate either section.
-fn patch_root_manifest(existing: &str, crate_dir: &str, name: &str) -> String {
+/// Add `crate_dir` to `[workspace] members` (creating the table/list if
+/// needed), WITHOUT touching `[dependencies]`. Used for a CLONED external
+/// library: it joins the workspace so cargo builds it, but is NOT forced as a
+/// firmware dependency — an external crate may not even compile for the
+/// firmware's target, which would break the firmware build. The user adds the
+/// path dependency by hand when they actually `use` it.
+pub fn add_workspace_member(existing: &str, crate_dir: &str) -> String {
     let mut out = existing.trim_end().to_owned();
-
     let members = crate::panels::mcu_module::project_gen::workspace_members(existing);
     if !members.iter().any(|m| m == crate_dir) {
         // Whether a `members` list EXISTS, not whether it has entries. An empty
@@ -540,11 +545,14 @@ fn patch_root_manifest(existing: &str, crate_dir: &str, name: &str) -> String {
         if has_members_list(existing) {
             out = extend_members_list(&out, crate_dir);
         } else {
-            out.push_str(&format!(
-                "\n\n[workspace]\nmembers = [\"{crate_dir}\"]\n"
-            ));
+            out.push_str(&format!("\n\n[workspace]\nmembers = [\"{crate_dir}\"]\n"));
         }
     }
+    out
+}
+
+pub fn patch_root_manifest(existing: &str, crate_dir: &str, name: &str) -> String {
+    let mut out = add_workspace_member(existing, crate_dir);
     if !out.contains(&format!("[dependencies.{name}]")) {
         out.push_str(&format!(
             "\n[dependencies.{name}]\npath = \"{crate_dir}\"\n"

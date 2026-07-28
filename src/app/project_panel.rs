@@ -22,6 +22,8 @@ pub(super) struct ProjectPanelSignals {
     pub extract_folder: Option<String>,
     /// The LIBRARIES "+" button was clicked — create an empty library crate.
     pub new_library: bool,
+    /// The LIBRARIES "clone from git" button was clicked.
+    pub clone_library: bool,
     /// `(crate dir, is_rename)` when a library's pen / trash icon was clicked.
     pub library_action: Option<(String, bool)>,
     /// `user_src_files` index to show READ-ONLY in the Reference tab.
@@ -121,6 +123,7 @@ impl AppIde {
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
         let mut extract_folder: Option<String> = None;
         let mut new_library = false;
+        let mut clone_library = false;
         let mut library_action: Option<(String, bool)> = None;
         let mut open_reference: Option<usize> = None;
 
@@ -251,6 +254,7 @@ impl AppIde {
                             &lib_crates,
                             &mut self.tree_split_ratio,
                             &mut new_library,
+                            &mut clone_library,
                             &mut library_action,
                             &mut open_reference,
                         );
@@ -274,6 +278,7 @@ impl AppIde {
             save_clicked: save_project_clicked,
             extract_folder,
             new_library,
+            clone_library,
             library_action,
             open_reference,
         }

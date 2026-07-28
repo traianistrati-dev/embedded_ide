@@ -315,6 +315,19 @@ pub struct GitState {
     /// `origin`'s URL (`git remote get-url origin`), refreshed with the
     /// status. `None` → the tab offers the "Set remote" field instead of Push.
     pub remote_url: Option<String>,
+    /// Result of a "Clone from git" library clone: `Some(Ok(lib))` when a clone
+    /// finished and the app must wire it into the workspace, `Some(Err(msg))` on
+    /// failure. Consumed once by the app (`diag_embed`).
+    pub clone_result: Option<Result<ClonedLibrary, String>>,
+}
+
+/// A library successfully cloned into the project, awaiting workspace wiring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClonedLibrary {
+    /// Project-root-relative folder it was cloned into (`vendor/foo`).
+    pub dir: String,
+    /// Its `[package] name`, for the path dependency in the root manifest.
+    pub name: String,
 }
 
 impl GitState {
@@ -1141,6 +1154,107 @@ pub fn run_op(
     });
 }
 
+/// `git clone <url> <dir>` under the project, as an INDEPENDENT library repo
+/// (model 2: it keeps its own `.git`/remote; the project gitignores it). On
+/// success validates it is a Cargo crate and reads its package name; the app
+/// (`diag_embed`) then registers it as a workspace member and rescans the tree.
+/// Runs on a worker; sets `clone_result` when done.
+pub fn run_clone_library(
+    url: String,
+    dir: String,
+    project_dir: PathBuf,
+    state: Arc<Mutex<GitState>>,
+    ctx: egui::Context,
+) {
+    {
+        let mut st = state.lock().unwrap();
+        if st.busy.is_some() {
+            return; // one op at a time
+        }
+        st.busy = Some("clone");
+        st.clone_result = None;
+    }
+    std::thread::spawn(move || {
+        let finish = |res: Result<ClonedLibrary, String>| {
+            let mut st = state.lock().unwrap();
+            match &res {
+                Ok(l) => st.push(GitLine::Notice, format!("[ok] cloned into {}", l.dir)),
+                Err(e) => st.push(GitLine::Err, format!("[error] {e}")),
+            }
+            st.clone_result = Some(res);
+            st.busy = None;
+            drop(st);
+            ctx.request_repaint();
+        };
+
+        // Refuse to clone onto an existing folder — git would fail anyway, but a
+        // clear message beats "destination path already exists".
+        if project_dir.join(&dir).exists() {
+            return finish(Err(format!(
+                "`{dir}` already exists in the project — pick another folder name"
+            )));
+        }
+
+        let args = vec!["clone".to_string(), url.clone(), dir.clone()];
+        state.lock().unwrap().push(GitLine::Cmd, format!("> git {}", args.join(" ")));
+        let out = match run_git(&project_dir, &args) {
+            Ok(o) => o,
+            Err(e) => return finish(Err(format!("could not run git: {e}"))),
+        };
+        // git clone streams progress to stderr; surface it in the console.
+        for line in String::from_utf8_lossy(&out.stderr).lines() {
+            if !line.trim().is_empty() {
+                state.lock().unwrap().push(GitLine::Out, line.to_string());
+            }
+        }
+        if !out.status.success() {
+            return finish(Err("git clone failed — see the output above".into()));
+        }
+
+        // It must be a Cargo crate to join the workspace.
+        let manifest = project_dir.join(&dir).join("Cargo.toml");
+        let toml = match std::fs::read_to_string(&manifest) {
+            Ok(t) => t,
+            Err(_) => {
+                return finish(Err(format!(
+                    "the cloned repo has no Cargo.toml — `{dir}` is not a Rust crate"
+                )))
+            }
+        };
+        match parse_package_name(&toml) {
+            Some(name) => finish(Ok(ClonedLibrary { dir, name })),
+            None => finish(Err(format!(
+                "`{dir}/Cargo.toml` has no [package] name — not a library crate"
+            ))),
+        }
+    });
+}
+
+/// The `[package] name = "…"` value from a Cargo.toml, if present. Hand-parsed
+/// (no toml dep, like `workspace_members`): track the current `[section]`, then
+/// read the first `name = "…"` inside `[package]`.
+pub fn parse_package_name(cargo_toml: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_package = t == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = t.strip_prefix("name") {
+                if let Some(v) = rest.trim_start().strip_prefix('=') {
+                    let name = v.trim().trim_matches('"').trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parse `git diff --no-color` unified output into renderable rows. Content
 /// lines are only interpreted INSIDE a hunk (after the first `@@`), so the
 /// `---`/`+++` file headers can't masquerade as removals/additions. The
@@ -1721,6 +1835,14 @@ pub(crate) fn unsaved_changes(project_dir: &Path, snapshot: &[(String, String)])
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_package_name_reads_only_the_package_section() {
+        let toml = "[workspace]\nname = \"not-this\"\n\n[package]\nname = \"my_lib\"\nversion = \"0.1.0\"\n";
+        assert_eq!(parse_package_name(toml).as_deref(), Some("my_lib"));
+        // No [package] → None (e.g. a bare workspace root).
+        assert_eq!(parse_package_name("[workspace]\nmembers = []\n"), None);
+    }
 
     #[test]
     fn porcelain_branch_header_parses() {

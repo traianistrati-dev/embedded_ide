@@ -106,6 +106,30 @@ impl ProjectTreeState {
         }
     }
 
+    /// Scan ONE workspace-member directory into the tree, appending files and
+    /// folders not already tracked. Used after a `git clone` adds a member, so
+    /// the rest of the in-memory tree (and any unsaved edits) is preserved —
+    /// unlike a full `load_from_dir`. `member` is project-root-relative.
+    pub fn add_member_dir(&mut self, root: &Path, member: &str) {
+        let dir = root.join(member);
+        if !dir.is_dir() {
+            return;
+        }
+        let mut files = Vec::new();
+        let mut folders = vec![member.to_string()];
+        Self::scan_src_dir(root, &dir, &mut files, &mut folders);
+        for f in folders {
+            if !self.user_src_folders.contains(&f) {
+                self.user_src_folders.push(f);
+            }
+        }
+        for (p, c) in files {
+            if !self.user_src_files.iter().any(|(pp, _)| pp == &p) {
+                self.user_src_files.push((p, c));
+            }
+        }
+    }
+
     /// Recursively scan `dir`, recording paths relative to `root` (the PROJECT
     /// ROOT). Skips the generated `src/main.rs` and build/VCS directories.
     fn scan_src_dir(

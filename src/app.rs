@@ -928,6 +928,8 @@ pub struct AppIde {
     tree_split_ratio: f32,
     /// Open "Extract to library crate" dialog, if any.
     extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
+    /// Open "Clone a library from git" dialog, if any.
+    clone_library_dialog: Option<extract_crate_dialog::CloneLibraryDialog>,
     /// Open delete/rename confirmation for a library crate, if any.
     library_action: Option<extract_crate_dialog::LibraryActionDialog>,
     /// `true` while the "unsaved changes" prompt is up (close was cancelled).
@@ -1241,6 +1243,7 @@ impl AppIde {
                 persisted.tree_split_ratio.clamp(0.15, 0.85)
             },
             extract_crate: None,
+            clone_library_dialog: None,
             library_action: None,
             exit_prompt: false,
             allow_close: false,
@@ -2165,6 +2168,10 @@ impl eframe::App for AppIde {
         if signals.new_library {
             self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::new_library());
         }
+        // LIBRARIES "clone from git" → the clone dialog.
+        if signals.clone_library {
+            self.clone_library_dialog = Some(extract_crate_dialog::CloneLibraryDialog::new());
+        }
         // A library's pen / trash icon → the confirmation dialog.
         if let Some((dir, is_rename)) = signals.library_action {
             self.library_action = Some(extract_crate_dialog::LibraryActionDialog {
@@ -2332,6 +2339,7 @@ impl eframe::App for AppIde {
         self.show_git_restore_all_dialog(ui);
         self.show_git_switch_dialog(ui);
         self.show_extract_crate_dialog(ui);
+        self.show_clone_library_dialog(ui);
         self.show_library_action_dialog(ui);
         self.show_exit_prompt(ui);
 

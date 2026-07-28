@@ -418,6 +418,57 @@ impl AppIde {
         );
     }
 
+    /// Start a "Clone from git" library clone into `<project>/<dir>`. The worker
+    /// clones + validates; `finish_clone_library` wires it in on completion.
+    pub(super) fn start_clone_library(&mut self, url: String, dir: String) {
+        let Some(root) = self.project_dir.clone() else {
+            return; // dialog shows the "save first" hint
+        };
+        if self.git.is_busy() {
+            return;
+        }
+        crate::git::run_clone_library(
+            url,
+            dir,
+            root,
+            std::sync::Arc::clone(&self.git.state),
+            self.egui_ctx.clone(),
+        );
+    }
+
+    /// Wire a freshly-cloned library into the project (model 2 — INDEPENDENT
+    /// repo: it keeps its own `.git`/remote, and the project GITIGNORES it).
+    /// Registers it as a workspace member + path dependency, scans its files
+    /// into the tree, and saves.
+    pub(super) fn finish_clone_library(&mut self, dir: String) {
+        let Some(root) = self.project_dir.clone() else {
+            return;
+        };
+        // Workspace member ONLY — not a firmware dependency (an external crate
+        // may not build for the firmware's target; the user wires the dep by
+        // hand when they use it).
+        self.cargo_toml =
+            crate::project_tree::extract_crate::add_workspace_member(&self.cargo_toml, &dir);
+        // The clone is its OWN repo — keep the project from tracking its files
+        // (otherwise `git add -A` would gitlink it and break a fresh checkout).
+        let entry = format!("{dir}/");
+        let already = self
+            .gitignore
+            .lines()
+            .any(|l| matches!(l.trim(), t if t == dir || t == entry || t == format!("/{dir}")));
+        if !already {
+            if !self.gitignore.is_empty() && !self.gitignore.ends_with('\n') {
+                self.gitignore.push('\n');
+            }
+            self.gitignore.push_str(&format!("{entry}\n"));
+        }
+        // Bring its files into the tree WITHOUT a full reload (preserves other
+        // in-memory buffers); `load_from_dir` already treats members this way.
+        self.project_tree.add_member_dir(&root, &dir);
+        self.cached_project_files = None;
+        self.request_save = true;
+    }
+
     /// The in-memory project content, keyed by project-relative path — the
     /// exact file set `write_project` persists. The git worker compares it
     /// against disk for the "unsaved changes" warning (commits are strictly

@@ -288,6 +288,22 @@ impl AppIde {
                 *source_rewritten = true;
             }
         }
+        // A "Clone from git" library worker finished: wire it into the workspace
+        // (success) or surface the error in the dialog.
+        let clone_result = self.git.state.lock().unwrap().clone_result.take();
+        if let Some(res) = clone_result {
+            match res {
+                Ok(lib) => {
+                    self.finish_clone_library(lib.dir);
+                    self.clone_library_dialog = None;
+                }
+                Err(e) => {
+                    if let Some(d) = &mut self.clone_library_dialog {
+                        d.error = Some(e);
+                    }
+                }
+            }
+        }
         // History view: load a commit's file list / one file's diff. Both are
         // read-only git reads, guarded against a concurrent op inside.
         if let (Some(sha), Some(dir)) = (git_commit_load, self.git_dir()) {

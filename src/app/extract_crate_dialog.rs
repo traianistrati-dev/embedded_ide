@@ -46,6 +46,30 @@ impl ExtractCrateDialog {
     }
 }
 
+/// "Clone a library from git" dialog: a repo URL + a target folder name.
+pub(crate) struct CloneLibraryDialog {
+    pub url: String,
+    pub dir: String,
+    /// `true` while the folder name is auto-derived from the URL — retyping the
+    /// URL keeps updating it until the user edits the folder field themselves.
+    pub dir_auto: bool,
+    /// Error from the last clone attempt (set by `diag_embed` on failure).
+    pub error: Option<String>,
+}
+
+impl CloneLibraryDialog {
+    pub(crate) fn new() -> Self {
+        Self { url: String::new(), dir: String::new(), dir_auto: true, error: None }
+    }
+}
+
+/// The repo name from a git URL (`…/foo.git` / `git@host:user/foo.git` → `foo`).
+fn repo_name_from_url(url: &str) -> String {
+    let u = url.trim().trim_end_matches('/');
+    let last = u.rsplit(['/', ':']).next().unwrap_or("");
+    last.strip_suffix(".git").unwrap_or(last).to_string()
+}
+
 /// Confirmation for deleting or renaming an existing library crate.
 pub(crate) struct LibraryActionDialog {
     /// The crate's directory, project-root-relative (`mw_radar`).
@@ -56,6 +80,118 @@ pub(crate) struct LibraryActionDialog {
 }
 
 impl AppIde {
+    /// The "Clone a library from git" dialog. Starts the clone worker; the
+    /// wiring (workspace member + gitignore + tree scan) happens in `diag_embed`
+    /// when the worker's `clone_result` lands.
+    pub(super) fn show_clone_library_dialog(&mut self, ui: &egui::Ui) {
+        let Some(dlg) = &mut self.clone_library_dialog else {
+            return;
+        };
+        let busy = self.git.state.lock().unwrap().busy == Some("clone");
+        // Auto-fill the folder from the URL's repo name until the user edits it.
+        if dlg.dir_auto {
+            dlg.dir = repo_name_from_url(&dlg.url);
+        }
+        let mut close = false;
+        let mut start: Option<(String, String)> = None;
+
+        egui::Window::new("Clone a library from git")
+            .id(egui::Id::new("clone_library_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_width(520.0);
+                egui::Grid::new("clone_lib_fields")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Repo URL").size(11.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dlg.url)
+                                .desired_width(380.0)
+                                .hint_text("https://github.com/user/repo.git"),
+                        );
+                        ui.end_row();
+                        ui.label(egui::RichText::new("Folder").size(11.0));
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut dlg.dir)
+                                    .desired_width(220.0)
+                                    .hint_text("repo"),
+                            )
+                            .changed()
+                        {
+                            dlg.dir_auto = false;
+                        }
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Cloned as an INDEPENDENT repo (keeps its own git + remote), added to \
+                         the workspace, and gitignored by this project.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(140, 190, 240)),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} A fresh clone of THIS project won't include it — you'd re-clone \
+                         the library.",
+                        ph::WARNING,
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(220, 180, 90)),
+                );
+                if let Some(e) = &dlg.error {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} {e}", ph::X_CIRCLE))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(230, 110, 90)),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let can = !busy && !dlg.url.trim().is_empty() && !dlg.dir.trim().is_empty();
+                    if ui
+                        .add_enabled(
+                            can,
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Clone", ph::GIT_FORK))
+                                    .color(egui::Color32::from_rgb(120, 200, 140)),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        start = Some((dlg.url.trim().to_owned(), dlg.dir.trim().to_owned()));
+                    }
+                    if busy {
+                        crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
+                        ui.label(
+                            egui::RichText::new("cloning…")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(220, 180, 70)),
+                        );
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new("Cancel")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if let Some((url, dir)) = start {
+            if let Some(d) = &mut self.clone_library_dialog {
+                d.error = None;
+            }
+            self.start_clone_library(url, dir);
+        }
+        if close {
+            self.clone_library_dialog = None;
+        }
+    }
+
     /// Delete / rename confirmation for a library crate.
     pub(super) fn show_library_action_dialog(&mut self, ui: &egui::Ui) {
         let Some(dlg) = &mut self.library_action else {

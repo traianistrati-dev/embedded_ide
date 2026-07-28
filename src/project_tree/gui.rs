@@ -588,6 +588,8 @@ pub fn show_project_tree(
     split_ratio: &mut f32,
     // Set when the LIBRARIES "+" button is clicked; the caller opens the dialog.
     new_library: &mut bool,
+    // Set when the LIBRARIES "clone from git" button is clicked.
+    clone_library: &mut bool,
     // `(crate dir, is_rename)` when a library's pen / trash icon is clicked;
     // the caller opens the confirmation dialog.
     library_action: &mut Option<(String, bool)>,
@@ -906,6 +908,16 @@ pub fn show_project_tree(
                 .clicked()
             {
                 *new_library = true;
+            }
+            if ui
+                .add(egui::Button::new(egui::RichText::new(ph::GIT_FORK).size(11.0)).frame(false))
+                .on_hover_text(
+                    "Clone a library from git into the workspace (its own repo, gitignored \
+                     by this project)",
+                )
+                .clicked()
+            {
+                *clone_library = true;
             }
         });
     });
