@@ -362,9 +362,13 @@ impl AppIde {
         }
         let msg = self.git.commit_msg.trim().to_owned();
         let remote = self.git.remote_url_draft.trim().to_owned();
-        // A switch takes its target from the header picker; a new branch from the
-        // text field. Both flow through `run_op`'s single `branch` argument.
-        let branch = if op == crate::git::GitOp::SwitchBranch {
+        // A switch/delete takes its target branch from the header picker; a new
+        // branch from the text field. Both flow through `run_op`'s single
+        // `branch` argument.
+        let branch = if matches!(
+            op,
+            crate::git::GitOp::SwitchBranch | crate::git::GitOp::DeleteBranch
+        ) {
             self.git.switch_target.take().unwrap_or_default()
         } else {
             self.git.branch_draft.trim().to_owned()
@@ -418,9 +422,10 @@ impl AppIde {
         );
     }
 
-    /// Start a "Clone from git" library clone into `<project>/<dir>`. The worker
-    /// clones + validates; `finish_clone_library` wires it in on completion.
-    pub(super) fn start_clone_library(&mut self, url: String, dir: String) {
+    /// Start a "Clone from git" library import into `<project>/<dir>` — a plain
+    /// clone (independent repo) or a submodule. The worker runs git + validates;
+    /// `finish_clone_library` wires it in on completion.
+    pub(super) fn start_clone_library(&mut self, url: String, dir: String, as_submodule: bool) {
         let Some(root) = self.project_dir.clone() else {
             return; // dialog shows the "save first" hint
         };
@@ -430,17 +435,20 @@ impl AppIde {
         crate::git::run_clone_library(
             url,
             dir,
+            as_submodule,
             root,
             std::sync::Arc::clone(&self.git.state),
             self.egui_ctx.clone(),
         );
     }
 
-    /// Wire a freshly-cloned library into the project (model 2 — INDEPENDENT
-    /// repo: it keeps its own `.git`/remote, and the project GITIGNORES it).
-    /// Registers it as a workspace member + path dependency, scans its files
-    /// into the tree, and saves.
-    pub(super) fn finish_clone_library(&mut self, dir: String) {
+    /// Wire a freshly-imported library into the project. Registers it as a
+    /// workspace member and scans its files into the tree. For an INDEPENDENT
+    /// clone (`is_submodule == false`) it also GITIGNORES the folder — the clone
+    /// is its own repo, and tracking its files would gitlink it and break a
+    /// fresh checkout. A SUBMODULE is left tracked (git records it via
+    /// `.gitmodules` + a pinned commit — that's the whole point).
+    pub(super) fn finish_clone_library(&mut self, dir: String, is_submodule: bool) {
         let Some(root) = self.project_dir.clone() else {
             return;
         };
@@ -449,18 +457,18 @@ impl AppIde {
         // hand when they use it).
         self.cargo_toml =
             crate::project_tree::extract_crate::add_workspace_member(&self.cargo_toml, &dir);
-        // The clone is its OWN repo — keep the project from tracking its files
-        // (otherwise `git add -A` would gitlink it and break a fresh checkout).
-        let entry = format!("{dir}/");
-        let already = self
-            .gitignore
-            .lines()
-            .any(|l| matches!(l.trim(), t if t == dir || t == entry || t == format!("/{dir}")));
-        if !already {
-            if !self.gitignore.is_empty() && !self.gitignore.ends_with('\n') {
-                self.gitignore.push('\n');
+        if !is_submodule {
+            let entry = format!("{dir}/");
+            let already = self
+                .gitignore
+                .lines()
+                .any(|l| matches!(l.trim(), t if t == dir || t == entry || t == format!("/{dir}")));
+            if !already {
+                if !self.gitignore.is_empty() && !self.gitignore.ends_with('\n') {
+                    self.gitignore.push('\n');
+                }
+                self.gitignore.push_str(&format!("{entry}\n"));
             }
-            self.gitignore.push_str(&format!("{entry}\n"));
         }
         // Bring its files into the tree WITHOUT a full reload (preserves other
         // in-memory buffers); `load_from_dir` already treats members this way.

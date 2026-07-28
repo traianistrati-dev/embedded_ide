@@ -93,6 +93,8 @@ pub(super) fn show_diag_panel(
     git_discard_all: &mut bool,
     // Branch name the header picker asked to switch to.
     git_switch_branch: &mut Option<String>,
+    // Branch name the picker's trash icon asked to delete.
+    git_delete_branch: &mut Option<String>,
     // Workspace-member crate names — the Git tab's repository picker.
     git_libraries: &[String],
     // Flash-tab Programmer-row buttons: set `flash_scan`/`flash_go` on click;
@@ -626,6 +628,7 @@ pub(super) fn show_diag_panel(
                 git_discard,
                 git_discard_all,
                 git_switch_branch,
+                git_delete_branch,
                 git_libraries,
             );
         }

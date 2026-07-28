@@ -53,13 +53,22 @@ pub(crate) struct CloneLibraryDialog {
     /// `true` while the folder name is auto-derived from the URL — retyping the
     /// URL keeps updating it until the user edits the folder field themselves.
     pub dir_auto: bool,
+    /// `git submodule add` (tracked, self-contained) instead of a plain `git
+    /// clone` (independent repo, gitignored).
+    pub as_submodule: bool,
     /// Error from the last clone attempt (set by `diag_embed` on failure).
     pub error: Option<String>,
 }
 
 impl CloneLibraryDialog {
     pub(crate) fn new() -> Self {
-        Self { url: String::new(), dir: String::new(), dir_auto: true, error: None }
+        Self {
+            url: String::new(),
+            dir: String::new(),
+            dir_auto: true,
+            as_submodule: false,
+            error: None,
+        }
     }
 }
 
@@ -93,7 +102,7 @@ impl AppIde {
             dlg.dir = repo_name_from_url(&dlg.url);
         }
         let mut close = false;
-        let mut start: Option<(String, String)> = None;
+        let mut start: Option<(String, String, bool)> = None;
 
         egui::Window::new("Clone a library from git")
             .id(egui::Id::new("clone_library_dialog"))
@@ -127,23 +136,52 @@ impl AppIde {
                         ui.end_row();
                     });
                 ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Cloned as an INDEPENDENT repo (keeps its own git + remote), added to \
-                         the workspace, and gitignored by this project.",
-                    )
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(140, 190, 240)),
-                );
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} A fresh clone of THIS project won't include it — you'd re-clone \
-                         the library.",
-                        ph::WARNING,
-                    ))
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(220, 180, 90)),
-                );
+                ui.checkbox(&mut dlg.as_submodule, "Add as git submodule")
+                    .on_hover_text(
+                        "On: the project tracks it via .gitmodules + a pinned commit, so a \
+                         fresh clone (+ `git submodule update --init`) includes it — but it \
+                         needs the project to be a git repo, and updating the library is a \
+                         two-step commit (in the submodule, then the pointer here).\n\
+                         Off: an independent clone, gitignored by this project.",
+                    );
+                ui.add_space(4.0);
+                if dlg.as_submodule {
+                    ui.label(
+                        egui::RichText::new(
+                            "Added with `git submodule add` — the project TRACKS it (pinned \
+                             commit), so a fresh clone can fetch it. Keeps its own git + remote.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(140, 190, 240)),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} Editing it is a two-step commit: in the submodule, then the \
+                             updated pointer here.",
+                            ph::WARNING,
+                        ))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(220, 180, 90)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Cloned as an INDEPENDENT repo (keeps its own git + remote), added \
+                             to the workspace, and gitignored by this project.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(140, 190, 240)),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} A fresh clone of THIS project won't include it — you'd re-clone \
+                             the library.",
+                            ph::WARNING,
+                        ))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(220, 180, 90)),
+                    );
+                }
                 if let Some(e) = &dlg.error {
                     ui.add_space(4.0);
                     ui.label(
@@ -155,17 +193,22 @@ impl AppIde {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     let can = !busy && !dlg.url.trim().is_empty() && !dlg.dir.trim().is_empty();
+                    let label = if dlg.as_submodule { "Add submodule" } else { "Clone" };
                     if ui
                         .add_enabled(
                             can,
                             egui::Button::new(
-                                egui::RichText::new(format!("{} Clone", ph::GIT_FORK))
+                                egui::RichText::new(format!("{} {label}", ph::GIT_FORK))
                                     .color(egui::Color32::from_rgb(120, 200, 140)),
                             ),
                         )
                         .clicked()
                     {
-                        start = Some((dlg.url.trim().to_owned(), dlg.dir.trim().to_owned()));
+                        start = Some((
+                            dlg.url.trim().to_owned(),
+                            dlg.dir.trim().to_owned(),
+                            dlg.as_submodule,
+                        ));
                     }
                     if busy {
                         crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
@@ -181,11 +224,11 @@ impl AppIde {
                 });
             });
 
-        if let Some((url, dir)) = start {
+        if let Some((url, dir, as_submodule)) = start {
             if let Some(d) = &mut self.clone_library_dialog {
                 d.error = None;
             }
-            self.start_clone_library(url, dir);
+            self.start_clone_library(url, dir, as_submodule);
         }
         if close {
             self.clone_library_dialog = None;

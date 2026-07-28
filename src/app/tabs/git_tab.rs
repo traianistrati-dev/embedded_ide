@@ -58,6 +58,9 @@ pub fn show_git_tab(
     // Set to a branch name when the header picker requests a switch; the caller
     // confirms (if unsaved editor changes) then runs `git switch`.
     switch_branch: &mut Option<String>,
+    // Set to a branch name when the picker's trash icon is clicked; the caller
+    // confirms, then runs `git branch -D`.
+    delete_branch: &mut Option<String>,
     // Workspace-member crate names (extracted libraries) — the repo picker
     // offers one entry per library that can have its own git repository.
     libraries: &[String],
@@ -355,9 +358,29 @@ pub fn show_git_tab(
                     .selected_text(egui::RichText::new(branch).size(12.0).strong().color(branch_c))
                     .show_ui(ui, |ui| {
                         for b in &status.branches {
-                            if ui.selectable_label(b == branch, b).clicked() && b != branch {
-                                *switch_branch = Some(b.clone());
-                            }
+                            let is_current = b == branch;
+                            ui.horizontal(|ui| {
+                                if ui.selectable_label(is_current, b).clicked() && !is_current {
+                                    *switch_branch = Some(b.clone());
+                                }
+                                // Delete affordance for every branch but the one
+                                // you're on (git refuses to delete the current).
+                                if !is_current
+                                    && ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(ph::TRASH)
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(210, 120, 100)),
+                                            )
+                                            .frame(false),
+                                        )
+                                        .on_hover_text("Delete this local branch (git branch -D)")
+                                        .clicked()
+                                {
+                                    *delete_branch = Some(b.clone());
+                                }
+                            });
                         }
                     })
                     .response

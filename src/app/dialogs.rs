@@ -297,6 +297,66 @@ impl AppIde {
         }
     }
 
+    /// Confirmation for deleting a local branch from the header picker
+    /// (`git branch -D` — force, so it also drops unmerged commits).
+    pub(super) fn show_git_delete_branch_dialog(&mut self, ui: &egui::Ui) {
+        let Some(branch) = self.git_delete_branch_confirm.clone() else {
+            return;
+        };
+        let mut keep = true;
+        let mut confirmed = false;
+
+        egui::Window::new("Delete this branch?")
+            .id(egui::Id::new("git_delete_branch_confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_width(440.0);
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(format!("Delete the local branch \"{branch}\"."))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(220, 210, 190)),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Force delete (git branch -D): any commits ONLY on this branch are \
+                         lost. It does NOT touch the remote — a branch already deleted there is \
+                         just removed locally.",
+                        ph::WARNING,
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(230, 160, 90)),
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new(format!("{} Delete branch", ph::TRASH))
+                                .color(egui::Color32::from_rgb(230, 120, 100)),
+                        )
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+
+        if confirmed {
+            self.git.switch_target = Some(branch);
+            self.run_git_op(crate::git::GitOp::DeleteBranch);
+            keep = false;
+        }
+        if !keep {
+            self.git_delete_branch_confirm = None;
+        }
+    }
+
     /// Confirmation for History's "Restore this file": overwrite one file with
     /// its content at a commit.
     pub(super) fn show_git_restore_dialog(&mut self, ui: &egui::Ui) {

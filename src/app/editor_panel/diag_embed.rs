@@ -113,6 +113,7 @@ impl AppIde {
         let mut git_discard_all = false;
         // Branch the header picker asked to switch to.
         let mut git_switch_branch: Option<String> = None;
+        let mut git_delete_branch: Option<String> = None;
         // The Git tab's repository picker: each workspace member can have its
         // own git repo rooted at its folder.
         let git_libraries =
@@ -233,6 +234,7 @@ impl AppIde {
                     &mut git_discard,
                     &mut git_discard_all,
                     &mut git_switch_branch,
+                    &mut git_delete_branch,
                     &git_libraries,
                     &mut flash_scan,
                     &mut flash_go,
@@ -276,6 +278,11 @@ impl AppIde {
                 self.run_git_op(crate::git::GitOp::SwitchBranch);
             }
         }
+        // Deleting a branch is destructive (`-D` drops unmerged commits) — always
+        // confirm.
+        if let Some(b) = git_delete_branch {
+            self.git_delete_branch_confirm = Some(b);
+        }
         // A whole-tree restore rewrote the files on disk; the in-memory buffers
         // are now stale and WOULD overwrite them at the next save, so reload.
         let reload = {
@@ -294,7 +301,7 @@ impl AppIde {
         if let Some(res) = clone_result {
             match res {
                 Ok(lib) => {
-                    self.finish_clone_library(lib.dir);
+                    self.finish_clone_library(lib.dir, lib.is_submodule);
                     self.clone_library_dialog = None;
                 }
                 Err(e) => {

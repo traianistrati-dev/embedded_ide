@@ -913,6 +913,8 @@ pub struct AppIde {
     /// Branch name awaiting confirmation for a header-picker switch (only used
     /// when there are unsaved editor changes the disk reload would discard).
     git_switch_confirm: Option<String>,
+    /// Branch name awaiting confirmation for a picker `git branch -D` delete.
+    git_delete_branch_confirm: Option<String>,
     /// Confirmed restore, applied at the next editor render so `display_code`
     /// refreshes with it (same deferral as `pending_discard_file`).
     pending_restore: Option<(String, String)>,
@@ -1232,6 +1234,7 @@ impl AppIde {
             git_restore_confirm: None,
             git_restore_all_confirm: None,
             git_switch_confirm: None,
+            git_delete_branch_confirm: None,
             pending_restore: None,
             side_panels_collapsed: persisted.side_panels_collapsed,
             diag_collapsed: persisted.diag_collapsed,
@@ -2338,6 +2341,7 @@ impl eframe::App for AppIde {
         self.show_git_restore_dialog(ui);
         self.show_git_restore_all_dialog(ui);
         self.show_git_switch_dialog(ui);
+        self.show_git_delete_branch_dialog(ui);
         self.show_extract_crate_dialog(ui);
         self.show_clone_library_dialog(ui);
         self.show_library_action_dialog(ui);

@@ -55,6 +55,12 @@ pub enum GitOp {
     /// in-memory buffers are reloaded from disk). The name is the tab's
     /// `switch_target`.
     SwitchBranch,
+    /// `git branch -D <name>` — delete a LOCAL branch (from the header picker's
+    /// trash affordance). Force (`-D`) so an unmerged branch still deletes; the
+    /// caller confirms first. Does not touch HEAD/worktree, so no `op_gen` bump
+    /// or reload — the status refresh just drops it from the list. Name is the
+    /// tab's `switch_target`.
+    DeleteBranch,
 }
 
 impl GitOp {
@@ -73,6 +79,7 @@ impl GitOp {
             GitOp::ChangeRemote => "change remote",
             GitOp::NewBranch => "new branch",
             GitOp::SwitchBranch => "switch branch",
+            GitOp::DeleteBranch => "delete branch",
         }
     }
 }
@@ -328,6 +335,10 @@ pub struct ClonedLibrary {
     pub dir: String,
     /// Its `[package] name`, for the path dependency in the root manifest.
     pub name: String,
+    /// `true` when added via `git submodule add` (model 1: the project TRACKS it
+    /// via `.gitmodules` + a pinned commit, so it must NOT be gitignored).
+    /// `false` for a plain `git clone` (model 2: independent, gitignored).
+    pub is_submodule: bool,
 }
 
 impl GitState {
@@ -615,6 +626,8 @@ fn commands_for(
         GitOp::NewBranch => vec![vec!["checkout".into(), "-b".into(), branch.to_owned()]],
         // Check out an existing local branch.
         GitOp::SwitchBranch => vec![vec!["switch".into(), branch.to_owned()]],
+        // Force-delete a local branch (you can't delete the one you're on).
+        GitOp::DeleteBranch => vec![vec!["branch".into(), "-D".into(), branch.to_owned()]],
         GitOp::SetRemote => vec![vec!["remote".into(), "add".into(), "origin".into(), remote.to_owned()]],
         // Repoint origin, then drop the stale upstream — it names a branch in
         // the OLD repository, and leaving it makes the next Push fail. Only
@@ -1154,14 +1167,21 @@ pub fn run_op(
     });
 }
 
-/// `git clone <url> <dir>` under the project, as an INDEPENDENT library repo
-/// (model 2: it keeps its own `.git`/remote; the project gitignores it). On
-/// success validates it is a Cargo crate and reads its package name; the app
+/// Bring an external library repo into the project as a workspace member. Two
+/// models, chosen by `submodule`:
+/// - `false`: `git clone <url> <dir>` — INDEPENDENT repo (its own `.git`/remote;
+///   the project gitignores it; a fresh project clone won't include it).
+/// - `true`: `git submodule add <url> <dir>` — the project TRACKS it via
+///   `.gitmodules` + a pinned commit, so a fresh clone (+ `submodule update`)
+///   is self-contained. Requires the project to already BE a git repo.
+///
+/// On success validates it is a Cargo crate and reads its package name; the app
 /// (`diag_embed`) then registers it as a workspace member and rescans the tree.
 /// Runs on a worker; sets `clone_result` when done.
 pub fn run_clone_library(
     url: String,
     dir: String,
+    submodule: bool,
     project_dir: PathBuf,
     state: Arc<Mutex<GitState>>,
     ctx: egui::Context,
@@ -1178,7 +1198,14 @@ pub fn run_clone_library(
         let finish = |res: Result<ClonedLibrary, String>| {
             let mut st = state.lock().unwrap();
             match &res {
-                Ok(l) => st.push(GitLine::Notice, format!("[ok] cloned into {}", l.dir)),
+                Ok(l) => st.push(
+                    GitLine::Notice,
+                    format!(
+                        "[ok] {} into {}",
+                        if l.is_submodule { "added submodule" } else { "cloned" },
+                        l.dir
+                    ),
+                ),
                 Err(e) => st.push(GitLine::Err, format!("[error] {e}")),
             }
             st.clone_result = Some(res);
@@ -1194,21 +1221,34 @@ pub fn run_clone_library(
                 "`{dir}` already exists in the project — pick another folder name"
             )));
         }
+        // A submodule can only be added inside a git repo.
+        if submodule && !project_dir.join(".git").exists() {
+            return finish(Err(
+                "the project isn't a git repository yet — Init it (Git tab) before adding a \
+                 submodule, or clone as an independent repo instead"
+                    .into(),
+            ));
+        }
 
-        let args = vec!["clone".to_string(), url.clone(), dir.clone()];
+        let args = if submodule {
+            vec!["submodule".into(), "add".into(), url.clone(), dir.clone()]
+        } else {
+            vec!["clone".into(), url.clone(), dir.clone()]
+        };
         state.lock().unwrap().push(GitLine::Cmd, format!("> git {}", args.join(" ")));
         let out = match run_git(&project_dir, &args) {
             Ok(o) => o,
             Err(e) => return finish(Err(format!("could not run git: {e}"))),
         };
-        // git clone streams progress to stderr; surface it in the console.
+        // git streams clone progress to stderr; surface it in the console.
         for line in String::from_utf8_lossy(&out.stderr).lines() {
             if !line.trim().is_empty() {
                 state.lock().unwrap().push(GitLine::Out, line.to_string());
             }
         }
         if !out.status.success() {
-            return finish(Err("git clone failed — see the output above".into()));
+            let what = if submodule { "git submodule add" } else { "git clone" };
+            return finish(Err(format!("{what} failed — see the output above")));
         }
 
         // It must be a Cargo crate to join the workspace.
@@ -1222,7 +1262,7 @@ pub fn run_clone_library(
             }
         };
         match parse_package_name(&toml) {
-            Some(name) => finish(Ok(ClonedLibrary { dir, name })),
+            Some(name) => finish(Ok(ClonedLibrary { dir, name, is_submodule: submodule })),
             None => finish(Err(format!(
                 "`{dir}/Cargo.toml` has no [package] name — not a library crate"
             ))),
@@ -1949,6 +1989,14 @@ mod tests {
         assert_eq!(
             commands_for(GitOp::SwitchBranch, "", "", "develop", true, &None),
             vec![vec!["switch", "develop"]]
+        );
+    }
+
+    #[test]
+    fn delete_branch_force_deletes_the_target() {
+        assert_eq!(
+            commands_for(GitOp::DeleteBranch, "", "", "stale-lib", true, &None),
+            vec![vec!["branch", "-D", "stale-lib"]]
         );
     }
 
