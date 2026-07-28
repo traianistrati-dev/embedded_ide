@@ -390,8 +390,20 @@ impl AppIde {
         plan: extract_crate::DeleteCratePlan,
     ) -> Result<(), String> {
         let root = self.require_project_dir()?;
-        std::fs::remove_dir_all(root.join(&plan.crate_dir))
-            .map_err(|e| format!("Could not delete {}: {e}", plan.crate_dir))?;
+        // A library cloned as a git submodule owns a `.gitmodules` entry + a
+        // gitlink in the index; a plain `remove_dir_all` would leave those
+        // dangling (stale entry → `git status` fails → the repo reads as "not a
+        // repo"). Deinit + `git rm` cleans them and removes the tree too.
+        if crate::git::is_submodule(&root, &plan.crate_dir) {
+            crate::git::remove_submodule(&root, &plan.crate_dir);
+        }
+        // For a regular library this is THE removal; for a submodule `git rm`
+        // already deleted the tree, so a now-missing dir is expected.
+        let dir = root.join(&plan.crate_dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| format!("Could not delete {}: {e}", plan.crate_dir))?;
+        }
         self.project_tree
             .user_src_files
             .retain(|(p, _)| !plan.removed_files.contains(p));

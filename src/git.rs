@@ -1058,6 +1058,12 @@ pub fn run_op(
         // directory into one `? dir/` entry — a fresh (never-committed)
         // project showed a single "src/" row instead of its files (reported
         // as "nu se văd fișierele din src").
+        // `--ignore-submodules=dirty`: don't recurse into submodule working
+        // trees. A BROKEN or stale submodule entry (a `.gitmodules` path whose
+        // directory is gone) otherwise makes `git status` exit 128 — which the
+        // detection below reads as "not a git repository", so a repo with ONE
+        // bad submodule appeared uninitialised (`git init`). Submodule POINTER
+        // changes still show; only their inner dirty state is skipped.
         let t = std::time::Instant::now();
         match run_git(
             &project_dir,
@@ -1066,6 +1072,7 @@ pub fn run_op(
                 "--porcelain=v2".into(),
                 "--branch".into(),
                 "--untracked-files=all".into(),
+                "--ignore-submodules=dirty".into(),
             ],
         ) {
             Ok(out) => {
@@ -1293,6 +1300,55 @@ pub fn parse_package_name(cargo_toml: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The `path = …` values declared in a `.gitmodules` file. Pure (tested below).
+/// `.gitmodules` uses git-config syntax: sections `[submodule "name"]` with
+/// `path`/`url` entries — the PATH is what a submodule lives at in the tree.
+fn gitmodules_paths(gitmodules: &str) -> Vec<String> {
+    gitmodules
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("path")?.trim_start().strip_prefix('=')?;
+            Some(rest.trim().trim_matches('"').to_string())
+        })
+        .collect()
+}
+
+/// Whether `dir` (project-root-relative, forward slashes) is registered as a git
+/// submodule of the repo at `project_dir` — i.e. `.gitmodules` has a matching
+/// `path = <dir>` entry.
+pub fn is_submodule(project_dir: &Path, dir: &str) -> bool {
+    let Ok(gm) = std::fs::read_to_string(project_dir.join(".gitmodules")) else {
+        return false;
+    };
+    gitmodules_paths(&gm).iter().any(|p| p == dir)
+}
+
+/// Fully remove the submodule checked out at `dir` from the repo at
+/// `project_dir`: deinit it, drop the gitlink + its `.gitmodules` entry
+/// (`git rm`), and delete the backing repo under `.git/modules`. Best-effort —
+/// every step tolerates a partial/broken submodule.
+///
+/// This is exactly what a plain `remove_dir_all` MISSES: deleting only the
+/// working tree leaves a stale `.gitmodules` entry (and gitlink) pointing at a
+/// gone path, which later makes `git status` recurse into it and exit non-zero —
+/// the IDE then reads the repo as "not a repo" and offers `git init`.
+pub fn remove_submodule(project_dir: &Path, dir: &str) {
+    // Unregister: empties the working tree and drops the `.git/config` entry.
+    let _ = run_git(
+        project_dir,
+        &["submodule".into(), "deinit".into(), "-f".into(), "--".into(), dir.to_owned()],
+    );
+    // Drop the gitlink from the index AND the `.gitmodules` entry (staged), and
+    // remove the working tree. Modern git (>=1.8.5) rewrites `.gitmodules` here.
+    let _ = run_git(
+        project_dir,
+        &["rm".into(), "-f".into(), "--".into(), dir.to_owned()],
+    );
+    // The backing repo (submodule NAME == path in the common case). Harmless if
+    // already gone or if a differently-named module dir is left behind.
+    let _ = std::fs::remove_dir_all(project_dir.join(".git").join("modules").join(dir));
 }
 
 /// Parse `git diff --no-color` unified output into renderable rows. Content
@@ -1882,6 +1938,21 @@ mod tests {
         assert_eq!(parse_package_name(toml).as_deref(), Some("my_lib"));
         // No [package] → None (e.g. a bare workspace root).
         assert_eq!(parse_package_name("[workspace]\nmembers = []\n"), None);
+    }
+
+    #[test]
+    fn gitmodules_paths_reads_every_submodule_path() {
+        let gm = "\
+[submodule \"my-lib\"]
+\tpath = my-lib
+\turl = https://example.com/my-lib.git
+[submodule \"vendor/other\"]
+    path = vendor/other
+    url = https://example.com/other.git
+";
+        assert_eq!(gitmodules_paths(gm), vec!["my-lib", "vendor/other"]);
+        // A file with no submodule sections yields nothing.
+        assert!(gitmodules_paths("").is_empty());
     }
 
     #[test]
