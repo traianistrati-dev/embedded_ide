@@ -788,6 +788,14 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
         r.patched.push(format!("CPU = {}", form.cpu));
         r.patched.push(format!("Target = {}", form.target));
         r.patched.push(format!("HAL dependency = {}", form.hal_dep));
+        // Give the chip its family's clock tree so the Clock tab works and real
+        // RCC codegen is emitted — same mapping the XML importer uses. Only when
+        // the family actually has one (else leave the user's current choice).
+        let clk = crate::panels::mcu_module::mcu_form::ClockChoice::for_family(&form.family);
+        if clk != crate::panels::mcu_module::mcu_form::ClockChoice::None {
+            form.clock = clk;
+            r.patched.push(format!("Clock = {}", clk.label()));
+        }
     } else {
         patch(&mut form.family, &chip.family, "Family", &mut r);
         patch(&mut form.cpu, &chip.cpu, "CPU", &mut r);

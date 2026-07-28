@@ -1,16 +1,20 @@
-//! STM32G4 clock tree as a data-driven [`ClockGraph`] — the second family to go
-//! through the FAMILY-keyed RCC codegen (see [`super::super::codegen::rcc`]).
+//! STM32L4 clock tree as a data-driven [`ClockGraph`].
 //!
-//! Topology (RM0440): HSI16 and HSE (4–48 MHz crystal) feed the main PLL
-//! `src → /M → ×N → /R → PLLCLK` and the SYSCLK mux (HSI / HSE / PLLCLK). AHB
-//! divides SYSCLK into HCLK; APB1 / APB2 divide HCLK, with the ×2 timer rule.
-//! G4 uses the PLL **R** output for SYSCLK (like WBA), a nested `source:` inside
-//! the `Pll { … }` and a real crystal HSE — all captured by `RccDescriptor::g4`.
+//! Topology (RM0351): HSI16 and HSE (4–48 MHz) feed the main PLL
+//! `src → /M → ×N → /R → PLLCLK` and the SYSCLK mux; AHB → HCLK; APB1/APB2.
+//! Structurally identical to G4 (nested PLL source, R output) — the codegen
+//! difference is only `RccDescriptor::l4().hsi_needs_enable` (L4 boots with HSI
+//! OFF) and `ReadSpec::l4().reset_is_hw_default = false` (L4 boots on MSI).
 //!
-//! Default selections = a crystal-free 150 MHz preset (the non-boost ceiling):
-//! HSI16 / M=4 (4 MHz PLL in) / N=75 (VCO 300) / R=2 → **SYSCLK 150 MHz**, all
-//! buses /1. G4 needs NO hand-authored diagram layout — the generic
-//! [`auto_layout`](super::auto_layout::auto_layout) draws it from this topology.
+//! **MSI** is L4's defining low-power oscillator and its power-on SYSCLK source.
+//! It is modelled here as a source node so it SHOWS in the diagram and uniquely
+//! marks an L4 graph (no other family has `msi`). It is NOT yet a selectable
+//! SYSCLK/PLL source in codegen — that needs the generic reader/emitter to gain
+//! MSI (a `SysSource::Msi` + `MSIRange` extension), deliberately deferred to
+//! keep the byte-identical-tested core stable. The shipped preset is HSI→PLL.
+//!
+//! Default = the 80 MHz HSI preset (L4's ceiling): HSI16 / M=1 (16 MHz PLL in) /
+//! N=10 (VCO 160) / R=2 → **SYSCLK 80 MHz**, all buses /1. Auto-generated layout.
 
 use super::model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
 
@@ -29,15 +33,12 @@ fn e_in(from: &str, to: &str, input: usize) -> Edge {
     Edge { from: from.into(), to: to.into(), input }
 }
 
-/// Build the G4 graph with the crystal-free 150 MHz HSI→PLL preset selected.
-/// Node ids match what [`read_rcc_values`](super::super::codegen::rcc::read_rcc_values)
-/// expects (`hse`/`pllsrc`/`pllm`/`plln`/`pllr`/`sw`/`ahb`/`apb1`/`apb2`).
-pub fn stm32g4_graph() -> ClockGraph {
+/// Build the L4 graph with the crystal-free 80 MHz HSI→PLL preset selected.
+pub fn stm32l4_graph() -> ClockGraph {
     let bus_div: Vec<u32> = vec![1, 2, 4, 8, 16];
-    // HPRE skips /32 (same field encoding as F4).
     let ahb_div: Vec<u32> = vec![1, 2, 4, 8, 16, 64, 128, 256, 512];
-    let pll_m: Vec<u32> = vec![1, 2, 4, 6, 8, 16]; // PllPreDiv (1–16); safe subset
-    let pll_r: Vec<u32> = vec![2, 4, 6, 8]; // PllRDiv — the only valid G4 R divisors
+    let pll_m: Vec<u32> = vec![1, 2, 4, 6, 8]; // PllPreDiv (1–8 on L4)
+    let pll_r: Vec<u32> = vec![2, 4, 6, 8]; // PllRDiv {2,4,6,8}
 
     let nodes = vec![
         // ── Sources ──
@@ -51,11 +52,18 @@ pub fn stm32g4_graph() -> ClockGraph {
             NodeKind::Source { min_hz: 4 * M, max_hz: 48 * M, gated: true },
             NodeState::Source { enabled: false, hz: 8 * M },
         ),
+        // MSI — L4's power-on oscillator. Display-only for now (see module doc):
+        // present so the diagram shows it and to mark the graph as L4.
+        n(
+            "msi",
+            NodeKind::Source { min_hz: 100_000, max_hz: 48 * M, gated: true },
+            NodeState::Source { enabled: true, hz: 4 * M },
+        ),
         // ── Main PLL: src mux → /M → ×N → /R ──
         n("pllsrc", NodeKind::Mux { inputs: 2 }, NodeState::Index(0)), // HSI
-        n("pllm", NodeKind::Divider { options: pll_m }, NodeState::Index(2)), // /4 → 4 MHz
-        n("plln", NodeKind::Multiplier { min: 8, max: 127 }, NodeState::Value(75)), // VCO 300
-        n("pllr", NodeKind::Divider { options: pll_r }, NodeState::Index(0)), // /2 → 150 MHz
+        n("pllm", NodeKind::Divider { options: pll_m }, NodeState::Index(0)), // /1 → 16 MHz
+        n("plln", NodeKind::Multiplier { min: 8, max: 127 }, NodeState::Value(10)), // VCO 160
+        n("pllr", NodeKind::Divider { options: pll_r }, NodeState::Index(0)), // /2 → 80 MHz
         n_lim("pllclk", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
         // ── SYSCLK + buses ──
         n("sw", NodeKind::Mux { inputs: 3 }, NodeState::Index(2)), // PLLCLK
@@ -95,16 +103,11 @@ pub fn stm32g4_graph() -> ClockGraph {
     ClockGraph { nodes, edges }
 }
 
-/// Recognise a G4 graph (for the New MCU form's clock-choice dropdown). G4 uses
-/// the PLL `pllr` output (like WBA/G0) with two APB buses but none of F4's
-/// `pllp`, WBA's `apb7`, or G0's single-bus layout — `pllr + apb2 + !pllp +
-/// !apb7` pins it uniquely.
-pub fn is_g4_graph(g: &ClockGraph) -> bool {
-    g.node("pllr").is_some()
-        && g.node("apb2").is_some()
-        && g.node("pllp").is_none()
-        && g.node("apb7").is_none()
-        && g.node("msi").is_none() // an `msi` node marks L4, not G4
+/// Recognise an L4 graph (New MCU form dropdown). L4 is the only family that
+/// models the `msi` oscillator — a clean, unique marker (its topology is
+/// otherwise identical to G4).
+pub fn is_l4_graph(g: &ClockGraph) -> bool {
+    g.node("msi").is_some() && g.node("pllr").is_some()
 }
 
 #[cfg(test)]
@@ -113,20 +116,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_preset_computes_150mhz_sysclk() {
-        let f = evaluate(&stm32g4_graph());
-        assert_eq!(f.get("sysclk").copied(), Some(150 * M));
-        assert_eq!(f.get("hclk").copied(), Some(150 * M));
-        // All buses /1 → PCLK1/PCLK2 = HCLK.
-        assert_eq!(f.get("pclk1").copied(), Some(150 * M));
-        assert_eq!(f.get("pclk2").copied(), Some(150 * M));
+    fn default_preset_computes_80mhz_sysclk() {
+        let f = evaluate(&stm32l4_graph());
+        assert_eq!(f.get("sysclk").copied(), Some(80 * M));
+        assert_eq!(f.get("hclk").copied(), Some(80 * M));
     }
 
     #[test]
-    fn is_g4_graph_distinguishes_families() {
-        use super::super::{stm32f4_graph, stm32wba_graph};
-        assert!(is_g4_graph(&stm32g4_graph()));
-        assert!(!is_g4_graph(&stm32f4_graph())); // F4 → pllp
-        assert!(!is_g4_graph(&stm32wba_graph())); // WBA → pll1r
+    fn is_l4_graph_distinguishes_from_g4() {
+        use super::super::{stm32g0_graph, stm32g4_graph};
+        assert!(is_l4_graph(&stm32l4_graph()));
+        assert!(!is_l4_graph(&stm32g4_graph())); // no msi node
+        assert!(!is_l4_graph(&stm32g0_graph()));
     }
 }

@@ -37,6 +37,7 @@ pub fn rcc_recipe(family: &str) -> Option<(ReadSpec, RccDescriptor)> {
         "stm32f2" | "stm32f4" | "stm32f7" => Some((ReadSpec::f4(), RccDescriptor::f4())),
         "stm32g0" => Some((ReadSpec::g0(), RccDescriptor::g0())),
         "stm32g4" => Some((ReadSpec::g4(), RccDescriptor::g4())),
+        "stm32l4" => Some((ReadSpec::l4(), RccDescriptor::l4())),
         "stm32wba" => Some((ReadSpec::wba(), RccDescriptor::wba())),
         _ => None,
     }
@@ -54,7 +55,10 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig) -> String {
         ClockConfig::Graph(gc) => read_rcc_values(&gc.graph, &spec),
         _ => spec.reset.clone(),
     };
-    if values == spec.reset {
+    // The reset shortcut only applies when the chip's HW default equals this
+    // reset (HSI). L4/L5/U5 default to MSI, so a reset-equivalent graph must
+    // still emit an explicit HSI block, not `init(Default::default())`.
+    if spec.reset_is_hw_default && values == spec.reset {
         return EMBASSY_RESET_INIT.to_string();
     }
     emit_rcc_block(&desc, &values)
@@ -138,6 +142,11 @@ pub struct RccDescriptor {
     pub hse_label: HseLabel,
     /// The `via <X>` suffix in the PLL description: `PLLP` (F4) / `PLL1R` (WBA).
     pub pll_desc_via: &'static str,
+    /// Emit `config.rcc.hsi = true;` when HSI drives SYSCLK or the PLL. Needed
+    /// by families whose `Config::default()` leaves HSI OFF (L4/L5/U5:
+    /// `hsi: bool = false`); false where HSI is on by default (F4/G4/G0) or
+    /// unused (WBA fixed HSE).
+    pub hsi_needs_enable: bool,
 }
 
 impl RccDescriptor {
@@ -155,6 +164,7 @@ impl RccDescriptor {
             hsi_label: "HSI16",
             hse_label: HseLabel::WithMhz,
             pll_desc_via: "PLLP",
+            hsi_needs_enable: false,
         }
     }
 
@@ -178,7 +188,17 @@ impl RccDescriptor {
             hsi_label: "HSI16",
             hse_label: HseLabel::WithMhz,
             pll_desc_via: "PLLR",
+            hsi_needs_enable: false,
         }
+    }
+
+    /// STM32L4: same emit shape as G4 (nested source, R output, real HSE, no
+    /// frac, no voltage_scale line) EXCEPT `hsi_needs_enable` — L4's
+    /// `Config::default()` leaves `hsi: false`, so an HSI-sourced clock must
+    /// switch it on explicitly. Verified against embassy `l.rs` + metapac
+    /// `rcc_l4` (Sysclk::PLL1_R, Plln MUL8..127, Pllr {2,4,6,8}).
+    pub fn l4() -> Self {
+        Self { hsi_needs_enable: true, ..Self::g4() }
     }
 
     /// STM32G0: identical emit shape to G4 (nested source, R output, real HSE,
@@ -204,6 +224,7 @@ impl RccDescriptor {
             hsi_label: "HSI16",
             hse_label: HseLabel::Fixed("HSE32"),
             pll_desc_via: "PLL1R",
+            hsi_needs_enable: false,
         }
     }
 }
@@ -228,11 +249,17 @@ pub struct ReadSpec {
     /// fallback for any node the graph is missing, and compared against the
     /// result to decide the `embassy_stm32::init(Default::default())` path.
     pub reset: RccValues,
+    /// `true` when `Config::default()` equals `reset` (F4/G4/G0/WBA: HSI) — then
+    /// a reset-equivalent graph emits `init(Default::default())`. `false` for
+    /// L4/L5/U5, whose HW default is MSI, not HSI: a reset graph must still emit
+    /// an explicit HSI block, so the shortcut is skipped.
+    pub reset_is_hw_default: bool,
 }
 
 impl ReadSpec {
     pub fn f4() -> Self {
         Self {
+            reset_is_hw_default: true,
             hsi_hz: 16_000_000,
             hse_fixed_hz: None,
             pll_out_node: "pllp",
@@ -257,6 +284,7 @@ impl ReadSpec {
     /// selections (M=4, N=75, R=2) so a fully-reset graph reads back as reset.
     pub fn g4() -> Self {
         Self {
+            reset_is_hw_default: true,
             hsi_hz: 16_000_000,
             hse_fixed_hz: None,
             pll_out_node: "pllr",
@@ -281,6 +309,7 @@ impl ReadSpec {
     /// selections (M=1, N=8, R=2).
     pub fn g0() -> Self {
         Self {
+            reset_is_hw_default: true,
             hsi_hz: 16_000_000,
             hse_fixed_hz: None,
             pll_out_node: "pllr",
@@ -300,8 +329,35 @@ impl ReadSpec {
         }
     }
 
+    /// L4: HSI16, live HSE crystal, PLL output on `pllr`, APB1/2. `reset` mirrors
+    /// the shipped 80 MHz preset (M=1, N=10, R=2); `reset_is_hw_default: false`
+    /// because L4 boots on MSI, so a reset graph still emits an explicit HSI
+    /// block rather than `init(Default::default())`.
+    pub fn l4() -> Self {
+        Self {
+            reset_is_hw_default: false,
+            hsi_hz: 16_000_000,
+            hse_fixed_hz: None,
+            pll_out_node: "pllr",
+            apb: &[("apb1_pre", "apb1"), ("apb2_pre", "apb2")],
+            reset: RccValues {
+                sys: SysSource::Hsi,
+                hse_on: false,
+                hse_hz: 8_000_000,
+                pll_src_hse: false,
+                pll_m: 1,
+                pll_n: 10,
+                pll_out: 2,
+                ahb: 1,
+                sysclk_hz: 16_000_000,
+                apb: vec![("apb1_pre", 1), ("apb2_pre", 1)],
+            },
+        }
+    }
+
     pub fn wba() -> Self {
         Self {
+            reset_is_hw_default: true,
             hsi_hz: 16_000_000,
             hse_fixed_hz: Some(32_000_000),
             pll_out_node: "pllr",
@@ -464,6 +520,12 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
                 "        config.rcc.hse = Some(rcc::Hse { prescaler: rcc::HsePrescaler::DIV1 });\n",
             ),
         }
+    }
+
+    // ── HSI enable (families whose default leaves HSI off, e.g. L4) ─────
+    let hsi_used = v.sys == SysSource::Hsi || (v.sys == SysSource::Pll && !v.pll_src_hse);
+    if desc.hsi_needs_enable && hsi_used {
+        b.push_str("        config.rcc.hsi = true;\n");
     }
 
     // ── PLL ─────────────────────────────────────────────────────────────
@@ -682,10 +744,10 @@ mod tests {
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_R;"), "{s}");
         assert!(s.contains("VoltageScale::RANGE1"), "{s}");
 
-        // A family with no recipe (e.g. l4 until one lands) → embassy reset init,
+        // A family with no recipe (e.g. h7 until one lands) → embassy reset init,
         // regardless of what graph it carries.
         let g = GraphClock { graph: stm32f4_graph(), layout: Default::default() };
-        assert!(graph_clock_block("stm32l4", &ClockConfig::Graph(g))
+        assert!(graph_clock_block("stm32h7", &ClockConfig::Graph(g))
             .contains("embassy_stm32::init(Default::default())"));
 
         // Non-graph clock → reset init.
@@ -738,6 +800,36 @@ mod tests {
         assert_eq!(graph_clock_block("stm32f7", &gc()), f4);
         assert_eq!(graph_clock_block("stm32f2", &gc()), f4);
         assert!(f4.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"));
+    }
+
+    #[test]
+    fn l4_recipe_emits_hsi_enable_and_never_the_msi_reset_default() {
+        use crate::panels::mcu_module::clock::graph::{stm32l4_graph, GraphClock, NodeState};
+
+        // Shipped 80 MHz preset: HSI16 /1 ×10 /2 → 80 MHz.
+        let s = graph_clock_block("stm32l4", &ClockConfig::Graph(GraphClock {
+            graph: stm32l4_graph(),
+            layout: Default::default(),
+        }));
+        for needle in [
+            "config.rcc.hsi = true;", // L4 boots with HSI off — must switch it on
+            "source: rcc::PllSource::HSI,",
+            "mul: rcc::PllMul::MUL10,",
+            "divr: Some(rcc::PllRDiv::DIV2),",
+            "config.rcc.sys = rcc::Sysclk::PLL1_R;",
+            "SYSCLK 80 MHz (HSI16 /1 x10 /2 via PLLR)",
+        ] {
+            assert!(s.contains(needle), "missing: {needle}\n\n{s}");
+        }
+
+        // A reset-equivalent L4 graph (HSI sysclk, all /1) must STILL emit an
+        // explicit HSI block — NOT init(Default::default()), which on L4 is MSI.
+        let mut g = stm32l4_graph();
+        g.node_mut("sw").unwrap().state = NodeState::Index(0); // HSI direct
+        let s2 = graph_clock_block("stm32l4", &ClockConfig::Graph(GraphClock { graph: g, layout: Default::default() }));
+        assert!(s2.contains("config.rcc.hsi = true;"), "{s2}");
+        assert!(s2.contains("config.rcc.sys = rcc::Sysclk::HSI;"), "{s2}");
+        assert!(!s2.contains("init(Default::default())"), "L4 reset must be explicit, not MSI default\n\n{s2}");
     }
 
     #[test]

@@ -390,13 +390,9 @@ pub(crate) fn core_to_target(core: &str) -> &'static str {
 }
 
 /// Which built-in clock model fits a family (others get a plain reset clock).
+/// Delegates to the single source of truth so XML import and AI import agree.
 fn clock_for_family(family: &str) -> ClockChoice {
-    match family {
-        "stm32f1" => ClockChoice::Stm32f1,
-        "stm32wba" => ClockChoice::Stm32wba,
-        "stm32f4" => ClockChoice::Stm32f4,
-        _ => ClockChoice::None,
-    }
+    ClockChoice::for_family(family)
 }
 
 /// Per-chip F4 clock ceilings (embassy's `max` table): SYSCLK varies by model

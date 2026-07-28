@@ -64,10 +64,13 @@ pub enum ClockChoice {
     /// STM32G0 tree (data-driven graph — ships the 64 MHz HSI→PLL preset,
     /// single APB bus). Auto-generated layout.
     Stm32g0,
+    /// STM32L4 tree (data-driven graph — ships the 80 MHz HSI→PLL preset; MSI
+    /// shown but HSI-PLL codegen). Auto-generated layout.
+    Stm32l4,
 }
 
 impl ClockChoice {
-    pub const ALL: [ClockChoice; 7] = [
+    pub const ALL: [ClockChoice; 8] = [
         ClockChoice::None,
         ClockChoice::Stm32f1,
         ClockChoice::Esp32c3,
@@ -75,7 +78,26 @@ impl ClockChoice {
         ClockChoice::Stm32f4,
         ClockChoice::Stm32g4,
         ClockChoice::Stm32g0,
+        ClockChoice::Stm32l4,
     ];
+    /// The clock tree a chip FAMILY defaults to — so an imported chip (XML or
+    /// AI datasheet) whose family has a modelled tree gets a working Clock tab
+    /// and real RCC codegen without the user picking one by hand. `None` for
+    /// families with no tree yet (the reset-default clock still compiles).
+    pub fn for_family(family: &str) -> ClockChoice {
+        match family {
+            "stm32f1" => ClockChoice::Stm32f1,
+            "stm32wba" => ClockChoice::Stm32wba,
+            // F2/F4/F7 share embassy's f247 RCC → one tree (see `rcc::rcc_recipe`).
+            "stm32f2" | "stm32f4" | "stm32f7" => ClockChoice::Stm32f4,
+            "stm32g4" => ClockChoice::Stm32g4,
+            "stm32g0" => ClockChoice::Stm32g0,
+            "stm32l4" => ClockChoice::Stm32l4,
+            "esp32c3" => ClockChoice::Esp32c3,
+            _ => ClockChoice::None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ClockChoice::None => "None",
@@ -85,12 +107,13 @@ impl ClockChoice {
             ClockChoice::Stm32f4 => "STM32F2/F4/F7 tree",
             ClockChoice::Stm32g4 => "STM32G4 tree",
             ClockChoice::Stm32g0 => "STM32G0 tree",
+            ClockChoice::Stm32l4 => "STM32L4 tree",
         }
     }
     fn to_def(self) -> ClockDef {
         use crate::panels::mcu_module::clock::graph::{
-            stm32f4_graph, stm32f4_layout, stm32g0_graph, stm32g4_graph, stm32wba_graph,
-            stm32wba_layout, GraphClock,
+            stm32f4_graph, stm32f4_layout, stm32g0_graph, stm32g4_graph, stm32l4_graph,
+            stm32wba_graph, stm32wba_layout, GraphClock,
         };
         match self {
             ClockChoice::None => ClockDef::None,
@@ -114,11 +137,15 @@ impl ClockChoice {
                 graph: stm32g0_graph(),
                 layout: Default::default(),
             }),
+            ClockChoice::Stm32l4 => ClockDef::Graph(GraphClock {
+                graph: stm32l4_graph(),
+                layout: Default::default(),
+            }),
         }
     }
     fn from_def(d: &ClockDef) -> ClockChoice {
         use crate::panels::mcu_module::clock::graph::{
-            is_f4_graph, is_g0_graph, is_g4_graph, is_wba_graph,
+            is_f4_graph, is_g0_graph, is_g4_graph, is_l4_graph, is_wba_graph,
         };
         match d {
             ClockDef::Stm32f1(_) => ClockChoice::Stm32f1,
@@ -127,6 +154,7 @@ impl ClockChoice {
             ClockDef::Graph(gc) if is_f4_graph(&gc.graph) => ClockChoice::Stm32f4,
             ClockDef::Graph(gc) if is_g4_graph(&gc.graph) => ClockChoice::Stm32g4,
             ClockDef::Graph(gc) if is_g0_graph(&gc.graph) => ClockChoice::Stm32g0,
+            ClockDef::Graph(gc) if is_l4_graph(&gc.graph) => ClockChoice::Stm32l4,
             // A foreign graph maps to None here but is PRESERVED via
             // `McuForm::imported_clock`; plain none stays none.
             ClockDef::Graph(_) | ClockDef::None => ClockChoice::None,
@@ -969,6 +997,29 @@ mod tests {
 
     fn names(rows: &[PinRow]) -> Vec<&str> {
         rows.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    /// A chip's family picks its clock tree, and that tree round-trips to a
+    /// graph whose codegen the family dispatch recognises. Guards the "imported
+    /// chip gets a working clock automatically" path (recommendation b).
+    #[test]
+    fn for_family_maps_to_a_dispatchable_clock_tree() {
+        use crate::panels::mcu_module::clock::graph::{is_g0_graph, is_g4_graph};
+        use crate::panels::mcu_module::mcu_def::ClockDef;
+
+        assert_eq!(ClockChoice::for_family("stm32g4"), ClockChoice::Stm32g4);
+        assert_eq!(ClockChoice::for_family("stm32g0"), ClockChoice::Stm32g0);
+        // The f247 family shares one tree.
+        assert_eq!(ClockChoice::for_family("stm32f2"), ClockChoice::Stm32f4);
+        assert_eq!(ClockChoice::for_family("stm32f7"), ClockChoice::Stm32f4);
+        // A family with no tree yet → None (reset-default clock, still compiles).
+        assert_eq!(ClockChoice::for_family("stm32h7"), ClockChoice::None);
+
+        // End-to-end: a G4 choice builds a graph the codegen recognises as G4.
+        match ClockChoice::Stm32g4.to_def() {
+            ClockDef::Graph(gc) => assert!(is_g4_graph(&gc.graph) && !is_g0_graph(&gc.graph)),
+            _ => panic!("G4 choice must build a graph clock"),
+        }
     }
 
     /// The GUI order must be a real permutation of the four sides — a typo

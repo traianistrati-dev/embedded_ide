@@ -260,10 +260,10 @@ mod tests {
         use crate::panels::mcu_module::mcu_def::McuDefinition;
         let mut def: McuDefinition =
             crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
-        // Use a family WITHOUT an RCC recipe (l4) so the clock stays reset
-        // default — g0/g4 now read the graph and would emit a config block.
-        def.family = "stm32l4".into();
-        def.id = "stm32l4r5zi".into();
+        // Use a family WITHOUT an RCC recipe (h7) so the clock stays reset
+        // default — g0/g4/l4 now read the graph and would emit a config block.
+        def.family = "stm32h7".into();
+        def.id = "stm32h743zi".into();
         let code = def.build_mcu().fresh_main_rs();
         assert!(code.contains("HAL: embassy-stm32 (blocking)"));
         assert!(code.contains("fn main() -> !"));
