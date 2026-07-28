@@ -91,6 +91,8 @@ pub(super) fn show_diag_panel(
     // True when the user clicks "Discard all"; the caller confirms then resets
     // the whole tree to HEAD (Phase C).
     git_discard_all: &mut bool,
+    // Branch name the header picker asked to switch to.
+    git_switch_branch: &mut Option<String>,
     // Workspace-member crate names — the Git tab's repository picker.
     git_libraries: &[String],
     // Flash-tab Programmer-row buttons: set `flash_scan`/`flash_go` on click;
@@ -623,6 +625,7 @@ pub(super) fn show_diag_panel(
                 git_restore_all_from_commit,
                 git_discard,
                 git_discard_all,
+                git_switch_branch,
                 git_libraries,
             );
         }

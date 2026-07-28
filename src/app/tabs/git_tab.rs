@@ -55,6 +55,9 @@ pub fn show_git_tab(
     // Set true when the user clicks "Discard all" — the caller confirms, then
     // resets every file to HEAD + deletes untracked files (Phase C).
     discard_all_out: &mut bool,
+    // Set to a branch name when the header picker requests a switch; the caller
+    // confirms (if unsaved editor changes) then runs `git switch`.
+    switch_branch: &mut Option<String>,
     // Workspace-member crate names (extracted libraries) — the repo picker
     // offers one entry per library that can have its own git repository.
     libraries: &[String],
@@ -341,12 +344,32 @@ pub fn show_git_tab(
         }
         if is_repo {
             let branch = status.branch.as_deref().unwrap_or("(detached)");
-            ui.label(
-                egui::RichText::new(format!("{} {branch}", ph::GIT_BRANCH))
-                    .size(12.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(150, 195, 235)),
-            );
+            let branch_c = egui::Color32::from_rgb(150, 195, 235);
+            // Branch picker: a dropdown of LOCAL branches when there's more than
+            // one to choose from and no op is running; otherwise a plain label.
+            // Picking a different branch REQUESTS a switch — the caller confirms
+            // (unsaved changes are lost on the disk reload) then runs it.
+            if status.branches.len() > 1 && busy.is_none() {
+                ui.label(egui::RichText::new(ph::GIT_BRANCH.to_string()).size(12.0).color(branch_c));
+                egui::ComboBox::from_id_salt("git_branch_picker")
+                    .selected_text(egui::RichText::new(branch).size(12.0).strong().color(branch_c))
+                    .show_ui(ui, |ui| {
+                        for b in &status.branches {
+                            if ui.selectable_label(b == branch, b).clicked() && b != branch {
+                                *switch_branch = Some(b.clone());
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Switch to another local branch (reloads the project from disk)");
+            } else {
+                ui.label(
+                    egui::RichText::new(format!("{} {branch}", ph::GIT_BRANCH))
+                        .size(12.0)
+                        .strong()
+                        .color(branch_c),
+                );
+            }
             if let Some(up) = &status.upstream {
                 ui.label(
                     egui::RichText::new(format!("{} {up}", ph::ARROW_RIGHT))
@@ -409,6 +432,30 @@ pub fn show_git_tab(
                 .size(11.0)
                 .color(egui::Color32::from_gray(140)),
             );
+
+            // New branch off the CURRENT state, on the `repo:`-selected repo.
+            ui.separator();
+            ui.add(
+                egui::TextEdit::singleline(&mut git.branch_draft)
+                    .desired_width(120.0)
+                    .hint_text("new-branch"),
+            );
+            let has_name = !git.branch_draft.trim().is_empty();
+            if ui
+                .add_enabled(
+                    busy.is_none() && has_name,
+                    egui::Button::new(format!("{} New branch", ph::GIT_BRANCH)),
+                )
+                .on_hover_text(
+                    "git checkout -b <name> — create a branch from the CURRENT state \
+                     (this commit + any uncommitted changes) and switch to it, on the \
+                     repository selected in `repo:` above.",
+                )
+                .on_disabled_hover_text("enter a branch name first")
+                .clicked()
+            {
+                *op_out = Some(GitOp::NewBranch);
+            }
         } else if loaded {
             ui.label(
                 egui::RichText::new("not a git repository")

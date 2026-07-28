@@ -362,6 +362,13 @@ impl AppIde {
         }
         let msg = self.git.commit_msg.trim().to_owned();
         let remote = self.git.remote_url_draft.trim().to_owned();
+        // A switch takes its target from the header picker; a new branch from the
+        // text field. Both flow through `run_op`'s single `branch` argument.
+        let branch = if op == crate::git::GitOp::SwitchBranch {
+            self.git.switch_target.take().unwrap_or_default()
+        } else {
+            self.git.branch_draft.trim().to_owned()
+        };
         // Checkbox selection: everything checked → plain `add -A`; otherwise
         // stage only the checked changed files. All-unchecked never spawns.
         let add_paths = if self.git.excluded.is_empty() {
@@ -392,6 +399,7 @@ impl AppIde {
             op,
             msg,
             remote,
+            branch,
             add_paths,
             dir,
             crate::git::snapshot_for_target(self.git_disk_snapshot(), &self.git.target),

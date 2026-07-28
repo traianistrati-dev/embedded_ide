@@ -44,6 +44,17 @@ pub enum GitOp {
     /// fail with a confusing "no such ref" — the first Push after a change
     /// re-creates it with `-u`.
     ChangeRemote,
+    /// `git checkout -b <name>` — create a new branch from the CURRENT state
+    /// (current commit + any uncommitted changes come along) and switch to it,
+    /// on the repository the tab's `repo:` picker targets. The name comes from
+    /// the tab's `branch_draft` field.
+    NewBranch,
+    /// `git switch <name>` — check out an EXISTING local branch (from the header
+    /// picker). Rewrites the working tree, so on success it bumps `op_gen` (new
+    /// HEAD content → gutter baseline refetch) and sets `reload_project` (the
+    /// in-memory buffers are reloaded from disk). The name is the tab's
+    /// `switch_target`.
+    SwitchBranch,
 }
 
 impl GitOp {
@@ -60,6 +71,8 @@ impl GitOp {
             GitOp::Log => "log",
             GitOp::SetRemote => "set remote",
             GitOp::ChangeRemote => "change remote",
+            GitOp::NewBranch => "new branch",
+            GitOp::SwitchBranch => "switch branch",
         }
     }
 }
@@ -161,6 +174,9 @@ pub struct GitStatus {
     /// stays disabled until the first commit exists.
     pub has_commits: bool,
     pub changes: Vec<GitChange>,
+    /// Local branch names (`refs/heads`), for the header branch picker. Filled
+    /// by the status refresh, not by porcelain — a separate `for-each-ref`.
+    pub branches: Vec<String>,
 }
 
 /// One row of a parsed unified diff, ready for rendering.
@@ -402,6 +418,13 @@ pub struct GitConsole {
     /// Draft for the "Set remote origin" field (shown while no remote exists),
     /// reused by the Change-repository editor.
     pub remote_url_draft: String,
+    /// Draft for the "New branch" name field (a `git checkout -b` off the
+    /// current state, on the `repo:`-selected repository).
+    pub branch_draft: String,
+    /// The branch the header picker asked to switch to, consumed by the next
+    /// `GitOp::SwitchBranch`. Kept separate from `branch_draft` so picking a
+    /// branch doesn't overwrite what's typed in the "New branch" field.
+    pub switch_target: Option<String>,
     /// The Change-repository editor is open.
     pub changing_remote: bool,
     /// Validation message for that editor (git errors go to the scrollback).
@@ -427,6 +450,8 @@ impl Default for GitConsole {
             selected_commit: None,
             commit_msg: String::new(),
             remote_url_draft: String::new(),
+            branch_draft: String::new(),
+            switch_target: None,
             changing_remote: false,
             remote_note: None,
             excluded: std::collections::HashSet::new(),
@@ -533,6 +558,7 @@ fn commands_for(
     op: GitOp,
     msg: &str,
     remote: &str,
+    branch: &str,
     has_upstream: bool,
     add_paths: &Option<Vec<String>>,
 ) -> Vec<Vec<String>> {
@@ -572,6 +598,10 @@ fn commands_for(
             "-n",
             "200",
         ])],
+        // Branch off the CURRENT state (commit + working tree) and switch to it.
+        GitOp::NewBranch => vec![vec!["checkout".into(), "-b".into(), branch.to_owned()]],
+        // Check out an existing local branch.
+        GitOp::SwitchBranch => vec![vec!["switch".into(), branch.to_owned()]],
         GitOp::SetRemote => vec![vec!["remote".into(), "add".into(), "origin".into(), remote.to_owned()]],
         // Repoint origin, then drop the stale upstream — it names a branch in
         // the OLD repository, and leaving it makes the next Push fail. Only
@@ -835,6 +865,7 @@ pub fn run_op(
     op: GitOp,
     msg: String,
     remote: String,
+    branch: String,
     add_paths: Option<Vec<String>>,
     project_dir: PathBuf,
     snapshot: Vec<(String, String)>,
@@ -864,7 +895,7 @@ pub fn run_op(
         // First push of a branch needs `-u origin HEAD` to create its
         // upstream; once one exists, a plain `push` suffices.
         let has_upstream = state.lock().unwrap().status.upstream.is_some();
-        for args in commands_for(op, &msg, &remote, has_upstream, &add_paths) {
+        for args in commands_for(op, &msg, &remote, &branch, has_upstream, &add_paths) {
             let shown = format!("> git {}", args.join(" "));
             state.lock().unwrap().push(GitLine::Cmd, shown.clone());
             let t = std::time::Instant::now();
@@ -1061,17 +1092,47 @@ pub fn run_op(
             })
             .flatten();
 
+        // Local branch names for the header picker (only when this dir owns the
+        // repo, so a library never lists the parent's branches).
+        let branches: Vec<String> = owns
+            .then(|| {
+                run_git(
+                    &project_dir,
+                    &["for-each-ref".into(), "--format=%(refname:short)".into(), "refs/heads".into()],
+                )
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .map(|l| l.trim().to_owned())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
         let unsaved = unsaved_changes(&project_dir, &snapshot);
         {
             let mut st = state.lock().unwrap();
             st.remote_url = remote_url;
             st.unsaved = unsaved;
+            st.status.branches = branches;
             st.loaded = true;
             st.busy = None;
             // Commit / pull / init move HEAD or rewrite the worktree — the
             // editor's gutter-diff baseline must refetch.
             if matches!(op, GitOp::Commit | GitOp::CommitPush | GitOp::Pull | GitOp::Init) {
                 st.op_gen += 1;
+            }
+            // Switching branches rewrote the worktree (new HEAD content): refetch
+            // the gutter baseline AND reload the in-memory buffers from disk.
+            // Only when the switch actually happened (a dirty-tree conflict makes
+            // `git switch` fail and abort the sequence).
+            if op == GitOp::SwitchBranch && sequence_ok {
+                st.op_gen += 1;
+                st.reload_project = true;
             }
         }
         let _ = sequence_ok;
@@ -1713,12 +1774,12 @@ mod tests {
 
     #[test]
     fn commit_sequence_is_add_commit() {
-        let cmds = commands_for(GitOp::Commit, "msg with spaces", "", true, &None);
+        let cmds = commands_for(GitOp::Commit, "msg with spaces", "", "", true, &None);
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[0], vec!["add", "-A"]);
         assert_eq!(cmds[1], vec!["commit", "-m", "msg with spaces"]);
         // Refresh runs no commands — only the always-on status refresh.
-        assert!(commands_for(GitOp::Refresh, "", "", true, &None).is_empty());
+        assert!(commands_for(GitOp::Refresh, "", "", "", true, &None).is_empty());
     }
 
     #[test]
@@ -1726,7 +1787,7 @@ mod tests {
         // Checkbox selection → `add -A -- <paths>` stages only those (incl.
         // deletions matching them); everything-checked keeps plain `add -A`.
         let picked = Some(vec!["src/main.rs".to_owned(), "Cargo.toml".to_owned()]);
-        let cmds = commands_for(GitOp::Commit, "m", "", true, &picked);
+        let cmds = commands_for(GitOp::Commit, "m", "", "", true, &picked);
         assert_eq!(cmds[0], vec!["add", "-A", "--", "src/main.rs", "Cargo.toml"]);
         assert_eq!(cmds[1], vec!["commit", "-m", "m"]);
     }
@@ -1735,20 +1796,37 @@ mod tests {
     fn first_push_sets_upstream_later_pushes_are_plain() {
         // No upstream yet → the push must create it (`-u origin HEAD`).
         assert_eq!(
-            commands_for(GitOp::Push, "", "", false, &None),
+            commands_for(GitOp::Push, "", "", "", false, &None),
             vec![vec!["push", "-u", "origin", "HEAD"]]
         );
-        assert_eq!(commands_for(GitOp::Push, "", "", true, &None), vec![vec!["push"]]);
+        assert_eq!(commands_for(GitOp::Push, "", "", "", true, &None), vec![vec!["push"]]);
         // Commit & Push uses the same upstream-aware push as its last step.
-        let cmds = commands_for(GitOp::CommitPush, "m", "", false, &None);
+        let cmds = commands_for(GitOp::CommitPush, "m", "", "", false, &None);
         assert_eq!(cmds[2], vec!["push", "-u", "origin", "HEAD"]);
     }
 
     #[test]
     fn set_remote_adds_origin_with_the_draft_url() {
         assert_eq!(
-            commands_for(GitOp::SetRemote, "", "https://github.com/u/r.git", true, &None),
+            commands_for(GitOp::SetRemote, "", "https://github.com/u/r.git", "", true, &None),
             vec![vec!["remote", "add", "origin", "https://github.com/u/r.git"]]
+        );
+    }
+
+    #[test]
+    fn new_branch_checks_out_a_branch_from_the_draft_name() {
+        // Branch off the current state (checkout -b keeps working-tree changes).
+        assert_eq!(
+            commands_for(GitOp::NewBranch, "", "", "feature/foo", true, &None),
+            vec![vec!["checkout", "-b", "feature/foo"]]
+        );
+    }
+
+    #[test]
+    fn switch_branch_checks_out_the_target() {
+        assert_eq!(
+            commands_for(GitOp::SwitchBranch, "", "", "develop", true, &None),
+            vec![vec!["switch", "develop"]]
         );
     }
 
@@ -1987,6 +2065,7 @@ index abc..def 100644
             GitOp::ChangeRemote,
             "",
             "https://github.com/u/new.git",
+            "",
             true,
             &None,
         );
@@ -2001,6 +2080,7 @@ index abc..def 100644
             GitOp::ChangeRemote,
             "",
             "https://github.com/u/new.git",
+            "",
             false,
             &None,
         );

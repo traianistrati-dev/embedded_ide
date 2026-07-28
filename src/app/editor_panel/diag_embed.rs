@@ -111,6 +111,8 @@ impl AppIde {
         let mut git_discard: Option<(String, bool)> = None;
         // Set when the user clicks "Discard all" in the Git tab.
         let mut git_discard_all = false;
+        // Branch the header picker asked to switch to.
+        let mut git_switch_branch: Option<String> = None;
         // The Git tab's repository picker: each workspace member can have its
         // own git repo rooted at its folder.
         let git_libraries =
@@ -230,6 +232,7 @@ impl AppIde {
                     &mut git_restore_all_from_commit,
                     &mut git_discard,
                     &mut git_discard_all,
+                    &mut git_switch_branch,
                     &git_libraries,
                     &mut flash_scan,
                     &mut flash_go,
@@ -260,6 +263,18 @@ impl AppIde {
         }
         if let Some(sha) = git_restore_all_from_commit {
             self.git_restore_all_confirm = Some(sha);
+        }
+        // A branch switch reloads the project from disk (via `reload_project`),
+        // which discards unsaved editor edits — confirm first if any exist,
+        // otherwise switch straight away.
+        if let Some(b) = git_switch_branch {
+            let has_unsaved = !self.git.state.lock().unwrap().unsaved.is_empty();
+            if has_unsaved {
+                self.git_switch_confirm = Some(b);
+            } else {
+                self.git.switch_target = Some(b);
+                self.run_git_op(crate::git::GitOp::SwitchBranch);
+            }
         }
         // A whole-tree restore rewrote the files on disk; the in-memory buffers
         // are now stale and WOULD overwrite them at the next save, so reload.

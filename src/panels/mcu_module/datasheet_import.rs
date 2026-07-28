@@ -226,8 +226,20 @@ pub fn build_prompt(family_hint: &str, package: &str) -> String {
              - never take numbers from another column — BGA columns use \
              letter+digit codes like A1 / H7 and are always wrong here;\n\
              - the number of pins you return must match the \"{pkg}\" package;\n\
-             - if the datasheet contains no package named exactly \"{pkg}\", \
-             return \"pins\": [] rather than guessing a similar one."
+             - WHERE TO LOOK for a small package (≤32 pins, e.g. TSSOP20, SO8N, \
+             UFQFPN28): its pins are in the \"Pin definitions\" TABLE as a \
+             per-package pin-NUMBER column, AND in its own pinout FIGURE. If the \
+             table column is hard to read, read the pin numbers and names \
+             DIRECTLY off the package's pinout figure instead — do NOT give up \
+             and return an empty list just because the table is awkward;\n\
+             - MATCHING is tolerant of formatting: a PDF mangles headers, so \
+             \"{pkg}\" also matches the same name with different spacing, \
+             hyphenation or case (\"TSSOP20\" = \"TSSOP 20\" = \"TSSOP-20\"). Only \
+             a DIFFERENT trailing word makes it a different package (\"UFQFPN48\" \
+             ≠ \"UFQFPN48 SMPS\");\n\
+             - return \"pins\": [] ONLY when \"{pkg}\" genuinely does not appear \
+             in the datasheet at all — never because its column/figure is hard \
+             to parse or its header is formatted differently."
         ));
     }
     format!(
@@ -771,9 +783,12 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     // USER input that drives which pin-number column the model reads, so the
     // model's echo must never override it.
     patch(&mut form.flash_origin, &chip.flash_origin, "Flash origin", &mut r);
-    patch(&mut form.flash_size, &chip.flash_size, "Flash size", &mut r);
+    // Sizes go through a sanitizer: the model occasionally trails junk onto the
+    // value (e.g. "8K probe_chip"), which would fail the memory-value check and
+    // block Save. Keep just the leading `0x…` / `<n>` / `<n>K|M` token.
+    patch(&mut form.flash_size, &sanitize_mem_size(&chip.flash_size), "Flash size", &mut r);
     patch(&mut form.ram_origin, &chip.ram_origin, "RAM origin", &mut r);
-    patch(&mut form.ram_size, &chip.ram_size, "RAM size", &mut r);
+    patch(&mut form.ram_size, &sanitize_mem_size(&chip.ram_size), "RAM size", &mut r);
     patch(&mut form.probe_chip, &chip.probe_chip, "Probe chip", &mut r);
 
     // Identity + the build-critical fields the model doesn't reliably return.
@@ -947,6 +962,40 @@ fn patch(dst: &mut String, value: &str, label: &str, r: &mut ApplyReport) {
 }
 
 
+/// Keep only the leading memory-size token from a possibly-noisy model value:
+/// a `0x…` hex literal, or `<digits>` optionally followed (across spaces) by a
+/// `K`/`M` suffix — matching what [`mcu_form::parse_ld_number`] accepts. Trailing
+/// junk ("8K probe_chip", "64 Kbytes") is dropped; empty in → empty out.
+fn sanitize_mem_size(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        if !hex.is_empty() {
+            return format!("0x{hex}");
+        }
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let Some(i) = chars.iter().position(|c| c.is_ascii_digit()) else {
+        return String::new();
+    };
+    let mut j = i;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        j += 1;
+    }
+    let num: String = chars[i..j].iter().collect();
+    // Skip spaces, then take a K/M suffix if one follows (e.g. "8 Kbytes" → 8K).
+    let mut k = j;
+    while k < chars.len() && chars[k] == ' ' {
+        k += 1;
+    }
+    let suffix = match chars.get(k) {
+        Some('K') | Some('k') => "K",
+        Some('M') | Some('m') => "M",
+        _ => "",
+    };
+    format!("{num}{suffix}")
+}
+
 /// Lowercase a display name into a valid id (`a–z 0–9 _`); other chars dropped.
 fn slugify(name: &str) -> String {
     name.trim()
@@ -1094,7 +1143,7 @@ pub fn with_extra_prompt(base: &str, extra: &str) -> String {
 
 /// Bump when the prompt or the JSON contract changes, so stale entries miss
 /// instead of feeding an old shape back in.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// `<user config>/datasheet_cache` — sibling of the stored API key.
 pub fn cache_dir() -> Option<PathBuf> {
@@ -1590,6 +1639,19 @@ pub fn call_ai(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_mem_size_keeps_only_the_value_token() {
+        assert_eq!(sanitize_mem_size("8K probe_chip"), "8K"); // the reported bug
+        assert_eq!(sanitize_mem_size("64K"), "64K");
+        assert_eq!(sanitize_mem_size("8 Kbytes"), "8K");
+        assert_eq!(sanitize_mem_size("128"), "128");
+        assert_eq!(sanitize_mem_size("0x20000000"), "0x20000000");
+        assert_eq!(sanitize_mem_size(""), "");
+        assert_eq!(sanitize_mem_size("unknown"), "");
+        // The result must round-trip through the form's validator.
+        assert!(crate::panels::mcu_module::mcu_form::parse_ld_number(&sanitize_mem_size("8K probe_chip")).is_some());
+    }
 
     #[test]
     fn packages_prepass_prompt_schema_and_parse() {

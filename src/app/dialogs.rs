@@ -224,6 +224,79 @@ impl AppIde {
         }
     }
 
+    /// Confirmation for switching branches WHILE there are unsaved editor
+    /// changes: the switch reloads the project from disk, so those edits are
+    /// lost. No dialog is shown when nothing is unsaved — the switch runs
+    /// straight away (see `diag_embed`).
+    pub(super) fn show_git_switch_dialog(&mut self, ui: &egui::Ui) {
+        let Some(branch) = self.git_switch_confirm.clone() else {
+            return;
+        };
+        let unsaved = self.git.state.lock().unwrap().unsaved.clone();
+        let mut keep = true;
+        let mut confirmed = false;
+
+        egui::Window::new("Switch branch with unsaved changes?")
+            .id(egui::Id::new("git_switch_confirm"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_width(480.0);
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Checking out \"{branch}\" reloads every file from disk."
+                    ))
+                    .size(11.5)
+                    .color(egui::Color32::from_rgb(220, 210, 190)),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} {} file(s) have unsaved editor changes — they will be LOST. \
+                         Save (Ctrl+S) or Discard them first to keep them.",
+                        ph::WARNING,
+                        unsaved.len()
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(230, 160, 90)),
+                );
+                if !unsaved.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(unsaved.join(" · "))
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(150)),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new(format!("{} Switch anyway", ph::GIT_BRANCH))
+                                .color(egui::Color32::from_rgb(230, 160, 70)),
+                        )
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+
+        if confirmed {
+            self.git.switch_target = Some(branch);
+            self.run_git_op(crate::git::GitOp::SwitchBranch);
+            keep = false;
+        }
+        if !keep {
+            self.git_switch_confirm = None;
+        }
+    }
+
     /// Confirmation for History's "Restore this file": overwrite one file with
     /// its content at a commit.
     pub(super) fn show_git_restore_dialog(&mut self, ui: &egui::Ui) {
