@@ -888,10 +888,15 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
             if extra > 0 { format!(", and {extra} more") } else { String::new() }
         ));
     }
-    // Sort by package position, then split across the four sides QFP-style —
-    // exactly what the XML importer does.
+    // Sort by package position, then lay out: a dual-in-line package (SO8N,
+    // TSSOP, …) goes on the LEFT+RIGHT edges only; everything else splits across
+    // the four sides QFP-style. Same choice the XML importer makes.
     rows.sort_by_key(|row| row.number.parse::<usize>().unwrap_or(usize::MAX));
-    form.pins = stm32_pin_data::distribute_sides(&rows);
+    form.pins = if stm32_pin_data::is_two_row_package(&form.package) {
+        stm32_pin_data::distribute_sides_2row(&rows)
+    } else {
+        stm32_pin_data::distribute_sides(&rows)
+    };
 
     // Cross-check: non-integer positions mean the model read the WRONG package
     // column (BGA columns use A1/H7 codes). One clear diagnostic beats dozens of

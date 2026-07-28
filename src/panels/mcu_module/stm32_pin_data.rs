@@ -108,7 +108,12 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
     }
 
     pin_rows.sort_by_key(|r| r.number.parse::<usize>().unwrap_or(usize::MAX));
-    let sides = distribute_sides(&pin_rows);
+    // Dual-in-line packages (SO8N, TSSOP, …) lay out on LEFT+RIGHT only.
+    let sides = if is_two_row_package(&package) {
+        distribute_sides_2row(&pin_rows)
+    } else {
+        distribute_sides(&pin_rows)
+    };
 
     let clock = clock_for_family(&family);
     let target = core_to_target(&core).to_string();
@@ -370,6 +375,30 @@ pub(crate) fn distribute_sides(rows: &[PinRow]) -> [Vec<PinRow>; 4] {
     [top, bottom, left, right]
 }
 
+/// A dual-in-line package (SOIC / TSSOP / SSOP / MSOP / SO8N / DIP): pins on two
+/// opposite edges only, not four. Matched by the package NAME — the pin table
+/// carries no shape info. Conservative substrings that no QFP/QFN/BGA hits.
+pub(crate) fn is_two_row_package(package: &str) -> bool {
+    let p = package.trim().to_ascii_uppercase();
+    p.contains("SOP")      // SOP / SSOP / TSSOP / MSOP
+        || p.contains("SOIC")
+        || p.contains("DIP") // DIP / PDIP
+        || p.contains("DIL")
+        || p.starts_with("SO") // SO8N, SOT23
+}
+
+/// Lay pins out DIP/SOIC-style on the LEFT and RIGHT edges only (top/bottom
+/// empty), with the real chip numbering: pin 1 top-left, counting DOWN the left
+/// edge, then UP the right edge (so the highest number sits top-right). `rows`
+/// are pre-sorted by pin number. Returns `[top, bottom, left, right]`.
+pub(crate) fn distribute_sides_2row(rows: &[PinRow]) -> [Vec<PinRow>; 4] {
+    let half = rows.len().div_ceil(2); // left keeps the extra pin for odd counts
+    let left = rows[..half].to_vec();
+    let mut right = rows[half..].to_vec();
+    right.reverse(); // right edge counts UP from the bottom → top-to-bottom is reversed
+    [Vec::new(), Vec::new(), left, right]
+}
+
 /// Cortex core string → Rust target triple. `pub(crate)` so [`mcu_identity`]
 /// reuses the same mapping.
 pub(crate) fn core_to_target(core: &str) -> &'static str {
@@ -614,6 +643,30 @@ mod tests {
         assert_eq!(nums(&bottom), ["3", "4"]);
         assert_eq!(nums(&right), ["5", "6"]);
         assert_eq!(nums(&top), ["8", "7"]); // top is reversed
+    }
+
+    #[test]
+    fn two_row_packages_lay_out_left_and_right_only() {
+        // SO8N-style: 8 pins → left 1-4 (top→bottom), right 8-5 (top→bottom,
+        // counting UP from the bottom), no top/bottom.
+        let rows: Vec<PinRow> = (1..=8)
+            .map(|i| PinRow { number: i.to_string(), ..Default::default() })
+            .collect();
+        let [top, bottom, left, right] = distribute_sides_2row(&rows);
+        let nums = |s: &[PinRow]| s.iter().map(|r| r.number.clone()).collect::<Vec<_>>();
+        assert!(top.is_empty() && bottom.is_empty());
+        assert_eq!(nums(&left), ["1", "2", "3", "4"]);
+        assert_eq!(nums(&right), ["8", "7", "6", "5"]);
+    }
+
+    #[test]
+    fn two_row_package_detection() {
+        for p in ["SO8N", "TSSOP20", "SOIC8", "SSOP28", "MSOP10", "DIP8", "SOT23-6"] {
+            assert!(is_two_row_package(p), "{p} should be two-row");
+        }
+        for p in ["LQFP64", "UFQFPN48", "UFBGA100", "WLCSP25", "TFBGA216"] {
+            assert!(!is_two_row_package(p), "{p} should NOT be two-row");
+        }
     }
 
     #[test]

@@ -3,10 +3,19 @@
 use eframe::egui;
 use crate::panels::mcu_module::mcu::model::{PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
 
+/// Smallest chip-body span, in "pin units", along an edge that carries few (or
+/// no) pins. Without it a dual-in-line layout (all pins on left+right, so
+/// `top_count == 0`) collapses to a sliver and the two pin rows look stuck
+/// together with no body between them. A floor here gives every chip a visible
+/// middle without inventing phantom pins.
+pub const MIN_BODY_PINS: usize = 3;
+
 /// Calculate chip dimensions and canvas size based on pin counts.
 pub fn calculate_layout(top_count: usize, left_count: usize) -> (f32, f32, f32, f32) {
-    let mcu_width = (top_count as f32 * (PIN_WIDTH + PIN_SPACING)) + PIN_SPACING * 2.0;
-    let mcu_height = (left_count as f32 * (PIN_WIDTH + PIN_SPACING)) + PIN_SPACING * 2.0;
+    let body_w = top_count.max(MIN_BODY_PINS) as f32;
+    let body_h = left_count.max(MIN_BODY_PINS) as f32;
+    let mcu_width = (body_w * (PIN_WIDTH + PIN_SPACING)) + PIN_SPACING * 2.0;
+    let mcu_height = (body_h * (PIN_WIDTH + PIN_SPACING)) + PIN_SPACING * 2.0;
     let canvas_w = mcu_width + PIN_HEIGHT * 2.0 + 20.0;
     let canvas_h = mcu_height + PIN_HEIGHT * 2.0 + 20.0;
     (mcu_width, mcu_height, canvas_w, canvas_h)
