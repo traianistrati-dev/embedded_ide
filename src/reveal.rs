@@ -56,7 +56,7 @@ pub fn command_for(target: &Target) -> (&'static str, Vec<String>) {
         Target::Dir(d) => {
             let p = d.to_string_lossy().to_string();
             if cfg!(target_os = "windows") {
-                ("explorer", vec![p])
+                ("explorer", vec![win_path(&p)])
             } else if cfg!(target_os = "macos") {
                 ("open", vec![p])
             } else {
@@ -66,7 +66,7 @@ pub fn command_for(target: &Target) -> (&'static str, Vec<String>) {
         Target::Select(f) => {
             let p = f.to_string_lossy().to_string();
             if cfg!(target_os = "windows") {
-                ("explorer", vec![format!("/select,{p}")])
+                ("explorer", vec![format!("/select,{}", win_path(&p))])
             } else if cfg!(target_os = "macos") {
                 ("open", vec!["-R".to_string(), p])
             } else {
@@ -79,6 +79,15 @@ pub fn command_for(target: &Target) -> (&'static str, Vec<String>) {
             }
         }
     }
+}
+
+/// Normalize a path to Windows separators for `explorer.exe`. The IDE keeps
+/// tree paths PROJECT-ROOT-relative with FORWARD slashes, so `project_dir.join`
+/// yields a MIXED string (`F:\proj\lib/src/x.rs`). Explorer's `/select,` — and
+/// even a bare folder arg — ignores a path with `/` and lands on "This PC", so
+/// every `/` must become `\`.
+fn win_path(p: &str) -> String {
+    p.replace('/', "\\")
 }
 
 /// Launch the file manager for `path`.
@@ -131,24 +140,28 @@ mod tests {
     #[test]
     fn windows_select_is_one_argument_with_no_space() {
         // `explorer /select, <path>` as two args (or with a space) opens
-        // Documents instead of selecting the file.
-        let t = Target::Select(PathBuf::from("C:/proj/src/main.rs"));
+        // Documents instead of selecting the file. And the path MUST use `\`:
+        // a project-root-relative source lands here as a mixed `C:\proj\lib/src`
+        // string, which Explorer ignores → "This PC".
+        let t = Target::Select(PathBuf::from("C:/proj/lib/src/main.rs"));
         let (prog, args) = command_for(&t);
         if cfg!(target_os = "windows") {
             assert_eq!(prog, "explorer");
             assert_eq!(args.len(), 1);
-            assert_eq!(args[0], "/select,C:/proj/src/main.rs");
+            assert_eq!(args[0], r"/select,C:\proj\lib\src\main.rs");
             assert!(!args[0].contains(", "));
+            // The PATH part (after the `/select,` verb) must have no `/`.
+            assert!(!args[0]["/select,".len()..].contains('/'));
         }
     }
 
     #[test]
-    fn windows_dir_is_passed_bare() {
-        let t = Target::Dir(PathBuf::from("C:/proj/src"));
+    fn windows_dir_is_passed_bare_with_backslashes() {
+        let t = Target::Dir(PathBuf::from("C:/proj/lib/src"));
         let (prog, args) = command_for(&t);
         if cfg!(target_os = "windows") {
             assert_eq!(prog, "explorer");
-            assert_eq!(args, vec!["C:/proj/src".to_string()]);
+            assert_eq!(args, vec![r"C:\proj\lib\src".to_string()]);
         }
     }
 }
