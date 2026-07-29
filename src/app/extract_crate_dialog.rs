@@ -97,9 +97,10 @@ impl AppIde {
             return;
         };
         let busy = self.git.state.lock().unwrap().busy == Some("clone");
-        // Auto-fill the folder from the URL's repo name until the user edits it.
+        // Auto-fill the folder from the URL's repo name until the user edits it,
+        // snake-cased so a hyphenated repo (`foo-bar`) lands as `foo_bar`.
         if dlg.dir_auto {
-            dlg.dir = repo_name_from_url(&dlg.url);
+            dlg.dir = extract_crate::to_snake_case(&repo_name_from_url(&dlg.url));
         }
         let mut close = false;
         let mut start: Option<(String, String, bool)> = None;
@@ -132,6 +133,9 @@ impl AppIde {
                             .changed()
                         {
                             dlg.dir_auto = false;
+                            // Snake-case what the user typed: spaces / `-` / other
+                            // specials → `_`, so the folder is always valid.
+                            dlg.dir = extract_crate::to_snake_case(&dlg.dir);
                         }
                         ui.end_row();
                     });
@@ -251,6 +255,12 @@ impl AppIde {
             return;
         };
         let dir = dlg.dir.clone();
+        // Snake-case the new name live (spaces / `-` / specials → `_`) so the
+        // renamed folder + crate are always valid — same rule as the clone
+        // dialog. Done before the plan is built so the preview stays in sync.
+        if let Some(name) = &mut dlg.rename_to {
+            *name = extract_crate::to_snake_case(name);
+        }
         let is_rename = dlg.rename_to.is_some();
         let mut close = false;
         let mut confirmed = false;
@@ -590,7 +600,11 @@ impl AppIde {
                     .spacing([8.0, 6.0])
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new("Crate name").size(11.0));
-                        ui.text_edit_singleline(&mut m.name);
+                        if ui.text_edit_singleline(&mut m.name).changed() {
+                            // Snake-case the crate/folder name (spaces / `-` /
+                            // specials → `_`) — same rule as clone + rename.
+                            m.name = extract_crate::to_snake_case(&m.name);
+                        }
                         ui.end_row();
                         ui.label(egui::RichText::new("Version").size(11.0));
                         ui.text_edit_singleline(&mut m.version);

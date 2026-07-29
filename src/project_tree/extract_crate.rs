@@ -74,6 +74,25 @@ pub fn crate_ident(name: &str) -> String {
     name.replace('-', "_")
 }
 
+/// Format a library FOLDER / crate name as true snake_case: every character
+/// that is not an ASCII letter, digit or `_` (spaces, `-`, `.`, `/`, …) becomes
+/// `_`, and letters are lower-cased (`mmWave` → `mmwave`). Applied live as the
+/// user types in the clone/rename fields, so it must be idempotent and must NOT
+/// collapse or trim `_` — that would fight the caret while typing `foo_bar`.
+pub fn to_snake_case(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else if c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// The trimmed crate name, or why it cannot be one. Shared by extraction and
 /// by creating an empty library so both reject the same things.
 fn validate_crate_name(raw: &str) -> Result<&str, String> {
@@ -817,6 +836,17 @@ mod tests {
             p.root_cargo_toml
         );
         assert_eq!(p.root_cargo_toml.matches("[workspace]").count(), 1);
+    }
+
+    #[test]
+    fn to_snake_case_replaces_specials_and_lowercases() {
+        assert_eq!(to_snake_case("hmmd-mmWave-sensor-embede-io-lib"), "hmmd_mmwave_sensor_embede_io_lib");
+        assert_eq!(to_snake_case("My Cool Lib"), "my_cool_lib");
+        assert_eq!(to_snake_case("a.b/c"), "a_b_c");
+        // Underscores + digits pass through (typing stays natural).
+        assert_eq!(to_snake_case("foo_bar1"), "foo_bar1");
+        // Idempotent.
+        assert_eq!(to_snake_case(&to_snake_case("A-b C")), "a_b_c");
     }
 
     #[test]
