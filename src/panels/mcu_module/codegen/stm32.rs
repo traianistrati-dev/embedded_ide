@@ -338,8 +338,10 @@ pub fn make_generated_section(
             .get(&n)
             .map(|c| module_label_sfx(&c.custom_label))
             .unwrap_or_default();
+        // One value implementing `embedded_io::{Read, Write}` (see the config
+        // file) — pass `&mut _serial{n}` to your portable, trait-generic code.
         fn_calls.push_str(&format!(
-            "    let (mut _tx{n}{sfx}, mut _rx{n}{sfx}) = \
+            "    let mut _serial{n}{sfx} = \
              pins::configs::usart{n}::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
         ));
     }
@@ -745,9 +747,17 @@ const STOP_BITS: u8 = {STOP}; // 1, 2
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
+//
+// `init` returns a value implementing the STANDARD `embedded-io` traits
+// (`Read` + `Write`), so your application code stays portable across chips/HALs:
+//
+//     fn app<S: embedded_io::Read + embedded_io::Write>(serial: &mut S) { /* … */ }
+//
+// stm32f1xx-hal 0.10 still speaks embedded-hal 0.2 (`nb`), so `SerialIo` below
+// bridges its split `Tx`/`Rx` to `embedded-io`.
 use stm32f1xx_hal::{
     pac,
-    prelude::*,
+    prelude::*,       // brings the embedded-hal 0.2 `nb` serial methods into scope
     afio,
     rcc::Clocks,
     serial::{self, Config, Serial, StopBits},
@@ -779,13 +789,50 @@ fn get_config() -> serial::Config {
     config
 }
 
+/// Bridges the HAL's `nb` serial (embedded-hal 0.2) to blocking `embedded-io`.
+pub struct SerialIo<TX, RX>(pub TX, pub RX);
+
+#[derive(Debug)]
+pub struct IoError;
+impl embedded_io::Error for IoError {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
+    }
+}
+impl<TX, RX> embedded_io::ErrorType for SerialIo<TX, RX> {
+    type Error = IoError;
+}
+impl<TX: embedded_hal_0_2::serial::Write<u8>, RX> embedded_io::Write for SerialIo<TX, RX> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        for &b in buf {
+            nb::block!(self.0.write(b)).map_err(|_| IoError)?;
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        nb::block!(self.0.flush()).map_err(|_| IoError)
+    }
+}
+impl<TX, RX: embedded_hal_0_2::serial::Read<u8>> embedded_io::Read for SerialIo<TX, RX> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // `embedded-io::Read` blocks until at least one byte is available.
+        buf[0] = nb::block!(self.1.read()).map_err(|_| IoError)?;
+        Ok(1)
+    }
+}
+
+/// Initialise USART{N} and expose it as an `embedded-io` Read + Write value.
 pub fn init(
     usart: pac::USART{N},
     pins: impl serial::Pins<pac::USART{N}>,
     afio: &mut afio::Parts,
     clocks: &Clocks,
-) -> (serial::Tx<pac::USART{N}>, serial::Rx<pac::USART{N}>) {
-    Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()
+) -> impl embedded_io::Read + embedded_io::Write {
+    let (tx, rx) = Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split();
+    SerialIo(tx, rx)
 }
 "#;
 
@@ -833,16 +880,72 @@ fn get_mode() -> Mode {
     }
 }
 
+/// Bridges the HAL's blocking/nb SPI (embedded-hal 0.2) to the STANDARD
+/// `embedded-hal` 1.0 `SpiBus`, so driver/app code stays portable across HALs:
+///
+///     fn app<S: embedded_hal::spi::SpiBus>(spi: &mut S) { /* … */ }
+pub struct SpiBusIo<SPI>(pub SPI);
+
+#[derive(Debug)]
+pub struct IoError;
+impl embedded_hal::spi::Error for IoError {
+    fn kind(&self) -> embedded_hal::spi::ErrorKind {
+        embedded_hal::spi::ErrorKind::Other
+    }
+}
+impl<SPI> embedded_hal::spi::ErrorType for SpiBusIo<SPI> {
+    type Error = IoError;
+}
+impl<SPI> embedded_hal::spi::SpiBus<u8> for SpiBusIo<SPI>
+where
+    SPI: embedded_hal_0_2::blocking::spi::Write<u8>
+        + embedded_hal_0_2::blocking::spi::Transfer<u8>
+        + embedded_hal_0_2::spi::FullDuplex<u8>,
+{
+    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        embedded_hal_0_2::blocking::spi::Write::write(&mut self.0, words).map_err(|_| IoError)
+    }
+    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        for w in words.iter_mut() {
+            nb::block!(embedded_hal_0_2::spi::FullDuplex::send(&mut self.0, 0)).map_err(|_| IoError)?;
+            *w = nb::block!(embedded_hal_0_2::spi::FullDuplex::read(&mut self.0)).map_err(|_| IoError)?;
+        }
+        Ok(())
+    }
+    fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        embedded_hal_0_2::blocking::spi::Transfer::transfer(&mut self.0, words)
+            .map(|_| ())
+            .map_err(|_| IoError)
+    }
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        // Clock max(read, write) bytes; pad the write with 0, ignore reads past `read`.
+        for i in 0..read.len().max(write.len()) {
+            let b = write.get(i).copied().unwrap_or(0);
+            nb::block!(embedded_hal_0_2::spi::FullDuplex::send(&mut self.0, b)).map_err(|_| IoError)?;
+            let r = nb::block!(embedded_hal_0_2::spi::FullDuplex::read(&mut self.0)).map_err(|_| IoError)?;
+            if let Some(slot) = read.get_mut(i) {
+                *slot = r;
+            }
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Initialise SPI{N} and expose it as an `embedded-hal` 1.0 `SpiBus`.
 pub fn init<PINS>(
     spi: pac::SPI{N},
     pins: PINS,
     afio: &mut afio::Parts,
     clocks: &Clocks,
-) -> Spi<pac::SPI{N}, Spi{N}NoRemap, PINS>
+) -> impl embedded_hal::spi::SpiBus<u8>
 where
     PINS: spi::Pins<Spi{N}NoRemap>,
 {
-    Spi::spi{N}(spi, pins, &mut afio.mapr, get_mode(), CLOCK_KHZ.kHz(), clocks)
+    let bus = Spi::spi{N}(spi, pins, &mut afio.mapr, get_mode(), CLOCK_KHZ.kHz(), *clocks);
+    SpiBusIo(bus)
 }
 "#;
 
@@ -877,16 +980,73 @@ fn get_mode() -> I2cMode {
     }
 }
 
+/// Bridges the HAL's blocking I2C (embedded-hal 0.2) to the STANDARD
+/// `embedded-hal` 1.0 `I2c`, so driver/app code stays portable across HALs:
+///
+///     fn app<I: embedded_hal::i2c::I2c>(i2c: &mut I) { /* … */ }
+pub struct I2cIo<I2C>(pub I2C);
+
+#[derive(Debug)]
+pub struct IoError;
+impl embedded_hal::i2c::Error for IoError {
+    fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+        embedded_hal::i2c::ErrorKind::Other
+    }
+}
+impl<I2C> embedded_hal::i2c::ErrorType for I2cIo<I2C> {
+    type Error = IoError;
+}
+impl<I2C> embedded_hal::i2c::I2c<embedded_hal::i2c::SevenBitAddress> for I2cIo<I2C>
+where
+    I2C: embedded_hal_0_2::blocking::i2c::Read
+        + embedded_hal_0_2::blocking::i2c::Write
+        + embedded_hal_0_2::blocking::i2c::WriteRead,
+{
+    fn transaction(
+        &mut self,
+        addr: u8,
+        ops: &mut [embedded_hal::i2c::Operation<'_>],
+    ) -> Result<(), Self::Error> {
+        use embedded_hal::i2c::Operation;
+        // Optimise the common `[Write, Read]` (register read) into one
+        // repeated-start `write_read`; single ops map directly. Other multi-op
+        // sequences fall back to per-op (each with its own START/STOP).
+        match ops {
+            [Operation::Write(w), Operation::Read(r)] => {
+                embedded_hal_0_2::blocking::i2c::WriteRead::write_read(&mut self.0, addr, w, r)
+                    .map_err(|_| IoError)
+            }
+            _ => {
+                for op in ops.iter_mut() {
+                    match op {
+                        Operation::Read(r) => {
+                            embedded_hal_0_2::blocking::i2c::Read::read(&mut self.0, addr, r)
+                                .map_err(|_| IoError)?
+                        }
+                        Operation::Write(w) => {
+                            embedded_hal_0_2::blocking::i2c::Write::write(&mut self.0, addr, w)
+                                .map_err(|_| IoError)?
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Initialise I2C{N} and expose it as an `embedded-hal` 1.0 `I2c`.
 pub fn init<PINS>(
     i2c: pac::I2C{N},
     pins: PINS,
     afio: &mut afio::Parts,
     clocks: &Clocks,
-) -> BlockingI2c<pac::I2C{N}, PINS>
+) -> impl embedded_hal::i2c::I2c
 where
     PINS: i2c::Pins<pac::I2C{N}>,
 {
-    BlockingI2c::i2c{N}(i2c, pins, &mut afio.mapr, get_mode(), *clocks, 1000, 10, 1000, 1000)
+    let bus = BlockingI2c::i2c{N}(i2c, pins, &mut afio.mapr, get_mode(), *clocks, 1000, 10, 1000, 1000);
+    I2cIo(bus)
 }
 "#;
 

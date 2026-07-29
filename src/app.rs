@@ -1550,15 +1550,27 @@ impl AppIde {
         };
         if let Some((all_pins, config_files)) = regen {
             use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
-            // CAN init pulls in the external `bxcan`/`nb` crates — add or drop
-            // them in Cargo.toml based on whether codegen emitted `can1.rs`.
-            let needs_can = config_files.iter().any(|(name, _)| name == "can1.rs");
+            // Peripheral config files pull in standard-trait crates (embedded-io
+            // for USART, embedded-hal 1.0 `SpiBus`/`I2c` for SPI/I2C, bxcan for
+            // CAN, nb for the blocking bridges). One authority manages the whole
+            // shared set — keyed on which config files codegen emitted.
+            let has_cfg = |p: &str| config_files.iter().any(|(name, _)| name.starts_with(p));
+            let needs_can = has_cfg("can");
+            let needs_usart = has_cfg("usart");
+            let needs_spi = has_cfg("spi");
+            let needs_i2c = has_cfg("i2c");
             // USB CDC init needs `usb-device`/`usbd-serial` + the `stm32-usbd`
             // HAL feature, keyed on whether the USB D-/D+ pins are configured.
             let needs_usb = all_pins
                 .iter()
                 .any(|(_, _, f)| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
-            let new_toml = project_gen::ensure_can_deps(&self.cargo_toml, needs_can);
+            let new_toml = project_gen::ensure_peripheral_deps(
+                &self.cargo_toml,
+                needs_can,
+                needs_usart,
+                needs_spi,
+                needs_i2c,
+            );
             let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb);
             if new_toml != self.cargo_toml {
                 self.cargo_toml = new_toml;

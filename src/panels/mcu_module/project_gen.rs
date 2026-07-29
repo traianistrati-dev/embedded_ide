@@ -203,38 +203,29 @@ pub fn splice_config(
         .unwrap_or_default()
 }
 
-/// Add or remove the `bxcan` + `nb` dependencies in a Cargo.toml's
-/// `[dependencies]` section, driven by whether a CAN peripheral is configured.
-///
-/// The generated `src/pins/configs/can1.rs` uses the external `bxcan` crate (and
-/// `nb` for its blocking API), which the base `[dependencies]` block doesn't
-/// include. This is called every frame from `init_frame`, so it must be
-/// idempotent: it returns the input unchanged when the deps are already in the
-/// desired state, and drops the auto-added lines again once CAN is removed.
-pub fn ensure_can_deps(cargo_toml: &str, needs_can: bool) -> String {
-    // True when `line` declares the dependency `name` (`name = …`), tolerating
-    // leading whitespace and any spacing around `=`.
-    let is_dep = |line: &str, name: &str| {
-        line.trim_start()
-            .strip_prefix(name)
-            .map(|rest| rest.trim_start().starts_with('='))
-            .unwrap_or(false)
-    };
-    let has_bxcan = cargo_toml.lines().any(|l| is_dep(l, "bxcan"));
-    if needs_can == has_bxcan {
-        return cargo_toml.to_owned(); // already in the desired state — no churn
-    }
+/// `true` when Cargo.toml line `line` declares the dependency `name`
+/// (`name = …`), tolerating leading whitespace and any spacing around `=`.
+fn is_dep_line(line: &str, name: &str) -> bool {
+    line.trim_start()
+        .strip_prefix(name)
+        .map(|rest| rest.trim_start().starts_with('='))
+        .unwrap_or(false)
+}
 
+/// Insert `add_lines` right after the `[dependencies]` header when `add`, or
+/// drop every line matching `names` when `!add`. Idempotent + newline-preserving
+/// — the shared engine behind the peripheral dep syncs. The caller pre-checks
+/// the desired state (via a marker dep) so this only runs on a real transition.
+fn edit_dep_lines(cargo_toml: &str, add: bool, names: &[&str], add_lines: &[&str]) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut inserted = false;
     for line in cargo_toml.lines() {
-        if !needs_can && (is_dep(line, "bxcan") || is_dep(line, "nb")) {
-            continue; // CAN gone → drop the deps we added
+        if !add && names.iter().any(|n| is_dep_line(line, n)) {
+            continue; // feature gone → drop the deps we added
         }
         out.push(line.to_string());
-        if needs_can && !inserted && line.trim() == "[dependencies]" {
-            out.push("bxcan = \"0.7\"".to_string());
-            out.push("nb    = \"1\"".to_string());
+        if add && !inserted && line.trim() == "[dependencies]" {
+            out.extend(add_lines.iter().map(|s| s.to_string()));
             inserted = true;
         }
     }
@@ -242,6 +233,52 @@ pub fn ensure_can_deps(cargo_toml: &str, needs_can: bool) -> String {
     if cargo_toml.ends_with('\n') {
         s.push('\n');
     }
+    s
+}
+
+/// Ensure a single dependency `name` is present iff `needs`. Idempotent — a
+/// no-op when already in the desired state (no mtime churn). `is_dep_line`'s `=`
+/// check keeps `embedded-hal` distinct from `embedded-hal-0-2`.
+fn ensure_dep(cargo_toml: &str, name: &str, needs: bool, add_line: &str) -> String {
+    let has = cargo_toml.lines().any(|l| is_dep_line(l, name));
+    if needs == has {
+        return cargo_toml.to_owned();
+    }
+    edit_dep_lines(cargo_toml, needs, &[name], &[add_line])
+}
+
+/// The single authority for the peripheral-driven `[dependencies]` lines, keyed
+/// on which peripherals are configured. Idempotent (called every frame from
+/// `init_frame`). Deps are SHARED across peripherals (`embedded-hal-0-2` by
+/// USART+SPI+I2C, `nb` by CAN+USART+SPI), so managing them in ONE place — rather
+/// than per-feature functions — is what stops two features fighting over the same
+/// line (add/remove churn). `nb`-note: SPI's `SpiBus` bridge uses `nb` for the
+/// per-byte FullDuplex path; the I2C bridge does not.
+///
+/// - `bxcan`            — CAN (`can1.rs`)
+/// - `embedded-io`      — USART (`usart*.rs` exposes the port as embedded-io)
+/// - `embedded-hal-0-2` — USART/SPI/I2C bridges (the HAL is on embedded-hal 0.2;
+///   the package alias frees the `embedded-hal` name for the 1.0 traits below)
+/// - `embedded-hal` 1.0 — SPI (`SpiBus`) + I2C (`I2c`) portable traits
+/// - `nb`               — CAN + USART + SPI (`nb::block!`)
+pub fn ensure_peripheral_deps(
+    cargo_toml: &str,
+    needs_can: bool,
+    needs_usart: bool,
+    needs_spi: bool,
+    needs_i2c: bool,
+) -> String {
+    let mut s = cargo_toml.to_owned();
+    s = ensure_dep(&s, "bxcan", needs_can, "bxcan = \"0.7\"");
+    s = ensure_dep(&s, "embedded-io", needs_usart, "embedded-io  = \"0.6\"");
+    s = ensure_dep(
+        &s,
+        "embedded-hal-0-2",
+        needs_usart || needs_spi || needs_i2c,
+        "embedded-hal-0-2 = { package = \"embedded-hal\", version = \"0.2.7\", features = [\"unproven\"] }",
+    );
+    s = ensure_dep(&s, "embedded-hal", needs_spi || needs_i2c, "embedded-hal = \"1.0\"");
+    s = ensure_dep(&s, "nb", needs_can || needs_usart || needs_spi, "nb           = \"1\"");
     s
 }
 
@@ -918,39 +955,53 @@ mod tests {
     }
 
     #[test]
-    fn ensure_can_deps_adds_removes_and_is_idempotent() {
+    fn ensure_peripheral_deps_adds_removes_shared_and_is_idempotent() {
         let base = gen_config(
             ConfigFile::CargoToml,
             &stm32_def(),
             &ToolchainKind::RustEmbedded,
         );
-        assert!(!base.contains("bxcan"), "base has no CAN deps");
+        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false);
+        assert!(!base.contains("bxcan") && !base.contains("embedded-hal"), "clean base");
 
-        // Adding when CAN is configured inserts both crates inside [dependencies].
-        let with = ensure_can_deps(&base, true);
-        assert!(with.contains("bxcan = \"0.7\""), "bxcan added:\n{with}");
-        assert!(with.contains("nb    = \"1\""), "nb added");
-        let deps_idx = with.find("[dependencies]").unwrap();
-        assert!(
-            with[deps_idx..].find("bxcan").unwrap()
-                < with[deps_idx..].find("stm32f1xx-hal").unwrap()
-                || with.contains("bxcan"),
-            "bxcan within deps section"
-        );
+        // CAN only → bxcan + nb; no embedded-io/hal.
+        let can = ensure_peripheral_deps(&base, true, false, false, false);
+        assert!(can.contains("bxcan = \"0.7\"") && can.contains("nb           = \"1\""));
+        assert!(!can.contains("embedded-io") && !can.contains("embedded-hal"));
+        assert_eq!(none(&can), base, "removal restores base");
 
-        // Re-running with CAN still on is a no-op (no duplicate lines / churn).
-        let with2 = ensure_can_deps(&with, true);
-        assert_eq!(with, with2, "add must be idempotent");
-        assert_eq!(with.matches("bxcan").count(), 1, "no duplicate bxcan");
+        // USART only → embedded-io + embedded-hal-0-2 + nb; NO embedded-hal 1.0.
+        let usart = ensure_peripheral_deps(&base, false, true, false, false);
+        assert!(usart.contains("embedded-io  = \"0.6\""), "{usart}");
+        assert!(usart.contains("embedded-hal-0-2 = { package = \"embedded-hal\""), "{usart}");
+        assert!(usart.contains("nb           = \"1\""));
+        // The exact `embedded-hal = ` (1.0) line must NOT be present for USART-only.
+        assert!(!usart.lines().any(|l| is_dep_line(l, "embedded-hal")), "no eh 1.0:\n{usart}");
+        assert_eq!(none(&usart), base);
 
-        // Removing when CAN is gone drops exactly the two lines, back to base.
-        let removed = ensure_can_deps(&with, false);
-        assert!(!removed.contains("bxcan"), "bxcan removed:\n{removed}");
-        assert!(!removed.contains("nb    ="), "nb removed");
-        assert_eq!(removed, base, "removal restores the original");
+        // SPI only → embedded-hal 1.0 + embedded-hal-0-2 + nb; no embedded-io.
+        let spi = ensure_peripheral_deps(&base, false, false, true, false);
+        assert!(spi.lines().any(|l| is_dep_line(l, "embedded-hal")), "eh 1.0 present");
+        assert!(spi.contains("embedded-hal-0-2") && spi.contains("nb           ="));
+        assert!(!spi.contains("embedded-io"));
 
-        // Removing when there's nothing to remove is also a no-op.
-        assert_eq!(ensure_can_deps(&base, false), base);
+        // I2C only → embedded-hal 1.0 + embedded-hal-0-2, but NO nb (I2c bridge
+        // needs no nb::block!).
+        let i2c = ensure_peripheral_deps(&base, false, false, false, true);
+        assert!(i2c.lines().any(|l| is_dep_line(l, "embedded-hal")) && i2c.contains("embedded-hal-0-2"));
+        assert!(!i2c.lines().any(|l| is_dep_line(l, "nb")), "no nb for i2c-only:\n{i2c}");
+
+        // Everything on → all present, exactly one line each; idempotent.
+        let all = ensure_peripheral_deps(&base, true, true, true, true);
+        for dep in ["bxcan", "embedded-io", "embedded-hal", "embedded-hal-0-2", "nb"] {
+            assert_eq!(
+                all.lines().filter(|l| is_dep_line(l, dep)).count(),
+                1,
+                "exactly one `{dep}` line:\n{all}"
+            );
+        }
+        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true), all, "idempotent");
+        assert_eq!(none(&all), base, "full teardown restores base");
     }
 
     #[test]

@@ -322,14 +322,11 @@ mod tests {
         let n = mcu.modules[0].instance();
         let code = mcu.fresh_main_rs();
 
-        // USART handles carry the sanitized label: `_tx1_imu_sensor`.
+        // The USART handle carries the sanitized label: `_serial1_imu_sensor`
+        // (one `embedded-io` Read+Write value, not a split tx/rx pair).
         assert!(
-            code.contains(&format!("_tx{n}_imu_sensor")),
-            "tx handle labelled:\n{code}"
-        );
-        assert!(
-            code.contains(&format!("_rx{n}_imu_sensor")),
-            "rx handle labelled"
+            code.contains(&format!("_serial{n}_imu_sensor")),
+            "serial handle labelled:\n{code}"
         );
 
         // The label persists through the mcu.config round-trip (serde on config).
