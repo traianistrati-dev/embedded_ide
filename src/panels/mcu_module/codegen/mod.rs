@@ -657,7 +657,12 @@ mod tests {
         mcu.apply_pin_function(10, PinFunction::GpioOutput);
         let code = mcu.fresh_main_rs();
 
-        assert_contains_substring(&code, "let pa0_out = &mut gpioa.pa0.into_push_pull_output");
+        // GPIO out is wrapped in the eh-1.0 bridge (portable seam), keeping the
+        // `&mut` + var-name shape so the round-trip parsers still work.
+        assert_contains_substring(
+            &code,
+            "let pa0_out = &mut pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
+        );
         // The bare-field form must NOT be used for the binding name.
         assert_not_contains_substring(&code, "let pa0 = &mut gpioa.pa0");
     }
@@ -689,7 +694,7 @@ mod tests {
 
         assert_contains_substring(
             &code,
-            "let pa0_out_status_led = &mut gpioa.pa0.into_push_pull_output",
+            "let pa0_out_status_led = &mut pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
         );
 
         // The label round-trips back into the pin's custom_label on reopen.

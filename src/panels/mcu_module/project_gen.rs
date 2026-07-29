@@ -267,17 +267,21 @@ pub fn ensure_peripheral_deps(
     needs_usart: bool,
     needs_spi: bool,
     needs_i2c: bool,
+    needs_gpio: bool,
 ) -> String {
+    let eh1 = needs_spi || needs_i2c || needs_gpio; // SpiBus / I2c / OutputPin…
+    let eh02 = needs_usart || eh1; // every bridge speaks to the HAL's eh 0.2
     let mut s = cargo_toml.to_owned();
     s = ensure_dep(&s, "bxcan", needs_can, "bxcan = \"0.7\"");
     s = ensure_dep(&s, "embedded-io", needs_usart, "embedded-io  = \"0.6\"");
     s = ensure_dep(
         &s,
         "embedded-hal-0-2",
-        needs_usart || needs_spi || needs_i2c,
+        eh02,
         "embedded-hal-0-2 = { package = \"embedded-hal\", version = \"0.2.7\", features = [\"unproven\"] }",
     );
-    s = ensure_dep(&s, "embedded-hal", needs_spi || needs_i2c, "embedded-hal = \"1.0\"");
+    s = ensure_dep(&s, "embedded-hal", eh1, "embedded-hal = \"1.0\"");
+    // nb: CAN, USART, and the SPI SpiBus bridge (FullDuplex) — NOT I2C or GPIO.
     s = ensure_dep(&s, "nb", needs_can || needs_usart || needs_spi, "nb           = \"1\"");
     s
 }
@@ -961,17 +965,17 @@ mod tests {
             &stm32_def(),
             &ToolchainKind::RustEmbedded,
         );
-        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false);
+        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false, false);
         assert!(!base.contains("bxcan") && !base.contains("embedded-hal"), "clean base");
 
         // CAN only → bxcan + nb; no embedded-io/hal.
-        let can = ensure_peripheral_deps(&base, true, false, false, false);
+        let can = ensure_peripheral_deps(&base, true, false, false, false, false);
         assert!(can.contains("bxcan = \"0.7\"") && can.contains("nb           = \"1\""));
         assert!(!can.contains("embedded-io") && !can.contains("embedded-hal"));
         assert_eq!(none(&can), base, "removal restores base");
 
         // USART only → embedded-io + embedded-hal-0-2 + nb; NO embedded-hal 1.0.
-        let usart = ensure_peripheral_deps(&base, false, true, false, false);
+        let usart = ensure_peripheral_deps(&base, false, true, false, false, false);
         assert!(usart.contains("embedded-io  = \"0.6\""), "{usart}");
         assert!(usart.contains("embedded-hal-0-2 = { package = \"embedded-hal\""), "{usart}");
         assert!(usart.contains("nb           = \"1\""));
@@ -980,19 +984,25 @@ mod tests {
         assert_eq!(none(&usart), base);
 
         // SPI only → embedded-hal 1.0 + embedded-hal-0-2 + nb; no embedded-io.
-        let spi = ensure_peripheral_deps(&base, false, false, true, false);
+        let spi = ensure_peripheral_deps(&base, false, false, true, false, false);
         assert!(spi.lines().any(|l| is_dep_line(l, "embedded-hal")), "eh 1.0 present");
         assert!(spi.contains("embedded-hal-0-2") && spi.contains("nb           ="));
         assert!(!spi.contains("embedded-io"));
 
         // I2C only → embedded-hal 1.0 + embedded-hal-0-2, but NO nb (I2c bridge
         // needs no nb::block!).
-        let i2c = ensure_peripheral_deps(&base, false, false, false, true);
+        let i2c = ensure_peripheral_deps(&base, false, false, false, true, false);
         assert!(i2c.lines().any(|l| is_dep_line(l, "embedded-hal")) && i2c.contains("embedded-hal-0-2"));
         assert!(!i2c.lines().any(|l| is_dep_line(l, "nb")), "no nb for i2c-only:\n{i2c}");
 
+        // GPIO only → embedded-hal 1.0 + embedded-hal-0-2, NO nb, NO embedded-io.
+        let gpio = ensure_peripheral_deps(&base, false, false, false, false, true);
+        assert!(gpio.lines().any(|l| is_dep_line(l, "embedded-hal")) && gpio.contains("embedded-hal-0-2"));
+        assert!(!gpio.lines().any(|l| is_dep_line(l, "nb")) && !gpio.contains("embedded-io"));
+        assert_eq!(none(&gpio), base);
+
         // Everything on → all present, exactly one line each; idempotent.
-        let all = ensure_peripheral_deps(&base, true, true, true, true);
+        let all = ensure_peripheral_deps(&base, true, true, true, true, true);
         for dep in ["bxcan", "embedded-io", "embedded-hal", "embedded-hal-0-2", "nb"] {
             assert_eq!(
                 all.lines().filter(|l| is_dep_line(l, dep)).count(),
@@ -1000,7 +1010,7 @@ mod tests {
                 "exactly one `{dep}` line:\n{all}"
             );
         }
-        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true), all, "idempotent");
+        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true, true), all, "idempotent");
         assert_eq!(none(&all), base, "full teardown restores base");
     }
 

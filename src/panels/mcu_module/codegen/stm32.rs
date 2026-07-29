@@ -273,13 +273,19 @@ pub fn make_generated_section(
                 expr.trim_start_matches("//").trim()
             )
         } else {
-            let prefix = if needs_mut_ref(&pin.selected_function) {
-                "&mut "
-            } else {
-                ""
+            // GPIO in/out are wrapped in the `pins::configs::io` bridge so the
+            // binding is a STANDARD `embedded-hal` 1.0 pin — portable to any HAL.
+            // The wrapper is transparent (`.0` gives the raw HAL pin back) and the
+            // `&mut` + var-name + comment shape is unchanged, so `parse_main_rs` /
+            // `parse_pin_labels` still round-trip.
+            let (prefix, open, close) = match pin.selected_function {
+                PinFunction::GpioOutput => ("&mut ", "pins::configs::io::DigitalOut(", ")"),
+                PinFunction::GpioInput => ("&mut ", "pins::configs::io::DigitalIn(", ")"),
+                ref f if needs_mut_ref(f) => ("&mut ", "", ""),
+                _ => ("", "", ""),
             };
             format!(
-                "    let {binding} = {prefix}{pv}.{field}.{expr}; // {comment}",
+                "    let {binding} = {prefix}{open}{pv}.{field}.{expr}{close}; // {comment}",
                 binding = binding_of(pin, meta),
                 field = meta.var,
                 pv = meta.port_var,
@@ -557,7 +563,7 @@ fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
              let dp = pac::Peripherals::take().unwrap();\n\n\
              let mut flash = dp.FLASH.constrain();\n\
              let rcc = dp.RCC.constrain();\n\
-             let _clocks = {clock_chain};\n\n\
+             let clocks = {clock_chain};\n\n\
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n"
     )
@@ -646,8 +652,74 @@ pub fn config_files(
             can_config_file(can.get(&1), pclk1_of(clock)),
         ));
     }
+    // The GPIO/Delay → embedded-hal 1.0 bridge module, when any GPIO in/out pin
+    // is configured (the pin bindings wrap it — see the pin-declaration lines).
+    if has(PinFunction::GpioOutput) || has(PinFunction::GpioInput) {
+        out.push(("io.rs".to_string(), GPIO_IO_FILE.to_string()));
+    }
     out
 }
+
+/// `src/pins/configs/io.rs` — bridges the HAL's embedded-hal 0.2 GPIO + blocking
+/// delay to the STANDARD `embedded-hal` 1.0 traits (`OutputPin`/`InputPin`/
+/// `DelayNs`), so driver/app code stays portable across HALs. Real-compile
+/// verified on thumbv7m. The leading GENERATED marker block is required by
+/// `sync_config_files` (there is no per-chip config here — it stays a comment).
+const GPIO_IO_FILE: &str = r#"// <<< GENERATED>>>
+// Portable GPIO/Delay bridges — no per-chip config; this marker just frames the
+// regenerated region. Edit the bridges below freely.
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+//
+// Wrap a HAL pin/delay to make it a STANDARD `embedded-hal` 1.0 value, so your
+// driver/app code is portable across chips/HALs:
+//
+//     fn app<P: embedded_hal::digital::OutputPin>(led: &mut P) { /* … */ }
+#[derive(Debug)]
+pub struct IoError;
+impl embedded_hal::digital::Error for IoError {
+    fn kind(&self) -> embedded_hal::digital::ErrorKind {
+        embedded_hal::digital::ErrorKind::Other
+    }
+}
+
+/// A HAL output pin (embedded-hal 0.2) as an `embedded-hal` 1.0 pin.
+pub struct DigitalOut<P>(pub P);
+impl<P> embedded_hal::digital::ErrorType for DigitalOut<P> {
+    type Error = IoError;
+}
+impl<P: embedded_hal_0_2::digital::v2::OutputPin> embedded_hal::digital::OutputPin for DigitalOut<P> {
+    fn set_low(&mut self) -> Result<(), Self::Error> { self.0.set_low().map_err(|_| IoError) }
+    fn set_high(&mut self) -> Result<(), Self::Error> { self.0.set_high().map_err(|_| IoError) }
+}
+impl<P> embedded_hal::digital::StatefulOutputPin for DigitalOut<P>
+where
+    P: embedded_hal_0_2::digital::v2::OutputPin + embedded_hal_0_2::digital::v2::StatefulOutputPin,
+{
+    fn is_set_high(&mut self) -> Result<bool, Self::Error> { self.0.is_set_high().map_err(|_| IoError) }
+    fn is_set_low(&mut self) -> Result<bool, Self::Error> { self.0.is_set_low().map_err(|_| IoError) }
+}
+
+/// A HAL input pin (embedded-hal 0.2) as an `embedded-hal` 1.0 pin.
+pub struct DigitalIn<P>(pub P);
+impl<P> embedded_hal::digital::ErrorType for DigitalIn<P> {
+    type Error = IoError;
+}
+impl<P: embedded_hal_0_2::digital::v2::InputPin> embedded_hal::digital::InputPin for DigitalIn<P> {
+    fn is_high(&mut self) -> Result<bool, Self::Error> { self.0.is_high().map_err(|_| IoError) }
+    fn is_low(&mut self) -> Result<bool, Self::Error> { self.0.is_low().map_err(|_| IoError) }
+}
+
+/// A HAL blocking delay (embedded-hal 0.2) as an `embedded-hal` 1.0 `DelayNs`.
+/// Build one from the SysTick: `let mut d = pins::configs::io::Delay(cp.SYST.delay(&clocks));`
+#[allow(dead_code)]
+pub struct Delay<D>(pub D);
+impl<D: embedded_hal_0_2::blocking::delay::DelayUs<u32>> embedded_hal::delay::DelayNs for Delay<D> {
+    fn delay_ns(&mut self, ns: u32) { self.0.delay_us(ns.div_ceil(1000)); }
+    fn delay_us(&mut self, us: u32) { self.0.delay_us(us); }
+}
+"#;
 
 /// APB1 (PCLK1) frequency in Hz from the clock config — needed for the CAN bit
 /// timing. Mirrors [`clock_setup_chain`]'s graph→typed→frequencies path.

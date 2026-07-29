@@ -1559,6 +1559,9 @@ impl AppIde {
             let needs_usart = has_cfg("usart");
             let needs_spi = has_cfg("spi");
             let needs_i2c = has_cfg("i2c");
+            // GPIO in/out pins are wrapped in the `pins::configs::io` eh-1.0
+            // bridge, emitted as `io.rs`.
+            let needs_gpio = has_cfg("io");
             // USB CDC init needs `usb-device`/`usbd-serial` + the `stm32-usbd`
             // HAL feature, keyed on whether the USB D-/D+ pins are configured.
             let needs_usb = all_pins
@@ -1570,6 +1573,7 @@ impl AppIde {
                 needs_usart,
                 needs_spi,
                 needs_i2c,
+                needs_gpio,
             );
             let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb);
             if new_toml != self.cargo_toml {
