@@ -390,6 +390,12 @@ pub struct LspState {
     /// instances accumulating across restarts, each still watching and
     /// re-analyzing the workspace on every file write.
     child: Option<std::process::Child>,
+    /// A bounded, human-readable trace of RA's startup: `$/progress` titles
+    /// ("Fetching metadata", "Building CrateGraph", …) and every `window/`
+    /// showMessage / logMessage (warning+). Shown in the Analyzer tab so a failed
+    /// workspace load is DIAGNOSABLE instead of a silent stuck "Checking…".
+    /// Cleared on `reset()`; capped at `LOAD_LOG_CAP`.
+    pub load_log: Vec<String>,
 }
 
 impl Default for LspState {
@@ -442,12 +448,26 @@ impl Default for LspState {
             calls_refs_pending: HashMap::new(),
             calls_refs_results: HashMap::new(),
             child: None,
+            load_log: Vec::new(),
         }
     }
 }
 
+/// Cap on `LspState::load_log` — a startup trace, not a full server log.
+const LOAD_LOG_CAP: usize = 250;
+
 impl LspState {
     // ── Sending helpers ───────────────────────────────────────────────────────
+
+    /// Append a line to the RA startup trace (Analyzer tab), oldest dropped past
+    /// the cap. Timestamps aren't added — order is the useful signal.
+    pub fn push_load_log(&mut self, line: impl Into<String>) {
+        self.load_log.push(line.into());
+        if self.load_log.len() > LOAD_LOG_CAP {
+            let overflow = self.load_log.len() - LOAD_LOG_CAP;
+            self.load_log.drain(0..overflow);
+        }
+    }
 
     fn send_raw(&self, json: String) {
         if let Some(tx) = &self.sender {
@@ -1141,6 +1161,7 @@ impl LspState {
         self.references_results.clear();
         self.calls_refs_pending.clear();
         self.calls_refs_results.clear();
+        self.load_log.clear();
     }
 }
 
@@ -1243,6 +1264,7 @@ fn launch(
         }
         s.sender = Some(tx.clone());
         s.child = Some(child);
+        s.push_load_log("• rust-analyzer process started");
     }
 
     // ── Write thread ──────────────────────────────────────────────────────────
@@ -1600,6 +1622,7 @@ fn handle_incoming(
             let mut s = state.lock().unwrap();
             if s.generation == my_gen {
                 s.status = LspStatus::Indexing;
+                s.push_load_log("• initialize handshake OK — loading workspace…");
             }
             ctx.request_repaint();
         }
@@ -1655,6 +1678,19 @@ fn handle_incoming(
             let mut s = state.lock().unwrap();
             if s.generation != my_gen {
                 return;
+            }
+
+            // Trace the loading phases (Analyzer tab). A `begin` carries a human
+            // title ("Fetching metadata", "Building CrateGraph", "Indexing"); log
+            // it so a load that STALLS shows where it got stuck. Check spans are
+            // routine post-load noise — only log those before RA is Ready.
+            if kind == "begin" {
+                if let Some(title) = msg["params"]["value"]["title"].as_str() {
+                    if !is_check || s.status != LspStatus::Ready {
+                        s.push_load_log(format!("• {title}"));
+                        ctx.request_repaint();
+                    }
+                }
             }
 
             if is_indexing && kind == "end" && s.status == LspStatus::Indexing {
@@ -1836,7 +1872,44 @@ fn handle_incoming(
             }
         }
 
-        // Ignore window/logMessage, telemetry, etc.
+        // ── Server-side messages (the workspace-load failure channel) ─────────
+        // RA reports a failed `cargo metadata` / project load via these — the
+        // exact diagnosis a stuck "Checking…" otherwise hides. `type`: 1=Error
+        // 2=Warning 3=Info 4=Log. showMessage is user-facing (always logged);
+        // logMessage is a firehose, so keep Error/Warning only.
+        "window/showMessage" | "window/logMessage" => {
+            let ty = msg["params"]["type"].as_u64().unwrap_or(4);
+            let text = msg["params"]["message"].as_str().unwrap_or("").trim();
+            let keep = method == "window/showMessage" || ty <= 2;
+            if keep && !text.is_empty() {
+                let tag = match ty {
+                    1 => "[error]",
+                    2 => "[warn]",
+                    3 => "[info]",
+                    _ => "[log]",
+                };
+                let mut s = state.lock().unwrap();
+                if s.generation != my_gen {
+                    return;
+                }
+                // Multi-line messages (cargo's backtrace) collapse to readable
+                // rows so the Analyzer tab stays scannable.
+                for (i, line) in text.lines().enumerate() {
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if i == 0 {
+                        s.push_load_log(format!("{tag} {line}"));
+                    } else {
+                        s.push_load_log(format!("    {line}"));
+                    }
+                }
+                ctx.request_repaint();
+            }
+        }
+
+        // Ignore telemetry, etc.
         _ => {}
     }
 }

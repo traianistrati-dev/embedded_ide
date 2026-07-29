@@ -527,6 +527,10 @@ impl AppIde {
                 self.cargo_toml = w.tentative;
                 self.cached_project_files = None;
                 self.request_save = true;
+                // The workspace gained a member — restart RA so it re-runs
+                // `cargo metadata` cleanly and analyzes the new crate (a wedged
+                // RA won't pick it up from a didChange alone).
+                self.restart_lsp();
             }
             Err(e) => self.workspace_add_error = Some((w.dir, e)),
         }
@@ -545,7 +549,20 @@ impl AppIde {
         self.workspace_load_error = None;
         self.cached_project_files = None;
         self.request_save = true;
+        // Removing a member changes the workspace graph — and if an incompatible
+        // member had wedged RA, only a restart recovers it (a manifest edit alone
+        // won't un-stick a dead analyzer, the reported "stuck Checking…").
+        self.restart_lsp();
         self.recheck_workspace_health();
+    }
+
+    /// Restart rust-analyzer: `reset()` kills the child + bumps the generation +
+    /// marks it `Stopped`; the LSP lifecycle in `init_frame` then re-writes the
+    /// workspace and spawns a fresh RA next frame. The single entry point for
+    /// the Analyzer-tab "Restart" button and every workspace-structure change.
+    pub(super) fn restart_lsp(&mut self) {
+        self.lsp_state.lock().unwrap().reset();
+        self.lsp_selected_diagnostic = None;
     }
 
     /// Start a background `cargo metadata` HEALTH CHECK of the project exactly as

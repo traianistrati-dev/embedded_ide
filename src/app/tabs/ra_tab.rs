@@ -14,13 +14,14 @@ pub fn show_ra_tab(
 ) {
     // Extract everything we need while holding the lock, then drop it
     // before we start drawing so there's no risk of a deadlock.
-    let (status, total_err, total_warn, all_diags, failed_msg) = {
+    let (status, total_err, total_warn, all_diags, failed_msg, load_log) = {
         let lsp = lsp_state.lock().unwrap();
         let failed_msg = if let lsp::LspStatus::Failed(ref m) = lsp.status {
             Some(m.clone())
         } else {
             None
         };
+        let load_log = lsp.load_log.clone();
         // Flatten all diagnostics into (rel_path, LspDiagnostic) pairs. While a
         // re-check is pending (`flycheck_stale`), drop flycheck (cargo check)
         // diagnostics: rustc's line/cols are stale and the error may already be
@@ -43,6 +44,7 @@ pub fn show_ra_tab(
             lsp.total_warnings(),
             flat,
             failed_msg,
+            load_log,
         )
     };
 
@@ -105,12 +107,70 @@ pub fn show_ra_tab(
 
         ui.label(egui::RichText::new(icon).size(13.0).color(color));
         ui.label(egui::RichText::new(text).size(12.0).color(color).strong());
+
+        // Restart rust-analyzer (right-aligned). `reset()` marks it Stopped +
+        // bumps the generation; the app's LSP lifecycle re-writes the workspace
+        // and spawns a fresh RA next frame. The fix for a wedged analyzer that a
+        // manifest change alone won't un-stick (e.g. after a Detach).
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .button(egui::RichText::new(format!("{} Restart", ph::ARROW_CLOCKWISE)).size(11.0))
+                .on_hover_text(
+                    "Restart rust-analyzer — kills it and starts a fresh one that \
+                     re-runs `cargo metadata`. Use if it's stuck or after fixing the \
+                     workspace.",
+                )
+                .clicked()
+            {
+                lsp_state.lock().unwrap().reset();
+                *selected = None;
+            }
+        });
     });
 
     // Spinner repaint
     if matches!(status, lsp::LspStatus::Starting | lsp::LspStatus::Indexing) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    // ── rust-analyzer load log ────────────────────────────────────────────────
+    // The startup trace (progress phases + server messages). Expanded while NOT
+    // ready — that's when a stall/failure needs diagnosing — collapsed once
+    // ready so it doesn't crowd the diagnostics.
+    if !load_log.is_empty() {
+        let default_open = !matches!(status, lsp::LspStatus::Ready);
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("rust-analyzer log ({})", load_log.len())).size(11.0),
+        )
+        .id_salt("ra_load_log")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("ra_load_log_scroll")
+                .max_height(140.0)
+                .auto_shrink([false, true])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &load_log {
+                        let color = if line.starts_with("[error]") {
+                            egui::Color32::from_rgb(230, 110, 95)
+                        } else if line.starts_with("[warn]") {
+                            egui::Color32::from_rgb(220, 180, 80)
+                        } else if line.starts_with('•') {
+                            egui::Color32::from_rgb(120, 160, 200)
+                        } else {
+                            egui::Color32::from_gray(175)
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(line).size(10.5).monospace().color(color),
+                            )
+                            .wrap(),
+                        );
+                    }
+                });
+        });
     }
 
     // Failed detail

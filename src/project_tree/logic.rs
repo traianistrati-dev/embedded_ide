@@ -90,13 +90,42 @@ impl ProjectTreeState {
         // Library crates: read the members out of the root manifest rather than
         // guessing from directory names, so only real crates are picked up.
         let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
-        for member in crate::panels::mcu_module::project_gen::workspace_members(&manifest) {
-            let dir = root.join(&member);
+        let members = crate::panels::mcu_module::project_gen::workspace_members(&manifest);
+        for member in &members {
+            let dir = root.join(member);
             if dir.is_dir() {
-                if !folders.contains(&member) {
+                if !folders.contains(member) {
                     folders.push(member.clone());
                 }
                 Self::scan_src_dir(root, &dir, &mut files, &mut folders);
+            }
+        }
+
+        // DETACHED libraries: a cloned crate that is not (yet) a `[workspace]`
+        // member still owns its `Cargo.toml`. It must be scanned too, or it
+        // would vanish from the tree on every reload/restart (leaving only its
+        // "Add to workspace" affordance unreachable). A top-level dir counts as
+        // a detached library iff it has a `Cargo.toml` and is not a member.
+        // `src`, `target` and hidden dirs (`.git`, `.cargo`, …) are never crates.
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().replace('\\', "/");
+                if name == SRC_ROOT
+                    || name == "target"
+                    || name.starts_with('.')
+                    || members.iter().any(|m| m == &name)
+                    || folders.contains(&name)
+                {
+                    continue;
+                }
+                if path.join("Cargo.toml").is_file() {
+                    folders.push(name);
+                    Self::scan_src_dir(root, &path, &mut files, &mut folders);
+                }
             }
         }
 
@@ -646,6 +675,33 @@ mod tests {
         let state = ProjectTreeState::load_from_dir(parent);
         assert!(state.user_src_files.is_empty());
         assert!(state.user_src_folders.is_empty());
+    }
+
+    #[test]
+    fn test_load_picks_up_a_detached_library() {
+        // A cloned lib that is NOT a `[workspace] member` must still be scanned
+        // in, or it would vanish from the tree on every reload/restart.
+        let (temp, src) = setup_temp_project!();
+        let root = src.parent().unwrap();
+        fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+        // Root manifest with NO members (the firmware only).
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"fw\"\n").unwrap();
+        // A detached library: its own dir + Cargo.toml + a source file.
+        let lib = root.join("mmwave");
+        fs::create_dir(&lib).unwrap();
+        fs::write(lib.join("Cargo.toml"), "[package]\nname = \"mmwave\"\n").unwrap();
+        fs::create_dir(lib.join("src")).unwrap();
+        fs::write(lib.join("src").join("lib.rs"), "pub fn go() {}\n").unwrap();
+        // A hidden dir + `target` must NOT be treated as a library.
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("Cargo.toml"), "x").unwrap();
+
+        let state = ProjectTreeState::load_from_dir(root);
+        assert_folder_exists(&state, "mmwave");
+        assert_file_exists(&state, "mmwave/Cargo.toml");
+        assert_file_exists(&state, "mmwave/src/lib.rs");
+        assert_file_not_exists(&state, ".git/Cargo.toml");
+        drop(temp);
     }
 
     #[test]
