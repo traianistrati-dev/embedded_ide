@@ -5,7 +5,7 @@
 use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
+    ApiStyle, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
 };
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -430,6 +430,31 @@ pub fn module_config_ui(
         })
         .collect();
 
+    // Portable (embedded-io/hal) vs native (concrete HAL) init — shown for the
+    // bus modules (USART/SPI/I2C) that generate a `pins/configs/*.rs` init.
+    let api_row = |ui: &mut egui::Ui, style: &mut ApiStyle| {
+        ui.label("Init API");
+        egui::ComboBox::from_id_salt("api_style")
+            .selected_text(match style {
+                ApiStyle::Portable => "Portable (embedded-io/hal)",
+                ApiStyle::Native => "Native (HAL type)",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(style, ApiStyle::Portable, "Portable (embedded-io/hal)")
+                    .on_hover_text(
+                        "init returns a STANDARD embedded-io / embedded-hal 1.0 value — \
+                         portable driver code across HALs. Its `.0` still gives the raw \
+                         HAL object back.",
+                    );
+                ui.selectable_value(style, ApiStyle::Native, "Native (HAL type)")
+                    .on_hover_text(
+                        "init returns the concrete stm32f1xx-hal type — no bridge, no extra \
+                         trait crates, max HAL features.",
+                    );
+            });
+        ui.end_row();
+    };
+
     egui::Grid::new("module_cfg")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -471,6 +496,7 @@ pub fn module_config_ui(
                             ui.selectable_value(&mut cfg.stop_bits, StopBits::Two, "2");
                         });
                     ui.end_row();
+                    api_row(ui, &mut cfg.api_style);
                 }
                 ModuleConfig::Spi(cfg) => {
                     ui.label("SPI mode");
@@ -491,6 +517,7 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
+                    api_row(ui, &mut cfg.api_style);
                 }
                 ModuleConfig::I2c(cfg) => {
                     ui.label("Clock");
@@ -504,6 +531,7 @@ pub fn module_config_ui(
                     ui.label("Address (7-bit)");
                     ui.add(egui::DragValue::new(&mut cfg.address).range(0..=127).hexadecimal(2, false, true));
                     ui.end_row();
+                    api_row(ui, &mut cfg.api_style);
                 }
                 ModuleConfig::Can(cfg) => {
                     ui.label("Bit rate");

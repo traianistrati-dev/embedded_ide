@@ -189,6 +189,19 @@ pub enum StopBits {
     Two,
 }
 
+/// Which init API a Virtual Module's generated `pins/configs/*.rs` exposes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ApiStyle {
+    /// `init` returns a STANDARD `embedded-io` / `embedded-hal` 1.0 value, so
+    /// driver/app code is portable across HALs. The wrapper's `.0` still gives
+    /// the raw HAL object back. This is the default.
+    #[default]
+    Portable,
+    /// `init` returns the CONCRETE `stm32f1xx-hal` type (`Serial`/`Spi`/
+    /// `BlockingI2c`) — no bridge, no extra trait crates. Max HAL features.
+    Native,
+}
+
 /// USART communication settings + the user's RX/TX data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsartModuleConfig {
@@ -205,6 +218,10 @@ pub struct UsartModuleConfig {
     /// (e.g. `_tx1_imu`). `#[serde(default)]` keeps old `@modules` markers valid.
     #[serde(default)]
     pub custom_label: String,
+    /// Portable (embedded-io) vs native (concrete HAL) init. `#[serde(default)]`
+    /// → old configs load as `Portable`.
+    #[serde(default)]
+    pub api_style: ApiStyle,
 }
 
 impl UsartModuleConfig {
@@ -219,6 +236,7 @@ impl UsartModuleConfig {
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
+            api_style: ApiStyle::default(),
         }
     }
 }
@@ -236,6 +254,9 @@ pub struct SpiModuleConfig {
     /// User label appended to the generated `_spiN` handle (e.g. `_spi1_imu`).
     #[serde(default)]
     pub custom_label: String,
+    /// Portable (embedded-hal 1.0 `SpiBus`) vs native (`Spi<…>`) init.
+    #[serde(default)]
+    pub api_style: ApiStyle,
 }
 
 impl SpiModuleConfig {
@@ -248,6 +269,7 @@ impl SpiModuleConfig {
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
+            api_style: ApiStyle::default(),
         }
     }
 }
@@ -265,6 +287,9 @@ pub struct I2cModuleConfig {
     /// User label appended to the generated `_i2cN` handle (e.g. `_i2c1_imu`).
     #[serde(default)]
     pub custom_label: String,
+    /// Portable (embedded-hal 1.0 `I2c`) vs native (`BlockingI2c<…>`) init.
+    #[serde(default)]
+    pub api_style: ApiStyle,
 }
 
 impl I2cModuleConfig {
@@ -277,6 +302,7 @@ impl I2cModuleConfig {
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
+            api_style: ApiStyle::default(),
         }
     }
 }

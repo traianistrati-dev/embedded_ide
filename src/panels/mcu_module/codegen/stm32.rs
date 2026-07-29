@@ -3,8 +3,8 @@
 use super::super::clock::frequencies;
 use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
 use super::super::modules::{
-    CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
-    UsbModuleConfig,
+    ApiStyle, CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits,
+    UsartModuleConfig, UsbModuleConfig,
 };
 use super::super::pins::logic::pin::Pin;
 use super::super::pins::logic::pin_function::PinFunction;
@@ -920,13 +920,70 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         Some(StopBits::Two) => 2,
         _ => 1,
     };
-    USART_TMPL
-        .replace("{N}", &n.to_string())
+    let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
+        ApiStyle::Portable => USART_TMPL,
+        ApiStyle::Native => USART_TMPL_NATIVE,
+    };
+    tmpl.replace("{N}", &n.to_string())
         .replace("{BAUD}", &baud.to_string())
         .replace("{DATA}", &data.to_string())
         .replace("{PARITY}", &parity.to_string())
         .replace("{STOP}", &stop.to_string())
 }
+
+/// Native `stm32f1xx-hal` USART init (no embedded-io bridge). Returns the
+/// `Serial` peripheral; `.split()` gives `(Tx, Rx)`. Selected via `ApiStyle`.
+const USART_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const BAUDRATE: u32 = {BAUD};
+const DATA_BITS: u8 = {DATA}; // 8, 9
+const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+const STOP_BITS: u8 = {STOP}; // 1, 2
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+// NATIVE stm32f1xx-hal API (chosen in the Virtual Module). `init` returns the
+// `Serial` peripheral — call `.split()` for `(Tx, Rx)`, or use it directly.
+// Switch to the portable `embedded-io` API in the Virtual Module.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    rcc::Clocks,
+    serial::{self, Config, Serial, StopBits},
+};
+
+fn get_config() -> serial::Config {
+    let mut config = Config::default().baudrate(BAUDRATE.bps());
+    if DATA_BITS == 8 {
+        config = config.wordlength_8bits();
+    } else if DATA_BITS == 9 {
+        config = config.wordlength_9bits();
+    }
+    if PARITY == 'N' {
+        config = config.parity_none();
+    } else if PARITY == 'O' {
+        config = config.parity_odd();
+    } else if PARITY == 'E' {
+        config = config.parity_even();
+    }
+    if STOP_BITS == 1 {
+        config = config.stopbits(StopBits::STOP1);
+    } else if STOP_BITS == 2 {
+        config = config.stopbits(StopBits::STOP2);
+    }
+    config
+}
+
+pub fn init<PINS: serial::Pins<pac::USART{N}>>(
+    usart: pac::USART{N},
+    pins: PINS,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+) -> Serial<pac::USART{N}, PINS> {
+    Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks)
+}
+"#;
 
 const SPI_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
@@ -1024,11 +1081,54 @@ where
 fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>) -> String {
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
-    SPI_TMPL
-        .replace("{N}", &n.to_string())
+    let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
+        ApiStyle::Portable => SPI_TMPL,
+        ApiStyle::Native => SPI_TMPL_NATIVE,
+    };
+    tmpl.replace("{N}", &n.to_string())
         .replace("{MODE}", &mode.to_string())
         .replace("{KHZ}", &khz.to_string())
 }
+
+/// Native `stm32f1xx-hal` SPI init (no eh-1.0 bridge). Returns `Spi<…>`.
+const SPI_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+const CLOCK_KHZ: u32 = {KHZ};
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+// NATIVE stm32f1xx-hal API — returns `Spi<…>`. Switch to the portable
+// `embedded-hal` 1.0 `SpiBus` API in the Virtual Module.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    rcc::Clocks,
+    spi::{self, Mode, Phase, Polarity, Spi, Spi{N}NoRemap},
+};
+
+fn get_mode() -> Mode {
+    match SPI_MODE {
+        1 => Mode { polarity: Polarity::IdleLow, phase: Phase::CaptureOnSecondTransition },
+        2 => Mode { polarity: Polarity::IdleHigh, phase: Phase::CaptureOnFirstTransition },
+        3 => Mode { polarity: Polarity::IdleHigh, phase: Phase::CaptureOnSecondTransition },
+        _ => Mode { polarity: Polarity::IdleLow, phase: Phase::CaptureOnFirstTransition },
+    }
+}
+
+pub fn init<PINS>(
+    spi: pac::SPI{N},
+    pins: PINS,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+) -> Spi<pac::SPI{N}, Spi{N}NoRemap, PINS, u8>
+where
+    PINS: spi::Pins<Spi{N}NoRemap>,
+{
+    Spi::spi{N}(spi, pins, &mut afio.mapr, get_mode(), CLOCK_KHZ.kHz(), *clocks)
+}
+"#;
 
 const I2C_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
@@ -1124,10 +1224,51 @@ where
 
 fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(100_000) / 1_000;
-    I2C_TMPL
-        .replace("{N}", &n.to_string())
+    let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
+        ApiStyle::Portable => I2C_TMPL,
+        ApiStyle::Native => I2C_TMPL_NATIVE,
+    };
+    tmpl.replace("{N}", &n.to_string())
         .replace("{KHZ}", &khz.to_string())
 }
+
+/// Native `stm32f1xx-hal` I2C init (no eh-1.0 bridge). Returns `BlockingI2c<…>`.
+const I2C_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+// NATIVE stm32f1xx-hal API — returns `BlockingI2c<…>`. Switch to the portable
+// `embedded-hal` 1.0 `I2c` API in the Virtual Module.
+use stm32f1xx_hal::{
+    pac,
+    prelude::*,
+    afio,
+    rcc::Clocks,
+    i2c::{self, BlockingI2c, Mode as I2cMode},
+};
+
+fn get_mode() -> I2cMode {
+    if CLOCK_KHZ <= 100 {
+        I2cMode::Standard { frequency: CLOCK_KHZ.kHz() }
+    } else {
+        I2cMode::Fast { frequency: CLOCK_KHZ.kHz(), duty_cycle: i2c::DutyCycle::Ratio2to1 }
+    }
+}
+
+pub fn init<PINS>(
+    i2c: pac::I2C{N},
+    pins: PINS,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+) -> BlockingI2c<pac::I2C{N}, PINS>
+where
+    PINS: i2c::Pins<pac::I2C{N}>,
+{
+    BlockingI2c::i2c{N}(i2c, pins, &mut afio.mapr, get_mode(), *clocks, 1000, 10, 1000, 1000)
+}
+"#;
 
 /// Append any **missing** helper functions to `file`, after `fn main`, in the
 /// user-editable region. Helpers already present (matched by `fn <name>(`) are

@@ -1552,15 +1552,26 @@ impl AppIde {
             use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
             // Peripheral config files pull in standard-trait crates (embedded-io
             // for USART, embedded-hal 1.0 `SpiBus`/`I2c` for SPI/I2C, bxcan for
-            // CAN, nb for the blocking bridges). One authority manages the whole
-            // shared set — keyed on which config files codegen emitted.
+            // CAN, nb for the blocking bridges). Keyed on the config files AND —
+            // for the trait crates — on each module's API style: a NATIVE-style
+            // USART/SPI/I2C module emits a config file but needs NO trait crate.
             let has_cfg = |p: &str| config_files.iter().any(|(name, _)| name.starts_with(p));
             let needs_can = has_cfg("can");
-            let needs_usart = has_cfg("usart");
-            let needs_spi = has_cfg("spi");
-            let needs_i2c = has_cfg("i2c");
+            // Trait crates only for PORTABLE modules.
+            let (mut needs_usart, mut needs_spi, mut needs_i2c) = (false, false, false);
+            if let Some(m) = &self.mcu {
+                use crate::panels::mcu_module::modules::{ApiStyle, ModuleConfig};
+                for md in &m.modules {
+                    match &md.config {
+                        ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
+                        ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
+                        ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => needs_i2c = true,
+                        _ => {}
+                    }
+                }
+            }
             // GPIO in/out pins are wrapped in the `pins::configs::io` eh-1.0
-            // bridge, emitted as `io.rs`.
+            // bridge, emitted as `io.rs` (always portable).
             let needs_gpio = has_cfg("io");
             // USB CDC init needs `usb-device`/`usbd-serial` + the `stm32-usbd`
             // HAL feature, keyed on whether the USB D-/D+ pins are configured.

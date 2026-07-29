@@ -12,8 +12,9 @@ pub mod model;
 pub mod persist;
 
 pub use model::{
-    CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal, Parity,
-    SpiModuleConfig, StopBits, UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
+    ApiStyle, CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal,
+    Parity, SpiModuleConfig, StopBits, UsartModuleConfig, UsbModuleConfig, VirtualModule,
+    module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -332,6 +333,35 @@ mod tests {
         // The label persists through the mcu.config round-trip (serde on config).
         let (parsed, _) = crate::panels::mcu_module::mcu_config::parse(&mcu.mcu_config_text());
         assert_eq!(parsed, mcu.modules);
+    }
+
+    /// The `ApiStyle` selector switches the generated `usart1.rs` init between the
+    /// portable `embedded-io` shape and the native `stm32f1xx-hal` `Serial` shape.
+    #[test]
+    fn api_style_switches_the_generated_init() {
+        use crate::panels::mcu_module::modules::ApiStyle;
+        let usart_body = |style: ApiStyle| {
+            let mut mcu = create_stm32f103c8tx();
+            assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+            if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
+                cfg.api_style = style;
+            }
+            mcu.config_files()
+                .into_iter()
+                .find(|(n, _)| n == "usart1.rs")
+                .unwrap()
+                .1
+        };
+
+        // Portable (default) → embedded-io return + the bridge.
+        let portable = usart_body(ApiStyle::Portable);
+        assert!(portable.contains("impl embedded_io::Read + embedded_io::Write"), "{portable}");
+        assert!(portable.contains("struct SerialIo"), "{portable}");
+
+        // Native → concrete `Serial`, no embedded-io.
+        let native = usart_body(ApiStyle::Native);
+        assert!(native.contains("-> Serial<pac::USART1, PINS>"), "{native}");
+        assert!(!native.contains("embedded_io"), "native has no embedded-io:\n{native}");
     }
 
     /// An SPI module label lands on the `_spiN` handle.
