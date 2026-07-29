@@ -970,8 +970,8 @@ pub fn show_project_tree(
                 .selectable(false)
                 .sense(egui::Sense::click()),
             );
-            // right_to_left: the FIRST widget added sits furthest right, so the
-            // caret goes in first and the two action icons land to its left.
+            // Only the expand/collapse caret stays inline — every action (rename,
+            // detach, delete, open folder) lives in the right-click menu below.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let icon = if open { ph::CARET_DOWN } else { ph::CARET_DOUBLE_UP };
                 if ui
@@ -984,78 +984,6 @@ pub fn show_project_tree(
                     .clicked()
                 {
                     toggle = true;
-                }
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::PENCIL_SIMPLE)
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(170)),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Rename this library (asks first)")
-                    .clicked()
-                {
-                    *library_action = Some((lib.clone(), true));
-                }
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::TRASH)
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(210, 110, 95)),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Delete this library (asks first)")
-                    .clicked()
-                {
-                    *library_action = Some((lib.clone(), false));
-                }
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(ph::LINK_BREAK)
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(200, 170, 100)),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text(
-                        "Detach from the workspace (keeps the files). Removes it from \
-                         [workspace] members + any path dependency — use this if it \
-                         broke rust-analyzer / the build.",
-                    )
-                    .clicked()
-                {
-                    *detach_from_workspace = Some(lib.clone());
-                }
-                // Added LAST so it sits to the LEFT of the trash icon: in a
-                // `right_to_left` layout the first widget added is the
-                // rightmost, so "before delete" means last.
-                let abs = project_dir.map(|d| d.join(lib));
-                if ui
-                    .add_enabled(
-                        abs.is_some(),
-                        egui::Button::new(
-                            egui::RichText::new(ph::FOLDER_OPEN)
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(170)),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Open this library's folder")
-                    .on_disabled_hover_text(
-                        "Save the project first (Ctrl+S) — it has no folder on disk yet",
-                    )
-                    .clicked()
-                {
-                    if let Some(p) = &abs {
-                        if let Err(e) = crate::reveal::open(p) {
-                            eprintln!("[reveal] {e}");
-                        }
-                    }
                 }
             });
             name_resp
@@ -1103,7 +1031,11 @@ pub fn show_project_tree(
         });
         state.store(ui.ctx());
 
-        header.response.context_menu(|ui| {
+        // Attach to the NAME label (`header.inner`), not the `horizontal`
+        // container: the label senses clicks and sits on top, so a right-click on
+        // the name never reached the container's menu (it looked like nothing
+        // happened). The label reliably fires `secondary_clicked`.
+        header.inner.context_menu(|ui| {
             if ui
                 .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
                 .clicked()
@@ -1120,6 +1052,36 @@ pub fn show_project_tree(
                 begin_inline_new(ui, true, lib, new_src_folder_name, new_folder_parent_folder);
                 *new_src_name = None;
                 *new_file_parent_folder = None;
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(egui::RichText::new(format!("{} Rename library…", ph::PENCIL_SIMPLE)).size(11.5))
+                .clicked()
+            {
+                *library_action = Some((lib.clone(), true));
+                ui.close();
+            }
+            if ui
+                .button(egui::RichText::new(format!("{} Detach from workspace", ph::LINK_BREAK)).size(11.5))
+                .on_hover_text(
+                    "Remove it from [workspace] members + any path dependency (keeps the \
+                     files) — use this if it broke rust-analyzer / the build.",
+                )
+                .clicked()
+            {
+                *detach_from_workspace = Some(lib.clone());
+                ui.close();
+            }
+            if ui
+                .button(
+                    egui::RichText::new(format!("{} Delete library…", ph::TRASH))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(230, 130, 115)),
+                )
+                .clicked()
+            {
+                *library_action = Some((lib.clone(), false));
                 ui.close();
             }
             ui.separator();
@@ -1164,6 +1126,9 @@ pub fn show_project_tree(
                     .selectable(false)
                     .sense(egui::Sense::click()),
                 );
+                // Only the caret stays inline (plus a transient spinner while its
+                // "Add to workspace" check runs — a status, not a button). Every
+                // action lives in the right-click menu below.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let icon = if open { ph::CARET_DOWN } else { ph::CARET_DOUBLE_UP };
                     if ui
@@ -1173,62 +1138,9 @@ pub fn show_project_tree(
                     {
                         toggle = true;
                     }
-                    // "Add to workspace" — a spinner replaces it while ITS check
-                    // runs; every add button disables while ANY check runs.
                     if ws_add_pending == Some(lib.as_str()) {
-                        ui.add(egui::Spinner::new().size(12.0));
-                    } else if ui
-                        .add_enabled(
-                            ws_add_pending.is_none(),
-                            egui::Button::new(
-                                egui::RichText::new(ph::PLUGS_CONNECTED)
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(120, 200, 140)),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text(
-                            "Add to workspace — runs a cargo-metadata check first, then \
-                             wires it in as a [workspace] member.",
-                        )
-                        .on_disabled_hover_text("A workspace check is already running…")
-                        .clicked()
-                    {
-                        *add_to_workspace = Some(lib.clone());
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(ph::TRASH)
-                                    .size(11.0)
-                                    .color(egui::Color32::from_rgb(210, 110, 95)),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text("Delete this library (asks first)")
-                        .clicked()
-                    {
-                        *library_action = Some((lib.clone(), false));
-                    }
-                    let abs = project_dir.map(|d| d.join(lib));
-                    if ui
-                        .add_enabled(
-                            abs.is_some(),
-                            egui::Button::new(
-                                egui::RichText::new(ph::FOLDER_OPEN)
-                                    .size(11.0)
-                                    .color(egui::Color32::from_gray(170)),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text("Open this library's folder")
-                        .clicked()
-                    {
-                        if let Some(p) = &abs {
-                            if let Err(e) = crate::reveal::open(p) {
-                                eprintln!("[reveal] {e}");
-                            }
-                        }
+                        ui.add(egui::Spinner::new().size(12.0))
+                            .on_hover_text("Checking whether it can join the workspace…");
                     }
                 });
                 name_resp
@@ -1266,6 +1178,56 @@ pub fn show_project_tree(
                 );
             });
             state.store(ui.ctx());
+
+            // Attach to the NAME label (see the member row above) so a right-
+            // click on the library name opens the menu.
+            header.inner.context_menu(|ui| {
+                let checking = ws_add_pending == Some(lib.as_str());
+                if ui
+                    .add_enabled(
+                        ws_add_pending.is_none(),
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Add to workspace", ph::PLUGS_CONNECTED))
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(140, 210, 160)),
+                        ),
+                    )
+                    .on_hover_text(
+                        "Wire it in as a [workspace] member + path dependency (runs a \
+                         cargo-metadata check first).",
+                    )
+                    .on_disabled_hover_text(if checking {
+                        "Checking this library…"
+                    } else {
+                        "A workspace check is already running…"
+                    })
+                    .clicked()
+                {
+                    *add_to_workspace = Some(lib.clone());
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(egui::RichText::new(format!("{} Rename library…", ph::PENCIL_SIMPLE)).size(11.5))
+                    .clicked()
+                {
+                    *library_action = Some((lib.clone(), true));
+                    ui.close();
+                }
+                if ui
+                    .button(
+                        egui::RichText::new(format!("{} Delete library…", ph::TRASH))
+                            .size(11.5)
+                            .color(egui::Color32::from_rgb(230, 130, 115)),
+                    )
+                    .clicked()
+                {
+                    *library_action = Some((lib.clone(), false));
+                    ui.close();
+                }
+                ui.separator();
+                reveal_menu_items(ui, project_dir, lib);
+            });
         }
     }
 
