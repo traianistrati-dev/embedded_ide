@@ -584,6 +584,12 @@ pub fn show_project_tree(
     // Directory names of the `[workspace] members` — the extracted library
     // crates, each rendered as its own collapsible section below the project.
     lib_crates: &[String],
+    // Cloned libraries NOT yet in the workspace (own a Cargo.toml, not members);
+    // shown in a DETACHED subsection with an "Add to workspace" action.
+    detached_libs: &[String],
+    // The detached lib (if any) whose "Add to workspace" cargo-metadata check is
+    // currently running — its row spins and all add buttons disable.
+    ws_add_pending: Option<&str>,
     // Share of the height given to the project half; dragged via the splitter.
     split_ratio: &mut f32,
     // Set when the LIBRARIES "+" button is clicked; the caller opens the dialog.
@@ -593,6 +599,10 @@ pub fn show_project_tree(
     // `(crate dir, is_rename)` when a library's pen / trash icon is clicked;
     // the caller opens the confirmation dialog.
     library_action: &mut Option<(String, bool)>,
+    // Set to a DETACHED lib's dir when its "Add to workspace" button is clicked.
+    add_to_workspace: &mut Option<String>,
+    // Set to a member lib's dir when its "Detach" button is clicked.
+    detach_from_workspace: &mut Option<String>,
     // `user_src_files` index of a file to open READ-ONLY in the Reference tab.
     open_reference: &mut Option<usize>,
 ) {
@@ -609,9 +619,10 @@ pub fn show_project_tree(
     // ── Split: project above, LIBRARIES below ────────────────────────────────
     // Only when there IS a library. Otherwise the project keeps the whole
     // height — reserving 40% for an empty section would just shrink the tree.
-    let has_libs = lib_crates
-        .iter()
-        .any(|c| user_src_files.iter().any(|(p, _)| p.starts_with(&format!("{c}/"))));
+    let has_libs = !detached_libs.is_empty()
+        || lib_crates
+            .iter()
+            .any(|c| user_src_files.iter().any(|(p, _)| p.starts_with(&format!("{c}/"))));
     const SPLIT_HANDLE_H: f32 = 6.0;
     let total_h = ui.available_height();
     // The LIBRARIES header always renders — it carries the "+" button, which is
@@ -912,8 +923,8 @@ pub fn show_project_tree(
             if ui
                 .add(egui::Button::new(egui::RichText::new(ph::GIT_FORK).size(11.0)).frame(false))
                 .on_hover_text(
-                    "Clone a library from git into the workspace (its own repo, gitignored \
-                     by this project)",
+                    "Clone a library from git into the project (its own repo, gitignored). \
+                     It arrives DETACHED — promote it with \"Add to workspace\" when ready.",
                 )
                 .clicked()
             {
@@ -1001,6 +1012,24 @@ pub fn show_project_tree(
                     .clicked()
                 {
                     *library_action = Some((lib.clone(), false));
+                }
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(ph::LINK_BREAK)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(200, 170, 100)),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text(
+                        "Detach from the workspace (keeps the files). Removes it from \
+                         [workspace] members + any path dependency — use this if it \
+                         broke rust-analyzer / the build.",
+                    )
+                    .clicked()
+                {
+                    *detach_from_workspace = Some(lib.clone());
                 }
                 // Added LAST so it sits to the LEFT of the trash icon: in a
                 // `right_to_left` layout the first widget added is the
@@ -1096,6 +1125,148 @@ pub fn show_project_tree(
             ui.separator();
             reveal_menu_items(ui, project_dir, lib);
         });
+    }
+
+    // ── Detached libraries (cloned, not yet in the workspace) ────────────────
+    // They own a Cargo.toml but are NOT `[workspace] members`, so cargo (and
+    // rust-analyzer) ignore them. "Add to workspace" promotes one after a
+    // cargo-metadata pre-check, so an incompatible crate can't break RA.
+    if !detached_libs.is_empty() {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("NOT IN WORKSPACE")
+                .size(9.0)
+                .color(egui::Color32::from_rgb(180, 150, 90)),
+        );
+        ui.label(
+            egui::RichText::new(
+                "Cloned libraries — Add to workspace to build + analyze them.",
+            )
+            .size(9.5)
+            .color(egui::Color32::from_gray(120)),
+        );
+        for lib in detached_libs {
+            let id = ui.make_persistent_id(("detached_lib_section", lib.as_str()));
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                false,
+            );
+            let open = state.is_open();
+            let mut toggle = false;
+            let amber = egui::Color32::from_rgb(190, 165, 110);
+            let header = ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(ph::PACKAGE).size(11.5).color(amber));
+                let name_resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(lib).size(11.5).monospace().color(amber),
+                    )
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let icon = if open { ph::CARET_DOWN } else { ph::CARET_DOUBLE_UP };
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(icon).size(11.0)).frame(false))
+                        .on_hover_text(if open { "Collapse" } else { "Expand" })
+                        .clicked()
+                    {
+                        toggle = true;
+                    }
+                    // "Add to workspace" — a spinner replaces it while ITS check
+                    // runs; every add button disables while ANY check runs.
+                    if ws_add_pending == Some(lib.as_str()) {
+                        ui.add(egui::Spinner::new().size(12.0));
+                    } else if ui
+                        .add_enabled(
+                            ws_add_pending.is_none(),
+                            egui::Button::new(
+                                egui::RichText::new(ph::PLUGS_CONNECTED)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(120, 200, 140)),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(
+                            "Add to workspace — runs a cargo-metadata check first, then \
+                             wires it in as a [workspace] member.",
+                        )
+                        .on_disabled_hover_text("A workspace check is already running…")
+                        .clicked()
+                    {
+                        *add_to_workspace = Some(lib.clone());
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(ph::TRASH)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(210, 110, 95)),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Delete this library (asks first)")
+                        .clicked()
+                    {
+                        *library_action = Some((lib.clone(), false));
+                    }
+                    let abs = project_dir.map(|d| d.join(lib));
+                    if ui
+                        .add_enabled(
+                            abs.is_some(),
+                            egui::Button::new(
+                                egui::RichText::new(ph::FOLDER_OPEN)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_gray(170)),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Open this library's folder")
+                        .clicked()
+                    {
+                        if let Some(p) = &abs {
+                            if let Err(e) = crate::reveal::open(p) {
+                                eprintln!("[reveal] {e}");
+                            }
+                        }
+                    }
+                });
+                name_resp
+            });
+            if toggle || header.inner.clicked() {
+                state.set_open(!open);
+            }
+            row_hover_feedback(ui, header.response.rect, header.response.contains_pointer());
+            state.show_body_indented(&header.response, ui, |ui| {
+                let tree = subtree_of(lib);
+                render_tree_node(
+                    ui,
+                    &tree,
+                    user_src_files,
+                    user_src_folders,
+                    selected,
+                    8.0,
+                    renaming_file,
+                    &mut do_rename_file,
+                    &mut cancel_rename_file,
+                    &mut to_delete,
+                    &mut to_duplicate,
+                    open_reference,
+                    renaming_folder,
+                    workspace_dir,
+                    project_dir,
+                    save_needed,
+                    new_src_name,
+                    new_src_folder_name,
+                    new_file_parent_folder,
+                    new_folder_parent_folder,
+                    lib,
+                    &mut move_request,
+                    extract_folder,
+                );
+            });
+            state.store(ui.ctx());
+        }
     }
 
         });

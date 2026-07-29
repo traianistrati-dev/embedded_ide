@@ -934,6 +934,19 @@ pub struct AppIde {
     clone_library_dialog: Option<extract_crate_dialog::CloneLibraryDialog>,
     /// Open delete/rename confirmation for a library crate, if any.
     library_action: Option<extract_crate_dialog::LibraryActionDialog>,
+    /// In-flight "Add to workspace" cargo-metadata pre-check (see
+    /// `add_detached_lib_to_workspace`). `None` when idle.
+    workspace_add: Option<project_io::WorkspaceAdd>,
+    /// A pre-check that FAILED — shown as a modal so the user sees the cargo
+    /// error instead of a silently-broken workspace. `(dir, error)`.
+    workspace_add_error: Option<(String, String)>,
+    /// A detected workspace-load failure (our own `cargo metadata` health check
+    /// found the project won't load) — surfaced as a banner instead of a mystery
+    /// stuck "Checking…". Holds the cargo error text.
+    workspace_load_error: Option<String>,
+    /// In-flight `cargo metadata` health check (project open / after a detach).
+    /// `None` while idle; posts `Ok(())` / `Err(msg)` into the inner slot.
+    workspace_health: Option<std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>>,
     /// `true` while the "unsaved changes" prompt is up (close was cancelled).
     exit_prompt: bool,
     /// Set once the user has decided, so the close we send isn't intercepted
@@ -1248,6 +1261,10 @@ impl AppIde {
             extract_crate: None,
             clone_library_dialog: None,
             library_action: None,
+            workspace_add: None,
+            workspace_add_error: None,
+            workspace_load_error: None,
+            workspace_health: None,
             exit_prompt: false,
             allow_close: false,
             close_after_save: false,
@@ -2127,6 +2144,79 @@ impl eframe::App for AppIde {
                 });
             });
 
+        // ── Workspace-load-failure banner (Part 3 safety net) ─────────────────
+        // When `cargo metadata` fails, rust-analyzer never loads: no inline
+        // errors, no Structure edges, a stuck "Checking…". Surface that plainly
+        // (instead of the silent dead analyzer) with one-click recovery — detach
+        // the offending library from the workspace.
+        if let Some(err) = self.workspace_load_error.clone() {
+            let members =
+                crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+            let mut detach: Option<String> = None;
+            let mut dismiss = false;
+            egui::Panel::top("workspace_load_error_banner").show_inside(ui, |ui| {
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(58, 26, 26))
+                    .inner_margin(7.0)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} rust-analyzer can't load this project — `cargo \
+                                     metadata` failed. Inline errors, Structure edges and \
+                                     completions stay off until it's fixed.",
+                                    egui_phosphor::regular::WARNING,
+                                ))
+                                .size(11.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(240, 165, 150)),
+                            );
+                        });
+                        ui.label(
+                            egui::RichText::new(&err)
+                                .size(10.5)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(235, 140, 120)),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            if !members.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("Detach a library to recover:")
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(220, 190, 150)),
+                                );
+                                for m in &members {
+                                    if ui
+                                        .button(
+                                            egui::RichText::new(format!(
+                                                "{} {m}",
+                                                egui_phosphor::regular::LINK_BREAK
+                                            ))
+                                            .size(10.5),
+                                        )
+                                        .on_hover_text(format!(
+                                            "Remove `{m}` from the workspace (keeps its files)"
+                                        ))
+                                        .clicked()
+                                    {
+                                        detach = Some(m.clone());
+                                    }
+                                }
+                            }
+                            if ui.button("Dismiss").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            });
+            if let Some(m) = detach {
+                self.detach_lib_from_workspace(&m);
+            }
+            if dismiss {
+                self.workspace_load_error = None;
+            }
+        }
+
         // Build project files snapshot (used by both tree and editor panels)
         // Snapshot from the live editable state (main.rs + the five editable
         // config files), so the tree/editor show current edits — not a fresh
@@ -2183,6 +2273,21 @@ impl eframe::App for AppIde {
                 error: None,
             });
         }
+        // "Add to workspace" on a detached library → run the cargo-metadata
+        // pre-check; the member is applied only if it passes.
+        if let Some(dir) = signals.add_to_workspace {
+            self.add_detached_lib_to_workspace(dir);
+        }
+        // "Detach" a member library (remove from workspace, keep files).
+        if let Some(dir) = signals.detach_from_workspace {
+            self.detach_lib_from_workspace(&dir);
+        }
+        // Consume a finished "Add to workspace" pre-check (applies the member on
+        // success, or surfaces the cargo error).
+        self.poll_workspace_add();
+        // Consume a finished workspace health check (sets/clears the load-error
+        // banner).
+        self.poll_workspace_health();
         // "Open beside editor" → show the file READ-ONLY in the Reference tab.
         // The editor keeps whatever it had open, which is the whole point.
         if let Some(idx) = signals.open_reference {
@@ -2345,6 +2450,7 @@ impl eframe::App for AppIde {
         self.show_extract_crate_dialog(ui);
         self.show_clone_library_dialog(ui);
         self.show_library_action_dialog(ui);
+        self.show_workspace_add_error_dialog(ui);
         self.show_exit_prompt(ui);
 
         // Write the entire project to the workspace directory when the file

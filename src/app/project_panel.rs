@@ -26,6 +26,10 @@ pub(super) struct ProjectPanelSignals {
     pub clone_library: bool,
     /// `(crate dir, is_rename)` when a library's pen / trash icon was clicked.
     pub library_action: Option<(String, bool)>,
+    /// A DETACHED library the user asked to promote into the workspace.
+    pub add_to_workspace: Option<String>,
+    /// A member library the user asked to remove from the workspace (keep files).
+    pub detach_from_workspace: Option<String>,
     /// `user_src_files` index to show READ-ONLY in the Reference tab.
     pub open_reference: Option<usize>,
 }
@@ -125,6 +129,8 @@ impl AppIde {
         let mut new_library = false;
         let mut clone_library = false;
         let mut library_action: Option<(String, bool)> = None;
+        let mut add_to_workspace: Option<String> = None;
+        let mut detach_from_workspace: Option<String> = None;
         let mut open_reference: Option<usize> = None;
 
         egui::Panel::right("project_tree")
@@ -218,6 +224,18 @@ impl AppIde {
                 // top-level folder must not be presented as one.
                 let lib_crates =
                     crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+                // Cloned libraries not (yet) promoted into the workspace — shown
+                // in their own LIBRARIES subsection with an "Add to workspace"
+                // action (guarded by a cargo-metadata pre-check).
+                let detached = crate::project_tree::extract_crate::detached_libs(
+                    &self.project_tree.user_src_files,
+                    &lib_crates,
+                );
+                // Which detached lib has a pre-check running (spinner in the row).
+                let ws_add_pending = self
+                    .workspace_add
+                    .as_ref()
+                    .map(|w| w.dir.clone());
                 let build_cfg = self.selected_build_cfg();
                 match (project_files, build_cfg) {
                     (Some(_), Some((project, toolchain))) => {
@@ -252,10 +270,14 @@ impl AppIde {
                             save_project_needed,
                             &mut extract_folder,
                             &lib_crates,
+                            &detached,
+                            ws_add_pending.as_deref(),
                             &mut self.tree_split_ratio,
                             &mut new_library,
                             &mut clone_library,
                             &mut library_action,
+                            &mut add_to_workspace,
+                            &mut detach_from_workspace,
                             &mut open_reference,
                         );
                     }
@@ -280,6 +302,8 @@ impl AppIde {
             new_library,
             clone_library,
             library_action,
+            add_to_workspace,
+            detach_from_workspace,
             open_reference,
         }
     }

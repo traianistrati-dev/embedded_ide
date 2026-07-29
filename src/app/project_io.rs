@@ -186,6 +186,11 @@ impl AppIde {
             self.build_rs = load(ConfigFile::BuildRs, root.join("build.rs"));
             self.gitignore = load(ConfigFile::GitIgnore, root.join(".gitignore"));
         }
+
+        // Verify the project still loads for cargo (and therefore rust-analyzer)
+        // — a workspace member left in a bad state (e.g. an incompatible library
+        // added by hand) would otherwise fail silently as a stuck "Checking…".
+        self.recheck_workspace_health();
     }
 
     // ── Project rename ────────────────────────────────────────────────────────
@@ -442,21 +447,23 @@ impl AppIde {
         );
     }
 
-    /// Wire a freshly-imported library into the project. Registers it as a
-    /// workspace member and scans its files into the tree. For an INDEPENDENT
-    /// clone (`is_submodule == false`) it also GITIGNORES the folder — the clone
-    /// is its own repo, and tracking its files would gitlink it and break a
-    /// fresh checkout. A SUBMODULE is left tracked (git records it via
+    /// Wire a freshly-imported library into the project: scan its files into the
+    /// tree, and (for an INDEPENDENT clone) gitignore it. It is deliberately NOT
+    /// added to `[workspace] members` here — an external crate that can't resolve
+    /// for the firmware's target would break `cargo metadata`, which rust-analyzer
+    /// runs to load the WHOLE workspace, killing RA (no inline errors, no
+    /// Structure edges, a stuck "Checking…"). The user promotes it explicitly via
+    /// "Add to workspace" ([`add_detached_lib_to_workspace`]), which runs a
+    /// `cargo metadata` pre-check first. Until then it shows as a DETACHED library.
+    ///
+    /// For an INDEPENDENT clone (`is_submodule == false`) it also GITIGNORES the
+    /// folder — the clone is its own repo, and tracking its files would gitlink it
+    /// and break a fresh checkout. A SUBMODULE is left tracked (git records it via
     /// `.gitmodules` + a pinned commit — that's the whole point).
     pub(super) fn finish_clone_library(&mut self, dir: String, is_submodule: bool) {
         let Some(root) = self.project_dir.clone() else {
             return;
         };
-        // Workspace member ONLY — not a firmware dependency (an external crate
-        // may not build for the firmware's target; the user wires the dep by
-        // hand when they use it).
-        self.cargo_toml =
-            crate::project_tree::extract_crate::add_workspace_member(&self.cargo_toml, &dir);
         if !is_submodule {
             let entry = format!("{dir}/");
             let already = self
@@ -477,6 +484,238 @@ impl AppIde {
         self.request_save = true;
     }
 
+    /// Start promoting the DETACHED library `dir` into a `[workspace] member`.
+    /// A cargo-metadata PRE-CHECK runs first (async), because an incompatible
+    /// crate (its own workspace, conflicting deps, unresolvable path deps) would
+    /// break `cargo metadata` for the WHOLE workspace and kill rust-analyzer. The
+    /// member is applied only if that check passes ([`poll_workspace_add`]).
+    pub(super) fn add_detached_lib_to_workspace(&mut self, dir: String) {
+        let Some(root) = self.project_dir.clone() else {
+            return;
+        };
+        if self.workspace_add.is_some() {
+            return; // one check at a time
+        }
+        // The manifest we WOULD write. The worker trials it before we commit.
+        let tentative =
+            crate::project_tree::extract_crate::add_workspace_member(&self.cargo_toml, &dir);
+        let state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        run_metadata_precheck(
+            root,
+            tentative.clone(),
+            std::sync::Arc::clone(&state),
+            self.egui_ctx.clone(),
+        );
+        self.workspace_add = Some(WorkspaceAdd { dir, tentative, state });
+    }
+
+    /// Consume a finished "Add to workspace" pre-check. On success the tentative
+    /// manifest becomes the live one and a Save is requested (RA reloads with the
+    /// member). On failure the cargo error is stored for the modal. Idempotent —
+    /// a no-op until the worker posts a result.
+    pub(super) fn poll_workspace_add(&mut self) {
+        let done = self
+            .workspace_add
+            .as_ref()
+            .and_then(|w| w.state.lock().unwrap().take());
+        let Some(result) = done else {
+            return;
+        };
+        let w = self.workspace_add.take().unwrap();
+        match result {
+            Ok(()) => {
+                self.cargo_toml = w.tentative;
+                self.cached_project_files = None;
+                self.request_save = true;
+            }
+            Err(e) => self.workspace_add_error = Some((w.dir, e)),
+        }
+    }
+
+    /// Remove library `dir` from `[workspace] members` (and any path dependency)
+    /// WITHOUT deleting its files — the inverse of "Add to workspace". Used both
+    /// as the LIBRARIES "Detach" action and as the one-click recovery when an
+    /// incompatible member has broken the workspace load.
+    pub(super) fn detach_lib_from_workspace(&mut self, dir: &str) {
+        self.cargo_toml =
+            crate::project_tree::extract_crate::remove_workspace_member(&self.cargo_toml, dir);
+        // A detach can only FIX a broken workspace, so clear the stale banner
+        // now, then re-verify — the recheck re-flags it if something else is
+        // still wrong.
+        self.workspace_load_error = None;
+        self.cached_project_files = None;
+        self.request_save = true;
+        self.recheck_workspace_health();
+    }
+
+    /// Start a background `cargo metadata` HEALTH CHECK of the project exactly as
+    /// it is on disk — the same load rust-analyzer performs. A failure means RA
+    /// will not load either (no inline errors, no Structure edges, a stuck
+    /// "Checking…"), so [`poll_workspace_health`] surfaces it as a banner rather
+    /// than leaving the user with a silently-dead analyzer. Runs on open and
+    /// after a detach; no-op without a saved project dir.
+    pub(super) fn recheck_workspace_health(&mut self) {
+        let Some(root) = self.project_dir.clone() else {
+            self.workspace_load_error = None;
+            return;
+        };
+        let state = std::sync::Arc::new(std::sync::Mutex::new(None));
+        run_metadata_healthcheck(root, std::sync::Arc::clone(&state), self.egui_ctx.clone());
+        self.workspace_health = Some(state);
+    }
+
+    /// Consume a finished health check: store the error (banner) or clear it.
+    pub(super) fn poll_workspace_health(&mut self) {
+        let done = self
+            .workspace_health
+            .as_ref()
+            .and_then(|s| s.lock().unwrap().take());
+        let Some(result) = done else {
+            return;
+        };
+        self.workspace_health = None;
+        self.workspace_load_error = result.err();
+    }
+}
+
+/// In-flight state for the "Add to workspace" cargo-metadata pre-check.
+pub(super) struct WorkspaceAdd {
+    /// The library directory being promoted (project-root-relative).
+    pub dir: String,
+    /// The manifest to commit if the check passes.
+    pub tentative: String,
+    /// `None` while the worker runs; `Some(Ok/Err)` once it finishes.
+    pub state: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+/// Run `cargo metadata` against a TRIAL manifest to see whether adding a member
+/// keeps the workspace loadable — the same resolution rust-analyzer does on
+/// load. Runs on a worker thread; posts `Ok(())` / `Err(cargo error)` into
+/// `state`. RA-safe: RA watches the TEMP check workspace, never the project dir,
+/// so briefly swapping the project's `Cargo.toml` here can't disturb it. The
+/// original `Cargo.toml` (and `Cargo.lock`) are restored on every exit path.
+fn run_metadata_precheck(
+    project_dir: std::path::PathBuf,
+    tentative: String,
+    state: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+    ctx: eframe::egui::Context,
+) {
+    use std::process::Command;
+    std::thread::spawn(move || {
+        let manifest = project_dir.join("Cargo.toml");
+        let lock = project_dir.join("Cargo.lock");
+        let orig_toml = std::fs::read(&manifest).ok();
+        let orig_lock = std::fs::read(&lock).ok();
+
+        let result = (|| -> Result<(), String> {
+            std::fs::write(&manifest, tentative.as_bytes())
+                .map_err(|e| format!("could not write trial Cargo.toml: {e}"))?;
+            let mut cmd = Command::new("cargo");
+            crate::build::no_window(&mut cmd)
+                .args(["metadata", "--format-version", "1"])
+                .current_dir(&project_dir)
+                // A git path-dep could otherwise open a terminal credential
+                // prompt that hangs a headless process forever.
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(std::process::Stdio::null());
+            let out = cmd
+                .output()
+                .map_err(|e| format!("could not run cargo: {e}"))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(clean_cargo_error(&String::from_utf8_lossy(&out.stderr)))
+            }
+        })();
+
+        // Restore the project's manifest + lock no matter what.
+        match orig_toml {
+            Some(o) => {
+                let _ = std::fs::write(&manifest, o);
+            }
+            None => {
+                let _ = std::fs::remove_file(&manifest);
+            }
+        }
+        match orig_lock {
+            Some(o) => {
+                let _ = std::fs::write(&lock, o);
+            }
+            None => {
+                let _ = std::fs::remove_file(&lock);
+            }
+        }
+
+        *state.lock().unwrap() = Some(result);
+        ctx.request_repaint();
+    });
+}
+
+/// Run `cargo metadata` on the project AS-IS (no modification) to check whether
+/// the workspace still loads — the resolution rust-analyzer does on start. Posts
+/// `Ok(())` / `Err(cargo error)` into `state`. Read-only: unlike the pre-check it
+/// never writes the manifest, so it is safe to fire on project open.
+fn run_metadata_healthcheck(
+    project_dir: std::path::PathBuf,
+    state: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+    ctx: eframe::egui::Context,
+) {
+    use std::process::Command;
+    std::thread::spawn(move || {
+        // No manifest → nothing to load (e.g. a chip with no export). Treat as
+        // healthy so we never show a spurious banner.
+        if !project_dir.join("Cargo.toml").is_file() {
+            *state.lock().unwrap() = Some(Ok(()));
+            ctx.request_repaint();
+            return;
+        }
+        let mut cmd = Command::new("cargo");
+        crate::build::no_window(&mut cmd)
+            .args(["metadata", "--format-version", "1"])
+            .current_dir(&project_dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null());
+        let result = match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(clean_cargo_error(&String::from_utf8_lossy(&out.stderr))),
+            // cargo missing → the health check is meaningless, not a load error.
+            Err(_) => Ok(()),
+        };
+        *state.lock().unwrap() = Some(result);
+        ctx.request_repaint();
+    });
+}
+
+/// Trim cargo's `error:`/`Caused by:` stderr into a short, readable reason.
+/// Keeps the first `error:` line and the most specific `Caused by:` tail, so the
+/// modal shows "failed to select a version…" not the whole backtrace.
+fn clean_cargo_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "cargo metadata failed (no output)".to_owned();
+    }
+    let head = lines
+        .iter()
+        .find(|l| l.starts_with("error"))
+        .copied()
+        .unwrap_or(lines[0]);
+    // The LAST `Caused by:` entry is usually the root cause.
+    let cause = lines
+        .iter()
+        .rposition(|l| l.starts_with("Caused by:"))
+        .and_then(|i| lines.get(i + 1))
+        .copied();
+    match cause {
+        Some(c) if c != head => format!("{head}\n{c}"),
+        _ => head.to_owned(),
+    }
+}
+
+impl AppIde {
     /// The in-memory project content, keyed by project-relative path — the
     /// exact file set `write_project` persists. The git worker compares it
     /// against disk for the "unsaved changes" warning (commits are strictly

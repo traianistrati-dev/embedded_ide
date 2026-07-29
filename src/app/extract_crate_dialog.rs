@@ -166,8 +166,8 @@ impl AppIde {
                 } else {
                     ui.label(
                         egui::RichText::new(
-                            "Cloned as an INDEPENDENT repo (keeps its own git + remote), added \
-                             to the workspace, and gitignored by this project.",
+                            "Cloned as an INDEPENDENT repo (keeps its own git + remote), \
+                             gitignored by this project.",
                         )
                         .size(10.5)
                         .color(egui::Color32::from_rgb(140, 190, 240)),
@@ -182,6 +182,16 @@ impl AppIde {
                         .color(egui::Color32::from_rgb(220, 180, 90)),
                     );
                 }
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Cloned as a DETACHED library — not added to the workspace yet. Use \
+                         \"Add to workspace\" in LIBRARIES when ready; it runs a cargo-metadata \
+                         check first so an incompatible crate can't break rust-analyzer.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(155)),
+                );
                 if let Some(e) = &dlg.error {
                     ui.add_space(4.0);
                     ui.label(
@@ -382,6 +392,69 @@ impl AppIde {
         }
         if close {
             self.library_action = None;
+        }
+    }
+
+    /// Modal shown when an "Add to workspace" cargo-metadata pre-check FAILED —
+    /// the library would break the workspace (and rust-analyzer), so it was NOT
+    /// added. Shows the cargo error so the user can fix the library's deps.
+    pub(super) fn show_workspace_add_error_dialog(&mut self, ui: &egui::Ui) {
+        let Some((dir, error)) = self.workspace_add_error.clone() else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new(format!("Can't add `{dir}` to the workspace"))
+            .id(egui::Id::new("workspace_add_error_dialog"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.set_width(560.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Adding it as a workspace member would break `cargo metadata` \
+                         for the whole project — the same load rust-analyzer does — so it \
+                         was NOT added. The library stays cloned (detached).",
+                        ph::WARNING,
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(230, 160, 90)),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("cargo metadata:")
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(150)),
+                );
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_gray(24))
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(&error)
+                                .size(10.5)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(230, 120, 100)),
+                        );
+                    });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Common causes: the library needs a different version of a shared \
+                         crate, it is its OWN workspace (has its own [workspace]), or a \
+                         path/git dependency can't be resolved. Fix its Cargo.toml, then \
+                         try Add to workspace again.",
+                    )
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(150)),
+                );
+                ui.add_space(10.0);
+                if ui.button("OK").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.workspace_add_error = None;
         }
     }
 

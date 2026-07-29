@@ -294,6 +294,38 @@ fn drop_member(line: &str, dir: &str) -> String {
         .replace(&quoted, "")
 }
 
+/// "Detach" a library from the workspace WITHOUT touching its files: drop it
+/// from `[workspace] members` AND remove any `[dependencies.<dir>]` block. Both
+/// halves matter — a lingering `path` dependency still forces `cargo metadata`
+/// (and rust-analyzer) to resolve the crate, so removing only the member would
+/// not un-break a workspace an incompatible library had killed. Inverse of
+/// [`add_workspace_member`].
+pub fn remove_workspace_member(existing: &str, crate_dir: &str) -> String {
+    unpatch_root_manifest(existing, crate_dir, crate_dir)
+}
+
+/// Directories that carry their own `Cargo.toml` at the project root but are NOT
+/// listed as `[workspace] members` — i.e. cloned libraries sitting DETACHED,
+/// awaiting an explicit "Add to workspace". `user_files` are project-root-
+/// relative; a crate manifest one level down (`foo/Cargo.toml`) marks `foo`.
+/// `src/` is never a candidate (it's the firmware, not a library). Sorted +
+/// deduped for a stable UI.
+pub fn detached_libs(user_files: &[(String, String)], members: &[String]) -> Vec<String> {
+    let mut dirs: Vec<String> = user_files
+        .iter()
+        .filter_map(|(p, _)| {
+            let dir = p.strip_suffix("/Cargo.toml")?;
+            // Depth 1 only: `foo/Cargo.toml`, not `foo/bar/Cargo.toml` (that is
+            // a nested manifest inside the crate, not a top-level library).
+            (!dir.is_empty() && !dir.contains('/') && dir != "src").then(|| dir.to_owned())
+        })
+        .filter(|d| !members.iter().any(|m| m == d))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 /// Build the plan for extracting `folder` (a path relative to the PROJECT
 /// ROOT, e.g. `src/mw_radar`, no trailing slash) into a crate from `meta`.
 ///
@@ -785,6 +817,36 @@ mod tests {
             p.root_cargo_toml
         );
         assert_eq!(p.root_cargo_toml.matches("[workspace]").count(), 1);
+    }
+
+    #[test]
+    fn remove_workspace_member_drops_member_and_dependency() {
+        // A library that was promoted (member + hand-added path dep) — Detach
+        // must strip BOTH, or `cargo metadata` still resolves the path dep.
+        let root = "[package]\nname = \"fw\"\n\n[workspace]\nmembers = [\"lib_a\", \"lib_b\"]\n\n\
+                    [dependencies.lib_b]\npath = \"lib_b\"\n";
+        let out = remove_workspace_member(root, "lib_b");
+        assert!(out.contains("members = [\"lib_a\"]"), "{out}");
+        assert!(!out.contains("lib_b"), "no trace of the detached crate:\n{out}");
+        assert_eq!(out.matches("[workspace]").count(), 1);
+    }
+
+    #[test]
+    fn detached_libs_are_root_manifests_that_are_not_members() {
+        let files = vec![
+            ("mmwave/Cargo.toml".to_owned(), String::new()),
+            ("mmwave/src/lib.rs".to_owned(), String::new()),
+            ("mw_radar/Cargo.toml".to_owned(), String::new()),
+            ("src/main.rs".to_owned(), String::new()),
+            // Nested manifest inside a crate — NOT a top-level library.
+            ("mmwave/vendor/dep/Cargo.toml".to_owned(), String::new()),
+        ];
+        let members = vec!["mw_radar".to_owned()];
+        // mmwave has a manifest and is not a member → detached; mw_radar is a
+        // member; the nested vendor manifest is ignored.
+        assert_eq!(detached_libs(&files, &members), vec!["mmwave".to_owned()]);
+        // Once promoted, it stops being detached.
+        assert!(detached_libs(&files, &["mw_radar".to_owned(), "mmwave".to_owned()]).is_empty());
     }
 
     #[test]
