@@ -579,6 +579,16 @@ fn remove_stale_rs(root: &Path, dir: &Path, keep: &std::collections::HashSet<Str
             if name == "target" || name == ".git" {
                 continue;
             }
+            // NEVER prune inside a nested INDEPENDENT repo (a cloned library,
+            // detached or member — it keeps its own `.git`). Its files are the
+            // library's, not the IDE's `user_src_files`; deleting a `.rs` that
+            // isn't (yet) tracked in-memory — e.g. one added by a `git pull` in
+            // the library — was exactly the "detached lib left with an empty
+            // src/" data loss. The disposable build copy has no `.git`, so its
+            // chip-switch cleanup is unaffected.
+            if path.join(".git").exists() {
+                continue;
+            }
             remove_stale_rs(root, &path, keep);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             if let Ok(rel) = path.strip_prefix(root) {
@@ -981,6 +991,34 @@ mod tests {
         assert!(root.join("src").is_dir(), "src kept");
         assert!(root.join("target").is_dir(), "target kept");
         assert!(root.join("assets").is_dir(), "a folder without Cargo.toml is not ours to judge");
+    }
+
+    /// `remove_stale_rs` must NOT delete `.rs` inside a nested INDEPENDENT repo
+    /// (a cloned/detached library keeps its own `.git`), even when those files
+    /// aren't in the keep-set — that was the "detached lib left with empty src/"
+    /// data loss. A genuinely-stale `.rs` in the firmware's own tree still goes.
+    #[test]
+    fn stale_prune_spares_nested_git_repos() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        // Firmware: a stale file NOT in the keep-set.
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("stale.rs"), "// old").unwrap();
+        // An independent library (its own .git) with a file also not in keep.
+        let lib = root.join("mylib");
+        fs::create_dir_all(lib.join("src")).unwrap();
+        fs::create_dir_all(lib.join(".git")).unwrap();
+        fs::write(lib.join("src").join("lib.rs"), "pub fn go() {}").unwrap();
+
+        let keep: std::collections::HashSet<String> =
+            ["src/main.rs".to_string()].into_iter().collect();
+        remove_stale_rs(root, root, &keep);
+
+        assert!(!root.join("src").join("stale.rs").exists(), "firmware stale .rs pruned");
+        assert!(
+            lib.join("src").join("lib.rs").exists(),
+            "a file inside a nested independent repo must be spared"
+        );
     }
 
     /// A nested member (`crates/foo`) must protect its whole branch.

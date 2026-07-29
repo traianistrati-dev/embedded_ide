@@ -114,10 +114,22 @@ impl AppIde {
         // Branch the header picker asked to switch to.
         let mut git_switch_branch: Option<String> = None;
         let mut git_delete_branch: Option<String> = None;
-        // The Git tab's repository picker: each workspace member can have its
-        // own git repo rooted at its folder.
-        let git_libraries =
-            crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+        // The Git tab's repository picker: each library folder can have its own
+        // git repo rooted there — workspace members AND DETACHED libraries. A
+        // detached clone is decoupled from the PROJECT's workspace but still its
+        // own repo, so it must stay git-manageable (commit/push/pull on its own
+        // remote) whether attached or not.
+        let git_libraries = {
+            let members =
+                crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+            let detached = crate::project_tree::extract_crate::detached_libs(
+                &self.project_tree.user_src_files,
+                &members,
+            );
+            let mut libs = members;
+            libs.extend(detached);
+            libs
+        };
         // Flash-tab Programmer-row buttons (moved off the top toolbar).
         let mut flash_scan = false;
         let mut flash_go = false;
