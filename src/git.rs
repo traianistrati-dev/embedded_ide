@@ -1064,6 +1064,18 @@ pub fn run_op(
         // detection below reads as "not a git repository", so a repo with ONE
         // bad submodule appeared uninitialised (`git init`). Submodule POINTER
         // changes still show; only their inner dirty state is skipped.
+        //
+        // First, refresh the index STAT cache. When the IDE rewrites a file with
+        // BYTE-IDENTICAL content it still bumps the mtime, and `git status` then
+        // reports it modified (stat-dirty) though `git diff` sees nothing — a
+        // phantom ".M" that `reset --hard` cannot clear (no content to reset), so
+        // "Discard all" looked like it did nothing. `--refresh` re-stats such
+        // files and marks the content-clean ones unmodified. Best-effort: it
+        // exits non-zero when a file GENUINELY differs, which is expected here.
+        let _ = run_git(
+            &project_dir,
+            &["update-index".into(), "-q".into(), "--refresh".into()],
+        );
         let t = std::time::Instant::now();
         match run_git(
             &project_dir,
@@ -1480,6 +1492,14 @@ pub fn restore_file_at(dir: &Path, rev: &str, path: &str) -> Result<String, Stri
     }
     let content = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     let dest = dir.join(path);
+    // Skip the write when the working file already holds this exact content — a
+    // needless rewrite only bumps the mtime, which `git status` then flags as a
+    // phantom "modified" (stat-dirty) even though nothing changed. That is
+    // exactly what made a "Restore to HEAD" leave the file still showing as
+    // changed. (The status refresh also `update-index --refresh`es to be safe.)
+    if std::fs::read(&dest).is_ok_and(|b| b == content.as_bytes()) {
+        return Ok(content);
+    }
     // The file may have been DELETED since `rev` — then its folder is gone too.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;

@@ -554,13 +554,51 @@ fn push_quoted(s: &str, out: &mut Vec<String>) {
 /// re-check the whole crate) and makes rust-analyzer's VFS re-read and
 /// re-analyze it — so blindly rewriting every file on every Save/Build/Clippy
 /// was a main driver of the "everything gets slower over a session" problem.
+///
+/// PRESERVES the file's existing line-ending style. The IDE keeps every buffer
+/// LF-normalized in memory (see [[crlf-normalization]]), but an EXTERNAL library
+/// cloned on Windows is checked out CRLF (Git-for-Windows `core.autocrlf=true`).
+/// Blindly writing LF over it made git flag EVERY file as modified — content
+/// identical (`git diff` empty), only the EOL and the cached size differed, a
+/// phantom `.M` that neither `git diff` nor `update-index --refresh` could
+/// clear. Matching the on-disk EOL means an unchanged CRLF file is left byte-for-
+/// byte alone (no rewrite → git clean), and a real edit is written back CRLF so
+/// only the true change shows. Firmware files (LF from birth) are unaffected.
 fn write_if_changed(path: &Path, content: &[u8]) -> io::Result<()> {
-    if let Ok(existing) = fs::read(path) {
-        if existing == content {
-            return Ok(());
+    let existing = fs::read(path).ok();
+    // Match the EOL already on disk; default LF for a new file.
+    let to_write: std::borrow::Cow<[u8]> =
+        if existing.as_deref().is_some_and(has_crlf) && !content.is_empty() {
+            std::borrow::Cow::Owned(lf_to_crlf(content))
+        } else {
+            std::borrow::Cow::Borrowed(content)
+        };
+    if existing.as_deref() == Some(to_write.as_ref()) {
+        return Ok(());
+    }
+    fs::write(path, to_write.as_ref())
+}
+
+/// Whether `bytes` contains a Windows line ending (`\r\n`).
+fn has_crlf(bytes: &[u8]) -> bool {
+    bytes.windows(2).any(|w| w == b"\r\n")
+}
+
+/// Convert LF-normalized `content` to CRLF. Idempotent: a stray lone `\r` is
+/// dropped so `\r\n` never becomes `\r\r\n`.
+fn lf_to_crlf(content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len() + content.len() / 20 + 8);
+    for &b in content {
+        match b {
+            b'\r' => {}
+            b'\n' => {
+                out.push(b'\r');
+                out.push(b'\n');
+            }
+            other => out.push(other),
         }
     }
-    fs::write(path, content)
+    out
 }
 
 /// Walks `dir` recursively and removes every `.rs` file whose path relative to
@@ -991,6 +1029,35 @@ mod tests {
         assert!(root.join("src").is_dir(), "src kept");
         assert!(root.join("target").is_dir(), "target kept");
         assert!(root.join("assets").is_dir(), "a folder without Cargo.toml is not ours to judge");
+    }
+
+    /// `write_if_changed` must preserve a CRLF file's line endings, or the IDE
+    /// (LF in memory) rewrites a Windows-checkout library as LF → git flags every
+    /// file as a phantom modification. An unchanged CRLF file is left untouched;
+    /// a real edit is written back as CRLF.
+    #[test]
+    fn write_if_changed_preserves_crlf() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("radar.rs");
+        fs::write(&f, b"a\r\nb\r\n").unwrap(); // CRLF on disk (git checkout)
+        // Same content, LF form (the in-memory buffer) → must NOT rewrite.
+        let mtime_before = fs::metadata(&f).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_if_changed(&f, b"a\nb\n").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"a\r\nb\r\n", "CRLF file left byte-identical");
+        assert_eq!(
+            fs::metadata(&f).unwrap().modified().unwrap(),
+            mtime_before,
+            "no rewrite → mtime stable"
+        );
+        // A real edit is written back CRLF (only the change, no EOL flip).
+        write_if_changed(&f, b"a\nc\n").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"a\r\nc\r\n", "edit kept CRLF");
+        // An LF file stays LF.
+        let g = dir.path().join("main.rs");
+        fs::write(&g, b"x\ny\n").unwrap();
+        write_if_changed(&g, b"x\nz\n").unwrap();
+        assert_eq!(fs::read(&g).unwrap(), b"x\nz\n", "LF file stays LF");
     }
 
     /// `remove_stale_rs` must NOT delete `.rs` inside a nested INDEPENDENT repo

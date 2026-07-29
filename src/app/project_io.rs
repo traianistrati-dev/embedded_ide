@@ -484,11 +484,13 @@ impl AppIde {
         self.request_save = true;
     }
 
-    /// Start promoting the DETACHED library `dir` into a `[workspace] member`.
-    /// A cargo-metadata PRE-CHECK runs first (async), because an incompatible
-    /// crate (its own workspace, conflicting deps, unresolvable path deps) would
-    /// break `cargo metadata` for the WHOLE workspace and kill rust-analyzer. The
-    /// member is applied only if that check passes ([`poll_workspace_add`]).
+    /// Start promoting the DETACHED library `dir` into the workspace as BOTH a
+    /// `[workspace] member` AND a `[dependencies.<name>]` path dependency, so the
+    /// firmware can actually `use` it. A cargo-metadata PRE-CHECK runs first
+    /// (async), because an incompatible crate (its own workspace, conflicting
+    /// deps, unresolvable path deps) would break `cargo metadata` for the WHOLE
+    /// workspace and kill rust-analyzer. The change is applied only if that check
+    /// passes ([`poll_workspace_add`]).
     pub(super) fn add_detached_lib_to_workspace(&mut self, dir: String) {
         let Some(root) = self.project_dir.clone() else {
             return;
@@ -496,9 +498,19 @@ impl AppIde {
         if self.workspace_add.is_some() {
             return; // one check at a time
         }
+        // The dependency table key is the crate's PACKAGE name (from its own
+        // Cargo.toml), which can differ from the directory name — read it, and
+        // fall back to the dir name if the manifest can't be parsed.
+        let name = self
+            .project_tree
+            .user_src_files
+            .iter()
+            .find(|(p, _)| *p == format!("{dir}/Cargo.toml"))
+            .and_then(|(_, c)| crate::git::parse_package_name(c))
+            .unwrap_or_else(|| dir.clone());
         // The manifest we WOULD write. The worker trials it before we commit.
         let tentative =
-            crate::project_tree::extract_crate::add_workspace_member(&self.cargo_toml, &dir);
+            crate::project_tree::extract_crate::patch_root_manifest(&self.cargo_toml, &dir, &name);
         let state = std::sync::Arc::new(std::sync::Mutex::new(None));
         run_metadata_precheck(
             root,
@@ -1032,8 +1044,16 @@ impl AppIde {
         };
         match crate::git::discard_all_to_head(&dir) {
             Ok(()) => {
-                // Rebuild every buffer from the now-reset disk.
-                self.load_project_from_dir(&dir);
+                // Rebuild every buffer from the now-reset disk. Reload the
+                // PROJECT, never `dir`: when a LIBRARY repo is the selected
+                // target, `dir` is the library's folder — loading THAT as the
+                // project would repoint `project_dir` at the library and
+                // re-detect the chip from its manifest (the reported "Discard
+                // all doesn't work for the selected repo"). The project reload
+                // rescans src/ + members + detached libs, so a discarded
+                // library's files refresh either way.
+                let reload = self.project_dir.clone().unwrap_or(dir);
+                self.load_project_from_dir(&reload);
                 self.git_note("Discarded all changes (reset --hard + clean)".into());
             }
             Err(e) => self.git_note(format!("[error] discard-all failed: {e}")),
