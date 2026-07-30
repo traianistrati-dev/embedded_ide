@@ -346,10 +346,17 @@ pub fn make_generated_section(
             .get(&n)
             .map(|c| module_label_sfx(&c.custom_label))
             .unwrap_or_default();
-        // One value implementing `embedded_io::{Read, Write}` (see the config
-        // file) — pass `&mut _serial{n}` to your portable, trait-generic code.
+        // The binding shape follows the config's return type (see `api_style`):
+        //  · Native  → the split `(Tx, Rx)` handles     → `let (mut _txN, mut _rxN)`
+        //  · Portable → one `embedded_io::{Read,Write}`  → `let mut _serialN`
+        let native = matches!(usart.get(&n).map(|c| c.api_style), Some(ApiStyle::Native));
+        let binding = if native {
+            format!("let (mut _tx{n}{sfx}, mut _rx{n}{sfx})")
+        } else {
+            format!("let mut _serial{n}{sfx}")
+        };
         fn_calls.push_str(&format!(
-            "    let mut _serial{n}{sfx} = \
+            "    {binding} = \
              pins::configs::usart{n}::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
         ));
     }
@@ -933,8 +940,10 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         .replace("{STOP}", &stop.to_string())
 }
 
-/// Native `stm32f1xx-hal` USART init (no embedded-io bridge). Returns the
-/// `Serial` peripheral; `.split()` gives `(Tx, Rx)`. Selected via `ApiStyle`.
+/// Native `stm32f1xx-hal` USART init (no embedded-io bridge). Returns the split
+/// `(Tx, Rx)` halves — the idiomatic stm32f1xx-hal handles (TX for `writeln!`, RX
+/// for reading). Selected via `ApiStyle`; the `main.rs` binding destructures the
+/// tuple (`let (mut _txN, mut _rxN) = …`), unlike the single-value Portable form.
 const USART_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
 const BAUDRATE: u32 = {BAUD};
@@ -945,7 +954,7 @@ const STOP_BITS: u8 = {STOP}; // 1, 2
 
 // Everything below is editable — your changes are preserved on regeneration.
 // NATIVE stm32f1xx-hal API (chosen in the Virtual Module). `init` returns the
-// `Serial` peripheral — call `.split()` for `(Tx, Rx)`, or use it directly.
+// split `(Tx, Rx)` handles — use `Tx` with `writeln!` / `Rx` with `.read()`.
 // Switch to the portable `embedded-io` API in the Virtual Module.
 use stm32f1xx_hal::{
     pac,
@@ -982,8 +991,8 @@ pub fn init<PINS: serial::Pins<pac::USART{N}>>(
     pins: PINS,
     afio: &mut afio::Parts,
     clocks: &Clocks,
-) -> Serial<pac::USART{N}, PINS> {
-    Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks)
+) -> (serial::Tx<pac::USART{N}>, serial::Rx<pac::USART{N}>) {
+    Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()
 }
 "#;
 

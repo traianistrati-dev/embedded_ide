@@ -191,7 +191,16 @@ fn handle_preview(m: &VirtualModule) -> String {
         format!("_{lbl}")
     };
     match m.kind {
-        ModuleKind::GenericInterfaceUsart => format!("_tx{n}{sfx}, _rx{n}{sfx}"),
+        // USART: Native returns the split `(Tx, Rx)` handles → two names; Portable
+        // (and the async embedded-io bridge) returns one value → `_serialN`.
+        ModuleKind::GenericInterfaceUsart => {
+            let native = matches!(&m.config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Native);
+            if native {
+                format!("_tx{n}{sfx}, _rx{n}{sfx}")
+            } else {
+                format!("_serial{n}{sfx}")
+            }
+        }
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),

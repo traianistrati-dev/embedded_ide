@@ -358,10 +358,44 @@ mod tests {
         assert!(portable.contains("impl embedded_io::Read + embedded_io::Write"), "{portable}");
         assert!(portable.contains("struct SerialIo"), "{portable}");
 
-        // Native → concrete `Serial`, no embedded-io.
+        // Native → the split `(Tx, Rx)` handles via `.split()`, no embedded-io.
         let native = usart_body(ApiStyle::Native);
-        assert!(native.contains("-> Serial<pac::USART1, PINS>"), "{native}");
+        assert!(
+            native.contains("-> (serial::Tx<pac::USART1>, serial::Rx<pac::USART1>)"),
+            "{native}"
+        );
+        assert!(native.contains("Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()"), "{native}");
         assert!(!native.contains("embedded_io"), "native has no embedded-io:\n{native}");
+    }
+
+    /// The `main.rs` init binding follows the API style: Portable is one value
+    /// (`let mut _serialN`), Native destructures the split `(Tx, Rx)`
+    /// (`let (mut _txN, mut _rxN)`), matching each config's return type.
+    #[test]
+    fn usart_binding_shape_follows_api_style() {
+        use crate::panels::mcu_module::modules::ApiStyle;
+        let main_for = |style: ApiStyle| {
+            let mut mcu = create_stm32f103c8tx();
+            assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+            if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
+                cfg.custom_label = "mw radar".into();
+                cfg.api_style = style;
+            }
+            mcu.fresh_main_rs()
+        };
+
+        // Portable → single-value binding.
+        let portable = main_for(ApiStyle::Portable);
+        assert!(portable.contains("let mut _serial1_mw_radar = pins::configs::usart1::init("), "{portable}");
+        assert!(!portable.contains("let (mut _tx1"), "portable is NOT a tuple:\n{portable}");
+
+        // Native → destructured `(Tx, Rx)` tuple binding.
+        let native = main_for(ApiStyle::Native);
+        assert!(
+            native.contains("let (mut _tx1_mw_radar, mut _rx1_mw_radar) = pins::configs::usart1::init("),
+            "{native}"
+        );
+        assert!(!native.contains("let mut _serial1"), "native is NOT single-value:\n{native}");
     }
 
     /// An SPI module label lands on the `_spiN` handle.
