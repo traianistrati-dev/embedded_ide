@@ -182,7 +182,7 @@ pub fn module_title(m: &VirtualModule) -> String {
 /// Live preview of the generated handle variable name(s), with the user's
 /// label appended — the module analogue of the pin's `pc13_out_board_led`
 /// caption. SPI/I2C have one handle; USART has two (`_txN` / `_rxN`).
-fn handle_preview(m: &VirtualModule) -> String {
+fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
     let n = m.instance();
     let lbl = sanitize_label(m.config.custom_label());
     let sfx = if lbl.is_empty() {
@@ -193,8 +193,11 @@ fn handle_preview(m: &VirtualModule) -> String {
     match m.kind {
         // USART: Native returns the split `(Tx, Rx)` handles → two names; Portable
         // (and the async embedded-io bridge) returns one value → `_serialN`.
+        // `native_forced` is the project-level Native runtime (all peripherals
+        // Native regardless of the per-module `api_style`).
         ModuleKind::GenericInterfaceUsart => {
-            let native = matches!(&m.config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Native);
+            let native = native_forced
+                || matches!(&m.config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Native);
             if native {
                 format!("_tx{n}{sfx}, _rx{n}{sfx}")
             } else {
@@ -222,6 +225,7 @@ fn draw_box(
     m: &VirtualModule,
     connected: bool,
     color: egui::Color32,
+    native_forced: bool,
 ) {
     painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(38, 42, 50));
     let stroke = if connected {
@@ -261,7 +265,7 @@ fn draw_box(
     painter.with_clip_rect(rect).text(
         egui::pos2(rect.left() + 10.0, rect.bottom() - 26.0),
         egui::Align2::LEFT_BOTTOM,
-        handle_preview(m),
+        handle_preview(m, native_forced),
         egui::FontId::proportional(9.0),
         egui::Color32::from_rgb(140, 140, 150),
     );
@@ -337,12 +341,14 @@ pub fn draw_modules(
     }
 
     // ── 3. Draw boxes + wires; detect a header click to expand the list entry. ─
+    // Native runtime → the handle preview shows the split (Tx, Rx) for USART.
+    let native_forced = mcu.is_native();
     let mut clicked_id: Option<String> = None;
     let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
     for (i, rect, conns, side, connected) in &boxes {
         let m = &mcu.modules[*i];
         let inst = m.instance();
-        draw_box(painter, *rect, m, *connected, module_color(m.kind, inst));
+        draw_box(painter, *rect, m, *connected, module_color(m.kind, inst), native_forced);
 
         for (sig, anchor) in conns {
             let color = signal_color(*sig, inst);
@@ -426,6 +432,7 @@ pub fn module_config_ui(
     m: &mut VirtualModule,
     pin_names: &HashMap<usize, String>,
     is_async: bool,
+    is_native: bool,
 ) {
     // Connection rows (generic over kind), computed before borrowing config.
     let conn_rows: Vec<(&'static str, String)> = m
@@ -530,9 +537,10 @@ pub fn module_config_ui(
                             ui.selectable_value(&mut cfg.stop_bits, StopBits::Two, "2");
                         });
                     ui.end_row();
-                    // Async USART is always the embedded-io-async BufferedUart
-                    // bridge (no per-module choice) — hide the blocking selector.
-                    if !is_async {
+                    // The Portable/Native selector is only meaningful on the
+                    // Blocking runtime: async USART is always the embedded-io-async
+                    // BufferedUart bridge, and Native forces concrete HAL for all.
+                    if !is_async && !is_native {
                         api_row(ui, &mut cfg.api_style);
                     }
                 }
@@ -557,7 +565,7 @@ pub fn module_config_ui(
                     ui.end_row();
                     if is_async {
                         async_row(ui, &mut cfg.async_mode);
-                    } else {
+                    } else if !is_native {
                         api_row(ui, &mut cfg.api_style);
                     }
                 }
@@ -575,7 +583,7 @@ pub fn module_config_ui(
                     ui.end_row();
                     if is_async {
                         async_row(ui, &mut cfg.async_mode);
-                    } else {
+                    } else if !is_native {
                         api_row(ui, &mut cfg.api_style);
                     }
                 }

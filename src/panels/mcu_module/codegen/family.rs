@@ -15,8 +15,38 @@ use super::common::USER_TAIL;
 use super::{embassy_async, embassy_common, rcc, stm32, wba};
 use crate::panels::mcu_module::codegen_esp;
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
-use crate::panels::mcu_module::modules;
+use crate::panels::mcu_module::modules::{
+    self, ApiStyle, I2cModuleConfig, SpiModuleConfig, UsartModuleConfig,
+};
 use crate::panels::mcu_module::pins::logic::pin::Pin;
+use std::collections::BTreeMap;
+
+/// The USART/SPI/I2C configs for `mcu`'s blocking codegen, with `api_style`
+/// forced to Native when the project Runtime is Native (an "all concrete HAL"
+/// project). On Blocking each module keeps its own Portable/Native choice.
+fn resolve_bus_configs(
+    mcu: &Mcu,
+) -> (
+    BTreeMap<u8, UsartModuleConfig>,
+    BTreeMap<u8, SpiModuleConfig>,
+    BTreeMap<u8, I2cModuleConfig>,
+) {
+    let mut usart = modules::usart_configs(&mcu.modules);
+    let mut spi = modules::spi_configs(&mcu.modules);
+    let mut i2c = modules::i2c_configs(&mcu.modules);
+    if mcu.is_native() {
+        for c in usart.values_mut() {
+            c.api_style = ApiStyle::Native;
+        }
+        for c in spi.values_mut() {
+            c.api_style = ApiStyle::Native;
+        }
+        for c in i2c.values_mut() {
+            c.api_style = ApiStyle::Native;
+        }
+    }
+    (usart, spi, i2c)
+}
 
 /// Family-specific `main.rs` generation. One implementor per chip family.
 pub trait FamilyBackend {
@@ -62,9 +92,7 @@ impl FamilyBackend for Stm32f1Backend {
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let all = pins_of(mcu);
-        let usart = modules::usart_configs(&mcu.modules);
-        let spi = modules::spi_configs(&mcu.modules);
-        let i2c = modules::i2c_configs(&mcu.modules);
+        let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
         let gen_ = stm32::make_generated_section(
@@ -82,9 +110,7 @@ impl FamilyBackend for Stm32f1Backend {
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
-        let usart = modules::usart_configs(&mcu.modules);
-        let spi = modules::spi_configs(&mcu.modules);
-        let i2c = modules::i2c_configs(&mcu.modules);
+        let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
         let new_section = stm32::make_generated_section(
@@ -97,9 +123,7 @@ impl FamilyBackend for Stm32f1Backend {
 
     fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
         let all = pins_of(mcu);
-        let usart = modules::usart_configs(&mcu.modules);
-        let spi = modules::spi_configs(&mcu.modules);
-        let i2c = modules::i2c_configs(&mcu.modules);
+        let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         stm32::config_files(&all, &usart, &spi, &i2c, &can, &mcu.clock)
     }
@@ -297,6 +321,15 @@ static ASYNC_EMBASSY_BACKEND: AsyncEmbassyBackend = AsyncEmbassyBackend;
 /// enabled state.
 pub fn async_supported(family: &str) -> bool {
     ASYNC_EMBASSY_BACKEND.handles(family)
+}
+
+/// Whether a Native runtime is meaningful for `family` — i.e. the backend has
+/// concrete-HAL (Portable/Native) peripheral templates. Only `stm32f1`
+/// (stm32f1xx-hal) does; other STM32 families run on embassy-stm32 whose blocking
+/// bindings are already concrete (no separate Native form), and ESP has its own
+/// scheme. Drives the System-tab card's enabled state + the codegen forcing.
+pub fn native_supported(family: &str) -> bool {
+    family == "stm32f1"
 }
 
 /// Look up the backend for a family key, if one is registered.
@@ -595,6 +628,50 @@ mod tests {
         assert!(spi1.contains("embedded_hal_async::spi::SpiBus"));
         // The USART/GPIO-less project still keeps exactly one gen block.
         assert_eq!(code.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
+    }
+
+    /// The Native runtime forces concrete stm32f1xx-hal codegen for the bus
+    /// peripherals even when the module keeps its default `Portable` api_style —
+    /// the project-wide "all native" behaviour. `native_supported` gates it to F1.
+    #[test]
+    fn native_runtime_forces_concrete_hal() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::mock_mcu::create_stm32f103c8tx;
+        use crate::panels::mcu_module::modules::{ApiStyle, ModuleConfig, ModuleKind};
+
+        assert!(native_supported("stm32f1"));
+        assert!(!native_supported("stm32f4"));
+
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let n = mcu.modules[0].instance();
+        // The module keeps its default Portable api_style throughout.
+        assert!(matches!(&mcu.modules[0].config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable));
+
+        let usart_body = |mcu: &crate::panels::mcu_module::mcu::Mcu| {
+            mcu.config_files()
+                .into_iter()
+                .find(|(name, _)| name == &format!("usart{n}.rs"))
+                .expect("usart config file")
+                .1
+        };
+
+        // Blocking + Portable module → portable embedded-io init.
+        assert!(usart_body(&mcu).contains("impl embedded_io::Read + embedded_io::Write"));
+
+        // Native runtime OVERRIDES it → concrete `Serial` split, no embedded-io.
+        mcu.runtime = Runtime::Native;
+        assert!(mcu.is_native());
+        let body = usart_body(&mcu);
+        assert!(
+            body.contains(&format!("-> (serial::Tx<pac::USART{n}>, serial::Rx<pac::USART{n}>)")),
+            "{body}"
+        );
+        assert!(!body.contains("embedded_io"), "native forced → no embedded-io:\n{body}");
+        // …and main.rs uses the split `(Tx, Rx)` tuple binding.
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains(&format!("let (mut _tx{n}")), "native tuple binding:\n{code}");
+        assert!(!code.contains(&format!("let mut _serial{n}")), "not the single-value form");
     }
 
     /// The WBA backend produces a complete embassy skeleton with the markers,

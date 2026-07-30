@@ -1566,8 +1566,12 @@ impl AppIde {
             // via `ensure_async_deps` instead. Async is only offered on non-F1
             // STM32, where those bridges aren't generated anyway.
             let is_async = self.mcu.as_ref().is_some_and(|m| m.is_async());
+            // Native runtime → the bus peripherals expose CONCRETE HAL types
+            // (all `ApiStyle::Native`), so NONE of the portable trait-bridge
+            // crates are pulled — same as async, for a different reason.
+            let is_native = self.mcu.as_ref().is_some_and(|m| m.is_native());
             let needs_can = !is_async && has_cfg("can");
-            // Trait crates only for PORTABLE modules.
+            // Trait crates only for PORTABLE modules on the Blocking path.
             let (mut needs_usart, mut needs_spi, mut needs_i2c) = (false, false, false);
             // Async SPI/I2C deps: `embedded-hal` 1.0 for any bus, plus
             // `embedded-hal-async` when a module is in async-DMA mode.
@@ -1585,7 +1589,8 @@ impl AppIde {
                             needs_eh = true;
                             needs_eh_async |= mode == AsyncBusMode::AsyncDma;
                         }
-                    } else {
+                    } else if !is_native {
+                        // Blocking (mixed): trait crates for the Portable modules.
                         match &md.config {
                             ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
                             ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
@@ -1593,6 +1598,7 @@ impl AppIde {
                             _ => {}
                         }
                     }
+                    // is_native → all Native → no portable trait crates.
                 }
             }
             // GPIO in/out pins are wrapped in the `pins::configs::io` eh-1.0

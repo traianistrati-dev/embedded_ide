@@ -269,8 +269,10 @@ impl AppIde {
                             // collapse if open), then it's user-controlled again.
                             let to_open = mcu.expand_module.take();
                             // Async runtime → SPI/I2C modules show the Blocking|
-                            // Async-DMA selector instead of Portable|Native.
+                            // Async-DMA selector instead of Portable|Native; Native
+                            // runtime forces concrete HAL (per-module selector hidden).
                             let is_async = mcu.is_async();
+                            let is_native = mcu.is_native();
 
                             if !mcu.modules.is_empty() {
                                 let pin_names: std::collections::HashMap<usize, String> = mcu
@@ -312,7 +314,7 @@ impl AppIde {
                                                         .desired_width(160.0),
                                                     );
                                                 });
-                                                mod_gui::module_config_ui(ui, m, &pin_names, is_async);
+                                                mod_gui::module_config_ui(ui, m, &pin_names, is_async, is_native);
                                                 ui.add_space(4.0);
                                                 if ui
                                                     .button(format!("{} Remove module", ph::TRASH))
@@ -469,7 +471,8 @@ impl AppIde {
             );
             ui.add_space(10.0);
 
-            let supported = family::async_supported(&mcu.family);
+            let async_ok = family::async_supported(&mcu.family);
+            let native_ok = family::native_supported(&mcu.family);
 
             // ── Blocking ─────────────────────────────────────────────────────
             let blocking_sel = mcu.runtime == Runtime::Blocking;
@@ -477,14 +480,61 @@ impl AppIde {
                 ui,
                 blocking_sel,
                 true,
-                "Blocking (bare-metal)",
-                "#[entry] fn main() -> !  ·  blocking drivers \
-                 (embedded-io / embedded-hal 1.0)",
+                "Blocking (bare-metal, portable)",
+                "#[entry] fn main() -> !  ·  portable blocking drivers \
+                 (embedded-io / embedded-hal 1.0); per-module Native opt-in",
             )
             .clicked()
             {
                 mcu.runtime = Runtime::Blocking;
             }
+            runtime_details(
+                ui,
+                "rt_details_blocking",
+                &[
+                    ("Entry:", "#[cortex_m_rt::entry] fn main() -> ! — classic bare-metal, runs forever."),
+                    ("Drivers:", "Each USART/SPI/I2C initialises in src/pins/configs/*.rs and is exposed \
+                                  through STANDARD portable traits — embedded-io (serial) + embedded-hal 1.0 \
+                                  (SpiBus / I2c / OutputPin). App code generic over those traits ports across \
+                                  chips/HALs unchanged."),
+                    ("Per module:", "Each bus module has a Portable | Native selector; the portable wrapper's \
+                                     .0 still gives the raw HAL object back."),
+                    ("Applies to:", "Every chip — this is the default runtime."),
+                ],
+                "let mut _serial1 = pins::configs::usart1::init(...);\n\
+                 fn app<S: embedded_io::Read + embedded_io::Write>(s: &mut S) { /* portable */ }",
+            );
+            ui.add_space(6.0);
+
+            // ── Native (concrete HAL) ────────────────────────────────────────
+            let native_sel = mcu.runtime == Runtime::Native;
+            let native_resp = runtime_card(
+                ui,
+                native_sel,
+                native_ok,
+                "Native (bare-metal, HAL types)",
+                "#[entry] fn main() -> !  ·  concrete HAL types everywhere \
+                 (Serial / Spi / BlockingI2c) — no portable bridges",
+            );
+            if native_resp.clicked() && native_ok {
+                mcu.runtime = Runtime::Native;
+            }
+            runtime_details(
+                ui,
+                "rt_details_native",
+                &[
+                    ("Entry:", "#[entry] fn main() -> ! — the same bare-metal entry as Blocking."),
+                    ("Drivers:", "init returns the CONCRETE stm32f1xx-hal types: Serial split into (Tx, Rx), \
+                                  Spi<…>, BlockingI2c<…>. No portable bridges, no extra trait crates, full HAL \
+                                  features."),
+                    ("Scope:", "Project-wide — forces ALL USART/SPI/I2C to Native, so the per-module \
+                                Portable/Native selector is hidden."),
+                    ("Applies to:", "STM32F1 only (the family with concrete-HAL templates). Greyed on other \
+                                     families, whose blocking HAL types are already concrete."),
+                ],
+                "let (mut _tx1, mut _rx1) = pins::configs::usart1::init(...);\n\
+                 // use _tx1 with writeln!(), _rx1 with .read()",
+            );
             ui.add_space(6.0);
 
             // ── Async (embassy) ──────────────────────────────────────────────
@@ -492,32 +542,58 @@ impl AppIde {
             let async_resp = runtime_card(
                 ui,
                 async_sel,
-                supported,
+                async_ok,
                 "Async (embassy)",
                 "#[embassy_executor::main] async fn main(Spawner)  ·  \
                  .await-able drivers on embassy-stm32",
             );
-            if async_resp.clicked() && supported {
+            if async_resp.clicked() && async_ok {
                 mcu.runtime = Runtime::Async;
             }
+            runtime_details(
+                ui,
+                "rt_details_async",
+                &[
+                    ("Entry:", "#[embassy_executor::main] async fn main(Spawner) — the embassy executor drives \
+                                the task; use .await inside the loop."),
+                    ("Drivers:", "embedded-io-async (USART via BufferedUart) + embedded-hal-async (SPI/I2C). \
+                                  Each SPI/I2C module has a Blocking | Async-DMA selector."),
+                    ("Async-DMA:", "embassy async SPI/I2C need DMA channels the IDE can't choose → main.rs gets \
+                                    a TODO line to fill (it won't compile until you set channels valid for your chip)."),
+                    ("Deps:", "Adds embassy-executor + embassy-time + the HAL time-driver automatically."),
+                    ("Applies to:", "STM32F4/G0/G4/L4/H7/WBA/… (embassy families). NOT STM32F1 (on stm32f1xx-hal) \
+                                     or ESP yet."),
+                ],
+                "let mut _serial1 = pins::configs::usart1::init(p.USART1, p.PA10, p.PA9);\n\
+                 _serial1.write_all(b\"hi\").await.ok();",
+            );
 
             ui.add_space(10.0);
-            if !supported {
+            if !async_ok && !native_ok {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}  Async needs embassy — available for STM32F4/G0/G4/L4/H7/… \
-                         Not yet for {} (STM32F1 is on stm32f1xx-hal; ESP32 uses esp-hal).",
+                        "{}  {} only supports Blocking here (Native = STM32F1 concrete HAL; \
+                         Async = embassy on STM32F4/G0/G4/L4/H7/…).",
                         ph::WARNING,
                         mcu.family,
                     ))
                     .color(egui::Color32::from_rgb(210, 170, 90)),
                 );
+            } else if native_sel {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  All USART/SPI/I2C peripherals now expose the concrete \
+                         stm32f1xx-hal types (the per-module Portable/Native selector is \
+                         subsumed). USART `init` returns the split (Tx, Rx).",
+                        ph::INFO,
+                    ))
+                    .color(egui::Color32::from_rgb(120, 170, 220)),
+                );
             } else if async_sel {
                 ui.label(
                     egui::RichText::new(format!(
-                        "{}  main.rs now runs on the embassy executor. Add \
-                         `embassy_time::Timer::after_millis(..).await` in the loop; \
-                         USART/SPI/I2C async drivers are coming next.",
+                        "{}  main.rs now runs on the embassy executor — add \
+                         `embassy_time::Timer::after_millis(..).await` in the loop.",
                         ph::INFO,
                     ))
                     .color(egui::Color32::from_rgb(120, 170, 220)),
@@ -843,4 +919,51 @@ fn runtime_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+/// A collapsible "ⓘ Details" section under a Runtime card, explaining what that
+/// runtime generates and how it applies. `points` are `(label, body)` rows; a
+/// non-empty `example` is rendered as a monospace code block. The open/closed
+/// state persists per `salt` via egui's own widget memory.
+fn runtime_details(ui: &mut egui::Ui, salt: &str, points: &[(&str, &str)], example: &str) {
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!("{}  Details — how it works & applies", ph::INFO))
+            .size(11.5)
+            .color(egui::Color32::from_gray(160)),
+    )
+    .id_salt(salt)
+    .show(ui, |ui| {
+        for (label, body) in points {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(
+                    egui::RichText::new(*label)
+                        .strong()
+                        .size(11.5)
+                        .color(egui::Color32::from_gray(215)),
+                );
+                ui.label(
+                    egui::RichText::new(*body)
+                        .size(11.5)
+                        .color(egui::Color32::from_gray(165)),
+                );
+            });
+            ui.add_space(4.0);
+        }
+        if !example.is_empty() {
+            ui.add_space(2.0);
+            egui::Frame::new()
+                .inner_margin(egui::Margin::same(7))
+                .corner_radius(egui::CornerRadius::same(4))
+                .fill(egui::Color32::from_rgb(30, 30, 36))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(example)
+                            .monospace()
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(180, 200, 180)),
+                    );
+                });
+        }
+    });
 }

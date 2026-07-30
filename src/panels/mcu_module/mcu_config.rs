@@ -189,6 +189,11 @@ mod tests {
         assert!(text.contains("Async"));
         assert_eq!(parse_runtime(&text), Runtime::Async);
 
+        // Native round-trips too.
+        let text = serialize(&[], None, Runtime::Native);
+        assert!(text.contains("@runtime\n") && text.contains("Native"));
+        assert_eq!(parse_runtime(&text), Runtime::Native);
+
         // …and it coexists with modules + clock.
         let text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()), Runtime::Async);
         let (m, c) = parse(&text);

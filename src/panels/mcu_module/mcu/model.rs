@@ -17,9 +17,15 @@ pub const PIN_SPACING: f32 = 3.0;
 /// targets.
 ///
 /// - [`Runtime::Blocking`] (default): the classic bare-metal path — a
-///   `#[cortex_m_rt::entry] fn main() -> !` with blocking peripheral APIs
-///   (`embedded-io` / `embedded-hal` 1.0). Every family backend today is
-///   blocking.
+///   `#[cortex_m_rt::entry] fn main() -> !` with PORTABLE blocking APIs
+///   (`embedded-io` / `embedded-hal` 1.0 bridges), so driver code is portable
+///   across HALs. Per-module the peripheral can opt into Native.
+/// - [`Runtime::Native`]: also bare-metal `#[entry] fn main()`, but the
+///   peripherals expose the CONCRETE HAL types (`Serial`/`Spi`/`BlockingI2c` on
+///   stm32f1xx-hal) — no portable bridges, no extra trait crates, max HAL
+///   features. A project-wide "all native" shortcut; the per-module Portable/
+///   Native selector is subsumed. Only where the concrete-HAL templates exist
+///   ([`super::super::codegen::family::native_supported`] = STM32F1).
 /// - [`Runtime::Async`]: an embassy async project — `#[embassy_executor::main]
 ///   async fn main(Spawner)` on `embassy-stm32`, with `.await`-able drivers
 ///   (`embedded-io-async` / `embedded-hal-async`). Selected in the System tab;
@@ -31,6 +37,7 @@ pub const PIN_SPACING: f32 = 3.0;
 pub enum Runtime {
     #[default]
     Blocking,
+    Native,
     Async,
 }
 
@@ -39,6 +46,7 @@ impl Runtime {
     pub fn as_token(self) -> &'static str {
         match self {
             Self::Blocking => "Blocking",
+            Self::Native => "Native",
             Self::Async => "Async",
         }
     }
@@ -48,6 +56,7 @@ impl Runtime {
     pub fn from_token(s: &str) -> Self {
         match s.trim() {
             "Async" => Self::Async,
+            "Native" => Self::Native,
             _ => Self::Blocking,
         }
     }

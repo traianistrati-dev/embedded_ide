@@ -44,6 +44,14 @@ impl Mcu {
         self.runtime == Runtime::Async && family::async_supported(&self.family)
     }
 
+    /// Whether code generation is on the Native (concrete-HAL) path — Runtime is
+    /// Native AND the family has concrete-HAL templates (STM32F1). The bus
+    /// peripherals are then forced to `ApiStyle::Native` regardless of their
+    /// per-module setting.
+    pub fn is_native(&self) -> bool {
+        self.runtime == Runtime::Native && family::native_supported(&self.family)
+    }
+
     /// Build a brand-new `src/main.rs` (called when the MCU type is first
     /// selected or reset). Dispatches on `self.family` + `self.runtime`; families
     /// without a registered backend produce an empty file.
