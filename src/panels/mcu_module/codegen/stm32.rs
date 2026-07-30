@@ -147,6 +147,7 @@ pub fn make_generated_section(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    gpio_native: bool,
 ) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
@@ -273,16 +274,22 @@ pub fn make_generated_section(
                 expr.trim_start_matches("//").trim()
             )
         } else {
-            // GPIO in/out are wrapped in the `pins::configs::io` bridge so the
-            // binding is a STANDARD `embedded-hal` 1.0 pin — portable to any HAL.
-            // The wrapper is transparent (`.0` gives the raw HAL pin back) and the
-            // `&mut` + var-name + comment shape is unchanged, so `parse_main_rs` /
-            // `parse_pin_labels` still round-trip.
+            // GPIO In/Out binding shape follows the project's GPIO api
+            // (`gpio_native`):
+            //  · Portable (default) → wrap in the `pins::configs::io` bridge so
+            //    the binding is a STANDARD `embedded-hal` 1.0 pin — portable to
+            //    any HAL. The wrapper is transparent (`.0` gives the raw HAL pin
+            //    back) and the `&mut` + var-name + comment shape is unchanged, so
+            //    `parse_main_rs` / `parse_pin_labels` still round-trip.
+            //  · Native → bind the raw HAL pin (no io.rs, no embedded-hal dep).
             let (prefix, open, close) = match pin.selected_function {
-                PinFunction::GpioOutput => ("&mut ", "", ""),
-                PinFunction::GpioInput => ("&mut ", "", ""),
-                // PinFunction::GpioOutput => ("&mut ", "pins::configs::io::DigitalOut(", ")"),
-                // PinFunction::GpioInput => ("&mut ", "pins::configs::io::DigitalIn(", ")"),
+                PinFunction::GpioOutput if !gpio_native => {
+                    ("&mut ", "pins::configs::io::DigitalOut(", ")")
+                }
+                PinFunction::GpioInput if !gpio_native => {
+                    ("&mut ", "pins::configs::io::DigitalIn(", ")")
+                }
+                PinFunction::GpioOutput | PinFunction::GpioInput => ("&mut ", "", ""),
                 ref f if needs_mut_ref(f) => ("&mut ", "", ""),
                 _ => ("", "", ""),
             };
@@ -629,6 +636,7 @@ pub fn config_files(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     clock: &ClockConfig,
+    gpio_native: bool,
 ) -> Vec<(String, String)> {
     let funcs: Vec<&PinFunction> = all_pins
         .iter()
@@ -661,9 +669,11 @@ pub fn config_files(
             can_config_file(can.get(&1), pclk1_of(clock)),
         ));
     }
-    // The GPIO/Delay → embedded-hal 1.0 bridge module, when any GPIO in/out pin
-    // is configured (the pin bindings wrap it — see the pin-declaration lines).
-    if has(PinFunction::GpioOutput) || has(PinFunction::GpioInput) {
+    // The GPIO/Delay → embedded-hal 1.0 bridge module — ONLY on the Portable
+    // GPIO api (`!gpio_native`), when any GPIO in/out pin is configured (the pin
+    // bindings wrap it). On the Native GPIO api the pins bind raw, so io.rs would
+    // be dead code + pull an unused `embedded-hal` — skip it.
+    if !gpio_native && (has(PinFunction::GpioOutput) || has(PinFunction::GpioInput)) {
         out.push(("io.rs".to_string(), GPIO_IO_FILE.to_string()));
     }
     out

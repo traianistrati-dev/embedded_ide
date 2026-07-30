@@ -96,7 +96,7 @@ impl FamilyBackend for Stm32f1Backend {
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
         let gen_ = stm32::make_generated_section(
-            &mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can, &usb,
+            &mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can, &usb, mcu.gpio_native(),
         );
         let base = format!(
             "{header}{gen_}\n{tail}",
@@ -114,7 +114,7 @@ impl FamilyBackend for Stm32f1Backend {
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
         let new_section = stm32::make_generated_section(
-            &mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can, &usb,
+            &mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can, &usb, mcu.gpio_native(),
         );
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Add the ADC helper if newly needed; preserve user-edited ones.
@@ -125,7 +125,7 @@ impl FamilyBackend for Stm32f1Backend {
         let all = pins_of(mcu);
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
-        stm32::config_files(&all, &usart, &spi, &i2c, &can, &mcu.clock)
+        stm32::config_files(&all, &usart, &spi, &i2c, &can, &mcu.clock, mcu.gpio_native())
     }
 }
 

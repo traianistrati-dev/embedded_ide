@@ -1472,6 +1472,8 @@ impl AppIde {
         // Hash the runtime — flipping Blocking⇄Async re-targets the backend
         // (async entry) and the embassy deps, so it must trigger regeneration.
         mcu.runtime.as_token().hash(&mut hasher);
+        // Hash the GPIO api — Portable⇄Native flips the io.rs bridge + bindings.
+        format!("{:?}", mcu.gpio_api).hash(&mut hasher);
 
         // Hash modules
         for module in &mcu.modules {

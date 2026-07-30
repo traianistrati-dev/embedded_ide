@@ -105,6 +105,12 @@ pub struct Mcu {
     /// System tab; drives which family backend generates `main.rs` and the
     /// embassy runtime deps. Persisted in `mcu.config`.
     pub runtime: Runtime,
+    /// GPIO In/Out init style (STM32F1 blocking path): `Portable` wraps pins in
+    /// the `pins/configs/io.rs` embedded-hal 1.0 bridge (`DigitalOut`/`DigitalIn`
+    /// + `Delay`); `Native` binds the raw HAL pin (no io.rs, no embedded-hal for
+    /// GPIO). Chosen in the System tab. Forced to raw on the Native runtime;
+    /// irrelevant on Async (embassy `Output`/`Input`). Persisted in `mcu.config`.
+    pub gpio_api: crate::panels::mcu_module::modules::ApiStyle,
     /// Transient: id of a module the user clicked on the canvas, so the module
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.

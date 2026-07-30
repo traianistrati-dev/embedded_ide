@@ -599,6 +599,76 @@ impl AppIde {
                     .color(egui::Color32::from_rgb(120, 170, 220)),
                 );
             }
+
+            // ── GPIO In/Out bridge (io.rs) ───────────────────────────────────
+            use crate::panels::mcu_module::modules::ApiStyle;
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.heading(format!("{}  GPIO In/Out", ph::GEAR));
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "How GPIO In/Out pins bind in main.rs (STM32F1 blocking path).",
+                )
+                .color(egui::Color32::GRAY),
+            );
+            ui.add_space(8.0);
+
+            // Only the STM32F1 backend has the io.rs bridge; on the Native runtime
+            // GPIO is forced raw regardless.
+            let gpio_ok = native_ok && mcu.runtime != Runtime::Native;
+            let portable_sel = mcu.gpio_api == ApiStyle::Portable;
+            if runtime_card(
+                ui,
+                portable_sel && native_ok,
+                gpio_ok,
+                "Portable (embedded-hal bridge)",
+                "let pa0_out = &mut pins::configs::io::DigitalOut(...)  ·  \
+                 generates io.rs (embedded-hal 1.0 OutputPin/InputPin/DelayNs)",
+            )
+            .clicked()
+                && gpio_ok
+            {
+                mcu.gpio_api = ApiStyle::Portable;
+            }
+            ui.add_space(6.0);
+            let native_gpio_sel = mcu.gpio_api == ApiStyle::Native;
+            if runtime_card(
+                ui,
+                native_gpio_sel && native_ok,
+                gpio_ok,
+                "Native (raw HAL pin)",
+                "let pa0_out = &mut gpioa.pa0.into_push_pull_output(...)  ·  \
+                 no io.rs, no embedded-hal dep for GPIO",
+            )
+            .clicked()
+                && gpio_ok
+            {
+                mcu.gpio_api = ApiStyle::Native;
+            }
+
+            ui.add_space(8.0);
+            if !native_ok {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  The io.rs bridge is an STM32F1 feature. {} binds GPIO via \
+                         its own HAL (embassy `Output`/`Input` on non-F1).",
+                        ph::WARNING,
+                        mcu.family,
+                    ))
+                    .color(egui::Color32::from_rgb(210, 170, 90)),
+                );
+            } else if mcu.runtime == Runtime::Native {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  The Native runtime already binds all GPIO raw — this choice \
+                         applies on the Blocking runtime.",
+                        ph::INFO,
+                    ))
+                    .color(egui::Color32::from_rgb(120, 170, 220)),
+                );
+            }
         });
     }
 

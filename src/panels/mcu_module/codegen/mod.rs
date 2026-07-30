@@ -52,6 +52,16 @@ impl Mcu {
         self.runtime == Runtime::Native && family::native_supported(&self.family)
     }
 
+    /// Whether GPIO In/Out bind the RAW HAL pin (no `pins/configs/io.rs`
+    /// `DigitalOut`/`DigitalIn` bridge) — true when the GPIO api is `Native` OR
+    /// the whole project runs Native. `false` (the default) emits the portable
+    /// embedded-hal 1.0 bridge. Only consulted on the STM32F1 blocking path
+    /// (async uses embassy `Output`/`Input`; other families have no io.rs).
+    pub fn gpio_native(&self) -> bool {
+        use crate::panels::mcu_module::modules::ApiStyle;
+        self.is_native() || self.gpio_api == ApiStyle::Native
+    }
+
     /// Build a brand-new `src/main.rs` (called when the MCU type is first
     /// selected or reset). Dispatches on `self.family` + `self.runtime`; families
     /// without a registered backend produce an empty file.
@@ -694,6 +704,30 @@ mod tests {
         );
         // The bare-field form must NOT be used for the binding name.
         assert_not_contains_substring(&code, "let pa0 = &mut gpioa.pa0");
+    }
+
+    /// The GPIO api toggle switches the binding shape AND the io.rs emission:
+    /// Portable (default) wraps in the `pins::configs::io` bridge + emits io.rs;
+    /// Native binds the raw HAL pin + emits NO io.rs.
+    #[test]
+    fn test_gpio_api_toggle_switches_binding_and_io_rs() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::ApiStyle;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+
+        // Default (Portable) → DigitalOut bridge + io.rs config file.
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output");
+        assert!(mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "io.rs emitted for Portable");
+
+        // Native GPIO → raw HAL pin, NO io.rs, NO DigitalOut.
+        mcu.gpio_api = ApiStyle::Native;
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "let pa0_out = &mut gpioa.pa0.into_push_pull_output");
+        assert_not_contains_substring(&code, "DigitalOut");
+        assert!(!mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "no io.rs on Native GPIO");
     }
 
     /// A `<pin>_<type>` binding still round-trips back through `parse_main_rs`.

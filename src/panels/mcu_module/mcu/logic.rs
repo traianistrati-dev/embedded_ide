@@ -84,6 +84,7 @@ impl Mcu {
             clock_presets: Vec::new(),
             modules: Vec::new(),
             runtime: crate::panels::mcu_module::mcu::model::Runtime::default(),
+            gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
             expand_module: None,
         }
     }
@@ -267,7 +268,7 @@ impl Mcu {
         } else {
             None
         };
-        mcu_config::serialize(&self.modules, clock.as_ref(), self.runtime)
+        mcu_config::serialize(&self.modules, clock.as_ref(), self.runtime, self.gpio_api)
     }
 
     /// Restore virtual modules + clock from an `mcu.config` file on project open.
@@ -285,6 +286,8 @@ impl Mcu {
         // Runtime lives in its own `@runtime` section; a missing one (any
         // pre-async project) restores the default Blocking.
         self.runtime = mcu_config::parse_runtime(text);
+        // GPIO api (`@gpio`) — missing restores the default Portable (io.rs bridge).
+        self.gpio_api = mcu_config::parse_gpio_api(text);
     }
 
     /// Restores the clock-tree configuration parsed from a saved `main.rs`
