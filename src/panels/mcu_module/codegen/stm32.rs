@@ -279,8 +279,10 @@ pub fn make_generated_section(
             // `&mut` + var-name + comment shape is unchanged, so `parse_main_rs` /
             // `parse_pin_labels` still round-trip.
             let (prefix, open, close) = match pin.selected_function {
-                PinFunction::GpioOutput => ("&mut ", "pins::configs::io::DigitalOut(", ")"),
-                PinFunction::GpioInput => ("&mut ", "pins::configs::io::DigitalIn(", ")"),
+                PinFunction::GpioOutput => ("&mut ", "", ""),
+                PinFunction::GpioInput => ("&mut ", "", ""),
+                // PinFunction::GpioOutput => ("&mut ", "pins::configs::io::DigitalOut(", ")"),
+                // PinFunction::GpioInput => ("&mut ", "pins::configs::io::DigitalIn(", ")"),
                 ref f if needs_mut_ref(f) => ("&mut ", "", ""),
                 _ => ("", "", ""),
             };

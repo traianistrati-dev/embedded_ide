@@ -19,10 +19,12 @@
 
 use super::clock::model::Stm32f1Clock;
 use super::clock::persist as clock_persist;
+use super::mcu::Runtime;
 use super::modules::VirtualModule;
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
+const RUNTIME_HEADER: &str = "@runtime";
 
 /// File name written at the project root.
 pub const FILE_NAME: &str = "mcu.config";
@@ -34,10 +36,15 @@ pub const FILE_NAME: &str = "mcu.config";
 // `section_body` stays shared: both files use the same `@section` layout, and
 // the migration path reads the old sections straight out of this one.
 
-/// Build the `mcu.config` text from the MCU's `modules` and (STM32-only) clock.
-/// Returns an empty string when there is nothing to persist (no modules and no
-/// clock), so the caller can skip writing the file.
-pub fn serialize(modules: &[VirtualModule], clock: Option<&Stm32f1Clock>) -> String {
+/// Build the `mcu.config` text from the MCU's `modules`, (STM32-only) clock and
+/// `runtime`. Returns an empty string when there is nothing to persist (no
+/// modules, no clock, and the default Blocking runtime), so the caller can skip
+/// writing the file.
+pub fn serialize(
+    modules: &[VirtualModule],
+    clock: Option<&Stm32f1Clock>,
+    runtime: Runtime,
+) -> String {
     let mut out = String::new();
 
     if !modules.is_empty() {
@@ -61,17 +68,39 @@ pub fn serialize(modules: &[VirtualModule], clock: Option<&Stm32f1Clock>) -> Str
         out.push('\n');
     }
 
+    // Only persist a non-default runtime — a Blocking project keeps the file
+    // free of the section, so old projects (and the common case) round-trip
+    // byte-identically.
+    if runtime != Runtime::Blocking {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(RUNTIME_HEADER);
+        out.push('\n');
+        out.push_str(runtime.as_token());
+        out.push('\n');
+    }
+
     out
 }
 
 /// Parse an `mcu.config` file back into `(modules, clock)`. A missing or garbled
-/// section yields an empty module list / `None` clock.
+/// section yields an empty module list / `None` clock. (Runtime is read
+/// separately via [`parse_runtime`].)
 pub fn parse(text: &str) -> (Vec<VirtualModule>, Option<Stm32f1Clock>) {
     let modules = section_body(text, MODULES_HEADER)
         .and_then(|body| ron::from_str::<Vec<VirtualModule>>(body.trim()).ok())
         .unwrap_or_default();
     let clock = section_body(text, CLOCK_HEADER).map(|b| clock_persist::from_config_block(&b));
     (modules, clock)
+}
+
+/// The project [`Runtime`] recorded in `@runtime`; a missing section (any
+/// pre-async project) is the default [`Runtime::Blocking`].
+pub fn parse_runtime(text: &str) -> Runtime {
+    section_body(text, RUNTIME_HEADER)
+        .map(|b| Runtime::from_token(&b))
+        .unwrap_or_default()
 }
 
 /// The lines belonging to `header`: everything after the header line up to (but
@@ -120,7 +149,7 @@ mod tests {
             sysclk_src: SysclkSrc::Hsi,
             ..Stm32f1Clock::default()
         };
-        let text = serialize(&modules, Some(&clock));
+        let text = serialize(&modules, Some(&clock), Runtime::Blocking);
 
         // Headers + multi-line layout present.
         assert!(text.contains("@modules\n"));
@@ -135,17 +164,37 @@ mod tests {
 
     #[test]
     fn empty_when_nothing_to_persist() {
-        assert_eq!(serialize(&[], None), "");
+        assert_eq!(serialize(&[], None, Runtime::Blocking), "");
     }
 
     #[test]
     fn clock_only_when_no_modules() {
-        let text = serialize(&[], Some(&Stm32f1Clock::default()));
+        let text = serialize(&[], Some(&Stm32f1Clock::default()), Runtime::Blocking);
         assert!(!text.contains("@modules"));
         assert!(text.starts_with("@clock\n"));
         let (m, c) = parse(&text);
         assert!(m.is_empty());
         assert_eq!(c, Some(Stm32f1Clock::default()));
+    }
+
+    #[test]
+    fn runtime_round_trips_and_defaults_to_blocking() {
+        // Default runtime writes NO section — old projects stay byte-identical.
+        assert_eq!(serialize(&[], None, Runtime::Blocking), "");
+        assert_eq!(parse_runtime(""), Runtime::Blocking);
+
+        // Async is persisted and parsed back, even with no modules/clock.
+        let text = serialize(&[], None, Runtime::Async);
+        assert!(text.contains("@runtime\n"));
+        assert!(text.contains("Async"));
+        assert_eq!(parse_runtime(&text), Runtime::Async);
+
+        // …and it coexists with modules + clock.
+        let text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()), Runtime::Async);
+        let (m, c) = parse(&text);
+        assert_eq!(m.len(), 1);
+        assert!(c.is_some());
+        assert_eq!(parse_runtime(&text), Runtime::Async);
     }
 
     #[test]
@@ -165,7 +214,7 @@ mod tests {
         pos.insert("mw_radar/utils.rs".into(), (321.5, 208.0));
 
         // A legacy file: MCU sections followed by the old Structure ones.
-        let mut text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()));
+        let mut text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()), Runtime::Blocking);
         text.push('\n');
         text.push_str(&structure_config::serialize(&pos, &(true, Some(2), 0, false)));
 

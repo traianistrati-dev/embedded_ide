@@ -11,6 +11,48 @@ pub const PIN_HEIGHT: f32 = 50.0;
 pub const PIN_WIDTH: f32 = 30.0;
 pub const PIN_SPACING: f32 = 3.0;
 
+// ── Runtime ────────────────────────────────────────────────────────────────
+
+/// Project-level execution model — which code-generation runtime the firmware
+/// targets.
+///
+/// - [`Runtime::Blocking`] (default): the classic bare-metal path — a
+///   `#[cortex_m_rt::entry] fn main() -> !` with blocking peripheral APIs
+///   (`embedded-io` / `embedded-hal` 1.0). Every family backend today is
+///   blocking.
+/// - [`Runtime::Async`]: an embassy async project — `#[embassy_executor::main]
+///   async fn main(Spawner)` on `embassy-stm32`, with `.await`-able drivers
+///   (`embedded-io-async` / `embedded-hal-async`). Selected in the System tab;
+///   for STM32 it re-targets code generation to the async embassy backend.
+///
+/// Persisted in `mcu.config` (`@runtime`); old projects (no section) load as
+/// `Blocking`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Runtime {
+    #[default]
+    Blocking,
+    Async,
+}
+
+impl Runtime {
+    /// The token written to / read from the `mcu.config` `@runtime` section.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Blocking => "Blocking",
+            Self::Async => "Async",
+        }
+    }
+
+    /// Parse the `@runtime` token; anything unrecognised (incl. a missing
+    /// section) is the safe [`Runtime::Blocking`] default.
+    pub fn from_token(s: &str) -> Self {
+        match s.trim() {
+            "Async" => Self::Async,
+            _ => Self::Blocking,
+        }
+    }
+}
+
 // ── Mcu struct ───────────────────────────────────────────────────────────────
 
 /// Represents a microcontroller with four sides of pins and UI state.
@@ -50,6 +92,10 @@ pub struct Mcu {
     /// Virtual electronic modules (e.g. GI_USART) wired to the chip's pins and
     /// drawn beside it on the Pins canvas.
     pub modules: Vec<crate::panels::mcu_module::modules::VirtualModule>,
+    /// Execution model — Blocking (bare-metal) or Async (embassy). Chosen in the
+    /// System tab; drives which family backend generates `main.rs` and the
+    /// embassy runtime deps. Persisted in `mcu.config`.
+    pub runtime: Runtime,
     /// Transient: id of a module the user clicked on the canvas, so the module
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.

@@ -5,7 +5,7 @@
 use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
+    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
 };
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -416,6 +416,7 @@ pub fn module_config_ui(
     ui: &mut egui::Ui,
     m: &mut VirtualModule,
     pin_names: &HashMap<usize, String>,
+    is_async: bool,
 ) {
     // Connection rows (generic over kind), computed before borrowing config.
     let conn_rows: Vec<(&'static str, String)> = m
@@ -450,6 +451,30 @@ pub fn module_config_ui(
                     .on_hover_text(
                         "init returns the concrete stm32f1xx-hal type — no bridge, no extra \
                          trait crates, max HAL features.",
+                    );
+            });
+        ui.end_row();
+    };
+
+    // Async runtime only (SPI/I2C): blocking embassy driver vs async-DMA.
+    let async_row = |ui: &mut egui::Ui, mode: &mut AsyncBusMode| {
+        ui.label("Async init");
+        egui::ComboBox::from_id_salt("async_mode")
+            .selected_text(match mode {
+                AsyncBusMode::Blocking => "Blocking (embedded-hal 1.0)",
+                AsyncBusMode::AsyncDma => "Async-DMA (embedded-hal-async)",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(mode, AsyncBusMode::Blocking, "Blocking (embedded-hal 1.0)")
+                    .on_hover_text(
+                        "embassy new_blocking → a STANDARD blocking embedded-hal 1.0 bus. \
+                         No DMA — compiles out of the box. Fine inside an async project.",
+                    );
+                ui.selectable_value(mode, AsyncBusMode::AsyncDma, "Async-DMA (embedded-hal-async)")
+                    .on_hover_text(
+                        "embassy DMA new → an .await-able embedded-hal-async bus. Needs DMA \
+                         channels: main.rs gets a TODO line to fill with channels valid for \
+                         this peripheral on your chip (won't compile until you do).",
                     );
             });
         ui.end_row();
@@ -496,7 +521,11 @@ pub fn module_config_ui(
                             ui.selectable_value(&mut cfg.stop_bits, StopBits::Two, "2");
                         });
                     ui.end_row();
-                    api_row(ui, &mut cfg.api_style);
+                    // Async USART is always the embedded-io-async BufferedUart
+                    // bridge (no per-module choice) — hide the blocking selector.
+                    if !is_async {
+                        api_row(ui, &mut cfg.api_style);
+                    }
                 }
                 ModuleConfig::Spi(cfg) => {
                     ui.label("SPI mode");
@@ -517,7 +546,11 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
-                    api_row(ui, &mut cfg.api_style);
+                    if is_async {
+                        async_row(ui, &mut cfg.async_mode);
+                    } else {
+                        api_row(ui, &mut cfg.api_style);
+                    }
                 }
                 ModuleConfig::I2c(cfg) => {
                     ui.label("Clock");
@@ -531,7 +564,11 @@ pub fn module_config_ui(
                     ui.label("Address (7-bit)");
                     ui.add(egui::DragValue::new(&mut cfg.address).range(0..=127).hexadecimal(2, false, true));
                     ui.end_row();
-                    api_row(ui, &mut cfg.api_style);
+                    if is_async {
+                        async_row(ui, &mut cfg.async_mode);
+                    } else {
+                        api_row(ui, &mut cfg.api_style);
+                    }
                 }
                 ModuleConfig::Can(cfg) => {
                     ui.label("Bit rate");

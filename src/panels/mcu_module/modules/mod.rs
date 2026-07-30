@@ -12,9 +12,9 @@ pub mod model;
 pub mod persist;
 
 pub use model::{
-    ApiStyle, CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind, ModuleSignal,
-    Parity, SpiModuleConfig, StopBits, UsartModuleConfig, UsbModuleConfig, VirtualModule,
-    module_signal_of,
+    ApiStyle, AsyncBusMode, CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind,
+    ModuleSignal, Parity, SpiModuleConfig, StopBits, UsartModuleConfig, UsbModuleConfig,
+    VirtualModule, module_signal_of,
 };
 
 use std::collections::BTreeMap;

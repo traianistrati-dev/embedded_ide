@@ -12,9 +12,9 @@
 //! here — they are pure data (a `.ron` definition).
 
 use super::common::USER_TAIL;
-use super::{embassy_common, rcc, stm32, wba};
+use super::{embassy_async, embassy_common, rcc, stm32, wba};
 use crate::panels::mcu_module::codegen_esp;
-use crate::panels::mcu_module::mcu::Mcu;
+use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 
@@ -209,6 +209,75 @@ impl FamilyBackend for StmEmbassyBackend {
     }
 }
 
+// ── Async STM32 (embassy-stm32 + embassy-executor) ──────────────────────────
+// The [`Runtime::Async`] counterpart of [`StmEmbassyBackend`]: the SAME
+// embassy-stm32 GPIO codegen, but the entry point is `#[embassy_executor::main]
+// async fn main(Spawner)` driven by the executor instead of `#[entry] fn main()
+// -> !`. Selected by [`backend_for_runtime`] — never listed in [`BACKENDS`],
+// since it is chosen by runtime, not family. Handles every STM32 family that
+// runs on embassy-stm32; `stm32f1` (on stm32f1xx-hal) has no async path yet, so
+// it is excluded and the System-tab toggle is disabled for it.
+struct AsyncEmbassyBackend;
+
+impl FamilyBackend for AsyncEmbassyBackend {
+    fn family_id(&self) -> &'static str {
+        "stm32-async" // label only — dispatch is via `backend_for_runtime`
+    }
+
+    fn handles(&self, family: &str) -> bool {
+        family.starts_with("stm32") && family != "stm32f1"
+    }
+
+    fn fresh_main_rs(&self, mcu: &Mcu) -> String {
+        format!(
+            "{header}{section}\n{tail}",
+            header = embassy_async::invariant_header(&mcu.name, &mcu.id),
+            section = async_section(mcu),
+            tail = USER_TAIL,
+        )
+    }
+
+    fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
+        let section = async_section(mcu);
+        embassy_async::splice_section(existing, &section, &mcu.name, &mcu.id)
+    }
+
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        // Async bus peripherals: USART (BufferedUart → embedded-io-async), SPI +
+        // I2C (blocking `embedded-hal` 1.0 or async-DMA `embedded-hal-async`, per
+        // the module's AsyncBusMode). GPIO stays inline in main.rs (no io.rs).
+        async_periphs(mcu).config_files
+    }
+}
+
+/// The async peripherals (USART/SPI/I2C) derived from `mcu`'s modules + pins.
+fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
+    let all = pins_of(mcu);
+    let usart = modules::usart_configs(&mcu.modules);
+    let spi = modules::spi_configs(&mcu.modules);
+    let i2c = modules::i2c_configs(&mcu.modules);
+    embassy_async::async_peripherals(&all, &usart, &spi, &i2c)
+}
+
+/// The async generated section for `mcu`: the GPIO/raw pin bindings (minus the
+/// pins a bus driver consumes) followed by the peripheral `init(...)` calls.
+fn async_section(mcu: &Mcu) -> String {
+    let all = pins_of(mcu);
+    let periphs = async_periphs(mcu);
+    // Pins a bus driver moves into its peripheral must NOT also be bound raw.
+    let gpio_pins: Vec<&Pin> = all
+        .iter()
+        .copied()
+        .filter(|p| !periphs.consumed_pins.contains(&p.name))
+        .collect();
+    embassy_async::make_generated_section(
+        &mcu.name,
+        &gpio_pins,
+        &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+        &periphs.init_calls,
+    )
+}
+
 /// Registry of every known family backend. Add new families here. Order
 /// matters: the first backend whose [`handles`](FamilyBackend::handles) returns
 /// true wins, so the multi-family [`StmEmbassyBackend`] must come LAST.
@@ -219,12 +288,35 @@ const BACKENDS: &[&dyn FamilyBackend] = &[
     &StmEmbassyBackend,
 ];
 
+/// The async backend is chosen by runtime (not family), so it lives outside
+/// [`BACKENDS`]; a `static` gives the `&'static` the dispatch returns.
+static ASYNC_EMBASSY_BACKEND: AsyncEmbassyBackend = AsyncEmbassyBackend;
+
+/// Whether an Async runtime has a backend for `family` — i.e. an embassy-capable
+/// STM32 family. Drives both codegen dispatch and the System-tab toggle's
+/// enabled state.
+pub fn async_supported(family: &str) -> bool {
+    ASYNC_EMBASSY_BACKEND.handles(family)
+}
+
 /// Look up the backend for a family key, if one is registered.
 ///
 /// Families without a backend yet (e.g. "stm8") return `None`; callers fall
 /// back to "no code generation" so an unconfigured chip stays safe.
 pub fn backend_for(family: &str) -> Option<&'static dyn FamilyBackend> {
     BACKENDS.iter().copied().find(|b| b.handles(family))
+}
+
+/// Look up the backend honouring the project [`Runtime`]. Async re-targets every
+/// embassy-capable STM32 family to the async backend; everything else — and all
+/// of Blocking — falls through to [`backend_for`].
+///
+/// [`Runtime`]: crate::panels::mcu_module::mcu::Runtime
+pub fn backend_for_runtime(family: &str, runtime: Runtime) -> Option<&'static dyn FamilyBackend> {
+    if runtime == Runtime::Async && async_supported(family) {
+        return Some(&ASYNC_EMBASSY_BACKEND);
+    }
+    backend_for(family)
 }
 
 #[cfg(test)]
@@ -269,6 +361,240 @@ mod tests {
         assert!(code.contains("fn main() -> !"));
         assert!(code.contains("embassy_stm32::init(Default::default())"));
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
+    }
+
+    /// The Async runtime re-targets embassy-capable STM32 families to the async
+    /// backend, while Blocking (and F1/ESP under Async) keep their default one.
+    #[test]
+    fn async_runtime_dispatch() {
+        // Async supported for embassy STM32 families, not F1/ESP/unknown.
+        assert!(async_supported("stm32f4"));
+        assert!(async_supported("stm32g0"));
+        assert!(async_supported("stm32wba"));
+        assert!(!async_supported("stm32f1"));
+        assert!(!async_supported("esp32c3"));
+        assert!(!async_supported("rp2040"));
+
+        // Blocking always uses the family default.
+        assert_eq!(
+            backend_for_runtime("stm32f4", Runtime::Blocking)
+                .unwrap()
+                .family_id(),
+            "stm32"
+        );
+        // Async on an embassy family → the async backend.
+        assert_eq!(
+            backend_for_runtime("stm32f4", Runtime::Async)
+                .unwrap()
+                .family_id(),
+            "stm32-async"
+        );
+        // Async on F1 is inert — it stays on the F1 (stm32f1xx-hal) backend.
+        assert_eq!(
+            backend_for_runtime("stm32f1", Runtime::Async)
+                .unwrap()
+                .family_id(),
+            "stm32f1"
+        );
+    }
+
+    /// The async backend emits an `#[embassy_executor::main] async fn main`
+    /// skeleton (via `Mcu::fresh_main_rs` honouring `runtime`), distinct from the
+    /// blocking `#[entry] fn main() -> !`.
+    #[test]
+    fn async_backend_emits_embassy_executor_main() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::mcu_def::McuDefinition;
+        let mut def: McuDefinition =
+            crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+        // Retarget to an embassy family (F4) so async applies.
+        def.family = "stm32f4".into();
+        def.id = "stm32f411re".into();
+        let mut mcu = def.build_mcu();
+
+        // Blocking first — the classic entry.
+        assert!(mcu.fresh_main_rs().contains("fn main() -> !"));
+
+        // Flip to async — the executor entry + async header.
+        mcu.runtime = Runtime::Async;
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("HAL: embassy-stm32 (async)"));
+        assert!(code.contains("#[embassy_executor::main]"));
+        assert!(code.contains("async fn main(_spawner: Spawner)"));
+        assert!(code.contains("use embassy_executor::Spawner;"));
+        // Crate-level allow (the executor macro drops a fn-level one — see
+        // `embassy_async::invariant_header`).
+        assert!(code.contains("#![allow(unused_variables, unused_mut)]"));
+        assert!(!code.contains("fn main() -> !"), "no blocking entry in async");
+        assert!(!code.contains("use cortex_m_rt::entry;"), "no cortex_m_rt entry import");
+        assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
+    }
+
+    /// Toggling runtime on an EXISTING file re-splices the header + entry both
+    /// ways while preserving the user's loop body after the markers.
+    #[test]
+    fn runtime_switch_reslices_header_both_ways_and_keeps_user_tail() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::mcu_def::McuDefinition;
+        let mut def: McuDefinition =
+            crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+        def.family = "stm32g0".into();
+        def.id = "stm32g0b1re".into();
+        let mut mcu = def.build_mcu();
+
+        // A blocking file with a hand-edited loop body.
+        let blocking = mcu.fresh_main_rs();
+        let user = blocking.replace(
+            "// Your main loop code here.",
+            "defmt::info!(\"tick\"); // USER EDIT",
+        );
+        assert!(user.contains("fn main() -> !"));
+
+        // → Async: async header/entry replace the blocking ones; user tail kept.
+        mcu.runtime = Runtime::Async;
+        let now_async = mcu.update_main_rs(&user);
+        assert!(now_async.contains("#[embassy_executor::main]"));
+        assert!(now_async.contains("HAL: embassy-stm32 (async)"));
+        assert!(!now_async.contains("fn main() -> !"), "blocking entry gone");
+        assert!(!now_async.contains("use cortex_m_rt::entry;"), "blocking import gone");
+        assert!(now_async.contains("USER EDIT"), "user tail preserved");
+        assert_eq!(now_async.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
+
+        // → back to Blocking: blocking header/entry restored, still one GEN block.
+        mcu.runtime = Runtime::Blocking;
+        let back = mcu.update_main_rs(&now_async);
+        assert!(back.contains("fn main() -> !"));
+        assert!(back.contains("HAL: embassy-stm32 (blocking)"));
+        assert!(!back.contains("#[embassy_executor::main]"), "async entry gone");
+        assert!(!back.contains("use embassy_executor::Spawner;"), "async import gone");
+        assert!(back.contains("USER EDIT"), "user tail still preserved");
+        assert_eq!(back.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
+    }
+
+    /// An async USART (both TX+RX wired) emits a `usart{n}.rs` config file with
+    /// the embassy `BufferedUart` → embedded-io-async bridge, a call into it from
+    /// `main.rs`, and does NOT also bind the TX/RX pins raw (they're moved into
+    /// the driver).
+    #[test]
+    fn async_usart_emits_config_file_and_init_call() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::mcu_def::McuDefinition;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        let mut def: McuDefinition =
+            crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+        def.family = "stm32f4".into();
+        def.id = "stm32f411re".into();
+        let mut mcu = def.build_mcu();
+        mcu.runtime = Runtime::Async;
+
+        // Wire USART1 TX + RX on whichever pins offer them.
+        let tx = mcu
+            .iter_all_pins()
+            .find(|p| p.available_functions.contains(&PinFunction::UsartTx(1)))
+            .map(|p| p.number)
+            .expect("a UsartTx(1) pin");
+        let rx = mcu
+            .iter_all_pins()
+            .find(|p| p.available_functions.contains(&PinFunction::UsartRx(1)))
+            .map(|p| p.number)
+            .expect("a UsartRx(1) pin");
+        mcu.apply_pin_function(tx, PinFunction::UsartTx(1));
+        mcu.apply_pin_function(rx, PinFunction::UsartRx(1));
+
+        // main.rs: calls into the config module, no raw binding for the USART pins.
+        let code = mcu.fresh_main_rs();
+        assert!(
+            code.contains("pins::configs::usart1::init(p.USART1,"),
+            "USART init call missing:\n{code}"
+        );
+        assert!(
+            !code.contains("usart1_tx = p."),
+            "USART TX pin must not be bound raw:\n{code}"
+        );
+
+        // The config file is the async BufferedUart bridge.
+        let cfgs = mcu.config_files();
+        let usart1 = &cfgs
+            .iter()
+            .find(|(n, _)| n == "usart1.rs")
+            .expect("usart1.rs config file")
+            .1;
+        assert!(usart1.contains("BufferedUart"));
+        assert!(usart1.contains("embedded_io_async::Read"));
+        assert!(usart1.contains("bind_interrupts!"));
+        assert_eq!(usart1.matches("pub fn init").count(), 1);
+    }
+
+    /// Async SPI/I2C: a blocking-mode module emits `new_blocking` + embedded-hal
+    /// 1.0 with a no-DMA init call; an async-DMA module emits `Spi::new` +
+    /// embedded-hal-async with the DMA TODO placeholder in `main.rs`.
+    #[test]
+    fn async_spi_i2c_blocking_and_dma_codegen() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::mcu_def::McuDefinition;
+        use crate::panels::mcu_module::modules::{
+            AsyncBusMode, ModuleConfig, ModuleKind, SpiModuleConfig, VirtualModule,
+        };
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        let mut def: McuDefinition =
+            crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+        def.family = "stm32f4".into();
+        def.id = "stm32f411re".into();
+        let mut mcu = def.build_mcu();
+        mcu.runtime = Runtime::Async;
+
+        // Wire SPI1 (SCK/MOSI/MISO) + I2C1 (SCL/SDA) on whatever pins offer them.
+        for f in [
+            PinFunction::SpiSck(1),
+            PinFunction::SpiMosi(1),
+            PinFunction::SpiMiso(1),
+            PinFunction::I2cScl(1),
+            PinFunction::I2cSda(1),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.available_functions.contains(&f))
+                .map(|p| p.number)
+                .unwrap_or_else(|| panic!("no pin for {f:?}"));
+            mcu.apply_pin_function(num, f);
+        }
+
+        // Default (no module) → blocking SPI/I2C: new_blocking, embedded-hal 1.0,
+        // and init calls WITHOUT the DMA TODO.
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("pins::configs::spi1::init(p.SPI1,"), "SPI call:\n{code}");
+        assert!(code.contains("pins::configs::i2c1::init(p.I2C1,"), "I2C call");
+        assert!(!code.contains("DMA_TX_TODO"), "blocking calls carry no DMA TODO");
+        let cfgs = mcu.config_files();
+        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").expect("spi1.rs").1;
+        assert!(spi1.contains("Spi::new_blocking"));
+        assert!(spi1.contains("embedded_hal::spi::SpiBus"));
+        let i2c1 = &cfgs.iter().find(|(n, _)| n == "i2c1.rs").expect("i2c1.rs").1;
+        assert!(i2c1.contains("I2c::new_blocking"));
+        assert!(i2c1.contains("embedded_hal::i2c::I2c"));
+
+        // Switch SPI1 to async-DMA via its module → DMA driver + TODO in main.rs.
+        mcu.modules.push(VirtualModule {
+            id: "gi_spi_1".into(),
+            kind: ModuleKind::GenericInterfaceSpi,
+            name: "GI_SPI1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Spi(SpiModuleConfig {
+                async_mode: AsyncBusMode::AsyncDma,
+                ..SpiModuleConfig::new(1)
+            }),
+            connections: vec![],
+        });
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("DMA_TX_TODO"), "async-DMA call has the DMA TODO:\n{code}");
+        let cfgs = mcu.config_files();
+        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
+        assert!(spi1.contains("Spi::new(spi"), "DMA driver: {spi1}");
+        assert!(spi1.contains("embedded_hal_async::spi::SpiBus"));
+        // The USART/GPIO-less project still keeps exactly one gen block.
+        assert_eq!(code.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
     }
 
     /// The WBA backend produces a complete embassy skeleton with the markers,

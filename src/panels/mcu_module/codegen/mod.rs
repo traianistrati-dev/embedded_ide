@@ -8,13 +8,14 @@
 //! - unknown families (e.g. STM8) → no generated code yet.
 
 pub mod common;
+pub mod embassy_async;
 pub mod embassy_common;
 pub mod family;
 pub mod rcc;
 pub mod stm32;
 pub mod wba;
 
-use super::mcu::Mcu;
+use super::mcu::{Mcu, Runtime};
 
 // Re-export public API for backward compatibility
 pub use common::{
@@ -25,11 +26,30 @@ pub use common::{
 // ── Public API on Mcu ─────────────────────────────────────────────────────────
 
 impl Mcu {
+    /// The code-generation backend for this MCU, honouring both `family` and
+    /// `runtime`: the async embassy backend when [`Runtime::Async`] applies to
+    /// the family, otherwise the family's default (blocking) backend. Families
+    /// without a registered backend (e.g. STM8) yield `None`.
+    ///
+    /// [`Runtime::Async`]: crate::panels::mcu_module::mcu::Runtime
+    fn backend(&self) -> Option<&'static dyn family::FamilyBackend> {
+        family::backend_for_runtime(&self.family, self.runtime)
+    }
+
+    /// Whether code generation for this MCU is on the async (embassy) path — the
+    /// project [`Runtime`](crate::panels::mcu_module::mcu::Runtime) is Async AND
+    /// the family supports it. Drives the embassy async deps + the System-tab
+    /// toggle's effective state (Async selected on `stm32f1`/ESP is inert).
+    pub fn is_async(&self) -> bool {
+        self.runtime == Runtime::Async && family::async_supported(&self.family)
+    }
+
     /// Build a brand-new `src/main.rs` (called when the MCU type is first
-    /// selected or reset). Dispatches on `self.family`; families without a
-    /// registered backend produce an empty file.
+    /// selected or reset). Dispatches on `self.family` + `self.runtime`; families
+    /// without a registered backend produce an empty file.
     pub fn fresh_main_rs(&self) -> String {
-        let code = family::backend_for(&self.family)
+        let code = self
+            .backend()
             .map(|b| b.fresh_main_rs(self))
             .unwrap_or_default();
         // Module/clock state is persisted out-of-source in `mcu.config`
@@ -43,7 +63,8 @@ impl Mcu {
     /// Families without a GEN block (ESP32-C3 has its own scheme; STM8 has
     /// no backend) return the existing file unchanged.
     pub fn update_main_rs(&self, existing: &str) -> String {
-        let code = family::backend_for(&self.family)
+        let code = self
+            .backend()
             .map(|b| b.update_main_rs(self, existing))
             .unwrap_or_else(|| existing.to_owned());
         // Module/clock state is persisted in `mcu.config`, not in main.rs.
@@ -53,7 +74,7 @@ impl Mcu {
     /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
     /// generated_body)`. Empty for families without separate config files.
     pub fn config_files(&self) -> Vec<(String, String)> {
-        family::backend_for(&self.family)
+        self.backend()
             .map(|b| b.config_files(self))
             .unwrap_or_default()
     }

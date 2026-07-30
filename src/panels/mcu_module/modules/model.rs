@@ -202,6 +202,24 @@ pub enum ApiStyle {
     Native,
 }
 
+/// For the **async** (embassy) runtime, how a SPI/I2C module's generated init
+/// drives the bus. (Ignored on the blocking runtime, where [`ApiStyle`] applies
+/// instead.) embassy's async SPI/I2C REQUIRE DMA channels, which the IDE doesn't
+/// model — so async-DMA leaves a `TODO` in `main.rs` for the user to fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AsyncBusMode {
+    /// `init` uses embassy's `new_blocking` and returns `impl embedded_hal::…`
+    /// (the blocking `SpiBus`/`I2c` 1.0 traits). No DMA — compiles out of the
+    /// box. A blocking driver in an async project is a common, valid pattern.
+    /// The default.
+    #[default]
+    Blocking,
+    /// `init` uses embassy's DMA `new` and returns `impl embedded_hal_async::…`
+    /// (`.await`-able). Needs DMA channels: `main.rs` gets a `TODO` line where
+    /// you pass the channels valid for that peripheral on your chip.
+    AsyncDma,
+}
+
 /// USART communication settings + the user's RX/TX data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsartModuleConfig {
@@ -257,6 +275,10 @@ pub struct SpiModuleConfig {
     /// Portable (embedded-hal 1.0 `SpiBus`) vs native (`Spi<…>`) init.
     #[serde(default)]
     pub api_style: ApiStyle,
+    /// Async runtime only: blocking vs async-DMA embassy init. Ignored on the
+    /// blocking runtime (`api_style` applies there).
+    #[serde(default)]
+    pub async_mode: AsyncBusMode,
 }
 
 impl SpiModuleConfig {
@@ -270,6 +292,7 @@ impl SpiModuleConfig {
             tx_model: String::new(),
             custom_label: String::new(),
             api_style: ApiStyle::default(),
+            async_mode: AsyncBusMode::default(),
         }
     }
 }
@@ -290,6 +313,10 @@ pub struct I2cModuleConfig {
     /// Portable (embedded-hal 1.0 `I2c`) vs native (`BlockingI2c<…>`) init.
     #[serde(default)]
     pub api_style: ApiStyle,
+    /// Async runtime only: blocking vs async-DMA embassy init. Ignored on the
+    /// blocking runtime (`api_style` applies there).
+    #[serde(default)]
+    pub async_mode: AsyncBusMode,
 }
 
 impl I2cModuleConfig {
@@ -303,6 +330,7 @@ impl I2cModuleConfig {
             tx_model: String::new(),
             custom_label: String::new(),
             api_style: ApiStyle::default(),
+            async_mode: AsyncBusMode::default(),
         }
     }
 }

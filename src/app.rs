@@ -1469,6 +1469,10 @@ impl AppIde {
         // Hash clock config
         format!("{:?}", mcu.clock).hash(&mut hasher);
 
+        // Hash the runtime — flipping Blocking⇄Async re-targets the backend
+        // (async entry) and the embassy deps, so it must trigger regeneration.
+        mcu.runtime.as_token().hash(&mut hasher);
+
         // Hash modules
         for module in &mcu.modules {
             module.id.hash(&mut hasher);
@@ -1556,28 +1560,50 @@ impl AppIde {
             // for the trait crates — on each module's API style: a NATIVE-style
             // USART/SPI/I2C module emits a config file but needs NO trait crate.
             let has_cfg = |p: &str| config_files.iter().any(|(name, _)| name.starts_with(p));
-            let needs_can = has_cfg("can");
+            // On the async (embassy) path the blocking F1 trait-bridge deps
+            // (embedded-io / embedded-hal-0-2 / nb / bxcan / usb-device) DON'T
+            // apply — the async USART config pulls embedded-io-async + static_cell
+            // via `ensure_async_deps` instead. Async is only offered on non-F1
+            // STM32, where those bridges aren't generated anyway.
+            let is_async = self.mcu.as_ref().is_some_and(|m| m.is_async());
+            let needs_can = !is_async && has_cfg("can");
             // Trait crates only for PORTABLE modules.
             let (mut needs_usart, mut needs_spi, mut needs_i2c) = (false, false, false);
+            // Async SPI/I2C deps: `embedded-hal` 1.0 for any bus, plus
+            // `embedded-hal-async` when a module is in async-DMA mode.
+            let (mut needs_eh, mut needs_eh_async) = (false, false);
             if let Some(m) = &self.mcu {
-                use crate::panels::mcu_module::modules::{ApiStyle, ModuleConfig};
+                use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig};
                 for md in &m.modules {
-                    match &md.config {
-                        ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
-                        ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
-                        ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => needs_i2c = true,
-                        _ => {}
+                    if is_async {
+                        let mode = match &md.config {
+                            ModuleConfig::Spi(c) => Some(c.async_mode),
+                            ModuleConfig::I2c(c) => Some(c.async_mode),
+                            _ => None,
+                        };
+                        if let Some(mode) = mode {
+                            needs_eh = true;
+                            needs_eh_async |= mode == AsyncBusMode::AsyncDma;
+                        }
+                    } else {
+                        match &md.config {
+                            ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
+                            ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
+                            ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => needs_i2c = true,
+                            _ => {}
+                        }
                     }
                 }
             }
             // GPIO in/out pins are wrapped in the `pins::configs::io` eh-1.0
             // bridge, emitted as `io.rs` (always portable).
-            let needs_gpio = has_cfg("io");
+            let needs_gpio = !is_async && has_cfg("io");
             // USB CDC init needs `usb-device`/`usbd-serial` + the `stm32-usbd`
             // HAL feature, keyed on whether the USB D-/D+ pins are configured.
-            let needs_usb = all_pins
-                .iter()
-                .any(|(_, _, f)| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
+            let needs_usb = !is_async
+                && all_pins
+                    .iter()
+                    .any(|(_, _, f)| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
             let new_toml = project_gen::ensure_peripheral_deps(
                 &self.cargo_toml,
                 needs_can,
@@ -1587,6 +1613,18 @@ impl AppIde {
                 needs_gpio,
             );
             let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb);
+            // Async runtime (embassy-executor + embassy-time + the HAL time
+            // driver), plus — when the respective config files were emitted —
+            // embedded-io-async + static_cell (USART) and embedded-hal /
+            // embedded-hal-async (SPI/I2C). Keyed on the project Runtime being
+            // Async on an embassy-capable STM32 family.
+            let new_toml = project_gen::ensure_async_deps(
+                &new_toml,
+                is_async,
+                is_async && has_cfg("usart"),
+                needs_eh,
+                needs_eh_async,
+            );
             if new_toml != self.cargo_toml {
                 self.cargo_toml = new_toml;
                 self.invalidate_project_files_cache();

@@ -334,6 +334,65 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool) -> String {
     s
 }
 
+/// Add or remove the embassy async-runtime deps, driven by whether the project
+/// Runtime is Async (on an embassy-capable STM32). Manages `embassy-executor`
+/// (the `#[embassy_executor::main]` entry) + `embassy-time`, toggles the
+/// `time-driver-any` feature on the `embassy-stm32` line (embassy-time needs a
+/// time driver, which the HAL supplies), and — when an async USART config file
+/// exists (`needs_async_usart`) — adds `embedded-io-async` (the portable async
+/// serial traits) + `static_cell` (the `BufferedUart` ring buffers). Idempotent +
+/// newline-preserving (called every frame from `init_frame`). The executor's
+/// `critical-section-single-core` impl is already pulled by `cortex-m` in the
+/// base Cargo.toml.
+pub fn ensure_async_deps(
+    cargo_toml: &str,
+    needs_async: bool,
+    needs_async_usart: bool,
+    needs_eh: bool,
+    needs_eh_async: bool,
+) -> String {
+    let mut s = ensure_dep(
+        cargo_toml,
+        "embassy-executor",
+        needs_async,
+        "embassy-executor = { version = \"0.9\", features = [\"arch-cortex-m\", \"executor-thread\"] }",
+    );
+    s = ensure_dep(&s, "embassy-time", needs_async, "embassy-time = \"0.5\"");
+    // Async USART (`BufferedUart` → embedded-io-async). NB the crate is published
+    // as `static_cell` (underscore) — a `static-cell` key fails to resolve.
+    s = ensure_dep(&s, "embedded-io-async", needs_async_usart, "embedded-io-async = \"0.6\"");
+    s = ensure_dep(&s, "static_cell", needs_async_usart, "static_cell = \"2\"");
+    // Async SPI/I2C: blocking init → `embedded-hal` 1.0 (SpiBus/I2c); async-DMA
+    // init → `embedded-hal-async` (which builds on the 1.0 ErrorType, so eh is
+    // kept whenever any SPI/I2C exists).
+    s = ensure_dep(&s, "embedded-hal", needs_eh, "embedded-hal = \"1.0\"");
+    s = ensure_dep(&s, "embedded-hal-async", needs_eh_async, "embedded-hal-async = \"1.0\"");
+
+    // Toggle the `time-driver-any` HAL feature inside the `embassy-stm32`
+    // `features = [ … ]` array. A no-op for non-embassy projects — async is only
+    // offered where an `embassy-stm32` line exists.
+    let is_embassy = |line: &str| line.trim_start().starts_with("embassy-stm32");
+    let has_driver = s
+        .lines()
+        .any(|l| is_embassy(l) && l.contains("\"time-driver-any\""));
+    if needs_async != has_driver {
+        let mut out: Vec<String> = Vec::new();
+        for line in s.lines() {
+            if is_embassy(line) && line.contains("features = [") {
+                out.push(toggle_hal_feature(line, "time-driver-any", needs_async));
+            } else {
+                out.push(line.to_string());
+            }
+        }
+        let mut joined = out.join("\n");
+        if s.ends_with('\n') {
+            joined.push('\n');
+        }
+        s = joined;
+    }
+    s
+}
+
 /// Add or remove `"feature"` inside the `features = [ … ]` array of a single
 /// dependency `line`, idempotently.
 fn toggle_hal_feature(line: &str, feature: &str, add: bool) -> String {
@@ -1048,6 +1107,63 @@ mod tests {
             base,
             "no-op when nothing to remove"
         );
+    }
+
+    #[test]
+    fn ensure_async_deps_adds_removes_executor_time_and_driver() {
+        // An embassy Cargo.toml (as generated for a non-F1 STM32 chip).
+        let base = "[dependencies]\n\
+                    embassy-stm32 = { version = \"0.4\", features = [\"stm32f411re\"] }\n";
+
+        // Async runtime, no bus peripherals yet → executor + time + driver, but
+        // none of the peripheral trait crates.
+        let with = ensure_async_deps(base, true, false, false, false);
+        assert!(with.contains("embassy-executor = { version = \"0.9\""), "executor added:\n{with}");
+        assert!(with.contains("embassy-time = \"0.5\""), "embassy-time added");
+        assert!(with.contains("\"time-driver-any\""), "HAL time driver added");
+        assert!(!with.contains("embedded-io-async"), "no async USART crate yet");
+        assert!(!with.lines().any(|l| is_dep_line(l, "static_cell")), "no static_cell yet");
+        assert!(!with.lines().any(|l| is_dep_line(l, "embedded-hal")), "no embedded-hal yet");
+        // The chip feature survives the driver insertion.
+        assert!(with.contains("\"stm32f411re\""), "chip feature kept:\n{with}");
+        // Idempotent — no duplicate deps/features.
+        assert_eq!(ensure_async_deps(&with, true, false, false, false), with, "add must be idempotent");
+        assert_eq!(with.matches("\"time-driver-any\"").count(), 1, "driver not duplicated");
+        assert_eq!(with.lines().filter(|l| is_dep_line(l, "embassy-executor")).count(), 1);
+
+        // Add an async USART → embedded-io-async + static_cell appear too.
+        let with_usart = ensure_async_deps(base, true, true, false, false);
+        assert!(with_usart.contains("embedded-io-async = \"0.6\""), "async serial trait crate:\n{with_usart}");
+        assert!(with_usart.lines().any(|l| is_dep_line(l, "static_cell")), "static_cell (underscore)");
+        assert!(!with_usart.contains("static-cell ="), "must NOT use the hyphen name");
+        assert_eq!(ensure_async_deps(&with_usart, true, true, false, false), with_usart, "usart add idempotent");
+
+        // Blocking SPI/I2C on async → embedded-hal 1.0, NOT embedded-hal-async.
+        let with_bus = ensure_async_deps(base, true, false, true, false);
+        assert!(with_bus.lines().any(|l| is_dep_line(l, "embedded-hal")), "embedded-hal added:\n{with_bus}");
+        assert!(!with_bus.lines().any(|l| is_dep_line(l, "embedded-hal-async")), "no async trait crate for blocking bus");
+
+        // Async-DMA SPI/I2C → both embedded-hal + embedded-hal-async.
+        let with_dma = ensure_async_deps(base, true, false, true, true);
+        assert!(with_dma.lines().any(|l| is_dep_line(l, "embedded-hal")), "embedded-hal present");
+        assert!(with_dma.contains("embedded-hal-async = \"1.0\""), "async trait crate added:\n{with_dma}");
+        assert_eq!(ensure_async_deps(&with_dma, true, false, true, true), with_dma, "dma add idempotent");
+
+        // Dropping just the USART removes only its two crates (executor stays).
+        let no_usart = ensure_async_deps(&with_usart, true, false, false, false);
+        assert!(!no_usart.contains("embedded-io-async") && !no_usart.lines().any(|l| is_dep_line(l, "static_cell")));
+        assert!(no_usart.contains("embassy-executor"), "runtime deps stay");
+
+        // Removing everything restores the original exactly.
+        let removed = ensure_async_deps(&with_dma, false, false, false, false);
+        assert!(!removed.contains("embassy-executor"), "executor removed:\n{removed}");
+        assert!(!removed.contains("embassy-time"), "embassy-time removed");
+        assert!(!removed.contains("time-driver-any"), "driver feature removed");
+        assert!(!removed.contains("embedded-io-async"), "async serial crate removed");
+        assert!(!removed.lines().any(|l| is_dep_line(l, "embedded-hal")), "embedded-hal removed");
+        assert!(!removed.contains("embedded-hal-async"), "async trait crate removed");
+        assert_eq!(removed, base, "removal restores the original");
+        assert_eq!(ensure_async_deps(base, false, false, false, false), base, "no-op when nothing to remove");
     }
 
     /// A hand-written file with no GEN markers (external project) must be shown

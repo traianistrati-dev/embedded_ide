@@ -83,6 +83,7 @@ impl Mcu {
             clock_limits: ClockLimits::default(),
             clock_presets: Vec::new(),
             modules: Vec::new(),
+            runtime: crate::panels::mcu_module::mcu::model::Runtime::default(),
             expand_module: None,
         }
     }
@@ -266,20 +267,24 @@ impl Mcu {
         } else {
             None
         };
-        mcu_config::serialize(&self.modules, clock.as_ref())
+        mcu_config::serialize(&self.modules, clock.as_ref(), self.runtime)
     }
 
     /// Restore virtual modules + clock from an `mcu.config` file on project open.
     /// Apply *after* `apply_saved_pins` (which derives default modules from the
     /// pins) so the saved per-module config (labels, baud, …) wins.
     pub fn apply_mcu_config(&mut self, text: &str) {
-        let (modules, clock) = crate::panels::mcu_module::mcu_config::parse(text);
+        use crate::panels::mcu_module::mcu_config;
+        let (modules, clock) = mcu_config::parse(text);
         if !modules.is_empty() {
             self.modules = modules;
         }
         if let Some(c) = clock {
             self.apply_saved_clock(c);
         }
+        // Runtime lives in its own `@runtime` section; a missing one (any
+        // pre-async project) restores the default Blocking.
+        self.runtime = mcu_config::parse_runtime(text);
     }
 
     /// Restores the clock-tree configuration parsed from a saved `main.rs`

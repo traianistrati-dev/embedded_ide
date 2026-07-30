@@ -29,11 +29,12 @@ pub fn invariant_header(mcu_name: &str, mcu_id: &str) -> String {
     )
 }
 
-/// The generated section: gpio `use` items (only when needed), `#[entry]`, the
-/// caller-supplied `clock_block` (which must define `let p = …` and end in
-/// `\n`), and one `let` binding per configured pin. Opens `fn main()` —
-/// `USER_TAIL` closes it with the editable loop.
-pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock_block: &str) -> String {
+/// The gpio `use` line (only the types actually used, so no unused-import
+/// warnings) and the per-pin `let` binding body — shared by the blocking and
+/// async section builders (the GPIO API is identical between the two; only the
+/// entry point differs). An empty pin set yields an empty `use` line and a
+/// placeholder-comment body.
+pub(super) fn gpio_bindings(pins: &[&Pin]) -> (String, String) {
     let configured: Vec<&&Pin> = pins
         .iter()
         .filter(|p| p.selected_function != PinFunction::Unset)
@@ -70,10 +71,24 @@ pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock_block: &str) 
         body.push_str(&pin_binding_line(p));
         body.push('\n');
     }
-    if body.is_empty() {
-        body.push_str("    // No pins configured yet — assign functions on the Pins canvas.\n");
-    }
+    // NB: no "no pins" placeholder here — the caller decides, since the async
+    // section may still have peripheral (USART) init lines when no pin is bound.
+    (use_line, body)
+}
 
+/// The comment shown in `fn main` when nothing is generated yet.
+pub(super) const NO_PINS_PLACEHOLDER: &str =
+    "    // No pins configured yet — assign functions on the Pins canvas.\n";
+
+/// The generated section: gpio `use` items (only when needed), `#[entry]`, the
+/// caller-supplied `clock_block` (which must define `let p = …` and end in
+/// `\n`), and one `let` binding per configured pin. Opens `fn main()` —
+/// `USER_TAIL` closes it with the editable loop.
+pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock_block: &str) -> String {
+    let (use_line, mut body) = gpio_bindings(pins);
+    if body.is_empty() {
+        body.push_str(NO_PINS_PLACEHOLDER);
+    }
     format!(
         "{GEN_BEGIN}\n\
          {use_line}\n\
@@ -88,20 +103,19 @@ pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock_block: &str) 
     )
 }
 
-/// Re-splice only the generated section of an existing `main.rs`, preserving
-/// the user tail. Rebuilds from scratch when the markers are gone.
+/// Re-splice the generated section of an existing `main.rs`, preserving the user
+/// tail. The invariant header is rebuilt (not kept from `existing[..begin]`) so
+/// an Async→Blocking runtime switch restores the blocking imports/entry over a
+/// file that was previously async. Rebuilds from scratch when the markers are
+/// gone.
 pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id: &str) -> String {
-    if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
+    let header = invariant_header(mcu_name, mcu_id);
+    if let (Some(_begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         let after = existing[end..].trim_start_matches('\n');
-        format!("{}{}\n{}", &existing[..begin], new_section, after)
+        format!("{header}{new_section}\n{after}")
     } else {
-        format!(
-            "{}{}\n{}",
-            invariant_header(mcu_name, mcu_id),
-            new_section,
-            USER_TAIL,
-        )
+        format!("{header}{new_section}\n{USER_TAIL}")
     }
 }
 

@@ -268,6 +268,9 @@ impl AppIde {
                             // TOGGLE its list entry this frame (expand if closed,
                             // collapse if open), then it's user-controlled again.
                             let to_open = mcu.expand_module.take();
+                            // Async runtime → SPI/I2C modules show the Blocking|
+                            // Async-DMA selector instead of Portable|Native.
+                            let is_async = mcu.is_async();
 
                             if !mcu.modules.is_empty() {
                                 let pin_names: std::collections::HashMap<usize, String> = mcu
@@ -309,7 +312,7 @@ impl AppIde {
                                                         .desired_width(160.0),
                                                     );
                                                 });
-                                                mod_gui::module_config_ui(ui, m, &pin_names);
+                                                mod_gui::module_config_ui(ui, m, &pin_names, is_async);
                                                 ui.add_space(4.0);
                                                 if ui
                                                     .button(format!("{} Remove module", ph::TRASH))
@@ -420,23 +423,105 @@ impl AppIde {
                         });
                     }
                 },
-                McuTab::System => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}  System configuration — coming soon",
-                                ph::GEAR
-                            ))
-                            .size(16.0)
-                            .color(egui::Color32::GRAY),
-                        );
-                    });
-                }
+                McuTab::System => match &mut self.mcu {
+                    Some(mcu) => Self::show_system_tab(ui, mcu),
+                    None => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  System configuration — select an MCU first",
+                                    ph::GEAR
+                                ))
+                                .size(16.0)
+                                .color(egui::Color32::GRAY),
+                            );
+                        });
+                    }
+                },
                 // Module-relationship diagram — chip-agnostic (works with no
                 // MCU selected), so it doesn't gate on `self.mcu`.
                 McuTab::Structure => self.show_structure_tab(ui),
                 McuTab::Definition => self.show_definition_tab(ui),
                 McuTab::Reference => self.show_reference_tab(ui),
+            }
+        });
+    }
+
+    /// The "System" tab — project-level settings that aren't tied to a single
+    /// pin. Currently the **Runtime** selector (Blocking bare-metal vs. embassy
+    /// Async), which re-targets code generation and the embassy deps. Takes the
+    /// MCU by `&mut` (not `&mut self`) so the caller can hand it the already
+    /// borrowed `self.mcu` without a second borrow of `self`.
+    fn show_system_tab(ui: &mut egui::Ui, mcu: &mut crate::panels::mcu_module::mcu::Mcu) {
+        use crate::panels::mcu_module::codegen::family;
+        use crate::panels::mcu_module::mcu::Runtime;
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(10.0);
+            ui.heading(format!("{}  Runtime", ph::GEAR));
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "How the firmware executes. Changing this regenerates the \
+                     entry point in main.rs and the runtime dependencies.",
+                )
+                .color(egui::Color32::GRAY),
+            );
+            ui.add_space(10.0);
+
+            let supported = family::async_supported(&mcu.family);
+
+            // ── Blocking ─────────────────────────────────────────────────────
+            let blocking_sel = mcu.runtime == Runtime::Blocking;
+            if runtime_card(
+                ui,
+                blocking_sel,
+                true,
+                "Blocking (bare-metal)",
+                "#[entry] fn main() -> !  ·  blocking drivers \
+                 (embedded-io / embedded-hal 1.0)",
+            )
+            .clicked()
+            {
+                mcu.runtime = Runtime::Blocking;
+            }
+            ui.add_space(6.0);
+
+            // ── Async (embassy) ──────────────────────────────────────────────
+            let async_sel = mcu.runtime == Runtime::Async;
+            let async_resp = runtime_card(
+                ui,
+                async_sel,
+                supported,
+                "Async (embassy)",
+                "#[embassy_executor::main] async fn main(Spawner)  ·  \
+                 .await-able drivers on embassy-stm32",
+            );
+            if async_resp.clicked() && supported {
+                mcu.runtime = Runtime::Async;
+            }
+
+            ui.add_space(10.0);
+            if !supported {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  Async needs embassy — available for STM32F4/G0/G4/L4/H7/… \
+                         Not yet for {} (STM32F1 is on stm32f1xx-hal; ESP32 uses esp-hal).",
+                        ph::WARNING,
+                        mcu.family,
+                    ))
+                    .color(egui::Color32::from_rgb(210, 170, 90)),
+                );
+            } else if async_sel {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  main.rs now runs on the embassy executor. Add \
+                         `embassy_time::Timer::after_millis(..).await` in the loop; \
+                         USART/SPI/I2C async drivers are coming next.",
+                        ph::INFO,
+                    ))
+                    .color(egui::Color32::from_rgb(120, 170, 220)),
+                );
             }
         });
     }
@@ -701,4 +786,61 @@ impl AppIde {
             }
         });
     }
+}
+
+/// A selectable "card" for the Runtime picker: a framed, clickable block with a
+/// bold title over a dimmed monospace subtitle. `selected` tints it with the
+/// accent; `enabled == false` greys the text and swallows clicks (the disabled
+/// Async option on families without an embassy backend). Returns the click
+/// [`egui::Response`] so the caller decides what a click does.
+fn runtime_card(
+    ui: &mut egui::Ui,
+    selected: bool,
+    enabled: bool,
+    title: &str,
+    subtitle: &str,
+) -> egui::Response {
+    let accent = egui::Color32::from_rgb(90, 140, 210);
+    let fill = if selected {
+        egui::Color32::from_rgb(40, 55, 78)
+    } else {
+        egui::Color32::from_rgb(38, 38, 46)
+    };
+    let border = if selected {
+        egui::Stroke::new(1.5, accent)
+    } else {
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 82))
+    };
+
+    let inner = egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .corner_radius(egui::CornerRadius::same(6))
+        .fill(fill)
+        .stroke(border)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width().min(560.0));
+            let title_col = if enabled {
+                egui::Color32::from_gray(232)
+            } else {
+                egui::Color32::from_gray(120)
+            };
+            ui.label(egui::RichText::new(title).strong().size(14.0).color(title_col));
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .monospace()
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(if enabled { 155 } else { 100 })),
+            );
+        });
+
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let resp = ui.interact(inner.response.rect, egui::Id::new(("runtime_card", title)), sense);
+    if enabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
 }
