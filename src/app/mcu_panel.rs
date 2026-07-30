@@ -268,18 +268,38 @@ impl AppIde {
                             // TOGGLE its list entry this frame (expand if closed,
                             // collapse if open), then it's user-controlled again.
                             let to_open = mcu.expand_module.take();
-                            // Async runtime → SPI/I2C modules show the Blocking|
-                            // Async-DMA selector instead of Portable|Native; Native
-                            // runtime forces concrete HAL (per-module selector hidden).
-                            let is_async = mcu.is_async();
-                            let is_native = mcu.is_native();
+                            // The module selectors follow the STAGED runtime (what
+                            // the user is about to Apply), not the applied one.
+                            let is_async = mcu.pending_is_async();
+                            let is_native = mcu.pending_is_native();
 
                             if !mcu.modules.is_empty() {
+                                use crate::panels::mcu_module::mcu::logic::module_style;
+                                use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode};
                                 let pin_names: std::collections::HashMap<usize, String> = mcu
                                     .iter_all_pins()
                                     .map(|p| (p.number, p.name.clone()))
                                     .collect();
                                 let mut remove_id: Option<String> = None;
+                                // Pull the staged per-module styles into a LOCAL map so
+                                // the config panels can edit them without borrowing
+                                // `mcu` while `mcu.modules` is iterated. Seeded from the
+                                // current staged value, else the module's applied style.
+                                let mut local_pending: std::collections::BTreeMap<
+                                    String,
+                                    (ApiStyle, AsyncBusMode),
+                                > = mcu
+                                    .modules
+                                    .iter()
+                                    .map(|m| {
+                                        let cur = mcu
+                                            .pending_module_styles
+                                            .get(&m.id)
+                                            .copied()
+                                            .unwrap_or_else(|| module_style(&m.config));
+                                        (m.id.clone(), cur)
+                                    })
+                                    .collect();
                                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                                     for m in &mut mcu.modules {
                                         let title = mod_gui::module_title(m);
@@ -314,7 +334,10 @@ impl AppIde {
                                                         .desired_width(160.0),
                                                     );
                                                 });
-                                                mod_gui::module_config_ui(ui, m, &pin_names, is_async, is_native);
+                                                let pending = local_pending
+                                                    .get_mut(&m.id)
+                                                    .expect("pending entry seeded above");
+                                                mod_gui::module_config_ui(ui, m, &pin_names, is_async, is_native, pending);
                                                 ui.add_space(4.0);
                                                 if ui
                                                     .button(format!("{} Remove module", ph::TRASH))
@@ -325,6 +348,8 @@ impl AppIde {
                                             });
                                     }
                                 });
+                                // Write the edited staged styles back onto the MCU.
+                                mcu.pending_module_styles = local_pending;
                                 if let Some(id) = remove_id {
                                     mcu.remove_module(&id);
                                     modules_changed = true;
@@ -474,8 +499,12 @@ impl AppIde {
             let async_ok = family::async_supported(&mcu.family);
             let native_ok = family::native_supported(&mcu.family);
 
+            // The cards edit the STAGED choice (`pending_*`); nothing regenerates
+            // until "Apply" commits it (see the Apply bar below).
+            Self::runtime_apply_bar(ui, mcu);
+
             // ── Blocking ─────────────────────────────────────────────────────
-            let blocking_sel = mcu.runtime == Runtime::Blocking;
+            let blocking_sel = mcu.pending_runtime == Runtime::Blocking;
             if runtime_card(
                 ui,
                 blocking_sel,
@@ -486,7 +515,7 @@ impl AppIde {
             )
             .clicked()
             {
-                mcu.runtime = Runtime::Blocking;
+                mcu.pending_runtime = Runtime::Blocking;
             }
             runtime_details(
                 ui,
@@ -507,7 +536,7 @@ impl AppIde {
             ui.add_space(6.0);
 
             // ── Native (concrete HAL) ────────────────────────────────────────
-            let native_sel = mcu.runtime == Runtime::Native;
+            let native_sel = mcu.pending_runtime == Runtime::Native;
             let native_resp = runtime_card(
                 ui,
                 native_sel,
@@ -517,7 +546,7 @@ impl AppIde {
                  (Serial / Spi / BlockingI2c) — no portable bridges",
             );
             if native_resp.clicked() && native_ok {
-                mcu.runtime = Runtime::Native;
+                mcu.pending_runtime = Runtime::Native;
             }
             runtime_details(
                 ui,
@@ -538,7 +567,7 @@ impl AppIde {
             ui.add_space(6.0);
 
             // ── Async (embassy) ──────────────────────────────────────────────
-            let async_sel = mcu.runtime == Runtime::Async;
+            let async_sel = mcu.pending_runtime == Runtime::Async;
             let async_resp = runtime_card(
                 ui,
                 async_sel,
@@ -548,7 +577,7 @@ impl AppIde {
                  .await-able drivers on embassy-stm32",
             );
             if async_resp.clicked() && async_ok {
-                mcu.runtime = Runtime::Async;
+                mcu.pending_runtime = Runtime::Async;
             }
             runtime_details(
                 ui,
@@ -615,10 +644,11 @@ impl AppIde {
             );
             ui.add_space(8.0);
 
-            // Only the STM32F1 backend has the io.rs bridge; on the Native runtime
-            // GPIO is forced raw regardless.
-            let gpio_ok = native_ok && mcu.runtime != Runtime::Native;
-            let portable_sel = mcu.gpio_api == ApiStyle::Portable;
+            // Only the STM32F1 backend has the io.rs bridge; on the (staged)
+            // Native runtime GPIO is forced raw regardless. Edits the STAGED
+            // `pending_gpio_api`.
+            let gpio_ok = native_ok && mcu.pending_runtime != Runtime::Native;
+            let portable_sel = mcu.pending_gpio_api == ApiStyle::Portable;
             if runtime_card(
                 ui,
                 portable_sel && native_ok,
@@ -630,10 +660,10 @@ impl AppIde {
             .clicked()
                 && gpio_ok
             {
-                mcu.gpio_api = ApiStyle::Portable;
+                mcu.pending_gpio_api = ApiStyle::Portable;
             }
             ui.add_space(6.0);
-            let native_gpio_sel = mcu.gpio_api == ApiStyle::Native;
+            let native_gpio_sel = mcu.pending_gpio_api == ApiStyle::Native;
             if runtime_card(
                 ui,
                 native_gpio_sel && native_ok,
@@ -645,7 +675,7 @@ impl AppIde {
             .clicked()
                 && gpio_ok
             {
-                mcu.gpio_api = ApiStyle::Native;
+                mcu.pending_gpio_api = ApiStyle::Native;
             }
 
             ui.add_space(8.0);
@@ -659,7 +689,7 @@ impl AppIde {
                     ))
                     .color(egui::Color32::from_rgb(210, 170, 90)),
                 );
-            } else if mcu.runtime == Runtime::Native {
+            } else if mcu.pending_runtime == Runtime::Native {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  The Native runtime already binds all GPIO raw — this choice \
@@ -670,6 +700,81 @@ impl AppIde {
                 );
             }
         });
+    }
+
+    /// The staged-changes banner shown at the top of the System tab: nothing
+    /// regenerates until the user **Applies** the pending Runtime / GPIO /
+    /// per-module choices. Nothing is drawn when there's no staged change.
+    fn runtime_apply_bar(ui: &mut egui::Ui, mcu: &mut crate::panels::mcu_module::mcu::Mcu) {
+        if !mcu.style_dirty() {
+            return;
+        }
+        let diff = mcu.style_diff_summary();
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(10))
+            .corner_radius(egui::CornerRadius::same(6))
+            .fill(egui::Color32::from_rgb(48, 44, 30))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 130, 70)))
+            .show(ui, |ui| {
+                if !mcu.pending_apply_confirm {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  {} staged change{} — not applied yet.",
+                                ph::WARNING,
+                                diff.len(),
+                                if diff.len() == 1 { "" } else { "s" },
+                            ))
+                            .color(egui::Color32::from_rgb(230, 200, 120)),
+                        );
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new(format!("{}  Apply — regenerate", ph::CHECK)).strong())
+                            .on_hover_text("Commit these choices and regenerate main.rs, the config files and Cargo.toml deps")
+                            .clicked()
+                        {
+                            mcu.pending_apply_confirm = true;
+                        }
+                        if ui.button("Discard").on_hover_text("Revert the staged choices to what's applied").clicked() {
+                            mcu.sync_pending_style();
+                        }
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Apply these changes? This regenerates main.rs, the config files and Cargo.toml deps:")
+                            .strong()
+                            .color(egui::Color32::from_gray(225)),
+                    );
+                    ui.add_space(4.0);
+                    for line in &diff {
+                        ui.label(egui::RichText::new(format!("   ·  {line}")).monospace().size(11.5).color(egui::Color32::from_gray(200)));
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  Edits inside a config file may be lost if its template changes (e.g. blocking → async).",
+                            ph::WARNING,
+                        ))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(210, 170, 90)),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new(format!("{}  Confirm & apply", ph::CHECK)).strong())
+                            .clicked()
+                        {
+                            mcu.apply_pending_style();
+                        }
+                        if ui.button("Cancel").clicked() {
+                            mcu.pending_apply_confirm = false;
+                        }
+                    });
+                }
+            });
+        ui.add_space(12.0);
     }
 
     /// The F12 "Go to definition" snippet (external / crate / std files) —

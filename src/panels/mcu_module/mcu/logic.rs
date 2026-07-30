@@ -85,6 +85,10 @@ impl Mcu {
             modules: Vec::new(),
             runtime: crate::panels::mcu_module::mcu::model::Runtime::default(),
             gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
+            pending_runtime: crate::panels::mcu_module::mcu::model::Runtime::default(),
+            pending_gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
+            pending_module_styles: std::collections::BTreeMap::new(),
+            pending_apply_confirm: false,
             expand_module: None,
         }
     }
@@ -288,6 +292,93 @@ impl Mcu {
         self.runtime = mcu_config::parse_runtime(text);
         // GPIO api (`@gpio`) — missing restores the default Portable (io.rs bridge).
         self.gpio_api = mcu_config::parse_gpio_api(text);
+        // A freshly loaded project has NO staged edits: pending == applied.
+        self.sync_pending_style();
+    }
+
+    // ── Staged codegen-style choices (System-tab "Apply") ─────────────────────
+
+    /// Reset the staged (`pending_*`) choices to the currently APPLIED ones — so
+    /// nothing shows as dirty. Called on project load and right after an Apply.
+    pub fn sync_pending_style(&mut self) {
+        self.pending_runtime = self.runtime;
+        self.pending_gpio_api = self.gpio_api;
+        self.pending_module_styles = self
+            .modules
+            .iter()
+            .map(|m| (m.id.clone(), module_style(&m.config)))
+            .collect();
+        self.pending_apply_confirm = false;
+    }
+
+    /// Commit the staged choices into the applied fields — the runtime, GPIO api
+    /// and each module's `api_style`/`async_mode`. This changes the state hash, so
+    /// the next `init_frame` regenerates `main.rs`, the config files and the deps.
+    pub fn apply_pending_style(&mut self) {
+        self.runtime = self.pending_runtime;
+        self.gpio_api = self.pending_gpio_api;
+        let pending = std::mem::take(&mut self.pending_module_styles);
+        for m in &mut self.modules {
+            if let Some(&(api, async_mode)) = pending.get(&m.id) {
+                set_module_style(&mut m.config, api, async_mode);
+            }
+        }
+        self.pending_module_styles = pending;
+        self.pending_apply_confirm = false;
+    }
+
+    /// Whether any staged choice differs from the applied one (drives the Apply
+    /// button's enabled state).
+    pub fn style_dirty(&self) -> bool {
+        if self.pending_runtime != self.runtime || self.pending_gpio_api != self.gpio_api {
+            return true;
+        }
+        self.modules.iter().any(|m| {
+            self.pending_module_styles
+                .get(&m.id)
+                .is_some_and(|&staged| staged != module_style(&m.config))
+        })
+    }
+
+    /// Human-readable lines of what an Apply would change (for the confirm
+    /// prompt). Empty when nothing is staged.
+    pub fn style_diff_summary(&self) -> Vec<String> {
+        use crate::panels::mcu_module::modules::AsyncBusMode;
+        let mut out = Vec::new();
+        if self.pending_runtime != self.runtime {
+            out.push(format!(
+                "Runtime: {} → {}",
+                self.runtime.as_token(),
+                self.pending_runtime.as_token()
+            ));
+        }
+        if self.pending_gpio_api != self.gpio_api {
+            out.push(format!(
+                "GPIO In/Out: {:?} → {:?}",
+                self.gpio_api, self.pending_gpio_api
+            ));
+        }
+        for m in &self.modules {
+            let Some(&(api, asyncm)) = self.pending_module_styles.get(&m.id) else {
+                continue;
+            };
+            let (cur_api, cur_async) = module_style(&m.config);
+            let name = crate::panels::mcu_module::mcu::gui::modules::module_base_name(m);
+            if api != cur_api {
+                out.push(format!("{name} init: {cur_api:?} → {api:?}"));
+            }
+            if asyncm != cur_async && !matches!(
+                m.config,
+                crate::panels::mcu_module::modules::ModuleConfig::Usart(_)
+            ) {
+                let lbl = |x: AsyncBusMode| match x {
+                    AsyncBusMode::Blocking => "Blocking",
+                    AsyncBusMode::AsyncDma => "Async-DMA",
+                };
+                out.push(format!("{name} async: {} → {}", lbl(cur_async), lbl(asyncm)));
+            }
+        }
+        out
     }
 
     /// Restores the clock-tree configuration parsed from a saved `main.rs`
@@ -565,5 +656,36 @@ mod module_support_tests {
                 );
             }
         }
+    }
+}
+
+// ── Bus-module style helpers (used by the staged-Apply flow) ──────────────────
+use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig};
+
+/// The `(api_style, async_mode)` a bus module currently carries. USART has no
+/// `async_mode` (its async form is always the embedded-io-async bridge), so it
+/// reports `Blocking`; non-bus kinds report the defaults.
+pub fn module_style(config: &ModuleConfig) -> (ApiStyle, AsyncBusMode) {
+    match config {
+        ModuleConfig::Usart(c) => (c.api_style, AsyncBusMode::Blocking),
+        ModuleConfig::Spi(c) => (c.api_style, c.async_mode),
+        ModuleConfig::I2c(c) => (c.api_style, c.async_mode),
+        _ => (ApiStyle::Portable, AsyncBusMode::Blocking),
+    }
+}
+
+/// Write a staged `(api_style, async_mode)` into a bus module's config.
+fn set_module_style(config: &mut ModuleConfig, api: ApiStyle, async_mode: AsyncBusMode) {
+    match config {
+        ModuleConfig::Usart(c) => c.api_style = api,
+        ModuleConfig::Spi(c) => {
+            c.api_style = api;
+            c.async_mode = async_mode;
+        }
+        ModuleConfig::I2c(c) => {
+            c.api_style = api;
+            c.async_mode = async_mode;
+        }
+        _ => {}
     }
 }

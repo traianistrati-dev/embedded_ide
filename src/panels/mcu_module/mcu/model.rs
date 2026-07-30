@@ -111,6 +111,29 @@ pub struct Mcu {
     /// GPIO). Chosen in the System tab. Forced to raw on the Native runtime;
     /// irrelevant on Async (embassy `Output`/`Input`). Persisted in `mcu.config`.
     pub gpio_api: crate::panels::mcu_module::modules::ApiStyle,
+
+    // ── Staged codegen-style choices (System tab "Apply") ─────────────────────
+    // The APPLIED fields above (`runtime`, `gpio_api`) + each module's
+    // `config.api_style`/`async_mode` are what codegen reads and the regen hash
+    // gates on. The `pending_*` below are what the UI edits; nothing regenerates
+    // until the user clicks **Apply**, which commits pending → applied. All
+    // transient (not persisted, not hashed).
+    /// Staged runtime (edited by the System-tab cards; applied on "Apply").
+    pub pending_runtime: Runtime,
+    /// Staged GPIO api (System-tab cards).
+    pub pending_gpio_api: crate::panels::mcu_module::modules::ApiStyle,
+    /// Staged per-module `(api_style, async_mode)` keyed by module id. Lazily
+    /// populated when a module's config panel is opened; a module with no entry
+    /// has no staged change.
+    pub pending_module_styles: std::collections::BTreeMap<
+        String,
+        (
+            crate::panels::mcu_module::modules::ApiStyle,
+            crate::panels::mcu_module::modules::AsyncBusMode,
+        ),
+    >,
+    /// Transient: the inline "Apply — Confirm/Cancel" prompt is showing.
+    pub pending_apply_confirm: bool,
     /// Transient: id of a module the user clicked on the canvas, so the module
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.

@@ -433,6 +433,9 @@ pub fn module_config_ui(
     pin_names: &HashMap<usize, String>,
     is_async: bool,
     is_native: bool,
+    // The STAGED `(api_style, async_mode)` for this module — the api/async row
+    // edit THIS, not `m.config`, so nothing regenerates until "Apply".
+    pending: &mut (ApiStyle, AsyncBusMode),
 ) {
     // Connection rows (generic over kind), computed before borrowing config.
     let conn_rows: Vec<(&'static str, String)> = m
@@ -541,7 +544,7 @@ pub fn module_config_ui(
                     // Blocking runtime: async USART is always the embedded-io-async
                     // BufferedUart bridge, and Native forces concrete HAL for all.
                     if !is_async && !is_native {
-                        api_row(ui, &mut cfg.api_style);
+                        api_row(ui, &mut pending.0);
                     }
                 }
                 ModuleConfig::Spi(cfg) => {
@@ -564,9 +567,9 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
                     if is_async {
-                        async_row(ui, &mut cfg.async_mode);
+                        async_row(ui, &mut pending.1);
                     } else if !is_native {
-                        api_row(ui, &mut cfg.api_style);
+                        api_row(ui, &mut pending.0);
                     }
                 }
                 ModuleConfig::I2c(cfg) => {

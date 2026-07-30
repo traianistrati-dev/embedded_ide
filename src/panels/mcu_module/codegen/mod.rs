@@ -52,6 +52,18 @@ impl Mcu {
         self.runtime == Runtime::Native && family::native_supported(&self.family)
     }
 
+    /// Like [`Mcu::is_async`] but reading the STAGED `pending_runtime` — used by
+    /// the module config UI so its selectors follow the runtime the user is about
+    /// to apply, not the applied one.
+    pub fn pending_is_async(&self) -> bool {
+        self.pending_runtime == Runtime::Async && family::async_supported(&self.family)
+    }
+
+    /// Like [`Mcu::is_native`] but reading the STAGED `pending_runtime`.
+    pub fn pending_is_native(&self) -> bool {
+        self.pending_runtime == Runtime::Native && family::native_supported(&self.family)
+    }
+
     /// Whether GPIO In/Out bind the RAW HAL pin (no `pins/configs/io.rs`
     /// `DigitalOut`/`DigitalIn` bridge) — true when the GPIO api is `Native` OR
     /// the whole project runs Native. `false` (the default) emits the portable
@@ -728,6 +740,51 @@ mod tests {
         assert_contains_substring(&code, "let pa0_out = &mut gpioa.pa0.into_push_pull_output");
         assert_not_contains_substring(&code, "DigitalOut");
         assert!(!mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "no io.rs on Native GPIO");
+    }
+
+    /// Staged style choices don't affect codegen until `apply_pending_style`:
+    /// editing `pending_*` sets `style_dirty` but leaves the applied fields (and
+    /// therefore the generated code) alone; Apply commits them.
+    #[test]
+    fn test_staged_style_apply_and_dirty() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.sync_pending_style();
+        assert!(!mcu.style_dirty(), "fresh project: pending == applied");
+
+        // Stage GPIO Native → dirty, but codegen still sees Portable.
+        mcu.pending_gpio_api = ApiStyle::Native;
+        assert!(mcu.style_dirty());
+        assert_eq!(mcu.gpio_api, ApiStyle::Portable, "applied field unchanged");
+        assert!(!mcu.gpio_native(), "codegen still Portable until Apply");
+        assert!(mcu.style_diff_summary().iter().any(|l| l.contains("GPIO")));
+
+        // Apply → committed; codegen now Native; not dirty.
+        mcu.apply_pending_style();
+        assert!(!mcu.style_dirty());
+        assert_eq!(mcu.gpio_api, ApiStyle::Native);
+        assert!(mcu.gpio_native());
+
+        // Stage a per-module api_style; dirty; config unchanged until Apply.
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        mcu.sync_pending_style();
+        assert!(!mcu.style_dirty());
+        let id = mcu.modules[0].id.clone();
+        mcu.pending_module_styles
+            .insert(id, (ApiStyle::Native, AsyncBusMode::Blocking));
+        assert!(mcu.style_dirty());
+        assert!(
+            matches!(&mcu.modules[0].config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable),
+            "module config unchanged until Apply"
+        );
+        mcu.apply_pending_style();
+        assert!(
+            matches!(&mcu.modules[0].config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Native),
+            "Apply committed the module api_style"
+        );
+        assert!(!mcu.style_dirty());
     }
 
     /// A `<pin>_<type>` binding still round-trips back through `parse_main_rs`.
