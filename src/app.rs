@@ -1576,6 +1576,11 @@ impl AppIde {
             // Async SPI/I2C deps: `embedded-hal` 1.0 for any bus, plus
             // `embedded-hal-async` when a module is in async-DMA mode.
             let (mut needs_eh, mut needs_eh_async) = (false, false);
+            // ANY USART on the blocking/native path needs `nb`: a Portable USART
+            // via its `nb::block!` bridge, a Native USART because the concrete
+            // stm32f1xx-hal `Tx`/`Rx` are nb-based (`nb::block!(rx.read())`).
+            // (Async USART uses embedded-io-async → no nb.)
+            let mut any_usart_blocking = false;
             if let Some(m) = &self.mcu {
                 use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig};
                 for md in &m.modules {
@@ -1589,18 +1594,30 @@ impl AppIde {
                             needs_eh = true;
                             needs_eh_async |= mode == AsyncBusMode::AsyncDma;
                         }
-                    } else if !is_native {
-                        // Blocking (mixed): trait crates for the Portable modules.
-                        match &md.config {
-                            ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
-                            ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
-                            ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => needs_i2c = true,
-                            _ => {}
+                    } else {
+                        // Blocking OR Native path.
+                        if matches!(&md.config, ModuleConfig::Usart(_)) {
+                            any_usart_blocking = true;
                         }
+                        if !is_native {
+                            // Blocking (mixed): trait crates for the Portable modules.
+                            match &md.config {
+                                ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
+                                ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
+                                ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => needs_i2c = true,
+                                _ => {}
+                            }
+                        }
+                        // is_native → all Native → no portable trait crates
+                        // (but still `nb` via `any_usart_blocking` above).
                     }
-                    // is_native → all Native → no portable trait crates.
                 }
             }
+            // `nb`: CAN (bxcan), the Portable SPI FullDuplex bridge, and ANY
+            // USART on the non-async path. Kept separate so a Native USART (which
+            // sets no other trait crate) still keeps `nb` — and a user's pinned
+            // `nb = "1.1.0"` survives Save instead of being stripped.
+            let needs_nb = needs_can || needs_spi || any_usart_blocking;
             // GPIO in/out pins are wrapped in the `pins::configs::io` eh-1.0
             // bridge, emitted as `io.rs` (always portable).
             let needs_gpio = !is_async && has_cfg("io");
@@ -1617,6 +1634,7 @@ impl AppIde {
                 needs_spi,
                 needs_i2c,
                 needs_gpio,
+                needs_nb,
             );
             let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb);
             // Async runtime (embassy-executor + embassy-time + the HAL time

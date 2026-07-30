@@ -1933,11 +1933,19 @@ pub fn fetch_baseline(
 /// file on disk (or the file is missing) — i.e. edits a commit would MISS.
 /// `pub(crate)` so the exit prompt can ask the same question.
 pub(crate) fn unsaved_changes(project_dir: &Path, snapshot: &[(String, String)]) -> Vec<String> {
+    // Compare EOL-AGNOSTICALLY. The in-memory snapshot is LF-normalized, but a
+    // project checked out on Windows (`core.autocrlf=true`) has CRLF files on
+    // disk, and `write_if_changed` deliberately keeps that CRLF. A raw `disk !=
+    // content` therefore flagged EVERY file as unsaved (CRLF vs LF) even right
+    // after a save — while git itself reported the tree clean. Stripping `\r`
+    // (the canonical LF form `lf_to_crlf` assumes) makes "unsaved" mean a REAL
+    // content change — exactly what `write_if_changed` would actually rewrite.
+    let norm = |s: &str| s.replace('\r', "");
     snapshot
         .iter()
         .filter(|(rel, content)| {
             std::fs::read_to_string(project_dir.join(rel))
-                .map(|disk| disk != *content)
+                .map(|disk| norm(&disk) != norm(content))
                 .unwrap_or(true)
         })
         .map(|(rel, _)| rel.clone())
@@ -2592,6 +2600,29 @@ index abc..def 100644
         ];
         let unsaved = unsaved_changes(&dir, &snapshot);
         assert_eq!(unsaved, vec!["Cargo.toml".to_owned(), "src/missing.rs".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that is CRLF on disk (Windows checkout) but LF in the in-memory
+    /// snapshot must NOT count as unsaved — content is identical modulo EOL. This
+    /// is the false-positive the exit dialog + Git-tab warning used to show.
+    #[test]
+    fn unsaved_changes_ignores_crlf_vs_lf() {
+        let dir = std::env::temp_dir().join(format!("eide_git_eol_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        // On disk: CRLF (as `core.autocrlf=true` checks out on Windows).
+        std::fs::write(dir.join("src/main.rs"), "line1\r\nline2\r\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "a\r\nB\r\n").unwrap();
+
+        let snapshot = vec![
+            // In-memory: LF-normalized, SAME content → not unsaved.
+            ("src/main.rs".to_owned(), "line1\nline2\n".to_owned()),
+            // A REAL edit (line 2 changed) → still flagged despite the EOL diff.
+            ("Cargo.toml".to_owned(), "a\nb\n".to_owned()),
+        ];
+        let unsaved = unsaved_changes(&dir, &snapshot);
+        assert_eq!(unsaved, vec!["Cargo.toml".to_owned()], "only the real edit is unsaved");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

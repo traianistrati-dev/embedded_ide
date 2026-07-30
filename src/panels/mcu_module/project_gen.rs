@@ -260,7 +260,9 @@ fn ensure_dep(cargo_toml: &str, name: &str, needs: bool, add_line: &str) -> Stri
 /// - `embedded-hal-0-2` — USART/SPI/I2C bridges (the HAL is on embedded-hal 0.2;
 ///   the package alias frees the `embedded-hal` name for the 1.0 traits below)
 /// - `embedded-hal` 1.0 — SPI (`SpiBus`) + I2C (`I2c`) portable traits
-/// - `nb`               — CAN + USART + SPI (`nb::block!`)
+/// - `nb`               — passed in as `needs_nb` (CAN + the Portable USART/SPI
+///   `nb::block!` bridges + ANY Native USART, whose concrete stm32f1xx-hal
+///   `Tx`/`Rx` are nb-based). Computed by the caller so a Native USART keeps `nb`.
 pub fn ensure_peripheral_deps(
     cargo_toml: &str,
     needs_can: bool,
@@ -268,6 +270,7 @@ pub fn ensure_peripheral_deps(
     needs_spi: bool,
     needs_i2c: bool,
     needs_gpio: bool,
+    needs_nb: bool,
 ) -> String {
     let eh1 = needs_spi || needs_i2c || needs_gpio; // SpiBus / I2c / OutputPin…
     let eh02 = needs_usart || eh1; // every bridge speaks to the HAL's eh 0.2
@@ -281,8 +284,10 @@ pub fn ensure_peripheral_deps(
         "embedded-hal-0-2 = { package = \"embedded-hal\", version = \"0.2.7\", features = [\"unproven\"] }",
     );
     s = ensure_dep(&s, "embedded-hal", eh1, "embedded-hal = \"1.0\"");
-    // nb: CAN, USART, and the SPI SpiBus bridge (FullDuplex) — NOT I2C or GPIO.
-    s = ensure_dep(&s, "nb", needs_can || needs_usart || needs_spi, "nb           = \"1\"");
+    // nb is nb-based-serial / CAN — decided by the caller (see `needs_nb` doc).
+    // Note: `ensure_dep` is a no-op when nb is already present, so a user's
+    // pinned `nb = "1.1.0"` is PRESERVED (not reset to "1") while it's needed.
+    s = ensure_dep(&s, "nb", needs_nb, "nb           = \"1\"");
     s
 }
 
@@ -1024,17 +1029,18 @@ mod tests {
             &stm32_def(),
             &ToolchainKind::RustEmbedded,
         );
-        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false, false);
+        // `needs_nb` (last arg) mirrors the old CAN|USART|SPI derivation here.
+        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false, false, false);
         assert!(!base.contains("bxcan") && !base.contains("embedded-hal"), "clean base");
 
         // CAN only → bxcan + nb; no embedded-io/hal.
-        let can = ensure_peripheral_deps(&base, true, false, false, false, false);
+        let can = ensure_peripheral_deps(&base, true, false, false, false, false, true);
         assert!(can.contains("bxcan = \"0.7\"") && can.contains("nb           = \"1\""));
         assert!(!can.contains("embedded-io") && !can.contains("embedded-hal"));
         assert_eq!(none(&can), base, "removal restores base");
 
         // USART only → embedded-io + embedded-hal-0-2 + nb; NO embedded-hal 1.0.
-        let usart = ensure_peripheral_deps(&base, false, true, false, false, false);
+        let usart = ensure_peripheral_deps(&base, false, true, false, false, false, true);
         assert!(usart.contains("embedded-io  = \"0.6\""), "{usart}");
         assert!(usart.contains("embedded-hal-0-2 = { package = \"embedded-hal\""), "{usart}");
         assert!(usart.contains("nb           = \"1\""));
@@ -1043,25 +1049,25 @@ mod tests {
         assert_eq!(none(&usart), base);
 
         // SPI only → embedded-hal 1.0 + embedded-hal-0-2 + nb; no embedded-io.
-        let spi = ensure_peripheral_deps(&base, false, false, true, false, false);
+        let spi = ensure_peripheral_deps(&base, false, false, true, false, false, true);
         assert!(spi.lines().any(|l| is_dep_line(l, "embedded-hal")), "eh 1.0 present");
         assert!(spi.contains("embedded-hal-0-2") && spi.contains("nb           ="));
         assert!(!spi.contains("embedded-io"));
 
         // I2C only → embedded-hal 1.0 + embedded-hal-0-2, but NO nb (I2c bridge
         // needs no nb::block!).
-        let i2c = ensure_peripheral_deps(&base, false, false, false, true, false);
+        let i2c = ensure_peripheral_deps(&base, false, false, false, true, false, false);
         assert!(i2c.lines().any(|l| is_dep_line(l, "embedded-hal")) && i2c.contains("embedded-hal-0-2"));
         assert!(!i2c.lines().any(|l| is_dep_line(l, "nb")), "no nb for i2c-only:\n{i2c}");
 
         // GPIO only → embedded-hal 1.0 + embedded-hal-0-2, NO nb, NO embedded-io.
-        let gpio = ensure_peripheral_deps(&base, false, false, false, false, true);
+        let gpio = ensure_peripheral_deps(&base, false, false, false, false, true, false);
         assert!(gpio.lines().any(|l| is_dep_line(l, "embedded-hal")) && gpio.contains("embedded-hal-0-2"));
         assert!(!gpio.lines().any(|l| is_dep_line(l, "nb")) && !gpio.contains("embedded-io"));
         assert_eq!(none(&gpio), base);
 
         // Everything on → all present, exactly one line each; idempotent.
-        let all = ensure_peripheral_deps(&base, true, true, true, true, true);
+        let all = ensure_peripheral_deps(&base, true, true, true, true, true, true);
         for dep in ["bxcan", "embedded-io", "embedded-hal", "embedded-hal-0-2", "nb"] {
             assert_eq!(
                 all.lines().filter(|l| is_dep_line(l, dep)).count(),
@@ -1069,8 +1075,18 @@ mod tests {
                 "exactly one `{dep}` line:\n{all}"
             );
         }
-        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true, true), all, "idempotent");
+        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true, true, true), all, "idempotent");
         assert_eq!(none(&all), base, "full teardown restores base");
+
+        // Native USART (no Portable trait crate, but `needs_nb`) must KEEP a
+        // user-pinned `nb = "1.1.0"` untouched — the bug this fixes: Save used to
+        // strip it. `nb` needed, already present → `ensure_dep` no-ops.
+        let pinned = format!("{base}nb = \"1.1.0\"\n");
+        let kept = ensure_peripheral_deps(&pinned, false, false, false, false, false, true);
+        assert!(kept.contains("nb = \"1.1.0\""), "user nb version preserved:\n{kept}");
+        assert!(!kept.contains("nb           = \"1\""), "not duplicated with the IDE default");
+        // …and when nb is genuinely not needed it IS removed (unchanged behaviour).
+        assert!(!ensure_peripheral_deps(&pinned, false, false, false, false, false, false).contains("nb ="));
     }
 
     #[test]
