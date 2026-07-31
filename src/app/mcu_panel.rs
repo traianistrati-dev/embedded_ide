@@ -554,13 +554,24 @@ impl AppIde {
                 ui,
                 "rt_details_blocking",
                 &[
+                    ("On Apply:", "Regenerates main.rs with the #[entry] entry, rewrites every \
+                                   src/pins/configs/*.rs to the portable init, (re)writes src/pins/io.rs, \
+                                   and reconciles Cargo.toml — then triggers a build."),
                     ("Entry:", "#[cortex_m_rt::entry] fn main() -> ! — classic bare-metal, runs forever."),
                     ("Drivers:", "Each USART/SPI/I2C initialises in src/pins/configs/*.rs and is exposed \
                                   through STANDARD portable traits — embedded-io (serial) + embedded-hal 1.0 \
                                   (SpiBus / I2c / OutputPin). App code generic over those traits ports across \
                                   chips/HALs unchanged."),
-                    ("Per module:", "Each bus module has a Portable | Native selector; the portable wrapper's \
-                                     .0 still gives the raw HAL object back."),
+                    ("Virtual modules:", "Each USART/SPI/I2C module keeps its Init API: Portable | Native (HAL \
+                                          type) selector on the Pins tab. Portable = the trait wrapper (its .0 \
+                                          still hands back the raw HAL object); Native = the concrete HAL type \
+                                          for that one module only. SPI/I2C are always blocking here."),
+                    ("GPIO / io.rs:", "GPIO API = Portable (System tab) → src/pins/io.rs wraps the pins as \
+                                       DigitalOut / DigitalIn + a Delay over embedded-hal 1.0. GPIO API = Native \
+                                       → raw HAL pins and io.rs is not emitted."),
+                    ("Cargo.toml:", "Adds embedded-io (serial) + embedded-hal 1.0 (SPI/I2C/GPIO) + the \
+                                     embedded-hal-0-2 bridge alias; nb is added only while a Native-mode module \
+                                     needs it. The embassy-* async crates are removed."),
                     ("Applies to:", "Every chip — this is the default runtime."),
                 ],
                 "let mut _serial1 = pins::configs::usart1::init(...);\n\
@@ -585,12 +596,18 @@ impl AppIde {
                 ui,
                 "rt_details_native",
                 &[
+                    ("On Apply:", "Regenerates main.rs, rewrites every src/pins/configs/*.rs to the concrete \
+                                   init, drops src/pins/io.rs (raw GPIO), and reconciles Cargo.toml — then builds."),
                     ("Entry:", "#[entry] fn main() -> ! — the same bare-metal entry as Blocking."),
                     ("Drivers:", "init returns the CONCRETE stm32f1xx-hal types: Serial split into (Tx, Rx), \
                                   Spi<…>, BlockingI2c<…>. No portable bridges, no extra trait crates, full HAL \
                                   features."),
-                    ("Scope:", "Project-wide — forces ALL USART/SPI/I2C to Native, so the per-module \
-                                Portable/Native selector is hidden."),
+                    ("Virtual modules:", "Init API is FORCED to Native (HAL type) for every USART/SPI/I2C and \
+                                          shown locked on the Pins tab — project-wide, nothing to pick per module."),
+                    ("GPIO / io.rs:", "GPIO is raw concrete HAL pins — src/pins/io.rs (the DigitalOut / DigitalIn \
+                                       / Delay wrappers) is NOT generated. The System-tab GPIO selector is subsumed."),
+                    ("Cargo.toml:", "Adds nb (the concrete Tx / Rx are nb-based) and keeps the concrete \
+                                     stm32f1xx-hal; the embassy-* async crates are removed."),
                     ("Applies to:", "STM32F1 only (the family with concrete-HAL templates). Greyed on other \
                                      families, whose blocking HAL types are already concrete."),
                 ],
@@ -616,13 +633,22 @@ impl AppIde {
                 ui,
                 "rt_details_async",
                 &[
+                    ("On Apply:", "Regenerates main.rs with the embassy entry + Spawner, rewrites every \
+                                   src/pins/configs/*.rs to the async init, toggles the embassy Cargo.toml deps — \
+                                   then builds."),
                     ("Entry:", "#[embassy_executor::main] async fn main(Spawner) — the embassy executor drives \
                                 the task; use .await inside the loop."),
-                    ("Drivers:", "embedded-io-async (USART via BufferedUart) + embedded-hal-async (SPI/I2C). \
-                                  Each SPI/I2C module has a Blocking | Async-DMA selector."),
+                    ("Drivers:", "embedded-io-async (USART via BufferedUart, StaticCell ring buffers) + \
+                                  embedded-hal-async (SPI/I2C), initialised in src/pins/configs/*.rs."),
+                    ("Virtual modules:", "USART is always BufferedUart. Each SPI/I2C module gets a Blocking | \
+                                          Async-DMA selector on the Pins tab (the Portable/Native Init API is not \
+                                          used under Async)."),
                     ("Async-DMA:", "embassy async SPI/I2C need DMA channels the IDE can't choose → main.rs gets \
                                     a TODO line to fill (it won't compile until you set channels valid for your chip)."),
-                    ("Deps:", "Adds embassy-executor + embassy-time + the HAL time-driver automatically."),
+                    ("Cargo.toml:", "Adds embassy-executor + embassy-time and toggles the time-driver-any feature \
+                                     on embassy-stm32. Async USART adds embedded-io-async + static_cell; SPI/I2C \
+                                     add embedded-hal (blocking) / embedded-hal-async (async-DMA). Leaving Async \
+                                     removes these again."),
                     ("Applies to:", "STM32F4/G0/G4/L4/H7/WBA/… (embassy families). NOT STM32F1 (on stm32f1xx-hal) \
                                      or ESP yet."),
                 ],
@@ -1189,6 +1215,83 @@ fn runtime_card(
     resp
 }
 
+/// Style one word inside a Runtime-details body: crate/library names → yellow
+/// bold, source-file names → orange bold, async/runtime keywords → orange-red
+/// bold, peripheral names → bold (default colour); everything else stays plain.
+/// Matching strips surrounding sentence punctuation but the returned text keeps
+/// the original token verbatim.
+fn detail_word(word: &str) -> egui::RichText {
+    const SIZE: f32 = 11.5;
+    let plain = egui::Color32::from_gray(165);
+    // Trim only clear sentence punctuation for matching (keep '.', '/', '-', '_'
+    // so file names / crate names / `.await` survive).
+    let clean = word
+        .trim_start_matches('(')
+        .trim_end_matches([',', ';', ':', '.', ')']);
+
+    // 1. Source-file names → orange bold (Cargo.toml, io.rs, main.rs, *.rs …).
+    if clean.ends_with(".rs") || clean.ends_with(".toml") {
+        return egui::RichText::new(word)
+            .size(SIZE)
+            .strong()
+            .color(egui::Color32::from_rgb(240, 150, 40));
+    }
+    // 2. Crate / library names → yellow bold.
+    const LIBS: &[&str] = &[
+        "embedded-hal-0-2",
+        "embedded-hal",
+        "embedded-io",
+        "embedded-io-async",
+        "embedded-hal-async",
+        "nb",
+        "embassy-executor",
+        "embassy-time",
+        "embassy-stm32",
+        "static_cell",
+        "stm32f1xx-hal",
+        "cortex-m-rt",
+        "bxcan",
+        "usb-device",
+        "usbd-serial",
+    ];
+    if LIBS.contains(&clean) {
+        return egui::RichText::new(word)
+            .size(SIZE)
+            .strong()
+            .color(egui::Color32::from_rgb(235, 215, 70));
+    }
+    // 3. async / runtime keywords → orange-red bold.
+    const KEYWORDS: &[&str] = &[
+        "async",
+        "await",
+        ".await",
+        "Async",
+        "Async-DMA",
+        "Spawner",
+        "Blocking",
+        "Native",
+        "Portable",
+        "#[entry]",
+        "#[embassy_executor::main]",
+        "#[cortex_m_rt::entry]",
+    ];
+    if KEYWORDS.contains(&clean) {
+        return egui::RichText::new(word)
+            .size(SIZE)
+            .strong()
+            .color(egui::Color32::from_rgb(255, 85, 50));
+    }
+    // 4. Peripheral names → bold (default colour). Slash-joined groups like
+    // "USART/SPI/I2C" match via `contains`; case-sensitive so `BlockingI2c`
+    // (lower-case c) or English "can" don't trip it.
+    const PERIPH: &[&str] = &["USART", "SPI", "I2C", "CAN", "USB", "GPIO", "Tx", "Rx"];
+    if PERIPH.iter().any(|p| clean.contains(p)) {
+        return egui::RichText::new(word).size(SIZE).strong().color(plain);
+    }
+
+    egui::RichText::new(word).size(SIZE).color(plain)
+}
+
 /// A collapsible "ⓘ Details" section under a Runtime card, explaining what that
 /// runtime generates and how it applies. `points` are `(label, body)` rows; a
 /// non-empty `example` is rendered as a monospace code block. The open/closed
@@ -1210,11 +1313,11 @@ fn runtime_details(ui: &mut egui::Ui, salt: &str, points: &[(&str, &str)], examp
                         .size(11.5)
                         .color(egui::Color32::from_gray(215)),
                 );
-                ui.label(
-                    egui::RichText::new(*body)
-                        .size(11.5)
-                        .color(egui::Color32::from_gray(165)),
-                );
+                // Emphasise keywords inline: crate names, file names, runtime/
+                // async keywords and peripheral names each get their own colour.
+                for word in body.split_whitespace() {
+                    ui.label(detail_word(word));
+                }
             });
             ui.add_space(4.0);
         }
