@@ -23,6 +23,11 @@ impl AppIde {
         // The RA workspace content is about to change wholesale — drop the
         // flush hash cache so the first flush re-writes every file.
         self.flushed_hashes.lock().unwrap().clear();
+        // Arm the one-shot post-load RA restart: RA's first analysis of this
+        // project can be stale (Cargo.lock re-resolving, config files not yet
+        // indexed), so once it settles we restart it once for a correct status.
+        self.lsp_settle_recheck_done = false;
+        self.last_workspace_change = Some(std::time::Instant::now());
 
         self.selected_file = ProjectFileId::MainRs;
         self.renaming_file = None;

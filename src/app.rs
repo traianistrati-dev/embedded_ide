@@ -729,6 +729,16 @@ pub struct AppIde {
     /// save arriving mid-flush keeps `lsp_flush_requested` set and `init_frame`
     /// re-fires it once the worker clears this and wakes the UI.
     lsp_flush_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// One-shot guard for the post-load RA restart. On startup / project open, RA
+    /// analyzes too early — the freshly-reset `Cargo.lock` is still re-resolving
+    /// and late-written config files aren't indexed yet — so its first
+    /// diagnostics can be stale false errors. Once RA is `Ready` and the workspace
+    /// has been stable for `LSP_SETTLE`, we restart it ONCE so the status reflects
+    /// the fully-resolved workspace. Reset to `false` on every project load.
+    lsp_settle_recheck_done: bool,
+    /// When the RA workspace content last changed (codegen regen / project load) —
+    /// the debounce baseline for the settle restart above.
+    last_workspace_change: Option<std::time::Instant>,
     // ── Rename symbol (Ctrl+R → textDocument/rename) ─────────────────────────
     /// While `true`, the rename input popup is shown.
     rename_active: bool,
@@ -1167,6 +1177,8 @@ impl AppIde {
             reference_ctrl_space: false,
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
+            lsp_settle_recheck_done: true,
+            last_workspace_change: None,
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rename_active: false,
             rename_input: String::new(),
@@ -1668,6 +1680,12 @@ impl AppIde {
             self.project_tree.sync_config_files(&config_files);
             self.project_tree.sync_pin_files(&all_pins);
         }
+        // Any regen rewrites main.rs / config files / deps in the RA workspace —
+        // push back the settle baseline so the post-load restart waits for the
+        // codegen to stabilise before it fires.
+        if mcu_changed {
+            self.last_workspace_change = Some(std::time::Instant::now());
+        }
 
         // Tick flash counters down
         if self.copy_flash > 0 {
@@ -1730,6 +1748,36 @@ impl AppIde {
                 {
                     self.lsp_flush_requested = false;
                     self.spawn_lsp_flush();
+                }
+
+                // One-shot post-load restart: RA's first analysis of a just-opened
+                // project can be stale (the freshly-reset Cargo.lock is still
+                // re-resolving; late config files weren't indexed) and it sticks
+                // because RA only re-checks on Save. Once RA is Ready, the
+                // workspace has been stable for `LSP_SETTLE`, and there ARE
+                // diagnostics (so there's something possibly-stale to clear),
+                // restart RA exactly once so its status reflects the settled,
+                // fully-resolved workspace — what a manual Restart does today.
+                const LSP_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+                if !self.lsp_settle_recheck_done && self.has_project() {
+                    let settled = self
+                        .last_workspace_change
+                        .is_some_and(|t| t.elapsed() > LSP_SETTLE);
+                    // Wait for any in-flight check too: RA's first `cargo check`
+                    // re-resolves the reset Cargo.lock — restarting before it
+                    // finishes would just make the relaunched RA re-resolve again.
+                    let (has_diags, checking) = {
+                        let lsp = self.lsp_state.lock().unwrap();
+                        (!lsp.diagnostics.is_empty(), lsp.checking)
+                    };
+                    if settled && !checking {
+                        self.lsp_settle_recheck_done = true;
+                        // Only restart when there ARE diagnostics — a clean load
+                        // needs no re-index.
+                        if has_diags {
+                            self.restart_lsp();
+                        }
+                    }
                 }
             }
             _ => {}
