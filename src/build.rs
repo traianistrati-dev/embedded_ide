@@ -182,12 +182,16 @@ pub fn start_build(
     state: Arc<Mutex<BuildState>>,
     ctx: eframe::egui::Context,
     activity: Arc<Mutex<crate::activity::ActivityLog>>,
+    // `false` = `cargo check` (fast); `true` = `cargo build --release` (full
+    // optimized build). Both parse the same JSON diagnostics.
+    release: bool,
 ) {
     *state.lock().unwrap() = BuildState::Building;
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let next = run_cargo(&project_dir, &target, "check", &activity);
+        let sub = if release { "build" } else { "check" };
+        let next = run_cargo(&project_dir, &target, sub, release, &activity);
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -207,7 +211,7 @@ pub fn start_clippy(
     ctx.request_repaint();
 
     thread::spawn(move || {
-        let next = run_cargo(&project_dir, &target, "clippy", &activity);
+        let next = run_cargo(&project_dir, &target, "clippy", false, &activity);
         *state.lock().unwrap() = next;
         ctx.request_repaint();
     });
@@ -245,9 +249,14 @@ fn run_cargo(
     dir: &Path,
     target: &str,
     subcommand: &str,
+    release: bool,
     activity: &Arc<Mutex<crate::activity::ActivityLog>>,
 ) -> BuildState {
-    let kind = if subcommand == "clippy" { "Clippy" } else { "Build (cargo check)" };
+    let kind = match subcommand {
+        "clippy" => "Clippy",
+        "build" => "Build (cargo build --release)",
+        _ => "Build (cargo check)",
+    };
     let mut rec = crate::activity::Recorder::new(kind);
 
     // ── Step 1: install target if needed ────────────────────────────────────
@@ -279,15 +288,16 @@ fn run_cargo(
     // dependencies, not to workspace path deps.) Harmless when there is no
     // workspace section — the root package is then the only member.
     let cargo_started = std::time::Instant::now();
-    let cargo_cmd = format!("cargo {subcommand} --workspace --message-format=json --color=never");
+    let mut args: Vec<&str> = vec![subcommand, "--workspace"];
+    if release {
+        args.push("--release");
+    }
+    args.push("--message-format=json");
+    args.push("--color=never");
+    let cargo_cmd = format!("cargo {}", args.join(" "));
     let mut child = match no_window(&mut Command::new("cargo"))
         .current_dir(dir)
-        .args([
-            subcommand,
-            "--workspace",
-            "--message-format=json",
-            "--color=never",
-        ])
+        .args(&args)
         .stdout(Stdio::piped())
         // Capture stderr so we can detect disk-full and other fatal OS errors.
         // Without this, cargo crashes silently (no build-finished JSON) and the

@@ -350,9 +350,9 @@ impl AppIde {
         } else if entered_git {
             self.run_git_op(crate::git::GitOp::Refresh);
         }
-        // Cargo-tab Build button.
+        // Cargo-tab Build button — always a fast `cargo check`.
         if build_go {
-            self.start_build();
+            self.start_build(false);
         }
         // Cargo-tab Size button (Flash/RAM measurement).
         if size_go {

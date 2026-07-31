@@ -19,13 +19,34 @@
 
 use super::clock::model::Stm32f1Clock;
 use super::clock::persist as clock_persist;
-use super::mcu::Runtime;
+use super::mcu::{AutoBuild, Runtime};
 use super::modules::{ApiStyle, VirtualModule};
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
 const RUNTIME_HEADER: &str = "@runtime";
 const GPIO_HEADER: &str = "@gpio";
+const AUTOBUILD_HEADER: &str = "@autobuild";
+
+/// The `@autobuild` section text (or "" for the default `Check`) — appended by
+/// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
+/// signature (and its many test call-sites) stays put; it's a workflow setting,
+/// not part of the module/clock/runtime config.
+pub fn autobuild_section(auto_build: AutoBuild) -> String {
+    if auto_build == AutoBuild::Check {
+        String::new()
+    } else {
+        format!("{AUTOBUILD_HEADER}\n{}\n", auto_build.as_token())
+    }
+}
+
+/// The auto-build preference recorded in `@autobuild`; a missing section is the
+/// default `Check`.
+pub fn parse_autobuild(text: &str) -> AutoBuild {
+    section_body(text, AUTOBUILD_HEADER)
+        .map(|b| AutoBuild::from_token(&b))
+        .unwrap_or_default()
+}
 
 /// The token for a GPIO api style (`@gpio` section): "Native" or "Portable".
 fn gpio_token(s: ApiStyle) -> &'static str {
@@ -249,6 +270,32 @@ mod tests {
         let text = serialize(&[], None, Runtime::Async, ApiStyle::Native);
         assert_eq!(parse_runtime(&text), Runtime::Async);
         assert_eq!(parse_gpio_api(&text), ApiStyle::Native);
+    }
+
+    #[test]
+    fn autobuild_round_trips_and_defaults_to_check() {
+        use crate::panels::mcu_module::mcu::AutoBuild;
+        // Default (Check) writes NO section; missing section parses as Check.
+        assert_eq!(autobuild_section(AutoBuild::Check), "");
+        assert_eq!(parse_autobuild(""), AutoBuild::Check);
+        // Off / Release persist + parse back, independent of the other sections.
+        for mode in [AutoBuild::Off, AutoBuild::Release] {
+            let text = format!(
+                "{}{}",
+                serialize(&[], None, Runtime::Async, ApiStyle::Native),
+                {
+                    let s = autobuild_section(mode);
+                    // (mcu_config_text joins with a blank line; a leading one here
+                    //  is harmless for the section parser.)
+                    format!("\n{s}")
+                }
+            );
+            assert!(text.contains("@autobuild\n"));
+            assert_eq!(parse_autobuild(&text), mode);
+            // …and it doesn't disturb the other sections.
+            assert_eq!(parse_runtime(&text), Runtime::Async);
+            assert_eq!(parse_gpio_api(&text), ApiStyle::Native);
+        }
     }
 
     #[test]

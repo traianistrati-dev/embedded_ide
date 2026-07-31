@@ -62,6 +62,40 @@ impl Runtime {
     }
 }
 
+// ── Auto-build on Save ───────────────────────────────────────────────────────
+
+/// What the IDE does on Project Save when a library changed in `Cargo.toml`.
+/// A workflow preference (chosen in the System tab), NOT a codegen choice — it
+/// doesn't regenerate anything, so it's applied immediately (no staged Apply)
+/// and kept out of the codegen state hash. Persisted in `mcu.config` (`@autobuild`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AutoBuild {
+    /// Never auto-build; the user runs Build/Check manually.
+    Off,
+    /// Run `cargo check` (fast; catches errors + resolves new deps). Default.
+    #[default]
+    Check,
+    /// Run `cargo build --release` (slower; a full optimized build).
+    Release,
+}
+
+impl AutoBuild {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Check => "Check",
+            Self::Release => "Release",
+        }
+    }
+    pub fn from_token(s: &str) -> Self {
+        match s.trim() {
+            "Off" => Self::Off,
+            "Release" => Self::Release,
+            _ => Self::Check,
+        }
+    }
+}
+
 // ── Mcu struct ───────────────────────────────────────────────────────────────
 
 /// Represents a microcontroller with four sides of pins and UI state.
@@ -134,6 +168,10 @@ pub struct Mcu {
     >,
     /// Transient: the inline "Apply — Confirm/Cancel" prompt is showing.
     pub pending_apply_confirm: bool,
+
+    /// What Save does when a Cargo.toml library changed (System-tab preference,
+    /// persisted). Default `Check`.
+    pub auto_build: AutoBuild,
     /// Transient: id of a module the user clicked on the canvas, so the module
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.

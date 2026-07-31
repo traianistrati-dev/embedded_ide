@@ -89,6 +89,7 @@ impl Mcu {
             pending_gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
             pending_module_styles: std::collections::BTreeMap::new(),
             pending_apply_confirm: false,
+            auto_build: crate::panels::mcu_module::mcu::model::AutoBuild::default(),
             expand_module: None,
         }
     }
@@ -272,7 +273,18 @@ impl Mcu {
         } else {
             None
         };
-        mcu_config::serialize(&self.modules, clock.as_ref(), self.runtime, self.gpio_api)
+        let mut s =
+            mcu_config::serialize(&self.modules, clock.as_ref(), self.runtime, self.gpio_api);
+        // Auto-build preference lives in its own `@autobuild` section (workflow
+        // setting, not codegen config), appended here.
+        let ab = mcu_config::autobuild_section(self.auto_build);
+        if !ab.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&ab);
+        }
+        s
     }
 
     /// Restore virtual modules + clock from an `mcu.config` file on project open.
@@ -292,6 +304,8 @@ impl Mcu {
         self.runtime = mcu_config::parse_runtime(text);
         // GPIO api (`@gpio`) — missing restores the default Portable (io.rs bridge).
         self.gpio_api = mcu_config::parse_gpio_api(text);
+        // Auto-build preference (`@autobuild`) — missing restores the default Check.
+        self.auto_build = mcu_config::parse_autobuild(text);
         // A freshly loaded project has NO staged edits: pending == applied.
         self.sync_pending_style();
     }

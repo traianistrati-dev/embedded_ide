@@ -115,7 +115,7 @@ impl AppIde {
     /// start the background build. No-op without a buildable chip config.
     /// Fired from the Cargo Check tab's Build button (was a top-toolbar button
     /// before 2026-07-10).
-    pub(crate) fn start_build(&mut self) {
+    pub(crate) fn start_build(&mut self, release: bool) {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
@@ -140,6 +140,7 @@ impl AppIde {
                     Arc::clone(&self.build_state),
                     self.egui_ctx.clone(),
                     Arc::clone(&self.activity),
+                    release,
                 );
             }
             Err(e) => {

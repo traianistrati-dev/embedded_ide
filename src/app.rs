@@ -2436,6 +2436,7 @@ impl eframe::App for AppIde {
         let save_requested = std::mem::take(&mut self.request_save) || save_project_clicked;
         // Auto-build after this Save when a library changed in Cargo.toml.
         let mut auto_build_after_save = false;
+        let mut auto_build_release = false;
         if save_requested
             && self.save_in_progress.is_none()
             && self.selected_build_cfg().is_some()
@@ -2448,15 +2449,20 @@ impl eframe::App for AppIde {
             };
             if let Some(dest) = dest {
                 // If a dependency was added/edited/removed since the last Save
-                // (by the user editing Cargo.toml, or the codegen), run `cargo
-                // check` afterwards so the new deps resolve + compile. Skipped on
-                // the very first Save (no baseline yet).
+                // (by the user editing Cargo.toml, or the codegen), run the
+                // auto-build afterwards so the new deps resolve + compile — unless
+                // the project's `auto_build` preference is Off. Skipped on the
+                // very first Save (no baseline yet).
+                use crate::panels::mcu_module::mcu::AutoBuild;
+                let mode = self.mcu.as_ref().map(|m| m.auto_build).unwrap_or_default();
                 let cur_deps = project_gen::deps_fingerprint(&self.cargo_toml);
-                auto_build_after_save = self
+                let deps_changed = self
                     .last_saved_deps
                     .as_deref()
                     .is_some_and(|prev| prev != cur_deps);
                 self.last_saved_deps = Some(cur_deps);
+                auto_build_after_save = deps_changed && mode != AutoBuild::Off;
+                auto_build_release = mode == AutoBuild::Release;
 
                 // One id for every action this Save spawns.
                 self.save_session += 1;
@@ -2510,11 +2516,12 @@ impl eframe::App for AppIde {
                 });
             }
         }
-        // A library changed in Cargo.toml this Save → kick off `cargo check`
-        // (writes the check workspace + runs the build; result in the Cargo Check
-        // tab). Runs alongside the async disk-save, independent of it.
+        // A library changed in Cargo.toml this Save → kick off the auto-build
+        // (`cargo check`, or `cargo build --release` when the preference is
+        // Release). Writes the check workspace + runs it; result in the Cargo
+        // Check tab. Runs alongside the async disk-save, independent of it.
         if auto_build_after_save {
-            self.start_build();
+            self.start_build(auto_build_release);
         }
 
         // Apply a finished async save (set the result message / project home).

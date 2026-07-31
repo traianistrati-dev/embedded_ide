@@ -10,4 +10,4 @@ pub mod logic;
 pub mod model;
 
 // Re-export essentials for backward compatibility and convenience
-pub use model::{Mcu, Runtime, PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
+pub use model::{AutoBuild, Mcu, Runtime, PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};

@@ -699,6 +699,45 @@ impl AppIde {
                     .color(egui::Color32::from_rgb(120, 170, 220)),
                 );
             }
+
+            // ── Build on Save ────────────────────────────────────────────────
+            // A workflow preference (NOT a codegen choice) — applied immediately,
+            // no staged Apply.
+            use crate::panels::mcu_module::mcu::AutoBuild;
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.heading(format!("{}  Build on Save", ph::GEAR));
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "When a library changes in Cargo.toml (yours or codegen-added), Save can \
+                     run a build automatically so the new deps resolve + compile.",
+                )
+                .color(egui::Color32::GRAY),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("On dependency change:");
+                egui::ComboBox::from_id_salt("auto_build_on_save")
+                    .selected_text(match mcu.auto_build {
+                        AutoBuild::Off => "Off",
+                        AutoBuild::Check => "cargo check",
+                        AutoBuild::Release => "cargo build --release",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut mcu.auto_build, AutoBuild::Off, "Off")
+                            .on_hover_text("Never auto-build — run Build / Check manually.");
+                        ui.selectable_value(&mut mcu.auto_build, AutoBuild::Check, "cargo check")
+                            .on_hover_text("Fast: resolves new deps + catches errors (default).");
+                        ui.selectable_value(
+                            &mut mcu.auto_build,
+                            AutoBuild::Release,
+                            "cargo build --release",
+                        )
+                        .on_hover_text("Full optimized build — slower, but exactly what gets flashed.");
+                    });
+            });
         });
     }
 
