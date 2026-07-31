@@ -398,6 +398,38 @@ pub fn ensure_async_deps(
     s
 }
 
+/// A stable fingerprint of every DEPENDENCY line in `cargo_toml` — the bodies of
+/// `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` and any
+/// `[dependencies.<name>]` sub-tables. Comments + blank lines + surrounding
+/// whitespace are dropped so cosmetic edits don't count; adding/removing/editing
+/// a library DOES change it. Used to auto-run a build on Save when a lib changed.
+pub fn deps_fingerprint(cargo_toml: &str) -> String {
+    let mut out = String::new();
+    let mut in_deps = false;
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            // A section header: are we entering a dependency section?
+            in_deps = t.starts_with("[dependencies")
+                || t.starts_with("[dev-dependencies")
+                || t.starts_with("[build-dependencies")
+                || (t.starts_with("[target.") && t.contains("dependencies"));
+            if in_deps {
+                out.push_str(t);
+                out.push('\n');
+            }
+            continue;
+        }
+        if in_deps && !t.is_empty() && !t.starts_with('#') {
+            // Collapse internal whitespace too, so reformatting a dep line
+            // (`nb   =   "1"`) doesn't count as a change.
+            out.push_str(&t.split_whitespace().collect::<Vec<_>>().join(" "));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Add or remove `"feature"` inside the `features = [ … ]` array of a single
 /// dependency `line`, idempotently.
 fn toggle_hal_feature(line: &str, feature: &str, add: bool) -> String {
@@ -1123,6 +1155,27 @@ mod tests {
             base,
             "no-op when nothing to remove"
         );
+    }
+
+    #[test]
+    fn deps_fingerprint_tracks_libs_not_cosmetics() {
+        let base = "[package]\nname=\"x\"\n\n[dependencies]\ncortex-m = \"0.7\"\nnb = \"1\"\n\n[profile.release]\nlto = true\n";
+        let f0 = deps_fingerprint(base);
+        // A comment / blank-line / whitespace edit inside [dependencies] doesn't count.
+        let cosmetic = "[package]\nname=\"x\"\n\n[dependencies]\n# a note\ncortex-m   =   \"0.7\"\n\nnb = \"1\"\n\n[profile.release]\nlto = true\n";
+        assert_eq!(deps_fingerprint(cosmetic), f0, "cosmetics ignored");
+        // A profile change (not a dependency) doesn't count either.
+        let profile = base.replace("lto = true", "lto = false");
+        assert_eq!(deps_fingerprint(&profile), f0, "non-dependency section ignored");
+        // Adding a real lib DOES change the fingerprint.
+        let added = base.replace("nb = \"1\"\n", "nb = \"1\"\nheapless = \"0.8\"\n");
+        assert_ne!(deps_fingerprint(&added), f0, "new lib detected");
+        // A version bump counts.
+        let bumped = base.replace("nb = \"1\"", "nb = \"1.1\"");
+        assert_ne!(deps_fingerprint(&bumped), f0, "version edit detected");
+        // A [dependencies.foo] sub-table is included.
+        let sub = format!("{base}\n[dependencies.serde]\nversion = \"1\"\n");
+        assert_ne!(deps_fingerprint(&sub), f0, "sub-table lib detected");
     }
 
     #[test]

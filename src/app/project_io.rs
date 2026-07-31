@@ -187,6 +187,12 @@ impl AppIde {
             self.gitignore = load(ConfigFile::GitIgnore, root.join(".gitignore"));
         }
 
+        // Baseline the dependency fingerprint so the FIRST Save after the user
+        // edits a library in Cargo.toml auto-builds (see `last_saved_deps`).
+        self.last_saved_deps = Some(crate::panels::mcu_module::project_gen::deps_fingerprint(
+            &self.cargo_toml,
+        ));
+
         // Verify the project still loads for cargo (and therefore rust-analyzer)
         // — a workspace member left in a bad state (e.g. an incompatible library
         // added by hand) would otherwise fail silently as a stuck "Checking…".

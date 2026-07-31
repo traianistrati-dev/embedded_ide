@@ -957,6 +957,12 @@ pub struct AppIde {
     /// A Save requested from somewhere other than the toolbar (the exit
     /// prompt); OR-ed into `save_clicked` for one frame.
     request_save: bool,
+    /// The dependency fingerprint (`project_gen::deps_fingerprint`) at the last
+    /// Save / project load. When a Save finds it changed — a library was
+    /// added/edited/removed in Cargo.toml, by the user or the codegen — the IDE
+    /// auto-runs `cargo check` so the new deps resolve + compile. `None` before
+    /// any project is loaded (no auto-build on the very first Save).
+    last_saved_deps: Option<String>,
     /// Display name of the last opened/exported project (shown in the panel heading).
     project_name: Option<String>,
     /// Full path to the last opened project root folder.
@@ -1269,6 +1275,7 @@ impl AppIde {
             allow_close: false,
             close_after_save: false,
             request_save: false,
+            last_saved_deps: None,
             project_name: persisted.project_name,
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
@@ -1451,6 +1458,9 @@ impl AppIde {
             self.memory_x = f.memory_x;
             self.build_rs = f.build_rs;
             self.gitignore = f.gitignore;
+            // Baseline the deps so a New Project auto-builds on the first Save
+            // after the user's config adds libraries (USART/SPI/embassy/…).
+            self.last_saved_deps = Some(project_gen::deps_fingerprint(&self.cargo_toml));
             self.invalidate_project_files_cache();
         }
     }
@@ -2424,6 +2434,8 @@ impl eframe::App for AppIde {
         // `take` first: `||` short-circuits, and leaving the flag set would fire
         // a second save on the next frame.
         let save_requested = std::mem::take(&mut self.request_save) || save_project_clicked;
+        // Auto-build after this Save when a library changed in Cargo.toml.
+        let mut auto_build_after_save = false;
         if save_requested
             && self.save_in_progress.is_none()
             && self.selected_build_cfg().is_some()
@@ -2435,6 +2447,17 @@ impl eframe::App for AppIde {
                     .pick_folder(),
             };
             if let Some(dest) = dest {
+                // If a dependency was added/edited/removed since the last Save
+                // (by the user editing Cargo.toml, or the codegen), run `cargo
+                // check` afterwards so the new deps resolve + compile. Skipped on
+                // the very first Save (no baseline yet).
+                let cur_deps = project_gen::deps_fingerprint(&self.cargo_toml);
+                auto_build_after_save = self
+                    .last_saved_deps
+                    .as_deref()
+                    .is_some_and(|prev| prev != cur_deps);
+                self.last_saved_deps = Some(cur_deps);
+
                 // One id for every action this Save spawns.
                 self.save_session += 1;
                 let session = self.save_session;
@@ -2486,6 +2509,12 @@ impl eframe::App for AppIde {
                     flush_done: None,
                 });
             }
+        }
+        // A library changed in Cargo.toml this Save → kick off `cargo check`
+        // (writes the check workspace + runs the build; result in the Cargo Check
+        // tab). Runs alongside the async disk-save, independent of it.
+        if auto_build_after_save {
+            self.start_build();
         }
 
         // Apply a finished async save (set the result message / project home).
