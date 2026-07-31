@@ -475,6 +475,23 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
+    // Native RUNTIME forces every peripheral to the concrete HAL — show the Init
+    // API row DISABLED + locked on Native (instead of hiding it), so it's clear
+    // the choice is fixed here, not missing.
+    let api_row_locked = |ui: &mut egui::Ui| {
+        ui.label("Init API");
+        let resp = ui.add_enabled_ui(false, |ui| {
+            egui::ComboBox::from_id_salt("api_style_locked")
+                .selected_text("Native (HAL type)")
+                .show_ui(ui, |_ui| {});
+        });
+        resp.response.on_hover_text(
+            "Locked by the Native runtime — every peripheral uses the concrete HAL type. \
+             Switch the Runtime (System tab) to choose per module.",
+        );
+        ui.end_row();
+    };
+
     // Async runtime only (SPI/I2C): blocking embassy driver vs async-DMA.
     let async_row = |ui: &mut egui::Ui, mode: &mut AsyncBusMode| {
         ui.label("Async init");
@@ -540,10 +557,12 @@ pub fn module_config_ui(
                             ui.selectable_value(&mut cfg.stop_bits, StopBits::Two, "2");
                         });
                     ui.end_row();
-                    // The Portable/Native selector is only meaningful on the
-                    // Blocking runtime: async USART is always the embedded-io-async
-                    // BufferedUart bridge, and Native forces concrete HAL for all.
-                    if !is_async && !is_native {
+                    // Blocking → editable Portable|Native; Native runtime → shown
+                    // locked on Native; async USART → hidden (always the
+                    // embedded-io-async BufferedUart bridge, no choice).
+                    if is_native {
+                        api_row_locked(ui);
+                    } else if !is_async {
                         api_row(ui, &mut pending.0);
                     }
                 }
@@ -568,7 +587,9 @@ pub fn module_config_ui(
                     ui.end_row();
                     if is_async {
                         async_row(ui, &mut pending.1);
-                    } else if !is_native {
+                    } else if is_native {
+                        api_row_locked(ui);
+                    } else {
                         api_row(ui, &mut pending.0);
                     }
                 }
@@ -585,9 +606,11 @@ pub fn module_config_ui(
                     ui.add(egui::DragValue::new(&mut cfg.address).range(0..=127).hexadecimal(2, false, true));
                     ui.end_row();
                     if is_async {
-                        async_row(ui, &mut cfg.async_mode);
-                    } else if !is_native {
-                        api_row(ui, &mut cfg.api_style);
+                        async_row(ui, &mut pending.1);
+                    } else if is_native {
+                        api_row_locked(ui);
+                    } else {
+                        api_row(ui, &mut pending.0);
                     }
                 }
                 ModuleConfig::Can(cfg) => {
