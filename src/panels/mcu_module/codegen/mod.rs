@@ -787,6 +787,31 @@ mod tests {
         assert!(!mcu.style_dirty());
     }
 
+    /// `apply_change_list` lists not just the staged CHOICE but its concrete
+    /// effects — here, staging GPIO Native removes `io.rs` from the config files.
+    #[test]
+    fn test_apply_change_list_shows_config_effects() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::ApiStyle;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0 → io.rs (Portable)
+        mcu.sync_pending_style();
+        assert!(mcu.apply_change_list().is_empty(), "nothing staged");
+        assert!(mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "io.rs present");
+
+        // Stage GPIO Native → the change list includes the choice + io.rs removal.
+        mcu.pending_gpio_api = ApiStyle::Native;
+        let list = mcu.apply_change_list();
+        assert!(list.iter().any(|l| l.contains("GPIO In/Out")), "choice line: {list:?}");
+        assert!(
+            list.iter().any(|l| l.contains("io.rs") && l.contains("removed")),
+            "io.rs removal listed: {list:?}"
+        );
+        assert!(list.iter().any(|l| l.contains("Cargo.toml")), "deps note: {list:?}");
+        assert!(list.iter().any(|l| l.contains("main.rs")), "main.rs note: {list:?}");
+    }
+
     /// A `<pin>_<type>` binding still round-trips back through `parse_main_rs`.
     #[test]
     fn test_binding_pin_type_format_roundtrips() {

@@ -395,6 +395,67 @@ impl Mcu {
         out
     }
 
+    /// The FULL list of concrete modifications an Apply would produce — the
+    /// staged choices ([`style_diff_summary`](Self::style_diff_summary)) PLUS
+    /// their effects: the `main.rs` entry-point change, and every
+    /// `src/pins/configs/*.rs` file that would be added / removed / regenerated
+    /// (dry-run: apply the pending choices to a clone and diff its
+    /// `config_files()`). Shown in the Apply-confirm prompt. Empty when nothing is
+    /// staged.
+    pub fn apply_change_list(&self) -> Vec<String> {
+        if !self.style_dirty() {
+            return Vec::new();
+        }
+        // 1. The choices the user made.
+        let mut out: Vec<String> = self
+            .style_diff_summary()
+            .into_iter()
+            .map(|l| format!("• {l}"))
+            .collect();
+
+        // 2. Entry-point change (only when async-ness flips; Blocking↔Native
+        //    share `#[entry] fn main() -> !`).
+        if self.pending_is_async() != self.is_async() {
+            let entry = if self.pending_is_async() {
+                "#[embassy_executor::main] async fn main(Spawner)"
+            } else {
+                "#[entry] fn main() -> !"
+            };
+            out.push(format!("↻ main.rs entry → {entry}"));
+        } else {
+            out.push("↻ main.rs regenerated (pin bindings)".to_string());
+        }
+
+        // 3. Config-file adds / removes / regenerations — a dry-run of the regen.
+        let mut preview = self.clone();
+        preview.apply_pending_style();
+        let before = self.config_files();
+        let after = preview.config_files();
+        let body_of = |v: &[(String, String)], n: &str| {
+            v.iter().find(|(f, _)| f == n).map(|(_, b)| b.clone())
+        };
+        let names: std::collections::BTreeSet<String> = before
+            .iter()
+            .chain(after.iter())
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in names {
+            match (body_of(&before, &name), body_of(&after, &name)) {
+                (None, Some(_)) => out.push(format!("+ src/pins/configs/{name}  (new)")),
+                (Some(_), None) => out.push(format!("− src/pins/configs/{name}  (removed)")),
+                (Some(b), Some(a)) if b != a => {
+                    out.push(format!("↻ src/pins/configs/{name}  (regenerated)"))
+                }
+                _ => {}
+            }
+        }
+
+        // 4. Cargo.toml deps follow the choices (embassy / embedded-io / nb / …);
+        //    the exact set is applied by `init_frame` after Apply.
+        out.push("↻ Cargo.toml dependencies updated to match".to_string());
+        out
+    }
+
     /// Restores the clock-tree configuration parsed from a saved `main.rs`
     /// (`// @clock` marker). The saved config is expanded to graph node states
     /// and adopted by id — F103-shaped graphs restore fully; other-family

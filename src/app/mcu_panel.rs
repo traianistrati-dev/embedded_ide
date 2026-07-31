@@ -782,14 +782,35 @@ impl AppIde {
                     });
                 } else {
                     ui.label(
-                        egui::RichText::new("Apply these changes? This regenerates main.rs, the config files and Cargo.toml deps:")
+                        egui::RichText::new("Apply these changes? Everything below will be regenerated:")
                             .strong()
                             .color(egui::Color32::from_gray(225)),
                     );
                     ui.add_space(4.0);
-                    for line in &diff {
-                        ui.label(egui::RichText::new(format!("   ·  {line}")).monospace().size(11.5).color(egui::Color32::from_gray(200)));
-                    }
+                    // The FULL list: the staged choices + their concrete effects
+                    // (entry point, config files added/removed/regenerated, deps).
+                    let changes = mcu.apply_change_list();
+                    egui::ScrollArea::vertical()
+                        .max_height(190.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for line in &changes {
+                                let (color, mono) = if line.starts_with('•') {
+                                    (egui::Color32::from_gray(220), false)
+                                } else if line.starts_with('+') {
+                                    (egui::Color32::from_rgb(140, 200, 140), true)
+                                } else if line.starts_with('−') {
+                                    (egui::Color32::from_rgb(210, 150, 150), true)
+                                } else {
+                                    (egui::Color32::from_gray(185), true)
+                                };
+                                let mut txt = egui::RichText::new(format!("   {line}")).size(11.5).color(color);
+                                if mono {
+                                    txt = txt.monospace();
+                                }
+                                ui.label(txt);
+                            }
+                        });
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(format!(
