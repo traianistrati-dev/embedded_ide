@@ -231,15 +231,20 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceCan => "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
                                         ModuleKind::GenericInterfaceUsb => "Add a virtual USB device and auto-wire it to the USB D-/D+ pins",
                                     };
+                                    // Colour the button's TEXT with the peripheral's
+                                    // colour ONLY when a module of this kind is already
+                                    // on the chip — a glance shows what's wired; the
+                                    // rest stay neutral. No background fill (it would
+                                    // hurt text clarity), matching the list names below.
+                                    let added = mcu.modules.iter().any(|m| m.kind == kind);
+                                    let label = format!("{} {}", ph::PLUS, kind.short());
+                                    let text = if added {
+                                        egui::RichText::new(label).color(mod_gui::module_color(kind, 1))
+                                    } else {
+                                        egui::RichText::new(label)
+                                    };
                                     if ui
-                                        .add_enabled(
-                                            can_add,
-                                            egui::Button::new(format!(
-                                                "{} {}",
-                                                ph::PLUS,
-                                                kind.short()
-                                            )),
-                                        )
+                                        .add_enabled(can_add, egui::Button::new(text))
                                         .on_hover_text(hover)
                                         .on_disabled_hover_text(if kind.is_single_instance() {
                                             "this chip has only one such peripheral and it's already used"
@@ -303,6 +308,10 @@ impl AppIde {
                                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                                     for m in &mut mcu.modules {
                                         let title = mod_gui::module_title(m);
+                                        // The entry's name carries the module's
+                                        // peripheral colour + a 10%-opacity tint
+                                        // behind it, matching its box on the canvas.
+                                        let mod_color = mod_gui::module_color(m.kind, m.instance());
                                         let toggle = to_open.as_deref() == Some(m.id.as_str());
                                         // Drive the section via CollapsingState so a canvas
                                         // click can TOGGLE (not just force-open) the entry.
@@ -319,7 +328,23 @@ impl AppIde {
                                         }
                                         state
                                             .show_header(ui, |ui| {
-                                                ui.label(egui::RichText::new(title).strong());
+                                                let bg = egui::Color32::from_rgba_unmultiplied(
+                                                    mod_color.r(),
+                                                    mod_color.g(),
+                                                    mod_color.b(),
+                                                    26, // ~10% opacity
+                                                );
+                                                egui::Frame::new()
+                                                    .fill(bg)
+                                                    .inner_margin(egui::Margin::symmetric(6, 2))
+                                                    .corner_radius(egui::CornerRadius::same(4))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(title)
+                                                                .strong()
+                                                                .color(mod_color),
+                                                        );
+                                                    });
                                             })
                                             .body(|ui| {
                                                 // Rename field — appended to the generated
@@ -339,8 +364,16 @@ impl AppIde {
                                                     .expect("pending entry seeded above");
                                                 mod_gui::module_config_ui(ui, m, &pin_names, is_async, is_native, pending);
                                                 ui.add_space(4.0);
+                                                // Red TEXT signals the destructive
+                                                // action; the button fill stays default.
                                                 if ui
-                                                    .button(format!("{} Remove module", ph::TRASH))
+                                                    .button(
+                                                        egui::RichText::new(format!(
+                                                            "{} Remove module",
+                                                            ph::TRASH
+                                                        ))
+                                                        .color(egui::Color32::from_rgb(220, 80, 80)),
+                                                    )
                                                     .clicked()
                                                 {
                                                     remove_id = Some(m.id.clone());

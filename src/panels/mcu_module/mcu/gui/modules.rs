@@ -101,8 +101,10 @@ fn signal_color(sig: ModuleSignal, instance: u8) -> egui::Color32 {
 }
 
 /// The module's representative colour = the peripheral's pin colour (USART/SPI/
-/// I2C category), used for the box border + title so it matches its pins.
-fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
+/// I2C category — instance-independent), used for the box border + title so it
+/// matches its pins, plus the list-entry name + the "already added" palette
+/// buttons.
+pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
     let f = match kind {
         ModuleKind::GenericInterfaceUsart => PinFunction::UsartTx(instance),
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
