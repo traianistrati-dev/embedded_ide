@@ -12,15 +12,15 @@ use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 pub fn partner_functions(func: &PinFunction) -> Vec<PinFunction> {
     match func {
         // USART — basic full-duplex pair
-        PinFunction::UsartTx(n)  => vec![PinFunction::UsartRx(*n)],
-        PinFunction::UsartRx(n)  => vec![PinFunction::UsartTx(*n)],
+        PinFunction::UsartTx(n) => vec![PinFunction::UsartRx(*n)],
+        PinFunction::UsartRx(n) => vec![PinFunction::UsartTx(*n)],
         // USART — hardware flow-control pair (optional, separate from TX/RX)
         PinFunction::UsartCts(n) => vec![PinFunction::UsartRts(*n)],
         PinFunction::UsartRts(n) => vec![PinFunction::UsartCts(*n)],
         // SPI — three-wire bus (NSS is optional, not auto-assigned)
-        PinFunction::SpiSck(n)  => vec![PinFunction::SpiMiso(*n), PinFunction::SpiMosi(*n)],
-        PinFunction::SpiMiso(n) => vec![PinFunction::SpiSck(*n),  PinFunction::SpiMosi(*n)],
-        PinFunction::SpiMosi(n) => vec![PinFunction::SpiSck(*n),  PinFunction::SpiMiso(*n)],
+        PinFunction::SpiSck(n) => vec![PinFunction::SpiMiso(*n), PinFunction::SpiMosi(*n)],
+        PinFunction::SpiMiso(n) => vec![PinFunction::SpiSck(*n), PinFunction::SpiMosi(*n)],
+        PinFunction::SpiMosi(n) => vec![PinFunction::SpiSck(*n), PinFunction::SpiMiso(*n)],
         // I²C — two-wire bus
         PinFunction::I2cScl(n) => vec![PinFunction::I2cSda(*n)],
         PinFunction::I2cSda(n) => vec![PinFunction::I2cScl(*n)],
@@ -31,7 +31,7 @@ pub fn partner_functions(func: &PinFunction) -> Vec<PinFunction> {
         PinFunction::UsbDm => vec![PinFunction::UsbDp],
         PinFunction::UsbDp => vec![PinFunction::UsbDm],
         // SWD — two-wire debug
-        PinFunction::SwdIo  => vec![PinFunction::SwdClk],
+        PinFunction::SwdIo => vec![PinFunction::SwdClk],
         PinFunction::SwdClk => vec![PinFunction::SwdIo],
         // GPIO, ADC, Timer, MCO, SpiNss, UsartCk — no automatic partners
         _ => vec![],
@@ -55,7 +55,7 @@ impl Mcu {
         right_pins: Vec<Pin>,
     ) -> Self {
         use crate::panels::mcu_module::clock::graph::{
-            layout::stm32f1_layout, stm32f1_graph, GraphClock,
+            GraphClock, layout::stm32f1_layout, stm32f1_graph,
         };
         use crate::panels::mcu_module::clock::{ClockConfig, ClockLimits, Stm32f1Clock};
         // Only the STM32F1 family has a built-in clock graph; others get `None`
@@ -108,8 +108,14 @@ impl Mcu {
     pub fn supports_module(&self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
         use crate::panels::mcu_module::modules::autowire;
         let (required, optional) = kind.signals();
-        autowire::pick_pins(self, &Default::default(), &Default::default(), required, optional)
-            .is_some()
+        autowire::pick_pins(
+            self,
+            &Default::default(),
+            &Default::default(),
+            required,
+            optional,
+        )
+        .is_some()
     }
 
     /// Could another `kind` be added RIGHT NOW — i.e. are there still free pins
@@ -137,13 +143,10 @@ impl Mcu {
         autowire::pick_pins(self, &used, &used_instances, required, optional).is_some()
     }
 
-    /// Add a virtual module (GI_USART / GI_SPI / GI_I2C) and auto-wire it to
+    /// Add a virtual module (_USART / _SPI / _I2C) and auto-wire it to
     /// compatible MCU pins, setting those pins' functions. Returns `false` (and
     /// adds nothing) when the chip has no free pins for the module's interface.
-    pub fn add_module(
-        &mut self,
-        kind: crate::panels::mcu_module::modules::ModuleKind,
-    ) -> bool {
+    pub fn add_module(&mut self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
         use crate::panels::mcu_module::modules::autowire;
 
         // CAN and USB are single-instance and their pin functions carry no
@@ -162,7 +165,7 @@ impl Mcu {
             .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin))
             .collect();
         // Peripheral instances already hosting a module of THIS kind are off-limits
-        // too — so a 2nd "+GI_SPI" advances to SPI2 instead of re-picking SPI1 on
+        // too — so a 2nd "+_SPI" advances to SPI2 instead of re-picking SPI1 on
         // its alternate pin set (which `reconcile_modules` would then merge in).
         let used_instances: std::collections::HashSet<u8> = self
             .modules
@@ -190,7 +193,7 @@ impl Mcu {
     }
 
     /// Remove a module by id, resetting the pins it was wired to back to `Unset`
-    /// (so removing a GI_USART/SPI/I2C frees its pins, mirroring "unplugging" the
+    /// (so removing a _USART/SPI/I2C frees its pins, mirroring "unplugging" the
     /// device).
     pub fn remove_module(&mut self, id: &str) {
         let pins: Vec<usize> = self
@@ -381,15 +384,21 @@ impl Mcu {
             if api != cur_api {
                 out.push(format!("{name} init: {cur_api:?} → {api:?}"));
             }
-            if asyncm != cur_async && !matches!(
-                m.config,
-                crate::panels::mcu_module::modules::ModuleConfig::Usart(_)
-            ) {
+            if asyncm != cur_async
+                && !matches!(
+                    m.config,
+                    crate::panels::mcu_module::modules::ModuleConfig::Usart(_)
+                )
+            {
                 let lbl = |x: AsyncBusMode| match x {
                     AsyncBusMode::Blocking => "Blocking",
                     AsyncBusMode::AsyncDma => "Async-DMA",
                 };
-                out.push(format!("{name} async: {} → {}", lbl(cur_async), lbl(asyncm)));
+                out.push(format!(
+                    "{name} async: {} → {}",
+                    lbl(cur_async),
+                    lbl(asyncm)
+                ));
             }
         }
         out
@@ -461,8 +470,8 @@ impl Mcu {
     /// and adopted by id — F103-shaped graphs restore fully; other-family
     /// graphs (no matching ids) are an intentional no-op.
     pub fn apply_saved_clock(&mut self, clock: crate::panels::mcu_module::clock::Stm32f1Clock) {
-        use crate::panels::mcu_module::clock::graph::stm32f1_graph;
         use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::stm32f1_graph;
         if let ClockConfig::Graph(gc) = &mut self.clock {
             gc.graph.adopt_states(&stm32f1_graph(&clock));
         }
@@ -576,7 +585,7 @@ impl Mcu {
     }
 
     /// Drop each module connection whose pin no longer carries the matching
-    /// USART function — so re-purposing a pin disconnects the GI_USART from it
+    /// USART function — so re-purposing a pin disconnects the _USART from it
     /// (the module stays, just unwired). Idempotent.
     /// Make the virtual modules mirror the pin assignments: a peripheral
     /// instance with any assigned USART/SPI/I2C signal pin gets (or keeps) a
@@ -587,14 +596,17 @@ impl Mcu {
     /// ones get the default config. Idempotent; never mutates pins.
     pub fn reconcile_modules(&mut self) {
         use crate::panels::mcu_module::modules::{
-            module_signal_of, Connection, ModuleKind, ModuleSignal, VirtualModule,
+            Connection, ModuleKind, ModuleSignal, VirtualModule, module_signal_of,
         };
         use std::collections::BTreeMap;
 
         let mut wanted: BTreeMap<(ModuleKind, u8), Vec<(ModuleSignal, usize)>> = BTreeMap::new();
         for p in self.iter_all_pins() {
             if let Some((kind, inst, sig)) = module_signal_of(&p.selected_function) {
-                wanted.entry((kind, inst)).or_default().push((sig, p.number));
+                wanted
+                    .entry((kind, inst))
+                    .or_default()
+                    .push((sig, p.number));
             }
         }
 

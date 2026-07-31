@@ -73,14 +73,20 @@ mod tests {
         cfg.baud_rate = 9600;
         cfg.rx_model = "pub struct R {\n    pub t: f32,\n}".into(); // multi-line on purpose
         VirtualModule {
-            id: "gi_usart_1".into(),
+            id: "_usart_1".into(),
             kind: ModuleKind::GenericInterfaceUsart,
-            name: "GI_USART1".into(),
+            name: "USART1".into(),
             pos: (12.0, 34.0),
             config: ModuleConfig::Usart(cfg),
             connections: vec![
-                Connection { signal: ModuleSignal::Tx, mcu_pin: 30 },
-                Connection { signal: ModuleSignal::Rx, mcu_pin: 31 },
+                Connection {
+                    signal: ModuleSignal::Tx,
+                    mcu_pin: 30,
+                },
+                Connection {
+                    signal: ModuleSignal::Rx,
+                    mcu_pin: 31,
+                },
             ],
         }
     }

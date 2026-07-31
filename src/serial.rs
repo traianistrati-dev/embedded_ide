@@ -78,7 +78,7 @@ pub struct SerialMonitor {
     /// Cached list of available ports (refreshed on demand).
     pub ports: Vec<String>,
     /// One-shot: `false` until the baud has been seeded from the first
-    /// GI_USART virtual module (done when the Serial tab first opens while
+    /// _USART virtual module (done when the Serial tab first opens while
     /// idle — replaces the old toolbar Serial button's seeding).
     pub baud_seeded: bool,
     /// `true` → the RX area shows the live plot instead of the text/hex view
@@ -526,7 +526,7 @@ pub fn text_search_job(
 
 #[cfg(test)]
 mod tests {
-    use super::{byte_color, render_rx_text, seq_color, seq_counts, text_search_job, SEARCH_HIT};
+    use super::{SEARCH_HIT, byte_color, render_rx_text, seq_color, seq_counts, text_search_job};
     use eframe::egui;
 
     /// Collect (line_text, is_yellow) from a text-search job.
@@ -562,7 +562,6 @@ mod tests {
         let job = text_search_job("a\nb\n", "a", 12.0, egui::Color32::GRAY);
         assert_eq!(job.text, "a\nb\n");
     }
-
 
     #[test]
     fn text_mode_is_lossy_utf8() {

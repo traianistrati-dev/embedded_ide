@@ -25,7 +25,7 @@ impl AppIde {
     ) -> Option<f32> {
         // First-open baud seeding for the Serial tab (was the toolbar Serial
         // button's job before it was removed): while the tab is selected and
-        // idle, seed the baud from the first GI_USART virtual module — once.
+        // idle, seed the baud from the first _USART virtual module — once.
         if self.build_tab == BuildPanelTab::Serial
             && !self.serial.baud_seeded
             && !self.serial.is_connected()
@@ -49,8 +49,8 @@ impl AppIde {
         // click; the tab's own Refresh button covers that. The switch happens
         // inside the panel closure below, so this sees it one frame later —
         // invisible in practice, and it keeps the check out of the render path.
-        let entered_git = self.build_tab != self.last_build_tab
-            && self.build_tab == BuildPanelTab::Git;
+        let entered_git =
+            self.build_tab != self.last_build_tab && self.build_tab == BuildPanelTab::Git;
         self.last_build_tab = self.build_tab;
 
         // The panel used to hide itself whenever no tab had activity. It no
@@ -72,9 +72,8 @@ impl AppIde {
         // the frame margins — `Frame::side_top_panel` is `Margin::symmetric(8,
         // 2)`. Style-derived rather than a magic number so it follows spacing.
         const PANEL_FRAME_V_MARGIN: f32 = 4.0; // 2 top + 2 bottom
-        let collapsed_h = ui.spacing().interact_size.y
-            + ui.spacing().item_spacing.y * 2.0
-            + PANEL_FRAME_V_MARGIN;
+        let collapsed_h =
+            ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + PANEL_FRAME_V_MARGIN;
         let panel_h = if collapsed {
             collapsed_h
         } else {
@@ -194,9 +193,8 @@ impl AppIde {
 
                     if drag_resp.dragged() {
                         // Dragging up → negative delta.y → panel grows
-                        self.diag_panel_height = (self.diag_panel_height
-                            - drag_resp.drag_delta().y)
-                            .clamp(MIN_H, max_h);
+                        self.diag_panel_height =
+                            (self.diag_panel_height - drag_resp.drag_delta().y).clamp(MIN_H, max_h);
                     }
                 }
 
@@ -373,8 +371,7 @@ impl AppIde {
         // Debugger halt location (breakpoint / step landed): jump the editor
         // there with an amber band — same path as a diagnostic-row click.
         if let Some((rel, line)) = self.debugger.take_nav() {
-            if let Some(id) =
-                crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
+            if let Some(id) = crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line as usize));

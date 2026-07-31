@@ -10,15 +10,15 @@ use serde::{Deserialize, Serialize};
 /// Kind of virtual module. New kinds are added here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ModuleKind {
-    /// Generic device speaking over USART (TX/RX) — "GI_USART".
+    /// Generic device speaking over USART (TX/RX) — "USART".
     GenericInterfaceUsart,
-    /// Generic device on an SPI bus (SCK/MOSI/MISO/NSS) — "GI_SPI".
+    /// Generic device on an SPI bus (SCK/MOSI/MISO/NSS) — "SPI".
     GenericInterfaceSpi,
-    /// Generic device on an I2C bus (SCL/SDA) — "GI_I2C".
+    /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
-    /// Generic device on a CAN bus (RX/TX) — "GI_CAN".
+    /// Generic device on a CAN bus (RX/TX) — "CAN".
     GenericInterfaceCan,
-    /// USB full-speed device (D-/D+) — "GI_USB".
+    /// USB full-speed device (D-/D+) — "USB".
     GenericInterfaceUsb,
 }
 
@@ -60,11 +60,11 @@ impl ModuleKind {
     /// Short tag used in the palette and as the default module name prefix.
     pub fn short(self) -> &'static str {
         match self {
-            ModuleKind::GenericInterfaceUsart => "GI_USART",
-            ModuleKind::GenericInterfaceSpi => "GI_SPI",
-            ModuleKind::GenericInterfaceI2c => "GI_I2C",
-            ModuleKind::GenericInterfaceCan => "GI_CAN",
-            ModuleKind::GenericInterfaceUsb => "GI_USB",
+            ModuleKind::GenericInterfaceUsart => "USART",
+            ModuleKind::GenericInterfaceSpi => "SPI",
+            ModuleKind::GenericInterfaceI2c => "I2C",
+            ModuleKind::GenericInterfaceCan => "CAN",
+            ModuleKind::GenericInterfaceUsb => "USB",
         }
     }
 
@@ -482,7 +482,12 @@ impl ModuleConfig {
         match self {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Spi(c) => {
-                format!("SPI{}  ·  mode {}  ·  {}", c.instance, c.mode, hz_label(c.clock_hz))
+                format!(
+                    "SPI{}  ·  mode {}  ·  {}",
+                    c.instance,
+                    c.mode,
+                    hz_label(c.clock_hz)
+                )
             }
             ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
             ModuleConfig::Can(c) => {
@@ -508,10 +513,10 @@ pub fn hz_label(hz: u32) -> String {
 /// (Not `Eq`: `pos` holds `f32`.)
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VirtualModule {
-    /// Stable id within the project (e.g. "gi_usart_1").
+    /// Stable id within the project (e.g. "usart_1").
     pub id: String,
     pub kind: ModuleKind,
-    /// Display name (e.g. "GI_USART1").
+    /// Display name (e.g. "USART1").
     pub name: String,
     /// Top-left position on the Pins canvas (used by the GUI phase).
     pub pos: (f32, f32),

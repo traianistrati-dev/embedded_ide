@@ -8,7 +8,7 @@
 //! ```text
 //! @modules
 //! [
-//!     (id: "gi_i2c_1", kind: GenericInterfaceI2c, …),
+//!     (id: "i2c_1", kind: GenericInterfaceI2c, …),
 //! ]
 //!
 //! @clock
@@ -182,14 +182,20 @@ mod tests {
         let mut cfg = I2cModuleConfig::new(1);
         cfg.custom_label = "128x32 display".into();
         VirtualModule {
-            id: "gi_i2c_1".into(),
+            id: "_i2c_1".into(),
             kind: ModuleKind::GenericInterfaceI2c,
-            name: "GI_I2C1".into(),
+            name: "I2C1".into(),
             pos: (0.0, 0.0),
             config: ModuleConfig::I2c(cfg),
             connections: vec![
-                Connection { signal: ModuleSignal::Scl, mcu_pin: 45 },
-                Connection { signal: ModuleSignal::Sda, mcu_pin: 46 },
+                Connection {
+                    signal: ModuleSignal::Scl,
+                    mcu_pin: 45,
+                },
+                Connection {
+                    signal: ModuleSignal::Sda,
+                    mcu_pin: 46,
+                },
             ],
         }
     }
@@ -201,7 +207,12 @@ mod tests {
             sysclk_src: SysclkSrc::Hsi,
             ..Stm32f1Clock::default()
         };
-        let text = serialize(&modules, Some(&clock), Runtime::Blocking, ApiStyle::Portable);
+        let text = serialize(
+            &modules,
+            Some(&clock),
+            Runtime::Blocking,
+            ApiStyle::Portable,
+        );
 
         // Headers + multi-line layout present.
         assert!(text.contains("@modules\n"));
@@ -216,12 +227,20 @@ mod tests {
 
     #[test]
     fn empty_when_nothing_to_persist() {
-        assert_eq!(serialize(&[], None, Runtime::Blocking, ApiStyle::Portable), "");
+        assert_eq!(
+            serialize(&[], None, Runtime::Blocking, ApiStyle::Portable),
+            ""
+        );
     }
 
     #[test]
     fn clock_only_when_no_modules() {
-        let text = serialize(&[], Some(&Stm32f1Clock::default()), Runtime::Blocking, ApiStyle::Portable);
+        let text = serialize(
+            &[],
+            Some(&Stm32f1Clock::default()),
+            Runtime::Blocking,
+            ApiStyle::Portable,
+        );
         assert!(!text.contains("@modules"));
         assert!(text.starts_with("@clock\n"));
         let (m, c) = parse(&text);
@@ -232,7 +251,10 @@ mod tests {
     #[test]
     fn runtime_round_trips_and_defaults_to_blocking() {
         // Default runtime writes NO section — old projects stay byte-identical.
-        assert_eq!(serialize(&[], None, Runtime::Blocking, ApiStyle::Portable), "");
+        assert_eq!(
+            serialize(&[], None, Runtime::Blocking, ApiStyle::Portable),
+            ""
+        );
         assert_eq!(parse_runtime(""), Runtime::Blocking);
 
         // Async is persisted and parsed back, even with no modules/clock.
@@ -247,7 +269,12 @@ mod tests {
         assert_eq!(parse_runtime(&text), Runtime::Native);
 
         // …and it coexists with modules + clock.
-        let text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()), Runtime::Async, ApiStyle::Portable);
+        let text = serialize(
+            &[sample_module()],
+            Some(&Stm32f1Clock::default()),
+            Runtime::Async,
+            ApiStyle::Portable,
+        );
         let (m, c) = parse(&text);
         assert_eq!(m.len(), 1);
         assert!(c.is_some());
@@ -257,14 +284,21 @@ mod tests {
     #[test]
     fn gpio_api_round_trips_and_defaults_to_portable() {
         // Default (Portable) writes NO @gpio section.
-        assert_eq!(serialize(&[], None, Runtime::Blocking, ApiStyle::Portable), "");
+        assert_eq!(
+            serialize(&[], None, Runtime::Blocking, ApiStyle::Portable),
+            ""
+        );
         assert_eq!(parse_gpio_api(""), ApiStyle::Portable);
 
         // Native is persisted + parsed back, independent of runtime.
         let text = serialize(&[], None, Runtime::Blocking, ApiStyle::Native);
         assert!(text.contains("@gpio\n") && text.contains("Native"));
         assert_eq!(parse_gpio_api(&text), ApiStyle::Native);
-        assert_eq!(parse_runtime(&text), Runtime::Blocking, "gpio section doesn't disturb runtime");
+        assert_eq!(
+            parse_runtime(&text),
+            Runtime::Blocking,
+            "gpio section doesn't disturb runtime"
+        );
 
         // Coexists with the runtime section.
         let text = serialize(&[], None, Runtime::Async, ApiStyle::Native);
@@ -315,9 +349,17 @@ mod tests {
         pos.insert("mw_radar/utils.rs".into(), (321.5, 208.0));
 
         // A legacy file: MCU sections followed by the old Structure ones.
-        let mut text = serialize(&[sample_module()], Some(&Stm32f1Clock::default()), Runtime::Blocking, ApiStyle::Portable);
+        let mut text = serialize(
+            &[sample_module()],
+            Some(&Stm32f1Clock::default()),
+            Runtime::Blocking,
+            ApiStyle::Portable,
+        );
         text.push('\n');
-        text.push_str(&structure_config::serialize(&pos, &(true, Some(2), 0, false)));
+        text.push_str(&structure_config::serialize(
+            &pos,
+            &(true, Some(2), 0, false),
+        ));
 
         let (m, c) = parse(&text);
         assert_eq!(m.len(), 1, "modules unaffected by the extra sections");

@@ -165,7 +165,10 @@ mod tests {
             .find(|(n, _)| n == "usart1.rs")
             .unwrap()
             .1;
-        assert!(body.contains("const BAUDRATE: u32 = 115200;"), "default:\n{body}");
+        assert!(
+            body.contains("const BAUDRATE: u32 = 115200;"),
+            "default:\n{body}"
+        );
 
         if let ModuleConfig::Usart(cfg) = &mut mcu.modules[0].config {
             cfg.baud_rate = 9600;
@@ -176,7 +179,10 @@ mod tests {
             .find(|(n, _)| n == "usart1.rs")
             .unwrap()
             .1;
-        assert!(body.contains("const BAUDRATE: u32 = 9600;"), "updated:\n{body}");
+        assert!(
+            body.contains("const BAUDRATE: u32 = 9600;"),
+            "updated:\n{body}"
+        );
         assert!(!body.contains("115200"), "old value gone");
     }
 
@@ -197,7 +203,10 @@ mod tests {
             .find(|(n, _)| n == "usart1.rs")
             .unwrap()
             .1;
-        assert!(body.contains("const BAUDRATE: u32 = 9600;"), "baud:\n{body}");
+        assert!(
+            body.contains("const BAUDRATE: u32 = 9600;"),
+            "baud:\n{body}"
+        );
         assert!(body.contains("const PARITY: char = 'E';"), "parity");
         assert!(body.contains("const STOP_BITS: u8 = 2;"), "stop bits");
         let code = mcu.fresh_main_rs();
@@ -355,7 +364,10 @@ mod tests {
 
         // Portable (default) → embedded-io return + the bridge.
         let portable = usart_body(ApiStyle::Portable);
-        assert!(portable.contains("impl embedded_io::Read + embedded_io::Write"), "{portable}");
+        assert!(
+            portable.contains("impl embedded_io::Read + embedded_io::Write"),
+            "{portable}"
+        );
         assert!(portable.contains("struct SerialIo"), "{portable}");
 
         // Native → the split `(Tx, Rx)` handles via `.split()`, no embedded-io.
@@ -364,8 +376,15 @@ mod tests {
             native.contains("-> (serial::Tx<pac::USART1>, serial::Rx<pac::USART1>)"),
             "{native}"
         );
-        assert!(native.contains("Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()"), "{native}");
-        assert!(!native.contains("embedded_io"), "native has no embedded-io:\n{native}");
+        assert!(
+            native
+                .contains("Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()"),
+            "{native}"
+        );
+        assert!(
+            !native.contains("embedded_io"),
+            "native has no embedded-io:\n{native}"
+        );
     }
 
     /// The `main.rs` init binding follows the API style: Portable is one value
@@ -386,16 +405,27 @@ mod tests {
 
         // Portable → single-value binding.
         let portable = main_for(ApiStyle::Portable);
-        assert!(portable.contains("let mut _serial1_mw_radar = pins::configs::usart1::init("), "{portable}");
-        assert!(!portable.contains("let (mut _tx1"), "portable is NOT a tuple:\n{portable}");
+        assert!(
+            portable.contains("let mut _serial1_mw_radar = pins::configs::usart1::init("),
+            "{portable}"
+        );
+        assert!(
+            !portable.contains("let (mut _tx1"),
+            "portable is NOT a tuple:\n{portable}"
+        );
 
         // Native → destructured `(Tx, Rx)` tuple binding.
         let native = main_for(ApiStyle::Native);
         assert!(
-            native.contains("let (mut _tx1_mw_radar, mut _rx1_mw_radar) = pins::configs::usart1::init("),
+            native.contains(
+                "let (mut _tx1_mw_radar, mut _rx1_mw_radar) = pins::configs::usart1::init("
+            ),
             "{native}"
         );
-        assert!(!native.contains("let mut _serial1"), "native is NOT single-value:\n{native}");
+        assert!(
+            !native.contains("let mut _serial1"),
+            "native is NOT single-value:\n{native}"
+        );
     }
 
     /// An SPI module label lands on the `_spiN` handle.
@@ -414,9 +444,9 @@ mod tests {
         );
     }
 
-    /// Adding GI_SPI twice must advance to SPI2 — not re-pick SPI1 on its
+    /// Adding _SPI twice must advance to SPI2 — not re-pick SPI1 on its
     /// alternate (PA5/6/7) pins, which would merge into the first module.
-    /// (Regression: 2nd "+GI_SPI" wrongly grabbed PA4/5/6/7 for SPI1.)
+    /// (Regression: 2nd "+_SPI" wrongly grabbed PA4/5/6/7 for SPI1.)
     #[test]
     fn second_spi_module_picks_spi2_not_spi1_again() {
         let mut mcu = create_stm32f103c8tx();
@@ -446,7 +476,7 @@ mod tests {
         assert_eq!(mcu.modules.len(), 2);
     }
 
-    /// GI_USB auto-wires to the USB D-/D+ pins (PA11/PA12) and is single-instance.
+    /// _USB auto-wires to the USB D-/D+ pins (PA11/PA12) and is single-instance.
     #[test]
     fn add_usb_module_wires_pins_and_is_single_instance() {
         let mut mcu = create_stm32f103c8tx();
@@ -458,8 +488,14 @@ mod tests {
         let dm = m.pin_for(ModuleSignal::UsbDm).unwrap();
         let dp = m.pin_for(ModuleSignal::UsbDp).unwrap();
         assert_ne!(dm, dp);
-        assert_eq!(mcu.find_pin(dm).unwrap().selected_function, PinFunction::UsbDm);
-        assert_eq!(mcu.find_pin(dp).unwrap().selected_function, PinFunction::UsbDp);
+        assert_eq!(
+            mcu.find_pin(dm).unwrap().selected_function,
+            PinFunction::UsbDm
+        );
+        assert_eq!(
+            mcu.find_pin(dp).unwrap().selected_function,
+            PinFunction::UsbDp
+        );
 
         // Single USB FS peripheral — a 2nd add is refused.
         assert!(!mcu.add_module(ModuleKind::GenericInterfaceUsb));
@@ -499,9 +535,15 @@ mod tests {
             .find(|(n, _)| n == "spi1.rs")
             .unwrap()
             .1;
-        assert!(body.contains("const SPI_MODE: u8 = 3;"), "mode const:\n{body}");
+        assert!(
+            body.contains("const SPI_MODE: u8 = 3;"),
+            "mode const:\n{body}"
+        );
         assert!(body.contains("const CLOCK_KHZ: u32 = 4000;"), "clock const");
-        assert!(body.contains("CLOCK_KHZ.kHz()"), "init references the constant");
+        assert!(
+            body.contains("CLOCK_KHZ.kHz()"),
+            "init references the constant"
+        );
         // main.rs calls the config module.
         assert!(mcu.fresh_main_rs().contains("pins::configs::spi1::init("));
     }
@@ -519,7 +561,10 @@ mod tests {
             .find(|(n, _)| n == "i2c1.rs")
             .unwrap()
             .1;
-        assert!(body.contains("const CLOCK_KHZ: u32 = 400;"), "clock const:\n{body}");
+        assert!(
+            body.contains("const CLOCK_KHZ: u32 = 400;"),
+            "clock const:\n{body}"
+        );
         assert!(body.contains("I2cMode::Fast"), "fast branch present");
         assert!(mcu.fresh_main_rs().contains("pins::configs::i2c1::init("));
     }
@@ -537,7 +582,7 @@ mod tests {
             .map(|p| p.number)
             .unwrap();
 
-        // Assign I2C1 SCL → a GI_I2C module appears, wired to that pin.
+        // Assign I2C1 SCL → a _I2C module appears, wired to that pin.
         mcu.apply_pin_function(scl, PinFunction::I2cScl(1));
         assert_eq!(mcu.modules.len(), 1, "I2C module auto-added");
         assert_eq!(mcu.modules[0].kind, ModuleKind::GenericInterfaceI2c);
@@ -564,7 +609,7 @@ mod tests {
         );
     }
 
-    /// A chip with no USART pins can't host a GI_USART module.
+    /// A chip with no USART pins can't host a _USART module.
     #[test]
     fn add_fails_without_usart_pins() {
         use crate::panels::mcu_module::mcu::model::Mcu;

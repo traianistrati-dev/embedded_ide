@@ -66,7 +66,7 @@ fn indent_block(s: &str) -> String {
 /// of `main.rs` (family-agnostic). Additive: a module already present (matched by
 /// `mod <id>`) is left untouched, so edits survive every regeneration — and a
 /// module with an empty data model emits nothing. The module's id is a valid Rust
-/// identifier (e.g. `gi_usart_1`), so its types are reachable as `gi_usart_1::…`.
+/// identifier (e.g. `_usart_1`), so its types are reachable as `_usart_1::…`.
 pub fn ensure_module_models(mut file: String, modules: &[VirtualModule]) -> String {
     let mut blocks: Vec<String> = Vec::new();
     for m in modules {
@@ -206,7 +206,9 @@ pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
         // Identify the binding var + pin name for the two `let`-binding shapes.
         let (var, pin_name) = if trimmed.starts_with("let p") {
             let after_let = &trimmed["let ".len()..];
-            let Some(eq_pos) = after_let.find(" =") else { continue };
+            let Some(eq_pos) = after_let.find(" =") else {
+                continue;
+            };
             let var = after_let[..eq_pos].trim();
             if var.len() < 3 || !var.starts_with('p') {
                 continue;
@@ -215,7 +217,10 @@ pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
                 Some(c) if c.is_ascii_lowercase() => c,
                 _ => continue,
             };
-            let num: String = var[2..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            let num: String = var[2..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if num.is_empty() {
                 continue;
             }
@@ -226,7 +231,9 @@ pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
             } else {
                 &trimmed["let ".len()..]
             };
-            let Some(eq_pos) = after_let.find(" =") else { continue };
+            let Some(eq_pos) = after_let.find(" =") else {
+                continue;
+            };
             let var = after_let[..eq_pos].trim();
             let rest = match var.strip_prefix("gpio") {
                 Some(r) if r.starts_with(|c: char| c.is_ascii_digit()) => r,
@@ -243,9 +250,16 @@ pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
 
         // Function from the comment, then strip the `<base>_<type>` prefix; the
         // remaining `_<label>` (if any) is the user's custom name.
-        let Some(comment_pos) = trimmed.rfind("// ") else { continue };
-        let label_str = trimmed[comment_pos + 3..].trim().trim_end_matches(';').trim();
-        let Some(func) = PinFunction::from_label(label_str) else { continue };
+        let Some(comment_pos) = trimmed.rfind("// ") else {
+            continue;
+        };
+        let label_str = trimmed[comment_pos + 3..]
+            .trim()
+            .trim_end_matches(';')
+            .trim();
+        let Some(func) = PinFunction::from_label(label_str) else {
+            continue;
+        };
 
         let needle = format!("_{}", var_suffix(&func));
         if let Some(pos) = var.find(&needle) {
@@ -313,7 +327,10 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
             };
             // Read the pin-number digits, stopping at the `_<type>` suffix (so
             // both `pc13` and `pc13_out` yield "13").
-            let pin_num_str: String = var[2..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            let pin_num_str: String = var[2..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if pin_num_str.is_empty() {
                 continue;
             }
@@ -359,7 +376,10 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
 
             // Read the pin-number digits, stopping at any `_<type>` suffix (so
             // `gpio2`, `gpio2_out`, `gpio0_adc1_in0` all yield the number).
-            let pin_num_str: String = gpio_rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let pin_num_str: String = gpio_rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if pin_num_str.is_empty() {
                 continue;
             }
@@ -452,7 +472,10 @@ mod tests {
     #[test]
     fn pin_binding_appends_sanitized_label() {
         // No label → plain `<base>_<type>`.
-        assert_eq!(pin_binding("pc13", &PinFunction::GpioOutput, ""), "pc13_out");
+        assert_eq!(
+            pin_binding("pc13", &PinFunction::GpioOutput, ""),
+            "pc13_out"
+        );
         // Label appended and sanitized.
         assert_eq!(
             pin_binding("pc13", &PinFunction::GpioOutput, "Status LED"),

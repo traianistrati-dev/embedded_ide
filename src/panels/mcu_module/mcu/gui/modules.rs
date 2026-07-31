@@ -1,13 +1,13 @@
-//! Render virtual modules (e.g. GI_USART) and their wires beside the chip on the
+//! Render virtual modules (e.g. _USART) and their wires beside the chip on the
 //! Pins canvas — a simplified schematic. Read-only (add/remove is in the Pins
 //! tab toolbar; config is the Module panel).
 
 use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
 };
-use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -68,16 +68,28 @@ fn pin_anchor_side(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<(
         chip_rect.left() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING) + PIN_WIDTH / 2.0
     };
     if let Some(i) = mcu.right_pins.iter().position(|p| p.number == pin_num) {
-        return Some((egui::pos2(chip_rect.right() + PIN_HEIGHT, row_y(i)), Side::Right));
+        return Some((
+            egui::pos2(chip_rect.right() + PIN_HEIGHT, row_y(i)),
+            Side::Right,
+        ));
     }
     if let Some(i) = mcu.left_pins.iter().position(|p| p.number == pin_num) {
-        return Some((egui::pos2(chip_rect.left() - PIN_HEIGHT, row_y(i)), Side::Left));
+        return Some((
+            egui::pos2(chip_rect.left() - PIN_HEIGHT, row_y(i)),
+            Side::Left,
+        ));
     }
     if let Some(i) = mcu.top_pins.iter().position(|p| p.number == pin_num) {
-        return Some((egui::pos2(col_x(i), chip_rect.top() - PIN_HEIGHT), Side::Top));
+        return Some((
+            egui::pos2(col_x(i), chip_rect.top() - PIN_HEIGHT),
+            Side::Top,
+        ));
     }
     if let Some(i) = mcu.bottom_pins.iter().position(|p| p.number == pin_num) {
-        return Some((egui::pos2(col_x(i), chip_rect.bottom() + PIN_HEIGHT), Side::Bottom));
+        return Some((
+            egui::pos2(col_x(i), chip_rect.bottom() + PIN_HEIGHT),
+            Side::Bottom,
+        ));
     }
     None
 }
@@ -145,30 +157,38 @@ fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui
     match side {
         Side::Right => egui::pos2(
             box_rect.left(),
-            anchor.y.clamp(box_rect.top() + 8.0, box_rect.bottom() - 8.0),
+            anchor
+                .y
+                .clamp(box_rect.top() + 8.0, box_rect.bottom() - 8.0),
         ),
         Side::Left => egui::pos2(
             box_rect.right(),
-            anchor.y.clamp(box_rect.top() + 8.0, box_rect.bottom() - 8.0),
+            anchor
+                .y
+                .clamp(box_rect.top() + 8.0, box_rect.bottom() - 8.0),
         ),
         Side::Top => egui::pos2(
-            anchor.x.clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
+            anchor
+                .x
+                .clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
             box_rect.bottom(),
         ),
         Side::Bottom => egui::pos2(
-            anchor.x.clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
+            anchor
+                .x
+                .clamp(box_rect.left() + 8.0, box_rect.right() - 8.0),
             box_rect.top(),
         ),
     }
 }
 
-/// The module name without the `GI_` prefix (e.g. `GI_I2C1` → `I2C1`).
+/// The module name without the `_` prefix (e.g. `_I2C1` → `I2C1`).
 pub fn module_base_name(m: &VirtualModule) -> &str {
-    m.name.strip_prefix("GI_").unwrap_or(&m.name)
+    m.name.strip_prefix("_").unwrap_or(&m.name)
 }
 
 /// Display title for the module list/box: the base name plus the user's **raw**
-/// label, verbatim — e.g. `GI_I2C1` + "128x32 display" → `I2C1 - 128x32 display`.
+/// label, verbatim — e.g. `_I2C1` + "128x32 display" → `I2C1 - 128x32 display`.
 pub fn module_title(m: &VirtualModule) -> String {
     let base = module_base_name(m);
     let label = m.config.custom_label();
@@ -316,13 +336,23 @@ pub fn draw_modules(
             .collect();
         let along = on_side.iter().sum::<f32>() / on_side.len().max(1) as f32;
         let conns2 = conns.iter().map(|(sig, p, _)| (*sig, *p)).collect();
-        sided.push(Sided { idx: i, conns: conns2, side, along });
+        sided.push(Sided {
+            idx: i,
+            conns: conns2,
+            side,
+            along,
+        });
     }
 
     // ── 2. Pack each side independently so same-side boxes never overlap. ──────
     // (module index, rect, conns, side, connected)
-    let mut boxes: Vec<(usize, egui::Rect, Vec<(ModuleSignal, egui::Pos2)>, Side, bool)> =
-        Vec::new();
+    let mut boxes: Vec<(
+        usize,
+        egui::Rect,
+        Vec<(ModuleSignal, egui::Pos2)>,
+        Side,
+        bool,
+    )> = Vec::new();
     for target in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
         let mut group: Vec<&Sided> = sided.iter().filter(|e| e.side == target).collect();
         group.sort_by(|a, b| a.along.total_cmp(&b.along));
@@ -337,7 +367,13 @@ pub fn draw_modules(
     for i in floating_idx {
         let min = egui::pos2(chip_rect.right() + PIN_HEIGHT + PIN_GAP, fy);
         fy += BOX_H + BOX_GAP;
-        boxes.push((i, egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H)), Vec::new(), Side::Right, false));
+        boxes.push((
+            i,
+            egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H)),
+            Vec::new(),
+            Side::Right,
+            false,
+        ));
     }
 
     // ── 3. Draw boxes + wires; detect a header click to expand the list entry. ─
@@ -348,7 +384,14 @@ pub fn draw_modules(
     for (i, rect, conns, side, connected) in &boxes {
         let m = &mcu.modules[*i];
         let inst = m.instance();
-        draw_box(painter, *rect, m, *connected, module_color(m.kind, inst), native_forced);
+        draw_box(
+            painter,
+            *rect,
+            m,
+            *connected,
+            module_color(m.kind, inst),
+            native_forced,
+        );
 
         for (sig, anchor) in conns {
             let color = signal_color(*sig, inst);
@@ -361,7 +404,11 @@ pub fn draw_modules(
         // Click the header area (above the rename field) to expand the list entry.
         let header_rect =
             egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - 30.0));
-        let resp = ui.interact(header_rect, ui.id().with(("vmod_box", *i)), egui::Sense::click());
+        let resp = ui.interact(
+            header_rect,
+            ui.id().with(("vmod_box", *i)),
+            egui::Sense::click(),
+        );
         if resp.hovered() {
             painter.rect_stroke(
                 *rect,
@@ -506,12 +553,16 @@ pub fn module_config_ui(
                         "embassy new_blocking → a STANDARD blocking embedded-hal 1.0 bus. \
                          No DMA — compiles out of the box. Fine inside an async project.",
                     );
-                ui.selectable_value(mode, AsyncBusMode::AsyncDma, "Async-DMA (embedded-hal-async)")
-                    .on_hover_text(
-                        "embassy DMA new → an .await-able embedded-hal-async bus. Needs DMA \
+                ui.selectable_value(
+                    mode,
+                    AsyncBusMode::AsyncDma,
+                    "Async-DMA (embedded-hal-async)",
+                )
+                .on_hover_text(
+                    "embassy DMA new → an .await-able embedded-hal-async bus. Needs DMA \
                          channels: main.rs gets a TODO line to fill with channels valid for \
                          this peripheral on your chip (won't compile until you do).",
-                    );
+                );
             });
         ui.end_row();
     };
@@ -526,7 +577,8 @@ pub fn module_config_ui(
                     egui::ComboBox::from_id_salt("baud")
                         .selected_text(cfg.baud_rate.to_string())
                         .show_ui(ui, |ui| {
-                            for b in [9600u32, 19200, 38400, 57600, 115200, 230400, 460800, 921600] {
+                            for b in [9600u32, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
+                            {
                                 ui.selectable_value(&mut cfg.baud_rate, b, b.to_string());
                             }
                         });
@@ -580,7 +632,10 @@ pub fn module_config_ui(
                     egui::ComboBox::from_id_salt("spiclk")
                         .selected_text(hz_label(cfg.clock_hz))
                         .show_ui(ui, |ui| {
-                            for hz in [125_000u32, 250_000, 500_000, 1_000_000, 2_000_000, 4_000_000, 8_000_000] {
+                            for hz in [
+                                125_000u32, 250_000, 500_000, 1_000_000, 2_000_000, 4_000_000,
+                                8_000_000,
+                            ] {
                                 ui.selectable_value(&mut cfg.clock_hz, hz, hz_label(hz));
                             }
                         });
@@ -603,7 +658,11 @@ pub fn module_config_ui(
                         });
                     ui.end_row();
                     ui.label("Address (7-bit)");
-                    ui.add(egui::DragValue::new(&mut cfg.address).range(0..=127).hexadecimal(2, false, true));
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.address)
+                            .range(0..=127)
+                            .hexadecimal(2, false, true),
+                    );
                     ui.end_row();
                     if is_async {
                         async_row(ui, &mut pending.1);

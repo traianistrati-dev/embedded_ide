@@ -15,7 +15,7 @@ use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 /// `optional` ones (e.g. SPI NSS) are added when a pin is available. Pins in
 /// `used` (wired to another module) are skipped, and peripheral instances in
 /// `used_instances` (already hosting a module of this kind) are skipped entirely
-/// — otherwise a 2nd "+GI_SPI" would re-pick SPI1 on its alternate pins instead
+/// — otherwise a 2nd "+_SPI" would re-pick SPI1 on its alternate pins instead
 /// of moving to SPI2. Tries instances 0..=3, preferring instances where the pins
 /// are already assigned to the signal.
 pub fn pick_pins(
