@@ -28,7 +28,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -69,6 +69,30 @@ pub struct VarRow {
     pub ty: Option<String>,
 }
 
+/// One watch expression + its most recent evaluation against the selected
+/// frame. `error` = the last `evaluate` failed (out of scope / unsupported);
+/// `value` then holds the reason. Expressions persist across halts; the value
+/// refreshes on each stop and on frame selection.
+#[derive(Clone)]
+pub struct WatchRow {
+    pub expr: String,
+    pub value: String,
+    pub ty: Option<String>,
+    pub error: bool,
+}
+
+/// The current hover-to-evaluate request: the identifier under the pointer and
+/// its value once the target answers. `generation` discards stale responses
+/// when the pointer moved to another identifier before the reply arrived.
+/// `value: None` = still awaiting the `evaluate` response (no tooltip yet).
+#[derive(Clone)]
+pub struct HoverEval {
+    pub generation: u64,
+    pub expr: String,
+    pub value: Option<String>,
+    pub ty: Option<String>,
+}
+
 #[derive(Default)]
 pub struct DebugState {
     pub phase: DebugPhase,
@@ -76,6 +100,13 @@ pub struct DebugState {
     pub stack: Vec<Frame>,
     pub locals: Vec<VarRow>,
     pub registers: Vec<VarRow>,
+    /// User watch expressions + their latest values (see [`WatchRow`]). Owned
+    /// here (not on `Debugger`) so the reader thread can re-evaluate them on a
+    /// halt. NOT cleared when the target runs — only the values go stale.
+    pub watches: Vec<WatchRow>,
+    /// Hover-to-evaluate for the identifier under the editor pointer (see
+    /// [`HoverEval`]); `None` when not hovering an identifier / not halted.
+    pub hover: Option<HoverEval>,
     /// Set by the reader when the target halts somewhere navigable; the UI
     /// consumes it (opens the file, scrolls, tints the line).
     pub nav: Option<(String, u32)>,
@@ -95,6 +126,11 @@ enum Pending {
     Scopes,
     VarsLocals,
     VarsRegisters,
+    /// `evaluate` for watch expression `i` (index into `DebugState::watches`).
+    Watch(usize),
+    /// `evaluate` for a hover tooltip; the `u64` is the hover generation so a
+    /// stale reply (pointer already moved on) is dropped.
+    Hover(u64),
     Other,
 }
 
@@ -180,6 +216,14 @@ pub struct Debugger {
     build_child: Arc<Mutex<Option<Child>>>,
     stop: Option<Arc<AtomicBool>>,
     cfg: Arc<Mutex<Option<Arc<SessionCfg>>>>,
+    /// Debug-tab pane split boundaries as fractions of the row width (three
+    /// separators → four panes: Console | Call stack | Variables | Watch).
+    /// UI-only, single-threaded. Draggable; see `debug_tab::split_widths`.
+    pub pane_splits: [f32; 3],
+    /// The Watch pane's "add expression" input text. UI-only.
+    pub watch_draft: String,
+    /// Monotonic generation for hover-evaluate requests (drops stale replies).
+    hover_gen: AtomicU64,
 }
 
 impl Default for Debugger {
@@ -196,6 +240,10 @@ impl Default for Debugger {
             build_child: Arc::new(Mutex::new(None)),
             stop: None,
             cfg: Arc::new(Mutex::new(None)),
+            // Console widest; stack / variables / watch share the rest.
+            pane_splits: [0.34, 0.56, 0.78],
+            watch_draft: String::new(),
+            hover_gen: AtomicU64::new(0),
         }
     }
 }
@@ -233,10 +281,26 @@ impl Debugger {
         if self.is_busy() {
             return;
         }
-        *self.state.lock().unwrap() = DebugState {
-            phase: DebugPhase::Building,
-            ..Default::default()
-        };
+        {
+            let mut st = self.state.lock().unwrap();
+            // Watch EXPRESSIONS survive a restart (user intent); their values
+            // reset and refill on the first halt of the new session.
+            let watches = st
+                .watches
+                .iter()
+                .map(|w| WatchRow {
+                    expr: w.expr.clone(),
+                    value: String::new(),
+                    ty: None,
+                    error: false,
+                })
+                .collect();
+            *st = DebugState {
+                phase: DebugPhase::Building,
+                watches,
+                ..Default::default()
+            };
+        }
         self.wire.pending.lock().unwrap().clear();
         let stop = Arc::new(AtomicBool::new(false));
         self.stop = Some(Arc::clone(&stop));
@@ -374,6 +438,7 @@ impl Debugger {
         st.locals.clear();
         st.registers.clear();
         st.sel_frame = None;
+        st.hover = None;
     }
 
     /// Show another frame's variables (stack-row click). Also raises the nav
@@ -388,6 +453,98 @@ impl Debugger {
         }
         self.wire
             .request("scopes", json!({"frameId": frame.id}), Pending::Scopes);
+        // The new frame's scope changes what every watch resolves to.
+        eval_watches(&self.wire, &self.state, frame.id);
+    }
+
+    /// Add a watch expression (from the editor's "Add to Watch" or the Watch
+    /// pane's input). Deduplicated; evaluated immediately when halted on a frame.
+    pub fn add_watch(&self, expr: String) {
+        let expr = expr.trim().to_string();
+        if expr.is_empty() {
+            return;
+        }
+        let (idx, frame) = {
+            let mut st = self.state.lock().unwrap();
+            if st.watches.iter().any(|w| w.expr == expr) {
+                return; // already watching it
+            }
+            st.watches.push(WatchRow {
+                expr: expr.clone(),
+                value: String::new(),
+                ty: None,
+                error: false,
+            });
+            (st.watches.len() - 1, st.sel_frame)
+        };
+        // Evaluate now if a session is halted on a frame; otherwise it fills in
+        // at the next stop.
+        if let Some(fid) = frame {
+            if self.wire.writer.lock().unwrap().is_some() {
+                self.wire.request(
+                    "evaluate",
+                    json!({"expression": expr, "frameId": fid, "context": "watch"}),
+                    Pending::Watch(idx),
+                );
+            }
+        }
+    }
+
+    pub fn remove_watch(&self, i: usize) {
+        let mut st = self.state.lock().unwrap();
+        if i < st.watches.len() {
+            st.watches.remove(i);
+        }
+    }
+
+    /// Evaluate `expr` for a hover tooltip (`context:"hover"`) against the
+    /// selected frame. Debounced: a no-op while the same expression is already
+    /// the current hover, so at most one request fires per identifier hovered.
+    /// Only meaningful while halted on a frame with a live session.
+    pub fn hover_eval(&self, expr: String) {
+        let expr = expr.trim().to_string();
+        if expr.is_empty() {
+            self.clear_hover();
+            return;
+        }
+        let fid = {
+            let st = self.state.lock().unwrap();
+            if !matches!(st.phase, DebugPhase::Stopped(_)) {
+                return;
+            }
+            // Same expression already shown / in flight → nothing to do.
+            if st.hover.as_ref().map(|h| h.expr.as_str()) == Some(expr.as_str()) {
+                return;
+            }
+            st.sel_frame
+        };
+        let Some(fid) = fid else {
+            return;
+        };
+        if self.wire.writer.lock().unwrap().is_none() {
+            return;
+        }
+        let generation = self.hover_gen.fetch_add(1, Ordering::Relaxed) + 1;
+        self.state.lock().unwrap().hover = Some(HoverEval {
+            generation,
+            expr: expr.clone(),
+            value: None,
+            ty: None,
+        });
+        self.wire.request(
+            "evaluate",
+            json!({"expression": expr, "frameId": fid, "context": "hover"}),
+            Pending::Hover(generation),
+        );
+    }
+
+    /// Drop any hover tooltip (pointer left an identifier / the editor, or the
+    /// session isn't halted).
+    pub fn clear_hover(&self) {
+        let mut st = self.state.lock().unwrap();
+        if st.hover.is_some() {
+            st.hover = None;
+        }
     }
 
     /// Push the current breakpoint set of one file to the live session (call
@@ -400,6 +557,26 @@ impl Debugger {
             return;
         }
         send_breakpoints(&self.wire, &cfg.project_dir, rel_path, lines);
+    }
+}
+
+/// Fire a DAP `evaluate` (context "watch") for every watch expression against
+/// `frame_id`; each response routes to `Pending::Watch(i)` → fills
+/// `DebugState::watches[i]`. Called on every halt and on frame selection.
+fn eval_watches(wire: &Wire, state: &Arc<Mutex<DebugState>>, frame_id: i64) {
+    let exprs: Vec<String> = state
+        .lock()
+        .unwrap()
+        .watches
+        .iter()
+        .map(|w| w.expr.clone())
+        .collect();
+    for (i, expr) in exprs.iter().enumerate() {
+        wire.request(
+            "evaluate",
+            json!({"expression": expr, "frameId": frame_id, "context": "watch"}),
+            Pending::Watch(i),
+        );
     }
 }
 
@@ -619,6 +796,25 @@ fn handle_response(
             .map(str::to_owned)
             .or_else(|| msg["body"]["error"]["format"].as_str().map(str::to_owned))
             .unwrap_or_else(|| format!("{} failed", msg["command"].as_str().unwrap_or("request")));
+        // A watch that can't be resolved (out of scope, unsupported expression)
+        // is normal — show it on the row, don't spam the console.
+        if let Pending::Watch(i) = kind {
+            let mut st = state.lock().unwrap();
+            if let Some(row) = st.watches.get_mut(i) {
+                row.value = err;
+                row.ty = None;
+                row.error = true;
+            }
+            return;
+        }
+        // A hover over a non-evaluable token just shows no tooltip.
+        if let Pending::Hover(g) = kind {
+            let mut st = state.lock().unwrap();
+            if st.hover.as_ref().map(|h| h.generation) == Some(g) {
+                st.hover = None;
+            }
+            return;
+        }
         console
             .lock()
             .unwrap()
@@ -706,6 +902,8 @@ fn handle_response(
             }
             if let Some(f) = top {
                 wire.request("scopes", json!({"frameId": f.id}), Pending::Scopes);
+                // Refresh every watch against the (new) top frame on each halt.
+                eval_watches(wire, state, f.id);
             }
         }
         Pending::Scopes => {
@@ -747,6 +945,27 @@ fn handle_response(
                 st.registers = rows;
             }
         }
+        Pending::Watch(i) => {
+            let value = msg["body"]["result"].as_str().unwrap_or("").to_string();
+            let ty = msg["body"]["type"].as_str().map(str::to_owned);
+            let mut st = state.lock().unwrap();
+            if let Some(row) = st.watches.get_mut(i) {
+                row.value = value;
+                row.ty = ty;
+                row.error = false;
+            }
+        }
+        Pending::Hover(g) => {
+            let value = msg["body"]["result"].as_str().unwrap_or("").to_string();
+            let ty = msg["body"]["type"].as_str().map(str::to_owned);
+            let mut st = state.lock().unwrap();
+            if let Some(h) = &mut st.hover {
+                if h.generation == g {
+                    h.value = Some(value);
+                    h.ty = ty;
+                }
+            }
+        }
         Pending::Other => {}
     }
 }
@@ -786,6 +1005,7 @@ fn handle_event(
             st.locals.clear();
             st.registers.clear();
             st.sel_frame = None;
+            st.hover = None;
         }
         Some("output") => {
             let text = msg["body"]["output"].as_str().unwrap_or("");

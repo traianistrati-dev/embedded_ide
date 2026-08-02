@@ -20,6 +20,9 @@ pub(super) enum EditorAction {
     Rename,
     GoToDef,
     GoToImpl,
+    /// Add the selection (or the identifier at the caret) to the Debug tab's
+    /// Watch pane.
+    AddWatch,
     Completion,
     Find,
     Replace,
@@ -79,6 +82,7 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
         item(ui, ph::PENCIL_SIMPLE, "Rename symbol", "Ctrl+R", EditorAction::Rename);
         item(ui, ph::ARROW_SQUARE_OUT, "Go to definition", "F12", EditorAction::GoToDef);
         item(ui, ph::PUZZLE_PIECE, "Go to implementation", "Ctrl+F12", EditorAction::GoToImpl);
+        item(ui, ph::EYE, "Add to Watch (Debug)", "", EditorAction::AddWatch);
     }
     if is_rs || is_cargo {
         ui.separator();

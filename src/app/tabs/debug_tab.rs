@@ -291,26 +291,37 @@ pub fn show_debug_tab(
     let avail_h = ui.available_height();
     let total_w = ui.available_width();
     let gap = ui.spacing().item_spacing.x.max(4.0);
-    let [console_w, stack_w, vars_w] = pane_widths(total_w - 2.0 * gap);
+    // Four panes → three gaps. Widths come from the draggable split boundaries.
+    let usable = (total_w - 3.0 * gap).max(0.0);
+    let splits = clamp_splits(dbg.pane_splits);
+    let [console_w, stack_w, vars_w, watch_w] = split_widths(usable, splits);
     let body_h = (avail_h - 18.0).max(24.0); // minus the pane title row
 
     // Snapshot the state once (short lock) — the panes render from the copy.
-    let (stack, locals, registers, sel_frame) = {
+    let (stack, locals, registers, sel_frame, watches) = {
         let st = dbg.state.lock().unwrap();
         (
             st.stack.clone(),
             st.locals.clone(),
             st.registers.clone(),
             st.sel_frame,
+            st.watches.clone(),
         )
     };
     let mut select: Option<Frame> = None;
+    let mut watch_add: Option<String> = None;
+    let mut watch_remove: Option<usize> = None;
 
     let (row, _) =
         ui.allocate_exact_size(egui::vec2(total_w, avail_h), egui::Sense::hover());
+    // Pane left edges: Console | Call stack | Variables | Watch.
+    let x0 = row.left();
+    let x1 = x0 + console_w + gap;
+    let x2 = x1 + stack_w + gap;
+    let x3 = x2 + vars_w + gap;
     // Child uis at explicit rects: their content never feeds back into the
     // parent's min_rect (unlike `ui.vertical`, which grows it).
-    let mut pane = |ui: &mut egui::Ui, x: f32, w: f32| -> egui::Ui {
+    let pane = |ui: &mut egui::Ui, x: f32, w: f32| -> egui::Ui {
         let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), egui::vec2(w, avail_h));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
@@ -320,22 +331,17 @@ pub fn show_debug_tab(
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
         child
     };
-    // Separator lines live in the gaps — painted, so they cost no layout.
-    let sep = ui.visuals().widgets.noninteractive.bg_stroke;
-    for x in [row.left() + console_w + gap * 0.5, row.right() - vars_w - gap * 0.5] {
-        ui.painter().vline(x, row.y_range(), sep);
-    }
 
     // Console.
     {
-        let ui = &mut pane(ui, row.left(), console_w);
+        let ui = &mut pane(ui, x0, console_w);
         pane_title(ui, "Console");
         render_scrollback(ui, &dbg.console, "debug_console", body_h);
     }
 
     // Stack frames.
     {
-        let ui = &mut pane(ui, row.left() + console_w + gap, stack_w);
+        let ui = &mut pane(ui, x1, stack_w);
         pane_title(ui, "Call stack");
         egui::ScrollArea::vertical()
             .id_salt("debug_stack")
@@ -377,7 +383,7 @@ pub fn show_debug_tab(
 
     // Variables: locals then registers.
     {
-        let ui = &mut pane(ui, row.right() - vars_w, vars_w);
+        let ui = &mut pane(ui, x2, vars_w);
         pane_title(ui, "Variables");
         egui::ScrollArea::vertical()
             .id_salt("debug_vars")
@@ -408,23 +414,157 @@ pub fn show_debug_tab(
             });
     }
 
+    // Watch: user expressions evaluated against the selected frame.
+    {
+        let ui = &mut pane(ui, x3, watch_w);
+        pane_title(ui, "Watch");
+        // Add row: "+" button and an expression field (Enter also adds).
+        ui.horizontal(|ui| {
+            if ui
+                .button(egui::RichText::new(ph::PLUS).size(11.0))
+                .on_hover_text("Add a watch expression")
+                .clicked()
+                && !dbg.watch_draft.trim().is_empty()
+            {
+                watch_add = Some(std::mem::take(&mut dbg.watch_draft));
+            }
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut dbg.watch_draft)
+                    .hint_text("expression…")
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+            if r.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !dbg.watch_draft.trim().is_empty()
+            {
+                watch_add = Some(std::mem::take(&mut dbg.watch_draft));
+            }
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("debug_watch")
+            .max_height((body_h - 24.0).max(24.0))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if watches.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Right-click a variable in the editor → Add to Watch, \
+                             or type an expression above.",
+                        )
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(110)),
+                    );
+                }
+                for (i, w) in watches.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button(egui::RichText::new(ph::X).size(10.0))
+                            .on_hover_text("Remove")
+                            .clicked()
+                        {
+                            watch_remove = Some(i);
+                        }
+                        ui.label(
+                            egui::RichText::new(&w.expr)
+                                .size(10.5)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(200, 180, 120)),
+                        );
+                        let val_color = if w.error {
+                            egui::Color32::from_gray(110)
+                        } else {
+                            egui::Color32::from_gray(205)
+                        };
+                        let resp = ui.label(
+                            egui::RichText::new(if w.value.is_empty() { "—" } else { &w.value })
+                                .size(10.5)
+                                .monospace()
+                                .color(val_color),
+                        );
+                        if let Some(ty) = &w.ty {
+                            resp.on_hover_text(ty);
+                        }
+                    });
+                }
+            });
+    }
+
+    // Draggable separators in the gaps (drawn on top of the panes). Dragging
+    // separator k shifts the boundary between pane k and k+1.
+    let sep = ui.visuals().widgets.noninteractive.bg_stroke;
+    let accent = egui::Color32::from_rgb(90, 140, 210);
+    let mut new_splits = splits;
+    for (k, sx) in [x1 - gap * 0.5, x2 - gap * 0.5, x3 - gap * 0.5]
+        .into_iter()
+        .enumerate()
+    {
+        let handle = egui::Rect::from_min_max(
+            egui::pos2(sx - 3.0, row.top()),
+            egui::pos2(sx + 3.0, row.bottom()),
+        );
+        let resp = ui.interact(
+            handle,
+            ui.id().with(("debug_pane_sep", k)),
+            egui::Sense::drag(),
+        );
+        let hot = resp.hovered() || resp.dragged();
+        if hot {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        let stroke = if hot {
+            egui::Stroke::new(2.0, accent)
+        } else {
+            sep
+        };
+        ui.painter().vline(sx, row.y_range(), stroke);
+        if resp.dragged() && usable > 0.0 {
+            new_splits[k] = splits[k] + resp.drag_delta().x / usable;
+        }
+    }
+    if new_splits != splits {
+        dbg.pane_splits = clamp_splits(new_splits);
+    }
+
+    if let Some(e) = watch_add {
+        dbg.add_watch(e);
+    }
+    if let Some(i) = watch_remove {
+        dbg.remove_watch(i);
+    }
     if let Some(f) = select {
         dbg.select_frame(&f);
     }
 }
 
-/// Widths of the console / call-stack / variables panes for a row `usable` px
-/// wide (the row minus its two gaps). They sum to EXACTLY `usable` and are
-/// never negative: the panes shrink together on a narrow panel instead of
+/// Minimum fraction of the row each of the four panes keeps — the drag can't
+/// squeeze one below this, so nothing ever collapses to zero.
+const MIN_SPLIT: f32 = 0.08;
+
+/// Sanitize the three split boundaries (fractions of the row, ascending) so the
+/// four panes each keep at least [`MIN_SPLIT`] and stay ordered. Idempotent —
+/// re-clamping an already-valid array is a no-op.
+fn clamp_splits(mut b: [f32; 3]) -> [f32; 3] {
+    b[0] = b[0].clamp(MIN_SPLIT, 1.0 - 3.0 * MIN_SPLIT);
+    b[1] = b[1].clamp(b[0] + MIN_SPLIT, 1.0 - 2.0 * MIN_SPLIT);
+    b[2] = b[2].clamp(b[1] + MIN_SPLIT, 1.0 - MIN_SPLIT);
+    b
+}
+
+/// The four pane widths for a row `usable` px wide (row minus its three gaps),
+/// derived from the split boundaries `b`. They sum to EXACTLY `usable` and are
+/// never negative — the panes shrink together on a narrow panel instead of
 /// holding a floor, because a row wider than the panel makes egui re-widen the
-/// panel from its content rect — forever (see the note at the call site).
-fn pane_widths(usable: f32) -> [f32; 3] {
+/// Code Editor side panel from its content rect, forever (note at the call
+/// site). Callers pass boundaries already through [`clamp_splits`].
+fn split_widths(usable: f32, b: [f32; 3]) -> [f32; 4] {
     let usable = usable.max(0.0);
-    // Caps keep the side panes readable-but-bounded on a wide panel; the
-    // console takes whatever is left (26% + 30% < 100%, so it stays positive).
-    let stack = (usable * 0.26).min(340.0);
-    let vars = (usable * 0.30).min(400.0);
-    [usable - stack - vars, stack, vars]
+    [
+        b[0] * usable,
+        (b[1] - b[0]) * usable,
+        (b[2] - b[1]) * usable,
+        (1.0 - b[2]) * usable,
+    ]
 }
 
 fn pane_title(ui: &mut egui::Ui, title: &str) {
@@ -458,37 +598,48 @@ fn var_row(ui: &mut egui::Ui, v: &crate::debugger::VarRow, name_color: egui::Col
 
 #[cfg(test)]
 mod tests {
-    use super::pane_widths;
+    use super::{clamp_splits, split_widths, MIN_SPLIT};
 
-    /// The three panes must fit the row EXACTLY at every width — the runaway
-    /// this replaced came from floors (console 160 / stack 160 / vars 180) that
-    /// out-demanded a narrow panel, and the Code Editor side panel adopts its
-    /// content's width, so the row re-widened it every frame until the MCU and
-    /// Project panels hit their minimum.
+    /// The four panes must fit the row EXACTLY at every width — the runaway this
+    /// replaced came from floors that out-demanded a narrow panel, and the Code
+    /// Editor side panel adopts its content's width, so the row re-widened it
+    /// every frame until the MCU and Project panels hit their minimum.
     #[test]
     fn panes_always_fit_the_row() {
+        let splits = clamp_splits([0.34, 0.56, 0.78]);
         for usable in [0.0_f32, 1.0, 80.0, 200.0, 418.0, 500.0, 900.0, 1600.0, 4000.0] {
-            let [console, stack, vars] = pane_widths(usable);
-            assert!(
-                console >= 0.0 && stack >= 0.0 && vars >= 0.0,
-                "negative pane at {usable}: {console}/{stack}/{vars}"
-            );
-            let sum = console + stack + vars;
+            let w = split_widths(usable, splits);
+            assert!(w.iter().all(|x| *x >= 0.0), "negative pane at {usable}: {w:?}");
+            let sum: f32 = w.iter().sum();
             assert!(
                 (sum - usable).abs() < 0.001,
-                "row of {usable} demands {sum} ({console}/{stack}/{vars})"
+                "row of {usable} demands {sum} ({w:?})"
             );
         }
         // A degenerate/negative row (panel dragged to nothing) stays at zero.
-        assert_eq!(pane_widths(-50.0), [0.0, 0.0, 0.0]);
+        assert_eq!(split_widths(-50.0, splits), [0.0, 0.0, 0.0, 0.0]);
     }
 
-    /// On a wide panel the side panes stop growing and the console takes the
-    /// rest — the caps must not break the exact-fit contract above.
+    /// Clamping keeps every pane ≥ MIN_SPLIT and the boundaries ascending, even
+    /// from garbage input (out of order, out of range, all-collapsed).
     #[test]
-    fn side_panes_cap_and_the_console_absorbs_the_rest() {
-        let [console, stack, vars] = pane_widths(4000.0);
-        assert_eq!((stack, vars), (340.0, 400.0));
-        assert_eq!(console, 4000.0 - 340.0 - 400.0);
+    fn clamp_keeps_four_panes_alive() {
+        for raw in [
+            [0.34, 0.56, 0.78],   // already valid
+            [0.9, 0.1, 0.5],      // out of order
+            [-1.0, 2.0, 0.0],     // out of range
+            [0.0, 0.0, 0.0],      // all collapsed left
+            [1.0, 1.0, 1.0],      // all collapsed right
+        ] {
+            let b = clamp_splits(raw);
+            // Ascending with a MIN_SPLIT gap between each of the four panes.
+            assert!(b[0] >= MIN_SPLIT - 1e-6, "{b:?}");
+            assert!(b[1] - b[0] >= MIN_SPLIT - 1e-6, "{b:?}");
+            assert!(b[2] - b[1] >= MIN_SPLIT - 1e-6, "{b:?}");
+            assert!(1.0 - b[2] >= MIN_SPLIT - 1e-6, "{b:?}");
+        }
+        // Idempotent.
+        let once = clamp_splits([0.9, 0.1, 0.5]);
+        assert_eq!(clamp_splits(once), once);
     }
 }

@@ -23,6 +23,7 @@ mod code_action;
 mod comment;
 mod completion;
 mod context_menu;
+mod debug_hover;
 mod delete_line;
 mod diag_embed;
 mod doc_md;
@@ -838,6 +839,9 @@ impl AppIde {
                 self.paint_diff_gutter(ui, &editor_resp, editor_clip, &mut display_code);
                 // Breakpoint dots + click-to-toggle in the line-number column.
                 self.paint_breakpoint_gutter(ui, &editor_resp, editor_clip, &display_code);
+                // Hover-to-evaluate: value tooltip for the identifier under the
+                // pointer while a debug session is halted.
+                self.paint_debug_hover(ui, &editor_resp, &display_code);
 
                 // ── Ctrl+Enter code actions (RA assists / quick-fixes) ────────
                 if ctrl_enter_pressed {
@@ -901,6 +905,29 @@ impl AppIde {
                         Some(A::Rename) => ctrl_r_pressed = true,
                         Some(A::GoToDef) => f12_pressed = true,
                         Some(A::GoToImpl) => ctrl_f12_pressed = true,
+                        Some(A::AddWatch) => {
+                            // Prefer the current selection (lets you watch an
+                            // expression like `self.buf[0]`); else the identifier
+                            // under the caret. Reveal the Debug tab so the new
+                            // watch is visible.
+                            let expr = editor_resp
+                                .state
+                                .cursor
+                                .char_range()
+                                .and_then(|r| {
+                                    let lo = r.primary.index.min(r.secondary.index);
+                                    let hi = r.primary.index.max(r.secondary.index);
+                                    (lo != hi).then(|| {
+                                        let chars: Vec<char> = display_code.chars().collect();
+                                        chars[lo..hi.min(chars.len())].iter().collect::<String>()
+                                    })
+                                })
+                                .unwrap_or_else(|| word_under_cursor.clone());
+                            if !expr.trim().is_empty() {
+                                self.debugger.add_watch(expr);
+                                self.build_tab = crate::app::BuildPanelTab::Debug;
+                            }
+                        }
                         Some(A::SelectBlock) => select_block_pressed = true,
                         Some(A::Completion) => ctrl_space_pressed = true,
                         Some(A::Find) => self.find.open_with(find_replace::FindMode::FindFile),
