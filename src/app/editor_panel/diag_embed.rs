@@ -390,7 +390,7 @@ impl AppIde {
                 self.highlighted_error_line = Some((
                     id,
                     line as usize,
-                    egui::Color32::from_rgba_unmultiplied(60, 200, 90, 51),
+                    egui::Color32::from_rgba_unmultiplied(200, 50, 50, 40),
                 ));
             }
         }
@@ -417,8 +417,7 @@ impl AppIde {
             // does via `git_path_to_project`); without this a modified library
             // line never resolves and the click silently opens nothing.
             let key = self.git_path_to_project(&path);
-            if let Some(id) =
-                crate::app::resolve_diag_file(&key, &self.project_tree.user_src_files)
+            if let Some(id) = crate::app::resolve_diag_file(&key, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line));

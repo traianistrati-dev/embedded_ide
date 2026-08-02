@@ -560,6 +560,25 @@ impl Debugger {
     }
 }
 
+/// probe-rs answers an unresolved `evaluate` with a `success:true` result whose
+/// text is a placeholder marker — `<invalid expression "x">` (name isn't a
+/// register / in-scope local / static / SVD peripheral on THIS probe-rs),
+/// `<not found …>`, or `<optimized out>` (release build dropped it). Detect
+/// those so the UI can grey them out with a short reason instead of showing the
+/// raw marker. Returns `(display_text, is_unresolved)`.
+fn classify_eval_result(value: &str) -> (String, bool) {
+    let v = value.trim();
+    if v.starts_with("<invalid expression") {
+        ("not in scope / unsupported".to_string(), true)
+    } else if v.starts_with("<not found") {
+        ("not found in this frame".to_string(), true)
+    } else if v.contains("optimized out") {
+        ("optimized out".to_string(), true)
+    } else {
+        (value.to_string(), false)
+    }
+}
+
 /// Fire a DAP `evaluate` (context "watch") for every watch expression against
 /// `frame_id`; each response routes to `Pending::Watch(i)` → fills
 /// `DebugState::watches[i]`. Called on every halt and on frame selection.
@@ -946,21 +965,32 @@ fn handle_response(
             }
         }
         Pending::Watch(i) => {
-            let value = msg["body"]["result"].as_str().unwrap_or("").to_string();
-            let ty = msg["body"]["type"].as_str().map(str::to_owned);
+            let (value, unresolved) =
+                classify_eval_result(msg["body"]["result"].as_str().unwrap_or(""));
+            // A placeholder marker has no meaningful type.
+            let ty = if unresolved {
+                None
+            } else {
+                msg["body"]["type"].as_str().map(str::to_owned)
+            };
             let mut st = state.lock().unwrap();
             if let Some(row) = st.watches.get_mut(i) {
                 row.value = value;
                 row.ty = ty;
-                row.error = false;
+                row.error = unresolved;
             }
         }
         Pending::Hover(g) => {
-            let value = msg["body"]["result"].as_str().unwrap_or("").to_string();
+            let (value, unresolved) =
+                classify_eval_result(msg["body"]["result"].as_str().unwrap_or(""));
             let ty = msg["body"]["type"].as_str().map(str::to_owned);
             let mut st = state.lock().unwrap();
-            if let Some(h) = &mut st.hover {
-                if h.generation == g {
+            // Only the current hover generation, and never show a tooltip for an
+            // unresolved value (hover is for a quick peek at REAL values).
+            if st.hover.as_ref().map(|h| h.generation) == Some(g) {
+                if unresolved {
+                    st.hover = None;
+                } else if let Some(h) = &mut st.hover {
                     h.value = Some(value);
                     h.ty = ty;
                 }
@@ -1049,6 +1079,29 @@ fn rel_of(path: &str, project_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eval_result_placeholders_are_flagged_unresolved() {
+        // probe-rs's `success:true` placeholder markers → greyed with a reason.
+        assert_eq!(
+            classify_eval_result("<invalid expression \"buf_a\">"),
+            ("not in scope / unsupported".to_string(), true)
+        );
+        assert_eq!(
+            classify_eval_result("<not found: b>"),
+            ("not found in this frame".to_string(), true)
+        );
+        assert_eq!(
+            classify_eval_result("<optimized out>"),
+            ("optimized out".to_string(), true)
+        );
+        // A real value is passed through unchanged.
+        assert_eq!(classify_eval_result("42"), ("42".to_string(), false));
+        assert_eq!(
+            classify_eval_result("Some(5)"),
+            ("Some(5)".to_string(), false)
+        );
+    }
 
     #[test]
     fn rel_of_strips_workspace_prefix_case_insensitively() {

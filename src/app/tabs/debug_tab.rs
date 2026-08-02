@@ -12,6 +12,18 @@ use egui_phosphor::regular as ph;
 /// Memory key of this tab's help panel.
 const HELP_ID: &str = "debug";
 
+/// What probe-rs can evaluate for a watch/hover — shown on the Watch pane's ⓘ.
+/// Its evaluator resolves a SINGLE in-scope name; compound expressions and
+/// out-of-scope / optimized-out names come back unresolved.
+const WATCH_HELP: &str = "probe-rs evaluates a SINGLE in-scope name:\n\
+     • a local of the SELECTED Call-stack frame (as shown in Variables)\n\
+     • a static / global, a register (r0, pc, sp, lr…), or an SVD peripheral\n\
+     \n\
+     NOT supported here: compound expressions (a.b, arr[0], *p), arithmetic, and \
+     names that are out of scope or optimized out (release build).\n\
+     Tip: to read a variable, select the frame that owns it in Call stack. A newer \
+     `cargo install probe-rs-tools` improves evaluation.";
+
 pub fn show_debug_tab(
     ui: &mut egui::Ui,
     dbg: &mut Debugger,
@@ -437,6 +449,12 @@ pub fn show_debug_tab(
             {
                 watch_add = Some(std::mem::take(&mut dbg.watch_draft));
             }
+            ui.label(
+                egui::RichText::new(ph::INFO)
+                    .size(11.0)
+                    .color(egui::Color32::from_gray(130)),
+            )
+            .on_hover_text(WATCH_HELP);
             let r = ui.add(
                 egui::TextEdit::singleline(&mut dbg.watch_draft)
                     .hint_text("expression…")
@@ -458,8 +476,9 @@ pub fn show_debug_tab(
                 if watches.is_empty() {
                     ui.label(
                         egui::RichText::new(
-                            "Right-click a variable in the editor → Add to Watch, \
-                             or type an expression above.",
+                            "Right-click a variable in the editor → Add to Watch, or type \
+                             one above. Use a single in-scope name — hover the info icon \
+                             for the rules.",
                         )
                         .size(10.0)
                         .color(egui::Color32::from_gray(110)),
