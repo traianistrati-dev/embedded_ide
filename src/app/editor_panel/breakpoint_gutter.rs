@@ -45,12 +45,15 @@ impl AppIde {
 
         // The clickable strip: from the panel edge to just left of the diff
         // marks (which sit at `gp.x - 10 .. gp.x - 1`) — i.e. the line-number
-        // column. The dot is centred in it.
+        // column. Clicking anywhere on the number toggles the breakpoint.
         let strip_r = gp.x - 12.0;
         if strip_r - clip.left() < 10.0 {
             return; // no visible number column (degenerate layout)
         }
-        let dot_x = clip.left() + 8.0;
+        // The dot sits to the RIGHT of the line number, on the gutter/code
+        // divider (where the diff marks live at `gp.x - 7`) — not over the
+        // digits. The click strip stays on the number column above.
+        let dot_x = gp.x - 6.0;
         let strip = egui::Rect::from_min_max(
             egui::pos2(clip.left(), clip.top()),
             egui::pos2(strip_r, clip.bottom()),

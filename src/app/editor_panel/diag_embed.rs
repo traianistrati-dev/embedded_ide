@@ -379,14 +379,19 @@ impl AppIde {
             self.scan_probes();
         }
         // Debugger halt location (breakpoint / step landed): jump the editor
-        // there with an amber band — same path as a diagnostic-row click.
+        // there with a translucent GREEN band — same path as a diagnostic-row
+        // click. Alpha 51 (~80% transparent) keeps the halted line's code
+        // readable through the tint.
         if let Some((rel, line)) = self.debugger.take_nav() {
             if let Some(id) = crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line as usize));
-                self.highlighted_error_line =
-                    Some((id, line as usize, egui::Color32::from_rgb(235, 190, 60)));
+                self.highlighted_error_line = Some((
+                    id,
+                    line as usize,
+                    egui::Color32::from_rgba_unmultiplied(60, 200, 90, 51),
+                ));
             }
         }
         // Flash-tab Programmer-row buttons.
