@@ -635,6 +635,15 @@ pub struct AppIde {
     rtt: crate::rtt::RttConsole,
     /// On-target debug session (DAP client over probe-rs dap-server).
     debugger: crate::debugger::Debugger,
+    /// Debug probes from the last `probe-rs list` scan — the shared selector on
+    /// the RTT and Debug tabs (both drive probe-rs). Populated by `scan_probes`.
+    probe_list: Vec<crate::probe::ProbeInfo>,
+    /// The chosen `--probe VID:PID[:Serial]` selector for RTT + Debug sessions;
+    /// `None` = auto-select (probe-rs picks the only attached probe). Shared by
+    /// both tabs. Session-only (not persisted).
+    selected_probe: Option<String>,
+    /// Error from the last probe scan (e.g. probe-rs missing), shown in the tab.
+    probe_scan_err: Option<String>,
     /// Source breakpoints per workspace-relative path (1-based lines), toggled
     /// from the editor's line-number gutter. Session-only (not persisted).
     breakpoints: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
@@ -1150,6 +1159,9 @@ impl AppIde {
             tools_state: required_tools::make_tools_state(),
             rtt: crate::rtt::RttConsole::default(),
             debugger: crate::debugger::Debugger::default(),
+            probe_list: Vec::new(),
+            selected_probe: None,
+            probe_scan_err: None,
             breakpoints: std::collections::BTreeMap::new(),
             // Completer: seeded with Rust keywords/types + learns words from code
             completer: Completer::new_with_syntax(&Syntax::rust())

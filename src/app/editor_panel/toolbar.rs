@@ -32,6 +32,28 @@ impl AppIde {
         );
     }
 
+    /// Enumerate the connected debug probes via `probe-rs list` for the shared
+    /// RTT / Debug probe selector. Runs synchronously — `probe-rs list` returns
+    /// in well under a second — and keeps the current selection if that probe is
+    /// still attached, otherwise falls back to auto-select.
+    pub(crate) fn scan_probes(&mut self) {
+        match crate::probe::list_probes() {
+            Ok(list) => {
+                if let Some(sel) = &self.selected_probe {
+                    if !list.iter().any(|p| &p.selector == sel) {
+                        self.selected_probe = None; // the chosen probe went away
+                    }
+                }
+                self.probe_list = list;
+                self.probe_scan_err = None;
+            }
+            Err(e) => {
+                self.probe_list.clear();
+                self.probe_scan_err = Some(e);
+            }
+        }
+    }
+
     /// Build `--release` and flash over SWD via OpenOCD, using the selected
     /// programmer's interface/adapter. No-op without a buildable chip config.
     pub(crate) fn flash_swd(&mut self) {
@@ -256,6 +278,7 @@ impl AppIde {
                     build_dir,
                     project.target.clone(),
                     project.probe_chip.clone(),
+                    self.selected_probe.clone(),
                     self.egui_ctx.clone(),
                 );
             }
@@ -292,6 +315,7 @@ impl AppIde {
                     build_dir,
                     project.target.clone(),
                     project.probe_chip.clone(),
+                    self.selected_probe.clone(),
                     bps,
                     self.egui_ctx.clone(),
                 );

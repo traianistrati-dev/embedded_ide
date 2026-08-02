@@ -156,6 +156,9 @@ fn read_message(stream: &mut TcpStream) -> Option<Value> {
 struct SessionCfg {
     project_dir: PathBuf,
     chip: String,
+    /// The `--probe VID:PID[:Serial]` selector for the DAP `launch` `probe`
+    /// field, or `None` to let probe-rs auto-pick (see [`crate::probe`]).
+    probe: Option<String>,
     elf: PathBuf,
     /// Breakpoints at session start (rel path → 1-based lines). Later edits
     /// go over the wire directly (`Debugger::sync_breakpoints`).
@@ -222,6 +225,8 @@ impl Debugger {
         project_dir: PathBuf,
         target: String,
         chip: String,
+        // The `--probe VID:PID[:Serial]` selector, or `None` for auto-select.
+        probe: Option<String>,
         breakpoints: BTreeMap<String, Vec<u32>>,
         ctx: egui::Context,
     ) {
@@ -247,6 +252,7 @@ impl Debugger {
                 &project_dir,
                 &target,
                 &chip,
+                probe,
                 breakpoints,
                 &console,
                 &state,
@@ -426,6 +432,7 @@ fn run_session(
     project_dir: &Path,
     target: &str,
     chip: &str,
+    probe: Option<String>,
     breakpoints: BTreeMap<String, Vec<u32>>,
     console: &Arc<Mutex<TerminalState>>,
     state: &Arc<Mutex<DebugState>>,
@@ -502,6 +509,7 @@ fn run_session(
     let cfg = Arc::new(SessionCfg {
         project_dir: project_dir.to_path_buf(),
         chip: chip.to_string(),
+        probe: probe.filter(|s| !s.is_empty()),
         elf,
         breakpoints,
     });
@@ -625,25 +633,27 @@ fn handle_response(
     match kind {
         Pending::Initialize => {
             // Capabilities received → launch (flash + reset the target).
-            wire.request(
-                "launch",
-                json!({
-                    "cwd": cfg.project_dir.to_string_lossy(),
-                    "chip": cfg.chip,
-                    "connectUnderReset": false,
-                    "flashingConfig": {
-                        "flashingEnabled": true,
-                        "haltAfterReset": false,
-                    },
-                    "coreConfigs": [{
-                        "coreIndex": 0,
-                        "programBinary": cfg.elf.to_string_lossy(),
-                        "rttEnabled": true,
-                    }],
-                    "consoleLogLevel": "Console",
-                }),
-                Pending::Launch,
-            );
+            // probe-rs's DAP `launch` accepts an optional `probe` selector
+            // (VID:PID[:Serial]); omit the key entirely to keep auto-select.
+            let mut launch = json!({
+                "cwd": cfg.project_dir.to_string_lossy(),
+                "chip": cfg.chip,
+                "connectUnderReset": false,
+                "flashingConfig": {
+                    "flashingEnabled": true,
+                    "haltAfterReset": false,
+                },
+                "coreConfigs": [{
+                    "coreIndex": 0,
+                    "programBinary": cfg.elf.to_string_lossy(),
+                    "rttEnabled": true,
+                }],
+                "consoleLogLevel": "Console",
+            });
+            if let Some(sel) = &cfg.probe {
+                launch["probe"] = json!(sel);
+            }
+            wire.request("launch", launch, Pending::Launch);
         }
         Pending::Launch => {
             let mut st = state.lock().unwrap();

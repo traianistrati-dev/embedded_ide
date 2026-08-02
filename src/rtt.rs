@@ -106,6 +106,9 @@ impl RttConsole {
         project_dir: PathBuf,
         target: String,
         chip: String,
+        // The `--probe VID:PID[:Serial]` selector, or `None` to let probe-rs
+        // auto-pick the only attached probe (see [`crate::probe`]).
+        probe: Option<String>,
         ctx: egui::Context,
     ) {
         if self.is_busy() {
@@ -120,7 +123,16 @@ impl RttConsole {
         let child_slot = Arc::clone(&self.child);
         thread::spawn(move || {
             let end = run_session(
-                mode, &project_dir, &target, &chip, &state, &phase, &child_slot, &stop, &ctx,
+                mode,
+                &project_dir,
+                &target,
+                &chip,
+                probe.as_deref(),
+                &state,
+                &phase,
+                &child_slot,
+                &stop,
+                &ctx,
             );
             *child_slot.lock().unwrap() = None;
             // A user Stop already set Idle + logged; don't overwrite it.
@@ -248,6 +260,7 @@ fn run_session(
     project_dir: &std::path::Path,
     target: &str,
     chip: &str,
+    probe: Option<&str>,
     state: &Arc<Mutex<TerminalState>>,
     phase: &Arc<Mutex<RttPhase>>,
     child_slot: &Arc<Mutex<Option<Child>>>,
@@ -269,15 +282,29 @@ fn run_session(
         RttMode::Run => "run",
         RttMode::Attach => "attach",
     };
+    // `--probe VID:PID[:Serial]` pins the session to one probe; absent, probe-rs
+    // auto-selects (and errors when several are attached).
+    let probe_arg = probe
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" --probe {s}"))
+        .unwrap_or_default();
     state.lock().unwrap().push_plain(
         LineKind::Input,
-        format!("> probe-rs {sub} --chip {chip} {}", elf.display()),
+        format!(
+            "> probe-rs {sub} --chip {chip}{probe_arg} {}",
+            elf.display()
+        ),
     );
     ctx.request_repaint();
 
-    let mut probe = no_window(&mut Command::new("probe-rs"))
+    let mut cmd = Command::new("probe-rs");
+    let builder = no_window(&mut cmd)
         .current_dir(project_dir)
-        .args([sub, "--chip", chip])
+        .args([sub, "--chip", chip]);
+    if let Some(sel) = probe.filter(|s| !s.is_empty()) {
+        builder.args(["--probe", sel]);
+    }
+    let mut probe = builder
         .arg(&elf)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

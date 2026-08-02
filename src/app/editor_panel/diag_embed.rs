@@ -147,6 +147,8 @@ impl AppIde {
         let mut rtt_go: Option<crate::rtt::RttMode> = None;
         // Debug-tab Start button.
         let mut debug_go = false;
+        // Shared RTT/Debug probe-selector Scan button.
+        let mut probe_scan = false;
         let rtt_chip = self
             .selected_build_cfg()
             .map(|(p, _)| p.probe_chip)
@@ -258,6 +260,10 @@ impl AppIde {
                     &rtt_chip,
                     &mut self.debugger,
                     &mut debug_go,
+                    &self.probe_list,
+                    &mut self.selected_probe,
+                    &mut probe_scan,
+                    self.probe_scan_err.as_deref(),
                 );
             });
         // Clicking a tab on the collapsed bar reopens the panel at 20% of the
@@ -367,6 +373,10 @@ impl AppIde {
         // Debug-tab Start button.
         if debug_go {
             self.start_debug();
+        }
+        // Shared RTT/Debug probe-selector Scan button.
+        if probe_scan {
+            self.scan_probes();
         }
         // Debugger halt location (breakpoint / step landed): jump the editor
         // there with an amber band — same path as a diagnostic-row click.

@@ -19,6 +19,7 @@ pub mod git;
 pub mod lsp;
 pub mod openocd;
 pub mod panels;
+pub mod probe;
 pub mod project_tree;
 pub mod required_tools;
 pub mod reveal;

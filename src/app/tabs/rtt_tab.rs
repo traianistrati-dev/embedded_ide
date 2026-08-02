@@ -21,6 +21,12 @@ pub fn show_rtt_tab(
     // The probe-rs chip name the session will use (shown so a wrong chip is
     // obvious before attaching).
     chip: &str,
+    // Shared probe selector (RTT + Debug): the scanned list, the chosen
+    // `--probe` selector, a "scan" click signal, and the last scan error.
+    probes: &[crate::probe::ProbeInfo],
+    selected_probe: &mut Option<String>,
+    probe_scan: &mut bool,
+    probe_scan_err: Option<&str>,
 ) {
     let phase = rtt.phase();
     let busy = rtt.is_busy();
@@ -105,6 +111,9 @@ pub fn show_rtt_tab(
         )
         .on_hover_text("probe-rs chip name — from the selected MCU definition");
 
+        ui.separator();
+        super::probe_selector_ui(ui, probes, selected_probe, probe_scan, probe_scan_err);
+
         // Phase status, right-aligned.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (text, color) = match &phase {
@@ -181,6 +190,10 @@ pub fn show_rtt_tab(
              throughput is far higher than a serial console.",
             "Chip is taken from the selected MCU definition; a wrong chip name \
              makes probe-rs refuse to attach.",
+            "Probe: with several probes attached, click Scan and pick one — it \
+             passes `--probe VID:PID:Serial` so probe-rs targets that exact \
+             probe. Auto lets probe-rs choose (fine with a single probe). The \
+             choice is shared with the Debug tab.",
         ],
     );
 

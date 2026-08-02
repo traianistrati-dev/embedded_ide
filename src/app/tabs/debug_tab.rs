@@ -20,6 +20,12 @@ pub fn show_debug_tab(
     debug_go: &mut bool,
     can_run: bool,
     chip: &str,
+    // Shared probe selector (RTT + Debug): the scanned list, the chosen
+    // `--probe` selector, a "scan" click signal, and the last scan error.
+    probes: &[crate::probe::ProbeInfo],
+    selected_probe: &mut Option<String>,
+    probe_scan: &mut bool,
+    probe_scan_err: Option<&str>,
 ) {
     let phase = dbg.phase();
     let busy = dbg.is_busy();
@@ -135,6 +141,9 @@ pub fn show_debug_tab(
                 .color(egui::Color32::from_rgb(120, 160, 200)),
         );
 
+        ui.separator();
+        super::probe_selector_ui(ui, probes, selected_probe, probe_scan, probe_scan_err);
+
         // Phase status, right-aligned.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (text, color) = match &phase {
@@ -237,6 +246,10 @@ pub fn show_debug_tab(
             "Requires `probe-rs` in PATH (cargo install probe-rs-tools) and a \
              probe: ST-Link / J-Link / CMSIS-DAP, or the built-in USB-JTAG on \
              ESP32-C3.",
+            "Probe: with several probes attached, click Scan and pick one — the \
+             DAP launch then targets that exact probe (VID:PID:Serial). Auto \
+             lets probe-rs choose (fine with a single probe). Shared with the \
+             RTT tab.",
             "Debug info comes from the release build (`debug = true` in the \
              generated Cargo.toml). Optimised code can make lines jump around \
              or variables read as <optimized out> — that is the compiler, not \

@@ -120,6 +120,12 @@ pub(super) fn show_diag_panel(
     // Debug tab: session + Start signal (caller runs `start_debug`).
     debugger: &mut crate::debugger::Debugger,
     debug_go: &mut bool,
+    // Shared probe selector (RTT + Debug): scanned probe list, chosen `--probe`
+    // selector, a "scan" click signal (caller runs `scan_probes`), last error.
+    probe_list: &[crate::probe::ProbeInfo],
+    selected_probe: &mut Option<String>,
+    probe_scan: &mut bool,
+    probe_scan_err: Option<&str>,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -599,10 +605,30 @@ pub(super) fn show_diag_panel(
             );
         }
         BuildPanelTab::Rtt => {
-            show_rtt_tab(ui, rtt, rtt_go, can_flash, rtt_chip);
+            show_rtt_tab(
+                ui,
+                rtt,
+                rtt_go,
+                can_flash,
+                rtt_chip,
+                probe_list,
+                selected_probe,
+                probe_scan,
+                probe_scan_err,
+            );
         }
         BuildPanelTab::Debug => {
-            show_debug_tab(ui, debugger, debug_go, can_flash, rtt_chip);
+            show_debug_tab(
+                ui,
+                debugger,
+                debug_go,
+                can_flash,
+                rtt_chip,
+                probe_list,
+                selected_probe,
+                probe_scan,
+                probe_scan_err,
+            );
         }
         BuildPanelTab::Serial => {
             show_serial_tab(ui, serial, ctx);
