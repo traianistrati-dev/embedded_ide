@@ -376,7 +376,13 @@ impl ProjectTreeState {
     /// with `pub mod <periph>;`. When `files` is empty the whole subtree is
     /// dropped. Call this BEFORE `sync_pin_files` so the latter can add
     /// `pub mod configs;` to `pins/mod.rs`.
-    pub fn sync_config_files(&mut self, files: &[(String, String)]) {
+    /// `force` = rewrite each existing config file in FULL (the whole template,
+    /// not just the constants block). Used on a Runtime / Init-API Apply, where
+    /// the `init()` template itself changes (blocking ⇄ async ⇄ native) and a
+    /// constants-only splice would leave the old implementation in place. A
+    /// normal (baud/param) change passes `false` so user edits below the markers
+    /// survive.
+    pub fn sync_config_files(&mut self, files: &[(String, String)], force: bool) {
         const DIR: &str = "src/pins/configs";
         const MOD_PATH: &str = "src/pins/configs/mod.rs";
         const GEN_BEGIN: &str = "// <<< GENERATED>>>";
@@ -425,7 +431,13 @@ impl ProjectTreeState {
                 .iter_mut()
                 .find(|(p, _)| p == &file_path)
             {
-                if let Some(block) = extract_gen_block(body) {
+                if force {
+                    // Template swapped (runtime / api style) → replace the whole
+                    // file; the editable region carries the init that must change.
+                    if *content != *body {
+                        *content = body.clone();
+                    }
+                } else if let Some(block) = extract_gen_block(body) {
                     let existing = content.clone();
                     let updated = splice_pin_file(&existing, &block);
                     if *content != updated {
@@ -1190,7 +1202,7 @@ mod tests {
         let mut state = ProjectTreeState::new();
         let path = "src/pins/configs/usart1.rs";
         let v1 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), v1.to_string())]);
+        state.sync_config_files(&[("usart1.rs".to_string(), v1.to_string())], false);
         assert!(state.user_src_files.iter().any(|(p, _)| p == path));
 
         // User edits the EDITABLE part (below the markers).
@@ -1205,7 +1217,7 @@ mod tests {
 
         // Regenerate with a new baud rate (only the constants block changes).
         let v2 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 9600;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), v2.to_string())]);
+        state.sync_config_files(&[("usart1.rs".to_string(), v2.to_string())], false);
 
         let body = &state
             .user_src_files
@@ -1222,5 +1234,31 @@ mod tests {
             body.contains("/* MY EDIT */"),
             "user body edit preserved:\n{body}"
         );
+    }
+
+    /// A Runtime / Init-API Apply passes `force = true`: the WHOLE config file is
+    /// replaced (the editable `init()` template changes blocking → native/async),
+    /// so a constants-only splice would leave stale code — the bug behind "MCU
+    /// System code doesn't update on change".
+    #[test]
+    fn config_file_force_rewrites_the_whole_template() {
+        let mut state = ProjectTreeState::new();
+        let path = "src/pins/configs/usart1.rs";
+        // Blocking (portable) template — its init lives BELOW the markers.
+        let portable = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse portable;\npub fn init() -> SerialIo { /* portable */ }\n";
+        state.sync_config_files(&[("usart1.rs".to_string(), portable.to_string())], false);
+
+        // Apply switches the runtime → a completely different (native) template.
+        let native = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse native;\npub fn init() -> (Tx, Rx) { /* native */ }\n";
+        state.sync_config_files(&[("usart1.rs".to_string(), native.to_string())], true);
+
+        let body = &state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == path)
+            .unwrap()
+            .1;
+        assert!(body.contains("(Tx, Rx)"), "new template applied:\n{body}");
+        assert!(!body.contains("SerialIo"), "old template gone:\n{body}");
     }
 }

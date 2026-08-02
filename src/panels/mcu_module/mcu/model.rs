@@ -169,6 +169,14 @@ pub struct Mcu {
     /// Transient: the inline "Apply — Confirm/Cancel" prompt is showing.
     pub pending_apply_confirm: bool,
 
+    /// Transient one-shot: set by `apply_pending_style` so the NEXT config-file
+    /// regeneration rewrites the peripheral `configs/*.rs` templates in FULL
+    /// (not just the constants block). A Runtime / Init-API change swaps the
+    /// whole `init()` template (blocking ⇄ async ⇄ native), which lives in the
+    /// "editable" region a normal splice preserves — so without this the code
+    /// would not update on Apply. Cleared after that regen.
+    pub config_regen_forced: bool,
+
     /// What Save does when a Cargo.toml library changed (System-tab preference,
     /// persisted). Default `Check`.
     pub auto_build: AutoBuild,

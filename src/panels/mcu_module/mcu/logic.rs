@@ -89,6 +89,7 @@ impl Mcu {
             pending_gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
             pending_module_styles: std::collections::BTreeMap::new(),
             pending_apply_confirm: false,
+            config_regen_forced: false,
             auto_build: crate::panels::mcu_module::mcu::model::AutoBuild::default(),
             expand_module: None,
         }
@@ -342,6 +343,9 @@ impl Mcu {
         }
         self.pending_module_styles = pending;
         self.pending_apply_confirm = false;
+        // The runtime / api-style just changed → the config templates (whole
+        // `init()`, not just the consts) must be regenerated in full next frame.
+        self.config_regen_forced = true;
     }
 
     /// Whether any staged choice differs from the applied one (drives the Apply

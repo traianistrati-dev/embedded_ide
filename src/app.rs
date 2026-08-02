@@ -1689,8 +1689,17 @@ impl AppIde {
                 self.cargo_toml = new_toml;
                 self.invalidate_project_files_cache();
             }
-            self.project_tree.sync_config_files(&config_files);
+            // On a Runtime / Init-API Apply the config templates change wholesale
+            // (blocking ⇄ async ⇄ native init) — force a FULL rewrite so the old
+            // `init()` in the editable region is replaced, not just the consts.
+            let force_configs = self.mcu.as_ref().is_some_and(|m| m.config_regen_forced);
+            self.project_tree.sync_config_files(&config_files, force_configs);
             self.project_tree.sync_pin_files(&all_pins);
+            if force_configs {
+                if let Some(m) = &mut self.mcu {
+                    m.config_regen_forced = false;
+                }
+            }
         }
         // Any regen rewrites main.rs / config files / deps in the RA workspace —
         // push back the settle baseline so the post-load restart waits for the
