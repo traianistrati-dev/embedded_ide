@@ -1508,6 +1508,10 @@ impl AppIde {
         mcu.runtime.as_token().hash(&mut hasher);
         // Hash the GPIO api — Portable⇄Native flips the io.rs bridge + bindings.
         format!("{:?}", mcu.gpio_api).hash(&mut hasher);
+        // Strict-lints toggle: flipping it adds/removes the Cargo.toml
+        // `[lints.clippy]` block AND the `#[allow]` exemptions injected into the
+        // generated main.rs / config files, so it must trigger regeneration.
+        mcu.strict_lints.hash(&mut hasher);
 
         // Hash modules
         for module in &mcu.modules {
@@ -1685,6 +1689,9 @@ impl AppIde {
                 needs_eh,
                 needs_eh_async,
             );
+            // Strict-lints `[lints.clippy]` block (MCU System toggle).
+            let strict = self.mcu.as_ref().is_some_and(|m| m.strict_lints);
+            let new_toml = project_gen::ensure_strict_lints(&new_toml, strict);
             if new_toml != self.cargo_toml {
                 self.cargo_toml = new_toml;
                 self.invalidate_project_files_cache();

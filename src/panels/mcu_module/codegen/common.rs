@@ -46,6 +46,82 @@ pub fn parse_mcu_id(source: &str) -> Option<String> {
 
 pub const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
 
+// ── Strict-lints exemption for generated code ─────────────────────────────────
+//
+// When the MCU System "Strict lints" toggle is on, the project Cargo.toml gets a
+// `[lints.clippy]` deny profile (see `project_gen::ensure_strict_lints`). The
+// GENERATED code (main's init, the peripheral `configs/*.rs`) uses `unwrap()`,
+// `as`, indexing, … idiomatically, so it is exempted with `#[allow]` — leaving
+// only the USER's own code (their modules, and main's loop below the GEN block —
+// no, the whole entry fn is exempt since its init bindings must stay in scope)
+// under the strict lints.
+
+/// The strict-profile clippy lints as `#[allow]`-able names. Matches the deny
+/// list in `project_gen::STRICT_LINTS_BLOCK`.
+const STRICT_LINT_LIST: &str = "clippy::pedantic, clippy::nursery, \
+     clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, \
+     clippy::arithmetic_side_effects, clippy::unreachable, clippy::unimplemented, \
+     clippy::unchecked_time_subtraction, clippy::todo, clippy::string_slice, \
+     clippy::panic_in_result_fn, clippy::panic, clippy::exit, clippy::as_conversions";
+
+/// When `strict`, put `#[allow(<strict lints>)]` on the generated entry fn so
+/// its init (`take().unwrap()`, `as` casts, …) doesn't flood clippy. Inserted
+/// just before `#[entry]` / `#[embassy_executor::main]` — inside the GEN block,
+/// so it's rebuilt on every regeneration (no accumulation). The whole `main` is
+/// exempt: its init bindings must stay in scope for the user's loop, so the loop
+/// can't be split off; the user's real code lives in their own modules, which
+/// stay fully linted. No-op when `strict` is off or no entry attr is found.
+pub fn strict_main_exemption(code: String, strict: bool) -> String {
+    if !strict {
+        return code;
+    }
+    for entry in [
+        "#[entry]",
+        "#[embassy_executor::main]",
+        "#[esp_hal::main]",
+        "#[main]",
+    ] {
+        let mut offset = 0;
+        for line in code.split_inclusive('\n') {
+            if line.trim() == entry {
+                let attr = format!("#[allow({STRICT_LINT_LIST})]\n");
+                let mut out = String::with_capacity(code.len() + attr.len());
+                out.push_str(&code[..offset]);
+                out.push_str(&attr);
+                out.push_str(&code[offset..]);
+                return out;
+            }
+            offset += line.len();
+        }
+    }
+    code
+}
+
+/// When `strict`, put a module-level `#![allow(<strict lints>)]` right after a
+/// config file's `// <<< GENERATED>>>` marker (before the first `const`), so the
+/// whole generated peripheral module is exempt. Inside the marker block, so
+/// `sync_config_files` re-splices it in/out on toggle. No-op otherwise.
+pub fn strict_config_exemption(body: String, strict: bool) -> String {
+    const MARK: &str = "// <<< GENERATED>>>";
+    if !strict {
+        return body;
+    }
+    let Some(pos) = body.find(MARK) else {
+        return body;
+    };
+    let after = pos + MARK.len();
+    let insert_at = body[after..]
+        .find('\n')
+        .map(|n| after + n + 1)
+        .unwrap_or(after);
+    let attr = format!("#![allow({STRICT_LINT_LIST})]\n");
+    let mut out = String::with_capacity(body.len() + attr.len());
+    out.push_str(&body[..insert_at]);
+    out.push_str(&attr);
+    out.push_str(&body[insert_at..]);
+    out
+}
+
 // ── Virtual-module data models ────────────────────────────────────────────────
 
 use super::super::modules::VirtualModule;
@@ -443,6 +519,42 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_main_exemption_wraps_entry_only_when_strict() {
+        let code = "// GEN\nuse foo;\n#[entry]\nfn main() -> ! {\n    let dp = take().unwrap();\n}\n";
+        // Off → unchanged.
+        assert_eq!(strict_main_exemption(code.to_string(), false), code);
+        // On → an #[allow(...)] appears immediately before #[entry].
+        let on = strict_main_exemption(code.to_string(), true);
+        assert!(on.contains("#[allow(clippy::pedantic"), "allow added:\n{on}");
+        assert!(on.contains("clippy::unwrap_used"), "lints listed:\n{on}");
+        let allow_pos = on.find("#[allow(").unwrap();
+        let entry_pos = on.find("#[entry]").unwrap();
+        assert!(allow_pos < entry_pos, "allow precedes entry:\n{on}");
+        // Only one allow (no accumulation on a second pass over fresh codegen).
+        assert_eq!(on.matches("#[allow(clippy::pedantic").count(), 1);
+    }
+
+    #[test]
+    fn strict_main_exemption_handles_embassy_entry() {
+        let code = "#[embassy_executor::main]\nasync fn main(s: Spawner) {}\n";
+        let on = strict_main_exemption(code.to_string(), true);
+        assert!(on.starts_with("#[allow(clippy::"), "allow first:\n{on}");
+        assert!(on.contains("#[embassy_executor::main]"));
+    }
+
+    #[test]
+    fn strict_config_exemption_inserts_module_allow_after_marker() {
+        let body = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\n";
+        assert_eq!(strict_config_exemption(body.to_string(), false), body);
+        let on = strict_config_exemption(body.to_string(), true);
+        // Module inner attribute, right after the marker, before the const.
+        let attr = on.find("#![allow(clippy::").unwrap();
+        let marker = on.find("// <<< GENERATED>>>").unwrap();
+        let konst = on.find("const BAUDRATE").unwrap();
+        assert!(marker < attr && attr < konst, "attr between marker and const:\n{on}");
+    }
 
     #[test]
     fn mcu_id_marker_round_trips() {

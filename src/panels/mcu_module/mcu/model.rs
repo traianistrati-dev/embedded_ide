@@ -180,6 +180,13 @@ pub struct Mcu {
     /// What Save does when a Cargo.toml library changed (System-tab preference,
     /// persisted). Default `Check`.
     pub auto_build: AutoBuild,
+    /// Strict "deny panics" Clippy profile (System-tab preference, persisted).
+    /// When on, a `[lints.clippy]` block (pedantic/nursery + unwrap/panic/
+    /// indexing/arithmetic/as… all `deny`) is written into the project
+    /// `Cargo.toml`, and the GENERATED code (main.rs entry fn + `configs/*.rs`)
+    /// is exempted with `#[allow]` so only the user's own code is linted.
+    /// Default `false`. See `project_gen::ensure_strict_lints`.
+    pub strict_lints: bool,
     /// Transient: id of a module the user clicked on the canvas, so the module
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.

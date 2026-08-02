@@ -398,6 +398,79 @@ pub fn ensure_async_deps(
     s
 }
 
+/// Markers bounding the IDE-managed strict-lints block (so it can be found +
+/// removed cleanly on toggle-off, and never duplicated on toggle-on).
+const STRICT_LINTS_BEGIN: &str = "# <<< strict-lints (Embedded IDE) — toggle in MCU System >>>";
+const STRICT_LINTS_END: &str = "# <<< strict-lints end >>>";
+
+/// The `[lints.clippy]` block written when the strict-lints toggle is ON. A
+/// panic-free / restriction profile: pedantic + nursery groups deny, plus the
+/// specific panic/unwrap/index/arithmetic/as lints. Only affects `cargo clippy`
+/// (not check/build/flash). The generated code is exempted with `#[allow]` (see
+/// [`crate::panels::mcu_module::codegen::common::strict_lint_names`]).
+const STRICT_LINTS_BLOCK: &str = "\
+[lints.clippy]
+pedantic = { level = \"deny\", priority = -1 }
+nursery = { level = \"deny\", priority = -1 }
+unwrap_used = \"deny\"
+expect_used = \"deny\"
+indexing_slicing = \"deny\"
+arithmetic_side_effects = \"deny\"
+unreachable = \"deny\"
+unimplemented = \"deny\"
+unchecked_time_subtraction = \"deny\"
+todo = \"deny\"
+string_slice = \"deny\"
+panic_in_result_fn = \"deny\"
+panic = \"deny\"
+exit = \"deny\"
+as_conversions = \"deny\"
+";
+
+/// Add or remove the strict-lints `[lints.clippy]` block, driven by the MCU
+/// System "Strict lints" toggle. Idempotent: strips any prior IDE-managed block
+/// first, then appends a fresh one when `enabled`. Newline-preserving.
+pub fn ensure_strict_lints(cargo_toml: &str, enabled: bool) -> String {
+    // Drop any existing IDE block (between the markers, inclusive) + the blank
+    // line that precedes it.
+    let mut s = String::new();
+    let mut skipping = false;
+    for line in cargo_toml.lines() {
+        if line.trim() == STRICT_LINTS_BEGIN {
+            skipping = true;
+            // Trim a single blank separator line we had inserted before it.
+            if s.ends_with("\n\n") {
+                s.pop();
+            }
+            continue;
+        }
+        if skipping {
+            if line.trim() == STRICT_LINTS_END {
+                skipping = false;
+            }
+            continue;
+        }
+        s.push_str(line);
+        s.push('\n');
+    }
+    if enabled {
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push('\n');
+        s.push_str(STRICT_LINTS_BEGIN);
+        s.push('\n');
+        s.push_str(STRICT_LINTS_BLOCK);
+        s.push_str(STRICT_LINTS_END);
+        s.push('\n');
+    }
+    // Preserve the original trailing-newline shape when disabled + unchanged.
+    if !enabled && !cargo_toml.ends_with('\n') && s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
 /// A stable fingerprint of every DEPENDENCY line in `cargo_toml` — the bodies of
 /// `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` and any
 /// `[dependencies.<name>]` sub-tables. Comments + blank lines + surrounding
@@ -964,6 +1037,26 @@ fn cargo_config_esp(c: &ProjectDef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_lints_add_remove_is_idempotent() {
+        let base = "[package]\nname = \"x\"\n\n[dependencies]\ncortex-m = \"0.7\"\n";
+        // Enable → block present, once.
+        let on = ensure_strict_lints(base, true);
+        assert!(on.contains("[lints.clippy]"), "block added:\n{on}");
+        assert!(on.contains("unwrap_used = \"deny\""));
+        assert!(on.contains("as_conversions = \"deny\""));
+        assert_eq!(on.matches("[lints.clippy]").count(), 1);
+        // Enabling again doesn't duplicate.
+        assert_eq!(ensure_strict_lints(&on, true), on);
+        // Disable → back to exactly the original (block + its markers gone).
+        let off = ensure_strict_lints(&on, false);
+        assert!(!off.contains("[lints.clippy]"), "block removed:\n{off}");
+        assert!(!off.contains("strict-lints"), "markers removed:\n{off}");
+        assert_eq!(off, base);
+        // Disabling a base without the block is a no-op.
+        assert_eq!(ensure_strict_lints(base, false), base);
+    }
 
     fn stm32_def() -> ProjectDef {
         ProjectDef {

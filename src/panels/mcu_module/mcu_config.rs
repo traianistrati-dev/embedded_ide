@@ -27,6 +27,7 @@ const CLOCK_HEADER: &str = "@clock";
 const RUNTIME_HEADER: &str = "@runtime";
 const GPIO_HEADER: &str = "@gpio";
 const AUTOBUILD_HEADER: &str = "@autobuild";
+const STRICT_HEADER: &str = "@strict";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -46,6 +47,22 @@ pub fn parse_autobuild(text: &str) -> AutoBuild {
     section_body(text, AUTOBUILD_HEADER)
         .map(|b| AutoBuild::from_token(&b))
         .unwrap_or_default()
+}
+
+/// The `@strict` section text (or "" for the default OFF) — the strict-lints
+/// Clippy preference. Appended like `@autobuild`.
+pub fn strict_section(strict: bool) -> String {
+    if strict {
+        format!("{STRICT_HEADER}\non\n")
+    } else {
+        String::new()
+    }
+}
+
+/// The strict-lints preference recorded in `@strict`; missing / anything but
+/// `on` is OFF (the default).
+pub fn parse_strict(text: &str) -> bool {
+    section_body(text, STRICT_HEADER).as_deref() == Some("on")
 }
 
 /// The token for a GPIO api style (`@gpio` section): "Native" or "Portable".

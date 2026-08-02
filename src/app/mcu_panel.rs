@@ -797,6 +797,33 @@ impl AppIde {
                         .on_hover_text("Full optimized build — slower, but exactly what gets flashed.");
                     });
             });
+
+            // ── Strict lints (Clippy) ────────────────────────────────────────
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(10.0);
+            ui.heading(format!("{}  Strict lints (Clippy)", ph::SHIELD_CHECK));
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(
+                    "Add a strict `[lints.clippy]` deny profile (pedantic + nursery + no \
+                     unwrap / panic / indexing / arithmetic / as-cast) to Cargo.toml. Only \
+                     affects the Clippy tab — check / build / flash are unaffected.",
+                )
+                .color(egui::Color32::GRAY),
+            );
+            ui.add_space(8.0);
+            if ui
+                .checkbox(&mut mcu.strict_lints, "Deny panics & risky ops on my code")
+                .on_hover_text(
+                    "The generated code (main's init + src/pins/configs/*.rs) is auto-exempted \
+                     with #[allow], so only YOUR modules are held to the strict profile. \
+                     Toggling regenerates Cargo.toml + the exemptions.",
+                )
+                .changed()
+            {
+                // Codegen reads `strict_lints` (hashed) → regeneration next frame.
+            }
         });
     }
 

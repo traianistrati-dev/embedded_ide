@@ -84,7 +84,9 @@ impl Mcu {
             .unwrap_or_default();
         // Module/clock state is persisted out-of-source in `mcu.config`
         // (see `Mcu::mcu_config_text`), not as comment markers in main.rs.
-        common::ensure_module_models(code, &self.modules)
+        let code = common::ensure_module_models(code, &self.modules);
+        // Strict-lints: exempt the generated entry fn (its init uses unwrap/as…).
+        common::strict_main_exemption(code, self.strict_lints)
     }
 
     /// Update `existing` in-place: replace only the generated section
@@ -98,7 +100,9 @@ impl Mcu {
             .map(|b| b.update_main_rs(self, existing))
             .unwrap_or_else(|| existing.to_owned());
         // Module/clock state is persisted in `mcu.config`, not in main.rs.
-        common::ensure_module_models(code, &self.modules)
+        let code = common::ensure_module_models(code, &self.modules);
+        // Strict-lints exemption on the (freshly re-spliced) entry fn.
+        common::strict_main_exemption(code, self.strict_lints)
     }
 
     /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
@@ -107,6 +111,10 @@ impl Mcu {
         self.backend()
             .map(|b| b.config_files(self))
             .unwrap_or_default()
+            .into_iter()
+            // Strict-lints: exempt each generated peripheral config module.
+            .map(|(name, body)| (name, common::strict_config_exemption(body, self.strict_lints)))
+            .collect()
     }
 
     /// Kept for any remaining call sites — delegates to `fresh_main_rs`.

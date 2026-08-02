@@ -91,6 +91,7 @@ impl Mcu {
             pending_apply_confirm: false,
             config_regen_forced: false,
             auto_build: crate::panels::mcu_module::mcu::model::AutoBuild::default(),
+            strict_lints: false,
             expand_module: None,
         }
     }
@@ -288,6 +289,14 @@ impl Mcu {
             }
             s.push_str(&ab);
         }
+        // Strict-lints preference (`@strict`) — workflow setting like @autobuild.
+        let strict = mcu_config::strict_section(self.strict_lints);
+        if !strict.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&strict);
+        }
         s
     }
 
@@ -310,6 +319,8 @@ impl Mcu {
         self.gpio_api = mcu_config::parse_gpio_api(text);
         // Auto-build preference (`@autobuild`) — missing restores the default Check.
         self.auto_build = mcu_config::parse_autobuild(text);
+        // Strict-lints preference (`@strict`) — missing restores the default OFF.
+        self.strict_lints = mcu_config::parse_strict(text);
         // A freshly loaded project has NO staged edits: pending == applied.
         self.sync_pending_style();
     }
