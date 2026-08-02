@@ -74,13 +74,45 @@ fn line_starts(text: &str) -> Vec<usize> {
 }
 
 impl AppIde {
+    /// Resolve which git repo owns a project-relative editor `path`, returning
+    /// `(repo_dir, path_relative_to_that_repo)`. A workspace-member or detached
+    /// library folder that carries its OWN `.git` (submodule / separate clone)
+    /// is a distinct repo — its files aren't blobs in the project repo, so the
+    /// baseline must be read from the library repo with the prefix stripped.
+    /// Everything else stays on the project repo with the path unchanged.
+    fn diff_repo_for(
+        &self,
+        root: &std::path::Path,
+        path: String,
+    ) -> (std::path::PathBuf, String) {
+        let members =
+            crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+        let detached = crate::project_tree::extract_crate::detached_libs(
+            &self.project_tree.user_src_files,
+            &members,
+        );
+        for lib in members.iter().chain(detached.iter()) {
+            let prefix = format!("{}/", lib.trim_end_matches('/'));
+            if let Some(rest) = path.strip_prefix(&prefix) {
+                let lib_dir = root.join(lib);
+                // `.git` is a directory for a normal repo, a FILE for a
+                // submodule / worktree — `exists()` catches both.
+                if lib_dir.join(".git").exists() {
+                    return (lib_dir, rest.to_string());
+                }
+                break; // in a member that shares the project repo → use as-is
+            }
+        }
+        (root.to_path_buf(), path)
+    }
+
     /// Keep the gutter data fresh for the displayed file: (re)fetch the HEAD
     /// baseline when the file or `op_gen` changed, and recompute the hunks
     /// when the text or baseline changed (memoized on their hashes — the diff
     /// itself only runs on an actual edit). Call post-editor, with the frame's
     /// final text, right before [`AppIde::paint_diff_gutter`].
     pub(super) fn tick_diff_gutter(&mut self, display_code: &str) {
-        let (Some(dir), Some(path)) = (
+        let (Some(root), Some(path)) = (
             self.project_dir.clone(),
             git_path_of(self.selected_file, &self.project_tree.user_src_files),
         ) else {
@@ -88,6 +120,13 @@ impl AppIde {
             self.diff_gutter.computed_hash = 0;
             return;
         };
+
+        // A library folder can be its OWN git repo (submodule / detached clone,
+        // separate remote). The project repo doesn't track its blobs, so a
+        // baseline `git show HEAD:<lib>/src/…` run there returns nothing and the
+        // gutter stayed blank for library files. Redirect the fetch to the repo
+        // that actually owns the file, with the path relative to IT.
+        let (dir, path) = self.diff_repo_for(&root, path);
 
         let key = (path, self.git.state.lock().unwrap().op_gen);
         let (fresh, done, content_hash) = {
