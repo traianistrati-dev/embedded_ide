@@ -615,6 +615,7 @@ pub(super) fn show_diag_panel(
                 selected_probe,
                 probe_scan,
                 probe_scan_err,
+                toolchain,
             );
         }
         BuildPanelTab::Debug => {
@@ -628,6 +629,7 @@ pub(super) fn show_diag_panel(
                 selected_probe,
                 probe_scan,
                 probe_scan_err,
+                toolchain,
             );
         }
         BuildPanelTab::Serial => {

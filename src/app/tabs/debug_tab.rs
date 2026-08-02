@@ -26,6 +26,8 @@ pub fn show_debug_tab(
     selected_probe: &mut Option<String>,
     probe_scan: &mut bool,
     probe_scan_err: Option<&str>,
+    // Project chip's toolchain — gates which probes are selectable.
+    toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
 ) {
     let phase = dbg.phase();
     let busy = dbg.is_busy();
@@ -142,7 +144,14 @@ pub fn show_debug_tab(
         );
 
         ui.separator();
-        super::probe_selector_ui(ui, probes, selected_probe, probe_scan, probe_scan_err);
+        super::probe_selector_ui(
+            ui,
+            probes,
+            selected_probe,
+            probe_scan,
+            probe_scan_err,
+            toolchain,
+        );
 
         // Phase status, right-aligned.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

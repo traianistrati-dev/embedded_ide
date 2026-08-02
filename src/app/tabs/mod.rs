@@ -27,13 +27,34 @@ pub use activity_tab::show_activity_tab;
 pub use tools_tab::show_tools_tab;
 pub use git_tab::show_git_tab;
 
+use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use eframe::egui;
 use egui_phosphor::regular as ph;
+
+/// Whether a probe of `kind` (as `probe-rs list` reports it — "ST-LINK",
+/// "EspJtag", "JLink", "CMSIS-DAP", …) can drive the project chip's toolchain,
+/// the same gate the Flash tab applies to programmers. ARM chips use SWD probes
+/// (ST-Link / J-Link / CMSIS-DAP); ESP chips use the built-in USB-JTAG (or a
+/// J-Link in JTAG mode). SDCC / 8051 isn't a probe-rs target at all.
+pub(crate) fn probe_compatible(kind: &str, toolchain: &ToolchainKind) -> bool {
+    let k = kind.to_ascii_lowercase();
+    let is_jlink = k.contains("jlink") || k.contains("j-link");
+    let is_arm_swd =
+        k.contains("st-link") || k.contains("stlink") || k.contains("cmsis") || is_jlink;
+    let is_esp_jtag = k.contains("esp") || k.contains("jtag");
+    match toolchain {
+        ToolchainKind::RustEmbedded => is_arm_swd,
+        ToolchainKind::EspRust => is_esp_jtag || is_jlink,
+        ToolchainKind::SdccC => false,
+    }
+}
 
 /// The shared probe picker rendered on both the RTT and Debug tabs (both drive
 /// probe-rs). `Scan` re-runs `probe-rs list`; the ComboBox pins the session to
 /// one probe via `--probe VID:PID[:Serial]`, or "Auto" to let probe-rs choose.
-/// Meant to sit inside a `horizontal_wrapped` toolbar row.
+/// Probes incompatible with the project chip's toolchain are shown greyed and
+/// can't be selected (like the Flash tab's programmer list). Meant to sit
+/// inside a `horizontal_wrapped` toolbar row.
 pub(crate) fn probe_selector_ui(
     ui: &mut egui::Ui,
     probes: &[crate::probe::ProbeInfo],
@@ -41,6 +62,7 @@ pub(crate) fn probe_selector_ui(
     // Set true when the user clicks Scan; the caller runs `scan_probes`.
     scan_go: &mut bool,
     scan_err: Option<&str>,
+    toolchain: &ToolchainKind,
 ) {
     ui.label(
         egui::RichText::new("Probe:")
@@ -80,8 +102,26 @@ pub(crate) fn probe_selector_ui(
             }
             for p in probes {
                 let is_sel = selected.as_deref() == Some(p.selector.as_str());
-                if ui.selectable_label(is_sel, p.combo_label()).clicked() {
+                let compatible = probe_compatible(&p.kind, toolchain);
+                // Incompatible probes are greyed + disabled, like the Flash
+                // tab's programmer list.
+                let color = if compatible {
+                    egui::Color32::from_gray(210)
+                } else {
+                    egui::Color32::from_gray(90)
+                };
+                let resp = ui.add_enabled(
+                    compatible,
+                    egui::Button::selectable(
+                        is_sel,
+                        egui::RichText::new(p.combo_label()).size(10.5).color(color),
+                    ),
+                );
+                if resp.clicked() && compatible {
                     *selected = Some(p.selector.clone());
+                }
+                if !compatible {
+                    resp.on_hover_text("Not compatible with this chip's toolchain.");
                 }
             }
             if probes.is_empty() {
@@ -105,5 +145,37 @@ pub(crate) fn probe_selector_ui(
                 .size(10.5)
                 .color(egui::Color32::from_rgb(210, 150, 90)),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{probe_compatible, ToolchainKind};
+
+    #[test]
+    fn arm_chips_accept_swd_probes_not_esp_jtag() {
+        let arm = ToolchainKind::RustEmbedded;
+        // Exact strings `probe-rs list` prints for these probes.
+        assert!(probe_compatible("ST-LINK", &arm));
+        assert!(probe_compatible("JLink", &arm));
+        assert!(probe_compatible("CMSIS-DAP", &arm));
+        // The ESP built-in USB-JTAG can't debug an ARM chip.
+        assert!(!probe_compatible("EspJtag", &arm));
+    }
+
+    #[test]
+    fn esp_chips_accept_jtag_not_stlink() {
+        let esp = ToolchainKind::EspRust;
+        assert!(probe_compatible("EspJtag", &esp));
+        assert!(probe_compatible("JLink", &esp)); // J-Link JTAG works on ESP too
+        assert!(!probe_compatible("ST-LINK", &esp));
+        assert!(!probe_compatible("CMSIS-DAP", &esp));
+    }
+
+    #[test]
+    fn sdcc_has_no_probe_rs_target() {
+        let sdcc = ToolchainKind::SdccC;
+        assert!(!probe_compatible("ST-LINK", &sdcc));
+        assert!(!probe_compatible("EspJtag", &sdcc));
     }
 }
