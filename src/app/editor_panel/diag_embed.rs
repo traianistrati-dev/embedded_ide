@@ -406,8 +406,14 @@ impl AppIde {
         // Config files map too; paths with no editor equivalent (e.g.
         // mcu.config) are silently ignored.
         if let Some((path, line)) = git_open {
+            // `path` is relative to the ACTIVE git repo — inside a library repo
+            // git reports `src/lib.rs` where the IDE keys the file
+            // `mw_radar/src/lib.rs`. Re-root it (like every other git handler
+            // does via `git_path_to_project`); without this a modified library
+            // line never resolves and the click silently opens nothing.
+            let key = self.git_path_to_project(&path);
             if let Some(id) =
-                crate::app::resolve_diag_file(&path, &self.project_tree.user_src_files)
+                crate::app::resolve_diag_file(&key, &self.project_tree.user_src_files)
             {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line));
