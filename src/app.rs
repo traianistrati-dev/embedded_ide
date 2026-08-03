@@ -494,6 +494,11 @@ struct PersistedState {
     /// replaced by the 60% default on load.
     #[serde(default)]
     tree_split_ratio: f32,
+    /// User turned OFF the full-width yellow line background for git-changed
+    /// lines in the editor (keeping only the gutter bars). Serde default `false`
+    /// = shown, so existing/older state keeps the current look.
+    #[serde(default)]
+    hide_diff_line_bg: bool,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -809,6 +814,11 @@ pub struct AppIde {
     clippy_rename_queue: std::collections::VecDeque<crate::build::RenameFix>,
     /// Request keyboard focus for the rename input on the frame it opens.
     rename_focus: bool,
+    /// Show the full-width translucent-yellow line background for git-changed
+    /// lines in the editor. When off, only the gutter bars (green/amber/red)
+    /// remain — the band was distracting while editing. Persisted (inverted, as
+    /// `hide_diff_line_bg`). Toggled from the editor toolbar.
+    diff_line_bg: bool,
     // ── Find / Replace (Ctrl+F / Ctrl+H / Ctrl+Shift+F / Ctrl+Shift+H) ───────
     /// Search bar state: mode, query/replacement text, results, match cursor.
     find: editor_panel::find_replace::FindReplace,
@@ -1285,6 +1295,7 @@ impl AppIde {
             pending_restore: None,
             side_panels_collapsed: persisted.side_panels_collapsed,
             diag_collapsed: persisted.diag_collapsed,
+            diff_line_bg: !persisted.hide_diff_line_bg,
             // 0.0 = absent from an older build's state; clamp keeps a corrupt
             // value from collapsing one half to nothing.
             tree_split_ratio: if persisted.tree_split_ratio <= 0.0 {
@@ -2215,6 +2226,7 @@ impl eframe::App for AppIde {
                 side_panels_collapsed: self.side_panels_collapsed,
                 diag_collapsed: self.diag_collapsed,
                 tree_split_ratio: self.tree_split_ratio,
+                hide_diff_line_bg: !self.diff_line_bg,
             },
         );
     }

@@ -448,6 +448,34 @@ impl AppIde {
                 });
 
                 ui.add_space(4.0);
+
+                // ── Git diff line-background toggle ────────────────────
+                // The full-width yellow band on git-changed lines can distract /
+                // mis-align while editing; OFF keeps just the gutter bars.
+                let bg_btn = ui.selectable_label(
+                    self.diff_line_bg,
+                    egui::RichText::new(format!("{} Diff bg", ph::GIT_DIFF))
+                        .size(11.0)
+                        .color(if self.diff_line_bg {
+                            egui::Color32::from_rgb(210, 190, 90)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                );
+                if bg_btn.clicked() {
+                    self.diff_line_bg = !self.diff_line_bg;
+                }
+                bg_btn.on_hover_text(if self.diff_line_bg {
+                    "Git change background: ON — changed lines get a full-width \
+                     yellow band.\nClick to keep ONLY the gutter bars next to the \
+                     line number."
+                } else {
+                    "Git change background: OFF — only the gutter bars (green / \
+                     amber) mark changed lines.\nClick to highlight the whole row \
+                     again."
+                });
+
+                ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(4.0);
 

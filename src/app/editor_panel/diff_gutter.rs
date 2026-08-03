@@ -214,8 +214,10 @@ impl AppIde {
             // Added / modified lines (new_len > 0): a translucent yellow band
             // across the FULL width — line-number gutter included — so the
             // changed lines are obvious. Deletion markers have no line to fill.
-            // Painted first, so the coloured bar stays on top.
-            if hk.new_len > 0 {
+            // Painted first, so the coloured bar stays on top. The user can turn
+            // the band off (it can distract / mis-align while editing) — the
+            // gutter bars below always remain.
+            if hk.new_len > 0 && self.diff_line_bg {
                 painter.rect_filled(
                     egui::Rect::from_min_max(
                         egui::pos2(clip.left(), y_top),
