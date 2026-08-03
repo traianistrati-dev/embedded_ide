@@ -23,6 +23,7 @@ mod tabs;
 pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
+mod clone_project_dialog;
 mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
@@ -951,6 +952,9 @@ pub struct AppIde {
     extract_crate: Option<extract_crate_dialog::ExtractCrateDialog>,
     /// Open "Clone a library from git" dialog, if any.
     clone_library_dialog: Option<extract_crate_dialog::CloneLibraryDialog>,
+    /// "Clone project" modal (duplicate the whole project + libraries to a new
+    /// folder). See [`clone_project_dialog`].
+    clone_project_dialog: Option<clone_project_dialog::CloneProjectDialog>,
     /// Open delete/rename confirmation for a library crate, if any.
     library_action: Option<extract_crate_dialog::LibraryActionDialog>,
     /// In-flight "Add to workspace" cargo-metadata pre-check (see
@@ -1290,6 +1294,7 @@ impl AppIde {
             },
             extract_crate: None,
             clone_library_dialog: None,
+            clone_project_dialog: None,
             library_action: None,
             workspace_add: None,
             workspace_add_error: None,
@@ -2442,6 +2447,13 @@ impl eframe::App for AppIde {
         if signals.clone_library {
             self.clone_library_dialog = Some(extract_crate_dialog::CloneLibraryDialog::new());
         }
+        // Project-header "Clone project" → the duplicate-to-a-new-folder dialog.
+        if signals.clone_project {
+            if let Some(dir) = self.project_dir.clone() {
+                self.clone_project_dialog =
+                    Some(clone_project_dialog::CloneProjectDialog::new(&dir));
+            }
+        }
         // A library's pen / trash icon → the confirmation dialog.
         if let Some((dir, is_rename)) = signals.library_action {
             self.library_action = Some(extract_crate_dialog::LibraryActionDialog {
@@ -2652,6 +2664,7 @@ impl eframe::App for AppIde {
         self.show_git_delete_branch_dialog(ui);
         self.show_extract_crate_dialog(ui);
         self.show_clone_library_dialog(ui);
+        self.show_clone_project_dialog(ui);
         self.show_library_action_dialog(ui);
         self.show_workspace_add_error_dialog(ui);
         self.show_exit_prompt(ui);

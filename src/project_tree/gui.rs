@@ -596,6 +596,8 @@ pub fn show_project_tree(
     new_library: &mut bool,
     // Set when the LIBRARIES "clone from git" button is clicked.
     clone_library: &mut bool,
+    // Set when the project-header "Clone project" button is clicked.
+    clone_project: &mut bool,
     // `(crate dir, is_rename)` when a library's pen / trash icon is clicked;
     // the caller opens the confirmation dialog.
     library_action: &mut Option<(String, bool)>,
@@ -606,12 +608,37 @@ pub fn show_project_tree(
     // `user_src_files` index of a file to open READ-ONLY in the Reference tab.
     open_reference: &mut Option<usize>,
 ) {
-    ui.label(
-        egui::RichText::new(format!("package: {pkg_name}"))
-            .size(12.0)
-            .strong()
-            .color(egui::Color32::LIGHT_YELLOW),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("package: {pkg_name}"))
+                .size(12.0)
+                .strong()
+                .color(egui::Color32::LIGHT_YELLOW),
+        );
+        // "Clone project" — a snapshot of the whole project + libraries into a
+        // new folder (e.g. before switching the Runtime, which regenerates code).
+        // Needs a saved project on disk.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    project_dir.is_some(),
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Clone", ph::COPY)).size(10.5),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text(
+                    "Duplicate this project — every file plus its libraries — into a new \
+                     folder. A snapshot before changing the Runtime, which regenerates \
+                     different code. Copies the SAVED project (skips target/ and .git).",
+                )
+                .on_disabled_hover_text("Save the project first.")
+                .clicked()
+            {
+                *clone_project = true;
+            }
+        });
+    });
     // Transient "can't move" banner from a refused drag-drop (auto-cleared).
     show_tree_notice(ui);
     ui.add_space(2.0);

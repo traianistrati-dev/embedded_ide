@@ -24,6 +24,8 @@ pub(super) struct ProjectPanelSignals {
     pub new_library: bool,
     /// The LIBRARIES "clone from git" button was clicked.
     pub clone_library: bool,
+    /// The project-header "Clone project" button was clicked.
+    pub clone_project: bool,
     /// `(crate dir, is_rename)` when a library's pen / trash icon was clicked.
     pub library_action: Option<(String, bool)>,
     /// A DETACHED library the user asked to promote into the workspace.
@@ -128,6 +130,7 @@ impl AppIde {
         let mut extract_folder: Option<String> = None;
         let mut new_library = false;
         let mut clone_library = false;
+        let mut clone_project = false;
         let mut library_action: Option<(String, bool)> = None;
         let mut add_to_workspace: Option<String> = None;
         let mut detach_from_workspace: Option<String> = None;
@@ -275,6 +278,7 @@ impl AppIde {
                             &mut self.tree_split_ratio,
                             &mut new_library,
                             &mut clone_library,
+                            &mut clone_project,
                             &mut library_action,
                             &mut add_to_workspace,
                             &mut detach_from_workspace,
@@ -301,6 +305,7 @@ impl AppIde {
             extract_folder,
             new_library,
             clone_library,
+            clone_project,
             library_action,
             add_to_workspace,
             detach_from_workspace,
