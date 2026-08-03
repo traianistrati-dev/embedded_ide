@@ -93,6 +93,8 @@ impl Mcu {
             auto_build: crate::panels::mcu_module::mcu::model::AutoBuild::default(),
             strict_lints: false,
             expand_module: None,
+            module_undo: Vec::new(),
+            module_remove_confirm: None,
         }
     }
 
@@ -210,6 +212,58 @@ impl Mcu {
             }
         }
         self.modules.retain(|m| m.id != id);
+    }
+
+    // ── Virtual-module undo (Ctrl+Z on the Pins tab) ──────────────────────────
+
+    /// Cap on the module undo stack — a Ctrl+Z safety net, not full history.
+    const MODULE_UNDO_CAP: usize = 30;
+
+    /// Snapshot the modules + pin state BEFORE an explicit add/remove, so Ctrl+Z
+    /// (or the Undo button) can revert it. `label` is shown on the Undo hover.
+    pub fn push_module_undo(&mut self, label: String) {
+        use crate::panels::mcu_module::mcu::model::ModuleUndo;
+        let pins = self
+            .iter_all_pins()
+            .map(|p| (p.number, p.selected_function.clone(), p.custom_label.clone()))
+            .collect();
+        self.module_undo.push(ModuleUndo {
+            modules: self.modules.clone(),
+            pins,
+            label,
+        });
+        if self.module_undo.len() > Self::MODULE_UNDO_CAP {
+            self.module_undo.remove(0);
+        }
+    }
+
+    /// Drop the most recent snapshot WITHOUT applying it — used when a snapshotted
+    /// action turned out to be a no-op (e.g. an add that found no free pins).
+    pub fn discard_last_module_undo(&mut self) {
+        self.module_undo.pop();
+    }
+
+    /// Revert the last add/remove: restore its snapshot (pins + modules). Returns
+    /// the undone action's label, or `None` when the stack is empty.
+    pub fn undo_modules(&mut self) -> Option<String> {
+        let snap = self.module_undo.pop()?;
+        for (num, func, label) in &snap.pins {
+            if let Some(p) = self.find_pin_mut(*num) {
+                p.selected_function = func.clone();
+                p.custom_label = label.clone();
+            }
+        }
+        self.modules = snap.modules;
+        self.module_remove_confirm = None;
+        Some(snap.label)
+    }
+
+    pub fn can_undo_modules(&self) -> bool {
+        !self.module_undo.is_empty()
+    }
+
+    pub fn last_module_undo_label(&self) -> Option<&str> {
+        self.module_undo.last().map(|u| u.label.as_str())
     }
 
     /// Returns `(number, name, selected_function)` for every non-reserved pin.

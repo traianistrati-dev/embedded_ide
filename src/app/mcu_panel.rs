@@ -252,8 +252,36 @@ impl AppIde {
                                             "every instance of this peripheral is already wired to a module — remove one to free it"
                                         })
                                         .clicked()
-                                        && mcu.add_module(kind)
                                     {
+                                        // Snapshot for Ctrl+Z BEFORE the add; drop it
+                                        // again if the add found no free pins.
+                                        mcu.push_module_undo(format!("Add {}", kind.short()));
+                                        if mcu.add_module(kind) {
+                                            modules_changed = true;
+                                        } else {
+                                            mcu.discard_last_module_undo();
+                                        }
+                                    }
+                                }
+                                // Undo the last module add/remove (also Ctrl+Z).
+                                if mcu.can_undo_modules() {
+                                    ui.separator();
+                                    let hover = format!(
+                                        "Undo: {}  (Ctrl+Z)",
+                                        mcu.last_module_undo_label().unwrap_or("last change")
+                                    );
+                                    if ui
+                                        .button(
+                                            egui::RichText::new(format!(
+                                                "{} Undo",
+                                                ph::ARROW_COUNTER_CLOCKWISE
+                                            ))
+                                            .size(11.0),
+                                        )
+                                        .on_hover_text(hover)
+                                        .clicked()
+                                    {
+                                        mcu.undo_modules();
                                         modules_changed = true;
                                     }
                                 }
@@ -268,6 +296,18 @@ impl AppIde {
                                     );
                                 }
                             });
+
+                            // Ctrl+Z reverts the last module add/remove — but only
+                            // when NO text field has focus, so the editor's own undo
+                            // still works while the user is typing.
+                            let undo_z = ui.memory(|m| m.focused().is_none())
+                                && ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
+                                });
+                            if undo_z && mcu.can_undo_modules() {
+                                mcu.undo_modules();
+                                modules_changed = true;
+                            }
 
                             // Id of a module clicked on the canvas last frame →
                             // TOGGLE its list entry this frame (expand if closed,
@@ -285,7 +325,15 @@ impl AppIde {
                                     .iter_all_pins()
                                     .map(|p| (p.number, p.name.clone()))
                                     .collect();
-                                let mut remove_id: Option<String> = None;
+                                // Removal is confirmed inline (it resets the module's
+                                // pins). `confirm_id` = the module currently showing
+                                // the confirm; the loop can't touch `mcu` while it
+                                // borrows `mcu.modules`, so it signals via locals
+                                // applied after the loop.
+                                let confirm_id = mcu.module_remove_confirm.clone();
+                                let mut remove_id: Option<String> = None; // confirmed → remove
+                                let mut arm_confirm: Option<String> = None; // show the confirm
+                                let mut cancel_confirm = false;
                                 // Pull the staged per-module styles into a LOCAL map so
                                 // the config panels can edit them without borrowing
                                 // `mcu` while `mcu.modules` is iterated. Seeded from the
@@ -364,9 +412,37 @@ impl AppIde {
                                                     .expect("pending entry seeded above");
                                                 mod_gui::module_config_ui(ui, m, &pin_names, is_async, is_native, pending);
                                                 ui.add_space(4.0);
-                                                // Red TEXT signals the destructive
-                                                // action; the button fill stays default.
-                                                if ui
+                                                if confirm_id.as_deref() == Some(m.id.as_str()) {
+                                                    // Armed → inline confirm (removing
+                                                    // resets this module's pins).
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "{} Remove this module & free its pins?",
+                                                                ph::WARNING
+                                                            ))
+                                                            .size(11.5)
+                                                            .color(egui::Color32::from_rgb(220, 180, 90)),
+                                                        );
+                                                        if ui
+                                                            .button(
+                                                                egui::RichText::new(format!(
+                                                                    "{} Remove",
+                                                                    ph::TRASH
+                                                                ))
+                                                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            remove_id = Some(m.id.clone());
+                                                        }
+                                                        if ui.button("Cancel").clicked() {
+                                                            cancel_confirm = true;
+                                                        }
+                                                    });
+                                                } else if ui
+                                                    // Red TEXT signals the destructive
+                                                    // action; the fill stays default.
                                                     .button(
                                                         egui::RichText::new(format!(
                                                             "{} Remove module",
@@ -376,15 +452,31 @@ impl AppIde {
                                                     )
                                                     .clicked()
                                                 {
-                                                    remove_id = Some(m.id.clone());
+                                                    arm_confirm = Some(m.id.clone());
                                                 }
                                             });
                                     }
                                 });
                                 // Write the edited staged styles back onto the MCU.
                                 mcu.pending_module_styles = local_pending;
+                                // Apply the inline remove-confirm signals.
+                                if let Some(id) = arm_confirm {
+                                    mcu.module_remove_confirm = Some(id);
+                                }
+                                if cancel_confirm {
+                                    mcu.module_remove_confirm = None;
+                                }
                                 if let Some(id) = remove_id {
+                                    // Snapshot for Ctrl+Z, then remove + free pins.
+                                    let title = mcu
+                                        .modules
+                                        .iter()
+                                        .find(|m| m.id == id)
+                                        .map(mod_gui::module_title)
+                                        .unwrap_or_else(|| "module".to_owned());
+                                    mcu.push_module_undo(format!("Remove {title}"));
                                     mcu.remove_module(&id);
+                                    mcu.module_remove_confirm = None;
                                     modules_changed = true;
                                 }
                             }

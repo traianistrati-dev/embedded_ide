@@ -191,4 +191,21 @@ pub struct Mcu {
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.
     pub expand_module: Option<String>,
+    /// Undo stack for explicit Virtual-module add/remove (Ctrl+Z on the Pins
+    /// tab). Each entry snapshots the modules + pin state before the change so
+    /// an unwanted add/remove can be reverted. Transient, capped, not persisted.
+    pub module_undo: Vec<ModuleUndo>,
+    /// Transient: id of the module whose "Remove" button is armed and awaiting
+    /// an inline confirmation (delete resets its pins, so it's confirmed first).
+    pub module_remove_confirm: Option<String>,
+}
+
+/// One Virtual-module undo snapshot (see [`Mcu::module_undo`]): the modules and
+/// the pin state (`(number, function, custom_label)`) as they were BEFORE an
+/// add/remove, plus a short label for the Undo button's hover.
+#[derive(Clone)]
+pub struct ModuleUndo {
+    pub modules: Vec<crate::panels::mcu_module::modules::VirtualModule>,
+    pub pins: Vec<(usize, PinFunction, String)>,
+    pub label: String,
 }

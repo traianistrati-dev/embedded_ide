@@ -153,6 +153,44 @@ mod tests {
         );
     }
 
+    /// Ctrl+Z: a snapshot taken before an add/remove restores BOTH the modules
+    /// and the pins (add unassigns them, remove re-assigns them).
+    #[test]
+    fn module_undo_reverts_add_and_remove() {
+        let mut mcu = create_stm32f103c8tx();
+
+        // Undo an ADD → back to no modules, pins freed.
+        mcu.push_module_undo("Add USART".into());
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let tx = mcu.modules[0].pin_for(ModuleSignal::Tx).unwrap();
+        assert_eq!(mcu.undo_modules().as_deref(), Some("Add USART"));
+        assert!(mcu.modules.is_empty(), "add undone");
+        assert_eq!(
+            mcu.find_pin(tx).unwrap().selected_function,
+            PinFunction::Unset,
+            "pins freed by the undo"
+        );
+
+        // Undo a REMOVE → the module (and its pins) come back.
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let id = mcu.modules[0].id.clone();
+        mcu.push_module_undo("Remove USART1".into());
+        mcu.remove_module(&id);
+        assert!(mcu.modules.is_empty());
+        mcu.undo_modules();
+        assert_eq!(mcu.modules.len(), 1, "remove undone");
+        assert_ne!(
+            mcu.find_pin(tx).unwrap().selected_function,
+            PinFunction::Unset,
+            "pins re-assigned by the undo"
+        );
+
+        // Discard drops the snapshot without applying it.
+        mcu.push_module_undo("x".into());
+        mcu.discard_last_module_undo();
+        assert!(!mcu.can_undo_modules());
+    }
+
     /// The config constants live in `src/pins/configs/usart1.rs` and track the
     /// module config — editing the baud rate updates the `BAUDRATE` constant.
     #[test]
