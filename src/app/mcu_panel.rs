@@ -1106,11 +1106,7 @@ impl AppIde {
             // so it still looks like code.
             ui.add_enabled_ui(false, |ui| {
                 crate::editor::gui::code_editor::show_rust_editor_plain(
-                    ui,
-                    &mut code,
-                    font_size,
-                    rows,
-                    &editor_id,
+                    ui, &mut code, font_size, rows, &editor_id,
                 );
             });
             // Disabled widgets can't hold focus; make sure a stale `true` from
@@ -1121,11 +1117,7 @@ impl AppIde {
 
         let clip = ui.clip_rect();
         let out = crate::editor::gui::code_editor::show_rust_editor_plain(
-            ui,
-            &mut code,
-            font_size,
-            rows,
-            &editor_id,
+            ui, &mut code, font_size, rows, &editor_id,
         );
         // Focus is read AFTER rendering and used by the main editor's
         // keyboard-scope gate NEXT frame — that panel runs earlier, so
@@ -1203,9 +1195,7 @@ impl AppIde {
         match path {
             "src/main.rs" => Some((ProjectFileId::MainRs, self.generated_code.clone())),
             "Cargo.toml" => Some((ProjectFileId::CargoToml, self.cargo_toml.clone())),
-            ".cargo/config.toml" => {
-                Some((ProjectFileId::CargoConfig, self.cargo_config.clone()))
-            }
+            ".cargo/config.toml" => Some((ProjectFileId::CargoConfig, self.cargo_config.clone())),
             "memory.x" => Some((ProjectFileId::MemoryX, self.memory_x.clone())),
             "build.rs" => Some((ProjectFileId::BuildRs, self.build_rs.clone())),
             ".gitignore" => Some((ProjectFileId::GitIgnore, self.gitignore.clone())),
@@ -1321,7 +1311,12 @@ fn runtime_card(
             } else {
                 egui::Color32::from_gray(120)
             };
-            ui.label(egui::RichText::new(title).strong().size(14.0).color(title_col));
+            ui.label(
+                egui::RichText::new(title)
+                    .strong()
+                    .size(14.0)
+                    .color(title_col),
+            );
             ui.label(
                 egui::RichText::new(subtitle)
                     .monospace()
@@ -1335,7 +1330,11 @@ fn runtime_card(
     } else {
         egui::Sense::hover()
     };
-    let resp = ui.interact(inner.response.rect, egui::Id::new(("runtime_card", title)), sense);
+    let resp = ui.interact(
+        inner.response.rect,
+        egui::Id::new(("runtime_card", title)),
+        sense,
+    );
     if enabled && resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

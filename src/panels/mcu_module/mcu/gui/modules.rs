@@ -714,27 +714,27 @@ pub fn module_config_ui(
         });
 
     ui.add_space(4.0);
-    let label = |ui: &mut egui::Ui, t: &str| {
-        ui.label(
-            egui::RichText::new(t)
-                .size(11.0)
-                .color(egui::Color32::from_rgb(150, 150, 160)),
-        );
-    };
-    label(ui, "RX data model");
-    ui.add(
-        egui::TextEdit::multiline(m.config.rx_model_mut())
-            .desired_rows(3)
-            .desired_width(f32::INFINITY)
-            .code_editor()
-            .hint_text("data the device sends — e.g. struct Reading { temp: f32, .. }"),
-    );
-    label(ui, "TX data model");
-    ui.add(
-        egui::TextEdit::multiline(m.config.tx_model_mut())
-            .desired_rows(3)
-            .desired_width(f32::INFINITY)
-            .code_editor()
-            .hint_text("data you send to the device — e.g. command frames"),
-    );
+    // let label = |ui: &mut egui::Ui, t: &str| {
+    //     ui.label(
+    //         egui::RichText::new(t)
+    //             .size(11.0)
+    //             .color(egui::Color32::from_rgb(150, 150, 160)),
+    //     );
+    // };
+    // label(ui, "RX data model");
+    // ui.add(
+    //     egui::TextEdit::multiline(m.config.rx_model_mut())
+    //         .desired_rows(3)
+    //         .desired_width(f32::INFINITY)
+    //         .code_editor()
+    //         .hint_text("data the device sends — e.g. struct Reading { temp: f32, .. }"),
+    // );
+    // label(ui, "TX data model");
+    // ui.add(
+    //     egui::TextEdit::multiline(m.config.tx_model_mut())
+    //         .desired_rows(3)
+    //         .desired_width(f32::INFINITY)
+    //         .code_editor()
+    //         .hint_text("data you send to the device — e.g. command frames"),
+    // );
 }
