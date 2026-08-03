@@ -1039,6 +1039,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blocking_gpio_keeps_embedded_hal_through_the_async_pass() {
+        // Blocking GPIO (io.rs) pulls embedded-hal 1.0 via `ensure_peripheral_deps`.
+        let base = "[package]\nname = \"x\"\n\n[dependencies]\ncortex-m = \"0.7\"\n";
+        let with_gpio = ensure_peripheral_deps(base, false, false, false, false, true, false);
+        assert!(
+            with_gpio.lines().any(|l| is_dep_line(l, "embedded-hal")),
+            "peripheral deps add embedded-hal for GPIO:\n{with_gpio}"
+        );
+        // The async pass runs next and ALSO manages embedded-hal — it must be told
+        // the blocking need (combined), or it strips what was just added.
+        let after_async = ensure_async_deps(&with_gpio, false, false, true, false);
+        assert!(
+            after_async.lines().any(|l| is_dep_line(l, "embedded-hal")),
+            "async pass keeps embedded-hal when the combined need is true:\n{after_async}"
+        );
+        // Guard proving the bug shape: the OLD `needs_eh = false` stripped it.
+        let stripped = ensure_async_deps(&with_gpio, false, false, false, false);
+        assert!(
+            !stripped.lines().any(|l| is_dep_line(l, "embedded-hal")),
+            "needs_eh=false would strip it (the bug this guards):\n{stripped}"
+        );
+    }
+
+    #[test]
     fn strict_lints_add_remove_is_idempotent() {
         let base = "[package]\nname = \"x\"\n\n[dependencies]\ncortex-m = \"0.7\"\n";
         // Enable → block present, once.

@@ -14,6 +14,9 @@ use std::path::Path;
 pub(crate) struct CloneProjectDialog {
     /// Absolute destination directory (default: a sibling `<name>-copy`).
     pub dest: String,
+    /// Switch the IDE to the clone once it's written (default: stay on the
+    /// current project).
+    pub open_after: bool,
     pub error: Option<String>,
     /// `Some((file_count, dest))` after a successful clone → the modal shows a
     /// done screen instead of the form.
@@ -24,6 +27,7 @@ impl CloneProjectDialog {
     pub(crate) fn new(project_dir: &Path) -> Self {
         Self {
             dest: default_clone_dest(project_dir),
+            open_after: false,
             error: None,
             done: None,
         }
@@ -109,7 +113,8 @@ impl AppIde {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let mut close = false;
-        let mut do_clone: Option<String> = None;
+        // `(dest, open_after)` when the user presses Clone.
+        let mut do_clone: Option<(String, bool)> = None;
 
         let dlg = self.clone_project_dialog.as_mut().unwrap();
         egui::Window::new(format!("{}  Clone project", ph::COPY))
@@ -167,6 +172,12 @@ impl AppIde {
                             .font(egui::TextStyle::Monospace),
                     );
                 });
+                ui.add_space(6.0);
+                ui.checkbox(&mut dlg.open_after, "Open cloned project after clone")
+                    .on_hover_text(
+                        "On: switch the IDE to the copy once it's written (unsaved edits in \
+                         the current project are left as they are). Off: stay here.",
+                    );
                 if let Some(e) = &dlg.error {
                     ui.add_space(4.0);
                     ui.label(
@@ -181,7 +192,7 @@ impl AppIde {
                         .button(egui::RichText::new(format!("{}  Clone", ph::COPY)).strong())
                         .clicked()
                     {
-                        do_clone = Some(dlg.dest.clone());
+                        do_clone = Some((dlg.dest.clone(), dlg.open_after));
                     }
                     if ui.button("Cancel").clicked() {
                         close = true;
@@ -189,10 +200,16 @@ impl AppIde {
                 });
             });
 
-        if let Some(dest) = do_clone {
+        if let Some((dest, open_after)) = do_clone {
             match self.clone_project_to(Path::new(&dest)) {
                 Ok(count) => {
-                    if let Some(d) = &mut self.clone_project_dialog {
+                    if open_after {
+                        // Switch the IDE to the fresh copy (same path as File>Open)
+                        // and close the modal — we've navigated away from the done
+                        // screen.
+                        self.load_project_from_dir(Path::new(&dest));
+                        self.clone_project_dialog = None;
+                    } else if let Some(d) = &mut self.clone_project_dialog {
                         d.done = Some((count, dest));
                         d.error = None;
                     }

@@ -204,6 +204,14 @@ impl AppIde {
                             use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
                             use crate::panels::mcu_module::modules::ModuleKind;
 
+                            // A per-module "Init API" change (Portable | Native)
+                            // below STAGES a codegen choice exactly like the
+                            // System-tab Runtime cards — so show the SAME Apply /
+                            // Discard prompt HERE. Without it the staged change was
+                            // only visible on the System tab, leaving the user
+                            // unsure whether the Init-API switch took effect.
+                            Self::runtime_apply_bar(ui, mcu);
+
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.label(

@@ -1687,11 +1687,18 @@ impl AppIde {
             // embedded-io-async + static_cell (USART) and embedded-hal /
             // embedded-hal-async (SPI/I2C). Keyed on the project Runtime being
             // Async on an embassy-capable STM32 family.
+            //
+            // BOTH `ensure_peripheral_deps` (blocking eh1 = SPI/I2C/GPIO) and this
+            // manage `embedded-hal` 1.0 — so the need passed here MUST include the
+            // blocking case, or the blocking GPIO (io.rs) / SPI / I2C `embedded-hal`
+            // that `ensure_peripheral_deps` just added would be stripped right back
+            // out here (and a user's manual `embedded-hal` line with it).
+            let needs_eh_total = needs_eh || needs_spi || needs_i2c || needs_gpio;
             let new_toml = project_gen::ensure_async_deps(
                 &new_toml,
                 is_async,
                 is_async && has_cfg("usart"),
-                needs_eh,
+                needs_eh_total,
                 needs_eh_async,
             );
             // Strict-lints `[lints.clippy]` block (MCU System toggle).
