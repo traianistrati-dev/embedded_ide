@@ -43,20 +43,22 @@ impl AppIde {
         let galley = &editor_resp.galley;
         let gp = editor_resp.galley_pos;
 
-        // The clickable strip: from the panel edge to just left of the diff
-        // marks (which sit at `gp.x - 10 .. gp.x - 1`) — i.e. the line-number
-        // column. Clicking anywhere on the number toggles the breakpoint.
-        let strip_r = gp.x - 12.0;
-        if strip_r - clip.left() < 10.0 {
-            return; // no visible number column (degenerate layout)
+        // Guard: a visible line-number column must exist (its right edge is
+        // ~`gp.x - 12`); a degenerate layout has none.
+        let num_col_r = gp.x - 12.0;
+        if num_col_r - clip.left() < 10.0 {
+            return;
         }
         // The dot sits to the RIGHT of the line number, on the gutter/code
-        // divider (where the diff marks live at `gp.x - 7`) — not over the
-        // digits. The click strip stays on the number column above.
+        // divider (where the diff marks live at `gp.x - 7`).
         let dot_x = gp.x - 6.0;
+        // Clickable strip: the number column PLUS the dot itself (out to
+        // `gp.x - 3`), so clicking the red dot toggles the breakpoint — not just
+        // the digits. The diff bars underneath are hover-only now (their
+        // click-to-revert was removed), so this overlap is safe.
         let strip = egui::Rect::from_min_max(
             egui::pos2(clip.left(), clip.top()),
-            egui::pos2(strip_r, clip.bottom()),
+            egui::pos2(gp.x - 3.0, clip.bottom()),
         );
 
         // Char index of every line start — line → y via the galley.

@@ -836,7 +836,7 @@ impl AppIde {
                 // click-to-revert. A revert mutates `display_code`; the
                 // write-back below persists it (same as the context-menu Cut).
                 self.tick_diff_gutter(&display_code);
-                self.paint_diff_gutter(ui, &editor_resp, editor_clip, &mut display_code);
+                self.paint_diff_gutter(ui, &editor_resp, editor_clip, &display_code);
                 // Breakpoint dots + click-to-toggle in the line-number column.
                 self.paint_breakpoint_gutter(ui, &editor_resp, editor_clip, &display_code);
                 // Hover-to-evaluate: value tooltip for the identifier under the

@@ -1,15 +1,16 @@
-//! Live git gutter marks in the code editor (Phase A) + "Revert hunk" (B).
+//! Live git gutter marks in the code editor.
 //!
 //! Compares the LIVE in-memory editor text — including unsaved edits — against
 //! the file's content at git HEAD (`git show HEAD:<path>`, fetched on a worker
 //! and cached per (path, `GitState::op_gen`), so a commit/pull refreshes the
 //! baseline). Marks are painted left of the text: green bar = added lines,
 //! amber bar = modified, red wedge = lines deleted at that boundary. Hovering
-//! a mark shows the HEAD version of those lines; clicking it reverts the hunk
-//! in the editor buffer (still unsaved — Ctrl+S persists, like any edit).
+//! a mark shows the HEAD version of those lines. Click-to-revert was REMOVED —
+//! the bars sit under the breakpoint dot, so clicking to set a breakpoint
+//! reverted the hunk; revert now lives in the Git tab's diff view (+ Ctrl+Z).
 
 use crate::app::{AppIde, ProjectFileId};
-use crate::git::{compute_hunks, fetch_baseline, revert_hunk, BaselineFetch, DiffHunk};
+use crate::git::{compute_hunks, fetch_baseline, BaselineFetch, DiffHunk};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
@@ -173,14 +174,15 @@ impl AppIde {
         }
     }
 
-    /// Paint the gutter marks and handle hover (HEAD preview) + click (revert
-    /// hunk — mutates `display_code`; the caller's write-back persists it).
+    /// Paint the gutter marks (green/amber bars, red deletion wedge) + the
+    /// hover HEAD preview. Read-only: click-to-revert was removed (it collided
+    /// with the breakpoint dot); revert lives in the Git tab.
     pub(super) fn paint_diff_gutter(
         &mut self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
         clip: egui::Rect,
-        display_code: &mut String,
+        display_code: &str,
     ) {
         if self.diff_gutter.hunks.is_empty() || self.diff_gutter.computed_hash == 0 {
             return;
@@ -189,7 +191,6 @@ impl AppIde {
         let gp = editor_resp.galley_pos;
         let total_chars = display_code.chars().count();
         let painter = ui.painter().with_clip_rect(clip);
-        let mut revert: Option<usize> = None;
 
         let starts = &self.diff_gutter.line_starts;
         let ci_of = |line: usize| starts.get(line).copied().unwrap_or(total_chars).min(total_chars);
@@ -246,8 +247,12 @@ impl AppIde {
                 );
             }
 
-            // Hover: HEAD preview + hint. Click: revert. (Hit area widened —
-            // a 3 px bar is a fiddly click target.)
+            // Hover-only: preview the HEAD version. Click-to-revert was REMOVED —
+            // the bar sits under the breakpoint dot (gp.x-6), so clicking to set a
+            // breakpoint reverted the hunk instead. Revert now lives in the Git
+            // tab's diff view (+ Ctrl+Z). Being hover-only, this no longer fights
+            // the breakpoint gutter's click strip (painted after → owns clicks in
+            // this overlapping area).
             let hit = egui::Rect::from_min_max(
                 egui::pos2(x - 3.0, y_top),
                 egui::pos2(x + 6.0, y_bot),
@@ -255,13 +260,10 @@ impl AppIde {
             let resp = ui.interact(
                 hit,
                 egui::Id::new("diff_gutter").with(self.selected_file_key()).with(i),
-                egui::Sense::click(),
+                egui::Sense::hover(),
             );
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
             let baseline = self.diff_gutter.baseline_text.as_deref().unwrap_or("");
-            resp.clone().on_hover_ui(|ui| {
+            resp.on_hover_ui(|ui| {
                 ui.set_max_width(520.0);
                 let head = if hk.old_len == 0 {
                     "linii noi (nu există în HEAD)".to_owned()
@@ -285,27 +287,12 @@ impl AppIde {
                     ui.label(egui::RichText::new("…").size(10.5));
                 }
                 ui.label(
-                    egui::RichText::new("click: revert hunk (readuce versiunea din HEAD)")
+                    egui::RichText::new("revert: Git tab → diff, or Ctrl+Z")
                         .size(10.0)
                         .italics()
                         .color(egui::Color32::from_gray(130)),
                 );
             });
-            if resp.clicked() {
-                revert = Some(i);
-            }
-        }
-
-        if let Some(i) = revert {
-            let (Some(baseline), Some(hk)) = (
-                self.diff_gutter.baseline_text.clone(),
-                self.diff_gutter.hunks.get(i).cloned(),
-            ) else {
-                return;
-            };
-            *display_code = revert_hunk(display_code, &baseline, &hk);
-            // Positions are stale now — recompute next frame from the new text.
-            self.diff_gutter.computed_hash = 0;
         }
     }
 
