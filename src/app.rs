@@ -298,6 +298,8 @@ enum BuildPanelTab {
     Serial,
     /// `cargo clippy` improvement suggestions.
     Clippy,
+    /// `cargo bloat` code-size breakdown (Flash per function / crate).
+    Profile,
     /// Built-in command console (streaming `powershell` runner).
     Terminal,
     /// Per-action timing breakdown (Save / Build / Flash / Clippy).
@@ -608,6 +610,14 @@ pub struct AppIde {
     /// Shared state of the Flash/RAM size measurement (Cargo tab's Size button:
     /// `cargo build --release` + ELF section parse — see `crate::size`).
     size_state: Arc<Mutex<crate::size::SizeState>>,
+    /// `cargo bloat` code-size breakdown for the Profile tab (see
+    /// `crate::profile`). `profile_by_crate` toggles per-crate vs per-function.
+    profile_state: Arc<Mutex<crate::profile::ProfileState>>,
+    profile_by_crate: bool,
+    /// Profile-tab view: Static (cargo bloat) vs Runtime (flamegraph).
+    profile_mode: crate::profile::ProfileMode,
+    /// On-target flamegraph sampling state (Runtime mode; see `crate::flamegraph`).
+    flame_state: Arc<Mutex<crate::flamegraph::FlameState>>,
     /// Was any flash pipeline busy last frame? Edge-detects "flash finished" to
     /// re-measure Flash/RAM automatically (see `poll_flash_finished_size`).
     flash_was_busy: bool,
@@ -1156,6 +1166,10 @@ impl AppIde {
             build_state: Arc::new(Mutex::new(BuildState::Idle)),
             clippy_state: Arc::new(Mutex::new(BuildState::Idle)),
             size_state: Arc::new(Mutex::new(crate::size::SizeState::Idle)),
+            profile_state: Arc::new(Mutex::new(crate::profile::ProfileState::Idle)),
+            profile_by_crate: false,
+            profile_mode: crate::profile::ProfileMode::Static,
+            flame_state: Arc::new(Mutex::new(crate::flamegraph::FlameState::Idle)),
             flash_was_busy: false,
             last_build_tab: BuildPanelTab::RustAnalyzer,
             clippy_sel: None,

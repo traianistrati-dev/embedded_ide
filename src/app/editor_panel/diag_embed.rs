@@ -149,6 +149,9 @@ impl AppIde {
         let mut debug_go = false;
         // Shared RTT/Debug probe-selector Scan button.
         let mut probe_scan = false;
+        // Profile-tab "Analyze" (cargo bloat) + "Sample" (flamegraph) buttons.
+        let mut profile_run = false;
+        let mut profile_sample = false;
         let rtt_chip = self
             .selected_build_cfg()
             .map(|(p, _)| p.probe_chip)
@@ -264,6 +267,12 @@ impl AppIde {
                     &mut self.selected_probe,
                     &mut probe_scan,
                     self.probe_scan_err.as_deref(),
+                    &mut self.profile_mode,
+                    &self.profile_state,
+                    &mut self.profile_by_crate,
+                    &mut profile_run,
+                    &self.flame_state,
+                    &mut profile_sample,
                 );
             });
         // Clicking a tab on the collapsed bar reopens the panel at 20% of the
@@ -377,6 +386,14 @@ impl AppIde {
         // Shared RTT/Debug probe-selector Scan button.
         if probe_scan {
             self.scan_probes();
+        }
+        // Profile-tab "Analyze" button → cargo bloat.
+        if profile_run {
+            self.start_profile();
+        }
+        // Profile-tab "Sample" button → on-target flamegraph.
+        if profile_sample {
+            self.start_flame();
         }
         // Debugger halt location (breakpoint / step landed): jump the editor
         // there with a translucent GREEN band — same path as a diagnostic-row

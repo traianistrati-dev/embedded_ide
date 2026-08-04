@@ -190,6 +190,18 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
                 manual_url:    "https://git-scm.com",
                 status:        ToolStatus::Unknown,
             },
+            RequiredTool {
+                name:          "cargo-bloat",
+                description:   "Code-size profiler — powers the Profile tab (.text/Flash per function)",
+                toolchain:     None,
+                check_cmd:     "cargo",
+                check_args:    &["bloat", "--version"],
+                check_pattern: "",
+                install_cmd:   Some("cargo"),
+                install_args:  &["install", "cargo-bloat"],
+                manual_url:    "https://github.com/RazrFalcon/cargo-bloat",
+                status:        ToolStatus::Unknown,
+            },
             // ── RustEmbedded (STM32 / ARM Cortex-M) ─────────────────────────
             RequiredTool {
                 name:          "thumbv7m-none-eabi",

@@ -256,6 +256,71 @@ impl AppIde {
         }
     }
 
+    /// Run `cargo bloat` for the Profile tab: write the project, then analyze the
+    /// release build's `.text` per function (or per crate). No-op without a chip.
+    pub(crate) fn start_profile(&mut self) {
+        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        match project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+            &self.structure_config_text(),
+        ) {
+            Ok(()) => {
+                self.build_tab = BuildPanelTab::Profile;
+                crate::profile::start_profile(
+                    build_dir,
+                    project.target.clone(),
+                    self.profile_by_crate,
+                    Arc::clone(&self.profile_state),
+                    self.egui_ctx.clone(),
+                );
+            }
+            Err(e) => {
+                *self.profile_state.lock().unwrap() =
+                    crate::profile::ProfileState::Failed(format!("Could not write project: {e}"));
+            }
+        }
+    }
+
+    /// Runtime flamegraph: write the project, then halt-sample the RUNNING
+    /// firmware's call stack via probe-rs (see `crate::flamegraph`). Attach only
+    /// (no flash) — the firmware must already be running. No-op without a chip.
+    pub(crate) fn start_flame(&mut self) {
+        let Some((project, _toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        match project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+            &self.structure_config_text(),
+        ) {
+            Ok(()) => {
+                self.build_tab = BuildPanelTab::Profile;
+                crate::flamegraph::start_flame(
+                    build_dir,
+                    project.target.clone(),
+                    project.probe_chip.clone(),
+                    self.selected_probe.clone(),
+                    400, // sample count — a few seconds of halt-sampling
+                    Arc::clone(&self.flame_state),
+                    self.egui_ctx.clone(),
+                );
+            }
+            Err(e) => {
+                *self.flame_state.lock().unwrap() =
+                    crate::flamegraph::FlameState::Failed(format!("Could not write project: {e}"));
+            }
+        }
+    }
+
     /// Start an RTT session: write the project, then hand off to the
     /// [`crate::rtt::RttConsole`] pipeline (build --release → probe-rs
     /// run/attach). Fired from the RTT tab's buttons. No-op without a chip.

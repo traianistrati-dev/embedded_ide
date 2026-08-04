@@ -6,6 +6,7 @@
 use super::BuildPanelTab;
 use super::tabs::{
     show_activity_tab, show_cargo_tab, show_clippy_tab, show_debug_tab, show_dfu_tab, show_git_tab,
+    show_profile_tab,
     show_ra_tab, show_rtt_tab, show_serial_tab, show_terminal_tab, show_tools_tab,
 };
 use crate::activity::ActivityLog;
@@ -126,6 +127,15 @@ pub(super) fn show_diag_panel(
     selected_probe: &mut Option<String>,
     probe_scan: &mut bool,
     probe_scan_err: Option<&str>,
+    // Profile tab: static-vs-runtime mode; cargo-bloat state + per-crate toggle +
+    // "Analyze" signal; the flamegraph state + a "Sample" signal (caller runs
+    // `start_profile` / `start_flame`).
+    profile_mode: &mut crate::profile::ProfileMode,
+    profile_state: &Arc<Mutex<crate::profile::ProfileState>>,
+    profile_by_crate: &mut bool,
+    profile_run: &mut bool,
+    flame_state: &Arc<Mutex<crate::flamegraph::FlameState>>,
+    profile_sample: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -241,6 +251,42 @@ pub(super) fn show_diag_panel(
             );
             if btn.clicked() {
                 *tab = BuildPanelTab::Clippy;
+                *tab_clicked = true;
+            }
+        }
+
+        ui.separator();
+
+        // Profile tab button (cargo bloat code-size breakdown).
+        {
+            let active = *tab == BuildPanelTab::Profile;
+            let (badge, col) = match &*profile_state.lock().unwrap() {
+                crate::profile::ProfileState::Running => {
+                    (" …".to_owned(), egui::Color32::GRAY)
+                }
+                crate::profile::ProfileState::Done(_) => (
+                    format!(" {}", ph::CHECK_CIRCLE),
+                    egui::Color32::from_rgb(80, 200, 100),
+                ),
+                crate::profile::ProfileState::Failed(_) => (
+                    format!(" {}", ph::X_CIRCLE),
+                    egui::Color32::from_rgb(220, 80, 70),
+                ),
+                crate::profile::ProfileState::Idle => {
+                    (String::new(), egui::Color32::DARK_GRAY)
+                }
+            };
+            let label = format!("{} Profile{badge}", ph::CHART_BAR);
+            let btn = ui.add(
+                egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
+                    egui::Color32::WHITE
+                } else {
+                    col
+                }))
+                .frame(active),
+            );
+            if btn.clicked() {
+                *tab = BuildPanelTab::Profile;
                 *tab_clicked = true;
             }
         }
@@ -673,6 +719,19 @@ pub(super) fn show_diag_panel(
                 clippy_apply_all,
                 clippy_apply_rename,
                 clippy_gen_ranges,
+            );
+        }
+        BuildPanelTab::Profile => {
+            show_profile_tab(
+                ui,
+                profile_mode,
+                profile_state,
+                profile_by_crate,
+                profile_run,
+                flame_state,
+                profile_sample,
+                rtt_chip,
+                can_flash,
             );
         }
         BuildPanelTab::RequiredTools => {
