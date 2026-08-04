@@ -608,6 +608,25 @@ pub fn show_project_tree(
     // `user_src_files` index of a file to open READ-ONLY in the Reference tab.
     open_reference: &mut Option<usize>,
 ) {
+    // Diagnostic status of the user files (cargo + rust-analyzer), so
+    // `user_file_row` can flag them: `true` = has ERRORS (red icon), `false` =
+    // only WARNINGS (amber icon); absent = clean. The fixed project files get
+    // this in `file_row`. Keyed the same as the diagnostics / Structure's
+    // `node_errors`.
+    let file_diags: std::collections::HashMap<String, bool> = user_src_files
+        .iter()
+        .filter_map(|(rel, _)| {
+            let err = build_result.is_some_and(|r| r.has_errors_in(rel))
+                || lsp_state.is_some_and(|l| l.error_count_for(rel) > 0);
+            if err {
+                return Some((rel.clone(), true));
+            }
+            let warn = build_result.is_some_and(|r| r.has_warnings_in(rel))
+                || lsp_state.is_some_and(|l| l.warning_count_for(rel) > 0);
+            warn.then(|| (rel.clone(), false))
+        })
+        .collect();
+
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(format!("package: {pkg_name}"))
@@ -777,6 +796,7 @@ pub fn show_project_tree(
                 SRC_ROOT, // this header IS src/, so children hang off it
                 &mut move_request,
                 extract_folder,
+                &file_diags,
             );
 
         });
@@ -1054,6 +1074,7 @@ pub fn show_project_tree(
                 lib,
                 &mut move_request,
                 extract_folder,
+                &file_diags,
             );
         });
         state.store(ui.ctx());
@@ -1202,6 +1223,7 @@ pub fn show_project_tree(
                     lib,
                     &mut move_request,
                     extract_folder,
+                    &file_diags,
                 );
             });
             state.store(ui.ctx());
@@ -1385,6 +1407,8 @@ fn render_tree_node(
     parent_path: &str,
     move_request: &mut Option<(DraggedItem, String)>,
     extract_folder: &mut Option<String>,
+    // User-file diagnostic status: `true` = errors, `false` = warnings-only.
+    file_diags: &std::collections::HashMap<String, bool>,
 ) {
     let default_tree_folder_color = egui::Color32::from_rgb(100, 105, 115);
     // While any inline edit is active (new file/folder input or a rename), don't
@@ -1418,6 +1442,7 @@ fn render_tree_node(
                     can_duplicate,
                     &full_path,
                     project_dir,
+                    file_diags.get(&full_path).copied(),
                 );
             }
             TreeNode::Folder(children) => {
@@ -1567,6 +1592,7 @@ fn render_tree_node(
                             &folder_path,
                             move_request,
                             extract_folder,
+                            file_diags,
                         );
                     });
 
@@ -1789,14 +1815,27 @@ fn file_row(
             *selected = id;
         }
         if let Some(cargo_path) = id.cargo_path() {
-            let cargo_err = build_result.map_or(false, |r| r.has_errors_in(cargo_path));
-            let lsp_err = lsp_state.map_or(false, |l| l.error_count_for(cargo_path) > 0);
-            if cargo_err || lsp_err {
+            let err = build_result.is_some_and(|r| r.has_errors_in(cargo_path))
+                || lsp_state.is_some_and(|l| l.error_count_for(cargo_path) > 0);
+            if err {
                 ui.label(
                     egui::RichText::new(ph::X_CIRCLE)
                         .size(10.0)
                         .color(egui::Color32::from_rgb(220, 80, 70)),
-                );
+                )
+                .on_hover_text("This file has errors");
+            } else {
+                // Amber warning badge — only when there are warnings but NO errors.
+                let warn = build_result.is_some_and(|r| r.has_warnings_in(cargo_path))
+                    || lsp_state.is_some_and(|l| l.warning_count_for(cargo_path) > 0);
+                if warn {
+                    ui.label(
+                        egui::RichText::new(ph::WARNING)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(220, 180, 60)),
+                    )
+                    .on_hover_text("This file has warnings");
+                }
             }
         }
     });
@@ -1824,6 +1863,9 @@ fn user_file_row(
     // the Show-in-Explorer / Copy-path entries.
     rel_path: &str,
     project_dir: Option<&std::path::Path>,
+    // Diagnostic badge at the row's end: `Some(true)` = errors (red), `Some(false)`
+    // = warnings only (amber), `None` = clean.
+    diag: Option<bool>,
 ) {
     let hi = egui::Color32::from_rgb(100, 180, 255);
     let normal = egui::Color32::from_rgb(200, 205, 215);
@@ -1875,6 +1917,27 @@ fn user_file_row(
             .selectable(false)
             .sense(egui::Sense::click()),
         );
+        // Diagnostic badge at the row's end — red error / amber warning — same
+        // as the fixed project files' `file_row` and the Structure tab's flag.
+        match diag {
+            Some(true) => {
+                ui.label(
+                    egui::RichText::new(ph::X_CIRCLE)
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(220, 80, 70)),
+                )
+                .on_hover_text("This file has errors");
+            }
+            Some(false) => {
+                ui.label(
+                    egui::RichText::new(ph::WARNING)
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(220, 180, 60)),
+                )
+                .on_hover_text("This file has warnings");
+            }
+            None => {}
+        }
         // Holding the primary button on the row (pre-arm) — reported to the
         // caller so the cursor can show "grab" while the 0.4s hold elapses.
         let held =
