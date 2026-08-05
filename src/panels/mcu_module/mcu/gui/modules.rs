@@ -248,9 +248,24 @@ fn draw_box(
     connected: bool,
     color: egui::Color32,
     native_forced: bool,
+    // `Some(t)` (t in 0..1) while this module is pending deletion — its box
+    // background pulses red so it's obvious on the diagram which one is being
+    // removed. `None` = normal.
+    removing_blink: Option<f32>,
 ) {
-    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(38, 42, 50));
-    let stroke = if connected {
+    // Background: normal dark, or a red pulse (dark ↔ red by `t`) while the
+    // remove-confirm for this module is open.
+    let fill = match removing_blink {
+        Some(t) => {
+            let lerp = |a: u8, c: u8| (a as f32 + (c as f32 - a as f32) * t).round() as u8;
+            egui::Color32::from_rgb(lerp(38, 190), lerp(42, 45), lerp(50, 45))
+        }
+        None => egui::Color32::from_rgb(38, 42, 50),
+    };
+    painter.rect_filled(rect, 6.0, fill);
+    let stroke = if removing_blink.is_some() {
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 70, 70)) // pending removal
+    } else if connected {
         egui::Stroke::new(1.4, color) // border matches the pin colour
     } else {
         egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 90, 90)) // disconnected
@@ -381,11 +396,23 @@ pub fn draw_modules(
     // ── 3. Draw boxes + wires; detect a header click to expand the list entry. ─
     // Native runtime → the handle preview shows the split (Tx, Rx) for USART.
     let native_forced = mcu.is_native();
+    // While a remove-confirm is open, pulse the target module's box red so it's
+    // obvious on the diagram which module is about to be deleted. Computed once
+    // per frame; only the matching box uses it. Repaint keeps the pulse alive.
+    let removing_id = mcu.module_remove_confirm.clone();
+    let blink = if removing_id.is_some() {
+        ui.ctx().request_repaint();
+        let phase = (ui.input(|i| i.time) * std::f64::consts::TAU * 1.8).sin();
+        0.5 + 0.5 * phase as f32
+    } else {
+        0.0
+    };
     let mut clicked_id: Option<String> = None;
     let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
     for (i, rect, conns, side, connected) in &boxes {
         let m = &mcu.modules[*i];
         let inst = m.instance();
+        let removing = removing_id.as_deref() == Some(m.id.as_str());
         draw_box(
             painter,
             *rect,
@@ -393,6 +420,7 @@ pub fn draw_modules(
             *connected,
             module_color(m.kind, inst),
             native_forced,
+            removing.then_some(blink),
         );
 
         for (sig, anchor) in conns {
