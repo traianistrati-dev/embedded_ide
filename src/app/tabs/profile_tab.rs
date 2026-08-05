@@ -281,24 +281,100 @@ fn runtime_view(
 }
 
 /// Icicle flamegraph: root at the top (full width), callees stacked below, each
-/// as wide as its share of the parent's samples. Warm per-symbol colours; hover
-/// shows the sample count + percentage.
+/// as wide as its share of the parent's samples. Warm per-symbol colours.
+/// **Clicking** a segment opens a 90%-wide details popup (function, samples, %,
+/// and the callee breakdown) — richer than a hover tooltip and it stays put.
 fn flame_widget(ui: &mut egui::Ui, root: &FlameNode) {
     let total = root.count.max(1);
     const ROW_H: f32 = 17.0;
     let depth = tree_depth(root);
     let w = ui.available_width();
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(w, (ROW_H * depth as f32).max(ROW_H)), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(w, (ROW_H * depth as f32).max(ROW_H)),
+        egui::Sense::click(),
+    );
     let painter = ui.painter().with_clip_rect(rect);
-    let hover = resp.hover_pos();
-    let mut tip: Option<String> = None;
-    draw_node(&painter, root, rect.left(), rect.top(), w, total, ROW_H, hover, &mut tip);
-    if let Some(t) = tip {
-        resp.on_hover_ui(|ui| {
-            ui.label(egui::RichText::new(t).monospace().size(11.0));
-        });
+    // The click position picks exactly one segment (its row + x span).
+    let click = resp.clicked().then(|| resp.interact_pointer_pos()).flatten();
+    let mut hit: Option<FlameNode> = None;
+    draw_node(&painter, root, rect.left(), rect.top(), w, ROW_H, click, &mut hit);
+
+    let sel_id = ui.id().with("flame_selected");
+    if let Some(node) = hit {
+        ui.data_mut(|d| d.insert_temp(sel_id, (node, total)));
     }
+    if let Some((node, total)) = ui.data(|d| d.get_temp::<(FlameNode, usize)>(sel_id)) {
+        let mut open = true;
+        let pw = w * 0.9; // 90% of the flamegraph panel width
+        egui::Window::new("Frame details")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(pw);
+                flame_details(ui, &node, total);
+            });
+        if !open {
+            ui.data_mut(|d| d.remove::<(FlameNode, usize)>(sel_id));
+        }
+    }
+}
+
+/// The details popup body for a clicked flame segment.
+fn flame_details(ui: &mut egui::Ui, node: &FlameNode, total: usize) {
+    let pct = node.count as f32 / total as f32 * 100.0;
+    ui.label(
+        egui::RichText::new(&node.name)
+            .monospace()
+            .size(13.0)
+            .strong(),
+    );
+    ui.label(
+        egui::RichText::new(format!("{} samples · {:.1}% of all", node.count, pct))
+            .color(egui::Color32::from_rgb(120, 190, 120)),
+    );
+    if node.children.is_empty() {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("leaf — no callees sampled below this frame")
+                .italics()
+                .color(egui::Color32::GRAY),
+        );
+        return;
+    }
+    ui.separator();
+    ui.label(egui::RichText::new("Callees (share of this frame):").size(11.5));
+    let parent = node.count.max(1) as f32;
+    let mut kids: Vec<&FlameNode> = node.children.iter().collect();
+    kids.sort_by(|a, b| b.count.cmp(&a.count));
+    egui::ScrollArea::vertical()
+        .max_height(320.0)
+        .show(ui, |ui| {
+            for c in kids {
+                let cp = c.count as f32 / parent * 100.0;
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [46.0, 14.0],
+                        egui::Label::new(
+                            egui::RichText::new(format!("{cp:>5.1}%")).monospace().size(10.5),
+                        ),
+                    );
+                    // mini share bar
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(80.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(r.min, egui::vec2((80.0 * cp / 100.0).max(1.0), 10.0)),
+                        1.0,
+                        node_color(&c.name),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{}  {}", c.count, c.name))
+                            .monospace()
+                            .size(10.5),
+                    );
+                });
+            }
+        });
 }
 
 fn tree_depth(node: &FlameNode) -> usize {
@@ -312,10 +388,9 @@ fn draw_node(
     x: f32,
     y: f32,
     w: f32,
-    total: usize,
     row_h: f32,
-    hover: Option<egui::Pos2>,
-    tip: &mut Option<String>,
+    click: Option<egui::Pos2>,
+    hit: &mut Option<FlameNode>,
 ) {
     if w < 1.0 {
         return;
@@ -331,21 +406,17 @@ fn draw_node(
             egui::Color32::from_rgb(25, 20, 15),
         );
     }
-    if let Some(p) = hover {
+    // The click lands in exactly one row, so this matches a single segment.
+    if let Some(p) = click {
         if rect.contains(p) {
-            *tip = Some(format!(
-                "{}\n{} samples · {:.1}%",
-                node.name,
-                node.count,
-                node.count as f32 / total as f32 * 100.0
-            ));
+            *hit = Some(node.clone());
         }
     }
     let mut cx = x;
     let parent = node.count.max(1) as f32;
     for c in &node.children {
         let cw = w * (c.count as f32 / parent);
-        draw_node(painter, c, cx, y + row_h, cw, total, row_h, hover, tip);
+        draw_node(painter, c, cx, y + row_h, cw, row_h, click, hit);
         cx += cw;
     }
 }

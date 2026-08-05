@@ -400,7 +400,7 @@ pub fn ensure_async_deps(
 
 /// Markers bounding the IDE-managed strict-lints block (so it can be found +
 /// removed cleanly on toggle-off, and never duplicated on toggle-on).
-const STRICT_LINTS_BEGIN: &str = "# <<< strict-lints (Embedded IDE) — toggle in MCU System >>>";
+const STRICT_LINTS_BEGIN: &str = "# <<< strict-lints (Embedded IDE) - toggle in MCU System >>>";
 const STRICT_LINTS_END: &str = "# <<< strict-lints end >>>";
 
 /// The `[lints.clippy]` block written when the strict-lints toggle is ON. A
@@ -430,34 +430,55 @@ as_conversions = \"deny\"
 /// Add or remove the strict-lints `[lints.clippy]` block, driven by the MCU
 /// System "Strict lints" toggle. Idempotent: strips any prior IDE-managed block
 /// first, then appends a fresh one when `enabled`. Newline-preserving.
+///
+/// The strip is anchored on the plain-ASCII END marker (not the BEGIN one): it
+/// removes from the block's `[lints.clippy]` header — plus the BEGIN marker and
+/// one blank line above it, when present — through the END marker. This
+/// de-duplicates even a block whose BEGIN marker was lost or mangled (which used
+/// to leave the strip unable to find the block, so it appended another → the
+/// "multiple `[lints.clippy]`" bug).
 pub fn ensure_strict_lints(cargo_toml: &str, enabled: bool) -> String {
-    // Drop any existing IDE block (between the markers, inclusive) + the blank
-    // line that precedes it.
-    let mut s = String::new();
-    let mut skipping = false;
-    for line in cargo_toml.lines() {
-        if line.trim() == STRICT_LINTS_BEGIN {
-            skipping = true;
-            // Trim a single blank separator line we had inserted before it.
-            if s.ends_with("\n\n") {
-                s.pop();
-            }
+    let lines: Vec<&str> = cargo_toml.lines().collect();
+    let mut remove = vec![false; lines.len()];
+    for i in 0..lines.len() {
+        if lines[i].trim() != STRICT_LINTS_END {
             continue;
         }
-        if skipping {
-            if line.trim() == STRICT_LINTS_END {
-                skipping = false;
-            }
+        // Walk back to the block's `[lints.clippy]` header.
+        let mut start = i;
+        while start > 0 && lines[start].trim() != "[lints.clippy]" {
+            start -= 1;
+        }
+        if lines[start].trim() != "[lints.clippy]" {
+            continue; // orphan END marker with no header — leave it be
+        }
+        // Include the BEGIN marker + one blank separator above, when present.
+        if start > 0 && lines[start - 1].trim() == STRICT_LINTS_BEGIN {
+            start -= 1;
+        }
+        if start > 0 && lines[start - 1].trim().is_empty() {
+            start -= 1;
+        }
+        for r in &mut remove[start..=i] {
+            *r = true;
+        }
+    }
+
+    let mut s = String::new();
+    for (k, line) in lines.iter().enumerate() {
+        if remove[k] {
             continue;
         }
         s.push_str(line);
         s.push('\n');
     }
     if enabled {
-        if !s.ends_with('\n') {
-            s.push('\n');
+        if !s.is_empty() {
+            if !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push('\n'); // one blank separator before the block
         }
-        s.push('\n');
         s.push_str(STRICT_LINTS_BEGIN);
         s.push('\n');
         s.push_str(STRICT_LINTS_BLOCK);
@@ -1080,6 +1101,75 @@ mod tests {
         assert_eq!(off, base);
         // Disabling a base without the block is a no-op.
         assert_eq!(ensure_strict_lints(base, false), base);
+    }
+
+    #[test]
+    fn strict_lints_dedupes_block_with_lost_begin_marker() {
+        // The reported bug: a strict block whose BEGIN marker went missing (only
+        // the END marker survived) wasn't recognised, so each Save appended a new
+        // `[lints.clippy]` → several stacked. The END-anchored strip must remove
+        // such an orphaned block (and any duplicates) and leave exactly one.
+        let base = "[package]\nname = \"x\"\n";
+        let orphan = format!(
+            "{base}\n[lints.clippy]\nunwrap_used = \"deny\"\npanic = \"deny\"\n{END}\n\
+             \n[lints.clippy]\nunwrap_used = \"deny\"\npanic = \"deny\"\n{END}\n",
+            END = STRICT_LINTS_END,
+        );
+        let fixed = ensure_strict_lints(&orphan, true);
+        assert_eq!(
+            fixed.matches("[lints.clippy]").count(),
+            1,
+            "exactly one block after re-enable:\n{fixed}"
+        );
+        assert_eq!(fixed.matches(STRICT_LINTS_END).count(), 1);
+        // And toggling it off clears the orphaned blocks entirely.
+        let off = ensure_strict_lints(&orphan, false);
+        assert!(!off.contains("[lints.clippy]"), "all blocks removed:\n{off}");
+        assert_eq!(off, base);
+    }
+
+    #[test]
+    fn strict_block_survives_full_save_open_extract_cycle() {
+        // Regression / root-cause guard for the "multiple [lints.clippy]" bug.
+        // Proves the whole in-app pipeline PRESERVES the strict block's markers:
+        // generate → enable strict → open (splice refreshes the GENERATED block)
+        // → extract a lib (add workspace member) → un-extract (remove it, leaving
+        // `members = []`, the shape from the bug report) → open again → re-enable.
+        // The BEGIN marker survives every step, so exactly ONE block remains — the
+        // orphaned blocks in the wild came from an EXTERNAL edit dropping the
+        // marker comment, not from this code (which the END-anchored strip + ASCII
+        // marker now tolerate anyway).
+        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+        use crate::project_tree::extract_crate::{add_workspace_member, remove_workspace_member};
+        let def = stm32_def();
+        let tc = ToolchainKind::RustEmbedded;
+
+        let mut toml = ensure_strict_lints(&gen_config(ConfigFile::CargoToml, &def, &tc), true);
+        for step in [
+            "generate+enable",
+            "open",
+            "extract",
+            "un-extract",
+            "reopen",
+            "re-enable",
+        ] {
+            toml = match step {
+                "open" | "reopen" => splice_config(ConfigFile::CargoToml, &toml, &def, &tc),
+                "extract" => add_workspace_member(&toml, "mylib"),
+                "un-extract" => remove_workspace_member(&toml, "mylib"),
+                "re-enable" => ensure_strict_lints(&toml, true),
+                _ => toml,
+            };
+            assert!(
+                toml.contains(STRICT_LINTS_BEGIN),
+                "BEGIN marker lost after `{step}`:\n{toml}"
+            );
+            assert_eq!(
+                toml.matches("[lints.clippy]").count(),
+                1,
+                "exactly one block after `{step}`:\n{toml}"
+            );
+        }
     }
 
     fn stm32_def() -> ProjectDef {

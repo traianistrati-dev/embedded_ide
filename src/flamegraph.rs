@@ -151,7 +151,9 @@ fn run(
         .args(["dap-server", "--port", &port.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // Capture stderr: probe-rs logs the REAL reason an attach fails here
+        // (no probe, probe busy, unknown chip, target not responding …).
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -160,11 +162,52 @@ fn run(
                 format!("could not launch probe-rs dap-server: {e}")
             }
         })?;
+    // Drain the dap-server's stderr on a background thread (capped) so a chatty
+    // server can never fill the pipe buffer and block the sampling loop; the tail
+    // is surfaced if the run fails.
+    let log = Arc::new(Mutex::new(String::new()));
+    let drain = server.stderr.take().map(|mut se| {
+        let log = log.clone();
+        thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = se.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let mut l = log.lock().unwrap();
+                l.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if l.len() > 8192 {
+                    let cut = l.len() - 8192;
+                    *l = l.split_off(cut);
+                }
+            }
+        })
+    });
     // Kill the server whatever happens next.
     let result = sample_over_dap(port, &elf, chip, probe, n_samples, state, ctx);
     let _ = server.kill();
     let _ = server.wait();
-    result
+    if let Some(h) = drain {
+        let _ = h.join(); // kill → stderr EOF → drain exits; ensures full capture
+    }
+    // On failure, enrich the terse DAP error with the dap-server's own log tail
+    // (probe-rs logs the real reason there).
+    result.map_err(|e| {
+        let log = log.lock().unwrap();
+        let tail: Vec<&str> = log
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .rev()
+            .take(4)
+            .collect();
+        if tail.is_empty() {
+            e
+        } else {
+            let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+            format!("{e}\n\nprobe-rs dap-server:\n{tail}")
+        }
+    })
 }
 
 /// `cargo build --release --message-format=json`, return the ELF path.
@@ -355,12 +398,23 @@ fn wait_response(stream: &mut TcpStream, command: &str) -> Result<Value, String>
     Err(format!("no response to {command}"))
 }
 
-/// Read messages until EVENT `event` arrives.
+/// Read messages until EVENT `event` arrives. A FAILED response to a pending
+/// request (e.g. `attach` when the probe/target isn't there) is surfaced with
+/// its message rather than skipped — otherwise the server just closes and the
+/// real reason is lost as a bare "closed waiting for 'initialized'".
 fn wait_event(stream: &mut TcpStream, event: &str) -> Result<Value, String> {
     for _ in 0..200 {
         let msg = read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for '{event}'"))?;
         if msg["type"] == "event" && msg["event"] == event {
             return Ok(msg);
+        }
+        if msg["type"] == "response" && msg["success"].as_bool() == Some(false) {
+            let cmd = msg["command"].as_str().unwrap_or("request");
+            let m = msg["message"]
+                .as_str()
+                .or_else(|| msg["body"]["error"]["format"].as_str())
+                .unwrap_or("request failed");
+            return Err(format!("{cmd} failed: {m}"));
         }
     }
     Err(format!("no '{event}' event"))
