@@ -184,6 +184,17 @@ fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui
     }
 }
 
+/// Nearest point on a box's edge to `target` — the wire terminal for a
+/// user-dragged (manually placed) box, whose original `side` no longer implies
+/// which edge faces the chip. Clamps `target` into the rect: an anchor outside
+/// the box lands on its boundary.
+fn nearest_edge(rect: egui::Rect, target: egui::Pos2) -> egui::Pos2 {
+    egui::pos2(
+        target.x.clamp(rect.left(), rect.right()),
+        target.y.clamp(rect.top(), rect.bottom()),
+    )
+}
+
 /// The module name without the `_` prefix (e.g. `_I2C1` → `I2C1`).
 pub fn module_base_name(m: &VirtualModule) -> &str {
     m.name.strip_prefix("_").unwrap_or(&m.name)
@@ -326,8 +337,13 @@ pub fn draw_modules(
         side: Side,
         along: f32,
     }
+    let chip_center = chip_rect.center();
     let mut sided: Vec<Sided> = Vec::new();
     let mut floating_idx: Vec<usize> = Vec::new();
+    // Modules the user has dragged to a manual position (`pos != (0,0)`, stored
+    // as an offset from the chip centre) are placed there directly, skipping the
+    // auto-packing. Their wire conns are kept so the wires still track the pins.
+    let mut manual_mods: Vec<(usize, Vec<(ModuleSignal, egui::Pos2)>)> = Vec::new();
 
     for (i, m) in mcu.modules.iter().enumerate() {
         let conns: Vec<(ModuleSignal, egui::Pos2, Side)> = m
@@ -337,6 +353,11 @@ pub fn draw_modules(
                 pin_anchor_side(mcu, chip_rect, c.mcu_pin).map(|(p, s)| (c.signal, p, s))
             })
             .collect();
+        if m.pos != (0.0, 0.0) {
+            let conns2 = conns.iter().map(|(sig, p, _)| (*sig, *p)).collect();
+            manual_mods.push((i, conns2));
+            continue;
+        }
         if conns.is_empty() {
             floating_idx.push(i);
             continue;
@@ -362,12 +383,13 @@ pub fn draw_modules(
     }
 
     // ── 2. Pack each side independently so same-side boxes never overlap. ──────
-    // (module index, rect, conns, side, connected)
+    // (module index, rect, conns, side, connected, manual)
     let mut boxes: Vec<(
         usize,
         egui::Rect,
         Vec<(ModuleSignal, egui::Pos2)>,
         Side,
+        bool,
         bool,
     )> = Vec::new();
     for target in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
@@ -376,7 +398,7 @@ pub fn draw_modules(
         let mut cursor = f32::MIN;
         for e in group {
             let rect = packed_rect(chip_rect, e.side, e.along, &mut cursor);
-            boxes.push((e.idx, rect, e.conns.clone(), e.side, true));
+            boxes.push((e.idx, rect, e.conns.clone(), e.side, true, false));
         }
     }
     // Disconnected modules stack in the right margin.
@@ -390,7 +412,16 @@ pub fn draw_modules(
             Vec::new(),
             Side::Right,
             false,
+            false,
         ));
+    }
+    // Manually-dragged boxes: placed at chip centre + stored offset.
+    for (i, conns) in manual_mods {
+        let p = mcu.modules[i].pos;
+        let rect =
+            egui::Rect::from_min_size(chip_center + egui::vec2(p.0, p.1), egui::vec2(BOX_W, BOX_H));
+        let connected = !conns.is_empty();
+        boxes.push((i, rect, conns, Side::Right, connected, true));
     }
 
     // ── 3. Draw boxes + wires; detect a header click to expand the list entry. ─
@@ -408,8 +439,12 @@ pub fn draw_modules(
         0.0
     };
     let mut clicked_id: Option<String> = None;
+    // Applied after the loop (can't mutate `mcu.modules` while it's borrowed by
+    // the box `m`): dragged offsets, and right-click "reset to auto" requests.
+    let mut drag_updates: Vec<(usize, (f32, f32))> = Vec::new();
+    let mut reset_updates: Vec<usize> = Vec::new();
     let mut field_pass: Vec<(usize, egui::Rect)> = Vec::new();
-    for (i, rect, conns, side, connected) in &boxes {
+    for (i, rect, conns, side, connected, manual) in &boxes {
         let m = &mcu.modules[*i];
         let inst = m.instance();
         let removing = removing_id.as_deref() == Some(m.id.as_str());
@@ -425,21 +460,38 @@ pub fn draw_modules(
 
         for (sig, anchor) in conns {
             let color = signal_color(*sig, inst);
-            let term = facing_terminal(*rect, *side, *anchor);
+            // A dragged box's stored side no longer implies an edge, so aim the
+            // wire at the box edge nearest the pin; auto boxes keep their side.
+            let term = if *manual {
+                nearest_edge(*rect, *anchor)
+            } else {
+                facing_terminal(*rect, *side, *anchor)
+            };
             painter.circle_filled(term, 3.5, color);
             painter.circle_filled(*anchor, 3.5, color);
             painter.line_segment([term, *anchor], egui::Stroke::new(1.6, color));
         }
 
-        // Click the header area (above the rename field) to expand the list entry.
+        // Drag the header area (above the rename field) to MOVE the box; a plain
+        // click still expands the list entry. Right-click a moved box to reset.
         let header_rect =
             egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - 30.0));
-        let resp = ui.interact(
-            header_rect,
-            ui.id().with(("vmod_box", *i)),
-            egui::Sense::click(),
-        );
-        if resp.hovered() {
+        let resp = ui
+            .interact(
+                header_rect,
+                ui.id().with(("vmod_box", *i)),
+                egui::Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        if resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            // drag_delta is already in scene coords (the Scene layer transform is
+            // applied by egui), so it's correct at any zoom.
+            let new_min = rect.min + resp.drag_delta();
+            let off = new_min - chip_center;
+            drag_updates.push((*i, (off.x, off.y)));
+        }
+        if resp.hovered() || resp.dragged() {
             painter.rect_stroke(
                 *rect,
                 6.0,
@@ -450,7 +502,22 @@ pub fn draw_modules(
         if resp.clicked() {
             clicked_id = Some(m.id.clone());
         }
+        if *manual {
+            resp.context_menu(|ui| {
+                if ui.button("Reset to auto position").clicked() {
+                    reset_updates.push(*i);
+                    ui.close();
+                }
+            });
+        }
         field_pass.push((*i, *rect));
+    }
+    // Apply drag / reset now that the box borrow of `mcu.modules` has ended.
+    for (i, off) in drag_updates {
+        mcu.modules[i].pos = off;
+    }
+    for i in reset_updates {
+        mcu.modules[i].pos = (0.0, 0.0);
     }
 
     // ── 4. Rename fields (mutable pass) ───────────────────────────────────────
