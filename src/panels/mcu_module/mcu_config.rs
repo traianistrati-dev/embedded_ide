@@ -28,6 +28,8 @@ const RUNTIME_HEADER: &str = "@runtime";
 const GPIO_HEADER: &str = "@gpio";
 const AUTOBUILD_HEADER: &str = "@autobuild";
 const STRICT_HEADER: &str = "@strict";
+const ROTATION_HEADER: &str = "@rotation";
+const IOPINS_HEADER: &str = "@iopins";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -63,6 +65,56 @@ pub fn strict_section(strict: bool) -> String {
 /// `on` is OFF (the default).
 pub fn parse_strict(text: &str) -> bool {
     section_body(text, STRICT_HEADER).as_deref() == Some("on")
+}
+
+/// The `@rotation` section text (or "" for the default un-rotated) — the diagram
+/// rotation toggle. Appended like `@autobuild`.
+pub fn rotation_section(rotated: bool) -> String {
+    if rotated {
+        format!("{ROTATION_HEADER}\non\n")
+    } else {
+        String::new()
+    }
+}
+
+/// The diagram-rotation preference recorded in `@rotation`; missing / anything
+/// but `on` is un-rotated (the default).
+pub fn parse_rotation(text: &str) -> bool {
+    section_body(text, ROTATION_HEADER).as_deref() == Some("on")
+}
+
+/// The `@iopins` section — manual in/out field positions, one `num=x,y` per
+/// line — or "" when none are placed.
+pub fn iopins_section(pos: &std::collections::BTreeMap<usize, (f32, f32)>) -> String {
+    if pos.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(IOPINS_HEADER);
+    s.push('\n');
+    for (num, (x, y)) in pos {
+        s.push_str(&format!("{num}={x},{y}\n"));
+    }
+    s
+}
+
+/// Parse the `@iopins` section back into the `pin → (x,y)` map; malformed lines
+/// are skipped.
+pub fn parse_iopins(text: &str) -> std::collections::BTreeMap<usize, (f32, f32)> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(body) = section_body(text, IOPINS_HEADER) else {
+        return map;
+    };
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some((n, xy)) = line.split_once('=') {
+            if let (Ok(num), Some((xs, ys))) = (n.trim().parse::<usize>(), xy.split_once(',')) {
+                if let (Ok(x), Ok(y)) = (xs.trim().parse::<f32>(), ys.trim().parse::<f32>()) {
+                    map.insert(num, (x, y));
+                }
+            }
+        }
+    }
+    map
 }
 
 /// The token for a GPIO api style (`@gpio` section): "Native" or "Portable".
@@ -248,6 +300,27 @@ mod tests {
             serialize(&[], None, Runtime::Blocking, ApiStyle::Portable),
             ""
         );
+    }
+
+    #[test]
+    fn rotation_round_trips() {
+        assert_eq!(rotation_section(false), "");
+        assert!(!parse_rotation(""));
+        let t = rotation_section(true);
+        assert!(t.contains("@rotation"));
+        assert!(parse_rotation(&t));
+    }
+
+    #[test]
+    fn iopins_round_trip() {
+        let mut m = std::collections::BTreeMap::new();
+        assert_eq!(iopins_section(&m), "");
+        assert!(parse_iopins("").is_empty());
+        m.insert(13usize, (12.5_f32, -8.0_f32));
+        m.insert(45usize, (100.0_f32, 40.0_f32));
+        let t = iopins_section(&m);
+        assert!(t.starts_with("@iopins\n"), "{t}");
+        assert_eq!(parse_iopins(&t), m);
     }
 
     #[test]

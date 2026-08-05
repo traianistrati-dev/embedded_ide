@@ -95,7 +95,25 @@ impl Mcu {
             expand_module: None,
             module_undo: Vec::new(),
             module_remove_confirm: None,
+            rotated: false,
+            io_pin_pos: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// A 4-sided (QFP-style) package — pins on 3 or 4 edges. Rotation makes it a
+    /// 45° diamond; a 2-sided (DIP) package rotates 90° instead. See
+    /// [`crate::panels::mcu_module::mcu::gui::rotate`].
+    pub fn is_quad_package(&self) -> bool {
+        [
+            &self.top_pins,
+            &self.bottom_pins,
+            &self.left_pins,
+            &self.right_pins,
+        ]
+        .iter()
+        .filter(|v| !v.is_empty())
+        .count()
+            >= 3
     }
 
     // ── Virtual modules ───────────────────────────────────────────────────────
@@ -351,6 +369,22 @@ impl Mcu {
             }
             s.push_str(&strict);
         }
+        // Diagram rotation (`@rotation`) — view preference, same append pattern.
+        let rotation = mcu_config::rotation_section(self.rotated);
+        if !rotation.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&rotation);
+        }
+        // Manual in/out field positions (`@iopins`) — view preference.
+        let iopins = mcu_config::iopins_section(&self.io_pin_pos);
+        if !iopins.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&iopins);
+        }
         s
     }
 
@@ -375,6 +409,10 @@ impl Mcu {
         self.auto_build = mcu_config::parse_autobuild(text);
         // Strict-lints preference (`@strict`) — missing restores the default OFF.
         self.strict_lints = mcu_config::parse_strict(text);
+        // Diagram rotation (`@rotation`) — missing restores the default (0°).
+        self.rotated = mcu_config::parse_rotation(text);
+        // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
+        self.io_pin_pos = mcu_config::parse_iopins(text);
         // A freshly loaded project has NO staged edits: pending == applied.
         self.sync_pending_style();
     }

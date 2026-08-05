@@ -198,6 +198,17 @@ pub struct Mcu {
     /// Transient: id of the module whose "Remove" button is armed and awaiting
     /// an inline confirmation (delete resets its pins, so it's confirmed first).
     pub module_remove_confirm: Option<String>,
+    /// Diagram rotation toggle (persisted in `mcu.config` `@rotation`). `false`
+    /// = default orientation. `true` = rotated one step clockwise: a 4-sided
+    /// (QFP) chip becomes a 45° diamond, a 2-sided (DIP) chip turns 90°
+    /// (vertical ⇄ horizontal). Purely a view/layout preference — never affects
+    /// codegen. See `mcu/gui/rotate.rs`.
+    pub rotated: bool,
+    /// Manual on-canvas positions for in/out (GPIO In/Out/PWM) pin rename
+    /// fields: pin number → field-CENTRE offset from the chip centre. Absent =
+    /// auto-placed beside the pin. Draggable like virtual modules; persisted in
+    /// `mcu.config` `@iopins`. View-only.
+    pub io_pin_pos: std::collections::BTreeMap<usize, (f32, f32)>,
 }
 
 /// One Virtual-module undo snapshot (see [`Mcu::module_undo`]): the modules and

@@ -196,6 +196,9 @@ impl AppIde {
                     //    pins), rename it, edit its config, or remove it. Add/
                     //    remove change pin functions, so re-sync pins/ after.
                     let mut modules_changed = false;
+                    // Set when the Rotate toggle is clicked → re-fit the Pins
+                    // canvas so the re-oriented chip isn't left off-screen.
+                    let mut rotate_toggled = false;
                     egui::TopBottomPanel::bottom("vmodules_panel")
                         .resizable(true)
                         .default_height(190.0)
@@ -292,6 +295,40 @@ impl AppIde {
                                         mcu.undo_modules();
                                         modules_changed = true;
                                     }
+                                }
+                                // View-only diagram rotation (persisted in
+                                // mcu.config). A 4-sided chip toggles a 45°
+                                // diamond, a 2-sided one 90° — to line pins &
+                                // modules up horizontally. See mcu/gui/rotate.rs.
+                                ui.separator();
+                                let rot_hint = if mcu.is_quad_package() {
+                                    "Rotate the chip 45° into a diamond — helps line up pins & modules. Toggle off to reset."
+                                } else {
+                                    "Rotate the chip 90° (vertical / horizontal) — helps line up pins & modules."
+                                };
+                                if ui
+                                    .selectable_label(
+                                        mcu.rotated,
+                                        egui::RichText::new(format!(
+                                            "{} Rotate",
+                                            ph::ARROW_CLOCKWISE
+                                        ))
+                                        .size(11.0),
+                                    )
+                                    .on_hover_text(rot_hint)
+                                    .clicked()
+                                {
+                                    mcu.rotated = !mcu.rotated;
+                                    rotate_toggled = true;
+                                    // ANY orientation change → clean auto-layout:
+                                    // drop the manual drag positions (they don't
+                                    // transfer between 0° / 90° / diamond) so the
+                                    // modules + in/out fields snap beside their
+                                    // pins for the new orientation.
+                                    for m in &mut mcu.modules {
+                                        m.pos = (0.0, 0.0);
+                                    }
+                                    mcu.io_pin_pos.clear();
                                 }
                                 if !any_supported {
                                     ui.label(
@@ -495,6 +532,11 @@ impl AppIde {
                             let all_pins = mcu.all_pin_functions();
                             self.project_tree.sync_pin_files(&all_pins);
                         }
+                    }
+                    // Rotating re-orients the whole chip, so drop any manual
+                    // zoom/pan and let the canvas auto-fit the new layout.
+                    if rotate_toggled {
+                        self.mcu_view_adjusted = false;
                     }
 
                     // Diagram fills the remaining (top) area.

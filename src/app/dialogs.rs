@@ -896,6 +896,13 @@ impl AppIde {
                                 self.selected_mcu_id = new_id;
                                 self.mcu =
                                     Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                                // A new chip starts in the default orientation —
+                                // never inherit the previous chip's rotation (its
+                                // package may differ). The fresh build already
+                                // clears it; kept explicit so it can't regress.
+                                if let Some(m) = &mut self.mcu {
+                                    m.rotated = false;
+                                }
                                 // Re-fit the Pins canvas to the new chip.
                                 self.mcu_view_adjusted = false;
                                 self.generated_code = self

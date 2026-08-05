@@ -3,6 +3,7 @@
 //! tab toolbar; config is the Module panel).
 
 use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+use super::rotate::Rot;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
@@ -35,32 +36,61 @@ enum Side {
     Bottom,
 }
 
-/// Outer connection point of an MCU pin + the side it's on. `None` if the pin
-/// isn't on this chip.
-pub fn pin_anchor(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<egui::Pos2> {
-    pin_anchor_side(mcu, chip_rect, pin_num).map(|(p, _)| p)
+/// Half-extents (from the chip centre) needed to keep every DRAGGED module box
+/// fully on-canvas — so `Mcu::draw` can grow the painter and the Scene's
+/// auto-fit won't clip a box pulled far from the chip. `(0,0)` when nothing is
+/// manually placed. A module `pos` is the box top-left offset from the centre.
+pub fn dragged_half_extent(mcu: &Mcu) -> egui::Vec2 {
+    let mut hx = 0.0_f32;
+    let mut hy = 0.0_f32;
+    for m in &mcu.modules {
+        if m.pos != (0.0, 0.0) {
+            hx = hx.max(m.pos.0.abs()).max((m.pos.0 + BOX_W).abs());
+            hy = hy.max(m.pos.1.abs()).max((m.pos.1 + BOX_H).abs());
+        }
+    }
+    egui::vec2(hx, hy)
 }
 
-/// Outer connection point of an MCU pin + the unit vector pointing **away** from
-/// the chip on that pin's side. `None` if the pin isn't on this chip. Used to
-/// draw in/out arrows that extend straight out past the pin.
+/// Outer connection point of an MCU pin (rotation applied). `None` if the pin
+/// isn't on this chip. `chip_rect` is the LOCAL (un-rotated) body; `rot` is the
+/// diagram rotation.
+pub fn pin_anchor(mcu: &Mcu, chip_rect: egui::Rect, rot: Rot, pin_num: usize) -> Option<egui::Pos2> {
+    pin_anchor_side(mcu, chip_rect, rot, pin_num).map(|(p, _)| p)
+}
+
+/// Outer connection point + the unit vector pointing **away** from the chip
+/// (rotation applied — a true 45° direction on a diamond). Used to draw in/out
+/// arrows straight out past the pin.
 pub fn pin_anchor_dir(
+    mcu: &Mcu,
+    chip_rect: egui::Rect,
+    rot: Rot,
+    pin_num: usize,
+) -> Option<(egui::Pos2, egui::Vec2)> {
+    pin_anchor_local(mcu, chip_rect, pin_num)
+        .map(|(p, out)| (rot.apply(p), rot.vec(out).normalized()))
+}
+
+/// Outer connection point + its **screen** side — the rotated outward direction
+/// snapped to the nearest axis, used to place module boxes on a chip edge.
+fn pin_anchor_side(
+    mcu: &Mcu,
+    chip_rect: egui::Rect,
+    rot: Rot,
+    pin_num: usize,
+) -> Option<(egui::Pos2, Side)> {
+    pin_anchor_local(mcu, chip_rect, pin_num)
+        .map(|(p, out)| (rot.apply(p), side_from_outward(rot.vec(out))))
+}
+
+/// LOCAL (un-rotated) outer point + unit outward vector of a pin. `None` if the
+/// pin isn't on this chip.
+fn pin_anchor_local(
     mcu: &Mcu,
     chip_rect: egui::Rect,
     pin_num: usize,
 ) -> Option<(egui::Pos2, egui::Vec2)> {
-    pin_anchor_side(mcu, chip_rect, pin_num).map(|(p, s)| {
-        let dir = match s {
-            Side::Right => egui::vec2(1.0, 0.0),
-            Side::Left => egui::vec2(-1.0, 0.0),
-            Side::Top => egui::vec2(0.0, -1.0),
-            Side::Bottom => egui::vec2(0.0, 1.0),
-        };
-        (p, dir)
-    })
-}
-
-fn pin_anchor_side(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<(egui::Pos2, Side)> {
     let row_y = |i: usize| {
         chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING) + PIN_WIDTH / 2.0
     };
@@ -70,28 +100,43 @@ fn pin_anchor_side(mcu: &Mcu, chip_rect: egui::Rect, pin_num: usize) -> Option<(
     if let Some(i) = mcu.right_pins.iter().position(|p| p.number == pin_num) {
         return Some((
             egui::pos2(chip_rect.right() + PIN_HEIGHT, row_y(i)),
-            Side::Right,
+            egui::vec2(1.0, 0.0),
         ));
     }
     if let Some(i) = mcu.left_pins.iter().position(|p| p.number == pin_num) {
         return Some((
             egui::pos2(chip_rect.left() - PIN_HEIGHT, row_y(i)),
-            Side::Left,
+            egui::vec2(-1.0, 0.0),
         ));
     }
     if let Some(i) = mcu.top_pins.iter().position(|p| p.number == pin_num) {
         return Some((
             egui::pos2(col_x(i), chip_rect.top() - PIN_HEIGHT),
-            Side::Top,
+            egui::vec2(0.0, -1.0),
         ));
     }
     if let Some(i) = mcu.bottom_pins.iter().position(|p| p.number == pin_num) {
         return Some((
             egui::pos2(col_x(i), chip_rect.bottom() + PIN_HEIGHT),
-            Side::Bottom,
+            egui::vec2(0.0, 1.0),
         ));
     }
     None
+}
+
+/// Snap a (rotated) outward vector to the nearest chip side.
+fn side_from_outward(v: egui::Vec2) -> Side {
+    if v.x.abs() >= v.y.abs() {
+        if v.x >= 0.0 {
+            Side::Right
+        } else {
+            Side::Left
+        }
+    } else if v.y >= 0.0 {
+        Side::Bottom
+    } else {
+        Side::Top
+    }
 }
 
 /// Wire/terminal colour for a module signal — the **same colour as the MCU pin**
@@ -188,7 +233,7 @@ fn facing_terminal(box_rect: egui::Rect, side: Side, anchor: egui::Pos2) -> egui
 /// user-dragged (manually placed) box, whose original `side` no longer implies
 /// which edge faces the chip. Clamps `target` into the rect: an anchor outside
 /// the box lands on its boundary.
-fn nearest_edge(rect: egui::Rect, target: egui::Pos2) -> egui::Pos2 {
+pub fn nearest_edge(rect: egui::Rect, target: egui::Pos2) -> egui::Pos2 {
     egui::pos2(
         target.x.clamp(rect.left(), rect.right()),
         target.y.clamp(rect.top(), rect.bottom()),
@@ -326,9 +371,15 @@ fn draw_box(
 pub fn draw_modules(
     mcu: &mut Mcu,
     painter: &egui::Painter,
-    chip_rect: egui::Rect,
+    local_chip: egui::Rect,
+    display_chip: egui::Rect,
+    rot: Rot,
     ui: &mut egui::Ui,
 ) {
+    // Boxes are placed around the DISPLAY rect (what the user sees); pin anchors
+    // are computed on the LOCAL rect then rotated. For an un-rotated chip the two
+    // are identical and `rot` is the identity.
+    let chip_rect = display_chip;
     // ── 1. Classify each module: connected (side + along-axis centroid) or
     //       floating (no wired pins). `conns` keeps the wire endpoints.
     struct Sided {
@@ -350,7 +401,7 @@ pub fn draw_modules(
             .connections
             .iter()
             .filter_map(|c| {
-                pin_anchor_side(mcu, chip_rect, c.mcu_pin).map(|(p, s)| (c.signal, p, s))
+                pin_anchor_side(mcu, local_chip, rot, c.mcu_pin).map(|(p, s)| (c.signal, p, s))
             })
             .collect();
         if m.pos != (0.0, 0.0) {
