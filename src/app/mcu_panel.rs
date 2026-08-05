@@ -502,28 +502,157 @@ impl AppIde {
                     let chip_label = self.selected_label();
                     let pin_changed = match &mut self.mcu {
                         Some(mcu) => {
-                            // AUTO-ZOOM: the chip + virtual modules are drawn at
-                            // their natural fixed size inside an `egui::Scene`
-                            // whose rect is fed each frame from LAST frame's
-                            // content bounds — so the canvas always rescales to
-                            // fit the panel (window resizes, panel drags, new
-                            // modules). Drag-pan is disabled and the rect is
-                            // overwritten every frame, so no manual pan/zoom
-                            // sticks: it is a pure fit-to-view. Capped at 1.0 —
-                            // a large panel shows the chip at 100%, centered,
-                            // never blown up.
+                            // The chip + virtual modules are drawn at their
+                            // natural fixed size inside an `egui::Scene` (egui's
+                            // pan/zoom container). DEFAULT = auto-fit: the scene
+                            // rect is refilled from last frame's content bounds,
+                            // so the canvas rescales to fit the panel (window /
+                            // panel resizes, added modules). The user can then
+                            // take over the view exactly like the Structure tab —
+                            // mouse wheel = zoom to the cursor, Ctrl+± = zoom,
+                            // drag / middle-drag = pan, up to 4×; that latches
+                            // `mcu_view_adjusted` and the view PERSISTS. Ctrl+0
+                            // re-fits.
+                            // `avail`/`outer` = the rect the Scene will fill —
+                            // `outer` maps the cursor into scene space (for the
+                            // wheel zoom), `avail` keeps AUTO-fit capped at 100%.
+                            let avail = ui.available_size_before_wrap();
+                            let outer = ui.available_rect_before_wrap();
                             let mut scene_rect = self.mcu_scene_bounds;
                             let mut content_bounds = egui::Rect::NOTHING;
-                            let inner = egui::Scene::new()
-                                .zoom_range(0.05..=1.0)
-                                .drag_pan_buttons(egui::DragPanButtons::empty())
+
+                            // Structure-style plain mouse-wheel zoom, anchored at
+                            // the pointer. egui's Scene PANS on plain scroll, so
+                            // we intercept the wheel and turn it into a cursor
+                            // zoom (Ctrl+scroll is left to the Scene, which also
+                            // zooms to the pointer). We replicate the Scene's own
+                            // fit transform (scene→screen) to map the cursor into
+                            // scene space, zoom about it, then consume the scroll
+                            // so the Scene does not also pan.
+                            let fit = |scene: egui::Rect| -> egui::emath::TSTransform {
+                                let scale =
+                                    (outer.size() / scene.size()).min_elem().clamp(0.05, 4.0);
+                                egui::emath::TSTransform::from_translation(
+                                    outer.center().to_vec2() - scale * scene.center().to_vec2(),
+                                ) * egui::emath::TSTransform::from_scaling(scale)
+                            };
+                            let ptr = ui.input(|i| i.pointer.hover_pos());
+                            let (scroll_y, ctrl) =
+                                ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
+                            if let Some(ptr) = ptr
+                                && scroll_y != 0.0
+                                && !ctrl
+                                && outer.contains(ptr)
+                                && scene_rect.is_finite()
+                                && scene_rect.size() != egui::Vec2::ZERO
+                            {
+                                let to_global = fit(scene_rect);
+                                // Clamp so the effective scale stays in range — no
+                                // scene-rect drift past the zoom limits.
+                                let cur = to_global.scaling;
+                                let z = ((scroll_y * 0.002).exp() * cur).clamp(0.05, 4.0) / cur;
+                                let p = to_global.inverse() * ptr;
+                                let new = to_global
+                                    * egui::emath::TSTransform::from_translation(p.to_vec2())
+                                    * egui::emath::TSTransform::from_scaling(z)
+                                    * egui::emath::TSTransform::from_translation(-p.to_vec2());
+                                let new_rect = new.inverse() * outer;
+                                if new_rect.is_finite() && new_rect.size() != egui::Vec2::ZERO {
+                                    scene_rect = new_rect;
+                                    self.mcu_scene_bounds = new_rect;
+                                    self.mcu_view_adjusted = true;
+                                }
+                                // Consume so the Scene doesn't pan with it too.
+                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                            }
+                            let scene = egui::Scene::new()
+                                .zoom_range(0.05..=4.0)
+                                .drag_pan_buttons(
+                                    egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE,
+                                )
                                 .show(ui, &mut scene_rect, |ui| {
                                     let r = mcu.draw(ui);
                                     content_bounds = ui.min_rect();
                                     r
-                                })
-                                .inner;
-                            self.mcu_scene_bounds = content_bounds;
+                                });
+                            let inner = scene.inner;
+
+                            // Scene marks its response changed on the pan/zoom it
+                            // still owns (drag-pan + Ctrl+scroll zoom) and writes
+                            // the new view back into `scene_rect` — latch it.
+                            if scene.response.changed() {
+                                self.mcu_view_adjusted = true;
+                                self.mcu_scene_bounds = scene_rect;
+                            }
+
+                            // Ctrl+± zoom (around the view centre) + Ctrl+0
+                            // reset — consumed ONLY while the pointer is over the
+                            // canvas, so the editor keeps its own Ctrl+±. egui's
+                            // global keyboard-zoom is disabled, so the Scene
+                            // never sees these keys itself.
+                            if scene.response.contains_pointer() {
+                                let (reset, zoom_f) = ui.input_mut(|i| {
+                                    let cmd = egui::Modifiers::COMMAND;
+                                    if i.consume_key(cmd, egui::Key::Num0) {
+                                        (true, None)
+                                    } else if i.consume_key(cmd, egui::Key::Plus)
+                                        || i.consume_key(cmd, egui::Key::Equals)
+                                    {
+                                        (false, Some(1.0 / 1.2)) // smaller rect = zoom IN
+                                    } else if i.consume_key(cmd, egui::Key::Minus) {
+                                        (false, Some(1.2)) // larger rect = zoom OUT
+                                    } else {
+                                        (false, None)
+                                    }
+                                });
+                                if reset {
+                                    self.mcu_view_adjusted = false;
+                                } else if let Some(f) = zoom_f {
+                                    // `scene_rect` post-show is the actual current
+                                    // view (Scene wrote it, or it equals what we
+                                    // fed) — zoom relative to it, no jump.
+                                    let base = scene_rect;
+                                    if base.is_finite()
+                                        && base.size() != egui::Vec2::ZERO
+                                        && avail.x > 0.0
+                                        && avail.y > 0.0
+                                    {
+                                        // `scene_rect` maps onto `avail`, so bound
+                                        // the implied scale to ~0.2×..5× (the Scene
+                                        // also hard-clamps the displayed zoom to
+                                        // its own range) so repeated presses can't
+                                        // drift the view out of reach.
+                                        let min = avail * 0.2;
+                                        let max = avail * 5.0;
+                                        let s = base.size() * f;
+                                        let s = egui::vec2(
+                                            s.x.clamp(min.x, max.x),
+                                            s.y.clamp(min.y, max.y),
+                                        );
+                                        self.mcu_scene_bounds =
+                                            egui::Rect::from_center_size(base.center(), s);
+                                        self.mcu_view_adjusted = true;
+                                    }
+                                }
+                            }
+
+                            // Keep auto-fitting until the user takes over. Pad
+                            // the fed rect to at least the panel size so a panel
+                            // larger than the chip fits at 100% (centered, not
+                            // blown up); a smaller panel still shrinks to fit.
+                            if !self.mcu_view_adjusted {
+                                self.mcu_scene_bounds = if content_bounds.is_finite() {
+                                    egui::Rect::from_center_size(
+                                        content_bounds.center(),
+                                        egui::vec2(
+                                            content_bounds.width().max(avail.x),
+                                            content_bounds.height().max(avail.y),
+                                        ),
+                                    )
+                                } else {
+                                    content_bounds
+                                };
+                            }
                             inner
                         }
                         None => {

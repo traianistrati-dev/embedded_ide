@@ -533,11 +533,16 @@ pub struct AppIde {
     renaming_project: Option<String>,
     /// One-shot: focus the rename field on the dialog's first frame.
     renaming_project_focus: bool,
-    /// Content bounds (scene coords) of the Pins canvas — chip + virtual
-    /// modules — measured last frame. Fed back as the `egui::Scene` rect each
-    /// frame, so the canvas AUTO-FITS the panel: resizing the window (or
-    /// adding/dragging modules) rescales it; manual pan/zoom never persists.
+    /// View rect (scene coords) of the Pins canvas — chip + virtual modules.
+    /// While `mcu_view_adjusted` is false it is refilled from last frame's
+    /// content bounds each frame, so the canvas AUTO-FITS the panel (window /
+    /// panel resizes, added modules). Once the user pans or zooms it holds the
+    /// persisted view instead. See [`Self::mcu_view_adjusted`].
     mcu_scene_bounds: egui::Rect,
+    /// Latches once the user pans/zooms the Pins canvas (drag, scroll,
+    /// Ctrl+scroll, Ctrl+±): the view is then PERSISTED in `mcu_scene_bounds`
+    /// instead of auto-fitting. Ctrl+0 (or a chip change) clears it → re-fit.
+    mcu_view_adjusted: bool,
     /// Cached module graph for the Structure tab: `(content hash, graph,
     /// layout)`. Rebuilt only when a file's content or the file list changes.
     structure_cache: Option<(
@@ -1146,6 +1151,7 @@ impl AppIde {
             renaming_project: None,
             renaming_project_focus: false,
             mcu_scene_bounds: egui::Rect::NOTHING,
+            mcu_view_adjusted: false,
             structure_cache: None,
             structure_view: Default::default(),
             structure_calls: None,

@@ -896,6 +896,8 @@ impl AppIde {
                                 self.selected_mcu_id = new_id;
                                 self.mcu =
                                     Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                                // Re-fit the Pins canvas to the new chip.
+                                self.mcu_view_adjusted = false;
                                 self.generated_code = self
                                     .mcu
                                     .as_ref()

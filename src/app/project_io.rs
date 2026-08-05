@@ -78,6 +78,8 @@ impl AppIde {
             if id != self.selected_mcu_id {
                 self.selected_mcu_id = id;
                 self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                // Re-fit the Pins canvas to the new chip (drop any persisted view).
+                self.mcu_view_adjusted = false;
                 // Reset LSP — it was attached to the previous chip's workspace.
                 self.lsp_state.lock().unwrap().reset();
                 self.lsp_selected_diagnostic = None;
