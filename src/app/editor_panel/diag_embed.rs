@@ -132,6 +132,7 @@ impl AppIde {
         // Flash-tab Programmer-row buttons (moved off the top toolbar).
         let mut flash_scan = false;
         let mut flash_go = false;
+        let mut probe_flash_go = false;
         let can_flash = self.selected_build_cfg().is_some();
         // Cargo-tab Build button (moved off the top toolbar on 2026-07-10).
         let mut build_go = false;
@@ -273,6 +274,8 @@ impl AppIde {
                     &mut profile_run,
                     &self.flame_state,
                     &mut profile_sample,
+                    &self.probe_flash_state,
+                    &mut probe_flash_go,
                 );
             });
         // Clicking a tab on the collapsed bar reopens the panel at 20% of the
@@ -422,6 +425,10 @@ impl AppIde {
                 }
                 _ => self.flash_swd(),
             }
+        }
+        // Flash tab's probe-rs path (shared probe). `probe_scan` is consumed above.
+        if probe_flash_go {
+            self.flash_probe_rs();
         }
         // An added diff row was clicked in the Git tab → open its file in the
         // editor and scroll to that line (jump straight to the changed code).

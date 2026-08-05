@@ -643,6 +643,9 @@ pub struct AppIde {
     dfu_flash_addr: String,
     /// Shared state for OpenOCD SWD flash operations
     openocd_state: Arc<Mutex<OpenOcdState>>,
+    /// Status of a `cargo flash` (probe-rs) run — the Flash tab's probe-rs path,
+    /// which shares `selected_probe` with the Debug / RTT / Runtime tabs.
+    probe_flash_state: Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
     /// Target config file passed to OpenOCD (e.g. "target/stm32f1x.cfg")
     openocd_target_cfg: String,
     /// Shared state for ESP32 espflash operations
@@ -1123,6 +1126,9 @@ impl AppIde {
         let dfu_programmers: Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let openocd_state: Arc<Mutex<OpenOcdState>> = Arc::new(Mutex::new(OpenOcdState::Idle));
+        let probe_flash_state = Arc::new(Mutex::new(
+            crate::probe_flash::ProbeFlashState::Idle,
+        ));
         let espflash_state: Arc<Mutex<EspFlashState>> = Arc::new(Mutex::new(EspFlashState::Idle));
 
         // Scan immediately on startup (non-blocking — runs in background thread)
@@ -1187,6 +1193,7 @@ impl AppIde {
             // dfu_sel_programmer: 0,
             dfu_flash_addr: "0x08000000".to_string(),
             openocd_state,
+            probe_flash_state,
             openocd_target_cfg: "target/stm32f1x.cfg".to_string(),
             espflash_state,
             espflash_port: String::new(),

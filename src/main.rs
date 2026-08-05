@@ -19,6 +19,7 @@ pub mod flamegraph;
 pub mod git;
 pub mod lsp;
 pub mod openocd;
+pub mod probe_flash;
 pub mod panels;
 pub mod probe;
 pub mod profile;

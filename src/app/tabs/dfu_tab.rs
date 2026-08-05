@@ -34,6 +34,15 @@ pub fn show_dfu_tab(
     // in front instead of jumping to Cargo).
     size_state: &Arc<Mutex<SizeState>>,
     size_out: &mut bool,
+    // Shared probe-rs probe (same as Debug / RTT / Runtime) + its `cargo flash`
+    // path: `probe_flash_out` fires the flash, `probe_scan` re-runs `probe-rs
+    // list`, `probe_flash_state` is the status.
+    probe_list: &[crate::probe::ProbeInfo],
+    selected_probe: &mut Option<String>,
+    probe_scan: &mut bool,
+    probe_scan_err: Option<&str>,
+    probe_flash_state: &Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
+    probe_flash_out: &mut bool,
 ) {
     let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
@@ -299,6 +308,51 @@ pub fn show_dfu_tab(
                 ui.label(egui::RichText::new(line).size(10.0).color(color).italics());
             }
         }
+    }
+
+    // ── Probe row (probe-rs): the SAME probe as Debug / RTT / Runtime ─────────
+    // Only meaningful on the RustEmbedded toolchain (probe-rs targets ARM etc.).
+    if matches!(toolchain, ToolchainKind::RustEmbedded) {
+        let pf_state = probe_flash_state.lock().unwrap().clone();
+        ui.horizontal_wrapped(|ui| {
+            super::probe_selector_ui(ui, probe_list, selected_probe, probe_scan, probe_scan_err, toolchain);
+            let enabled = can_flash && !any_busy && !pf_state.is_busy();
+            if ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Flash (probe-rs)", ph::LIGHTNING))
+                            .size(10.5)
+                            .color(if enabled {
+                                egui::Color32::from_rgb(255, 165, 50)
+                            } else {
+                                egui::Color32::GRAY
+                            }),
+                    ),
+                )
+                .on_hover_text(
+                    "Build --release, then flash over the selected debug probe with \
+                     probe-rs (`cargo flash`). Uses the SAME probe as the Debug / \
+                     RTT / Runtime tabs. Needs probe-rs-tools in PATH.",
+                )
+                .clicked()
+            {
+                *probe_flash_out = true;
+            }
+            // Status of the last/ongoing probe-rs flash.
+            if !matches!(pf_state, crate::probe_flash::ProbeFlashState::Idle) {
+                ui.label(
+                    egui::RichText::new(pf_state.label())
+                        .size(10.5)
+                        .color(pf_state.color()),
+                );
+                if pf_state.is_busy() {
+                    ui.spinner();
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(120));
+                }
+            }
+        });
     }
 
     ui.separator();

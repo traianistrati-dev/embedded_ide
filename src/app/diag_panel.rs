@@ -136,6 +136,9 @@ pub(super) fn show_diag_panel(
     profile_run: &mut bool,
     flame_state: &Arc<Mutex<crate::flamegraph::FlameState>>,
     profile_sample: &mut bool,
+    // Flash tab's probe-rs path (shared probe): status + "Flash (probe-rs)" signal.
+    probe_flash_state: &Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
+    probe_flash_go: &mut bool,
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -648,6 +651,12 @@ pub(super) fn show_diag_panel(
                 can_flash,
                 size_state,
                 size_flash_go,
+                probe_list,
+                selected_probe,
+                probe_scan,
+                probe_scan_err,
+                probe_flash_state,
+                probe_flash_go,
             );
         }
         BuildPanelTab::Rtt => {
@@ -732,6 +741,11 @@ pub(super) fn show_diag_panel(
                 profile_sample,
                 rtt_chip,
                 can_flash,
+                probe_list,
+                selected_probe,
+                probe_scan,
+                probe_scan_err,
+                toolchain,
             );
         }
         BuildPanelTab::RequiredTools => {

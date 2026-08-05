@@ -24,6 +24,13 @@ pub fn show_profile_tab(
     // exists (gates both modes).
     chip: &str,
     can_run: bool,
+    // Shared probe-rs probe row (same as Debug / RTT / Flash) — shown in the
+    // Runtime view so the probe can be scanned/picked from here too.
+    probe_list: &[crate::probe::ProbeInfo],
+    selected_probe: &mut Option<String>,
+    probe_scan: &mut bool,
+    probe_scan_err: Option<&str>,
+    toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
 ) {
     // ── Mode switch ─────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -39,7 +46,18 @@ pub fn show_profile_tab(
 
     match mode {
         ProfileMode::Static => static_view(ui, state, by_crate, run_clicked, can_run),
-        ProfileMode::Runtime => runtime_view(ui, flame_state, sample_clicked, chip, can_run),
+        ProfileMode::Runtime => runtime_view(
+            ui,
+            flame_state,
+            sample_clicked,
+            chip,
+            can_run,
+            probe_list,
+            selected_probe,
+            probe_scan,
+            probe_scan_err,
+            toolchain,
+        ),
     }
 }
 
@@ -180,12 +198,18 @@ fn bloat_row(ui: &mut egui::Ui, r: &BloatRow, max: u64) {
 
 // ── Runtime (flamegraph) ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn runtime_view(
     ui: &mut egui::Ui,
     flame_state: &Arc<Mutex<FlameState>>,
     sample_clicked: &mut bool,
     chip: &str,
     can_run: bool,
+    probe_list: &[crate::probe::ProbeInfo],
+    selected_probe: &mut Option<String>,
+    probe_scan: &mut bool,
+    probe_scan_err: Option<&str>,
+    toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
 ) {
     let st = flame_state.lock().unwrap().clone();
     let busy = st.is_busy();
@@ -242,6 +266,17 @@ fn runtime_view(
                 FlameState::Idle => {}
             }
         });
+    });
+    // Shared probe row — pick the SAME probe as the Debug / RTT / Flash tabs.
+    ui.horizontal_wrapped(|ui| {
+        super::probe_selector_ui(
+            ui,
+            probe_list,
+            selected_probe,
+            probe_scan,
+            probe_scan_err,
+            toolchain,
+        );
     });
     ui.separator();
 

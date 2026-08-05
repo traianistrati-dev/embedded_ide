@@ -95,6 +95,36 @@ impl AppIde {
         }
     }
 
+    /// Flash via probe-rs (`cargo flash`) over the SHARED debug probe
+    /// (`selected_probe`) — the same one the Debug / RTT / Runtime tabs use. This
+    /// is the Flash tab's probe-rs path; no-op without a buildable chip config.
+    pub(crate) fn flash_probe_rs(&mut self) {
+        let Some((project, _tc)) = self.selected_build_cfg() else {
+            return;
+        };
+        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        if project_gen::write_project(
+            &build_dir,
+            &self.current_project_files(),
+            &self.project_tree.user_src_files,
+            &self.mcu_config_text(),
+            &self.structure_config_text(),
+        )
+        .is_ok()
+        {
+            self.build_tab = BuildPanelTab::Dfu;
+            crate::probe_flash::start_probe_flash(
+                build_dir,
+                project.target.clone(),
+                project.probe_chip.clone(),
+                self.selected_probe.clone(),
+                Arc::clone(&self.probe_flash_state),
+                Arc::clone(&self.dfu_log),
+                self.egui_ctx.clone(),
+            );
+        }
+    }
+
     /// Build `--release` and flash an ESP32 via espflash, over the selected
     /// programmer's serial port. No-op without a buildable chip config.
     pub(crate) fn flash_esp(&mut self) {
