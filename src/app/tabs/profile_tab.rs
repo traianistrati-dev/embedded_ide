@@ -323,31 +323,85 @@ fn flame_widget(ui: &mut egui::Ui, root: &FlameNode) {
     let total = root.count.max(1);
     const ROW_H: f32 = 17.0;
     let depth = tree_depth(root);
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(w, (ROW_H * depth as f32).max(ROW_H)),
-        egui::Sense::click(),
-    );
-    let painter = ui.painter().with_clip_rect(rect);
-    // The click position picks exactly one segment (its row + x span).
-    let click = resp.clicked().then(|| resp.interact_pointer_pos()).flatten();
-    let mut hit: Option<FlameNode> = None;
-    draw_node(&painter, root, rect.left(), rect.top(), w, ROW_H, click, &mut hit);
+    let avail_w = ui.available_width();
+    let height = (ROW_H * depth as f32).max(ROW_H);
 
+    // Horizontal zoom (mouse wheel up = in / down = out), persisted per-widget.
+    // The graph is drawn `avail_w * zoom` wide inside a horizontal ScrollArea, so
+    // a zoomed / very long graph gets a horizontal scrollbar. Zoom is ANCHORED at
+    // the cursor: on a wheel step we adjust the scroll offset so the content point
+    // under the pointer stays put (applied next frame via `off_id`).
+    let zoom_id = ui.id().with("flame_zoom");
+    let off_id = ui.id().with("flame_zoom_off");
+    let mut zoom: f32 = ui.data(|d| d.get_temp(zoom_id)).unwrap_or(1.0);
+    let content_w = (avail_w * zoom).max(avail_w);
+    // A pending cursor-anchored offset stored last frame → apply once.
+    let apply_off: Option<f32> = ui.data_mut(|d| {
+        let v = d.get_temp::<f32>(off_id);
+        if v.is_some() {
+            d.remove::<f32>(off_id);
+        }
+        v
+    });
+
+    let mut hit: Option<FlameNode> = None;
+    let mut scroll = egui::ScrollArea::horizontal().auto_shrink([false, false]);
+    if let Some(x) = apply_off {
+        scroll = scroll.horizontal_scroll_offset(x);
+    }
+    // Returns `Some((scroll_y, content_x_under_cursor))` when the wheel turned.
+    let out = scroll.show(ui, |ui| {
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(content_w, height), egui::Sense::click());
+        // Vertical wheel = zoom; consume it so no scroll area scrolls with it.
+        let wheel = resp.hover_pos().and_then(|hp| {
+            let sy = ui.input(|i| i.smooth_scroll_delta.y);
+            (sy != 0.0).then(|| {
+                ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                (sy, hp.x - rect.left()) // content-x (0..content_w) under the cursor
+            })
+        });
+        let painter = ui.painter().with_clip_rect(rect);
+        // The click position picks exactly one segment (its row + x span).
+        let click = resp.clicked().then(|| resp.interact_pointer_pos()).flatten();
+        draw_node(&painter, root, rect.left(), rect.top(), content_w, ROW_H, click, &mut hit);
+        wheel
+    });
+    if let Some((sy, content_x)) = out.inner {
+        // Keep the point under the cursor fixed: same content fraction stays at
+        // the same viewport x after the zoom.
+        let off = out.state.offset.x;
+        let vp_x = content_x - off; // cursor position within the viewport (fixed)
+        let frac = content_x / (avail_w * zoom); // fraction of the OLD content width
+        let new_zoom = (zoom * (sy * 0.0015).exp()).clamp(1.0, 64.0);
+        let new_off = (frac * avail_w * new_zoom - vp_x).max(0.0);
+        zoom = new_zoom;
+        ui.data_mut(|d| {
+            d.insert_temp(zoom_id, zoom);
+            d.insert_temp(off_id, new_off);
+        });
+        ui.ctx().request_repaint();
+    } else {
+        ui.data_mut(|d| d.insert_temp(zoom_id, zoom));
+    }
+
+    // Click → details popup, capped at the Profile tab width (never wider than
+    // the panel); long names wrap inside instead of stretching it.
     let sel_id = ui.id().with("flame_selected");
     if let Some(node) = hit {
         ui.data_mut(|d| d.insert_temp(sel_id, (node, total)));
     }
     if let Some((node, total)) = ui.data(|d| d.get_temp::<(FlameNode, usize)>(sel_id)) {
         let mut open = true;
-        let pw = w * 0.9; // 90% of the flamegraph panel width
+        let pw = (avail_w - 12.0).max(160.0);
         egui::Window::new("Frame details")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .max_width(pw)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
-                ui.set_min_width(pw);
+                ui.set_max_width(pw);
                 flame_details(ui, &node, total);
             });
         if !open {
@@ -359,11 +413,15 @@ fn flame_widget(ui: &mut egui::Ui, root: &FlameNode) {
 /// The details popup body for a clicked flame segment.
 fn flame_details(ui: &mut egui::Ui, node: &FlameNode, total: usize) {
     let pct = node.count as f32 / total as f32 * 100.0;
-    ui.label(
-        egui::RichText::new(&node.name)
-            .monospace()
-            .size(13.0)
-            .strong(),
+    // Wrap the (often huge, monomorphised) name so it never stretches the popup.
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(&node.name)
+                .monospace()
+                .size(12.5)
+                .strong(),
+        )
+        .wrap(),
     );
     ui.label(
         egui::RichText::new(format!("{} samples · {:.1}% of all", node.count, pct))
@@ -402,11 +460,15 @@ fn flame_details(ui: &mut egui::Ui, node: &FlameNode, total: usize) {
                         1.0,
                         node_color(&c.name),
                     );
-                    ui.label(
-                        egui::RichText::new(format!("{}  {}", c.count, c.name))
-                            .monospace()
-                            .size(10.5),
-                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{}  {}", c.count, c.name))
+                                .monospace()
+                                .size(10.5),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(&c.name);
                 });
             }
         });
