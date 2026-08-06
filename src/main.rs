@@ -18,6 +18,7 @@ pub mod espflash;
 pub mod flamegraph;
 pub mod git;
 pub mod lsp;
+pub mod msvc;
 pub mod openocd;
 pub mod probe_flash;
 pub mod panels;
@@ -34,6 +35,10 @@ pub mod size;
 pub mod terminal;
 
 fn main() -> eframe::Result<()> {
+    // Resolve the MSVC toolchain env off-thread so the first build doesn't pay
+    // for the one-off `vcvars64.bat` capture (see `msvc`).
+    msvc::warm_up();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_maximized(true)

@@ -25,6 +25,24 @@ use std::{
 /// ghost instances. No-op on non-Windows. Returns the same `&mut Command` so it
 /// chains inline: `no_window(Command::new("cargo")).args(...)`.
 pub fn no_window(cmd: &mut Command) -> &mut Command {
+    no_window_raw(cmd);
+    // Point the MSVC linker/compiler at a VERIFIED toolchain (Windows): rustc and
+    // cc-rs pick an install by little more than "does cl.exe exist", so a
+    // partially-installed Visual Studio shadows a complete one and every host
+    // build-script fails (LNK1104 msvcrt.lib / C1083 vcruntime.h). No-op when the
+    // process already has LIB (a Developer prompt) or nothing complete is found.
+    // See [`crate::msvc`].
+    #[cfg(windows)]
+    for (k, v) in crate::msvc::env_pairs() {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+/// [`no_window`] without the MSVC environment injection — used by the MSVC probe
+/// itself (which must not recurse into it) and anywhere the ambient environment
+/// must be left untouched.
+pub fn no_window_raw(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -353,6 +371,37 @@ fn run_cargo(
     activity.lock().unwrap().push(rec.finish());
     let stderr_text = stderr_thread.join().unwrap_or_default();
 
+    // Missing MSVC host C-runtime libraries (an incomplete VS "Desktop C++"
+    // install — e.g. only the `onecore` lib variant, no `lib\x64\`): every HOST
+    // build-script / proc-macro fails to LINK with `LNK1104: cannot open file
+    // 'msvcrt.lib'`. Surface the real cause + fix instead of a raw linker dump.
+    let has = |s: &str| {
+        stderr_text.contains(s) || result.diagnostics.iter().any(|d| d.rendered.contains(s))
+    };
+    let link_broken = (has("LNK1104") || has("LNK1181"))
+        && (has("msvcrt") || has("libcmt") || has("libvcruntime") || has("libucrt"));
+    // Same root cause on the COMPILER side: a crate with C code (ring, libusb…)
+    // can't find the MSVC headers.
+    let headers_broken = has("C1083") && (has("vcruntime.h") || has("corecrt.h"));
+    if link_broken || headers_broken {
+        return BuildState::Failed(
+            "[MSVC_LIBS] The MSVC toolchain can't find its C-runtime libraries / headers \
+             (LNK1104 'msvcrt.lib' or C1083 'vcruntime.h').\n\n\
+             Rust links every build-script for the HOST with the MSVC toolchain, so \
+             without it NOTHING builds.\n\n\
+             -> Open the TOOLS tab and check \"MSVC build tools\": it reports which \
+             Visual Studio installs are complete and can install the Build Tools for you.\n\n\
+             Note: a PARTIAL Visual Studio (compiler present, `VC\\Tools\\MSVC\\<ver>\\lib\\x64\\` \
+             or `include\\` missing) SHADOWS a complete one, because rustc picks an install by \
+             whether `cl.exe` exists. Repair/complete that install — VS Installer -> Modify -> \
+             workload \"Desktop development with C++\" (or components \"MSVC v143 … x64/x86 build \
+             tools\" + a \"Windows 10/11 SDK\").\n\
+             Tip: `cargo build` from a plain terminal fails the same way — it's the \
+             toolchain, not the IDE."
+                .to_string(),
+        );
+    }
+
     if !saw_build_finished {
         // clippy not installed → cargo prints "no such command" / "not provided".
         if subcommand == "clippy"
@@ -372,7 +421,7 @@ fn run_cargo(
         let is_disk_full = stderr_text.contains("not enough space")
             || stderr_text.contains("There is not enough space")
             || stderr_text.contains("os error 112")  // Windows  ERROR_DISK_FULL
-            || stderr_text.contains("os error 28");   // POSIX    ENOSPC
+            || stderr_text.contains("os error 28"); // POSIX    ENOSPC
         if is_disk_full {
             return BuildState::Failed(
                 "[DISK_FULL] The build target/ directory has run out of disk space.\n\n\

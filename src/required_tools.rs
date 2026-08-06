@@ -150,9 +150,8 @@ impl ToolsState {
 // ── Tool catalog ───────────────────────────────────────────────────────────────
 
 pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
-    Arc::new(Mutex::new(ToolsState {
-        log: Vec::new(),
-        tools: vec![
+    #[allow(unused_mut)]
+    let mut tools = vec![
             // ── Common to all toolchains ─────────────────────────────────────
             RequiredTool {
                 name:          "rustup",
@@ -264,7 +263,37 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
                 manual_url:    "https://github.com/esp-rs/espflash",
                 status:        ToolStatus::Unknown,
             },
+    ];
+
+    // ── Windows host linker prerequisite ─────────────────────────────────────
+    // Not an embedded tool: Rust links every build-script / proc-macro for the
+    // HOST with the MSVC linker, so without this NOTHING builds (LNK1104
+    // msvcrt.lib). Probed by file, not by binary presence — see `MSVC_CHECK`.
+    #[cfg(windows)]
+    tools.push(RequiredTool {
+        name:          "MSVC build tools",
+        description:   "Microsoft C++ x64 toolchain (msvcrt.lib + headers) — required to link Rust build-scripts on Windows",
+        toolchain:     None,
+        check_cmd:     MSVC_CHECK,
+        check_args:    &[],
+        check_pattern: "",
+        install_cmd:   Some("winget"),
+        install_args:  &[
+            "install",
+            "--id",
+            "Microsoft.VisualStudio.2022.BuildTools",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--override",
+            "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
         ],
+        manual_url:    "https://visualstudio.microsoft.com/visual-cpp-build-tools/",
+        status:        ToolStatus::Unknown,
+    });
+
+    Arc::new(Mutex::new(ToolsState {
+        log: Vec::new(),
+        tools,
     }))
 }
 
@@ -402,7 +431,61 @@ pub fn start_install_missing(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) 
 
 /// Run the check command synchronously and return the resulting `ToolStatus`.
 /// Does **not** hold any mutex while running the external command.
+/// Sentinel [`RequiredTool::check_cmd`] for the MSVC toolchain: it is NOT a CLI
+/// on PATH, and "the binary exists" is exactly the wrong test (a half-installed
+/// Visual Studio has `cl.exe` but no libs/headers), so it gets a file-based probe
+/// instead of a spawned command. See [`crate::msvc`].
+pub const MSVC_CHECK: &str = "@msvc-toolchain";
+
+/// File-based probe of the MSVC host toolchain: `Ok` when some install has BOTH
+/// `lib\x64\msvcrt.lib` and `include\vcruntime.h`; `Failed` (with the reason)
+/// when installs exist but are all incomplete — the case that silently breaks
+/// every build; `Missing` when there is none at all.
+#[cfg(windows)]
+fn check_msvc_toolchain() -> ToolStatus {
+    let installs = crate::msvc::installs();
+    if let Some(ok) = installs.iter().find(|i| i.is_complete()) {
+        // Name the broken ones too: they are why builds can still fail if the
+        // env injection is ever bypassed.
+        let broken = installs.iter().filter(|i| !i.is_complete()).count();
+        return ToolStatus::Ok(if broken > 0 {
+            format!("{} (+{broken} incomplete)", ok.label())
+        } else {
+            ok.label()
+        });
+    }
+    if installs.is_empty() {
+        return ToolStatus::Missing;
+    }
+    let detail: Vec<String> = installs
+        .iter()
+        .map(|i| {
+            let mut miss = Vec::new();
+            if !i.has_libs {
+                miss.push("libs");
+            }
+            if !i.has_headers {
+                miss.push("headers");
+            }
+            format!("{} missing {}", i.label(), miss.join("+"))
+        })
+        .collect();
+    ToolStatus::Failed(format!(
+        "Visual Studio found but its C++ x64 toolchain is incomplete ({}). \
+         Install the \"Desktop development with C++\" workload / Build Tools.",
+        detail.join("; ")
+    ))
+}
+
+#[cfg(not(windows))]
+fn check_msvc_toolchain() -> ToolStatus {
+    ToolStatus::Ok("n/a (not Windows)".to_string())
+}
+
 fn run_check_blocking(cmd: &str, args: &[&str], pattern: &str) -> ToolStatus {
+    if cmd == MSVC_CHECK {
+        return check_msvc_toolchain();
+    }
     let mut c = Command::new(cmd);
     c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
