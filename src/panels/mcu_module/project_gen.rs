@@ -203,6 +203,56 @@ pub fn splice_config(
         .unwrap_or_default()
 }
 
+/// Trailing marker on the `[dependencies]` lines the IDE added ITSELF.
+///
+/// Provenance matters because the peripheral/async/USB sync functions also
+/// REMOVE lines when a feature is switched off — and without a marker they
+/// happily removed a dependency the **user** had written by hand (e.g. adding
+/// `embedded-hal` for your own code, then switching Runtime, which flips the
+/// IDE's internal "needs" flag to false). Only marked lines may be removed.
+pub const DEP_MARKER: &str = "# <embedded-ide>";
+
+/// `true` when the line carries [`DEP_MARKER`], i.e. the IDE wrote it and may
+/// take it away again.
+fn is_ide_owned(line: &str) -> bool {
+    line.contains(DEP_MARKER)
+}
+
+/// The Rust identifier a Cargo dependency key maps to (`embedded-hal` →
+/// `embedded_hal`, `embedded-hal-0-2` → `embedded_hal_0_2`).
+pub fn crate_ident(dep_name: &str) -> String {
+    dep_name.replace('-', "_")
+}
+
+/// Does any source reference this crate? Guards the removal path: a dependency
+/// the code actually uses is never dropped, whatever the IDE's feature flags
+/// say. Matches `use <ident>…`, `<ident>::…` and `extern crate <ident>`.
+///
+/// Erring toward KEEPING is deliberate: a stale dependency costs a little build
+/// time, a wrongly removed one breaks the build.
+pub fn is_crate_referenced(sources: &[&str], dep_name: &str) -> bool {
+    let ident = crate_ident(dep_name);
+    // `embedded_hal::` must not match inside `embedded_hal_async::`, so require
+    // the character after the identifier to end it.
+    let ends_ident = |rest: &str| {
+        rest.starts_with("::")
+            || rest.starts_with(';')
+            || rest.starts_with(" as ")
+            || rest.starts_with("::{")
+    };
+    sources.iter().any(|src| {
+        src.match_indices(&ident).any(|(i, _)| {
+            // Must start at a word boundary too (not `my_embedded_hal`).
+            let before_ok = i == 0
+                || !src[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            before_ok && ends_ident(&src[i + ident.len()..])
+        })
+    })
+}
+
 /// `true` when Cargo.toml line `line` declares the dependency `name`
 /// (`name = …`), tolerating leading whitespace and any spacing around `=`.
 fn is_dep_line(line: &str, name: &str) -> bool {
@@ -220,12 +270,19 @@ fn edit_dep_lines(cargo_toml: &str, add: bool, names: &[&str], add_lines: &[&str
     let mut out: Vec<String> = Vec::new();
     let mut inserted = false;
     for line in cargo_toml.lines() {
-        if !add && names.iter().any(|n| is_dep_line(line, n)) {
-            continue; // feature gone → drop the deps we added
+        // Drop only what the IDE itself put there (see `DEP_MARKER`) — a
+        // hand-written line survives every feature toggle.
+        if !add && is_ide_owned(line) && names.iter().any(|n| is_dep_line(line, n)) {
+            continue;
         }
         out.push(line.to_string());
         if add && !inserted && line.trim() == "[dependencies]" {
-            out.extend(add_lines.iter().map(|s| s.to_string()));
+            // Stamp ownership as we add, so a later toggle may remove it again.
+            out.extend(
+                add_lines
+                    .iter()
+                    .map(|s| format!("{s}   {DEP_MARKER}")),
+            );
             inserted = true;
         }
     }
@@ -239,9 +296,21 @@ fn edit_dep_lines(cargo_toml: &str, add: bool, names: &[&str], add_lines: &[&str
 /// Ensure a single dependency `name` is present iff `needs`. Idempotent — a
 /// no-op when already in the desired state (no mtime churn). `is_dep_line`'s `=`
 /// check keeps `embedded-hal` distinct from `embedded-hal-0-2`.
-fn ensure_dep(cargo_toml: &str, name: &str, needs: bool, add_line: &str) -> String {
+fn ensure_dep(
+    cargo_toml: &str,
+    name: &str,
+    needs: bool,
+    add_line: &str,
+    // Project sources — a crate the code actually uses is never removed.
+    sources: &[&str],
+) -> String {
     let has = cargo_toml.lines().any(|l| is_dep_line(l, name));
     if needs == has {
+        return cargo_toml.to_owned();
+    }
+    // Second guard (after `DEP_MARKER`): even an IDE-added line stays if the
+    // code came to depend on it.
+    if !needs && is_crate_referenced(sources, name) {
         return cargo_toml.to_owned();
     }
     edit_dep_lines(cargo_toml, needs, &[name], &[add_line])
@@ -271,23 +340,26 @@ pub fn ensure_peripheral_deps(
     needs_i2c: bool,
     needs_gpio: bool,
     needs_nb: bool,
+    // Project sources (main.rs + user files) — see `is_crate_referenced`.
+    sources: &[&str],
 ) -> String {
     let eh1 = needs_spi || needs_i2c || needs_gpio; // SpiBus / I2c / OutputPin…
     let eh02 = needs_usart || eh1; // every bridge speaks to the HAL's eh 0.2
     let mut s = cargo_toml.to_owned();
-    s = ensure_dep(&s, "bxcan", needs_can, "bxcan = \"0.7\"");
-    s = ensure_dep(&s, "embedded-io", needs_usart, "embedded-io  = \"0.6\"");
+    s = ensure_dep(&s, "bxcan", needs_can, "bxcan = \"0.7\"", sources);
+    s = ensure_dep(&s, "embedded-io", needs_usart, "embedded-io  = \"0.6\"", sources);
     s = ensure_dep(
         &s,
         "embedded-hal-0-2",
         eh02,
         "embedded-hal-0-2 = { package = \"embedded-hal\", version = \"0.2.7\", features = [\"unproven\"] }",
+        sources,
     );
-    s = ensure_dep(&s, "embedded-hal", eh1, "embedded-hal = \"1.0\"");
+    s = ensure_dep(&s, "embedded-hal", eh1, "embedded-hal = \"1.0\"", sources);
     // nb is nb-based-serial / CAN — decided by the caller (see `needs_nb` doc).
     // Note: `ensure_dep` is a no-op when nb is already present, so a user's
     // pinned `nb = "1.1.0"` is PRESERVED (not reset to "1") while it's needed.
-    s = ensure_dep(&s, "nb", needs_nb, "nb           = \"1\"");
+    s = ensure_dep(&s, "nb", needs_nb, "nb           = \"1\"", sources);
     s
 }
 
@@ -296,7 +368,7 @@ pub fn ensure_peripheral_deps(
 /// peripheral is configured. Like [`ensure_can_deps`], idempotent and called
 /// every frame — the generated USB CDC init needs both crates and the HAL
 /// feature (which exposes `stm32f1xx_hal::usb`).
-pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool) -> String {
+pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool, sources: &[&str]) -> String {
     let is_dep = |line: &str, name: &str| {
         line.trim_start()
             .strip_prefix(name)
@@ -315,7 +387,14 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut inserted = false;
     for line in cargo_toml.lines() {
-        if !needs_usb && (is_dep(line, "usb-device") || is_dep(line, "usbd-serial")) {
+        // Same provenance + in-use guards as `ensure_dep`: only drop the lines
+        // the IDE wrote, and never one the code still references.
+        if !needs_usb
+            && is_ide_owned(line)
+            && (is_dep(line, "usb-device") || is_dep(line, "usbd-serial"))
+            && !is_crate_referenced(sources, "usb-device")
+            && !is_crate_referenced(sources, "usbd-serial")
+        {
             continue; // USB gone → drop the deps we added
         }
         // Toggle the `stm32-usbd` HAL feature inside the `features = [ … ]` array.
@@ -327,8 +406,8 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool) -> String {
         if needs_usb && !inserted && line.trim() == "[dependencies]" {
             // Versions matched to stm32f1xx-hal 0.10's `usb` module (stm32-usbd),
             // which targets usb-device 0.2 / usbd-serial 0.1 (`.product()` API).
-            out.push("usb-device  = \"0.2\"".to_string());
-            out.push("usbd-serial = \"0.1\"".to_string());
+            out.push(format!("usb-device  = \"0.2\"   {DEP_MARKER}"));
+            out.push(format!("usbd-serial = \"0.1\"   {DEP_MARKER}"));
             inserted = true;
         }
     }
@@ -355,23 +434,25 @@ pub fn ensure_async_deps(
     needs_async_usart: bool,
     needs_eh: bool,
     needs_eh_async: bool,
+    sources: &[&str],
 ) -> String {
     let mut s = ensure_dep(
         cargo_toml,
         "embassy-executor",
         needs_async,
         "embassy-executor = { version = \"0.9\", features = [\"arch-cortex-m\", \"executor-thread\"] }",
+        sources,
     );
-    s = ensure_dep(&s, "embassy-time", needs_async, "embassy-time = \"0.5\"");
+    s = ensure_dep(&s, "embassy-time", needs_async, "embassy-time = \"0.5\"", sources);
     // Async USART (`BufferedUart` → embedded-io-async). NB the crate is published
     // as `static_cell` (underscore) — a `static-cell` key fails to resolve.
-    s = ensure_dep(&s, "embedded-io-async", needs_async_usart, "embedded-io-async = \"0.6\"");
-    s = ensure_dep(&s, "static_cell", needs_async_usart, "static_cell = \"2\"");
+    s = ensure_dep(&s, "embedded-io-async", needs_async_usart, "embedded-io-async = \"0.6\"", sources);
+    s = ensure_dep(&s, "static_cell", needs_async_usart, "static_cell = \"2\"", sources);
     // Async SPI/I2C: blocking init → `embedded-hal` 1.0 (SpiBus/I2c); async-DMA
     // init → `embedded-hal-async` (which builds on the 1.0 ErrorType, so eh is
     // kept whenever any SPI/I2C exists).
-    s = ensure_dep(&s, "embedded-hal", needs_eh, "embedded-hal = \"1.0\"");
-    s = ensure_dep(&s, "embedded-hal-async", needs_eh_async, "embedded-hal-async = \"1.0\"");
+    s = ensure_dep(&s, "embedded-hal", needs_eh, "embedded-hal = \"1.0\"", sources);
+    s = ensure_dep(&s, "embedded-hal-async", needs_eh_async, "embedded-hal-async = \"1.0\"", sources);
 
     // Toggle the `time-driver-any` HAL feature inside the `embassy-stm32`
     // `features = [ … ]` array. A no-op for non-embassy projects — async is only
@@ -1063,20 +1144,20 @@ mod tests {
     fn blocking_gpio_keeps_embedded_hal_through_the_async_pass() {
         // Blocking GPIO (io.rs) pulls embedded-hal 1.0 via `ensure_peripheral_deps`.
         let base = "[package]\nname = \"x\"\n\n[dependencies]\ncortex-m = \"0.7\"\n";
-        let with_gpio = ensure_peripheral_deps(base, false, false, false, false, true, false);
+        let with_gpio = ensure_peripheral_deps(base, false, false, false, false, true, false, &[]);
         assert!(
             with_gpio.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "peripheral deps add embedded-hal for GPIO:\n{with_gpio}"
         );
         // The async pass runs next and ALSO manages embedded-hal — it must be told
         // the blocking need (combined), or it strips what was just added.
-        let after_async = ensure_async_deps(&with_gpio, false, false, true, false);
+        let after_async = ensure_async_deps(&with_gpio, false, false, true, false, &[]);
         assert!(
             after_async.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "async pass keeps embedded-hal when the combined need is true:\n{after_async}"
         );
         // Guard proving the bug shape: the OLD `needs_eh = false` stripped it.
-        let stripped = ensure_async_deps(&with_gpio, false, false, false, false);
+        let stripped = ensure_async_deps(&with_gpio, false, false, false, false, &[]);
         assert!(
             !stripped.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "needs_eh=false would strip it (the bug this guards):\n{stripped}"
@@ -1269,17 +1350,17 @@ mod tests {
             &ToolchainKind::RustEmbedded,
         );
         // `needs_nb` (last arg) mirrors the old CAN|USART|SPI derivation here.
-        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false, false, false);
+        let none = |t: &str| ensure_peripheral_deps(t, false, false, false, false, false, false, &[]);
         assert!(!base.contains("bxcan") && !base.contains("embedded-hal"), "clean base");
 
         // CAN only → bxcan + nb; no embedded-io/hal.
-        let can = ensure_peripheral_deps(&base, true, false, false, false, false, true);
+        let can = ensure_peripheral_deps(&base, true, false, false, false, false, true, &[]);
         assert!(can.contains("bxcan = \"0.7\"") && can.contains("nb           = \"1\""));
         assert!(!can.contains("embedded-io") && !can.contains("embedded-hal"));
         assert_eq!(none(&can), base, "removal restores base");
 
         // USART only → embedded-io + embedded-hal-0-2 + nb; NO embedded-hal 1.0.
-        let usart = ensure_peripheral_deps(&base, false, true, false, false, false, true);
+        let usart = ensure_peripheral_deps(&base, false, true, false, false, false, true, &[]);
         assert!(usart.contains("embedded-io  = \"0.6\""), "{usart}");
         assert!(usart.contains("embedded-hal-0-2 = { package = \"embedded-hal\""), "{usart}");
         assert!(usart.contains("nb           = \"1\""));
@@ -1288,25 +1369,25 @@ mod tests {
         assert_eq!(none(&usart), base);
 
         // SPI only → embedded-hal 1.0 + embedded-hal-0-2 + nb; no embedded-io.
-        let spi = ensure_peripheral_deps(&base, false, false, true, false, false, true);
+        let spi = ensure_peripheral_deps(&base, false, false, true, false, false, true, &[]);
         assert!(spi.lines().any(|l| is_dep_line(l, "embedded-hal")), "eh 1.0 present");
         assert!(spi.contains("embedded-hal-0-2") && spi.contains("nb           ="));
         assert!(!spi.contains("embedded-io"));
 
         // I2C only → embedded-hal 1.0 + embedded-hal-0-2, but NO nb (I2c bridge
         // needs no nb::block!).
-        let i2c = ensure_peripheral_deps(&base, false, false, false, true, false, false);
+        let i2c = ensure_peripheral_deps(&base, false, false, false, true, false, false, &[]);
         assert!(i2c.lines().any(|l| is_dep_line(l, "embedded-hal")) && i2c.contains("embedded-hal-0-2"));
         assert!(!i2c.lines().any(|l| is_dep_line(l, "nb")), "no nb for i2c-only:\n{i2c}");
 
         // GPIO only → embedded-hal 1.0 + embedded-hal-0-2, NO nb, NO embedded-io.
-        let gpio = ensure_peripheral_deps(&base, false, false, false, false, true, false);
+        let gpio = ensure_peripheral_deps(&base, false, false, false, false, true, false, &[]);
         assert!(gpio.lines().any(|l| is_dep_line(l, "embedded-hal")) && gpio.contains("embedded-hal-0-2"));
         assert!(!gpio.lines().any(|l| is_dep_line(l, "nb")) && !gpio.contains("embedded-io"));
         assert_eq!(none(&gpio), base);
 
         // Everything on → all present, exactly one line each; idempotent.
-        let all = ensure_peripheral_deps(&base, true, true, true, true, true, true);
+        let all = ensure_peripheral_deps(&base, true, true, true, true, true, true, &[]);
         for dep in ["bxcan", "embedded-io", "embedded-hal", "embedded-hal-0-2", "nb"] {
             assert_eq!(
                 all.lines().filter(|l| is_dep_line(l, dep)).count(),
@@ -1314,18 +1395,102 @@ mod tests {
                 "exactly one `{dep}` line:\n{all}"
             );
         }
-        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true, true, true), all, "idempotent");
+        assert_eq!(ensure_peripheral_deps(&all, true, true, true, true, true, true, &[]), all, "idempotent");
         assert_eq!(none(&all), base, "full teardown restores base");
 
         // Native USART (no Portable trait crate, but `needs_nb`) must KEEP a
         // user-pinned `nb = "1.1.0"` untouched — the bug this fixes: Save used to
         // strip it. `nb` needed, already present → `ensure_dep` no-ops.
         let pinned = format!("{base}nb = \"1.1.0\"\n");
-        let kept = ensure_peripheral_deps(&pinned, false, false, false, false, false, true);
+        let kept = ensure_peripheral_deps(&pinned, false, false, false, false, false, true, &[]);
         assert!(kept.contains("nb = \"1.1.0\""), "user nb version preserved:\n{kept}");
         assert!(!kept.contains("nb           = \"1\""), "not duplicated with the IDE default");
-        // …and when nb is genuinely not needed it IS removed (unchanged behaviour).
-        assert!(!ensure_peripheral_deps(&pinned, false, false, false, false, false, false).contains("nb ="));
+        // …and even when nb is no longer needed the HAND-WRITTEN line SURVIVES:
+        // it carries no `DEP_MARKER`, so the IDE doesn't own it. (This assertion
+        // was the opposite before — stripping a user's line was the bug.)
+        let after = ensure_peripheral_deps(&pinned, false, false, false, false, false, false, &[]);
+        assert!(
+            after.contains("nb = \"1.1.0\""),
+            "a hand-written dependency must never be removed:\n{after}"
+        );
+        // But one the IDE added itself is still cleaned up when unneeded.
+        let ide_added = ensure_peripheral_deps(&base, false, false, false, false, false, true, &[]);
+        assert!(ide_added.contains("nb"), "IDE added it:\n{ide_added}");
+        let cleaned =
+            ensure_peripheral_deps(&ide_added, false, false, false, false, false, false, &[]);
+        assert!(!cleaned.contains("nb "), "IDE-owned line removed:\n{cleaned}");
+    }
+
+    /// THE reported bug: add `embedded-hal` by hand, then switch the System
+    /// Runtime (which flips the IDE's internal "needs" flags) — the line used to
+    /// vanish. A hand-written dependency has no `DEP_MARKER`, so it must survive
+    /// every toggle, in both dep-sync functions.
+    #[test]
+    fn hand_written_dependency_survives_a_runtime_switch() {
+        let base = "[package]
+name = \"x\"
+
+[dependencies]
+cortex-m = \"0.7\"
+";
+        let by_hand = format!("{base}embedded-hal = \"1.0\"
+");
+
+        // Blocking → Async: needs_gpio/spi/i2c all go false.
+        let after_periph =
+            ensure_peripheral_deps(&by_hand, false, false, false, false, false, false, &[]);
+        assert!(
+            after_periph.contains("embedded-hal = \"1.0\""),
+            "peripheral sync ate the user's line:
+{after_periph}"
+        );
+        let after_async = ensure_async_deps(&after_periph, false, false, false, false, &[]);
+        assert!(
+            after_async.contains("embedded-hal = \"1.0\""),
+            "async sync ate the user's line:
+{after_async}"
+        );
+        // Nothing was touched at all.
+        assert_eq!(after_async, by_hand);
+    }
+
+    /// Second guard: even a line the IDE added is kept once the CODE uses it.
+    #[test]
+    fn dependency_referenced_by_code_is_never_stripped() {
+        let base = "[package]
+name = \"x\"
+
+[dependencies]
+cortex-m = \"0.7\"
+";
+        // IDE adds it (marked) for a GPIO project…
+        let added = ensure_peripheral_deps(base, false, false, false, false, true, false, &[]);
+        assert!(added.contains("embedded-hal"));
+        // …the user then writes code against it; turning GPIO off must NOT strip it.
+        let src = "use embedded_hal::digital::OutputPin;
+fn f() {}
+";
+        let kept = ensure_peripheral_deps(&added, false, false, false, false, false, false, &[src]);
+        assert!(kept.contains("embedded-hal"), "in-use crate stripped:
+{kept}");
+        // With no such reference it IS cleaned up.
+        let gone = ensure_peripheral_deps(&added, false, false, false, false, false, false, &[]);
+        assert!(!gone.contains("embedded-hal"), "unused crate kept:
+{gone}");
+    }
+
+    #[test]
+    fn crate_reference_detection_is_precise() {
+        // Real uses.
+        assert!(is_crate_referenced(&["use embedded_hal::digital::OutputPin;"], "embedded-hal"));
+        assert!(is_crate_referenced(&["let x = embedded_hal::spi::Mode::default();"], "embedded-hal"));
+        assert!(is_crate_referenced(&["extern crate nb;"], "nb"));
+        assert!(is_crate_referenced(&["use embedded_hal_0_2::adc::OneShot;"], "embedded-hal-0-2"));
+        // A LONGER crate name must not count as the shorter one…
+        assert!(!is_crate_referenced(&["use embedded_hal_async::spi::SpiBus;"], "embedded-hal"));
+        // …nor an identifier that merely ends with it.
+        assert!(!is_crate_referenced(&["my_embedded_hal::foo();"], "embedded-hal"));
+        assert!(!is_crate_referenced(&["// nothing here"], "embedded-hal"));
     }
 
     #[test]
@@ -1334,7 +1499,7 @@ mod tests {
         let base = "[dependencies]\n\
                     stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"rt\"] }\n";
 
-        let with = ensure_usb_deps(base, true);
+        let with = ensure_usb_deps(base, true, &[]);
         assert!(
             with.contains("usb-device  = \"0.2\""),
             "usb-device added:\n{with}"
@@ -1342,7 +1507,7 @@ mod tests {
         assert!(with.contains("usbd-serial = \"0.1\""), "usbd-serial added");
         assert!(with.contains("\"stm32-usbd\""), "stm32-usbd feature added");
         // Idempotent.
-        assert_eq!(ensure_usb_deps(&with, true), with, "add must be idempotent");
+        assert_eq!(ensure_usb_deps(&with, true, &[]), with, "add must be idempotent");
         assert_eq!(
             with.matches("\"stm32-usbd\"").count(),
             1,
@@ -1350,7 +1515,7 @@ mod tests {
         );
 
         // Removing restores the original (deps + feature gone).
-        let removed = ensure_usb_deps(&with, false);
+        let removed = ensure_usb_deps(&with, false, &[]);
         assert!(
             !removed.contains("usb-device"),
             "usb-device removed:\n{removed}"
@@ -1358,7 +1523,7 @@ mod tests {
         assert!(!removed.contains("stm32-usbd"), "feature removed");
         assert_eq!(removed, base, "removal restores the original");
         assert_eq!(
-            ensure_usb_deps(base, false),
+            ensure_usb_deps(base, false, &[]),
             base,
             "no-op when nothing to remove"
         );
@@ -1393,7 +1558,7 @@ mod tests {
 
         // Async runtime, no bus peripherals yet → executor + time + driver, but
         // none of the peripheral trait crates.
-        let with = ensure_async_deps(base, true, false, false, false);
+        let with = ensure_async_deps(base, true, false, false, false, &[]);
         assert!(with.contains("embassy-executor = { version = \"0.9\""), "executor added:\n{with}");
         assert!(with.contains("embassy-time = \"0.5\""), "embassy-time added");
         assert!(with.contains("\"time-driver-any\""), "HAL time driver added");
@@ -1403,35 +1568,35 @@ mod tests {
         // The chip feature survives the driver insertion.
         assert!(with.contains("\"stm32f411re\""), "chip feature kept:\n{with}");
         // Idempotent — no duplicate deps/features.
-        assert_eq!(ensure_async_deps(&with, true, false, false, false), with, "add must be idempotent");
+        assert_eq!(ensure_async_deps(&with, true, false, false, false, &[]), with, "add must be idempotent");
         assert_eq!(with.matches("\"time-driver-any\"").count(), 1, "driver not duplicated");
         assert_eq!(with.lines().filter(|l| is_dep_line(l, "embassy-executor")).count(), 1);
 
         // Add an async USART → embedded-io-async + static_cell appear too.
-        let with_usart = ensure_async_deps(base, true, true, false, false);
+        let with_usart = ensure_async_deps(base, true, true, false, false, &[]);
         assert!(with_usart.contains("embedded-io-async = \"0.6\""), "async serial trait crate:\n{with_usart}");
         assert!(with_usart.lines().any(|l| is_dep_line(l, "static_cell")), "static_cell (underscore)");
         assert!(!with_usart.contains("static-cell ="), "must NOT use the hyphen name");
-        assert_eq!(ensure_async_deps(&with_usart, true, true, false, false), with_usart, "usart add idempotent");
+        assert_eq!(ensure_async_deps(&with_usart, true, true, false, false, &[]), with_usart, "usart add idempotent");
 
         // Blocking SPI/I2C on async → embedded-hal 1.0, NOT embedded-hal-async.
-        let with_bus = ensure_async_deps(base, true, false, true, false);
+        let with_bus = ensure_async_deps(base, true, false, true, false, &[]);
         assert!(with_bus.lines().any(|l| is_dep_line(l, "embedded-hal")), "embedded-hal added:\n{with_bus}");
         assert!(!with_bus.lines().any(|l| is_dep_line(l, "embedded-hal-async")), "no async trait crate for blocking bus");
 
         // Async-DMA SPI/I2C → both embedded-hal + embedded-hal-async.
-        let with_dma = ensure_async_deps(base, true, false, true, true);
+        let with_dma = ensure_async_deps(base, true, false, true, true, &[]);
         assert!(with_dma.lines().any(|l| is_dep_line(l, "embedded-hal")), "embedded-hal present");
         assert!(with_dma.contains("embedded-hal-async = \"1.0\""), "async trait crate added:\n{with_dma}");
-        assert_eq!(ensure_async_deps(&with_dma, true, false, true, true), with_dma, "dma add idempotent");
+        assert_eq!(ensure_async_deps(&with_dma, true, false, true, true, &[]), with_dma, "dma add idempotent");
 
         // Dropping just the USART removes only its two crates (executor stays).
-        let no_usart = ensure_async_deps(&with_usart, true, false, false, false);
+        let no_usart = ensure_async_deps(&with_usart, true, false, false, false, &[]);
         assert!(!no_usart.contains("embedded-io-async") && !no_usart.lines().any(|l| is_dep_line(l, "static_cell")));
         assert!(no_usart.contains("embassy-executor"), "runtime deps stay");
 
         // Removing everything restores the original exactly.
-        let removed = ensure_async_deps(&with_dma, false, false, false, false);
+        let removed = ensure_async_deps(&with_dma, false, false, false, false, &[]);
         assert!(!removed.contains("embassy-executor"), "executor removed:\n{removed}");
         assert!(!removed.contains("embassy-time"), "embassy-time removed");
         assert!(!removed.contains("time-driver-any"), "driver feature removed");
@@ -1439,7 +1604,7 @@ mod tests {
         assert!(!removed.lines().any(|l| is_dep_line(l, "embedded-hal")), "embedded-hal removed");
         assert!(!removed.contains("embedded-hal-async"), "async trait crate removed");
         assert_eq!(removed, base, "removal restores the original");
-        assert_eq!(ensure_async_deps(base, false, false, false, false), base, "no-op when nothing to remove");
+        assert_eq!(ensure_async_deps(base, false, false, false, false, &[]), base, "no-op when nothing to remove");
     }
 
     /// A hand-written file with no GEN markers (external project) must be shown

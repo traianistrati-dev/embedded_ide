@@ -1717,6 +1717,18 @@ impl AppIde {
                 && all_pins
                     .iter()
                     .any(|(_, _, f)| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
+            // Every source the project compiles — a dependency referenced by
+            // this code is never stripped, whatever the feature flags say (a
+            // Runtime switch used to silently delete a hand-added
+            // `embedded-hal`). See `project_gen::is_crate_referenced`.
+            let sources: Vec<&str> = std::iter::once(self.generated_code.as_str())
+                .chain(
+                    self.project_tree
+                        .user_src_files
+                        .iter()
+                        .map(|(_, body)| body.as_str()),
+                )
+                .collect();
             let new_toml = project_gen::ensure_peripheral_deps(
                 &self.cargo_toml,
                 needs_can,
@@ -1725,8 +1737,9 @@ impl AppIde {
                 needs_i2c,
                 needs_gpio,
                 needs_nb,
+                &sources,
             );
-            let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb);
+            let new_toml = project_gen::ensure_usb_deps(&new_toml, needs_usb, &sources);
             // Async runtime (embassy-executor + embassy-time + the HAL time
             // driver), plus — when the respective config files were emitted —
             // embedded-io-async + static_cell (USART) and embedded-hal /
@@ -1745,6 +1758,7 @@ impl AppIde {
                 is_async && has_cfg("usart"),
                 needs_eh_total,
                 needs_eh_async,
+                &sources,
             );
             // Strict-lints `[lints.clippy]` block (MCU System toggle).
             let strict = self.mcu.as_ref().is_some_and(|m| m.strict_lints);
