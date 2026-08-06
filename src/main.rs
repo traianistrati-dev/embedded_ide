@@ -15,6 +15,7 @@ pub mod debugger;
 pub mod dfu;
 pub mod editor;
 pub mod espflash;
+pub mod failure_hint;
 pub mod flamegraph;
 pub mod git;
 pub mod lsp;

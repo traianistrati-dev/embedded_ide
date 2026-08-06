@@ -29,6 +29,9 @@ pub fn show_rtt_tab(
     probe_scan_err: Option<&str>,
     // Project chip's toolchain — gates which probes are selectable.
     toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
+    // Tools confirmed missing — buttons needing one are greyed out with a
+    // "install it in Tools" hint (see `super::tool_missing`).
+    missing_tools: &[&'static str],
 ) {
     let phase = rtt.phase();
     let busy = rtt.is_busy();
@@ -37,6 +40,10 @@ pub fn show_rtt_tab(
     // Wrapped for the same reason as the Debug tab's: an overflowing plain row
     // would keep re-widening the Code Editor side panel (it adopts its
     // content's rect as its width).
+    // probe-rs drives every action here; if the self-check proved it absent,
+    // grey them out instead of letting the run fail with a spawn error.
+    let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
+    let can_run = can_run && !no_probe_rs;
     ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
@@ -56,6 +63,11 @@ pub fn show_rtt_tab(
                  stream RTT/defmt logs.\nNeeds probe-rs in PATH and a debug \
                  probe (ST-Link / J-Link / CMSIS-DAP / ESP32 USB-JTAG).",
             )
+            .on_disabled_hover_text(if no_probe_rs {
+                super::needs_tool_hint("probe-rs")
+            } else {
+                "A session is running, or no chip config exists yet.".to_owned()
+            })
             .clicked()
         {
             *rtt_go = Some(RttMode::Run);
@@ -73,6 +85,11 @@ pub fn show_rtt_tab(
                  the symbols (RTT block address + defmt table), so it must match \
                  what is on the chip.",
             )
+            .on_disabled_hover_text(if no_probe_rs {
+                super::needs_tool_hint("probe-rs")
+            } else {
+                "A session is running, or no chip config exists yet.".to_owned()
+            })
             .clicked()
         {
             *rtt_go = Some(RttMode::Attach);

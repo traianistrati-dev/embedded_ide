@@ -43,6 +43,9 @@ pub fn show_dfu_tab(
     probe_scan_err: Option<&str>,
     probe_flash_state: &Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
     probe_flash_out: &mut bool,
+    // Tools confirmed missing — buttons needing one are greyed out with a
+    // "install it in Tools" hint (see `super::tool_missing`).
+    missing_tools: &[&'static str],
 ) {
     let state = dfu_state.lock().unwrap().clone();
     let ocd_state = openocd_state.lock().unwrap().clone();
@@ -148,7 +151,8 @@ pub fn show_dfu_tab(
                 }
             }
             ToolchainKind::EspRust => {
-                let enabled = !any_busy && can_flash;
+                let no_espflash = super::tool_missing(missing_tools, "espflash");
+                let enabled = !any_busy && can_flash && !no_espflash;
                 if ui
                     .add_enabled(
                         enabled,
@@ -167,6 +171,11 @@ pub fn show_dfu_tab(
                          Needs: espflash in PATH, the ESP32 in download mode\n\
                          (hold BOOT -> press RESET -> release BOOT).",
                     )
+                    .on_disabled_hover_text(if no_espflash {
+                        super::needs_tool_hint("espflash")
+                    } else {
+                        "Busy, or no chip config exists yet.".to_owned()
+                    })
                     .clicked()
                 {
                     *flash_out = true;
@@ -316,7 +325,8 @@ pub fn show_dfu_tab(
         let pf_state = probe_flash_state.lock().unwrap().clone();
         ui.horizontal_wrapped(|ui| {
             super::probe_selector_ui(ui, probe_list, selected_probe, probe_scan, probe_scan_err, toolchain);
-            let enabled = can_flash && !any_busy && !pf_state.is_busy();
+            let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
+            let enabled = can_flash && !any_busy && !pf_state.is_busy() && !no_probe_rs;
             if ui
                 .add_enabled(
                     enabled,
@@ -335,6 +345,11 @@ pub fn show_dfu_tab(
                      probe-rs (`cargo flash`). Uses the SAME probe as the Debug / \
                      RTT / Runtime tabs. Needs probe-rs-tools in PATH.",
                 )
+                .on_disabled_hover_text(if no_probe_rs {
+                    super::needs_tool_hint("probe-rs")
+                } else {
+                    "Busy, or no chip config exists yet.".to_owned()
+                })
                 .clicked()
             {
                 *probe_flash_out = true;

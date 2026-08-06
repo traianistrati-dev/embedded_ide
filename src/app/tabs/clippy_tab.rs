@@ -100,7 +100,7 @@ pub fn show_clippy_tab(
             ),
             BuildState::Failed(msg) => {
                 let first = msg.lines().next().unwrap_or(msg);
-                let first = first.strip_prefix("[CLIPPY_MISSING] ").unwrap_or(first);
+                let first = crate::failure_hint::strip(first);
                 (
                     ph::X_CIRCLE,
                     format!("clippy failed: {first}"),
@@ -144,10 +144,15 @@ pub fn show_clippy_tab(
     let result = match &state {
         BuildState::Failed(msg) => {
             ui.separator();
-            let display = msg.strip_prefix("[CLIPPY_MISSING] ").unwrap_or(msg);
+            let display = crate::failure_hint::strip(msg);
             egui::ScrollArea::vertical()
                 .id_salt("clippy_failed_scroll")
                 .show(ui, |ui| {
+                    // Known cause (missing clippy / MSVC toolchain …) → shared
+                    // card; otherwise the raw message.
+                    if crate::failure_hint::show_card(ui, msg, |_| {}) {
+                        return;
+                    }
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(display)

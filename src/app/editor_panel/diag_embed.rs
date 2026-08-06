@@ -133,6 +133,10 @@ impl AppIde {
         let mut flash_scan = false;
         let mut flash_go = false;
         let mut probe_flash_go = false;
+        // Snapshot of the tools proven missing by the startup self-check — the
+        // tabs grey out the buttons that shell out to them. Cheap (a few &str)
+        // and taken once per frame so no tab needs the mutex.
+        let missing_tools: Vec<&'static str> = self.tools_state.lock().unwrap().unavailable();
         let can_flash = self.selected_build_cfg().is_some();
         // Cargo-tab Build button (moved off the top toolbar on 2026-07-10).
         let mut build_go = false;
@@ -276,6 +280,7 @@ impl AppIde {
                     &mut profile_sample,
                     &self.probe_flash_state,
                     &mut probe_flash_go,
+                    &missing_tools,
                 );
             });
         // Clicking a tab on the collapsed bar reopens the panel at 20% of the
@@ -429,6 +434,11 @@ impl AppIde {
         // Flash tab's probe-rs path (shared probe). `probe_scan` is consumed above.
         if probe_flash_go {
             self.flash_probe_rs();
+        }
+        // "Open Tools" on a failure-hint card (crate::failure_hint) — signalled
+        // through egui temp data so it needn't be threaded through every tab.
+        if crate::failure_hint::take_open_tools_request(ui.ctx()) {
+            self.build_tab = BuildPanelTab::RequiredTools;
         }
         // An added diff row was clicked in the Git tab → open its file in the
         // editor and scroll to that line (jump straight to the changed code).

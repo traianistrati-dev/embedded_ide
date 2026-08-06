@@ -14,6 +14,22 @@ pub mod activity_tab;
 pub mod tools_tab;
 pub mod git_tab;
 
+// ── Feature gating on missing tools ──────────────────────────────────────────
+
+/// `true` when `tool` is in the CONFIRMED-unavailable list (see
+/// [`crate::required_tools::ToolsState::unavailable`]) — i.e. a button that
+/// shells out to it should be greyed out. An empty list (the normal case, and
+/// also the state before the startup check finishes) never gates anything.
+pub(crate) fn tool_missing(missing_tools: &[&'static str], tool: &str) -> bool {
+    missing_tools.iter().any(|m| *m == tool)
+}
+
+/// Standard hover text for a button disabled because its tool is absent — one
+/// wording everywhere, always naming the fix.
+pub(crate) fn needs_tool_hint(tool: &str) -> String {
+    format!("Needs `{tool}` — it is missing. Install it from the Tools tab.")
+}
+
 // Re-export all tab functions for convenience
 pub use mcu_tab::show_peripherals_tab;
 pub use cargo_tab::show_cargo_tab;

@@ -139,6 +139,10 @@ pub(super) fn show_diag_panel(
     // Flash tab's probe-rs path (shared probe): status + "Flash (probe-rs)" signal.
     probe_flash_state: &Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
     probe_flash_go: &mut bool,
+    // Tools confirmed missing (startup self-check) — buttons that shell out to
+    // one of them are greyed out with a "install it in Tools" hint. Empty while
+    // the check hasn't proven a problem, so the UI stays permissive.
+    missing_tools: &[&'static str],
 ) {
     // ── Tab header ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -657,6 +661,7 @@ pub(super) fn show_diag_panel(
                 probe_scan_err,
                 probe_flash_state,
                 probe_flash_go,
+                missing_tools,
             );
         }
         BuildPanelTab::Rtt => {
@@ -671,6 +676,7 @@ pub(super) fn show_diag_panel(
                 probe_scan,
                 probe_scan_err,
                 toolchain,
+                missing_tools,
             );
         }
         BuildPanelTab::Debug => {
@@ -685,6 +691,7 @@ pub(super) fn show_diag_panel(
                 probe_scan,
                 probe_scan_err,
                 toolchain,
+                missing_tools,
             );
         }
         BuildPanelTab::Serial => {
@@ -746,6 +753,7 @@ pub(super) fn show_diag_panel(
                 probe_scan,
                 probe_scan_err,
                 toolchain,
+                missing_tools,
             );
         }
         BuildPanelTab::RequiredTools => {

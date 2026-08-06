@@ -655,6 +655,11 @@ pub struct AppIde {
     espflash_port: String,
     /// Shared state for the Required Tools tab (check + install operations)
     tools_state: Arc<Mutex<required_tools::ToolsState>>,
+    /// Dependency self-check: `false` until the one-shot startup scan has been
+    /// kicked off (background thread — see `poll_dependency_check`).
+    deps_checked: bool,
+    /// The user closed the "missing dependencies" banner this session.
+    deps_banner_dismissed: bool,
     /// RTT / defmt console (probe-rs pipeline + scrollback) — the RTT tab.
     rtt: crate::rtt::RttConsole,
     /// On-target debug session (DAP client over probe-rs dap-server).
@@ -1198,6 +1203,8 @@ impl AppIde {
             espflash_state,
             espflash_port: String::new(),
             tools_state: required_tools::make_tools_state(),
+            deps_checked: false,
+            deps_banner_dismissed: false,
             rtt: crate::rtt::RttConsole::default(),
             debugger: crate::debugger::Debugger::default(),
             probe_list: Vec::new(),
@@ -2371,6 +2378,90 @@ impl eframe::App for AppIde {
                     }
                 });
             });
+
+        // ── Missing-dependency banner (startup self-check) ────────────────────
+        // The IDE shells out to rustup / rustc / probe-rs / the MSVC linker …;
+        // when one is absent the failure used to surface only as a cryptic error
+        // deep in a build log. Check once at startup (background thread) and say
+        // plainly what is missing and what it costs. Only BLOCKING problems get a
+        // banner — a missing cargo-bloat just greys out one tab.
+        if !self.deps_checked {
+            self.deps_checked = true;
+            required_tools::start_check_all(Arc::clone(&self.tools_state), ui.ctx().clone());
+        }
+        if !self.deps_banner_dismissed {
+            let tc = self.selected_toolchain();
+            let problems = self
+                .tools_state
+                .lock()
+                .unwrap()
+                .blocking_problems(tc.as_ref());
+            if !problems.is_empty() {
+                let mut open_tools = false;
+                let mut dismiss = false;
+                egui::Panel::top("missing_deps_banner").show_inside(ui, |ui| {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(58, 40, 20))
+                        .inner_margin(7.0)
+                        .show(ui, |ui| {
+                            let names: Vec<&str> = problems.iter().map(|(n, _, _)| *n).collect();
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} Missing required dependencies: {}",
+                                        egui_phosphor::regular::WARNING,
+                                        names.join(", ")
+                                    ))
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(245, 200, 130)),
+                                );
+                            });
+                            for (name, _, impact) in &problems {
+                                ui.label(
+                                    egui::RichText::new(format!("• {name} — {impact}"))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(225, 195, 155)),
+                                );
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .button(
+                                        egui::RichText::new(format!(
+                                            "{} Open Tools",
+                                            egui_phosphor::regular::WRENCH
+                                        ))
+                                        .size(10.5),
+                                    )
+                                    .on_hover_text("Check / install the missing dependencies")
+                                    .clicked()
+                                {
+                                    open_tools = true;
+                                }
+                                if ui.button("Dismiss").clicked() {
+                                    dismiss = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(
+                                        "(installed it just now? re-check in Tools — a tool \
+                                         installed after the IDE started isn't on its PATH)",
+                                    )
+                                    .size(9.5)
+                                    .italics()
+                                    .color(egui::Color32::from_gray(160)),
+                                );
+                            });
+                        });
+                });
+                if open_tools {
+                    self.build_tab = BuildPanelTab::RequiredTools;
+                    self.deps_banner_dismissed = true;
+                }
+                if dismiss {
+                    self.deps_banner_dismissed = true;
+                }
+            }
+        }
 
         // ── Workspace-load-failure banner (Part 3 safety net) ─────────────────
         // When `cargo metadata` fails, rust-analyzer never loads: no inline

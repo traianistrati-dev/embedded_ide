@@ -43,7 +43,7 @@ pub fn show_cargo_tab(
             BuildState::Failed(msg) => {
                 let first = msg.lines().next().unwrap_or(msg);
                 // Suppress the [DISK_FULL] prefix from the one-liner badge
-                let first = first.strip_prefix("[DISK_FULL] ").unwrap_or(first);
+                let first = crate::failure_hint::strip(first);
                 Some((
                     ph::X_CIRCLE,
                     format!("Build failed: {}", first),
@@ -207,61 +207,29 @@ pub fn show_cargo_tab(
         if let BuildState::Failed(msg) = &state {
             ui.separator();
 
-            // ── Special disk-full banner ──────────────────────────────────────
+            // ── Known-cause card (disk full, missing MSVC toolchain, …) ───────
+            // One shared renderer for every `[TAG]`ged failure — see
+            // `crate::failure_hint`; the disk-full case adds its own recovery
+            // button, the tool-related ones get "Open Tools" for free.
             let is_disk_full = msg.starts_with("[DISK_FULL]");
-            if is_disk_full {
-                // Orange warning box with an inline "Clean target/" button
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(60, 45, 10))
-                    .inner_margin(egui::Margin::same(8))
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{} Disk full", ph::WARNING))
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(250, 190, 60))
-                                    .strong(),
-                            );
-                            ui.label(
-                                egui::RichText::new(
-                                    " — the build target/ directory ran out of space.",
-                                )
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(230, 210, 140)),
-                            );
-                        });
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "ESP32 / RISC-V builds produce several GB of LLVM artefacts \
-                                 on the first run.  Click the button to delete the target/ \
-                                 folder and free that space — crates cached in ~/.cargo are \
-                                 NOT removed so the next build only re-compiles changed files.",
-                            )
-                            .size(10.5)
-                            .color(egui::Color32::from_rgb(200, 190, 150)),
-                        );
-                        ui.add_space(6.0);
-                        if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new(format!(
-                                    "{} Clean target/  (free space)",
-                                    ph::TRASH
-                                ))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(255, 210, 80)),
+            let shown = crate::failure_hint::show_card(ui, msg, |ui| {
+                if is_disk_full
+                    && ui
+                        .add(egui::Button::new(
+                            egui::RichText::new(format!(
+                                "{} Clean target/  (free space)",
+                                ph::TRASH
                             ))
-                            .clicked()
-                        {
-                            build::start_clean(
-                                workspace.clone(),
-                                Arc::clone(build_state),
-                                ctx.clone(),
-                            );
-                            *selected_diagnostic = None;
-                        }
-                    });
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(255, 210, 80)),
+                        ))
+                        .clicked()
+                {
+                    build::start_clean(workspace.clone(), Arc::clone(build_state), ctx.clone());
+                    *selected_diagnostic = None;
+                }
+            });
+            if shown {
                 ui.add_space(4.0);
             }
 
@@ -269,8 +237,8 @@ pub fn show_cargo_tab(
             egui::ScrollArea::vertical()
                 .id_salt("build_failed_scroll")
                 .show(ui, |ui| {
-                    // Strip the [DISK_FULL] marker before display
-                    let display_msg = msg.strip_prefix("[DISK_FULL] ").unwrap_or(msg.as_str());
+                    // Marker already explained by the card above.
+                    let display_msg = crate::failure_hint::strip(msg.as_str());
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(display_msg)

@@ -31,6 +31,9 @@ pub fn show_profile_tab(
     probe_scan: &mut bool,
     probe_scan_err: Option<&str>,
     toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
+    // Tools confirmed missing — buttons needing one are greyed out with a
+    // "install it in Tools" hint (see `super::tool_missing`).
+    missing_tools: &[&'static str],
 ) {
     // ── Mode switch ─────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -45,7 +48,14 @@ pub fn show_profile_tab(
     ui.separator();
 
     match mode {
-        ProfileMode::Static => static_view(ui, state, by_crate, run_clicked, can_run),
+        ProfileMode::Static => static_view(
+            ui,
+            state,
+            by_crate,
+            run_clicked,
+            can_run && !super::tool_missing(missing_tools, "cargo-bloat"),
+            super::tool_missing(missing_tools, "cargo-bloat"),
+        ),
         ProfileMode::Runtime => runtime_view(
             ui,
             flame_state,
@@ -57,6 +67,7 @@ pub fn show_profile_tab(
             probe_scan,
             probe_scan_err,
             toolchain,
+            super::tool_missing(missing_tools, "probe-rs"),
         ),
     }
 }
@@ -69,6 +80,8 @@ fn static_view(
     by_crate: &mut bool,
     run_clicked: &mut bool,
     can_run: bool,
+    // `cargo-bloat` proven absent → explain that instead of a generic disable.
+    no_bloat: bool,
 ) {
     let st = state.lock().unwrap().clone();
     let busy = st.is_busy();
@@ -91,6 +104,11 @@ fn static_view(
                 "cargo bloat --release: build, then report the .text (Flash) size of each \
                  function.\nNeeds cargo-bloat: cargo install cargo-bloat",
             )
+            .on_disabled_hover_text(if no_bloat {
+                super::needs_tool_hint("cargo-bloat")
+            } else {
+                "Busy, or no chip config exists yet.".to_owned()
+            })
             .clicked()
         {
             *run_clicked = true;
@@ -147,7 +165,11 @@ fn static_view(
         ProfileState::Failed(e) => {
             ui.add_space(6.0);
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.label(egui::RichText::new(e).monospace().size(11.0).color(egui::Color32::from_rgb(230, 130, 120)));
+                // `[BLOAT_MISSING]` & friends get the shared explanation card
+                // (with an "Open Tools" button); anything else prints as-is.
+                if !crate::failure_hint::show_card(ui, e, |_| {}) {
+                    ui.label(egui::RichText::new(e).monospace().size(11.0).color(egui::Color32::from_rgb(230, 130, 120)));
+                }
             });
         }
         ProfileState::Done(res) => {
@@ -210,7 +232,10 @@ fn runtime_view(
     probe_scan: &mut bool,
     probe_scan_err: Option<&str>,
     toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
+    // `probe-rs` proven absent → the on-target sampler can't run at all.
+    no_probe_rs: bool,
 ) {
+    let can_run = can_run && !no_probe_rs;
     let st = flame_state.lock().unwrap().clone();
     let busy = st.is_busy();
 
@@ -233,6 +258,11 @@ fn runtime_view(
                  into a flamegraph.\nThe firmware must already be flashed + running. \
                  Intrusive (each halt stops the CPU) → a statistical view.",
             )
+            .on_disabled_hover_text(if no_probe_rs {
+                super::needs_tool_hint("probe-rs")
+            } else {
+                "Sampling, or no chip config exists yet.".to_owned()
+            })
             .clicked()
         {
             *sample_clicked = true;

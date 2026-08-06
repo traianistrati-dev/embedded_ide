@@ -106,16 +106,36 @@ pub fn show_tools_tab(
                                 .color(egui::Color32::GRAY),
                         );
 
+                        // ── Severity badge — answers "do I actually need this?"
+                        ui.label(
+                            egui::RichText::new(row.severity.label())
+                                .size(10.0)
+                                .color(row.severity.color()),
+                        )
+                        .on_hover_text(row.impact);
+
                         // ── Status badge ───────────────────────────────────
+                        let status_hover = match &row.status {
+                            ToolStatus::Outdated { found, min } => format!(
+                                "Found {found}, but this IDE needs {min} or newer. \
+                                 It may still work — update it with the button on the right.\n\n{}",
+                                row.impact
+                            ),
+                            _ => row.impact.to_owned(),
+                        };
                         ui.label(
                             egui::RichText::new(row.status.label())
                                 .size(10.5)
                                 .color(row.status.color()),
-                        );
+                        )
+                        .on_hover_text(status_hover);
 
                         // ── Version string ─────────────────────────────────
                         let ver = match &row.status {
                             ToolStatus::Ok(v) => v.as_str(),
+                            // Show what WAS found, so the gap to the minimum is
+                            // visible without hovering.
+                            ToolStatus::Outdated { found, .. } => found.as_str(),
                             _ => "—",
                         };
                         ui.label(
@@ -149,7 +169,14 @@ pub fn show_tools_tab(
 
                             // Install button — only when missing/failed AND auto-installable
                             if row.can_auto_install
-                                && matches!(row.status, ToolStatus::Missing | ToolStatus::Failed(_))
+                                && matches!(
+                                    row.status,
+                                    ToolStatus::Missing
+                                        | ToolStatus::Failed(_)
+                                        // An outdated tool offers the same
+                                        // action — installing again upgrades it.
+                                        | ToolStatus::Outdated { .. }
+                                )
                             {
                                 if ui
                                     .add_enabled(

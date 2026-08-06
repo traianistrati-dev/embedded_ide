@@ -40,6 +40,9 @@ pub fn show_debug_tab(
     probe_scan_err: Option<&str>,
     // Project chip's toolchain — gates which probes are selectable.
     toolchain: &crate::panels::mcu_module::mcu_catalog::ToolchainKind,
+    // Tools confirmed missing — buttons needing one are greyed out with a
+    // "install it in Tools" hint (see `super::tool_missing`).
+    missing_tools: &[&'static str],
 ) {
     let phase = dbg.phase();
     let busy = dbg.is_busy();
@@ -50,6 +53,9 @@ pub fn show_debug_tab(
     // Wrapped, not `ui.horizontal`: a plain row keeps allocating past the edge
     // on a narrow panel, and the Code Editor side panel adopts its content's
     // width — an overflowing row would widen the panel every frame.
+    // The whole tab is probe-rs (dap-server); grey it out when it's missing.
+    let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
+    let can_run = can_run && !no_probe_rs;
     ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
@@ -70,6 +76,11 @@ pub fn show_debug_tab(
                  left of a line number in the editor (red dot) — before or \
                  during the session.",
             )
+            .on_disabled_hover_text(if no_probe_rs {
+                super::needs_tool_hint("probe-rs")
+            } else {
+                "A session is running, or no chip config exists yet.".to_owned()
+            })
             .clicked()
         {
             *debug_go = true;
