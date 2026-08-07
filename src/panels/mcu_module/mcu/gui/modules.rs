@@ -872,7 +872,7 @@ pub fn draw_modules(
                             egui::pos2(r.right() + 2.0, r.bottom() + 2.0),
                         ),
                         4.0,
-                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                        egui::Stroke::new(2.8, egui::Color32::WHITE),
                         egui::StrokeKind::Middle,
                     );
                 }

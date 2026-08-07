@@ -177,7 +177,7 @@ pub fn draw_io_arrows(
     // borrows `mcu.find_pin_mut`).
     let mut drag_updates: Vec<(usize, (f32, f32))> = Vec::new();
     let mut reset_updates: Vec<usize> = Vec::new();
-    let mut goto_request: Option<usize> = None;
+    let mut click_request: Option<usize> = None;
     // The pin the user has selected on the chip: its field group out here is
     // called out the same way as the pin itself and as a selected module box.
     let selected_pin = mcu.selected_pin;
@@ -243,11 +243,15 @@ pub fn draw_io_arrows(
                 egui::Sense::click_and_drag(),
             )
             .on_hover_cursor(egui::CursorIcon::Grab)
-            .on_hover_text("Click to jump to this variable in the code - drag to move the field");
-        // The strip SHOWS the generated variable name, so clicking it asks the
-        // editor to jump to the line that binds it.
+            .on_hover_text(
+                "Click to select the pin and jump to this variable in the code - \
+                 drag to move the field",
+            );
+        // The strip SHOWS the generated variable name, so clicking it does what
+        // clicking the pin on the chip does: select it (click again to deselect)
+        // and jump to the line that binds the variable.
         if resp.clicked() {
-            goto_request = Some(it.num);
+            click_request = Some(it.num);
         }
         if resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -301,7 +305,8 @@ pub fn draw_io_arrows(
             painter.rect_stroke(
                 field_rect.union(handle_rect).expand(3.0),
                 4.0,
-                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                // Same 2.8 px as a selected module box's border.
+                egui::Stroke::new(2.8, egui::Color32::WHITE),
                 egui::StrokeKind::Middle,
             );
         }
@@ -313,8 +318,21 @@ pub fn draw_io_arrows(
     for num in reset_updates {
         mcu.io_pin_pos.remove(&num);
     }
-    if let Some(num) = goto_request {
-        mcu.request_pin_goto(num);
+    // Same toggle as clicking the pin on the chip (see `Mcu::draw`): select it,
+    // click again to deselect, and jump to the code only on the click that
+    // selects. Applied after the loop, so the border it turns on shows on the
+    // next frame — hence the repaint request.
+    if let Some(num) = click_request {
+        mcu.selected_pin = if mcu.selected_pin == Some(num) {
+            None
+        } else {
+            Some(num)
+        };
+        if mcu.selected_pin == Some(num) {
+            mcu.fn_scroll_offset = 0.0;
+            mcu.request_pin_goto(num);
+        }
+        ui.ctx().request_repaint();
     }
 }
 
