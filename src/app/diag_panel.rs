@@ -6,8 +6,8 @@
 use super::BuildPanelTab;
 use super::tabs::{
     show_activity_tab, show_cargo_tab, show_clippy_tab, show_debug_tab, show_dfu_tab, show_git_tab,
-    show_profile_tab,
-    show_ra_tab, show_rtt_tab, show_serial_tab, show_terminal_tab, show_tools_tab,
+    show_profile_tab, show_ra_tab, show_rtt_tab, show_serial_tab, show_terminal_tab,
+    show_tools_tab,
 };
 use crate::activity::ActivityLog;
 use crate::build::BuildState;
@@ -268,9 +268,7 @@ pub(super) fn show_diag_panel(
         {
             let active = *tab == BuildPanelTab::Profile;
             let (badge, col) = match &*profile_state.lock().unwrap() {
-                crate::profile::ProfileState::Running => {
-                    (" …".to_owned(), egui::Color32::GRAY)
-                }
+                crate::profile::ProfileState::Running => (" …".to_owned(), egui::Color32::GRAY),
                 crate::profile::ProfileState::Done(_) => (
                     format!(" {}", ph::CHECK_CIRCLE),
                     egui::Color32::from_rgb(80, 200, 100),
@@ -279,9 +277,7 @@ pub(super) fn show_diag_panel(
                     format!(" {}", ph::X_CIRCLE),
                     egui::Color32::from_rgb(220, 80, 70),
                 ),
-                crate::profile::ProfileState::Idle => {
-                    (String::new(), egui::Color32::DARK_GRAY)
-                }
+                crate::profile::ProfileState::Idle => (String::new(), egui::Color32::DARK_GRAY),
             };
             let label = format!("{} Profile{badge}", ph::CHART_BAR);
             let btn = ui.add(

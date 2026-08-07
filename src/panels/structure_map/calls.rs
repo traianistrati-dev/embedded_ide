@@ -125,7 +125,12 @@ impl CallPass {
             if from_node == to_node {
                 continue; // intra-module call — not drawn
             }
-            let edge = CallEdge { from_node, from_row, to_node, to_row };
+            let edge = CallEdge {
+                from_node,
+                from_row,
+                to_node,
+                to_row,
+            };
             *self.pair_counts.entry(edge).or_insert(0) += 1;
             if self.seen.insert(edge) {
                 self.edges.push(edge);
@@ -164,7 +169,11 @@ mod tests {
     use super::*;
 
     fn loc(path: &str, line0: u32) -> ReferenceLoc {
-        ReferenceLoc { path: path.into(), line: line0, character: 4 }
+        ReferenceLoc {
+            path: path.into(),
+            line: line0,
+            character: 4,
+        }
     }
 
     fn sample() -> ModuleGraph {
@@ -225,8 +234,18 @@ fn main() {
         assert_eq!(
             pass.edges,
             vec![
-                CallEdge { from_node: 0, from_row: 0, to_node: a, to_row: 0 },
-                CallEdge { from_node: b, from_row: 0, to_node: a, to_row: 0 },
+                CallEdge {
+                    from_node: 0,
+                    from_row: 0,
+                    to_node: a,
+                    to_row: 0
+                },
+                CallEdge {
+                    from_node: b,
+                    from_row: 0,
+                    to_node: a,
+                    to_row: 0
+                },
             ],
             "main::main → a::helper and b::run → a::helper (use line + external dropped)"
         );

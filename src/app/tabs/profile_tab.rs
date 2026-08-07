@@ -38,7 +38,9 @@ pub fn show_profile_tab(
     // ── Mode switch ─────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {
         ui.selectable_value(mode, ProfileMode::Static, "Static (size)")
-            .on_hover_text("cargo bloat: Flash (.text) size per function / crate. No target needed.");
+            .on_hover_text(
+                "cargo bloat: Flash (.text) size per function / crate. No target needed.",
+            );
         ui.selectable_value(mode, ProfileMode::Runtime, "Runtime (flamegraph)")
             .on_hover_text(
                 "On-target statistical profiler: halt-samples the running firmware's call \
@@ -130,7 +132,11 @@ fn static_view(
                     egui::Color32::from_rgb(220, 180, 60),
                 ),
                 ProfileState::Done(r) => (
-                    format!("{} {}", r.rows.len(), if r.by_crate { "crates" } else { "fns" }),
+                    format!(
+                        "{} {}",
+                        r.rows.len(),
+                        if r.by_crate { "crates" } else { "fns" }
+                    ),
                     egui::Color32::from_rgb(120, 190, 120),
                 ),
                 ProfileState::Failed(_) => {
@@ -140,7 +146,8 @@ fn static_view(
             ui.label(egui::RichText::new(text).size(10.5).color(color));
             if busy {
                 ui.spinner();
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(150));
             }
         });
     });
@@ -160,32 +167,60 @@ fn static_view(
         }
         ProfileState::Running => {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Building --release and running cargo bloat…").size(11.0).color(egui::Color32::from_rgb(200, 180, 120)));
+            ui.label(
+                egui::RichText::new("Building --release and running cargo bloat…")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(200, 180, 120)),
+            );
         }
         ProfileState::Failed(e) => {
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                // `[BLOAT_MISSING]` & friends get the shared explanation card
-                // (with an "Open Tools" button); anything else prints as-is.
-                if !crate::failure_hint::show_card(ui, e, |_| {}) {
-                    ui.label(egui::RichText::new(e).monospace().size(11.0).color(egui::Color32::from_rgb(230, 130, 120)));
-                }
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // `[BLOAT_MISSING]` & friends get the shared explanation card
+                    // (with an "Open Tools" button); anything else prints as-is.
+                    if !crate::failure_hint::show_card(ui, e, |_| {}) {
+                        ui.label(
+                            egui::RichText::new(e)
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(230, 130, 120)),
+                        );
+                    }
+                });
         }
         ProfileState::Done(res) => {
-            let max = res.rows.iter().map(|r| r.size_bytes).max().unwrap_or(1).max(1);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                if !res.summary.is_empty() {
-                    ui.label(egui::RichText::new(&res.summary).size(11.0).color(egui::Color32::from_gray(160)));
-                    ui.add_space(4.0);
-                }
-                if res.rows.is_empty() {
-                    ui.label(egui::RichText::new(&res.raw).monospace().size(10.5).color(egui::Color32::from_gray(190)));
-                }
-                for r in &res.rows {
-                    bloat_row(ui, r, max);
-                }
-            });
+            let max = res
+                .rows
+                .iter()
+                .map(|r| r.size_bytes)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if !res.summary.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&res.summary)
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(160)),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    if res.rows.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&res.raw)
+                                .monospace()
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(190)),
+                        );
+                    }
+                    for r in &res.rows {
+                        bloat_row(ui, r, max);
+                    }
+                });
         }
     }
 }
@@ -193,7 +228,8 @@ fn static_view(
 /// One size bar: width ∝ size, coloured small→large, `size · crate · name` on it.
 fn bloat_row(ui: &mut egui::Ui, r: &BloatRow, max: u64) {
     let frac = (r.size_bytes as f32 / max as f32).clamp(0.0, 1.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
     }
@@ -213,8 +249,17 @@ fn bloat_row(ui: &mut egui::Ui, r: &BloatRow, max: u64) {
     } else {
         format!("{}   {}::{}", r.size_label, r.crate_name, r.name)
     };
-    painter.text(rect.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::monospace(11.0), egui::Color32::from_gray(235));
-    resp.on_hover_text(format!("{:.1}% of .text · {} bytes", r.text_pct, r.size_bytes));
+    painter.text(
+        rect.left_center() + egui::vec2(6.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::monospace(11.0),
+        egui::Color32::from_gray(235),
+    );
+    resp.on_hover_text(format!(
+        "{:.1}% of .text · {} bytes",
+        r.text_pct, r.size_bytes
+    ));
     ui.add_space(2.0);
 }
 
@@ -268,34 +313,57 @@ fn runtime_view(
             *sample_clicked = true;
         }
         ui.separator();
-        ui.label(egui::RichText::new("Chip:").size(10.5).color(egui::Color32::GRAY));
+        ui.label(
+            egui::RichText::new("Chip:")
+                .size(10.5)
+                .color(egui::Color32::GRAY),
+        );
         ui.label(
             egui::RichText::new(if chip.is_empty() { "—" } else { chip })
                 .size(10.5)
                 .monospace()
                 .color(egui::Color32::from_rgb(120, 160, 200)),
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            match &st {
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| match &st {
                 FlameState::Sampling(done, total) => {
-                    ui.label(egui::RichText::new(format!("{done}/{total}")).size(10.5).color(egui::Color32::from_rgb(220, 180, 60)));
+                    ui.label(
+                        egui::RichText::new(format!("{done}/{total}"))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(220, 180, 60)),
+                    );
                     ui.spinner();
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(120));
                 }
                 FlameState::Building => {
-                    ui.label(egui::RichText::new("building…").size(10.5).color(egui::Color32::from_rgb(220, 180, 60)));
+                    ui.label(
+                        egui::RichText::new("building…")
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(220, 180, 60)),
+                    );
                     ui.spinner();
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(150));
                 }
                 FlameState::Done(r) => {
-                    ui.label(egui::RichText::new(format!("{} samples", r.samples)).size(10.5).color(egui::Color32::from_rgb(120, 190, 120)));
+                    ui.label(
+                        egui::RichText::new(format!("{} samples", r.samples))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(120, 190, 120)),
+                    );
                 }
                 FlameState::Failed(_) => {
-                    ui.label(egui::RichText::new("failed").size(10.5).color(egui::Color32::from_rgb(220, 110, 100)));
+                    ui.label(
+                        egui::RichText::new("failed")
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(220, 110, 100)),
+                    );
                 }
                 FlameState::Idle => {}
-            }
-        });
+            },
+        );
     });
     // Shared probe row — pick the SAME probe as the Debug / RTT / Flash tabs.
     ui.horizontal_wrapped(|ui| {
@@ -325,22 +393,39 @@ fn runtime_view(
         }
         FlameState::Building => {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Building --release (for symbols)…").size(11.0).color(egui::Color32::from_rgb(200, 180, 120)));
+            ui.label(
+                egui::RichText::new("Building --release (for symbols)…")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(200, 180, 120)),
+            );
         }
         FlameState::Sampling(done, total) => {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(format!("Sampling the call stack… {done}/{total}")).size(11.0).color(egui::Color32::from_rgb(200, 180, 120)));
+            ui.label(
+                egui::RichText::new(format!("Sampling the call stack… {done}/{total}"))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(200, 180, 120)),
+            );
         }
         FlameState::Failed(e) => {
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.label(egui::RichText::new(e).monospace().size(11.0).color(egui::Color32::from_rgb(230, 130, 120)));
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(e)
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(230, 130, 120)),
+                    );
+                });
         }
         FlameState::Done(res) => {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                flame_widget(ui, &res.root);
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    flame_widget(ui, &res.root);
+                });
         }
     }
 }
@@ -393,8 +478,20 @@ fn flame_widget(ui: &mut egui::Ui, root: &FlameNode) {
         });
         let painter = ui.painter().with_clip_rect(rect);
         // The click position picks exactly one segment (its row + x span).
-        let click = resp.clicked().then(|| resp.interact_pointer_pos()).flatten();
-        draw_node(&painter, root, rect.left(), rect.top(), content_w, ROW_H, click, &mut hit);
+        let click = resp
+            .clicked()
+            .then(|| resp.interact_pointer_pos())
+            .flatten();
+        draw_node(
+            &painter,
+            root,
+            rect.left(),
+            rect.top(),
+            content_w,
+            ROW_H,
+            click,
+            &mut hit,
+        );
         wheel
     });
     if let Some((sy, content_x)) = out.inner {
@@ -480,13 +577,19 @@ fn flame_details(ui: &mut egui::Ui, node: &FlameNode, total: usize) {
                     ui.add_sized(
                         [46.0, 14.0],
                         egui::Label::new(
-                            egui::RichText::new(format!("{cp:>5.1}%")).monospace().size(10.5),
+                            egui::RichText::new(format!("{cp:>5.1}%"))
+                                .monospace()
+                                .size(10.5),
                         ),
                     );
                     // mini share bar
-                    let (r, _) = ui.allocate_exact_size(egui::vec2(80.0, 10.0), egui::Sense::hover());
+                    let (r, _) =
+                        ui.allocate_exact_size(egui::vec2(80.0, 10.0), egui::Sense::hover());
                     ui.painter().rect_filled(
-                        egui::Rect::from_min_size(r.min, egui::vec2((80.0 * cp / 100.0).max(1.0), 10.0)),
+                        egui::Rect::from_min_size(
+                            r.min,
+                            egui::vec2((80.0 * cp / 100.0).max(1.0), 10.0),
+                        ),
                         1.0,
                         node_color(&c.name),
                     );
@@ -522,7 +625,10 @@ fn draw_node(
     if w < 1.0 {
         return;
     }
-    let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2((w - 1.0).max(0.5), row_h - 1.0));
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(x, y),
+        egui::vec2((w - 1.0).max(0.5), row_h - 1.0),
+    );
     painter.rect_filled(rect, 1.0, node_color(&node.name));
     if w > 26.0 {
         painter.text(

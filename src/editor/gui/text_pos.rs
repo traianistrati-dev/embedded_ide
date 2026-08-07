@@ -260,10 +260,7 @@ mod diags_for_file_tests {
     #[test]
     fn uri_keys_still_match_by_suffix() {
         let mut map = HashMap::new();
-        map.insert(
-            "file:///c:/tmp/ws/src/utils.rs".to_string(),
-            vec![diag()],
-        );
+        map.insert("file:///c:/tmp/ws/src/utils.rs".to_string(), vec![diag()]);
         assert_eq!(diags_for_file(&map, "src/utils.rs").len(), 1);
     }
 

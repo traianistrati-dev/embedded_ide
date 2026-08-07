@@ -45,7 +45,7 @@ pub fn make_generated_section(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{parse_main_rs, USER_TAIL};
+    use super::super::{USER_TAIL, parse_main_rs};
     use super::*;
     use crate::panels::mcu_module::pins::logic::pin::Pin;
     use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -108,11 +108,14 @@ mod tests {
     /// range 2), and an HSI-reset graph falls back to `Default::default()`.
     #[test]
     fn clock_graph_maps_to_embassy_rcc_config() {
-        use crate::panels::mcu_module::clock::graph::{stm32wba_graph, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32wba_graph};
         use crate::panels::mcu_module::clock::model::ClockConfig;
 
         // 100 MHz preset (the shipped default selections).
-        let gc = GraphClock { graph: stm32wba_graph(), layout: Default::default() };
+        let gc = GraphClock {
+            graph: stm32wba_graph(),
+            layout: Default::default(),
+        };
         let section = make_generated_section("WBA", &[], &ClockConfig::Graph(gc.clone()), "");
         for needle in [
             "config.rcc.hse = Some(rcc::Hse { prescaler: rcc::HsePrescaler::DIV1 });",
@@ -149,7 +152,10 @@ mod tests {
                 hz: 32_000_000,
             };
         let s3 = make_generated_section("WBA", &[], &ClockConfig::Graph(gc3), "");
-        assert!(s3.contains("embassy_stm32::init(Default::default())"), "{s3}");
+        assert!(
+            s3.contains("embassy_stm32::init(Default::default())"),
+            "{s3}"
+        );
     }
 
     /// Splice replaces only the GEN block, keeping the user tail.

@@ -13,7 +13,7 @@
 //! PC-sampling (chip- + probe-specific). Not hardware-tested in this repo.
 
 use crate::build::no_window;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -71,7 +71,8 @@ pub fn build_tree(samples: &[Vec<String>]) -> FlameNode {
 }
 
 fn sort_desc(node: &mut FlameNode) {
-    node.children.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    node.children
+        .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
     for c in &mut node.children {
         sort_desc(c);
     }
@@ -123,7 +124,15 @@ pub fn start_flame(
     *state.lock().unwrap() = FlameState::Building;
     ctx.request_repaint();
     thread::spawn(move || {
-        let next = run(&project_dir, &target, &chip, probe.as_deref(), n_samples, &state, &ctx);
+        let next = run(
+            &project_dir,
+            &target,
+            &chip,
+            probe.as_deref(),
+            n_samples,
+            &state,
+            &ctx,
+        );
         if let Err(e) = &next {
             *state.lock().unwrap() = FlameState::Failed(e.clone());
         } else if let Ok(res) = next {
@@ -273,7 +282,12 @@ fn sample_over_dap(
     let mut seq = 1i64;
 
     // Handshake: initialize → launch (ATTACH: no flash) → configurationDone.
-    send(&mut stream, &mut seq, "initialize", json!({"adapterID": "probe-rs"}))?;
+    send(
+        &mut stream,
+        &mut seq,
+        "initialize",
+        json!({"adapterID": "probe-rs"}),
+    )?;
     wait_response(&mut stream, "initialize")?;
     let mut launch = json!({
         "chip": chip,
@@ -298,7 +312,12 @@ fn sample_over_dap(
         // Give the target a moment to run between samples (spreads the samples,
         // reduces "always halted in the same spot" bias from back-to-back halts).
         thread::sleep(Duration::from_millis(8));
-        send(&mut stream, &mut seq, "pause", json!({"threadId": thread_id.max(1)}))?;
+        send(
+            &mut stream,
+            &mut seq,
+            "pause",
+            json!({"threadId": thread_id.max(1)}),
+        )?;
         let stopped = wait_event(&mut stream, "stopped")?;
         if let Some(t) = stopped["body"]["threadId"].as_i64() {
             thread_id = t;
@@ -315,7 +334,12 @@ fn sample_over_dap(
                 samples.push(stack);
             }
         }
-        send(&mut stream, &mut seq, "continue", json!({"threadId": thread_id.max(1)}))?;
+        send(
+            &mut stream,
+            &mut seq,
+            "continue",
+            json!({"threadId": thread_id.max(1)}),
+        )?;
 
         if i % 4 == 0 {
             *state.lock().unwrap() = FlameState::Sampling(samples.len(), n_samples);
@@ -353,7 +377,12 @@ fn frames_of(resp: &Value) -> Option<Vec<String>> {
 
 // ── Minimal blocking DAP client ───────────────────────────────────────────────
 
-fn send(stream: &mut TcpStream, seq: &mut i64, command: &str, arguments: Value) -> Result<(), String> {
+fn send(
+    stream: &mut TcpStream,
+    seq: &mut i64,
+    command: &str,
+    arguments: Value,
+) -> Result<(), String> {
     let msg = json!({"seq": *seq, "type": "request", "command": command, "arguments": arguments});
     *seq += 1;
     let body = msg.to_string();
@@ -386,7 +415,8 @@ fn read_msg(stream: &mut TcpStream) -> Option<Value> {
 /// Read messages until a successful RESPONSE to `command` arrives.
 fn wait_response(stream: &mut TcpStream, command: &str) -> Result<Value, String> {
     for _ in 0..200 {
-        let msg = read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for {command}"))?;
+        let msg =
+            read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for {command}"))?;
         if msg["type"] == "response" && msg["command"] == command {
             if msg["success"].as_bool() == Some(false) {
                 let m = msg["message"].as_str().unwrap_or("request failed");
@@ -404,7 +434,8 @@ fn wait_response(stream: &mut TcpStream, command: &str) -> Result<Value, String>
 /// real reason is lost as a bare "closed waiting for 'initialized'".
 fn wait_event(stream: &mut TcpStream, event: &str) -> Result<Value, String> {
     for _ in 0..200 {
-        let msg = read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for '{event}'"))?;
+        let msg =
+            read_msg(stream).ok_or_else(|| format!("dap-server closed waiting for '{event}'"))?;
         if msg["type"] == "event" && msg["event"] == event {
             return Ok(msg);
         }
@@ -455,7 +486,10 @@ mod tests {
         assert_eq!(main.children[1].name, "setup");
         // loop→work is the hot leaf (3), before idle (1).
         let lp = &main.children[0];
-        assert_eq!((lp.children[0].name.as_str(), lp.children[0].count), ("work", 3));
+        assert_eq!(
+            (lp.children[0].name.as_str(), lp.children[0].count),
+            ("work", 3)
+        );
         assert_eq!(lp.children[1].name, "idle");
     }
 

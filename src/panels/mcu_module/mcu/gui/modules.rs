@@ -149,7 +149,12 @@ pub fn dragged_half_extent(mcu: &Mcu) -> egui::Vec2 {
 /// Outer connection point of an MCU pin (rotation applied). `None` if the pin
 /// isn't on this chip. `chip_rect` is the LOCAL (un-rotated) body; `rot` is the
 /// diagram rotation.
-pub fn pin_anchor(mcu: &Mcu, chip_rect: egui::Rect, rot: Rot, pin_num: usize) -> Option<egui::Pos2> {
+pub fn pin_anchor(
+    mcu: &Mcu,
+    chip_rect: egui::Rect,
+    rot: Rot,
+    pin_num: usize,
+) -> Option<egui::Pos2> {
     pin_anchor_side(mcu, chip_rect, rot, pin_num).map(|(p, _)| p)
 }
 
@@ -236,11 +241,7 @@ fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: 
 /// Snap a (rotated) outward vector to the nearest chip side.
 fn side_from_outward(v: egui::Vec2) -> Side {
     if v.x.abs() >= v.y.abs() {
-        if v.x >= 0.0 {
-            Side::Right
-        } else {
-            Side::Left
-        }
+        if v.x >= 0.0 { Side::Right } else { Side::Left }
     } else if v.y >= 0.0 {
         Side::Bottom
     } else {
@@ -664,7 +665,13 @@ pub fn draw_modules(
         group.sort_by(|a, b| a.along.total_cmp(&b.along));
         let mut cursor = f32::MIN;
         for e in group {
-            let rect = packed_rect(chip_rect, e.side, e.along, &mut cursor, box_h(&mcu.modules[e.idx]));
+            let rect = packed_rect(
+                chip_rect,
+                e.side,
+                e.along,
+                &mut cursor,
+                box_h(&mcu.modules[e.idx]),
+            );
             boxes.push((e.idx, rect, e.conns.clone(), e.side, true, false));
         }
     }
@@ -686,8 +693,7 @@ pub fn draw_modules(
     // Manually-dragged boxes: placed at chip centre + stored offset.
     for (i, conns) in manual_mods {
         let p = mcu.modules[i].pos;
-        let rect =
-            egui::Rect::from_min_size(
+        let rect = egui::Rect::from_min_size(
             chip_center + egui::vec2(p.0, p.1),
             egui::vec2(BOX_W, box_h(&mcu.modules[i])),
         );
@@ -1233,7 +1239,10 @@ pub fn module_config_ui(
                                 egui::Color32::from_rgb(230, 170, 70)
                             };
                             ui.menu_button(
-                                egui::RichText::new(&name).size(10.5).strong().color(btn_col),
+                                egui::RichText::new(&name)
+                                    .size(10.5)
+                                    .strong()
+                                    .color(btn_col),
                                 |ui| {
                                     ui.set_min_width(210.0);
                                     ui.label(
@@ -1358,7 +1367,12 @@ pub fn module_config_ui(
                                 .map(|f| *f == PinFunction::Unset)
                                 .unwrap_or(true)
                         })
-                        .map(|n| pin_names.get(n).cloned().unwrap_or_else(|| format!("pin{n}")))
+                        .map(|n| {
+                            pin_names
+                                .get(n)
+                                .cloned()
+                                .unwrap_or_else(|| format!("pin{n}"))
+                        })
                         .collect();
                     let incomplete = !unconfigured.is_empty();
                     let current_sig = custom_pins_sig(&cfg.pins, pin_sigs);

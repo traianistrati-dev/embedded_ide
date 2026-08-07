@@ -22,7 +22,11 @@ pub fn toggle_line_comments(
 
     // A non-empty selection ending exactly at a line start shouldn't pull in the
     // next line.
-    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' { hi - 1 } else { hi };
+    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' {
+        hi - 1
+    } else {
+        hi
+    };
 
     // Per-line content ranges [start, end) in char indices ('\n' excluded).
     let mut line_ranges: Vec<(usize, usize)> = Vec::new();

@@ -112,9 +112,9 @@ impl FamilyBackend for Stm32f1Backend {
             header = stm32::invariant_header(&mcu.name, &mcu.id),
             tail = USER_TAIL,
         );
-        // Only the ADC init helper lives after `fn main`; USART/SPI/I2C init are
-        // in `src/pins/configs/`.
-        stm32::ensure_helper_defs(base, &all)
+        // Nothing lives after `fn main` any more: USART/SPI/I2C init are in
+        // `src/pins/configs/` and the ADC is one line inside the GEN block.
+        stm32::strip_obsolete_helpers(base)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
@@ -135,15 +135,23 @@ impl FamilyBackend for Stm32f1Backend {
             &mcu.custom_module_inits(),
         );
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
-        // Add the ADC helper if newly needed; preserve user-edited ones.
-        stm32::ensure_helper_defs(spliced, &all)
+        // Clean up the init helpers older versions appended after `fn main`.
+        stm32::strip_obsolete_helpers(spliced)
     }
 
     fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
         let all = pins_of(mcu);
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
-        stm32::config_files(&all, &usart, &spi, &i2c, &can, &mcu.clock, mcu.gpio_native())
+        stm32::config_files(
+            &all,
+            &usart,
+            &spi,
+            &i2c,
+            &can,
+            &mcu.clock,
+            mcu.gpio_native(),
+        )
     }
 }
 
@@ -410,9 +418,15 @@ mod tests {
     /// emits a complete, buildable embassy skeleton.
     #[test]
     fn other_stm32_families_use_the_generic_embassy_backend() {
-        for fam in ["stm32f4", "stm32g0", "stm32g4", "stm32l4", "stm32h7", "stm32c0"] {
+        for fam in [
+            "stm32f4", "stm32g0", "stm32g4", "stm32l4", "stm32h7", "stm32c0",
+        ] {
             let b = backend_for(fam).unwrap_or_else(|| panic!("no backend for {fam}"));
-            assert_eq!(b.family_id(), "stm32", "{fam} should hit the generic backend");
+            assert_eq!(
+                b.family_id(),
+                "stm32",
+                "{fam} should hit the generic backend"
+            );
         }
         // The dedicated backends still win over the generic one.
         assert_eq!(backend_for("stm32f1").unwrap().family_id(), "stm32f1");
@@ -494,8 +508,14 @@ mod tests {
         // Crate-level allow (the executor macro drops a fn-level one — see
         // `embassy_async::invariant_header`).
         assert!(code.contains("#![allow(unused_variables, unused_mut)]"));
-        assert!(!code.contains("fn main() -> !"), "no blocking entry in async");
-        assert!(!code.contains("use cortex_m_rt::entry;"), "no cortex_m_rt entry import");
+        assert!(
+            !code.contains("fn main() -> !"),
+            "no blocking entry in async"
+        );
+        assert!(
+            !code.contains("use cortex_m_rt::entry;"),
+            "no cortex_m_rt entry import"
+        );
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
     }
 
@@ -525,19 +545,37 @@ mod tests {
         assert!(now_async.contains("#[embassy_executor::main]"));
         assert!(now_async.contains("HAL: embassy-stm32 (async)"));
         assert!(!now_async.contains("fn main() -> !"), "blocking entry gone");
-        assert!(!now_async.contains("use cortex_m_rt::entry;"), "blocking import gone");
+        assert!(
+            !now_async.contains("use cortex_m_rt::entry;"),
+            "blocking import gone"
+        );
         assert!(now_async.contains("USER EDIT"), "user tail preserved");
-        assert_eq!(now_async.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
+        assert_eq!(
+            now_async
+                .matches(crate::panels::mcu_module::codegen::GEN_BEGIN)
+                .count(),
+            1
+        );
 
         // → back to Blocking: blocking header/entry restored, still one GEN block.
         mcu.runtime = Runtime::Blocking;
         let back = mcu.update_main_rs(&now_async);
         assert!(back.contains("fn main() -> !"));
         assert!(back.contains("HAL: embassy-stm32 (blocking)"));
-        assert!(!back.contains("#[embassy_executor::main]"), "async entry gone");
-        assert!(!back.contains("use embassy_executor::Spawner;"), "async import gone");
+        assert!(
+            !back.contains("#[embassy_executor::main]"),
+            "async entry gone"
+        );
+        assert!(
+            !back.contains("use embassy_executor::Spawner;"),
+            "async import gone"
+        );
         assert!(back.contains("USER EDIT"), "user tail still preserved");
-        assert_eq!(back.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
+        assert_eq!(
+            back.matches(crate::panels::mcu_module::codegen::GEN_BEGIN)
+                .count(),
+            1
+        );
     }
 
     /// An async USART (both TX+RX wired) emits a `usart{n}.rs` config file with
@@ -633,14 +671,31 @@ mod tests {
         // Default (no module) → blocking SPI/I2C: new_blocking, embedded-hal 1.0,
         // and init calls WITHOUT the DMA TODO.
         let code = mcu.fresh_main_rs();
-        assert!(code.contains("pins::configs::spi1::init(p.SPI1,"), "SPI call:\n{code}");
-        assert!(code.contains("pins::configs::i2c1::init(p.I2C1,"), "I2C call");
-        assert!(!code.contains("DMA_TX_TODO"), "blocking calls carry no DMA TODO");
+        assert!(
+            code.contains("pins::configs::spi1::init(p.SPI1,"),
+            "SPI call:\n{code}"
+        );
+        assert!(
+            code.contains("pins::configs::i2c1::init(p.I2C1,"),
+            "I2C call"
+        );
+        assert!(
+            !code.contains("DMA_TX_TODO"),
+            "blocking calls carry no DMA TODO"
+        );
         let cfgs = mcu.config_files();
-        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").expect("spi1.rs").1;
+        let spi1 = &cfgs
+            .iter()
+            .find(|(n, _)| n == "spi1.rs")
+            .expect("spi1.rs")
+            .1;
         assert!(spi1.contains("Spi::new_blocking"));
         assert!(spi1.contains("embedded_hal::spi::SpiBus"));
-        let i2c1 = &cfgs.iter().find(|(n, _)| n == "i2c1.rs").expect("i2c1.rs").1;
+        let i2c1 = &cfgs
+            .iter()
+            .find(|(n, _)| n == "i2c1.rs")
+            .expect("i2c1.rs")
+            .1;
         assert!(i2c1.contains("I2c::new_blocking"));
         assert!(i2c1.contains("embedded_hal::i2c::I2c"));
 
@@ -657,13 +712,20 @@ mod tests {
             connections: vec![],
         });
         let code = mcu.fresh_main_rs();
-        assert!(code.contains("DMA_TX_TODO"), "async-DMA call has the DMA TODO:\n{code}");
+        assert!(
+            code.contains("DMA_TX_TODO"),
+            "async-DMA call has the DMA TODO:\n{code}"
+        );
         let cfgs = mcu.config_files();
         let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
         assert!(spi1.contains("Spi::new(spi"), "DMA driver: {spi1}");
         assert!(spi1.contains("embedded_hal_async::spi::SpiBus"));
         // The USART/GPIO-less project still keeps exactly one gen block.
-        assert_eq!(code.matches(crate::panels::mcu_module::codegen::GEN_BEGIN).count(), 1);
+        assert_eq!(
+            code.matches(crate::panels::mcu_module::codegen::GEN_BEGIN)
+                .count(),
+            1
+        );
     }
 
     /// The Native runtime forces concrete stm32f1xx-hal codegen for the bus
@@ -682,7 +744,9 @@ mod tests {
         assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
         let n = mcu.modules[0].instance();
         // The module keeps its default Portable api_style throughout.
-        assert!(matches!(&mcu.modules[0].config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable));
+        assert!(
+            matches!(&mcu.modules[0].config, ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable)
+        );
 
         let usart_body = |mcu: &crate::panels::mcu_module::mcu::Mcu| {
             mcu.config_files()
@@ -700,14 +764,25 @@ mod tests {
         assert!(mcu.is_native());
         let body = usart_body(&mcu);
         assert!(
-            body.contains(&format!("-> (serial::Tx<pac::USART{n}>, serial::Rx<pac::USART{n}>)")),
+            body.contains(&format!(
+                "-> (serial::Tx<pac::USART{n}>, serial::Rx<pac::USART{n}>)"
+            )),
             "{body}"
         );
-        assert!(!body.contains("embedded_io"), "native forced → no embedded-io:\n{body}");
+        assert!(
+            !body.contains("embedded_io"),
+            "native forced → no embedded-io:\n{body}"
+        );
         // …and main.rs uses the split `(Tx, Rx)` tuple binding.
         let code = mcu.fresh_main_rs();
-        assert!(code.contains(&format!("let (mut _tx{n}")), "native tuple binding:\n{code}");
-        assert!(!code.contains(&format!("let mut _serial{n}")), "not the single-value form");
+        assert!(
+            code.contains(&format!("let (mut _tx{n}")),
+            "native tuple binding:\n{code}"
+        );
+        assert!(
+            !code.contains(&format!("let mut _serial{n}")),
+            "not the single-value form"
+        );
     }
 
     /// The WBA backend produces a complete embassy skeleton with the markers,

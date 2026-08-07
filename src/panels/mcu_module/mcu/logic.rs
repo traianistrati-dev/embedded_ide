@@ -278,7 +278,13 @@ impl Mcu {
         use crate::panels::mcu_module::mcu::model::ModuleUndo;
         let pins = self
             .iter_all_pins()
-            .map(|p| (p.number, p.selected_function.clone(), p.custom_label.clone()))
+            .map(|p| {
+                (
+                    p.number,
+                    p.selected_function.clone(),
+                    p.custom_label.clone(),
+                )
+            })
             .collect();
         self.module_undo.push(ModuleUndo {
             modules: self.modules.clone(),

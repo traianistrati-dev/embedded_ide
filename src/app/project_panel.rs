@@ -170,10 +170,7 @@ impl AppIde {
                                 if ui
                                     .add_enabled(
                                         can_save,
-                                        egui::Button::new(format!(
-                                            "{} Save Project",
-                                            ph::EXPORT
-                                        )),
+                                        egui::Button::new(format!("{} Save Project", ph::EXPORT)),
                                     )
                                     .on_hover_text("Export/Save project to disk (Ctrl+S)")
                                     .clicked()
@@ -184,8 +181,8 @@ impl AppIde {
                                 // Rename needs a folder on disk (a project gets
                                 // its name at the first Save) and no save
                                 // worker writing into the old path meanwhile.
-                                let can_rename = self.project_dir.is_some()
-                                    && self.save_in_progress.is_none();
+                                let can_rename =
+                                    self.project_dir.is_some() && self.save_in_progress.is_none();
                                 if ui
                                     .add_enabled(
                                         can_rename,
@@ -235,10 +232,7 @@ impl AppIde {
                     &lib_crates,
                 );
                 // Which detached lib has a pre-check running (spinner in the row).
-                let ws_add_pending = self
-                    .workspace_add
-                    .as_ref()
-                    .map(|w| w.dir.clone());
+                let ws_add_pending = self.workspace_add.as_ref().map(|w| w.dir.clone());
                 let build_cfg = self.selected_build_cfg();
                 match (project_files, build_cfg) {
                     (Some(_), Some((project, toolchain))) => {

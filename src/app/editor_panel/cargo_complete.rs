@@ -86,7 +86,11 @@ impl AppIde {
         display_code: &mut String,
         ctrl_space_pressed: bool,
     ) {
-        let cursor_char_idx = editor_resp.state.cursor.char_range().map(|r| r.primary.index);
+        let cursor_char_idx = editor_resp
+            .state
+            .cursor
+            .char_range()
+            .map(|r| r.primary.index);
 
         // ── 0. Different manifest than the popup was opened for? ──────────────
         // Offsets and the item list belong to the file they were computed in;
@@ -167,7 +171,9 @@ impl AppIde {
     fn cargo_items_for(&mut self, ctx: &CargoCtx) -> (Vec<CargoItem>, bool, Option<String>) {
         match ctx {
             CargoCtx::Name { prefix, .. } => (filter_crates(prefix), false, None),
-            CargoCtx::Version { crate_name, prefix, .. } => {
+            CargoCtx::Version {
+                crate_name, prefix, ..
+            } => {
                 self.ensure_version_fetch(crate_name);
                 let guard = self
                     .cargo_complete
@@ -186,7 +192,11 @@ impl AppIde {
                             .enumerate()
                             .map(|(i, v)| CargoItem {
                                 label: v.clone(),
-                                detail: if i == 0 { "latest".into() } else { String::new() },
+                                detail: if i == 0 {
+                                    "latest".into()
+                                } else {
+                                    String::new()
+                                },
                                 action: CargoAccept::Version(v.clone()),
                             })
                             .collect();
@@ -292,9 +302,9 @@ impl AppIde {
     /// Re-position the editor caret for next frame (the widget already rendered).
     fn store_cargo_cursor(&self, ui: &mut egui::Ui, editor_resp: &TextEditOutput, char_idx: usize) {
         let mut st = editor_resp.state.clone();
-        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(
-            char_idx,
-        ))));
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(char_idx),
+        )));
         st.store(ui.ctx(), editor_resp.response.id);
     }
 
@@ -315,7 +325,9 @@ impl AppIde {
             let local = editor_resp
                 .galley
                 .pos_from_cursor(egui::text::CCursor::new(clamped));
-            editor_resp.response.rect.left_top() + local.min.to_vec2() + egui::vec2(0.0, local.height() + 2.0)
+            editor_resp.response.rect.left_top()
+                + local.min.to_vec2()
+                + egui::vec2(0.0, local.height() + 2.0)
         } else {
             editor_resp.response.rect.left_top()
         };
@@ -499,7 +511,12 @@ fn parse_dep_section(inner: &str) -> Option<DepSection> {
     None
 }
 
-fn name_ctx(section: &DepSection, line: &[char], line_start: usize, col: usize) -> Option<CargoCtx> {
+fn name_ctx(
+    section: &DepSection,
+    line: &[char],
+    line_start: usize,
+    col: usize,
+) -> Option<CargoCtx> {
     // Crate names are only typed in a `[dependencies]`-style table.
     if *section != DepSection::Table {
         return None;
@@ -508,7 +525,10 @@ fn name_ctx(section: &DepSection, line: &[char], line_start: usize, col: usize) 
     let trimmed = typed.trim_start();
     let lead_ws = typed.chars().count() - trimmed.chars().count();
     // Must look like a crate-name prefix (letters/digits/-/_), possibly empty.
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return None;
     }
     Some(CargoCtx::Name {
@@ -552,10 +572,18 @@ fn version_ctx(
         DepSection::Table => {
             if veq == first_eq {
                 // `crate = "…"` simple form — key is the crate name.
-                line[..first_eq].iter().collect::<String>().trim().to_string()
+                line[..first_eq]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
             } else if key == "version" {
                 // `crate = { version = "…" }` — outer key is the crate name.
-                line[..first_eq].iter().collect::<String>().trim().to_string()
+                line[..first_eq]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
             } else {
                 // Some other inline field (features/path/git/…) — not a version.
                 return None;
@@ -810,7 +838,9 @@ mod tests {
     fn version_context_simple_form() {
         let c = ctx("[dependencies]\ncortex-m = \"0.7|\"\n");
         match c {
-            Some(CargoCtx::Version { crate_name, prefix, .. }) => {
+            Some(CargoCtx::Version {
+                crate_name, prefix, ..
+            }) => {
                 assert_eq!(crate_name, "cortex-m");
                 assert_eq!(prefix, "0.7");
             }
@@ -822,7 +852,9 @@ mod tests {
     fn version_context_table_form() {
         let c = ctx("[dependencies]\nserde = { version = \"1|\", features = [] }\n");
         match c {
-            Some(CargoCtx::Version { crate_name, prefix, .. }) => {
+            Some(CargoCtx::Version {
+                crate_name, prefix, ..
+            }) => {
                 assert_eq!(crate_name, "serde");
                 assert_eq!(prefix, "1");
             }
@@ -834,7 +866,9 @@ mod tests {
     fn version_context_dotted_section() {
         let c = ctx("[dependencies.heapless]\nversion = \"0.|\"\n");
         match c {
-            Some(CargoCtx::Version { crate_name, prefix, .. }) => {
+            Some(CargoCtx::Version {
+                crate_name, prefix, ..
+            }) => {
                 assert_eq!(crate_name, "heapless");
                 assert_eq!(prefix, "0.");
             }

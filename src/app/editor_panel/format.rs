@@ -126,8 +126,7 @@ fn analyze_line(line: &str, in_block_comment: &mut bool) -> (usize, i32) {
             '\'' => {
                 // Distinguish a char literal (`'a'`, `'\n'`) from a lifetime
                 // (`'a`): only the former enters string mode.
-                let esc_lit =
-                    chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'');
+                let esc_lit = chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'');
                 let plain_lit = chars.get(i + 1).map_or(false, |x| *x != '\'' && *x != '\\')
                     && chars.get(i + 2) == Some(&'\'');
                 if esc_lit || plain_lit {
@@ -198,8 +197,7 @@ mod tests {
     #[test]
     fn ignores_braces_in_strings_and_comments() {
         let src = "fn f() {\nlet s = \"a { b }\";\n// a } brace } here\ng();\n}";
-        let expected =
-            "fn f() {\n    let s = \"a { b }\";\n    // a } brace } here\n    g();\n}";
+        let expected = "fn f() {\n    let s = \"a { b }\";\n    // a } brace } here\n    g();\n}";
         assert_eq!(fmt(src), expected);
     }
 

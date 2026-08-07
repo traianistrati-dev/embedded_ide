@@ -18,8 +18,7 @@ use super::super::clock::model::ClockConfig;
 
 /// embassy's reset default (HSI, everything /1) — the clock line for a family
 /// with no RCC recipe, or whose graph selections happen to equal the reset.
-const EMBASSY_RESET_INIT: &str =
-    "    let p = embassy_stm32::init(Default::default()); // reset clock (HSI). \
+const EMBASSY_RESET_INIT: &str = "    let p = embassy_stm32::init(Default::default()); // reset clock (HSI). \
      Set embassy_stm32::Config for RCC if needed.\n";
 
 /// The RCC recipe (how to READ the graph + how to EMIT the config) for an STM32
@@ -198,7 +197,10 @@ impl RccDescriptor {
     /// switch it on explicitly. Verified against embassy `l.rs` + metapac
     /// `rcc_l4` (Sysclk::PLL1_R, Plln MUL8..127, Pllr {2,4,6,8}).
     pub fn l4() -> Self {
-        Self { hsi_needs_enable: true, ..Self::g4() }
+        Self {
+            hsi_needs_enable: true,
+            ..Self::g4()
+        }
     }
 
     /// STM32G0: identical emit shape to G4 (nested source, R output, real HSE,
@@ -419,9 +421,7 @@ pub fn read_rcc_values(g: &ClockGraph, spec: &ReadSpec) -> RccValues {
     // The pllsrc mux is 2-input (HSI=0, HSE=1): index != 0 → HSE; a missing
     // node keeps the family default. (F4 used `== Some(1)`, WBA `!= Some(0)`;
     // for the only real indices, 0 and 1, both agree with this.)
-    let pll_src_hse = index_of("pllsrc")
-        .map(|i| i != 0)
-        .unwrap_or(r.pll_src_hse);
+    let pll_src_hse = index_of("pllsrc").map(|i| i != 0).unwrap_or(r.pll_src_hse);
 
     let pll_m = divisor_of("pllm").unwrap_or(r.pll_m);
     let pll_n = match g.node("plln").map(|n| &n.state) {
@@ -483,7 +483,11 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
         SysSource::Hse => hse_desc.clone(),
         SysSource::Pll => format!(
             "{} /{} x{} /{} via {}",
-            if v.pll_src_hse { hse_desc.clone() } else { desc.hsi_label.to_string() },
+            if v.pll_src_hse {
+                hse_desc.clone()
+            } else {
+                desc.hsi_label.to_string()
+            },
             v.pll_m,
             v.pll_n,
             v.pll_out,
@@ -532,7 +536,9 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
     if v.sys == SysSource::Pll {
         let src = if v.pll_src_hse { "HSE" } else { "HSI" };
         if !desc.pll_source_nested {
-            b.push_str(&format!("        config.rcc.pll_src = rcc::PllSource::{src};\n"));
+            b.push_str(&format!(
+                "        config.rcc.pll_src = rcc::PllSource::{src};\n"
+            ));
         }
         b.push_str(&format!(
             "        config.rcc.{field} = Some(rcc::Pll {{\n",
@@ -541,7 +547,10 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
         if desc.pll_source_nested {
             b.push_str(&format!("            source: rcc::PllSource::{src},\n"));
         }
-        b.push_str(&format!("            prediv: rcc::PllPreDiv::DIV{},\n", v.pll_m));
+        b.push_str(&format!(
+            "            prediv: rcc::PllPreDiv::DIV{},\n",
+            v.pll_m
+        ));
         b.push_str(&format!("            mul: rcc::PllMul::MUL{},\n", v.pll_n));
         // Three outputs; the one this family uses gets the value, the rest None.
         for out in ["divp", "divq", "divr"] {
@@ -703,11 +712,13 @@ mod tests {
         // emits `init(Default::default())`. The shipped 100 MHz preset ships
         // APB1 /2, so resetting `sw` alone is (correctly) NOT the reset state —
         // every divider has to go back to /1 (index 0).
-        use crate::panels::mcu_module::clock::graph::{stm32f4_graph, NodeState};
+        use crate::panels::mcu_module::clock::graph::{NodeState, stm32f4_graph};
         let mut g = stm32f4_graph();
         g.node_mut("sw").unwrap().state = NodeState::Index(0); // HSI
-        g.node_mut("hse").unwrap().state =
-            NodeState::Source { enabled: false, hz: 8_000_000 };
+        g.node_mut("hse").unwrap().state = NodeState::Source {
+            enabled: false,
+            hz: 8_000_000,
+        };
         for div in ["ahb", "apb1", "apb2"] {
             g.node_mut(div).unwrap().state = NodeState::Index(0); // /1
         }
@@ -717,47 +728,75 @@ mod tests {
 
     #[test]
     fn family_dispatch_selects_the_recipe_without_topology_sniffing() {
-        use crate::panels::mcu_module::clock::graph::{stm32f4_graph, stm32wba_graph, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32f4_graph, stm32wba_graph};
 
         // F4 family + the shipped F4 graph → the F4 100 MHz RCC block.
-        let f4 = GraphClock { graph: stm32f4_graph(), layout: Default::default() };
+        let f4 = GraphClock {
+            graph: stm32f4_graph(),
+            layout: Default::default(),
+        };
         let s = graph_clock_block("stm32f4", &ClockConfig::Graph(f4));
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"), "{s}");
-        assert!(s.contains("SYSCLK 100 MHz (HSI16 /8 x100 /2 via PLLP)"), "{s}");
+        assert!(
+            s.contains("SYSCLK 100 MHz (HSI16 /8 x100 /2 via PLLP)"),
+            "{s}"
+        );
 
         // An F4 HSE-PLL config emits the HSE oscillator block + HSE source
         // (was `f4::hse_pll_emits_hse_block_and_source`, now family-dispatched).
         use crate::panels::mcu_module::clock::graph::NodeState;
         let mut hse = stm32f4_graph();
-        hse.node_mut("hse").unwrap().state = NodeState::Source { enabled: true, hz: 25_000_000 };
+        hse.node_mut("hse").unwrap().state = NodeState::Source {
+            enabled: true,
+            hz: 25_000_000,
+        };
         hse.node_mut("pllsrc").unwrap().state = NodeState::Index(1); // HSE
         hse.node_mut("pllm").unwrap().state = NodeState::Index(5); // /25
         hse.node_mut("plln").unwrap().state = NodeState::Value(160);
-        let s = graph_clock_block("stm32f4", &ClockConfig::Graph(GraphClock { graph: hse, layout: Default::default() }));
+        let s = graph_clock_block(
+            "stm32f4",
+            &ClockConfig::Graph(GraphClock {
+                graph: hse,
+                layout: Default::default(),
+            }),
+        );
         assert!(s.contains("config.rcc.hse = Some(rcc::Hse { freq: embassy_stm32::time::Hertz(25000000), mode: rcc::HseMode::Oscillator });"), "{s}");
-        assert!(s.contains("config.rcc.pll_src = rcc::PllSource::HSE;"), "{s}");
+        assert!(
+            s.contains("config.rcc.pll_src = rcc::PllSource::HSE;"),
+            "{s}"
+        );
         assert!(s.contains("mul: rcc::PllMul::MUL160,"), "{s}");
 
         // WBA family + the shipped WBA graph → the WBA 100 MHz RCC block.
-        let wba = GraphClock { graph: stm32wba_graph(), layout: Default::default() };
+        let wba = GraphClock {
+            graph: stm32wba_graph(),
+            layout: Default::default(),
+        };
         let s = graph_clock_block("stm32wba", &ClockConfig::Graph(wba));
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_R;"), "{s}");
         assert!(s.contains("VoltageScale::RANGE1"), "{s}");
 
         // A family with no recipe (e.g. h7 until one lands) → embassy reset init,
         // regardless of what graph it carries.
-        let g = GraphClock { graph: stm32f4_graph(), layout: Default::default() };
-        assert!(graph_clock_block("stm32h7", &ClockConfig::Graph(g))
-            .contains("embassy_stm32::init(Default::default())"));
+        let g = GraphClock {
+            graph: stm32f4_graph(),
+            layout: Default::default(),
+        };
+        assert!(
+            graph_clock_block("stm32h7", &ClockConfig::Graph(g))
+                .contains("embassy_stm32::init(Default::default())")
+        );
 
         // Non-graph clock → reset init.
-        assert!(graph_clock_block("stm32f4", &ClockConfig::None)
-            .contains("embassy_stm32::init(Default::default())"));
+        assert!(
+            graph_clock_block("stm32f4", &ClockConfig::None)
+                .contains("embassy_stm32::init(Default::default())")
+        );
     }
 
     #[test]
     fn g4_recipe_reads_the_preset_and_emits_valid_rcc() {
-        use crate::panels::mcu_module::clock::graph::{stm32g4_graph, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32g4_graph};
 
         // The shipped G4 default = HSI16 /4 ×75 /2 → 150 MHz, all buses /1.
         let v = read_rcc_values(&stm32g4_graph(), &ReadSpec::g4());
@@ -769,10 +808,13 @@ mod tests {
 
         // Emitted block: G4 nests the source, uses divr / PLL1_R, no frac, no
         // voltage_scale, and a real init(config).
-        let s = graph_clock_block("stm32g4", &ClockConfig::Graph(GraphClock {
-            graph: stm32g4_graph(),
-            layout: Default::default(),
-        }));
+        let s = graph_clock_block(
+            "stm32g4",
+            &ClockConfig::Graph(GraphClock {
+                graph: stm32g4_graph(),
+                layout: Default::default(),
+            }),
+        );
         for needle in [
             "source: rcc::PllSource::HSI,",
             "prediv: rcc::PllPreDiv::DIV4,",
@@ -793,8 +835,13 @@ mod tests {
 
     #[test]
     fn f2_and_f7_share_the_f4_recipe_byte_for_byte() {
-        use crate::panels::mcu_module::clock::graph::{stm32f4_graph, GraphClock};
-        let gc = || ClockConfig::Graph(GraphClock { graph: stm32f4_graph(), layout: Default::default() });
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32f4_graph};
+        let gc = || {
+            ClockConfig::Graph(GraphClock {
+                graph: stm32f4_graph(),
+                layout: Default::default(),
+            })
+        };
         // Same embassy rcc module (f247.rs) → identical emitted RCC block.
         let f4 = graph_clock_block("stm32f4", &gc());
         assert_eq!(graph_clock_block("stm32f7", &gc()), f4);
@@ -804,13 +851,16 @@ mod tests {
 
     #[test]
     fn l4_recipe_emits_hsi_enable_and_never_the_msi_reset_default() {
-        use crate::panels::mcu_module::clock::graph::{stm32l4_graph, GraphClock, NodeState};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, NodeState, stm32l4_graph};
 
         // Shipped 80 MHz preset: HSI16 /1 ×10 /2 → 80 MHz.
-        let s = graph_clock_block("stm32l4", &ClockConfig::Graph(GraphClock {
-            graph: stm32l4_graph(),
-            layout: Default::default(),
-        }));
+        let s = graph_clock_block(
+            "stm32l4",
+            &ClockConfig::Graph(GraphClock {
+                graph: stm32l4_graph(),
+                layout: Default::default(),
+            }),
+        );
         for needle in [
             "config.rcc.hsi = true;", // L4 boots with HSI off — must switch it on
             "source: rcc::PllSource::HSI,",
@@ -826,15 +876,24 @@ mod tests {
         // explicit HSI block — NOT init(Default::default()), which on L4 is MSI.
         let mut g = stm32l4_graph();
         g.node_mut("sw").unwrap().state = NodeState::Index(0); // HSI direct
-        let s2 = graph_clock_block("stm32l4", &ClockConfig::Graph(GraphClock { graph: g, layout: Default::default() }));
+        let s2 = graph_clock_block(
+            "stm32l4",
+            &ClockConfig::Graph(GraphClock {
+                graph: g,
+                layout: Default::default(),
+            }),
+        );
         assert!(s2.contains("config.rcc.hsi = true;"), "{s2}");
         assert!(s2.contains("config.rcc.sys = rcc::Sysclk::HSI;"), "{s2}");
-        assert!(!s2.contains("init(Default::default())"), "L4 reset must be explicit, not MSI default\n\n{s2}");
+        assert!(
+            !s2.contains("init(Default::default())"),
+            "L4 reset must be explicit, not MSI default\n\n{s2}"
+        );
     }
 
     #[test]
     fn g0_recipe_reads_the_preset_and_emits_a_single_apb_bus() {
-        use crate::panels::mcu_module::clock::graph::{stm32g0_graph, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32g0_graph};
 
         // The shipped G0 default = HSI16 /1 ×8 /2 → 64 MHz, single APB /1.
         let v = read_rcc_values(&stm32g0_graph(), &ReadSpec::g0());
@@ -843,10 +902,13 @@ mod tests {
         assert_eq!((v.pll_m, v.pll_n, v.pll_out), (1, 8, 2));
         assert_eq!(v.apb, vec![("apb1_pre", 1)]); // ONE bus — no apb2
 
-        let s = graph_clock_block("stm32g0", &ClockConfig::Graph(GraphClock {
-            graph: stm32g0_graph(),
-            layout: Default::default(),
-        }));
+        let s = graph_clock_block(
+            "stm32g0",
+            &ClockConfig::Graph(GraphClock {
+                graph: stm32g0_graph(),
+                layout: Default::default(),
+            }),
+        );
         for needle in [
             "source: rcc::PllSource::HSI,",
             "mul: rcc::PllMul::MUL8,",

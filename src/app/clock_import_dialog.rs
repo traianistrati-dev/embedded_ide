@@ -100,10 +100,11 @@ impl AppIde {
                 di.job = None;
                 match result {
                     Some(Ok(ex)) => {
-                        let sysclk = crate::panels::mcu_module::clock::graph::evaluate(&ex.clock.graph)
-                            .get("sysclk")
-                            .copied()
-                            .unwrap_or(0);
+                        let sysclk =
+                            crate::panels::mcu_module::clock::graph::evaluate(&ex.clock.graph)
+                                .get("sysclk")
+                                .copied()
+                                .unwrap_or(0);
                         form.set_imported_clock(ex.clock);
                         di.note = Some(format!(
                             "{} Clock imported ({} MHz SYSCLK){}. Review it in the Clock tab.",
@@ -141,167 +142,175 @@ impl AppIde {
             440.0,
             40.0,
         )
-            .show(ui.ctx(), |ui| {
-                super::datasheet_import_dialog::maximize_button(ui, &mut di.maximized);
-                ui.label(
-                    egui::RichText::new(
-                        "Extracts the clock SPINE (sources → PLL → SYSCLK → AHB → APB) as a \
+        .show(ui.ctx(), |ui| {
+            super::datasheet_import_dialog::maximize_button(ui, &mut di.maximized);
+            ui.label(
+                egui::RichText::new(
+                    "Extracts the clock SPINE (sources → PLL → SYSCLK → AHB → APB) as a \
                          graph and attaches it to this chip. The result is verified against the \
                          datasheet's own default SYSCLK before it is accepted.",
-                    )
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(160)),
-                );
-                ui.add_space(6.0);
+                )
+                .size(11.0)
+                .color(egui::Color32::from_gray(160)),
+            );
+            ui.add_space(6.0);
 
-                // ── Provider ─────────────────────────────────────────────
-                ui.horizontal(|ui| {
-                    ui.label("AI provider:");
-                    let before = di.provider;
-                    egui::ComboBox::from_id_salt("clk_provider")
-                        .selected_text(di.provider.label())
-                        .width(180.0)
-                        .show_ui(ui, |ui| {
-                            for p in ds::Provider::ALL {
-                                ui.selectable_value(&mut di.provider, p, p.label());
-                            }
-                        });
-                    if di.provider != before {
-                        di.api_key = ds::load_api_key(di.provider);
-                        di.model = di.provider.default_model().to_string();
-                        di.key_note = None;
-                        ds::save_last_provider(di.provider);
-                    }
-                });
-
-                // ── API key ──────────────────────────────────────────────
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} API key:", di.provider.label()));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut di.api_key)
-                            .password(!di.show_key)
-                            .desired_width(240.0),
-                    );
-                    ui.checkbox(&mut di.show_key, "show");
-                    if ui.button("Save key").clicked() {
-                        do_save_key = true;
-                    }
-                });
-                if let Some(n) = &di.key_note {
-                    ui.label(egui::RichText::new(n).size(10.5));
-                }
-
-                // ── Model ────────────────────────────────────────────────
-                ui.horizontal(|ui| {
-                    ui.label("Model:");
-                    ui.add(egui::TextEdit::singleline(&mut di.model).desired_width(200.0))
-                        .on_hover_text(di.provider.model_hint());
-                });
-
-                // ── Prompt (base read-only + supplementary) ──────────────
-                let base = crate::panels::mcu_module::clock::graph::extract::build_clock_prompt();
-                super::datasheet_import_dialog::prompt_section(
-                    ui,
-                    "clk_prompt",
-                    &mut di.prompt_open,
-                    &base,
-                    &mut di.extra_prompt,
-                );
-
-                ui.add_space(4.0);
-                ui.separator();
-
-                // ── Source: PDF or pasted text ───────────────────────────
-                ui.horizontal(|ui| {
-                    if ui.button(format!("{} Choose PDF…", ph::FILE_PDF)).clicked() {
-                        if let Some(path) =
-                            rfd::FileDialog::new().add_filter("PDF", &["pdf"]).pick_file()
-                        {
-                            match std::fs::read(&path) {
-                                Ok(bytes) => {
-                                    let name = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| "datasheet.pdf".into());
-                                    di.pdf = Some(PdfPick { name, bytes });
-                                    di.error = None;
-                                }
-                                Err(e) => di.error = Some(format!("Could not read PDF: {e}")),
-                            }
+            // ── Provider ─────────────────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("AI provider:");
+                let before = di.provider;
+                egui::ComboBox::from_id_salt("clk_provider")
+                    .selected_text(di.provider.label())
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for p in ds::Provider::ALL {
+                            ui.selectable_value(&mut di.provider, p, p.label());
                         }
-                    }
-                    if let Some(pdf) = &di.pdf {
-                        ui.label(
-                            egui::RichText::new(format!("{}  ({} KB)", pdf.name, pdf.bytes.len() / 1024))
-                                .size(10.5)
-                                .color(egui::Color32::from_rgb(150, 200, 150)),
-                        );
-                        if ui.button(ph::X).on_hover_text("Remove the PDF").clicked() {
-                            di.pdf = None;
-                        }
-                    }
-                });
-                if di.pdf.is_none() {
-                    ui.label(
-                        egui::RichText::new(
-                            "…or paste the clock-tree section (the RCC / clock text + the PLL and \
-                             prescaler tables):",
-                        )
-                        .size(10.5)
-                        .color(egui::Color32::from_gray(150)),
-                    );
-                    ui.add(
-                        egui::TextEdit::multiline(&mut di.text)
-                            .desired_rows(6)
-                            .desired_width(f32::INFINITY)
-                            .font(egui::TextStyle::Monospace),
-                    );
+                    });
+                if di.provider != before {
+                    di.api_key = ds::load_api_key(di.provider);
+                    di.model = di.provider.default_model().to_string();
+                    di.key_note = None;
+                    ds::save_last_provider(di.provider);
                 }
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut di.force_reextract, "re-extract")
-                        .on_hover_text("Ignore the cache and call (and bill) the API again.");
-                    let has_source =
-                        di.pdf.is_some() || !di.text.trim().is_empty();
-                    let can = !running && !di.api_key.trim().is_empty() && has_source;
-                    if ui
-                        .add_enabled(can, egui::Button::new(format!("{} Extract", ph::SPARKLE)))
-                        .on_disabled_hover_text("needs an API key and a PDF or pasted text")
-                        .clicked()
-                    {
-                        do_extract = true;
-                    }
-                    if running {
-                        crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
-                        ui.label(
-                            egui::RichText::new(" extracting…")
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(220, 180, 70)),
-                        );
-                    }
-                });
-
-                if let Some(note) = &di.note {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(note).size(11.0).color(egui::Color32::from_rgb(150, 200, 150)));
-                }
-                if let Some(err) = &di.error {
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(err)
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(220, 120, 100)),
-                    );
-                }
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Close").clicked() {
-                        keep_open = false;
-                    }
-                });
             });
+
+            // ── API key ──────────────────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label(format!("{} API key:", di.provider.label()));
+                ui.add(
+                    egui::TextEdit::singleline(&mut di.api_key)
+                        .password(!di.show_key)
+                        .desired_width(240.0),
+                );
+                ui.checkbox(&mut di.show_key, "show");
+                if ui.button("Save key").clicked() {
+                    do_save_key = true;
+                }
+            });
+            if let Some(n) = &di.key_note {
+                ui.label(egui::RichText::new(n).size(10.5));
+            }
+
+            // ── Model ────────────────────────────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("Model:");
+                ui.add(egui::TextEdit::singleline(&mut di.model).desired_width(200.0))
+                    .on_hover_text(di.provider.model_hint());
+            });
+
+            // ── Prompt (base read-only + supplementary) ──────────────
+            let base = crate::panels::mcu_module::clock::graph::extract::build_clock_prompt();
+            super::datasheet_import_dialog::prompt_section(
+                ui,
+                "clk_prompt",
+                &mut di.prompt_open,
+                &base,
+                &mut di.extra_prompt,
+            );
+
+            ui.add_space(4.0);
+            ui.separator();
+
+            // ── Source: PDF or pasted text ───────────────────────────
+            ui.horizontal(|ui| {
+                if ui.button(format!("{} Choose PDF…", ph::FILE_PDF)).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PDF", &["pdf"])
+                        .pick_file()
+                    {
+                        match std::fs::read(&path) {
+                            Ok(bytes) => {
+                                let name = path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "datasheet.pdf".into());
+                                di.pdf = Some(PdfPick { name, bytes });
+                                di.error = None;
+                            }
+                            Err(e) => di.error = Some(format!("Could not read PDF: {e}")),
+                        }
+                    }
+                }
+                if let Some(pdf) = &di.pdf {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  ({} KB)",
+                            pdf.name,
+                            pdf.bytes.len() / 1024
+                        ))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(150, 200, 150)),
+                    );
+                    if ui.button(ph::X).on_hover_text("Remove the PDF").clicked() {
+                        di.pdf = None;
+                    }
+                }
+            });
+            if di.pdf.is_none() {
+                ui.label(
+                    egui::RichText::new(
+                        "…or paste the clock-tree section (the RCC / clock text + the PLL and \
+                             prescaler tables):",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(150)),
+                );
+                ui.add(
+                    egui::TextEdit::multiline(&mut di.text)
+                        .desired_rows(6)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace),
+                );
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut di.force_reextract, "re-extract")
+                    .on_hover_text("Ignore the cache and call (and bill) the API again.");
+                let has_source = di.pdf.is_some() || !di.text.trim().is_empty();
+                let can = !running && !di.api_key.trim().is_empty() && has_source;
+                if ui
+                    .add_enabled(can, egui::Button::new(format!("{} Extract", ph::SPARKLE)))
+                    .on_disabled_hover_text("needs an API key and a PDF or pasted text")
+                    .clicked()
+                {
+                    do_extract = true;
+                }
+                if running {
+                    crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
+                    ui.label(
+                        egui::RichText::new(" extracting…")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(220, 180, 70)),
+                    );
+                }
+            });
+
+            if let Some(note) = &di.note {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(note)
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(150, 200, 150)),
+                );
+            }
+            if let Some(err) = &di.error {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(err)
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(220, 120, 100)),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Close").clicked() {
+                    keep_open = false;
+                }
+            });
+        });
 
         // ── Deferred side effects ────────────────────────────────────────────
         if do_save_key {

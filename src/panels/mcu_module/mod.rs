@@ -6,7 +6,6 @@ pub mod datasheet_import;
 pub mod mcu;
 pub mod mcu_catalog;
 pub mod mcu_config;
-pub mod structure_config;
 pub mod mcu_def;
 pub mod mcu_form;
 pub mod mcu_identity;
@@ -17,14 +16,15 @@ pub mod pins;
 pub mod project_gen;
 pub mod registry;
 pub mod stm32_pin_data;
+pub mod structure_config;
 
 // ── Core types re-exports (convenience imports) ──────────────────
+pub use mcu::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+pub use mcu_catalog::ToolchainKind;
 pub use pins::logic::{
-    pin::{Pin, PIN_FONT_SIZE, PIN_ROUNDING},
+    pin::{PIN_FONT_SIZE, PIN_ROUNDING, Pin},
     pin_function::PinFunction,
 };
-pub use mcu::{Mcu, PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
-pub use mcu_catalog::ToolchainKind;
 
 // ── MCU definitions / registry ──────────────────────────────────
 pub use builtins::{builtin_definitions, builtin_for};

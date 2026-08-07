@@ -115,7 +115,10 @@ mod tests {
         assert_eq!(value_from_graph(&ValueSrc::Rtc, &freqs), 40_000);
         assert_eq!(value_from_graph(&ValueSrc::Mco, &freqs), 0);
         // Node(id) resolves an arbitrary node directly.
-        assert_eq!(value_from_graph(&ValueSrc::Node("sysclk".into()), &freqs), 72_000_000);
+        assert_eq!(
+            value_from_graph(&ValueSrc::Node("sysclk".into()), &freqs),
+            72_000_000
+        );
         assert_eq!(value_from_graph(&ValueSrc::Node("nope".into()), &freqs), 0);
     }
 }

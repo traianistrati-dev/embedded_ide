@@ -324,7 +324,14 @@ pub fn show_dfu_tab(
     if matches!(toolchain, ToolchainKind::RustEmbedded) {
         let pf_state = probe_flash_state.lock().unwrap().clone();
         ui.horizontal_wrapped(|ui| {
-            super::probe_selector_ui(ui, probe_list, selected_probe, probe_scan, probe_scan_err, toolchain);
+            super::probe_selector_ui(
+                ui,
+                probe_list,
+                selected_probe,
+                probe_scan,
+                probe_scan_err,
+                toolchain,
+            );
             let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
             let enabled = can_flash && !any_busy && !pf_state.is_busy() && !no_probe_rs;
             if ui

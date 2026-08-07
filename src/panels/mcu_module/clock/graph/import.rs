@@ -95,7 +95,10 @@ mod tests {
         .unwrap();
         let gc = parse_clock_ron(&graph_only).expect("bare ClockGraph must parse");
         assert_eq!(gc.graph, sample().graph);
-        assert!(gc.layout.blocks.is_empty(), "missing layout defaults to empty");
+        assert!(
+            gc.layout.blocks.is_empty(),
+            "missing layout defaults to empty"
+        );
     }
 
     #[test]
@@ -120,7 +123,10 @@ mod tests {
                 },
                 // A source stuck at 0 Hz — the exact "extraction forgot the
                 // frequency" case.
-                state: NodeState::Source { enabled: true, hz: 0 },
+                state: NodeState::Source {
+                    enabled: true,
+                    hz: 0,
+                },
                 limit: None,
             }],
             edges: vec![],
@@ -137,7 +143,10 @@ mod tests {
     #[test]
     fn an_empty_tree_is_rejected() {
         let text = ron::ser::to_string_pretty(
-            &ClockGraph { nodes: vec![], edges: vec![] },
+            &ClockGraph {
+                nodes: vec![],
+                edges: vec![],
+            },
             ron::ser::PrettyConfig::default().struct_names(true),
         )
         .unwrap();

@@ -18,9 +18,9 @@ pub struct GraphClock {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::layout::stm32f1_layout;
     use super::super::stm32f1::stm32f1_graph;
+    use super::*;
     use crate::panels::mcu_module::clock::model::{ClockLimits, Stm32f1Clock};
 
     #[test]

@@ -16,8 +16,8 @@
 //! [`Runtime::Async`]: crate::panels::mcu_module::mcu::Runtime
 
 use super::common::sanitize_label;
-use super::embassy_common::{gpio_bindings, NO_PINS_PLACEHOLDER};
-use super::{mcu_id_marker_line, GEN_BEGIN, GEN_END, USER_TAIL};
+use super::embassy_common::{NO_PINS_PLACEHOLDER, gpio_bindings};
+use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::modules::{
     AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
 };
@@ -321,7 +321,10 @@ pub fn async_peripherals(
     for (n, tx, rx) in usart_wires(pins) {
         consumed.push(tx.clone());
         consumed.push(rx.clone());
-        let sfx = usart.get(&n).map(|c| label_sfx(&c.custom_label)).unwrap_or_default();
+        let sfx = usart
+            .get(&n)
+            .map(|c| label_sfx(&c.custom_label))
+            .unwrap_or_default();
         // BufferedUart::new takes (peri, rx, tx, …); the config's `init` mirrors it.
         calls.push_str(&format!(
             "    let mut _serial{n}{sfx} = \
@@ -609,5 +612,6 @@ pub fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
         AsyncBusMode::Blocking => ASYNC_I2C_TMPL_BLOCKING,
         AsyncBusMode::AsyncDma => ASYNC_I2C_TMPL_DMA,
     };
-    tmpl.replace("{N}", &n.to_string()).replace("{CLK}", &clk.to_string())
+    tmpl.replace("{N}", &n.to_string())
+        .replace("{CLK}", &clk.to_string())
 }

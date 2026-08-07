@@ -28,7 +28,12 @@ impl AppIde {
             // so it participates in the cache key — toggling rebuilds
             // instantly (parse is cheap) and restarts the call pass (node
             // indices shift).
-            h.finish() ^ if self.structure_view.show_externals { 0x9E37_79B9_7F4A_7C15 } else { 0 }
+            h.finish()
+                ^ if self.structure_view.show_externals {
+                    0x9E37_79B9_7F4A_7C15
+                } else {
+                    0
+                }
         };
         if self.structure_cache.as_ref().map(|(h, _, _)| *h) != Some(hash) {
             let mut graph =
@@ -72,11 +77,7 @@ impl AppIde {
         }
         // Keep frames coming while the pass works or waits for a save — LSP
         // replies repaint on arrival, but the NEXT request fires from here.
-        if self
-            .structure_calls
-            .as_ref()
-            .is_some_and(|p| p.running())
-        {
+        if self.structure_calls.as_ref().is_some_and(|p| p.running()) {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -171,9 +172,7 @@ impl AppIde {
             let id = match click.file {
                 None => ProjectFileId::MainRs,
                 // Guard against a stale index (file list changed this frame).
-                Some(i) if i < self.project_tree.user_src_files.len() => {
-                    ProjectFileId::UserFile(i)
-                }
+                Some(i) if i < self.project_tree.user_src_files.len() => ProjectFileId::UserFile(i),
                 Some(_) => return,
             };
             self.selected_file = id;

@@ -70,7 +70,10 @@ pub(crate) fn draw_static_diagram<R: Fn(&ValueSrc) -> u32>(
     let size = Vec2::new(VW * scale, VH * scale);
 
     let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let tf = Tf { origin: rect.min, scale };
+    let tf = Tf {
+        origin: rect.min,
+        scale,
+    };
 
     let clip = rect.intersect(ui.clip_rect());
     let painter = ui.painter().with_clip_rect(clip);
@@ -117,7 +120,10 @@ fn draw_static<R: Fn(&ValueSrc) -> u32>(
 
     for t in &lay.tags {
         let hz = resolve(&t.src);
-        let bad = t.limit.and_then(|k| ceiling_for(k, l)).map_or(false, |lim| over(hz, lim));
+        let bad = t
+            .limit
+            .and_then(|k| ceiling_for(k, l))
+            .map_or(false, |lim| over(hz, lim));
         tag(p, tf, t.x, t.y, &mhz(hz), bad, &t.name);
     }
 
@@ -151,7 +157,13 @@ pub(crate) fn interactive_graph(
     let mut pending: Option<(String, NodeState)> = None;
     for w in widgets {
         match w {
-            Widget::Combo { node, x, y, w: cw, options } => {
+            Widget::Combo {
+                node,
+                x,
+                y,
+                w: cw,
+                options,
+            } => {
                 let Some(cur) = graph.node(node).map(|n| n.state.clone()) else {
                     continue;
                 };
@@ -160,7 +172,15 @@ pub(crate) fn interactive_graph(
                 }
             }
             // Trapezoid mux — reuses the proven `mux_radios` primitive 1:1.
-            Widget::MuxRadios { node, x, y, w: mw, h, flip, inputs } => {
+            Widget::MuxRadios {
+                node,
+                x,
+                y,
+                w: mw,
+                h,
+                flip,
+                inputs,
+            } => {
                 let Some(cur) = graph.node(node).map(|n| n.state.clone()) else {
                     continue;
                 };
@@ -175,7 +195,14 @@ pub(crate) fn interactive_graph(
                     pending = Some((node.clone(), st.clone()));
                 }
             }
-            Widget::DragMhz { node, x, y, w: dw, min_mhz, max_mhz } => {
+            Widget::DragMhz {
+                node,
+                x,
+                y,
+                w: dw,
+                min_mhz,
+                max_mhz,
+            } => {
                 let Some(NodeState::Source { enabled, hz }) =
                     graph.node(node).map(|n| n.state.clone())
                 else {
@@ -200,7 +227,10 @@ pub(crate) fn interactive_graph(
                 if dragged {
                     pending = Some((
                         node.clone(),
-                        NodeState::Source { enabled, hz: (mhz * 1e6).round() as u32 },
+                        NodeState::Source {
+                            enabled,
+                            hz: (mhz * 1e6).round() as u32,
+                        },
                     ));
                 }
             }
@@ -288,7 +318,11 @@ fn mux_radios(
             tf.p(x + w, y + taper),
         ]
     };
-    painter.add(Shape::convex_polygon(poly, MUX_FILL, Stroke::new(1.2, MUX_STROKE)));
+    painter.add(Shape::convex_polygon(
+        poly,
+        MUX_FILL,
+        Stroke::new(1.2, MUX_STROKE),
+    ));
 
     let mut changed = false;
     for (i, (label, dy)) in inputs.iter().enumerate() {
@@ -297,12 +331,24 @@ fn mux_radios(
         // Radio sits just inside the wide edge (left for normal, right for flip);
         // the input stub stops at the mux edge so the wire meets the radio.
         let (stub_a, stub_b, lbl_x, lbl_align, radio_cx) = if flip {
-            (x + w + 24.0, x + w, x + w + 26.0, Align2::LEFT_CENTER, x + w - 11.0)
+            (
+                x + w + 24.0,
+                x + w,
+                x + w + 26.0,
+                Align2::LEFT_CENTER,
+                x + w - 11.0,
+            )
         } else {
             (x - 24.0, x, x - 26.0, Align2::RIGHT_CENTER, x + 11.0)
         };
         painter.line_segment([tf.p(stub_a, cy), tf.p(stub_b, cy)], stroke);
-        painter.text(tf.p(lbl_x, cy), lbl_align, *label, FontId::proportional(tf.fs(8.0)), DIM_C);
+        painter.text(
+            tf.p(lbl_x, cy),
+            lbl_align,
+            *label,
+            FontId::proportional(tf.fs(8.0)),
+            DIM_C,
+        );
 
         let center = tf.p(radio_cx, cy);
         let rsz = 12.0 * tf.scale;
@@ -322,13 +368,41 @@ fn mux_radios(
 
 fn block(p: &egui::Painter, tf: &Tf, x: f32, y: f32, w: f32, h: f32, title: &str) {
     let r = tf.r(x, y, w, h);
-    p.rect(r, 3.0, BOX_FILL, Stroke::new(1.2, STROKE_C), egui::StrokeKind::Inside);
-    p.text(r.center(), Align2::CENTER_CENTER, title, FontId::proportional(tf.fs(9.0)), LABEL_C);
+    p.rect(
+        r,
+        3.0,
+        BOX_FILL,
+        Stroke::new(1.2, STROKE_C),
+        egui::StrokeKind::Inside,
+    );
+    p.text(
+        r.center(),
+        Align2::CENTER_CENTER,
+        title,
+        FontId::proportional(tf.fs(9.0)),
+        LABEL_C,
+    );
 }
 
-fn out_box(p: &egui::Painter, tf: &Tf, x: f32, y: f32, w: f32, h: f32, label: &str, hz: u32, limit: Option<u32>) {
+fn out_box(
+    p: &egui::Painter,
+    tf: &Tf,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &str,
+    hz: u32,
+    limit: Option<u32>,
+) {
     let r = tf.r(x, y, w, h);
-    p.rect(r, 3.0, OUT_FILL, Stroke::new(1.0, STROKE_C), egui::StrokeKind::Inside);
+    p.rect(
+        r,
+        3.0,
+        OUT_FILL,
+        Stroke::new(1.0, STROKE_C),
+        egui::StrokeKind::Inside,
+    );
     let bad = limit.map(|l| hz > l).unwrap_or(false);
     let col = if bad { FREQ_BAD } else { FREQ_OK };
     // value (left) + label (right)
@@ -349,7 +423,13 @@ fn out_box(p: &egui::Painter, tf: &Tf, x: f32, y: f32, w: f32, h: f32, label: &s
 }
 
 fn label_above(p: &egui::Painter, tf: &Tf, x: f32, y: f32, text: &str) {
-    p.text(tf.p(x, y), Align2::LEFT_BOTTOM, text, FontId::proportional(tf.fs(8.5)), DIM_C);
+    p.text(
+        tf.p(x, y),
+        Align2::LEFT_BOTTOM,
+        text,
+        FontId::proportional(tf.fs(8.5)),
+        DIM_C,
+    );
 }
 
 fn wire(p: &egui::Painter, tf: &Tf, pts: &[(f32, f32)]) {

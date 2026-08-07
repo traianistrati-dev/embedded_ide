@@ -74,7 +74,11 @@ fn raw_string_end(chars: &[char], p: usize) -> Option<usize> {
 fn fade(color: egui::Color32) -> egui::Color32 {
     const GRAY: (u8, u8, u8) = (120, 120, 120);
     let mix = |a: u8, b: u8| ((a as u16 + b as u16 * 2) / 3) as u8;
-    egui::Color32::from_rgb(mix(color.r(), GRAY.0), mix(color.g(), GRAY.1), mix(color.b(), GRAY.2))
+    egui::Color32::from_rgb(
+        mix(color.r(), GRAY.0),
+        mix(color.g(), GRAY.1),
+        mix(color.b(), GRAY.2),
+    )
 }
 
 /// Build a syntax-highlighted `LayoutJob` for Rust source. Mirrors the colours of
@@ -126,7 +130,12 @@ pub(crate) fn rust_layout_job(
             while p < n && chars[p].is_whitespace() {
                 p += 1;
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Whitespace(' ')), in_dead(s));
+            push(
+                &mut job,
+                &slice(&chars, s, p),
+                col(TokenType::Whitespace(' ')),
+                in_dead(s),
+            );
             continue;
         }
         // ── Line comment `// …` ──
@@ -135,7 +144,12 @@ pub(crate) fn rust_layout_job(
             while p < n && chars[p] != '\n' {
                 p += 1;
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Comment(false)), in_dead(s));
+            push(
+                &mut job,
+                &slice(&chars, s, p),
+                col(TokenType::Comment(false)),
+                in_dead(s),
+            );
             continue;
         }
         // ── Block comment `/* … */` ──
@@ -148,12 +162,22 @@ pub(crate) fn rust_layout_job(
             if p < n {
                 p += 1; // include the closing '/'
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Comment(true)), in_dead(s));
+            push(
+                &mut job,
+                &slice(&chars, s, p),
+                col(TokenType::Comment(true)),
+                in_dead(s),
+            );
             continue;
         }
         // ── Raw string `r"…"` / `r#"…"#` / `br#"…"#` ──
         if let Some(end) = raw_string_end(&chars, p) {
-            push(&mut job, &slice(&chars, p, end), col(TokenType::Str('"')), in_dead(p));
+            push(
+                &mut job,
+                &slice(&chars, p, end),
+                col(TokenType::Str('"')),
+                in_dead(p),
+            );
             p = end;
             continue;
         }
@@ -174,7 +198,12 @@ pub(crate) fn rust_layout_job(
                     _ => p += 1,
                 }
             }
-            push(&mut job, &slice(&chars, s, p.min(n)), col(TokenType::Str('"')), in_dead(s));
+            push(
+                &mut job,
+                &slice(&chars, s, p.min(n)),
+                col(TokenType::Str('"')),
+                in_dead(s),
+            );
             continue;
         }
         // ── Char literal vs lifetime (both start with `'`) ──
@@ -189,7 +218,12 @@ pub(crate) fn rust_layout_job(
                 if p < n {
                     p += 1;
                 }
-                push(&mut job, &slice(&chars, s, p), col(TokenType::Str('\'')), in_dead(s));
+                push(
+                    &mut job,
+                    &slice(&chars, s, p),
+                    col(TokenType::Str('\'')),
+                    in_dead(s),
+                );
                 continue;
             }
             // Lifetime: `'` + identifier, and NOT a single-char literal `'x'`
@@ -213,7 +247,12 @@ pub(crate) fn rust_layout_job(
             if p < n && chars[p] == '\'' {
                 p += 1; // closing quote
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Str('\'')), in_dead(s));
+            push(
+                &mut job,
+                &slice(&chars, s, p),
+                col(TokenType::Str('\'')),
+                in_dead(s),
+            );
             continue;
         }
         // ── Number ──
@@ -225,16 +264,18 @@ pub(crate) fn rust_layout_job(
                 p += 1;
             }
             // float fraction `.123` — but never consume a `..` range operator.
-            if p < n
-                && chars[p] == '.'
-                && chars.get(p + 1).is_some_and(|c| c.is_ascii_digit())
-            {
+            if p < n && chars[p] == '.' && chars.get(p + 1).is_some_and(|c| c.is_ascii_digit()) {
                 p += 1;
                 while p < n && (chars[p].is_alphanumeric() || chars[p] == '_') {
                     p += 1;
                 }
             }
-            push(&mut job, &slice(&chars, s, p), col(TokenType::Numeric(false)), in_dead(s));
+            push(
+                &mut job,
+                &slice(&chars, s, p),
+                col(TokenType::Numeric(false)),
+                in_dead(s),
+            );
             continue;
         }
         // ── Identifier / keyword / type / special / function ──
@@ -261,7 +302,12 @@ pub(crate) fn rust_layout_job(
         // ── Punctuation / anything else (one char) ──
         let s = p;
         p += 1;
-        push(&mut job, &slice(&chars, s, p), col(TokenType::Punctuation(c)), in_dead(s));
+        push(
+            &mut job,
+            &slice(&chars, s, p),
+            col(TokenType::Punctuation(c)),
+            in_dead(s),
+        );
     }
     job
 }
@@ -327,7 +373,14 @@ fn cached_rust_layout_job(
 
 /// The numbered-lines gutter, faithfully ported from `CodeEditor::numlines_show`
 /// (we never use the shift / only-natural options, so they're dropped).
-fn numlines_show(ui: &mut egui::Ui, text: &str, theme: &ColorTheme, fontsize: f32, rows: usize, id: &str) {
+fn numlines_show(
+    ui: &mut egui::Ui,
+    text: &str,
+    theme: &ColorTheme,
+    fontsize: f32,
+    rows: usize,
+    id: &str,
+) {
     use egui::TextBuffer;
 
     let total = if text.ends_with('\n') || text.is_empty() {
@@ -340,7 +393,10 @@ fn numlines_show(ui: &mut egui::Ui, text: &str, theme: &ColorTheme, fontsize: f3
     let mut counter = (1..=total)
         .map(|i| {
             let label = i.to_string();
-            format!("{}{label}", " ".repeat(max_indent.saturating_sub(label.len())))
+            format!(
+                "{}{label}",
+                " ".repeat(max_indent.saturating_sub(label.len()))
+            )
         })
         .collect::<Vec<String>>()
         .join("\n");
@@ -394,7 +450,11 @@ fn show_rust_editor(
                         let mut layouter =
                             |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
                                 let job = cached_rust_layout_job(
-                                    buf.as_str(), theme, fontsize, syntax, dead_ranges,
+                                    buf.as_str(),
+                                    theme,
+                                    fontsize,
+                                    syntax,
+                                    dead_ranges,
                                 );
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
@@ -553,7 +613,10 @@ mod tests {
     fn dead_range_fades_color_without_changing_text() {
         let src = "fn dead() {}\nfn used() {}";
         let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[(0, 12)]);
-        assert_eq!(job.text, src, "dead ranges must not change the rendered text");
+        assert_eq!(
+            job.text, src,
+            "dead ranges must not change the rendered text"
+        );
         // The "dead" token (first `fn`, inside [0,12)) must not use the normal
         // keyword colour; the "used" token (after the dead range) must.
         let normal_kw = ColorTheme::GRUVBOX.type_color(TokenType::Keyword);
@@ -584,7 +647,11 @@ mod tests {
             .map(|(t, _)| t)
             .collect();
         // The three `'a` lifetimes are blue; the `'a'` char literal is not.
-        assert_eq!(blue, vec!["'a", "'a", "'a"], "only lifetimes are blue: {blue:?}");
+        assert_eq!(
+            blue,
+            vec!["'a", "'a", "'a"],
+            "only lifetimes are blue: {blue:?}"
+        );
     }
 
     #[test]
@@ -607,6 +674,9 @@ mod tests {
         let texts: Vec<String> = spans(src).into_iter().map(|(t, _)| t).collect();
         assert!(texts.iter().any(|t| t == "0"), "0 separate: {texts:?}");
         assert!(texts.iter().any(|t| t == "16"), "16 separate: {texts:?}");
-        assert!(!texts.iter().any(|t| t.contains("0..16")), "no merged range");
+        assert!(
+            !texts.iter().any(|t| t.contains("0..16")),
+            "no merged range"
+        );
     }
 }

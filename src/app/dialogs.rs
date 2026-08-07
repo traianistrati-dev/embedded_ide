@@ -59,7 +59,11 @@ impl AppIde {
                 // A long list would grow the modal past the window — cap it.
                 const MAX_LISTED: usize = 8;
                 for path in unsaved.iter().take(MAX_LISTED) {
-                    ui.label(egui::RichText::new(format!("  {path}")).monospace().size(11.0));
+                    ui.label(
+                        egui::RichText::new(format!("  {path}"))
+                            .monospace()
+                            .size(11.0),
+                    );
                 }
                 if unsaved.len() > MAX_LISTED {
                     ui.label(
@@ -195,8 +199,11 @@ impl AppIde {
                 ui.horizontal(|ui| {
                     if ui
                         .button(
-                            egui::RichText::new(format!("{} Restore all", ph::ARROW_COUNTER_CLOCKWISE))
-                                .color(egui::Color32::from_rgb(230, 160, 70)),
+                            egui::RichText::new(format!(
+                                "{} Restore all",
+                                ph::ARROW_COUNTER_CLOCKWISE
+                            ))
+                            .color(egui::Color32::from_rgb(230, 160, 70)),
                         )
                         .clicked()
                     {
@@ -396,11 +403,8 @@ impl AppIde {
                 ui.horizontal(|ui| {
                     if ui
                         .button(
-                            egui::RichText::new(format!(
-                                "{} Restore",
-                                ph::ARROW_COUNTER_CLOCKWISE
-                            ))
-                            .color(egui::Color32::from_rgb(230, 160, 70)),
+                            egui::RichText::new(format!("{} Restore", ph::ARROW_COUNTER_CLOCKWISE))
+                                .color(egui::Color32::from_rgb(230, 160, 70)),
                         )
                         .clicked()
                     {

@@ -24,10 +24,16 @@ pub struct ClockWarning {
 
 impl ClockWarning {
     fn error(msg: impl Into<String>) -> Self {
-        Self { severity: Severity::Error, msg: msg.into() }
+        Self {
+            severity: Severity::Error,
+            msg: msg.into(),
+        }
     }
     fn warn(msg: impl Into<String>) -> Self {
-        Self { severity: Severity::Warning, msg: msg.into() }
+        Self {
+            severity: Severity::Warning,
+            msg: msg.into(),
+        }
     }
 }
 
@@ -152,9 +158,9 @@ pub fn has_errors(c: &Stm32f1Clock, f: &ClockFrequencies, l: &ClockLimits) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::compute::frequencies;
     use super::super::model::{Stm32f1Clock, SysclkSrc};
+    use super::*;
 
     fn warns(c: &Stm32f1Clock) -> Vec<ClockWarning> {
         warnings(c, &frequencies(c), &ClockLimits::default())
@@ -173,31 +179,44 @@ mod tests {
     fn pclk1_over_36_is_error() {
         let mut c = Stm32f1Clock::default();
         c.apb1_pre = 1; // PCLK1 = 72 MHz > 36
-        assert!(warns(&c).iter().any(|w| w.severity == Severity::Error
-            && w.msg.contains("PCLK1")));
+        assert!(
+            warns(&c)
+                .iter()
+                .any(|w| w.severity == Severity::Error && w.msg.contains("PCLK1"))
+        );
     }
 
     #[test]
     fn adcclk_over_14_is_error() {
         let mut c = Stm32f1Clock::default();
         c.adc_pre = 2; // 72 / 2 = 36 MHz > 14
-        assert!(warns(&c).iter().any(|w| w.severity == Severity::Error
-            && w.msg.contains("ADCCLK")));
+        assert!(
+            warns(&c)
+                .iter()
+                .any(|w| w.severity == Severity::Error && w.msg.contains("ADCCLK"))
+        );
     }
 
     #[test]
     fn usb_not_48_is_warning() {
         let mut c = Stm32f1Clock::default();
         c.usb_pre = super::super::model::UsbPre::Div1; // 72 / 1 = 72 ≠ 48
-        assert!(warns(&c).iter().any(|w| w.severity == Severity::Warning
-            && w.msg.contains("USB")));
+        assert!(
+            warns(&c)
+                .iter()
+                .any(|w| w.severity == Severity::Warning && w.msg.contains("USB"))
+        );
     }
 
     #[test]
     fn hsi_source_warns_usb_unavailable() {
         let mut c = Stm32f1Clock::default();
         c.sysclk_src = SysclkSrc::Hsi;
-        assert!(warns(&c).iter().any(|w| w.msg.contains("USB is unavailable")));
+        assert!(
+            warns(&c)
+                .iter()
+                .any(|w| w.msg.contains("USB is unavailable"))
+        );
     }
 
     #[test]
@@ -224,8 +243,10 @@ mod tests {
         };
         assert!(!has_errors(&c, &f, &ClockLimits::default()));
         assert!(has_errors(&c, &f, &lim), "72 MHz must violate a 24 MHz cap");
-        assert!(warnings(&c, &f, &lim)
-            .iter()
-            .any(|w| w.msg.contains("24.0 MHz maximum")));
+        assert!(
+            warnings(&c, &f, &lim)
+                .iter()
+                .any(|w| w.msg.contains("24.0 MHz maximum"))
+        );
     }
 }

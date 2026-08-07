@@ -81,7 +81,9 @@ pub fn show_clippy_tab(
                         .size(11.0)
                         .color(egui::Color32::from_rgb(120, 190, 230)),
                 ))
-                .on_hover_text("Apply every fix and rename clippy suggests (renames run one-by-one).")
+                .on_hover_text(
+                    "Apply every fix and rename clippy suggests (renames run one-by-one).",
+                )
                 .clicked()
         {
             *apply_all = true;
@@ -204,14 +206,13 @@ pub fn show_clippy_tab(
                     // main.rs's GENERATED block: that code is owned by the MCU
                     // Configurator, so the button is shown but disabled (applying it
                     // would be reverted / unsafe).
-                    let locked = diag
-                        .fixes
-                        .iter()
-                        .any(|e| fix_locked(&e.file, e.start, e.end, gen_ranges))
-                        || diag
-                            .rename
-                            .as_ref()
-                            .is_some_and(|r| fix_locked(&r.file, r.byte, r.byte + 1, gen_ranges));
+                    let locked =
+                        diag.fixes
+                            .iter()
+                            .any(|e| fix_locked(&e.file, e.start, e.end, gen_ranges))
+                            || diag.rename.as_ref().is_some_and(|r| {
+                                fix_locked(&r.file, r.byte, r.byte + 1, gen_ranges)
+                            });
                     ui.allocate_ui_with_layout(
                         egui::vec2(64.0, 18.0),
                         egui::Layout::left_to_right(egui::Align::Center),

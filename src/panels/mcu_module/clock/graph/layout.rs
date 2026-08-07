@@ -173,26 +173,63 @@ const M: u32 = 1_000_000;
 /// The STM32F103 Figure-2 static layout (ported verbatim from the original
 /// `gui/diagram.rs`). Takes `limits` only to print the HSE crystal range.
 pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
-    let blk = |x, y, w, h, label: &str| BlockDef { x, y, w, h, label: label.to_owned() };
+    let blk = |x, y, w, h, label: &str| BlockDef {
+        x,
+        y,
+        w,
+        h,
+        label: label.to_owned(),
+    };
     let out = |x, y, w, h, label: &str, src, limit| OutputDef {
-        x, y, w, h, label: label.to_owned(), src, limit,
+        x,
+        y,
+        w,
+        h,
+        label: label.to_owned(),
+        src,
+        limit,
     };
-    let tag = |x, y, name: &str, src, limit| TagDef { x, y, name: name.to_owned(), src, limit };
-    let lbl = |x, y, text: &str| LabelDef { x, y, text: text.to_owned() };
+    let tag = |x, y, name: &str, src, limit| TagDef {
+        x,
+        y,
+        name: name.to_owned(),
+        src,
+        limit,
+    };
+    let lbl = |x, y, text: &str| LabelDef {
+        x,
+        y,
+        text: text.to_owned(),
+    };
     let combo = |node: &str, x, y, w, options: Vec<(String, NodeState)>| Widget::Combo {
-        node: node.to_owned(), x, y, w, options,
+        node: node.to_owned(),
+        x,
+        y,
+        w,
+        options,
     };
-    let mux = |node: &str, x, y, w, h, flip, inputs: Vec<(String, f32, NodeState)>| {
-        Widget::MuxRadios { node: node.to_owned(), x, y, w, h, flip, inputs }
-    };
+    let mux =
+        |node: &str, x, y, w, h, flip, inputs: Vec<(String, f32, NodeState)>| Widget::MuxRadios {
+            node: node.to_owned(),
+            x,
+            y,
+            w,
+            h,
+            flip,
+            inputs,
+        };
     // One trapezoid input: (label, dy where the wire enters, mux index to pick).
     let mi = |label: &str, dy: f32, i: usize| (label.to_owned(), dy, NodeState::Index(i));
     // Index-based options for a divider (`/N`), and value-based for the PLL mul.
     let div_opts = |vals: &[u32]| -> Vec<(String, NodeState)> {
-        vals.iter().enumerate().map(|(i, v)| (format!("/ {v}"), NodeState::Index(i))).collect()
+        vals.iter()
+            .enumerate()
+            .map(|(i, v)| (format!("/ {v}"), NodeState::Index(i)))
+            .collect()
     };
-    let mul_opts: Vec<(String, NodeState)> =
-        (2..=16u32).map(|v| (format!("×{v}"), NodeState::Value(v))).collect();
+    let mul_opts: Vec<(String, NodeState)> = (2..=16u32)
+        .map(|v| (format!("×{v}"), NodeState::Value(v)))
+        .collect();
     let s = |label: &str, state: NodeState| (label.to_owned(), state);
 
     ClockLayout {
@@ -203,31 +240,164 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
             blk(28.0, 283.0, 92.0, 34.0, "HSI RC\n8 MHz"),
             blk(175.0, 372.0, 40.0, 22.0, "/2"),
             blk(
-                28.0, 483.0, 92.0, 34.0,
-                &format!("HSE OSC\n{}–{} MHz", limits.hse_min_hz / M, limits.hse_max_hz / M),
+                28.0,
+                483.0,
+                92.0,
+                34.0,
+                &format!(
+                    "HSE OSC\n{}–{} MHz",
+                    limits.hse_min_hz / M,
+                    limits.hse_max_hz / M
+                ),
             ),
         ],
         outputs: vec![
-            out(820.0, 109.0, 160.0, 26.0, "RTCCLK -> RTC", ValueSrc::Rtc, None),
-            out(820.0, 149.0, 160.0, 26.0, "IWDGCLK <- LSI", ValueSrc::Fixed(40_000), None),
-            out(820.0, 232.0, 160.0, 26.0, "USBCLK -> USB", ValueSrc::Usb, None),
-            out(820.0, 272.0, 160.0, 26.0, "FLITFCLK <- HSI", ValueSrc::Flitf, None),
-            out(820.0, 346.0, 160.0, 28.0, "HCLK -> AHB / core / DMA", ValueSrc::Hclk, Some(LimitKey::HclkMax)),
-            out(820.0, 416.0, 160.0, 28.0, "Cortex SysTick", ValueSrc::Systick, None),
-            out(820.0, 456.0, 160.0, 28.0, "FCLK (free-running)", ValueSrc::Hclk, None),
-            out(820.0, 529.0, 160.0, 28.0, "APB1 peripherals", ValueSrc::Pclk1, Some(LimitKey::Pclk1Max)),
-            out(820.0, 576.0, 160.0, 28.0, "APB1 timers", ValueSrc::Pclk1Tim, None),
-            out(820.0, 649.0, 160.0, 28.0, "APB2 peripherals", ValueSrc::Pclk2, Some(LimitKey::Pclk2Max)),
-            out(820.0, 696.0, 160.0, 28.0, "APB2 timers", ValueSrc::Pclk2Tim, None),
-            out(820.0, 749.0, 160.0, 28.0, "ADC1/2", ValueSrc::Adc, Some(LimitKey::AdcclkMax)),
+            out(
+                820.0,
+                109.0,
+                160.0,
+                26.0,
+                "RTCCLK -> RTC",
+                ValueSrc::Rtc,
+                None,
+            ),
+            out(
+                820.0,
+                149.0,
+                160.0,
+                26.0,
+                "IWDGCLK <- LSI",
+                ValueSrc::Fixed(40_000),
+                None,
+            ),
+            out(
+                820.0,
+                232.0,
+                160.0,
+                26.0,
+                "USBCLK -> USB",
+                ValueSrc::Usb,
+                None,
+            ),
+            out(
+                820.0,
+                272.0,
+                160.0,
+                26.0,
+                "FLITFCLK <- HSI",
+                ValueSrc::Flitf,
+                None,
+            ),
+            out(
+                820.0,
+                346.0,
+                160.0,
+                28.0,
+                "HCLK -> AHB / core / DMA",
+                ValueSrc::Hclk,
+                Some(LimitKey::HclkMax),
+            ),
+            out(
+                820.0,
+                416.0,
+                160.0,
+                28.0,
+                "Cortex SysTick",
+                ValueSrc::Systick,
+                None,
+            ),
+            out(
+                820.0,
+                456.0,
+                160.0,
+                28.0,
+                "FCLK (free-running)",
+                ValueSrc::Hclk,
+                None,
+            ),
+            out(
+                820.0,
+                529.0,
+                160.0,
+                28.0,
+                "APB1 peripherals",
+                ValueSrc::Pclk1,
+                Some(LimitKey::Pclk1Max),
+            ),
+            out(
+                820.0,
+                576.0,
+                160.0,
+                28.0,
+                "APB1 timers",
+                ValueSrc::Pclk1Tim,
+                None,
+            ),
+            out(
+                820.0,
+                649.0,
+                160.0,
+                28.0,
+                "APB2 peripherals",
+                ValueSrc::Pclk2,
+                Some(LimitKey::Pclk2Max),
+            ),
+            out(
+                820.0,
+                696.0,
+                160.0,
+                28.0,
+                "APB2 timers",
+                ValueSrc::Pclk2Tim,
+                None,
+            ),
+            out(
+                820.0,
+                749.0,
+                160.0,
+                28.0,
+                "ADC1/2",
+                ValueSrc::Adc,
+                Some(LimitKey::AdcclkMax),
+            ),
             out(28.0, 625.0, 106.0, 26.0, "MCO pin", ValueSrc::Mco, None),
         ],
         tags: vec![
-            tag(460.0, 442.0, "PLLCLK", ValueSrc::Pllclk, Some(LimitKey::SysclkMax)),
-            tag(516.0, 344.0, "SYSCLK", ValueSrc::Sysclk, Some(LimitKey::SysclkMax)),
-            tag(592.0, 344.0, "HCLK", ValueSrc::Hclk, Some(LimitKey::HclkMax)),
-            tag(792.0, 524.0, "PCLK1", ValueSrc::Pclk1, Some(LimitKey::Pclk1Max)),
-            tag(792.0, 644.0, "PCLK2", ValueSrc::Pclk2, Some(LimitKey::Pclk2Max)),
+            tag(
+                460.0,
+                442.0,
+                "PLLCLK",
+                ValueSrc::Pllclk,
+                Some(LimitKey::SysclkMax),
+            ),
+            tag(
+                516.0,
+                344.0,
+                "SYSCLK",
+                ValueSrc::Sysclk,
+                Some(LimitKey::SysclkMax),
+            ),
+            tag(
+                592.0,
+                344.0,
+                "HCLK",
+                ValueSrc::Hclk,
+                Some(LimitKey::HclkMax),
+            ),
+            tag(
+                792.0,
+                524.0,
+                "PCLK1",
+                ValueSrc::Pclk1,
+                Some(LimitKey::Pclk1Max),
+            ),
+            tag(
+                792.0,
+                644.0,
+                "PCLK2",
+                ValueSrc::Pclk2,
+                Some(LimitKey::Pclk2Max),
+            ),
         ],
         labels_above: vec![
             lbl(148.0, 478.0, "PLLXTPRE"),
@@ -277,42 +447,98 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
         // mux radios for the four muxes, a drag-MHz for the HSE crystal, and
         // dropdowns for the prescalers (the typed path ignores these).
         widgets: vec![
-            mux("rtc", 250.0, 72.0, 40.0, 100.0, false, vec![
-                mi("HSE/128", 28.0, 0),
-                mi("LSE", 50.0, 1),
-                mi("LSI", 72.0, 2),
-            ]),
-            mux("pllsrc", 250.0, 370.0, 40.0, 145.0, false, vec![
-                mi("HSI/2", 13.0, 0),
-                mi("HSE", 132.0, 1),
-            ]),
-            mux("sw", 470.0, 300.0, 40.0, 120.0, false, vec![
-                mi("HSI", 24.0, 0),
-                mi("HSE", 60.0, 1),
-                mi("PLLCLK", 96.0, 2),
-            ]),
-            mux("mco", 250.0, 580.0, 40.0, 116.0, true, vec![
-                mi("SYSCLK", 20.0, 0),
-                mi("HSI", 48.0, 1),
-                mi("HSE", 76.0, 2),
-                mi("PLL/2", 104.0, 3),
-            ]),
+            mux(
+                "rtc",
+                250.0,
+                72.0,
+                40.0,
+                100.0,
+                false,
+                vec![
+                    mi("HSE/128", 28.0, 0),
+                    mi("LSE", 50.0, 1),
+                    mi("LSI", 72.0, 2),
+                ],
+            ),
+            mux(
+                "pllsrc",
+                250.0,
+                370.0,
+                40.0,
+                145.0,
+                false,
+                vec![mi("HSI/2", 13.0, 0), mi("HSE", 132.0, 1)],
+            ),
+            mux(
+                "sw",
+                470.0,
+                300.0,
+                40.0,
+                120.0,
+                false,
+                vec![
+                    mi("HSI", 24.0, 0),
+                    mi("HSE", 60.0, 1),
+                    mi("PLLCLK", 96.0, 2),
+                ],
+            ),
+            mux(
+                "mco",
+                250.0,
+                580.0,
+                40.0,
+                116.0,
+                true,
+                vec![
+                    mi("SYSCLK", 20.0, 0),
+                    mi("HSI", 48.0, 1),
+                    mi("HSE", 76.0, 2),
+                    mi("PLL/2", 104.0, 3),
+                ],
+            ),
             Widget::DragMhz {
                 node: "hse".to_owned(),
-                x: 28.0, y: 533.0, w: 92.0,
-                min_mhz: 1.0, max_mhz: 25.0,
+                x: 28.0,
+                y: 533.0,
+                w: 92.0,
+                min_mhz: 1.0,
+                max_mhz: 25.0,
             },
-            combo("pllxtpre", 150.0, 490.0, 60.0,
-                vec![s("/ 1", NodeState::Index(0)), s("/ 2", NodeState::Index(1))]),
+            combo(
+                "pllxtpre",
+                150.0,
+                490.0,
+                60.0,
+                vec![s("/ 1", NodeState::Index(0)), s("/ 2", NodeState::Index(1))],
+            ),
             combo("pllmul", 336.0, 430.0, 84.0, mul_opts),
-            combo("ahb", 540.0, 347.0, 86.0, div_opts(&[1, 2, 4, 8, 16, 64, 128, 256, 512])),
+            combo(
+                "ahb",
+                540.0,
+                347.0,
+                86.0,
+                div_opts(&[1, 2, 4, 8, 16, 64, 128, 256, 512]),
+            ),
             combo("apb1", 720.0, 530.0, 66.0, div_opts(&[1, 2, 4, 8, 16])),
             combo("apb2", 720.0, 650.0, 66.0, div_opts(&[1, 2, 4, 8, 16])),
             combo("adc", 720.0, 750.0, 66.0, div_opts(&[2, 4, 6, 8])),
-            combo("usb", 470.0, 232.0, 90.0,
-                vec![s("/ 1.5", NodeState::Index(0)), s("/ 1", NodeState::Index(1))]),
-            combo("systick", 700.0, 418.0, 66.0,
-                vec![s("/ 8", NodeState::Index(0)), s("/ 1", NodeState::Index(1))]),
+            combo(
+                "usb",
+                470.0,
+                232.0,
+                90.0,
+                vec![
+                    s("/ 1.5", NodeState::Index(0)),
+                    s("/ 1", NodeState::Index(1)),
+                ],
+            ),
+            combo(
+                "systick",
+                700.0,
+                418.0,
+                66.0,
+                vec![s("/ 8", NodeState::Index(0)), s("/ 1", NodeState::Index(1))],
+            ),
         ],
     }
 }

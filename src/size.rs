@@ -68,7 +68,9 @@ pub fn parse_memory_x(text: &str) -> MemLimits {
     clean.push_str(rest);
 
     for line in clean.lines() {
-        let Some(colon) = line.find(':') else { continue };
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
         let name = line[..colon]
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .find(|t| !t.is_empty())
@@ -541,11 +543,11 @@ mod tests {
         // Section headers: (name_off, type, flags, addr, offset, size)
         // shstrtab content sits at file offset 348.
         let shdrs: [(u32, u32, u32, u32, u32, u32); 5] = [
-            (0, 0, 0, 0, 0, 0),                          // null
-            (1, 1, 0x6, 0x0800_0000, 0x1000, 0x100),     // .text  PROGBITS ALLOC|EXEC
-            (7, 1, 0x3, 0x2000_0000, 0x2000, 0x20),      // .data  PROGBITS WRITE|ALLOC
-            (13, 8, 0x3, 0x2000_0020, 0x3000, 0x80),     // .bss   NOBITS   WRITE|ALLOC
-            (18, 3, 0x0, 0, 348, 28),                    // .shstrtab STRTAB
+            (0, 0, 0, 0, 0, 0),                      // null
+            (1, 1, 0x6, 0x0800_0000, 0x1000, 0x100), // .text  PROGBITS ALLOC|EXEC
+            (7, 1, 0x3, 0x2000_0000, 0x2000, 0x20),  // .data  PROGBITS WRITE|ALLOC
+            (13, 8, 0x3, 0x2000_0020, 0x3000, 0x80), // .bss   NOBITS   WRITE|ALLOC
+            (18, 3, 0x0, 0, 348, 28),                // .shstrtab STRTAB
         ];
         for (name, t, fl, addr, off, size) in shdrs {
             for x in [name, t, fl, addr, off, size, 0, 0, 1, 0] {

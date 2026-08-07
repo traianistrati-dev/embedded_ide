@@ -121,7 +121,9 @@ pub fn show_debug_tab(
         }
         ui.add_enabled_ui(stopped, |ui| {
             if ui
-                .button(egui::RichText::new(format!("{} Over", ph::ARROW_BEND_DOWN_RIGHT)).size(10.5))
+                .button(
+                    egui::RichText::new(format!("{} Over", ph::ARROW_BEND_DOWN_RIGHT)).size(10.5),
+                )
                 .on_hover_text("Step over — next line, calls run through")
                 .clicked()
             {
@@ -344,8 +346,7 @@ pub fn show_debug_tab(
     let mut watch_add: Option<String> = None;
     let mut watch_remove: Option<usize> = None;
 
-    let (row, _) =
-        ui.allocate_exact_size(egui::vec2(total_w, avail_h), egui::Sense::hover());
+    let (row, _) = ui.allocate_exact_size(egui::vec2(total_w, avail_h), egui::Sense::hover());
     // Pane left edges: Console | Call stack | Variables | Watch.
     let x0 = row.left();
     let x1 = x0 + console_w + gap;
@@ -380,32 +381,32 @@ pub fn show_debug_tab(
             .max_height(body_h)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                    if stack.is_empty() {
-                        ui.label(
-                            egui::RichText::new(if running {
-                                "running — Pause or wait for a breakpoint"
-                            } else {
-                                "no frames"
-                            })
-                            .size(10.5)
-                            .color(egui::Color32::from_gray(110)),
-                        );
-                    }
-                    for f in &stack {
-                        let selected = sel_frame == Some(f.id);
-                        let loc = match &f.file_rel {
-                            Some(rel) => format!("{rel}:{}", f.line),
-                            None => "(no source)".to_owned(),
-                        };
-                        let color = if f.file_rel.is_some() {
-                            egui::Color32::from_gray(210)
+                if stack.is_empty() {
+                    ui.label(
+                        egui::RichText::new(if running {
+                            "running — Pause or wait for a breakpoint"
                         } else {
-                            egui::Color32::from_gray(120)
-                        };
-                        let text = egui::RichText::new(format!("{}  {loc}", f.name))
-                            .size(10.5)
-                            .monospace()
-                            .color(color);
+                            "no frames"
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(110)),
+                    );
+                }
+                for f in &stack {
+                    let selected = sel_frame == Some(f.id);
+                    let loc = match &f.file_rel {
+                        Some(rel) => format!("{rel}:{}", f.line),
+                        None => "(no source)".to_owned(),
+                    };
+                    let color = if f.file_rel.is_some() {
+                        egui::Color32::from_gray(210)
+                    } else {
+                        egui::Color32::from_gray(120)
+                    };
+                    let text = egui::RichText::new(format!("{}  {loc}", f.name))
+                        .size(10.5)
+                        .monospace()
+                        .color(color);
                     if ui.selectable_label(selected, text).clicked() {
                         select = Some(f.clone());
                     }
@@ -637,7 +638,7 @@ fn var_row(ui: &mut egui::Ui, v: &crate::debugger::VarRow, name_color: egui::Col
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_splits, split_widths, MIN_SPLIT};
+    use super::{MIN_SPLIT, clamp_splits, split_widths};
 
     /// The four panes must fit the row EXACTLY at every width — the runaway this
     /// replaced came from floors that out-demanded a narrow panel, and the Code
@@ -646,9 +647,14 @@ mod tests {
     #[test]
     fn panes_always_fit_the_row() {
         let splits = clamp_splits([0.34, 0.56, 0.78]);
-        for usable in [0.0_f32, 1.0, 80.0, 200.0, 418.0, 500.0, 900.0, 1600.0, 4000.0] {
+        for usable in [
+            0.0_f32, 1.0, 80.0, 200.0, 418.0, 500.0, 900.0, 1600.0, 4000.0,
+        ] {
             let w = split_widths(usable, splits);
-            assert!(w.iter().all(|x| *x >= 0.0), "negative pane at {usable}: {w:?}");
+            assert!(
+                w.iter().all(|x| *x >= 0.0),
+                "negative pane at {usable}: {w:?}"
+            );
             let sum: f32 = w.iter().sum();
             assert!(
                 (sum - usable).abs() < 0.001,
@@ -664,11 +670,11 @@ mod tests {
     #[test]
     fn clamp_keeps_four_panes_alive() {
         for raw in [
-            [0.34, 0.56, 0.78],   // already valid
-            [0.9, 0.1, 0.5],      // out of order
-            [-1.0, 2.0, 0.0],     // out of range
-            [0.0, 0.0, 0.0],      // all collapsed left
-            [1.0, 1.0, 1.0],      // all collapsed right
+            [0.34, 0.56, 0.78], // already valid
+            [0.9, 0.1, 0.5],    // out of order
+            [-1.0, 2.0, 0.0],   // out of range
+            [0.0, 0.0, 0.0],    // all collapsed left
+            [1.0, 1.0, 1.0],    // all collapsed right
         ] {
             let b = clamp_splits(raw);
             // Ascending with a MIN_SPLIT gap between each of the four panes.

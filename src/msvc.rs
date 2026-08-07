@@ -151,7 +151,12 @@ fn fallback_scan() -> Vec<PathBuf> {
 fn probe_install(path: PathBuf) -> MsvcInstall {
     let tools = path.join("VC").join("Tools").join("MSVC");
     let mut versions: Vec<PathBuf> = std::fs::read_dir(&tools)
-        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
         .unwrap_or_default();
     versions.sort(); // lexicographic is fine for 14.xx.yyyyy
     let newest = versions.last().cloned();
@@ -229,10 +234,7 @@ fn vcvars_env(install: &Path) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     let mut cmd = std::process::Command::new("cmd");
     crate::build::no_window_raw(&mut cmd);
     // `call … >nul` keeps the banner out; `set` then dumps the environment.
-    cmd.raw_arg(format!(
-        "/C \"\"{}\" >nul 2>&1 && set\"",
-        bat.display()
-    ));
+    cmd.raw_arg(format!("/C \"\"{}\" >nul 2>&1 && set\"", bat.display()));
     let out = cmd.output();
     let Ok(out) = out else {
         return Vec::new();
@@ -310,7 +312,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         fake_install(&tmp, "14.44.35207", false, false);
         let i = probe_install(tmp.clone());
-        assert!(!i.is_complete(), "binary-only install must NOT count: {i:?}");
+        assert!(
+            !i.is_complete(),
+            "binary-only install must NOT count: {i:?}"
+        );
         assert!(!i.has_libs && !i.has_headers);
 
         // libs but no headers (links, but any C crate fails to compile)

@@ -10,73 +10,73 @@ impl PinFunction {
     /// number already makes each file name unique.
     pub fn file_token(&self) -> &'static str {
         match self {
-            PinFunction::Unset       => "unset",
-            PinFunction::GpioInput   => "in",
-            PinFunction::GpioOutput  => "out",
+            PinFunction::Unset => "unset",
+            PinFunction::GpioInput => "in",
+            PinFunction::GpioOutput => "out",
             PinFunction::AdcChannel { .. } => "adc",
-            PinFunction::TimerPwm { .. }   => "pwm",
-            PinFunction::UsartTx(_)  => "uart_tx",
-            PinFunction::UsartRx(_)  => "uart_rx",
+            PinFunction::TimerPwm { .. } => "pwm",
+            PinFunction::UsartTx(_) => "uart_tx",
+            PinFunction::UsartRx(_) => "uart_rx",
             PinFunction::UsartCts(_) => "uart_cts",
             PinFunction::UsartRts(_) => "uart_rts",
-            PinFunction::UsartCk(_)  => "uart_ck",
-            PinFunction::LpuartTx(_)  => "lpuart_tx",
-            PinFunction::LpuartRx(_)  => "lpuart_rx",
+            PinFunction::UsartCk(_) => "uart_ck",
+            PinFunction::LpuartTx(_) => "lpuart_tx",
+            PinFunction::LpuartRx(_) => "lpuart_rx",
             PinFunction::LpuartCts(_) => "lpuart_cts",
             PinFunction::LpuartRts(_) => "lpuart_rts",
-            PinFunction::SpiNss(_)   => "spi_nss",
-            PinFunction::SpiSck(_)   => "spi_sck",
-            PinFunction::SpiMiso(_)  => "spi_miso",
-            PinFunction::SpiMosi(_)  => "spi_mosi",
-            PinFunction::SpiRdy(_)   => "spi_rdy",
-            PinFunction::I2cScl(_)   => "i2c_scl",
-            PinFunction::I2cSda(_)   => "i2c_sda",
-            PinFunction::UsbDm       => "usb_dm",
-            PinFunction::UsbDp       => "usb_dp",
-            PinFunction::CanRx       => "can_rx",
-            PinFunction::CanTx       => "can_tx",
-            PinFunction::SwdIo       => "swdio",
-            PinFunction::SwdClk      => "swclk",
-            PinFunction::Mco         => "mco",
+            PinFunction::SpiNss(_) => "spi_nss",
+            PinFunction::SpiSck(_) => "spi_sck",
+            PinFunction::SpiMiso(_) => "spi_miso",
+            PinFunction::SpiMosi(_) => "spi_mosi",
+            PinFunction::SpiRdy(_) => "spi_rdy",
+            PinFunction::I2cScl(_) => "i2c_scl",
+            PinFunction::I2cSda(_) => "i2c_sda",
+            PinFunction::UsbDm => "usb_dm",
+            PinFunction::UsbDp => "usb_dp",
+            PinFunction::CanRx => "can_rx",
+            PinFunction::CanTx => "can_tx",
+            PinFunction::SwdIo => "swdio",
+            PinFunction::SwdClk => "swclk",
+            PinFunction::Mco => "mco",
             // The pin number already makes the file name unique, so a single
             // token is enough for every generic alternate function.
-            PinFunction::Other(_)    => "af",
+            PinFunction::Other(_) => "af",
         }
     }
 
     /// Full label shown on the function button
     pub fn label(&self) -> String {
         match self {
-            PinFunction::Unset              => "Not configured".into(),
-            PinFunction::GpioInput          => "GPIO Input".into(),
-            PinFunction::GpioOutput         => "GPIO Output".into(),
-            PinFunction::AdcChannel{adc, channel} => format!("ADC{adc}  IN{channel}"),
-            PinFunction::TimerPwm{timer, channel} => format!("TIM{timer}  CH{channel}  (PWM)"),
-            PinFunction::UsartTx(n)         => format!("USART{n}  TX"),
-            PinFunction::UsartRx(n)         => format!("USART{n}  RX"),
-            PinFunction::UsartCts(n)        => format!("USART{n}  CTS"),
-            PinFunction::UsartRts(n)        => format!("USART{n}  RTS"),
-            PinFunction::UsartCk(n)         => format!("USART{n}  CK"),
-            PinFunction::LpuartTx(n)        => format!("LPUART{n}  TX"),
-            PinFunction::LpuartRx(n)        => format!("LPUART{n}  RX"),
-            PinFunction::LpuartCts(n)       => format!("LPUART{n}  CTS"),
-            PinFunction::LpuartRts(n)       => format!("LPUART{n}  RTS"),
-            PinFunction::SpiNss(n)          => format!("SPI{n}  NSS"),
-            PinFunction::SpiSck(n)          => format!("SPI{n}  SCK"),
-            PinFunction::SpiMiso(n)         => format!("SPI{n}  MISO"),
-            PinFunction::SpiMosi(n)         => format!("SPI{n}  MOSI"),
-            PinFunction::SpiRdy(n)          => format!("SPI{n}  RDY"),
-            PinFunction::I2cScl(n)          => format!("I2C{n}  SCL"),
-            PinFunction::I2cSda(n)          => format!("I2C{n}  SDA"),
-            PinFunction::UsbDm              => "USB  D−".into(),
-            PinFunction::UsbDp              => "USB  D+".into(),
-            PinFunction::CanRx              => "CAN  RX".into(),
-            PinFunction::CanTx              => "CAN  TX".into(),
-            PinFunction::SwdIo              => "SWD  IO  (JTMS)".into(),
-            PinFunction::SwdClk             => "SWD  CLK  (JTCK)".into(),
-            PinFunction::Mco                => "MCO  (Master Clock Out)".into(),
+            PinFunction::Unset => "Not configured".into(),
+            PinFunction::GpioInput => "GPIO Input".into(),
+            PinFunction::GpioOutput => "GPIO Output".into(),
+            PinFunction::AdcChannel { adc, channel } => format!("ADC{adc}  IN{channel}"),
+            PinFunction::TimerPwm { timer, channel } => format!("TIM{timer}  CH{channel}  (PWM)"),
+            PinFunction::UsartTx(n) => format!("USART{n}  TX"),
+            PinFunction::UsartRx(n) => format!("USART{n}  RX"),
+            PinFunction::UsartCts(n) => format!("USART{n}  CTS"),
+            PinFunction::UsartRts(n) => format!("USART{n}  RTS"),
+            PinFunction::UsartCk(n) => format!("USART{n}  CK"),
+            PinFunction::LpuartTx(n) => format!("LPUART{n}  TX"),
+            PinFunction::LpuartRx(n) => format!("LPUART{n}  RX"),
+            PinFunction::LpuartCts(n) => format!("LPUART{n}  CTS"),
+            PinFunction::LpuartRts(n) => format!("LPUART{n}  RTS"),
+            PinFunction::SpiNss(n) => format!("SPI{n}  NSS"),
+            PinFunction::SpiSck(n) => format!("SPI{n}  SCK"),
+            PinFunction::SpiMiso(n) => format!("SPI{n}  MISO"),
+            PinFunction::SpiMosi(n) => format!("SPI{n}  MOSI"),
+            PinFunction::SpiRdy(n) => format!("SPI{n}  RDY"),
+            PinFunction::I2cScl(n) => format!("I2C{n}  SCL"),
+            PinFunction::I2cSda(n) => format!("I2C{n}  SDA"),
+            PinFunction::UsbDm => "USB  D−".into(),
+            PinFunction::UsbDp => "USB  D+".into(),
+            PinFunction::CanRx => "CAN  RX".into(),
+            PinFunction::CanTx => "CAN  TX".into(),
+            PinFunction::SwdIo => "SWD  IO  (JTMS)".into(),
+            PinFunction::SwdClk => "SWD  CLK  (JTCK)".into(),
+            PinFunction::Mco => "MCO  (Master Clock Out)".into(),
             // The datasheet's own signal name is the label.
-            PinFunction::Other(name)        => name.clone(),
+            PinFunction::Other(name) => name.clone(),
         }
     }
 
@@ -88,16 +88,16 @@ impl PinFunction {
     pub fn from_label(s: &str) -> Option<PinFunction> {
         // ── Fixed / parameter-free variants ──────────────────────────────────
         match s {
-            "GPIO Input"              => return Some(PinFunction::GpioInput),
-            "GPIO Output"             => return Some(PinFunction::GpioOutput),
-            "USB  D−"                 => return Some(PinFunction::UsbDm),
-            "USB  D+"                 => return Some(PinFunction::UsbDp),
-            "CAN  RX"                 => return Some(PinFunction::CanRx),
-            "CAN  TX"                 => return Some(PinFunction::CanTx),
-            "SWD  IO  (JTMS)"         => return Some(PinFunction::SwdIo),
-            "SWD  CLK  (JTCK)"        => return Some(PinFunction::SwdClk),
+            "GPIO Input" => return Some(PinFunction::GpioInput),
+            "GPIO Output" => return Some(PinFunction::GpioOutput),
+            "USB  D−" => return Some(PinFunction::UsbDm),
+            "USB  D+" => return Some(PinFunction::UsbDp),
+            "CAN  RX" => return Some(PinFunction::CanRx),
+            "CAN  TX" => return Some(PinFunction::CanTx),
+            "SWD  IO  (JTMS)" => return Some(PinFunction::SwdIo),
+            "SWD  CLK  (JTCK)" => return Some(PinFunction::SwdClk),
             "MCO  (Master Clock Out)" => return Some(PinFunction::Mco),
-            _                         => {}
+            _ => {}
         }
 
         // ── LPUART{n}  {role} ────────────────────────────────────────────────
@@ -122,12 +122,12 @@ impl PinFunction {
             if let Some((num_str, role)) = rest.split_once("  ") {
                 if let Ok(n) = num_str.parse::<u8>() {
                     return match role {
-                        "TX"  => Some(PinFunction::UsartTx(n)),
-                        "RX"  => Some(PinFunction::UsartRx(n)),
+                        "TX" => Some(PinFunction::UsartTx(n)),
+                        "RX" => Some(PinFunction::UsartRx(n)),
                         "CTS" => Some(PinFunction::UsartCts(n)),
                         "RTS" => Some(PinFunction::UsartRts(n)),
-                        "CK"  => Some(PinFunction::UsartCk(n)),
-                        _     => None,
+                        "CK" => Some(PinFunction::UsartCk(n)),
+                        _ => None,
                     };
                 }
             }
@@ -138,12 +138,12 @@ impl PinFunction {
             if let Some((num_str, role)) = rest.split_once("  ") {
                 if let Ok(n) = num_str.parse::<u8>() {
                     return match role {
-                        "NSS"  => Some(PinFunction::SpiNss(n)),
-                        "SCK"  => Some(PinFunction::SpiSck(n)),
+                        "NSS" => Some(PinFunction::SpiNss(n)),
+                        "SCK" => Some(PinFunction::SpiSck(n)),
                         "MISO" => Some(PinFunction::SpiMiso(n)),
                         "MOSI" => Some(PinFunction::SpiMosi(n)),
-                        "RDY"  => Some(PinFunction::SpiRdy(n)),
-                        _      => None,
+                        "RDY" => Some(PinFunction::SpiRdy(n)),
+                        _ => None,
                     };
                 }
             }
@@ -156,7 +156,7 @@ impl PinFunction {
                     return match role {
                         "SCL" => Some(PinFunction::I2cScl(n)),
                         "SDA" => Some(PinFunction::I2cSda(n)),
-                        _     => None,
+                        _ => None,
                     };
                 }
             }
@@ -167,9 +167,7 @@ impl PinFunction {
         if let Some(rest) = s.strip_prefix("ADC") {
             // rest = "1  IN3"  →  split on "  IN"
             if let Some((adc_str, ch_str)) = rest.split_once("  IN") {
-                if let (Ok(adc), Ok(channel)) =
-                    (adc_str.parse::<u8>(), ch_str.parse::<u8>())
-                {
+                if let (Ok(adc), Ok(channel)) = (adc_str.parse::<u8>(), ch_str.parse::<u8>()) {
                     return Some(PinFunction::AdcChannel { adc, channel });
                 }
             }
@@ -211,10 +209,10 @@ impl PinFunction {
     /// Returns `None` for `Unset` (no file should be written).
     pub fn hal_gpio_mode(&self) -> Option<&'static str> {
         match self {
-            PinFunction::Unset          => None,
-            PinFunction::GpioInput      => Some("Input"),
-            PinFunction::GpioOutput     => Some("Output"),
-            PinFunction::AdcChannel{..} => Some("Analog"),
+            PinFunction::Unset => None,
+            PinFunction::GpioInput => Some("Input"),
+            PinFunction::GpioOutput => Some("Output"),
+            PinFunction::AdcChannel { .. } => Some("Analog"),
             // Everything else is an alternate-function pin
             _ => Some("Alternate"),
         }
@@ -223,35 +221,35 @@ impl PinFunction {
     /// Short badge shown on the pin in the diagram
     pub fn short_label(&self) -> &str {
         match self {
-            PinFunction::Unset          => "—",
-            PinFunction::GpioInput      => "IN",
-            PinFunction::GpioOutput     => "OUT",
-            PinFunction::AdcChannel{..} => "ADC",
-            PinFunction::TimerPwm{..}   => "PWM",
-            PinFunction::UsartTx(_)     => "TX",
-            PinFunction::UsartRx(_)     => "RX",
-            PinFunction::UsartCts(_)    => "CTS",
-            PinFunction::UsartRts(_)    => "RTS",
-            PinFunction::UsartCk(_)     => "CK",
-            PinFunction::LpuartTx(_)    => "LPTX",
-            PinFunction::LpuartRx(_)    => "LPRX",
-            PinFunction::LpuartCts(_)   => "LPCTS",
-            PinFunction::LpuartRts(_)   => "LPRTS",
-            PinFunction::SpiNss(_)      => "NSS",
-            PinFunction::SpiSck(_)      => "SCK",
-            PinFunction::SpiMiso(_)     => "MISO",
-            PinFunction::SpiMosi(_)     => "MOSI",
-            PinFunction::SpiRdy(_)      => "RDY",
-            PinFunction::I2cScl(_)      => "SCL",
-            PinFunction::I2cSda(_)      => "SDA",
-            PinFunction::UsbDm          => "D−",
-            PinFunction::UsbDp          => "D+",
-            PinFunction::CanRx          => "CAN",
-            PinFunction::CanTx          => "CAN",
-            PinFunction::SwdIo          => "SWD",
-            PinFunction::SwdClk         => "SWD",
-            PinFunction::Mco            => "MCO",
-            PinFunction::Other(name)    => name,
+            PinFunction::Unset => "—",
+            PinFunction::GpioInput => "IN",
+            PinFunction::GpioOutput => "OUT",
+            PinFunction::AdcChannel { .. } => "ADC",
+            PinFunction::TimerPwm { .. } => "PWM",
+            PinFunction::UsartTx(_) => "TX",
+            PinFunction::UsartRx(_) => "RX",
+            PinFunction::UsartCts(_) => "CTS",
+            PinFunction::UsartRts(_) => "RTS",
+            PinFunction::UsartCk(_) => "CK",
+            PinFunction::LpuartTx(_) => "LPTX",
+            PinFunction::LpuartRx(_) => "LPRX",
+            PinFunction::LpuartCts(_) => "LPCTS",
+            PinFunction::LpuartRts(_) => "LPRTS",
+            PinFunction::SpiNss(_) => "NSS",
+            PinFunction::SpiSck(_) => "SCK",
+            PinFunction::SpiMiso(_) => "MISO",
+            PinFunction::SpiMosi(_) => "MOSI",
+            PinFunction::SpiRdy(_) => "RDY",
+            PinFunction::I2cScl(_) => "SCL",
+            PinFunction::I2cSda(_) => "SDA",
+            PinFunction::UsbDm => "D−",
+            PinFunction::UsbDp => "D+",
+            PinFunction::CanRx => "CAN",
+            PinFunction::CanTx => "CAN",
+            PinFunction::SwdIo => "SWD",
+            PinFunction::SwdClk => "SWD",
+            PinFunction::Mco => "MCO",
+            PinFunction::Other(name) => name,
         }
     }
 }

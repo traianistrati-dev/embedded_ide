@@ -178,7 +178,7 @@ impl AppIde {
         // fresh; files a toolchain doesn't use (memory.x/build.rs on ESP) stay
         // empty.
         if let Some((cfg, tc)) = self.selected_build_cfg() {
-            use crate::panels::mcu_module::project_gen::{gen_config, splice_config, ConfigFile};
+            use crate::panels::mcu_module::project_gen::{ConfigFile, gen_config, splice_config};
             let load = |file: ConfigFile, path: std::path::PathBuf| -> String {
                 match std::fs::read_to_string(&path) {
                     // LF-normalized like every buffer (phantom-gutter rule).
@@ -187,8 +187,10 @@ impl AppIde {
                 }
             };
             self.cargo_toml = load(ConfigFile::CargoToml, root.join("Cargo.toml"));
-            self.cargo_config =
-                load(ConfigFile::CargoConfig, root.join(".cargo").join("config.toml"));
+            self.cargo_config = load(
+                ConfigFile::CargoConfig,
+                root.join(".cargo").join("config.toml"),
+            );
             self.memory_x = load(ConfigFile::MemoryX, root.join("memory.x"));
             self.build_rs = load(ConfigFile::BuildRs, root.join("build.rs"));
             self.gitignore = load(ConfigFile::GitIgnore, root.join(".gitignore"));
@@ -370,12 +372,10 @@ impl AppIde {
             return;
         }
         if self.save_in_progress.is_some() {
-            self.git
-                .state
-                .lock()
-                .unwrap()
-                .lines
-                .push((crate::git::GitLine::Notice, "[busy] save in progress — retry in a moment".into()));
+            self.git.state.lock().unwrap().lines.push((
+                crate::git::GitLine::Notice,
+                "[busy] save in progress — retry in a moment".into(),
+            ));
             return;
         }
         let msg = self.git.commit_msg.trim().to_owned();
@@ -407,7 +407,11 @@ impl AppIde {
                 .map(|c| c.path.clone())
                 .filter(|p| !self.git.excluded.contains(p))
                 .collect();
-            if picked.is_empty() && matches!(op, crate::git::GitOp::Commit | crate::git::GitOp::CommitPush)
+            if picked.is_empty()
+                && matches!(
+                    op,
+                    crate::git::GitOp::Commit | crate::git::GitOp::CommitPush
+                )
             {
                 self.git.state.lock().unwrap().lines.push((
                     crate::git::GitLine::Notice,
@@ -428,10 +432,9 @@ impl AppIde {
             // Mirror only when committing a LIBRARY and the option is on; the
             // project root is where the second commit runs.
             match (&self.git.target, self.git.mirror_to_project) {
-                (crate::git::RepoTarget::Library(lib), true) => self
-                    .project_dir
-                    .clone()
-                    .map(|root| (lib.clone(), root)),
+                (crate::git::RepoTarget::Library(lib), true) => {
+                    self.project_dir.clone().map(|root| (lib.clone(), root))
+                }
                 _ => None,
             },
             std::sync::Arc::clone(&self.git.state),
@@ -531,7 +534,11 @@ impl AppIde {
             std::sync::Arc::clone(&state),
             self.egui_ctx.clone(),
         );
-        self.workspace_add = Some(WorkspaceAdd { dir, tentative, state });
+        self.workspace_add = Some(WorkspaceAdd {
+            dir,
+            tentative,
+            state,
+        });
     }
 
     /// Consume a finished "Add to workspace" pre-check. On success the tentative
@@ -875,8 +882,10 @@ impl AppIde {
                 {
                     let mut st = self.git.state.lock().unwrap();
                     st.op_gen += 1; // refresh the editor gutter's HEAD baseline marks
-                    st.lines
-                        .push((crate::git::GitLine::Notice, format!("reverted a hunk in {path}")));
+                    st.lines.push((
+                        crate::git::GitLine::Notice,
+                        format!("reverted a hunk in {path}"),
+                    ));
                 }
                 // Re-open the diff so the remaining hunks show (or it closes if
                 // the file now matches HEAD).
@@ -947,7 +956,9 @@ impl AppIde {
         {
             e.1 = content;
         } else {
-            self.project_tree.user_src_files.push((key.clone(), content));
+            self.project_tree
+                .user_src_files
+                .push((key.clone(), content));
         }
         self.cached_project_files = None;
         {
@@ -1093,9 +1104,9 @@ pub(super) fn valid_project_name(name: &str) -> Result<(), String> {
     if n.is_empty() {
         return Err("Name cannot be empty".into());
     }
-    if n.chars()
-        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20)
-    {
+    if n.chars().any(|c| {
+        matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20
+    }) {
         return Err(r#"Name cannot contain < > : " / \ | ? *"#.into());
     }
     if n.ends_with('.') || n.ends_with(' ') {
@@ -1180,7 +1191,10 @@ mod rename_project_tests {
         assert!(valid_project_name("done.").is_err(), "trailing dot");
         assert!(valid_project_name("CON").is_err(), "reserved device");
         assert!(valid_project_name("com3").is_err(), "reserved device");
-        assert!(valid_project_name("COMET").is_ok(), "COM prefix but not COMn");
+        assert!(
+            valid_project_name("COMET").is_ok(),
+            "COM prefix but not COMn"
+        );
     }
 
     #[test]
@@ -1223,7 +1237,10 @@ mod fs_create_tests {
         let mut files = Vec::new();
         let mut folders = Vec::new();
         apply_fs_create(&mut files, &mut folders, "folder1", true, None);
-        assert!(files.is_empty(), "a directory must never become a file entry");
+        assert!(
+            files.is_empty(),
+            "a directory must never become a file entry"
+        );
         assert_eq!(folders, vec!["folder1".to_owned()]);
         // Re-delivered event (or our own create + the watcher's) → no dupe.
         apply_fs_create(&mut files, &mut folders, "folder1", true, None);
@@ -1234,11 +1251,26 @@ mod fs_create_tests {
     fn file_create_adds_once_with_content() {
         let mut files = Vec::new();
         let mut folders = Vec::new();
-        apply_fs_create(&mut files, &mut folders, "folder1/file1.rs", false, Some("// x\n".into()));
-        assert_eq!(files, vec![("folder1/file1.rs".to_owned(), "// x\n".to_owned())]);
+        apply_fs_create(
+            &mut files,
+            &mut folders,
+            "folder1/file1.rs",
+            false,
+            Some("// x\n".into()),
+        );
+        assert_eq!(
+            files,
+            vec![("folder1/file1.rs".to_owned(), "// x\n".to_owned())]
+        );
         // The IDE's own inline-create already tracked it → the watcher's echo
         // must not duplicate (or overwrite newer in-memory content).
-        apply_fs_create(&mut files, &mut folders, "folder1/file1.rs", false, Some("stale".into()));
+        apply_fs_create(
+            &mut files,
+            &mut folders,
+            "folder1/file1.rs",
+            false,
+            Some("stale".into()),
+        );
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].1, "// x\n");
         assert!(folders.is_empty());

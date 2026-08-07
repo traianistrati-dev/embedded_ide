@@ -3,7 +3,7 @@
 //! goes. Populated by [`crate::activity`]; newest action first, each showing its
 //! phases with durations, the exact command line, and exit code.
 
-use crate::activity::{fmt_clock, fmt_dur, ActivityLog};
+use crate::activity::{ActivityLog, fmt_clock, fmt_dur};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
@@ -11,9 +11,12 @@ use std::sync::{Arc, Mutex};
 pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) {
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(format!("{} Activity — timing per Save / Build / Flash", ph::TIMER))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(160, 185, 215)),
+            egui::RichText::new(format!(
+                "{} Activity — timing per Save / Build / Flash",
+                ph::TIMER
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(160, 185, 215)),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
@@ -71,8 +74,7 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
                 // list. A standalone action (session `None`) always starts its
                 // own group — two consecutive Builds are two groups, not one.
                 let starts_group = i > 0
-                    && (action.session.is_none()
-                        || log.actions[i - 1].session != action.session);
+                    && (action.session.is_none() || log.actions[i - 1].session != action.session);
                 if starts_group {
                     ui.add_space(3.0);
                     // Idle gap between this action's end and the previous
@@ -114,20 +116,17 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
                     ph::ARROW_RIGHT,
                     fmt_clock(action.ended_at),
                 );
-                egui::CollapsingHeader::new(
-                    egui::RichText::new(head)
-                        .size(11.5)
-                        .strong()
-                        .color(if action.aborted {
-                            // A worker that died without finishing — this is
-                            // what used to hang the status bar at "Saving…".
-                            egui::Color32::from_rgb(235, 100, 90)
-                        } else if slow {
-                            egui::Color32::from_rgb(220, 180, 60)
-                        } else {
-                            egui::Color32::from_rgb(150, 200, 130)
-                        }),
-                )
+                egui::CollapsingHeader::new(egui::RichText::new(head).size(11.5).strong().color(
+                    if action.aborted {
+                        // A worker that died without finishing — this is
+                        // what used to hang the status bar at "Saving…".
+                        egui::Color32::from_rgb(235, 100, 90)
+                    } else if slow {
+                        egui::Color32::from_rgb(220, 180, 60)
+                    } else {
+                        egui::Color32::from_rgb(150, 200, 130)
+                    },
+                ))
                 .id_salt(("activity_action", i))
                 .default_open(i == 0) // expand the newest
                 .show(ui, |ui| {
@@ -141,11 +140,7 @@ pub fn show_activity_tab(ui: &mut egui::Ui, activity: &Arc<Mutex<ActivityLog>>) 
                             0.0,
                             fmt(egui::Color32::from_gray(210)),
                         );
-                        job.append(
-                            &format!("   {}", fmt_dur(ph_.dur)),
-                            0.0,
-                            fmt(dur_col),
-                        );
+                        job.append(&format!("   {}", fmt_dur(ph_.dur)), 0.0, fmt(dur_col));
                         if let Some(code) = ph_.exit {
                             job.append(
                                 &format!("   [exit {code}]"),

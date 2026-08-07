@@ -336,7 +336,10 @@ pub fn show_plot(ui: &mut egui::Ui, plot: &mut PlotState, height: f32) {
     let to_screen = |x: u64, v: f32| -> egui::Pos2 {
         let fx = (x - x_min) as f32 / x_span;
         let fy = (v - y_min) / (y_max - y_min);
-        egui::pos2(plot_l + fx * (plot_r - plot_l), plot_b - fy * (plot_b - plot_t))
+        egui::pos2(
+            plot_l + fx * (plot_r - plot_l),
+            plot_b - fy * (plot_b - plot_t),
+        )
     };
 
     // ── Grid + labels ─────────────────────────────────────────────────────────
@@ -492,10 +495,7 @@ mod tests {
         // Labelled, comma-separated, `=` too.
         assert_eq!(
             parse_line("temp:23.4, hum=56"),
-            vec![
-                (Some("temp".into()), 23.4),
-                (Some("hum".into()), 56.0)
-            ]
+            vec![(Some("temp".into()), 23.4), (Some("hum".into()), 56.0)]
         );
         // Junk tokens skipped; a pure log line yields nothing.
         assert_eq!(parse_line("Temp 23.5 C"), vec![(None, 23.5)]);

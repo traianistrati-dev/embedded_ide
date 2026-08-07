@@ -1,9 +1,9 @@
 //! Cargo build diagnostics tab.
+use crate::build::{self, BuildState};
+use crate::size::{MemUsage, SizeState};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
-use crate::build::{self, BuildState};
-use crate::size::{MemUsage, SizeState};
 
 pub fn show_cargo_tab(
     ui: &mut egui::Ui,
@@ -293,9 +293,23 @@ pub(super) fn render_size_row(ui: &mut egui::Ui, state: &SizeState) {
         }
         SizeState::Done(u) => {
             ui.horizontal(|ui| {
-                usage_bar(ui, "Flash", u.flash_used, u.limits.flash.map(|r| r.length), u, true);
+                usage_bar(
+                    ui,
+                    "Flash",
+                    u.flash_used,
+                    u.limits.flash.map(|r| r.length),
+                    u,
+                    true,
+                );
                 ui.add_space(12.0);
-                usage_bar(ui, "RAM", u.ram_used, u.limits.ram.map(|r| r.length), u, false);
+                usage_bar(
+                    ui,
+                    "RAM",
+                    u.ram_used,
+                    u.limits.ram.map(|r| r.length),
+                    u,
+                    false,
+                );
                 if u.limits.ram.is_none() {
                     ui.label(
                         egui::RichText::new("(no memory.x — sizes only)")
@@ -337,8 +351,7 @@ fn usage_bar(
 
     // The bar itself (only when a limit is known — no denominator, no bar).
     if let Some(p) = pct {
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(120.0, 11.0), egui::Sense::hover());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(120.0, 11.0), egui::Sense::hover());
         let painter = ui.painter();
         painter.rect_filled(rect, 2.0, egui::Color32::from_gray(48));
         let mut fill = rect;
@@ -362,16 +375,13 @@ fn usage_bar(
         ),
         None => fmt_bytes(used),
     };
-    ui.label(
-        egui::RichText::new(text)
-            .size(10.5)
-            .monospace()
-            .color(if pct.is_some_and(|p| p >= 0.9) {
-                color
-            } else {
-                egui::Color32::from_rgb(200, 205, 215)
-            }),
-    )
+    ui.label(egui::RichText::new(text).size(10.5).monospace().color(
+        if pct.is_some_and(|p| p >= 0.9) {
+            color
+        } else {
+            egui::Color32::from_rgb(200, 205, 215)
+        },
+    ))
     .on_hover_text(section_breakdown(usage, flash));
 }
 
@@ -563,4 +573,3 @@ pub(crate) fn render_diagnostics(
         }
     }
 }
-

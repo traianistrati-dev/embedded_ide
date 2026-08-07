@@ -31,5 +31,8 @@ pub fn text_position_horizontal(rect: egui::Rect) -> egui::Pos2 {
 
 /// Calculate text position for vertical (top/bottom side) pins.
 pub fn text_position_vertical(rect: egui::Rect) -> egui::Pos2 {
-    egui::pos2(rect.left() + (rect.width() / 3.4), rect.top() + rect.height() - 4.0)
+    egui::pos2(
+        rect.left() + (rect.width() / 3.4),
+        rect.top() + rect.height() - 4.0,
+    )
 }

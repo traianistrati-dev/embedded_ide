@@ -2046,7 +2046,11 @@ fn parse_code_actions(result: &serde_json::Value, root_uri: &str) -> Vec<CodeAct
                 .get("edit")
                 .filter(|e| !e.is_null())
                 .map(|e| parse_workspace_edit(e, root_uri));
-            Some(CodeAction { title, edits, raw: a.clone() })
+            Some(CodeAction {
+                title,
+                edits,
+                raw: a.clone(),
+            })
         })
         .filter(CodeAction::is_applicable)
         .collect()
@@ -2077,7 +2081,12 @@ fn parse_inlay_hints(result: &serde_json::Value, rel: &str) -> Vec<InlayHint> {
                 .as_array()
                 .map(|es| es.iter().filter_map(|e| parse_text_edit(e, rel)).collect())
                 .unwrap_or_default();
-            Some(InlayHint { line, character, label, text_edits })
+            Some(InlayHint {
+                line,
+                character,
+                label,
+                text_edits,
+            })
         })
         .collect()
 }
@@ -2487,7 +2496,10 @@ mod ra_sweep_tests {
     #[test]
     fn tasklist_csv_yields_image_name() {
         let line = r#""rust-analyzer.exe","16340","Console","1","540,120 K""#;
-        assert_eq!(tasklist_image_name(line).as_deref(), Some("rust-analyzer.exe"));
+        assert_eq!(
+            tasklist_image_name(line).as_deref(),
+            Some("rust-analyzer.exe")
+        );
     }
 
     #[test]
@@ -2527,9 +2539,11 @@ mod document_symbol_tests {
     fn trait_impl_members_are_flagged() {
         let result = serde_json::json!([
             // The user's exact shape: trait in one file's symbols…
-            sym("ParserResult", 11, serde_json::json!([
-                sym("new_parser", 12, serde_json::json!([])),
-            ])),
+            sym(
+                "ParserResult",
+                11,
+                serde_json::json!([sym("new_parser", 12, serde_json::json!([])),])
+            ),
             // …its implementation (impl block = kind 19 Object, not tracked
             // itself; its children are).
             sym(
@@ -2541,9 +2555,11 @@ mod document_symbol_tests {
                 ]),
             ),
             // Inherent impl — members keep normal unused-fading behaviour.
-            sym("impl HmmdFrame", 19, serde_json::json!([
-                sym("helper", 12, serde_json::json!([])),
-            ])),
+            sym(
+                "impl HmmdFrame",
+                19,
+                serde_json::json!([sym("helper", 12, serde_json::json!([])),])
+            ),
         ]);
 
         let syms = parse_document_symbols(&result);

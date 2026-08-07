@@ -609,7 +609,10 @@ mod tests {
         let after_up = toggle_up(text, primary_idx, &[]);
         assert_eq!(after_up.len(), 1, "Up should have added one caret");
         let after_down = toggle_down(text, primary_idx, &after_up);
-        assert!(after_down.is_empty(), "Down must undo it, not add a second one");
+        assert!(
+            after_down.is_empty(),
+            "Down must undo it, not add a second one"
+        );
     }
 
     #[test]
@@ -640,7 +643,11 @@ mod tests {
         let primary_idx = text.find("ccc").unwrap();
         let after_1 = toggle_up(text, primary_idx, &[]);
         let after_2 = toggle_up(text, primary_idx, &after_1);
-        assert_eq!(after_2.len(), 2, "a second Up press extends further, not undo");
+        assert_eq!(
+            after_2.len(),
+            2,
+            "a second Up press extends further, not undo"
+        );
         assert!(after_2.iter().any(|c| &text[c.head..c.head + 1] == "a"));
     }
 
@@ -726,11 +733,35 @@ mod tests {
         //        a b c  NL  d e f  NL
         let text = "abc\ndef\n";
         // Primary parked out of the way so nothing is dropped as a collision.
-        assert_eq!(heads(&move_extras(text, &[c(1), c(5)], CaretMove::Right, false, 99)), vec![2, 6]);
-        assert_eq!(heads(&move_extras(text, &[c(1), c(5)], CaretMove::Left, false, 99)), vec![0, 4]);
+        assert_eq!(
+            heads(&move_extras(
+                text,
+                &[c(1), c(5)],
+                CaretMove::Right,
+                false,
+                99
+            )),
+            vec![2, 6]
+        );
+        assert_eq!(
+            heads(&move_extras(
+                text,
+                &[c(1), c(5)],
+                CaretMove::Left,
+                false,
+                99
+            )),
+            vec![0, 4]
+        );
         // Clamped: index 0 cannot go left, the last index cannot go right.
-        assert_eq!(heads(&move_extras(text, &[c(0)], CaretMove::Left, false, 99)), vec![0]);
-        assert_eq!(heads(&move_extras(text, &[c(8)], CaretMove::Right, false, 99)), vec![8]);
+        assert_eq!(
+            heads(&move_extras(text, &[c(0)], CaretMove::Left, false, 99)),
+            vec![0]
+        );
+        assert_eq!(
+            heads(&move_extras(text, &[c(8)], CaretMove::Right, false, 99)),
+            vec![8]
+        );
     }
 
     /// Vertical movement keeps each caret's OWN column — using the primary's
@@ -741,13 +772,31 @@ mod tests {
         //        a b c  NL  d e f  NL  g h i  NL
         let text = "abc\ndef\nghi\n";
         // Carets at column 1 of line 0 and column 2 of line 1.
-        assert_eq!(heads(&move_extras(text, &[c(1), c(6)], CaretMove::Down, false, 99)), vec![5, 10]);
-        assert_eq!(heads(&move_extras(text, &[c(5), c(10)], CaretMove::Up, false, 99)), vec![1, 6]);
+        assert_eq!(
+            heads(&move_extras(
+                text,
+                &[c(1), c(6)],
+                CaretMove::Down,
+                false,
+                99
+            )),
+            vec![5, 10]
+        );
+        assert_eq!(
+            heads(&move_extras(text, &[c(5), c(10)], CaretMove::Up, false, 99)),
+            vec![1, 6]
+        );
         // No line with text left in that direction → the caret stays put. The
         // trailing empty line after the final newline is blank, so `ghi` is the
         // last line a caret can reach.
-        assert_eq!(heads(&move_extras(text, &[c(1)], CaretMove::Up, false, 99)), vec![1]);
-        assert_eq!(heads(&move_extras(text, &[c(9)], CaretMove::Down, false, 99)), vec![9]);
+        assert_eq!(
+            heads(&move_extras(text, &[c(1)], CaretMove::Up, false, 99)),
+            vec![1]
+        );
+        assert_eq!(
+            heads(&move_extras(text, &[c(9)], CaretMove::Down, false, 99)),
+            vec![9]
+        );
     }
 
     /// A caret must never land on a blank line: `lsp_pos_to_char_idx` clamps to
@@ -775,9 +824,15 @@ mod tests {
         //        a a a a  NL  NL  b b b b  NL
         let text = "aaaa\n\nbbbb\n";
         // Down from line 0 col 2 skips blank line 1 → line 2 col 2 (index 8).
-        assert_eq!(heads(&move_extras(text, &[c(2)], CaretMove::Down, false, 99)), vec![8]);
+        assert_eq!(
+            heads(&move_extras(text, &[c(2)], CaretMove::Down, false, 99)),
+            vec![8]
+        );
         // And back up again.
-        assert_eq!(heads(&move_extras(text, &[c(8)], CaretMove::Up, false, 99)), vec![2]);
+        assert_eq!(
+            heads(&move_extras(text, &[c(8)], CaretMove::Up, false, 99)),
+            vec![2]
+        );
     }
 
     /// A caret that lands on the primary, or on another caret, is one caret.
@@ -787,7 +842,16 @@ mod tests {
         // Extra at 1 moves right onto the primary at 2 → dropped.
         assert!(move_extras(text, &[c(1)], CaretMove::Right, false, 2).is_empty());
         // Two carets landing on the same spot collapse to one.
-        assert_eq!(heads(&move_extras(text, &[c(0), c(0)], CaretMove::Right, false, 99)), vec![1]);
+        assert_eq!(
+            heads(&move_extras(
+                text,
+                &[c(0), c(0)],
+                CaretMove::Right,
+                false,
+                99
+            )),
+            vec![1]
+        );
     }
 
     /// Shift+arrow grows each caret's OWN selection; the anchor stays put.

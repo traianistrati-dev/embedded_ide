@@ -154,14 +154,29 @@ mod tests {
         let up = r.vec(egui::vec2(-1.0, 0.0));
         assert!(up.x.abs() < 1e-4 && (up.y + 1.0).abs() < 1e-4, "{up:?}");
         let down = r.vec(egui::vec2(1.0, 0.0));
-        assert!(down.x.abs() < 1e-4 && (down.y - 1.0).abs() < 1e-4, "{down:?}");
+        assert!(
+            down.x.abs() < 1e-4 && (down.y - 1.0).abs() < 1e-4,
+            "{down:?}"
+        );
     }
 
     #[test]
     fn screen_side_snaps_to_nearest_axis() {
-        assert_eq!(ScreenSide::from_outward(egui::vec2(1.0, 0.2)), ScreenSide::Right);
-        assert_eq!(ScreenSide::from_outward(egui::vec2(-1.0, 0.2)), ScreenSide::Left);
-        assert_eq!(ScreenSide::from_outward(egui::vec2(0.2, 1.0)), ScreenSide::Bottom);
-        assert_eq!(ScreenSide::from_outward(egui::vec2(0.2, -1.0)), ScreenSide::Top);
+        assert_eq!(
+            ScreenSide::from_outward(egui::vec2(1.0, 0.2)),
+            ScreenSide::Right
+        );
+        assert_eq!(
+            ScreenSide::from_outward(egui::vec2(-1.0, 0.2)),
+            ScreenSide::Left
+        );
+        assert_eq!(
+            ScreenSide::from_outward(egui::vec2(0.2, 1.0)),
+            ScreenSide::Bottom
+        );
+        assert_eq!(
+            ScreenSide::from_outward(egui::vec2(0.2, -1.0)),
+            ScreenSide::Top
+        );
     }
 }

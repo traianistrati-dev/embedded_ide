@@ -11,7 +11,11 @@ pub fn move_lines(text: &str, sel_lo: usize, sel_hi: usize, down: bool) -> (Stri
     let lo = sel_lo.min(n).min(sel_hi.min(n));
     let hi = sel_lo.min(n).max(sel_hi.min(n));
     // A non-empty selection ending at a line start shouldn't pull in that line.
-    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' { hi - 1 } else { hi };
+    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' {
+        hi - 1
+    } else {
+        hi
+    };
 
     // A trailing '\n' is structural, not a real (movable) empty line — keep it
     // pinned to the end and operate on the lines before it.
@@ -71,7 +75,10 @@ pub fn move_lines(text: &str, sel_lo: usize, sel_hi: usize, down: bool) -> (Stri
         new_text.push('\n');
     }
 
-    let new_lo: usize = new_lines[..new_first].iter().map(|l| l.chars().count() + 1).sum();
+    let new_lo: usize = new_lines[..new_first]
+        .iter()
+        .map(|l| l.chars().count() + 1)
+        .sum();
     let block_len: usize = new_lines[new_first..=new_last].join("\n").chars().count();
     (new_text, new_lo, new_lo + block_len)
 }

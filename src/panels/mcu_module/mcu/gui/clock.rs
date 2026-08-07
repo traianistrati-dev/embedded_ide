@@ -1,6 +1,6 @@
 //! Clock tab rendering — dispatches to the per-family clock GUI.
 
-use crate::panels::mcu_module::clock::{gui as clock_gui, ClockConfig};
+use crate::panels::mcu_module::clock::{ClockConfig, gui as clock_gui};
 use crate::panels::mcu_module::mcu::model::Mcu;
 use eframe::egui;
 
@@ -10,7 +10,14 @@ impl Mcu {
     pub fn draw_clock_tab(&mut self, ui: &mut egui::Ui) -> bool {
         // Destructure so the config borrows mutably while the chip's limits,
         // presets and family stay readable alongside it.
-        let Mcu { clock, clock_limits, clock_presets, family, name, .. } = self;
+        let Mcu {
+            clock,
+            clock_limits,
+            clock_presets,
+            family,
+            name,
+            ..
+        } = self;
         match clock {
             ClockConfig::Graph(gc) => {
                 clock_gui::draw_graph_clock(ui, gc, clock_limits, clock_presets, family)

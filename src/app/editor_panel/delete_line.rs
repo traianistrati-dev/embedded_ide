@@ -11,7 +11,11 @@ fn spanned(text: &str, sel_lo: usize, sel_hi: usize) -> (Vec<String>, usize, usi
     let lo = sel_lo.min(n).min(sel_hi.min(n));
     let hi = sel_lo.min(n).max(sel_hi.min(n));
     // A non-empty selection ending at a line start shouldn't pull in that line.
-    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' { hi - 1 } else { hi };
+    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' {
+        hi - 1
+    } else {
+        hi
+    };
 
     // A trailing '\n' is structural; operate on the lines before it.
     let had_trailing = chars.last() == Some(&'\n');

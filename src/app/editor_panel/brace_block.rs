@@ -571,7 +571,10 @@ mod tests {
         let inner_open = src.find("{\n        z").unwrap();
         let inner_close = src[inner_open..].find('}').unwrap() + inner_open;
         let while_kw = src.find("while").unwrap();
-        assert_eq!(full_def_brace(src, inner_open), Some((while_kw, inner_close)));
+        assert_eq!(
+            full_def_brace(src, inner_open),
+            Some((while_kw, inner_close))
+        );
     }
 
     #[test]

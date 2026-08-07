@@ -16,7 +16,7 @@
 //! [`spawn_reader`]) so ANSI colours and throttled repaints come for free.
 
 use crate::build::no_window;
-use crate::terminal::{spawn_reader, LineKind, TerminalState};
+use crate::terminal::{LineKind, TerminalState, spawn_reader};
 use eframe::egui;
 use std::io::BufRead;
 use std::path::PathBuf;
@@ -268,8 +268,7 @@ fn run_session(
     ctx: &egui::Context,
 ) -> Result<(), String> {
     // ── Phase 1: cargo build --release ────────────────────────────────────────
-    let Some(elf) = cargo_build_streamed(project_dir, target, state, child_slot, stop, ctx)?
-    else {
+    let Some(elf) = cargo_build_streamed(project_dir, target, state, child_slot, stop, ctx)? else {
         return Ok(()); // stopped by the user mid-build
     };
     state

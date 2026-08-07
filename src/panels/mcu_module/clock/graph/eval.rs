@@ -75,7 +75,11 @@ fn eval_node(
         (_, NodeState::Unset) => 0,
 
         (NodeKind::Source { .. }, NodeState::Source { enabled, hz }) => {
-            if *enabled { *hz } else { 0 }
+            if *enabled {
+                *hz
+            } else {
+                0
+            }
         }
         // A source without explicit state falls back to its fixed minimum.
         (NodeKind::Source { min_hz, .. }, _) => *min_hz,
@@ -98,8 +102,15 @@ fn eval_node(
         (NodeKind::Output, _) => primary,
 
         (NodeKind::TimerMul { prescaler }, _) => {
-            let presc = by_id.get(prescaler.as_str()).map(|n| divisor_of(n)).unwrap_or(1);
-            if presc <= 1 { primary } else { primary.saturating_mul(2) }
+            let presc = by_id
+                .get(prescaler.as_str())
+                .map(|n| divisor_of(n))
+                .unwrap_or(1);
+            if presc <= 1 {
+                primary
+            } else {
+                primary.saturating_mul(2)
+            }
         }
 
         // Mismatched kind/state (shouldn't happen for well-formed graphs).
@@ -118,14 +129,23 @@ fn divisor_of(node: &Node) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::model::{Edge, Node, NodeKind, NodeState};
+    use super::*;
 
     fn n(id: &str, kind: NodeKind, state: NodeState) -> Node {
-        Node { id: id.into(), kind, state, limit: None }
+        Node {
+            id: id.into(),
+            kind,
+            state,
+            limit: None,
+        }
     }
     fn e(from: &str, to: &str, input: usize) -> Edge {
-        Edge { from: from.into(), to: to.into(), input }
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            input,
+        }
     }
 
     /// A tiny graph: src 8 MHz → ×9 → /2 → output, plus a parallel mux pick.
@@ -133,17 +153,33 @@ mod tests {
     fn evaluates_a_simple_chain() {
         let g = ClockGraph {
             nodes: vec![
-                n("src", NodeKind::Source { min_hz: 8_000_000, max_hz: 8_000_000, gated: false },
-                  NodeState::Source { enabled: true, hz: 8_000_000 }),
-                n("pll", NodeKind::Multiplier { min: 2, max: 16 }, NodeState::Value(9)),
-                n("div", NodeKind::Divider { options: vec![1, 2, 4] }, NodeState::Index(1)),
+                n(
+                    "src",
+                    NodeKind::Source {
+                        min_hz: 8_000_000,
+                        max_hz: 8_000_000,
+                        gated: false,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 8_000_000,
+                    },
+                ),
+                n(
+                    "pll",
+                    NodeKind::Multiplier { min: 2, max: 16 },
+                    NodeState::Value(9),
+                ),
+                n(
+                    "div",
+                    NodeKind::Divider {
+                        options: vec![1, 2, 4],
+                    },
+                    NodeState::Index(1),
+                ),
                 n("out", NodeKind::Output, NodeState::Fixed),
             ],
-            edges: vec![
-                e("src", "pll", 0),
-                e("pll", "div", 0),
-                e("div", "out", 0),
-            ],
+            edges: vec![e("src", "pll", 0), e("pll", "div", 0), e("div", "out", 0)],
         };
         let r = evaluate(&g);
         assert_eq!(r["pll"], 72_000_000);
@@ -156,19 +192,41 @@ mod tests {
     fn mux_and_ratio_choice() {
         let g = ClockGraph {
             nodes: vec![
-                n("a", NodeKind::Source { min_hz: 8_000_000, max_hz: 8_000_000, gated: false },
-                  NodeState::Source { enabled: true, hz: 8_000_000 }),
-                n("b", NodeKind::Source { min_hz: 12_000_000, max_hz: 12_000_000, gated: false },
-                  NodeState::Source { enabled: true, hz: 12_000_000 }),
+                n(
+                    "a",
+                    NodeKind::Source {
+                        min_hz: 8_000_000,
+                        max_hz: 8_000_000,
+                        gated: false,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 8_000_000,
+                    },
+                ),
+                n(
+                    "b",
+                    NodeKind::Source {
+                        min_hz: 12_000_000,
+                        max_hz: 12_000_000,
+                        gated: false,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 12_000_000,
+                    },
+                ),
                 n("mux", NodeKind::Mux { inputs: 2 }, NodeState::Index(1)),
                 // 72 MHz × 2/3 = 48 MHz (USB-style).
-                n("ratio", NodeKind::Choice { ratios: vec![(2, 3), (1, 1)] }, NodeState::Index(0)),
+                n(
+                    "ratio",
+                    NodeKind::Choice {
+                        ratios: vec![(2, 3), (1, 1)],
+                    },
+                    NodeState::Index(0),
+                ),
             ],
-            edges: vec![
-                e("a", "mux", 0),
-                e("b", "mux", 1),
-                e("mux", "ratio", 0),
-            ],
+            edges: vec![e("a", "mux", 0), e("b", "mux", 1), e("mux", "ratio", 0)],
         };
         let r = evaluate(&g);
         assert_eq!(r["mux"], 12_000_000, "mux picks input 1 (b)");
@@ -180,9 +238,23 @@ mod tests {
     fn disabled_source_propagates_zero() {
         let g = ClockGraph {
             nodes: vec![
-                n("hse", NodeKind::Source { min_hz: 4_000_000, max_hz: 16_000_000, gated: true },
-                  NodeState::Source { enabled: false, hz: 8_000_000 }),
-                n("pll", NodeKind::Multiplier { min: 2, max: 16 }, NodeState::Value(9)),
+                n(
+                    "hse",
+                    NodeKind::Source {
+                        min_hz: 4_000_000,
+                        max_hz: 16_000_000,
+                        gated: true,
+                    },
+                    NodeState::Source {
+                        enabled: false,
+                        hz: 8_000_000,
+                    },
+                ),
+                n(
+                    "pll",
+                    NodeKind::Multiplier { min: 2, max: 16 },
+                    NodeState::Value(9),
+                ),
             ],
             edges: vec![e("hse", "pll", 0)],
         };
@@ -196,11 +268,33 @@ mod tests {
     fn timer_mul_follows_prescaler() {
         let mut g = ClockGraph {
             nodes: vec![
-                n("hclk", NodeKind::Source { min_hz: 72_000_000, max_hz: 72_000_000, gated: false },
-                  NodeState::Source { enabled: true, hz: 72_000_000 }),
-                n("apb", NodeKind::Divider { options: vec![1, 2, 4, 8, 16] }, NodeState::Index(0)),
+                n(
+                    "hclk",
+                    NodeKind::Source {
+                        min_hz: 72_000_000,
+                        max_hz: 72_000_000,
+                        gated: false,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 72_000_000,
+                    },
+                ),
+                n(
+                    "apb",
+                    NodeKind::Divider {
+                        options: vec![1, 2, 4, 8, 16],
+                    },
+                    NodeState::Index(0),
+                ),
                 n("pclk", NodeKind::Tap, NodeState::Fixed),
-                n("tim", NodeKind::TimerMul { prescaler: "apb".into() }, NodeState::Fixed),
+                n(
+                    "tim",
+                    NodeKind::TimerMul {
+                        prescaler: "apb".into(),
+                    },
+                    NodeState::Fixed,
+                ),
             ],
             edges: vec![
                 e("hclk", "apb", 0),

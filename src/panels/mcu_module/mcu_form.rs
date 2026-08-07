@@ -112,8 +112,8 @@ impl ClockChoice {
     }
     fn to_def(self) -> ClockDef {
         use crate::panels::mcu_module::clock::graph::{
-            stm32f4_graph, stm32f4_layout, stm32g0_graph, stm32g4_graph, stm32l4_graph,
-            stm32wba_graph, stm32wba_layout, GraphClock,
+            GraphClock, stm32f4_graph, stm32f4_layout, stm32g0_graph, stm32g4_graph, stm32l4_graph,
+            stm32wba_graph, stm32wba_layout,
         };
         match self {
             ClockChoice::None => ClockDef::None,
@@ -237,8 +237,7 @@ impl McuForm {
         } else {
             self.id.trim().to_string()
         };
-        let Some((family, cpu, toolchain, target)) =
-            super::mcu_identity::identity_from_name(&name)
+        let Some((family, cpu, toolchain, target)) = super::mcu_identity::identity_from_name(&name)
         else {
             return false;
         };
@@ -502,9 +501,7 @@ impl McuForm {
             // flagged against the F103 defaults. (F4's real per-chip ceiling is
             // set by the XML converter; this is the F411-class default.)
             clock_limits: match self.clock {
-                ClockChoice::Stm32wba => {
-                    crate::panels::mcu_module::clock::graph::stm32wba_limits()
-                }
+                ClockChoice::Stm32wba => crate::panels::mcu_module::clock::graph::stm32wba_limits(),
                 ClockChoice::Stm32f4 => {
                     crate::panels::mcu_module::clock::graph::stm32f4_limits_default()
                 }
@@ -520,7 +517,6 @@ impl McuForm {
             .map_err(|e| format!("RON serialize error: {e}"))
     }
 }
-
 
 /// A valid registry id / file stem: non-empty, ASCII `a–z 0–9 _` only.
 pub fn is_valid_id(id: &str) -> bool {
@@ -659,8 +655,14 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             _ => None,
         },
         // `adc1_5` → ADC1 channel 5; `tim2_1` → TIM2 CH1.
-        "adc" => tail.parse().ok().map(|ch| PinFunction::AdcChannel { adc: n, channel: ch }),
-        "tim" => tail.parse().ok().map(|ch| PinFunction::TimerPwm { timer: n, channel: ch }),
+        "adc" => tail.parse().ok().map(|ch| PinFunction::AdcChannel {
+            adc: n,
+            channel: ch,
+        }),
+        "tim" => tail.parse().ok().map(|ch| PinFunction::TimerPwm {
+            timer: n,
+            channel: ch,
+        }),
         _ => None,
     }
 }
@@ -772,9 +774,21 @@ mod tests {
         f.display_name = "X".into();
         f.probe_chip = "X".into();
         f.pins[0] = vec![
-            PinRow { number: "1".into(), name: "PA0".into(), ..Default::default() },
-            PinRow { number: "1".into(), name: "PA1".into(), ..Default::default() },
-            PinRow { number: "abc".into(), name: "PA2".into(), ..Default::default() },
+            PinRow {
+                number: "1".into(),
+                name: "PA0".into(),
+                ..Default::default()
+            },
+            PinRow {
+                number: "1".into(),
+                name: "PA1".into(),
+                ..Default::default()
+            },
+            PinRow {
+                number: "abc".into(),
+                name: "PA2".into(),
+                ..Default::default()
+            },
         ];
         let errs = f.errors();
         assert!(errs.iter().any(|e| e.contains("used more than once")));
@@ -788,12 +802,21 @@ mod tests {
         assert_eq!(fns.len(), 11);
         assert_eq!(fns[2], PinFunction::UsartTx(1));
         assert_eq!(fns[5], PinFunction::AdcChannel { adc: 1, channel: 5 });
-        assert_eq!(fns[6], PinFunction::TimerPwm { timer: 2, channel: 1 });
+        assert_eq!(
+            fns[6],
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 1
+            }
+        );
         // Round-trips through the canonical string form.
         assert_eq!(parse_functions(&functions_to_string(&fns)), fns);
         // Commas and case are accepted; a typo is reported, others still parse.
         assert_eq!(parse_functions("IN, USART2_RX").len(), 2);
-        assert_eq!(unknown_function_tokens("in uart1_tx spi9_bad out"), vec!["uart1_tx", "spi9_bad"]);
+        assert_eq!(
+            unknown_function_tokens("in uart1_tx spi9_bad out"),
+            vec!["uart1_tx", "spi9_bad"]
+        );
         // A bad token on a pin row surfaces as a validation error.
         let mut f = McuForm::blank();
         f.id = "x".into();
@@ -806,7 +829,11 @@ mod tests {
             functions: "in wat".into(),
             imported: false,
         }];
-        assert!(f.errors().iter().any(|e| e.contains("unknown function token 'wat'")));
+        assert!(
+            f.errors()
+                .iter()
+                .any(|e| e.contains("unknown function token 'wat'"))
+        );
     }
 
     #[test]
@@ -842,7 +869,7 @@ mod tests {
     /// Edit detects it back, and a FOREIGN imported graph survives Edit→Save.
     #[test]
     fn wba_clock_choice_round_trips_and_foreign_graphs_survive() {
-        use crate::panels::mcu_module::clock::graph::{is_wba_graph, GraphClock};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, is_wba_graph};
 
         let mut f = McuForm::blank();
         f.id = "stm32wba55cg".into();
@@ -899,7 +926,10 @@ mod tests {
 
         // Full chain: build the Mcu and generate main.rs.
         let code = def.build_mcu().fresh_main_rs();
-        assert!(code.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"), "{code}");
+        assert!(
+            code.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"),
+            "{code}"
+        );
         assert!(code.contains("SYSCLK 100 MHz"), "{code}");
         // Edit round-trips the choice.
         assert_eq!(McuForm::from_definition(&def).clock, ClockChoice::Stm32f4);
@@ -923,13 +953,18 @@ mod tests {
         // Canonical round-trip.
         assert_eq!(parse_functions(&functions_to_string(&fns)), fns);
         // `rts_de` is an accepted alias for `rts` on both peripherals.
-        assert_eq!(parse_functions("usart2_rts_de"), vec![PinFunction::UsartRts(2)]);
-        assert_eq!(parse_functions("lpuart1_rts_de"), vec![PinFunction::LpuartRts(1)]);
+        assert_eq!(
+            parse_functions("usart2_rts_de"),
+            vec![PinFunction::UsartRts(2)]
+        );
+        assert_eq!(
+            parse_functions("lpuart1_rts_de"),
+            vec![PinFunction::LpuartRts(1)]
+        );
         // None of them are flagged as unknown any more.
-        assert!(unknown_function_tokens(
-            "lpuart1_tx lpuart1_rts_de spi1_rdy usart2_rts_de"
-        )
-        .is_empty());
+        assert!(
+            unknown_function_tokens("lpuart1_tx lpuart1_rts_de spi1_rdy usart2_rts_de").is_empty()
+        );
         // The cheatsheet advertises them.
         assert!(FUNCTION_TOKEN_HELP.contains("lpuart"));
         assert!(FUNCTION_TOKEN_HELP.contains("rdy"));
@@ -952,12 +987,18 @@ mod tests {
             ]
         );
         // Canonical round-trip through the token string.
-        assert_eq!(functions_to_string(&fns), "in out af:sai1_sd_a af:fmc_a0 af:tim1_ch1n");
+        assert_eq!(
+            functions_to_string(&fns),
+            "in out af:sai1_sd_a af:fmc_a0 af:tim1_ch1n"
+        );
         assert_eq!(parse_functions(&functions_to_string(&fns)), fns);
         // Generic AFs are never "unknown"…
         assert!(unknown_function_tokens("af:dcmi_d3 af:eth_mdio").is_empty());
         // …but a real typo still is (the prefix keeps validation honest).
-        assert_eq!(unknown_function_tokens("uart1_tx spi9_bad af:"), vec!["uart1_tx", "spi9_bad", "af:"]);
+        assert_eq!(
+            unknown_function_tokens("uart1_tx spi9_bad af:"),
+            vec!["uart1_tx", "spi9_bad", "af:"]
+        );
         // The label round-trips through codegen comments too.
         let f = PinFunction::Other("SAI1_SD_A".into());
         assert_eq!(f.label(), "SAI1_SD_A");
@@ -1070,6 +1111,10 @@ mod tests {
         f.probe_chip = "RP2040".into();
         f.family = "rp2040".into();
         assert!(f.errors().is_empty());
-        assert!(f.warnings().iter().any(|w| w.contains("no codegen backend")));
+        assert!(
+            f.warnings()
+                .iter()
+                .any(|w| w.contains("no codegen backend"))
+        );
     }
 }

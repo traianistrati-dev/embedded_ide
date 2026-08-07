@@ -19,8 +19,8 @@ use super::mcu::{Mcu, Runtime};
 
 // Re-export public API for backward compatibility
 pub use common::{
-    mcu_id_marker_line, parse_main_rs, parse_mcu_id, parse_pin_labels, pin_binding, sanitize_label,
-    var_suffix, GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL,
+    GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL, mcu_id_marker_line, parse_main_rs, parse_mcu_id,
+    parse_pin_labels, pin_binding, sanitize_label, var_suffix,
 };
 
 /// Type-parameter name for a pin in a Custom module's struct: the pin's own name
@@ -147,7 +147,10 @@ impl Mcu {
     /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
     /// generated_body)`. Empty for families without separate config files.
     pub fn config_files(&self) -> Vec<(String, String)> {
-        let mut files = self.backend().map(|b| b.config_files(self)).unwrap_or_default();
+        let mut files = self
+            .backend()
+            .map(|b| b.config_files(self))
+            .unwrap_or_default();
         // User-authored Custom modules produce a file each. They are generated
         // HERE rather than in a family backend because the struct is generic
         // over its pin types — no HAL type is named, so the same code is valid
@@ -156,7 +159,12 @@ impl Mcu {
         files
             .into_iter()
             // Strict-lints: exempt each generated peripheral config module.
-            .map(|(name, body)| (name, common::strict_config_exemption(body, self.strict_lints)))
+            .map(|(name, body)| {
+                (
+                    name,
+                    common::strict_config_exemption(body, self.strict_lints),
+                )
+            })
             .collect()
     }
 
@@ -196,7 +204,9 @@ impl Mcu {
                 .filter(|p| {
                     !matches!(
                         p.selected_function,
-                        PinFunction::GpioInput | PinFunction::GpioOutput | PinFunction::TimerPwm { .. }
+                        PinFunction::GpioInput
+                            | PinFunction::GpioOutput
+                            | PinFunction::TimerPwm { .. }
                     )
                 })
                 .map(|p| p.name.as_str())
@@ -330,22 +340,17 @@ impl Mcu {
             let use_line = if traits.is_empty() {
                 String::new()
             } else {
-                format!(
-                    "use embedded_hal::digital::{{{}}};\n\n",
-                    traits.join(", ")
-                )
+                format!("use embedded_hal::digital::{{{}}};\n\n", traits.join(", "))
             };
             // One commented example call per pin, using its real field name.
             let examples: Vec<String> = fields
                 .iter()
                 .zip(&bounds)
                 .filter_map(|(f, b)| match b {
-                    Some("InputPin") => {
-                        Some(format!("        // let {f} = self.{f}.is_high().unwrap_or(false);"))
-                    }
-                    Some("OutputPin") => {
-                        Some(format!("        // let _ = self.{f}.set_high();"))
-                    }
+                    Some("InputPin") => Some(format!(
+                        "        // let {f} = self.{f}.is_high().unwrap_or(false);"
+                    )),
+                    Some("OutputPin") => Some(format!("        // let _ = self.{f}.set_high();")),
                     _ => None,
                 })
                 .collect();
@@ -398,7 +403,10 @@ impl Mcu {
                 end = common::GEN_END,
                 name = m.config.custom_label(),
             );
-            out.push((format!("{}.rs", super::mcu::gui::modules::custom_file_stem(m)), body));
+            out.push((
+                format!("{}.rs", super::mcu::gui::modules::custom_file_stem(m)),
+                body,
+            ));
         }
         out
     }
@@ -451,7 +459,11 @@ mod tests {
         let parsed = parse_main_rs(input);
 
         assert!(parsed.iter().any(|(name, _)| name == "PA0"));
-        assert!(parsed.iter().any(|(_, func)| *func == PinFunction::GpioOutput));
+        assert!(
+            parsed
+                .iter()
+                .any(|(_, func)| *func == PinFunction::GpioOutput)
+        );
     }
 
     #[test]
@@ -460,7 +472,11 @@ mod tests {
         let parsed = parse_main_rs(input);
 
         assert!(parsed.iter().any(|(name, _)| name == "PC13"));
-        assert!(parsed.iter().any(|(_, func)| *func == PinFunction::GpioInput));
+        assert!(
+            parsed
+                .iter()
+                .any(|(_, func)| *func == PinFunction::GpioInput)
+        );
     }
 
     #[test]
@@ -473,7 +489,8 @@ mod tests {
 
     #[test]
     fn test_parse_main_rs_no_markers() {
-        let input = "let pa0 = &mut gpioa.pa0.into_push_pull_output(&mut gpioa.crl); // GPIO Output";
+        let input =
+            "let pa0 = &mut gpioa.pa0.into_push_pull_output(&mut gpioa.crl); // GPIO Output";
         let parsed = parse_main_rs(input);
 
         assert!(parsed.is_empty(), "Should not parse without markers");
@@ -584,7 +601,10 @@ mod tests {
         assert_contains_substring(&code, USER_TAIL);
         let trimmed_code = code.trim_end();
         let trimmed_tail = USER_TAIL.trim_end();
-        assert!(trimmed_code.ends_with(trimmed_tail), "Code should end with USER_TAIL");
+        assert!(
+            trimmed_code.ends_with(trimmed_tail),
+            "Code should end with USER_TAIL"
+        );
     }
 
     #[test]
@@ -656,8 +676,16 @@ mod tests {
         assert_eq!(first, second, "Second update should be identical to first");
 
         // Count markers to ensure they didn't multiply
-        assert_eq!(first.matches(GEN_BEGIN).count(), 1, "Should have exactly 1 GEN_BEGIN");
-        assert_eq!(second.matches(GEN_BEGIN).count(), 1, "Should have exactly 1 GEN_BEGIN");
+        assert_eq!(
+            first.matches(GEN_BEGIN).count(),
+            1,
+            "Should have exactly 1 GEN_BEGIN"
+        );
+        assert_eq!(
+            second.matches(GEN_BEGIN).count(),
+            1,
+            "Should have exactly 1 GEN_BEGIN"
+        );
     }
 
     #[test]
@@ -704,10 +732,10 @@ mod tests {
         assert_eq!(end_count, 1);
     }
 
-    // ── Peripheral helper placement / ADC fix ────────────────────────────────
+    // ── ADC init is a plain inline line (no helper fn) ───────────────────────
 
     #[test]
-    fn test_adc_helper_takes_clocks_by_value_after_main() {
+    fn test_adc_init_is_a_single_inline_line() {
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
@@ -715,25 +743,20 @@ mod tests {
         mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
         let code = mcu.fresh_main_rs();
 
-        // Bug fix: the helper takes `Clocks` BY VALUE, not `&Clocks`.
-        assert_contains_substring(
-            &code,
-            "fn init_adc1(adc1: pac::ADC1, clocks: Clocks) -> adc::Adc<pac::ADC1>",
-        );
+        // One plain line inside the GENERATED block — `Clocks` passed BY VALUE.
+        assert_contains_substring(&code, "let mut _adc1 = adc::Adc::adc1(dp.ADC1, clocks);");
         assert_not_contains_substring(&code, "clocks: &Clocks)");
-        // …and the call passes `clocks` by value (Clocks is Copy).
-        assert_contains_substring(&code, "init_adc1(dp.ADC1, clocks)");
+        // …and no helper fn is appended after `fn main` any more.
+        assert_not_contains_substring(&code, "fn init_adc1");
+        assert_not_contains_substring(&code, "── Peripheral init helpers");
 
-        // The helper is placed AFTER `fn main`, outside the GENERATED block.
-        let main_pos = code.find("fn main()").unwrap();
-        let helper_pos = code.find("fn init_adc1(").unwrap();
+        let init_pos = code.find("adc::Adc::adc1(").unwrap();
         let gen_end = code.find(GEN_END).unwrap();
-        assert!(helper_pos > main_pos, "helper must come after fn main");
-        assert!(helper_pos > gen_end, "helper must be outside the GEN block");
+        assert!(init_pos < gen_end, "ADC init must be inside the GEN block");
     }
 
     #[test]
-    fn test_helper_added_on_update_and_idempotent() {
+    fn test_adc_init_not_duplicated_on_update() {
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
@@ -743,11 +766,14 @@ mod tests {
                      OLD\n\
                      // <<< GENERATED END >>>\n    loop {}\n}\n";
         let once = mcu.update_main_rs(blank);
-        assert_contains_substring(&once, "fn init_adc1(adc1: pac::ADC1, clocks: Clocks)");
+        assert_not_contains_substring(&once, "fn init_adc1");
 
         let twice = mcu.update_main_rs(&once);
-        assert_eq!(once.matches("fn init_adc1(").count(), 1, "no duplicate helper");
-        assert_eq!(twice.matches("fn init_adc1(").count(), 1, "still single helper");
+        assert_eq!(
+            twice.matches("adc::Adc::adc1(").count(),
+            1,
+            "ADC init duplicated"
+        );
         assert_eq!(once, twice, "update must be idempotent");
     }
 
@@ -858,25 +884,30 @@ mod tests {
     }
 
     #[test]
-    fn test_user_edited_helper_is_preserved() {
+    fn test_legacy_helper_is_stripped_on_update() {
         use super::super::mock_mcu;
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
 
-        // A file where the user customised the helper body.
-        let edited = "// <<< GENERATED BEGIN — do not edit between these markers >>>\n\
+        // A file written by an older version: helper appended after `fn main`.
+        let legacy = "// <<< GENERATED BEGIN — do not edit between these markers >>>\n\
                       OLD\n\
                       // <<< GENERATED END >>>\n    loop {}\n}\n\n\
+                      // ── Peripheral init helpers (editable — tweak as needed) ──\n\n\
                       fn init_adc1(adc1: pac::ADC1, clocks: Clocks) -> adc::Adc<pac::ADC1> {\n\
                           let mut a = adc::Adc::adc1(adc1, clocks);\n\
                           a.set_sample_time(adc::SampleTime::T_239);\n\
                           a\n}\n";
-        let out = mcu.update_main_rs(edited);
+        let out = mcu.update_main_rs(legacy);
 
-        // The custom body survives and the helper is not duplicated.
-        assert_contains_substring(&out, "set_sample_time");
-        assert_eq!(out.matches("fn init_adc1(").count(), 1, "must not re-add helper");
+        // Helper and its orphaned section header are gone; user code before it
+        // (the `loop {}` body of main) is untouched.
+        assert_not_contains_substring(&out, "fn init_adc1");
+        assert_not_contains_substring(&out, "set_sample_time");
+        assert_not_contains_substring(&out, "── Peripheral init helpers");
+        assert_contains_substring(&out, "loop {}");
+        assert_contains_substring(&out, "let mut _adc1 = adc::Adc::adc1(dp.ADC1, clocks);");
     }
 
     // ── Clock codegen Tests ───────────────────────────────────────────────────
@@ -903,7 +934,7 @@ mod tests {
     #[test]
     fn test_graph_clock_drives_generated_chain() {
         use super::super::clock::graph::layout::stm32f1_layout;
-        use super::super::clock::graph::{stm32f1_graph, GraphClock};
+        use super::super::clock::graph::{GraphClock, stm32f1_graph};
         use super::super::clock::model::{Stm32f1Clock, SysclkSrc};
         use super::super::clock::{ClockConfig, ClockLimits};
         use super::super::mock_mcu;
@@ -923,8 +954,10 @@ mod tests {
     }
 
     /// Build a graph clock from a typed config (the only runtime clock model).
-    fn graph_clock(cfg: &super::super::clock::model::Stm32f1Clock) -> super::super::clock::ClockConfig {
-        use super::super::clock::graph::{layout::stm32f1_layout, stm32f1_graph, GraphClock};
+    fn graph_clock(
+        cfg: &super::super::clock::model::Stm32f1Clock,
+    ) -> super::super::clock::ClockConfig {
+        use super::super::clock::graph::{GraphClock, layout::stm32f1_layout, stm32f1_graph};
         use super::super::clock::{ClockConfig, ClockLimits};
         ClockConfig::Graph(GraphClock {
             graph: stm32f1_graph(cfg),
@@ -950,9 +983,9 @@ mod tests {
 
     #[test]
     fn test_clock_marker_roundtrips_through_mcu_config() {
+        use super::super::clock::ClockConfig;
         use super::super::clock::graph::graph_to_stm32f1;
         use super::super::clock::model::Stm32f1Clock;
-        use super::super::clock::ClockConfig;
         use super::super::mcu_config;
         use super::super::mock_mcu;
 
@@ -965,9 +998,14 @@ mod tests {
 
         // The clock is persisted in mcu.config (no longer a marker in main.rs),
         // and parses back to the graph's effective config.
-        assert!(!mcu.fresh_main_rs().contains("@clock"), "no marker in main.rs");
+        assert!(
+            !mcu.fresh_main_rs().contains("@clock"),
+            "no marker in main.rs"
+        );
         let (_, parsed) = mcu_config::parse(&mcu.mcu_config_text());
-        let ClockConfig::Graph(gc) = &mcu.clock else { panic!("expected graph clock") };
+        let ClockConfig::Graph(gc) = &mcu.clock else {
+            panic!("expected graph clock")
+        };
         assert_eq!(parsed, Some(graph_to_stm32f1(&gc.graph)));
     }
 
@@ -1024,8 +1062,15 @@ mod tests {
         mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
         mcu.apply_pin_function(11, PinFunction::GpioInput); // PA1
 
-        assert!(mcu.add_module(ModuleKind::Custom), "custom module always addable");
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        assert!(
+            mcu.add_module(ModuleKind::Custom),
+            "custom module always addable"
+        );
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "temp sensor".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
             c.pins = vec![10, 11];
@@ -1062,19 +1107,30 @@ mod tests {
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         mcu.apply_pin_function(10, PinFunction::GpioOutput);
         assert!(mcu.add_module(ModuleKind::Custom));
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "panel".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
             c.pins = vec![10]; // drafted, NOT applied
         }
 
         // Draft only → no file, no instantiation.
-        assert!(mcu.config_files().iter().all(|(n, _)| !n.starts_with("custom_")));
+        assert!(
+            mcu.config_files()
+                .iter()
+                .all(|(n, _)| !n.starts_with("custom_"))
+        );
         assert!(mcu.custom_module_inits().is_empty());
 
         // Update commits it.
-        if let Some(ModuleConfig::Custom(c)) =
-            mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).map(|m| &mut m.config)
+        if let Some(ModuleConfig::Custom(c)) = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .map(|m| &mut m.config)
         {
             // The signature is what the panel computes from the live pins; an
             // empty one here just exercises the list comparison.
@@ -1082,16 +1138,26 @@ mod tests {
             c.applied_pins = c.pins.clone();
             assert!(!c.has_pending_pins(""));
         }
-        assert!(mcu.config_files().iter().any(|(n, _)| n == "custom_panel.rs"));
+        assert!(
+            mcu.config_files()
+                .iter()
+                .any(|(n, _)| n == "custom_panel.rs")
+        );
 
         // An explicit struct name overrides the module-derived one.
-        if let Some(ModuleConfig::Custom(c)) =
-            mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).map(|m| &mut m.config)
+        if let Some(ModuleConfig::Custom(c)) = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .map(|m| &mut m.config)
         {
             c.struct_name = "encoder nav".to_owned();
         }
         let files = mcu.config_files();
-        let (_, body) = files.iter().find(|(n, _)| n.starts_with("custom_")).unwrap();
+        let (_, body) = files
+            .iter()
+            .find(|(n, _)| n.starts_with("custom_"))
+            .unwrap();
         assert_contains_substring(body, "pub struct EncoderNav<PA0>");
         assert_contains_substring(&mcu.custom_module_inits(), "EncoderNav::new(");
     }
@@ -1107,14 +1173,21 @@ mod tests {
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         mcu.apply_pin_function(10, PinFunction::GpioOutput);
         assert!(mcu.add_module(ModuleKind::Custom));
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "menu".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
             c.pins = vec![10];
             c.applied_pins = c.pins.clone(); // first Update: revision stays 0
         }
         let files = mcu.config_files();
-        assert!(files.iter().any(|(n, _)| n == "custom_menu.rs"), "{files:?}");
+        assert!(
+            files.iter().any(|(n, _)| n == "custom_menu.rs"),
+            "{files:?}"
+        );
         assert_contains_substring(&mcu.custom_module_inits(), "pins::configs::custom_menu::");
 
         // Second Update (a pin was added) → revision 1 → a fresh file.
@@ -1130,10 +1203,19 @@ mod tests {
             c.applied_pins = c.pins.clone();
         }
         let files = mcu.config_files();
-        assert!(files.iter().any(|(n, _)| n == "custom_menu_1.rs"), "{files:?}");
+        assert!(
+            files.iter().any(|(n, _)| n == "custom_menu_1.rs"),
+            "{files:?}"
+        );
         // Only the CURRENT revision is emitted, so `configs/mod.rs` declares one
         // module and the build can never see two copies of the struct.
-        assert_eq!(files.iter().filter(|(n, _)| n.starts_with("custom_")).count(), 1);
+        assert_eq!(
+            files
+                .iter()
+                .filter(|(n, _)| n.starts_with("custom_"))
+                .count(),
+            1
+        );
         assert_contains_substring(&mcu.custom_module_inits(), "pins::configs::custom_menu_1::");
         assert_not_contains_substring(&mcu.custom_module_inits(), "custom_menu::");
     }
@@ -1150,14 +1232,21 @@ mod tests {
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         mcu.apply_pin_function(10, PinFunction::GpioOutput);
         assert!(mcu.add_module(ModuleKind::Custom));
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "demo".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
             c.pins = vec![10];
             c.applied_pins = c.pins.clone();
         }
         let files = mcu.config_files();
-        let (_, body) = files.iter().find(|(n, _)| n.starts_with("custom_")).unwrap();
+        let (_, body) = files
+            .iter()
+            .find(|(n, _)| n.starts_with("custom_"))
+            .unwrap();
 
         // EXACTLY the marker `extract_gen_block` looks for (not main.rs's longer
         // "GENERATED BEGIN — do not edit…" form).
@@ -1187,7 +1276,11 @@ mod tests {
             p.custom_label = "led".to_owned();
         }
         assert!(mcu.add_module(ModuleKind::Custom));
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "panel".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
             c.pins = vec![10, 11];
@@ -1221,14 +1314,20 @@ mod tests {
 
         // Blocking embassy (non-F1 STM32).
         let blocking = embassy_common::make_generated_section("X", &pins, "", line);
-        assert!(blocking.contains(line), "embassy blocking:
-{blocking}");
+        assert!(
+            blocking.contains(line),
+            "embassy blocking:
+{blocking}"
+        );
         assert!(blocking.contains("Custom modules"));
 
         // Async embassy.
         let async_ = embassy_async::make_generated_section("X", &pins, "", "", line);
-        assert!(async_.contains(line), "embassy async:
-{async_}");
+        assert!(
+            async_.contains(line),
+            "embassy async:
+{async_}"
+        );
 
         // ESP32-C3.
         let esp = crate::panels::mcu_module::codegen_esp::fresh_esp32c3_main_rs(
@@ -1240,8 +1339,11 @@ mod tests {
             &Default::default(),
             line,
         );
-        assert!(esp.contains(line), "esp:
-{esp}");
+        assert!(
+            esp.contains(line),
+            "esp:
+{esp}"
+        );
 
         // In every case the line sits INSIDE the generated block.
         for code in [&blocking, &async_, &esp] {
@@ -1270,7 +1372,11 @@ mod tests {
             .expect("a USART TX pin");
 
         assert!(mcu.add_module(ModuleKind::Custom));
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "mix".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
             c.pins = vec![10, usart_pin];
@@ -1283,8 +1389,11 @@ mod tests {
             "expected an explanatory note, got:
 {inits}"
         );
-        assert!(!inits.contains("Mix::new("), "must NOT emit a broken call:
-{inits}");
+        assert!(
+            !inits.contains("Mix::new("),
+            "must NOT emit a broken call:
+{inits}"
+        );
     }
 
     /// Field names must carry the pin LABEL, so they match the variables main.rs
@@ -1309,7 +1418,11 @@ mod tests {
             }
         }
         assert!(mcu.add_module(ModuleKind::Custom));
-        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         *m.config.custom_label_mut() = "menu controler".to_owned();
         *m.config.custom_label_mut() = "menu controler".to_owned();
         if let ModuleConfig::Custom(c) = &mut m.config {
@@ -1319,7 +1432,10 @@ mod tests {
         }
 
         let files = mcu.config_files();
-        let (name, body) = files.iter().find(|(n, _)| n.starts_with("custom_")).unwrap();
+        let (name, body) = files
+            .iter()
+            .find(|(n, _)| n.starts_with("custom_"))
+            .unwrap();
         assert_eq!(name, "custom_menu_controler.rs");
 
         // Fields + `new` params carry the labels…
@@ -1361,7 +1477,11 @@ mod tests {
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         assert!(mcu.add_module(ModuleKind::Custom));
-        if let Some(m) = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom) {
+        if let Some(m) = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+        {
             if let ModuleConfig::Custom(c) = &mut m.config {
                 c.pins = vec![10, 11];
             }
@@ -1377,16 +1497,26 @@ mod tests {
         assert!(m.connections.iter().all(|c| [10, 11].contains(&c.mcu_pin)));
 
         // Empty the pin list → wires go, module stays.
-        if let Some(m) = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom) {
+        if let Some(m) = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+        {
             if let ModuleConfig::Custom(c) = &mut m.config {
                 c.pins.clear();
             }
         }
         mcu.reconcile_modules();
-        let m = mcu.modules.iter().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        let m = mcu
+            .modules
+            .iter()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
         assert!(m.connections.is_empty());
         assert!(
-            mcu.config_files().iter().all(|(n, _)| !n.starts_with("custom_")),
+            mcu.config_files()
+                .iter()
+                .all(|(n, _)| !n.starts_with("custom_")),
             "no file for a module with no pins"
         );
     }
@@ -1408,13 +1538,21 @@ mod tests {
 
         // Blocking: the choice is live and untouched.
         mcu.normalize_gpio_api();
-        assert_eq!(mcu.gpio_api, ApiStyle::Portable, "Blocking keeps the choice");
+        assert_eq!(
+            mcu.gpio_api,
+            ApiStyle::Portable,
+            "Blocking keeps the choice"
+        );
 
         // Native: snapped, and no io.rs bridge is emitted any more.
         mcu.runtime = Runtime::Native;
         mcu.pending_runtime = Runtime::Native;
         mcu.normalize_gpio_api();
-        assert_eq!(mcu.gpio_api, ApiStyle::Native, "applied value follows the runtime");
+        assert_eq!(
+            mcu.gpio_api,
+            ApiStyle::Native,
+            "applied value follows the runtime"
+        );
         assert_eq!(
             mcu.pending_gpio_api,
             ApiStyle::Native,
@@ -1443,15 +1581,24 @@ mod tests {
 
         // Default (Portable) → DigitalOut bridge + io.rs config file.
         let code = mcu.fresh_main_rs();
-        assert_contains_substring(&code, "pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output");
-        assert!(mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "io.rs emitted for Portable");
+        assert_contains_substring(
+            &code,
+            "pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
+        );
+        assert!(
+            mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
+            "io.rs emitted for Portable"
+        );
 
         // Native GPIO → raw HAL pin, NO io.rs, NO DigitalOut.
         mcu.gpio_api = ApiStyle::Native;
         let code = mcu.fresh_main_rs();
         assert_contains_substring(&code, "let pa0_out = &mut gpioa.pa0.into_push_pull_output");
         assert_not_contains_substring(&code, "DigitalOut");
-        assert!(!mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "no io.rs on Native GPIO");
+        assert!(
+            !mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
+            "no io.rs on Native GPIO"
+        );
     }
 
     /// Staged style choices don't affect codegen until `apply_pending_style`:
@@ -1460,7 +1607,9 @@ mod tests {
     #[test]
     fn test_staged_style_apply_and_dirty() {
         use super::super::mock_mcu;
-        use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind};
+        use crate::panels::mcu_module::modules::{
+            ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind,
+        };
 
         let mut mcu = mock_mcu::create_stm32f103c8tx();
         mcu.sync_pending_style();
@@ -1510,18 +1659,31 @@ mod tests {
         mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0 → io.rs (Portable)
         mcu.sync_pending_style();
         assert!(mcu.apply_change_list().is_empty(), "nothing staged");
-        assert!(mcu.config_files().iter().any(|(n, _)| n == "io.rs"), "io.rs present");
+        assert!(
+            mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
+            "io.rs present"
+        );
 
         // Stage GPIO Native → the change list includes the choice + io.rs removal.
         mcu.pending_gpio_api = ApiStyle::Native;
         let list = mcu.apply_change_list();
-        assert!(list.iter().any(|l| l.contains("GPIO In/Out")), "choice line: {list:?}");
         assert!(
-            list.iter().any(|l| l.contains("io.rs") && l.contains("removed")),
+            list.iter().any(|l| l.contains("GPIO In/Out")),
+            "choice line: {list:?}"
+        );
+        assert!(
+            list.iter()
+                .any(|l| l.contains("io.rs") && l.contains("removed")),
             "io.rs removal listed: {list:?}"
         );
-        assert!(list.iter().any(|l| l.contains("Cargo.toml")), "deps note: {list:?}");
-        assert!(list.iter().any(|l| l.contains("main.rs")), "main.rs note: {list:?}");
+        assert!(
+            list.iter().any(|l| l.contains("Cargo.toml")),
+            "deps note: {list:?}"
+        );
+        assert!(
+            list.iter().any(|l| l.contains("main.rs")),
+            "main.rs note: {list:?}"
+        );
     }
 
     /// A `<pin>_<type>` binding still round-trips back through `parse_main_rs`.
@@ -1534,8 +1696,11 @@ mod tests {
         let code = mcu.fresh_main_rs();
 
         let parsed = parse_main_rs(&code);
-        assert!(parsed.iter().any(|(name, func)| name == "PA0"
-            && *func == PinFunction::GpioOutput));
+        assert!(
+            parsed
+                .iter()
+                .any(|(name, func)| name == "PA0" && *func == PinFunction::GpioOutput)
+        );
     }
 
     /// A user label on a pin is appended to the generated binding name

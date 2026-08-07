@@ -7,9 +7,7 @@
 
 use super::AppIde;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
-use crate::panels::mcu_module::mcu_form::{
-    self, McuForm, PinRow, SIDES, SIDE_DISPLAY_ORDER,
-};
+use crate::panels::mcu_module::mcu_form::{self, McuForm, PinRow, SIDE_DISPLAY_ORDER, SIDES};
 use crate::panels::mcu_module::registry;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -556,8 +554,7 @@ fn pin_side_editor(
                     if ui
                         .add_enabled(
                             i > 0,
-                            egui::Button::new(egui::RichText::new(ph::ARROW_UP).size(10.0))
-                                .small(),
+                            egui::Button::new(egui::RichText::new(ph::ARROW_UP).size(10.0)).small(),
                         )
                         .on_hover_text("Move earlier along this side")
                         .clicked()
@@ -583,9 +580,7 @@ fn pin_side_editor(
                             // Same Left → Bottom → Right → Top order as the
                             // editors, so the picker doesn't contradict them.
                             for &target in &SIDE_DISPLAY_ORDER {
-                                if ui
-                                    .selectable_label(target == side, SIDES[target])
-                                    .clicked()
+                                if ui.selectable_label(target == side, SIDES[target]).clicked()
                                     && target != side
                                 {
                                     *move_out = Some((i, target));

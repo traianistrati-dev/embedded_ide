@@ -36,8 +36,7 @@ impl AppIde {
         clip: egui::Rect,
         display_code: &str,
     ) {
-        let Some(rel) = bp_path_of(self.selected_file, &self.project_tree.user_src_files)
-        else {
+        let Some(rel) = bp_path_of(self.selected_file, &self.project_tree.user_src_files) else {
             return;
         };
         let galley = &editor_resp.galley;

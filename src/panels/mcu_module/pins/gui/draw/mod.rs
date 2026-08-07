@@ -52,7 +52,9 @@ impl Pin {
         let rect = layout::calc_rect_right(x, y, height, width);
         shapes::draw_rect_filled(painter, rect, 0.0, self.get_background_color());
 
-        let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
+        let clicked = ui.map_or(false, |ui| {
+            listeners::listen_on_rect(self, painter, ui, rect, is_selected)
+        });
 
         let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
         text::draw_horizontal_text_colored(
@@ -84,7 +86,9 @@ impl Pin {
         let rect = layout::calc_rect_left(x, y, height, width);
         shapes::draw_rect_filled(painter, rect, 0.0, self.get_background_color());
 
-        let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
+        let clicked = ui.map_or(false, |ui| {
+            listeners::listen_on_rect(self, painter, ui, rect, is_selected)
+        });
 
         let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
         text::draw_horizontal_text_colored(
@@ -116,7 +120,9 @@ impl Pin {
         let rect = layout::calc_rect_top(x, y, height, width);
         shapes::draw_rect_filled(painter, rect, 0.0, self.get_background_color());
 
-        let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
+        let clicked = ui.map_or(false, |ui| {
+            listeners::listen_on_rect(self, painter, ui, rect, is_selected)
+        });
 
         let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
         text::draw_vertical_text_colored(
@@ -148,7 +154,9 @@ impl Pin {
         let rect = layout::calc_rect_bottom(x, y, height, width);
         shapes::draw_rect_filled(painter, rect, 0.0, self.get_background_color());
 
-        let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
+        let clicked = ui.map_or(false, |ui| {
+            listeners::listen_on_rect(self, painter, ui, rect, is_selected)
+        });
 
         let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
         text::draw_vertical_text_colored(

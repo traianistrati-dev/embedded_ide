@@ -1,9 +1,9 @@
 //! Required Tools tab.
+use crate::panels::mcu_module::ToolchainKind;
+use crate::required_tools;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
-use crate::required_tools;
-use crate::panels::mcu_module::ToolchainKind;
 
 pub fn show_tools_tab(
     ui: &mut egui::Ui,

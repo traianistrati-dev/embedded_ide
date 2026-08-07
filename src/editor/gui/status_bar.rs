@@ -1,10 +1,10 @@
 //! RA status bar — shows rust-analyzer state, diagnostics, and checking progress.
 
-use eframe::egui;
-use egui_phosphor::regular as ph;
-use crate::lsp::{LspStatus, LspState};
 use crate::app::ProjectFileId;
 use crate::editor::gui::text_pos::selected_file_rel_path;
+use crate::lsp::{LspState, LspStatus};
+use eframe::egui;
+use egui_phosphor::regular as ph;
 
 /// Display the RA status bar above the code editor.
 /// Shows whether RA is indexing, checking, or ready, along with error/warning counts.
@@ -16,8 +16,7 @@ pub fn show_ra_status_bar(
 ) {
     let (ra_status, checking, errs, warns) = {
         let lsp = lsp_state.lock().unwrap();
-        let rel = selected_file_rel_path(selected_file, user_src_files)
-            .unwrap_or_default();
+        let rel = selected_file_rel_path(selected_file, user_src_files).unwrap_or_default();
         let errs = lsp
             .diagnostics
             .get(&rel)
@@ -52,13 +51,11 @@ pub fn show_ra_status_bar(
             LspStatus::Starting | LspStatus::Indexing => {
                 crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
                 ui.label(
-                    egui::RichText::new(
-                        if matches!(ra_status, LspStatus::Starting) {
-                            " rust-analyzer: pornire…"
-                        } else {
-                            " rust-analyzer: indexare crate-uri…"
-                        },
-                    )
+                    egui::RichText::new(if matches!(ra_status, LspStatus::Starting) {
+                        " rust-analyzer: pornire…"
+                    } else {
+                        " rust-analyzer: indexare crate-uri…"
+                    })
                     .size(10.5)
                     .color(egui::Color32::from_rgb(200, 190, 80)),
                 );

@@ -49,10 +49,19 @@ pub fn over_limits(
     let mut out = Vec::new();
     for node in &graph.nodes {
         let Some(key) = node.limit else { continue };
-        let Some(ceiling) = ceiling_for(key, limits) else { continue };
-        let Some(&hz) = freqs.get(&node.id) else { continue };
+        let Some(ceiling) = ceiling_for(key, limits) else {
+            continue;
+        };
+        let Some(&hz) = freqs.get(&node.id) else {
+            continue;
+        };
         if hz > ceiling {
-            out.push(Overflow { node: node.id.clone(), key, hz, limit: ceiling });
+            out.push(Overflow {
+                node: node.id.clone(),
+                key,
+                hz,
+                limit: ceiling,
+            });
         }
     }
     out
@@ -60,9 +69,9 @@ pub fn over_limits(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::eval::evaluate;
     use super::super::stm32f1::stm32f1_graph;
+    use super::*;
     use crate::panels::mcu_module::clock::model::Stm32f1Clock;
 
     fn over(c: &Stm32f1Clock, l: &ClockLimits) -> Vec<String> {

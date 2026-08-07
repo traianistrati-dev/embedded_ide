@@ -1,8 +1,8 @@
 //! Rust-Analyzer diagnostics tab.
+use crate::lsp;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
-use crate::lsp;
 
 pub fn show_ra_tab(
     ui: &mut egui::Ui,
@@ -164,7 +164,10 @@ pub fn show_ra_tab(
                         };
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(line).size(10.5).monospace().color(color),
+                                egui::RichText::new(line)
+                                    .size(10.5)
+                                    .monospace()
+                                    .color(color),
                             )
                             .wrap(),
                         );
@@ -358,4 +361,3 @@ pub fn show_ra_tab(
         }
     }
 }
-

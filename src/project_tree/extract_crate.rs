@@ -183,7 +183,10 @@ pub fn plan_delete_crate(
     for (path, content) in user_files
         .iter()
         .filter(|(p, _)| !p.starts_with(&prefix))
-        .chain(std::iter::once(&("src/main.rs".to_owned(), main_rs.to_owned())))
+        .chain(std::iter::once(&(
+            "src/main.rs".to_owned(),
+            main_rs.to_owned(),
+        )))
     {
         if content.contains(&uses) {
             warnings.push(format!("{path} still refers to `{ident}::…`"));
@@ -247,11 +250,7 @@ pub fn plan_rename_crate(
             let new_path = format!("{new_name}/{rest}");
             // The crate's own manifest carries its name.
             let body = if rest == "Cargo.toml" {
-                content.replacen(
-                    &format!("\"{dir}\""),
-                    &format!("\"{new_name}\""),
-                    1,
-                )
+                content.replacen(&format!("\"{dir}\""), &format!("\"{new_name}\""), 1)
             } else {
                 content.clone()
             };
@@ -371,7 +370,11 @@ pub fn plan_extract(
     let crate_dir = name.to_owned();
     let ident = crate_ident(name);
     // The module path the folder had inside the app crate.
-    let folder_ident = folder.rsplit('/').next().unwrap_or(folder).replace('-', "_");
+    let folder_ident = folder
+        .rsplit('/')
+        .next()
+        .unwrap_or(folder)
+        .replace('-', "_");
 
     let mut plan = ExtractPlan {
         crate_dir: crate_dir.clone(),
@@ -441,10 +444,8 @@ pub fn plan_extract(
             .push((format!("{crate_dir}/src/lib.rs"), lib));
     }
 
-    plan.new_files.push((
-        format!("{crate_dir}/Cargo.toml"),
-        member_cargo_toml(meta),
-    ));
+    plan.new_files
+        .push((format!("{crate_dir}/Cargo.toml"), member_cargo_toml(meta)));
 
     // ── Rewrite what stays behind ────────────────────────────────────────────
     // `crate::mw_radar::Foo` → `mw_radar::Foo`, and the `mod mw_radar;`
@@ -482,7 +483,11 @@ pub fn plan_extract(
 /// after a leading `//!` doc block, which is also allowed to precede items and
 /// which the user would not want pushed down.
 fn with_no_std(src: &str, want: bool) -> String {
-    if !want || src.lines().any(|l| l.trim_start().starts_with("#![no_std]")) {
+    if !want
+        || src
+            .lines()
+            .any(|l| l.trim_start().starts_with("#![no_std]"))
+    {
         return src.to_owned();
     }
     let insert_at = src
@@ -521,10 +526,7 @@ fn rewrite_refs(src: &str, folder_ident: &str, crate_ident: &str) -> String {
         if t == format!("mod {folder_ident};") || t == format!("pub mod {folder_ident};") {
             continue;
         }
-        out.push_str(&line.replace(
-            &format!("crate::{folder_ident}"),
-            crate_ident,
-        ));
+        out.push_str(&line.replace(&format!("crate::{folder_ident}"), crate_ident));
         out.push('\n');
     }
     // Keep the original's trailing-newline shape.
@@ -641,7 +643,11 @@ fn extend_members_list(src: &str, crate_dir: &str) -> String {
             if let Some(close) = line.rfind(']') {
                 if line.trim_start().starts_with("members") || line.trim() == "]" {
                     let (head, tail) = line.split_at(close);
-                    let sep = if head.trim_end().ends_with('[') { "" } else { ", " };
+                    let sep = if head.trim_end().ends_with('[') {
+                        ""
+                    } else {
+                        ", "
+                    };
                     out.push_str(&format!("{head}{sep}\"{crate_dir}\"{tail}\n"));
                     done = true;
                     continue;
@@ -748,10 +754,7 @@ mod tests {
             .filter(|(a, _)| a == "mw_radar/src/lib.rs")
             .collect();
         assert_eq!(libs.len(), 1, "exactly one crate root");
-        assert_eq!(
-            libs[0].1,
-            "#![no_std]\n\npub mod frame;\npub mod parser;\n"
-        );
+        assert_eq!(libs[0].1, "#![no_std]\n\npub mod frame;\npub mod parser;\n");
         assert!(
             p.warnings.iter().any(|w| w.contains("super::")),
             "must warn that super:: breaks: {:?}",
@@ -790,7 +793,9 @@ mod tests {
         )];
         let p = plan_extract("src/mw_radar", &f, "", "", &meta()).unwrap();
         assert!(
-            p.warnings.iter().any(|w| w.contains("src/mw_radar/frame.rs:1")),
+            p.warnings
+                .iter()
+                .any(|w| w.contains("src/mw_radar/frame.rs:1")),
             "{:?}",
             p.warnings
         );
@@ -831,7 +836,8 @@ mod tests {
         let root = "[workspace]\nmembers = [\"other\"]\n";
         let p = plan_extract("src/mw_radar", &files(), "", root, &meta()).unwrap();
         assert!(
-            p.root_cargo_toml.contains("members = [\"other\", \"mw_radar\"]"),
+            p.root_cargo_toml
+                .contains("members = [\"other\", \"mw_radar\"]"),
             "{}",
             p.root_cargo_toml
         );
@@ -840,7 +846,10 @@ mod tests {
 
     #[test]
     fn to_snake_case_replaces_specials_and_lowercases() {
-        assert_eq!(to_snake_case("hmmd-mmWave-sensor-embede-io-lib"), "hmmd_mmwave_sensor_embede_io_lib");
+        assert_eq!(
+            to_snake_case("hmmd-mmWave-sensor-embede-io-lib"),
+            "hmmd_mmwave_sensor_embede_io_lib"
+        );
         assert_eq!(to_snake_case("My Cool Lib"), "my_cool_lib");
         assert_eq!(to_snake_case("a.b/c"), "a_b_c");
         // Underscores + digits pass through (typing stays natural).
@@ -857,7 +866,10 @@ mod tests {
                     [dependencies.lib_b]\npath = \"lib_b\"\n";
         let out = remove_workspace_member(root, "lib_b");
         assert!(out.contains("members = [\"lib_a\"]"), "{out}");
-        assert!(!out.contains("lib_b"), "no trace of the detached crate:\n{out}");
+        assert!(
+            !out.contains("lib_b"),
+            "no trace of the detached crate:\n{out}"
+        );
         assert_eq!(out.matches("[workspace]").count(), 1);
     }
 
@@ -940,7 +952,10 @@ mod tests {
             .find(|(a, _)| a == "mw_radar/Cargo.toml")
             .map(|(_, c)| c.clone())
             .expect("manifest");
-        assert!(manifest.contains("name        = \"mw_radar\""), "{manifest}");
+        assert!(
+            manifest.contains("name        = \"mw_radar\""),
+            "{manifest}"
+        );
         assert!(manifest.contains("test    = false"), "{manifest}");
 
         let lib = p
@@ -991,7 +1006,11 @@ mod tests {
 
         assert_eq!(p.removed_files.len(), 2, "only the crate's own files");
         assert!(!p.root_cargo_toml.contains("[dependencies.mw_radar]"));
-        assert!(p.root_cargo_toml.contains("members = []"), "{}", p.root_cargo_toml);
+        assert!(
+            p.root_cargo_toml.contains("members = []"),
+            "{}",
+            p.root_cargo_toml
+        );
         assert!(
             p.root_cargo_toml.contains("cortex-m"),
             "unrelated dependencies survive:\n{}",
@@ -1015,7 +1034,10 @@ mod tests {
                 "mw_radar/Cargo.toml".to_owned(),
                 "[package]\nname        = \"mw_radar\"\n".to_owned(),
             ),
-            ("mw_radar/src/lib.rs".to_owned(), "pub mod frame;\n".to_owned()),
+            (
+                "mw_radar/src/lib.rs".to_owned(),
+                "pub mod frame;\n".to_owned(),
+            ),
             (
                 "src/app.rs".to_owned(),
                 "use mw_radar::frame::Frame;\n".to_owned(),
@@ -1071,14 +1093,19 @@ mod tests {
             1,
             "one workspace table:\n{after_rename}"
         );
-        assert!(after_rename.contains("members = [\"radar_hal\"]"), "{after_rename}");
+        assert!(
+            after_rename.contains("members = [\"radar_hal\"]"),
+            "{after_rename}"
+        );
 
         // …and adding another library after that still does not duplicate it.
         let meta2 = CrateMeta {
             name: "test11".to_owned(),
             ..meta()
         };
-        let after_new = plan_new_crate(&meta2, &after_rename).unwrap().root_cargo_toml;
+        let after_new = plan_new_crate(&meta2, &after_rename)
+            .unwrap()
+            .root_cargo_toml;
         assert_eq!(
             after_new.matches("[workspace]").count(),
             1,

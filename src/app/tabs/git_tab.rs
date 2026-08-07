@@ -353,9 +353,18 @@ pub fn show_git_tab(
             // Picking a different branch REQUESTS a switch — the caller confirms
             // (unsaved changes are lost on the disk reload) then runs it.
             if status.branches.len() > 1 && busy.is_none() {
-                ui.label(egui::RichText::new(ph::GIT_BRANCH.to_string()).size(12.0).color(branch_c));
+                ui.label(
+                    egui::RichText::new(ph::GIT_BRANCH.to_string())
+                        .size(12.0)
+                        .color(branch_c),
+                );
                 egui::ComboBox::from_id_salt("git_branch_picker")
-                    .selected_text(egui::RichText::new(branch).size(12.0).strong().color(branch_c))
+                    .selected_text(
+                        egui::RichText::new(branch)
+                            .size(12.0)
+                            .strong()
+                            .color(branch_c),
+                    )
                     .show_ui(ui, |ui| {
                         for b in &status.branches {
                             let is_current = b == branch;
@@ -384,7 +393,9 @@ pub fn show_git_tab(
                         }
                     })
                     .response
-                    .on_hover_text("Switch to another local branch (reloads the project from disk)");
+                    .on_hover_text(
+                        "Switch to another local branch (reloads the project from disk)",
+                    );
             } else {
                 ui.label(
                     egui::RichText::new(format!("{} {branch}", ph::GIT_BRANCH))

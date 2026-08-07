@@ -103,10 +103,18 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
     type Pred = fn(&PinFunction) -> bool;
     // Ordered category table: (display name, RGB, "is this function mine?").
     let defs: &[(&'static str, (u8, u8, u8), Pred)] = &[
-        ("GPIO Output", (200, 120, 50), |f| matches!(f, PinFunction::GpioOutput)),
-        ("GPIO Input", (70, 160, 70), |f| matches!(f, PinFunction::GpioInput)),
-        ("ADC", (150, 70, 200), |f| matches!(f, PinFunction::AdcChannel { .. })),
-        ("Timers / PWM", (190, 170, 30), |f| matches!(f, PinFunction::TimerPwm { .. })),
+        ("GPIO Output", (200, 120, 50), |f| {
+            matches!(f, PinFunction::GpioOutput)
+        }),
+        ("GPIO Input", (70, 160, 70), |f| {
+            matches!(f, PinFunction::GpioInput)
+        }),
+        ("ADC", (150, 70, 200), |f| {
+            matches!(f, PinFunction::AdcChannel { .. })
+        }),
+        ("Timers / PWM", (190, 170, 30), |f| {
+            matches!(f, PinFunction::TimerPwm { .. })
+        }),
         ("USART", (50, 110, 200), |f| {
             matches!(
                 f,
@@ -138,7 +146,9 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
         ("SWD / Debug", (190, 50, 50), |f| {
             matches!(f, PinFunction::SwdIo | PinFunction::SwdClk)
         }),
-        ("MCO / Clock", (150, 150, 160), |f| matches!(f, PinFunction::Mco)),
+        ("MCO / Clock", (150, 150, 160), |f| {
+            matches!(f, PinFunction::Mco)
+        }),
     ];
 
     let pins: Vec<&Pin> = mcu.iter_all_pins().filter(|p| !p.reserved).collect();
@@ -224,7 +234,12 @@ fn category_row(ui: &mut egui::Ui, cat: &CategoryView, pending: &mut Option<(usi
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 2.0, cat.color);
-        ui.label(egui::RichText::new(cat.name).size(13.0).strong().color(cat.color));
+        ui.label(
+            egui::RichText::new(cat.name)
+                .size(13.0)
+                .strong()
+                .color(cat.color),
+        );
 
         let badge = if assigned > 0 {
             format!("{assigned}/{total} pins")
@@ -350,7 +365,10 @@ mod tests {
             assert!(names.contains(&expected), "missing category {expected}");
         }
         // ADC exposes many analog-capable pins.
-        assert!(category(&cats, "ADC").pins.len() >= 8, "expected ≥8 ADC pins");
+        assert!(
+            category(&cats, "ADC").pins.len() >= 8,
+            "expected ≥8 ADC pins"
+        );
         // Every option carries a non-empty label, and starts unassigned.
         for c in &cats {
             for p in &c.pins {
@@ -375,7 +393,10 @@ mod tests {
             .iter()
             .find(|p| p.pin_num == 10)
             .unwrap();
-        assert!(pa0.assigned().is_some(), "PA0 must be assigned in GPIO Output");
+        assert!(
+            pa0.assigned().is_some(),
+            "PA0 must be assigned in GPIO Output"
+        );
 
         // A configured pin disappears from every *other* category, so it can't
         // be selected twice with a different functionality.
@@ -397,8 +418,18 @@ mod tests {
         // PA0 (pin 10) supports both GPIO and ADC1 IN0 on the C8T6.
         // Before assignment it shows under both GPIO Output and ADC.
         let before = build_categories(&mcu);
-        assert!(category(&before, "ADC").pins.iter().any(|p| p.pin_num == 10));
-        assert!(category(&before, "GPIO Output").pins.iter().any(|p| p.pin_num == 10));
+        assert!(
+            category(&before, "ADC")
+                .pins
+                .iter()
+                .any(|p| p.pin_num == 10)
+        );
+        assert!(
+            category(&before, "GPIO Output")
+                .pins
+                .iter()
+                .any(|p| p.pin_num == 10)
+        );
 
         // Assign ADC → PA0 must vanish from GPIO Output (and every other row).
         mcu.apply_pin_function(10, PinFunction::AdcChannel { adc: 1, channel: 0 });
@@ -408,7 +439,10 @@ mod tests {
             "PA0 stays in its own ADC category"
         );
         assert!(
-            !category(&after, "GPIO Output").pins.iter().any(|p| p.pin_num == 10),
+            !category(&after, "GPIO Output")
+                .pins
+                .iter()
+                .any(|p| p.pin_num == 10),
             "PA0 is taken by ADC → hidden from GPIO Output"
         );
     }
@@ -473,7 +507,10 @@ mod tests {
         };
         assert_eq!(click_action(2, &unset), (2, PinFunction::GpioOutput));
 
-        let set = PinOption { assigned: true, ..unset };
+        let set = PinOption {
+            assigned: true,
+            ..unset
+        };
         assert_eq!(click_action(2, &set), (2, PinFunction::Unset));
     }
 }

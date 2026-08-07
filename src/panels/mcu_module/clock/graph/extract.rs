@@ -359,19 +359,26 @@ pub fn to_graph_clock(ex: &ExtractedClock) -> Result<GraphClock, String> {
         }
         nodes.push(node(
             "pllm",
-            NodeKind::Divider { options: nonempty(&p.m_divisors, 1) },
+            NodeKind::Divider {
+                options: nonempty(&p.m_divisors, 1),
+            },
             NodeState::Index(index_of_div(&p.m_divisors, ex.default.pll_m)),
         ));
         edges.push(edge("pllsrc", "pllm", 0));
         nodes.push(node(
             "plln",
-            NodeKind::Multiplier { min: p.n_min.max(1), max: p.n_max.max(p.n_min.max(1)) },
+            NodeKind::Multiplier {
+                min: p.n_min.max(1),
+                max: p.n_max.max(p.n_min.max(1)),
+            },
             NodeState::Value(clamp_n(ex.default.pll_n, p)),
         ));
         edges.push(edge("pllm", "plln", 0));
         nodes.push(node(
             "pllout",
-            NodeKind::Divider { options: nonempty(&p.output_divisors, 1) },
+            NodeKind::Divider {
+                options: nonempty(&p.output_divisors, 1),
+            },
             NodeState::Index(index_of_div(&p.output_divisors, ex.default.pll_out)),
         ));
         edges.push(edge("plln", "pllout", 0));
@@ -386,7 +393,9 @@ pub fn to_graph_clock(ex: &ExtractedClock) -> Result<GraphClock, String> {
     }
     nodes.push(node(
         "sw",
-        NodeKind::Mux { inputs: ex.sysclk_sources.len() },
+        NodeKind::Mux {
+            inputs: ex.sysclk_sources.len(),
+        },
         NodeState::Index(index_of_name(&ex.sysclk_sources, &ex.default.sysclk_source)),
     ));
     for (i, name) in ex.sysclk_sources.iter().enumerate() {
@@ -400,7 +409,9 @@ pub fn to_graph_clock(ex: &ExtractedClock) -> Result<GraphClock, String> {
     // ── AHB / HCLK ──────────────────────────────────────────────────────
     nodes.push(node(
         "ahb",
-        NodeKind::Divider { options: nonempty(&ex.ahb_divisors, 1) },
+        NodeKind::Divider {
+            options: nonempty(&ex.ahb_divisors, 1),
+        },
         NodeState::Index(0),
     ));
     edges.push(edge("sysclk", "ahb", 0));
@@ -413,7 +424,9 @@ pub fn to_graph_clock(ex: &ExtractedClock) -> Result<GraphClock, String> {
         let out_id = format!("{}_out", div_id);
         nodes.push(node(
             &div_id,
-            NodeKind::Divider { options: nonempty(&bus.divisors, 1) },
+            NodeKind::Divider {
+                options: nonempty(&bus.divisors, 1),
+            },
             NodeState::Index(0),
         ));
         edges.push(edge("ahb", &div_id, 0));
@@ -488,8 +501,16 @@ mod tests {
     fn wba_like() -> ExtractedClock {
         ExtractedClock {
             sources: vec![
-                ExtractedSource { name: "HSI16".into(), hz: 16_000_000, gated: true },
-                ExtractedSource { name: "HSE".into(), hz: 32_000_000, gated: true },
+                ExtractedSource {
+                    name: "HSI16".into(),
+                    hz: 16_000_000,
+                    gated: true,
+                },
+                ExtractedSource {
+                    name: "HSE".into(),
+                    hz: 32_000_000,
+                    gated: true,
+                },
             ],
             pll: Some(ExtractedPll {
                 source_options: vec!["HSI16".into(), "HSE".into()],
@@ -503,9 +524,18 @@ mod tests {
             sysclk_max_hz: 100_000_000,
             ahb_divisors: vec![1, 2, 4, 8, 16, 64, 128, 256, 512],
             apb: vec![
-                ExtractedBus { name: "APB1".into(), divisors: vec![1, 2, 4, 8, 16] },
-                ExtractedBus { name: "APB2".into(), divisors: vec![1, 2, 4, 8, 16] },
-                ExtractedBus { name: "APB7".into(), divisors: vec![1, 2, 4, 8, 16] },
+                ExtractedBus {
+                    name: "APB1".into(),
+                    divisors: vec![1, 2, 4, 8, 16],
+                },
+                ExtractedBus {
+                    name: "APB2".into(),
+                    divisors: vec![1, 2, 4, 8, 16],
+                },
+                ExtractedBus {
+                    name: "APB7".into(),
+                    divisors: vec![1, 2, 4, 8, 16],
+                },
             ],
             default: ExtractedDefault {
                 sysclk_source: "PLL1R".into(),
@@ -533,7 +563,10 @@ mod tests {
         let mut ex = wba_like();
         ex.sysclk_sources = vec!["PLL1R".into(), "HSE".into(), "HSI16".into()];
         let gc = to_graph_clock(&ex).expect("name mapping must ignore order");
-        assert_eq!(evaluate(&gc.graph).get("sysclk").copied(), Some(100_000_000));
+        assert_eq!(
+            evaluate(&gc.graph).get("sysclk").copied(),
+            Some(100_000_000)
+        );
     }
 
     #[test]
@@ -589,18 +622,23 @@ mod tests {
             }\n```";
         let ex = parse_clock_reply(reply).expect("reply must parse");
         let gc = to_graph_clock(&ex).expect("must convert + self-check");
-        assert_eq!(evaluate(&gc.graph).get("sysclk").copied(), Some(100_000_000));
+        assert_eq!(
+            evaluate(&gc.graph).get("sysclk").copied(),
+            Some(100_000_000)
+        );
     }
 
     #[test]
     fn schema_and_prompt_name_the_key_fields() {
         let schema = clock_extraction_schema(true);
         assert_eq!(schema["properties"]["sources"]["type"], "array");
-        assert!(schema["properties"]["default"]["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v == "sysclk_hz"));
+        assert!(
+            schema["properties"]["default"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "sysclk_hz")
+        );
         // Gemini's subset rejects additionalProperties; strict mode requires it.
         let strict = clock_extraction_schema(true);
         assert_eq!(strict["additionalProperties"], serde_json::json!(false));
@@ -632,6 +670,9 @@ mod tests {
         let gc = to_graph_clock(&wba_like()).unwrap();
         let text = super::super::import::export_clock_ron(&gc);
         let back = super::super::import::parse_clock_ron(&text).expect("Layer 1 must accept it");
-        assert_eq!(evaluate(&back.graph).get("sysclk").copied(), Some(100_000_000));
+        assert_eq!(
+            evaluate(&back.graph).get("sysclk").copied(),
+            Some(100_000_000)
+        );
     }
 }

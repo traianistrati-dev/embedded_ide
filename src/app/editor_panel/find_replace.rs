@@ -466,7 +466,11 @@ impl AppIde {
                 gp.x + galley.rect.width()
             };
             if y_bot >= clip.top() && y_top <= clip.bottom() && x_r > x_l {
-                let color = if file_find && idx == cur_idx { current } else { base };
+                let color = if file_find && idx == cur_idx {
+                    current
+                } else {
+                    base
+                };
                 painter.rect_filled(
                     egui::Rect::from_min_max(egui::pos2(x_l, y_top), egui::pos2(x_r, y_bot)),
                     2.0,
@@ -516,19 +520,35 @@ impl AppIde {
         for (i, (name, content)) in self.project_tree.user_src_files.iter().enumerate() {
             v.push((ProjectFileId::UserFile(i), name.clone(), content.clone()));
         }
-        v.push((ProjectFileId::CargoToml, "Cargo.toml".into(), self.cargo_toml.clone()));
+        v.push((
+            ProjectFileId::CargoToml,
+            "Cargo.toml".into(),
+            self.cargo_toml.clone(),
+        ));
         v.push((
             ProjectFileId::CargoConfig,
             ".cargo/config.toml".into(),
             self.cargo_config.clone(),
         ));
         if !self.memory_x.is_empty() {
-            v.push((ProjectFileId::MemoryX, "memory.x".into(), self.memory_x.clone()));
+            v.push((
+                ProjectFileId::MemoryX,
+                "memory.x".into(),
+                self.memory_x.clone(),
+            ));
         }
         if !self.build_rs.is_empty() {
-            v.push((ProjectFileId::BuildRs, "build.rs".into(), self.build_rs.clone()));
+            v.push((
+                ProjectFileId::BuildRs,
+                "build.rs".into(),
+                self.build_rs.clone(),
+            ));
         }
-        v.push((ProjectFileId::GitIgnore, ".gitignore".into(), self.gitignore.clone()));
+        v.push((
+            ProjectFileId::GitIgnore,
+            ".gitignore".into(),
+            self.gitignore.clone(),
+        ));
         v
     }
 
@@ -538,11 +558,7 @@ impl AppIde {
     /// `display_code` is re-synced afterwards for the same reason
     /// [`Self::run_project_replace`] does it: the editor writes its buffer back
     /// at end of frame and would otherwise revert the edit in the open file.
-    fn apply_leftover_rename(
-        &mut self,
-        displayed_file: ProjectFileId,
-        display_code: &mut String,
-    ) {
+    fn apply_leftover_rename(&mut self, displayed_file: ProjectFileId, display_code: &mut String) {
         let Some(new_name) = self.find.leftover_new_name.clone() else {
             return;
         };
@@ -561,9 +577,8 @@ impl AppIde {
         let mut files = 0usize;
         for (id, lines) in per_file {
             let content = self.searchable_content(id);
-            let (updated, n) = super::rename::replace_whole_word_on_lines(
-                &content, &old_name, &new_name, &lines,
-            );
+            let (updated, n) =
+                super::rename::replace_whole_word_on_lines(&content, &old_name, &new_name, &lines);
             if n > 0 {
                 self.set_searchable_content(id, updated);
                 total += n;
@@ -668,7 +683,10 @@ impl AppIde {
         for (id, _, content) in self.searchable_files() {
             let count = content.matches(query.as_str()).count();
             if count > 0 {
-                self.set_searchable_content(id, content.replace(query.as_str(), replacement.as_str()));
+                self.set_searchable_content(
+                    id,
+                    content.replace(query.as_str(), replacement.as_str()),
+                );
                 total += count;
                 files += 1;
             }

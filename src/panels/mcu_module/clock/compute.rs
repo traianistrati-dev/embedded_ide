@@ -90,8 +90,8 @@ pub fn frequencies(c: &Stm32f1Clock) -> ClockFrequencies {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::model::Stm32f1Clock;
+    use super::*;
 
     const MHZ: u32 = 1_000_000;
 

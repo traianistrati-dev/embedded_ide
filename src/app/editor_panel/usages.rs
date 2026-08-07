@@ -182,7 +182,10 @@ fn is_externally_invoked(name: &str, start_line: u32, text: &str) -> bool {
 /// reported position. Guards against a Build/Clippy result gone stale after a
 /// later edit shifted the code — the diagnostic just silently stops applying
 /// rather than fading the wrong span.
-fn unused_variable_range(d: &crate::build::Diagnostic, display_code: &str) -> Option<(usize, usize)> {
+fn unused_variable_range(
+    d: &crate::build::Diagnostic,
+    display_code: &str,
+) -> Option<(usize, usize)> {
     let name = d.message.split('`').nth(1)?;
     if name.is_empty() {
         return None;
@@ -324,7 +327,10 @@ impl AppIde {
                     if let Some(item) = self.usages.items.get_mut(idx) {
                         item.references = Some(
                             locs.into_iter()
-                                .map(|r| UsageRef { path: r.path, line: r.line })
+                                .map(|r| UsageRef {
+                                    path: r.path,
+                                    line: r.line,
+                                })
                                 .collect(),
                         );
                     }
@@ -353,7 +359,11 @@ impl AppIde {
     /// the variable elsewhere doesn't move the `let`, but clears the "unused"
     /// verdict all the same). The per-diagnostic identifier re-check below is
     /// extra insurance on top of that, not a substitute for it.
-    pub(super) fn usages_dead_ranges(&self, rel_path: &str, display_code: &str) -> Vec<(usize, usize)> {
+    pub(super) fn usages_dead_ranges(
+        &self,
+        rel_path: &str,
+        display_code: &str,
+    ) -> Vec<(usize, usize)> {
         let mut ranges = Vec::new();
 
         if self.usages.rel_path == rel_path && self.usages.computed_for_text == display_code {
@@ -451,7 +461,11 @@ impl AppIde {
                     continue; // scrolled out of view
                 }
 
-                let label = format!("{} {}", refs.len(), if refs.len() == 1 { "ref" } else { "refs" });
+                let label = format!(
+                    "{} {}",
+                    refs.len(),
+                    if refs.len() == 1 { "ref" } else { "refs" }
+                );
                 let font = egui::FontId::proportional(10.0);
                 let galley_txt = painter.layout_no_wrap(label.clone(), font.clone(), PILL_FG);
                 let pad = 3.0;
@@ -479,7 +493,10 @@ impl AppIde {
                 if resp.clicked() {
                     clicked = Some(i);
                 }
-                resp.on_hover_text(format!("`{}` — {label}, click to see call sites", item.name));
+                resp.on_hover_text(format!(
+                    "`{}` — {label}, click to see call sites",
+                    item.name
+                ));
             }
         }
 
@@ -544,9 +561,7 @@ impl AppIde {
                         });
                     ui.add_space(2.0);
                     if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("Close").size(10.0),
-                        ))
+                        .add(egui::Button::new(egui::RichText::new("Close").size(10.0)))
                         .clicked()
                     {
                         close = true;
@@ -559,7 +574,9 @@ impl AppIde {
         }
 
         if let Some((path, line)) = nav_to {
-            if let Some(id) = crate::app::project_file_for_def(&path, &self.project_tree.user_src_files) {
+            if let Some(id) =
+                crate::app::project_file_for_def(&path, &self.project_tree.user_src_files)
+            {
                 self.selected_file = id;
                 self.pending_scroll_to_line = Some((id, line as usize + 1));
                 self.highlighted_def_line = Some((id, line as usize + 1));

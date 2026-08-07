@@ -23,12 +23,12 @@ mod tabs;
 pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
+mod clock_import_dialog;
 mod clone_project_dialog;
+mod datasheet_import_dialog;
 mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
-mod datasheet_import_dialog;
-mod clock_import_dialog;
 
 mod diag_panel;
 
@@ -1154,9 +1154,7 @@ impl AppIde {
         let dfu_programmers: Arc<Mutex<HashMap<String, dfu::ProgrammerInfo>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let openocd_state: Arc<Mutex<OpenOcdState>> = Arc::new(Mutex::new(OpenOcdState::Idle));
-        let probe_flash_state = Arc::new(Mutex::new(
-            crate::probe_flash::ProbeFlashState::Idle,
-        ));
+        let probe_flash_state = Arc::new(Mutex::new(crate::probe_flash::ProbeFlashState::Idle));
         let espflash_state: Arc<Mutex<EspFlashState>> = Arc::new(Mutex::new(EspFlashState::Idle));
 
         // Scan immediately on startup (non-blocking — runs in background thread)
@@ -1803,9 +1801,15 @@ impl AppIde {
                         if !is_native {
                             // Blocking (mixed): trait crates for the Portable modules.
                             match &md.config {
-                                ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => needs_usart = true,
-                                ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => needs_spi = true,
-                                ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => needs_i2c = true,
+                                ModuleConfig::Usart(c) if c.api_style == ApiStyle::Portable => {
+                                    needs_usart = true
+                                }
+                                ModuleConfig::Spi(c) if c.api_style == ApiStyle::Portable => {
+                                    needs_spi = true
+                                }
+                                ModuleConfig::I2c(c) if c.api_style == ApiStyle::Portable => {
+                                    needs_i2c = true
+                                }
                                 _ => {}
                             }
                         }
@@ -2306,18 +2310,17 @@ impl AppIde {
         // so nothing that looks diagnostics up by `src/main.rs` — inline
         // squiggles, the Structure error badge, the RA tab's jump-to-error —
         // found anything.
-        let files: Vec<(String, String)> =
-            std::iter::once((
-                crate::project_tree::logic::src_path("main.rs"),
-                self.generated_code.clone(),
-            ))
-                .chain(
-                    self.project_tree
-                        .user_src_files
-                        .iter()
-                        .map(|(rel, content)| (rel.clone(), content.clone())),
-                )
-                .collect();
+        let files: Vec<(String, String)> = std::iter::once((
+            crate::project_tree::logic::src_path("main.rs"),
+            self.generated_code.clone(),
+        ))
+        .chain(
+            self.project_tree
+                .user_src_files
+                .iter()
+                .map(|(rel, content)| (rel.clone(), content.clone())),
+        )
+        .collect();
 
         let hashes = Arc::clone(&self.flushed_hashes);
         let lsp_state = Arc::clone(&self.lsp_state);
@@ -2331,8 +2334,7 @@ impl AppIde {
             // Clears `lsp_flush_in_flight` on EVERY exit path, unwinding
             // included. Declared first so it outlives everything below.
             let _flag = crate::activity::FlagGuard::set(in_flight);
-            let mut rec =
-                crate::activity::Recorder::new("Save (LSP flush)").in_session(session);
+            let mut rec = crate::activity::Recorder::new("Save (LSP flush)").in_session(session);
             let workspace = std::env::temp_dir().join("embedded_ide_0_check");
 
             // ── Disk writes (hash-cached) ─────────────────────────────────
@@ -2480,7 +2482,8 @@ impl eframe::App for AppIde {
             if self.unsaved_files().is_empty() {
                 self.allow_close = true; // nothing to lose — let it go
             } else {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.exit_prompt = true;
             }
         }
@@ -2841,9 +2844,7 @@ impl eframe::App for AppIde {
         // Auto-build after this Save when a library changed in Cargo.toml.
         let mut auto_build_after_save = false;
         let mut auto_build_release = false;
-        if save_requested
-            && self.save_in_progress.is_none()
-            && self.selected_build_cfg().is_some()
+        if save_requested && self.save_in_progress.is_none() && self.selected_build_cfg().is_some()
         {
             let dest: Option<std::path::PathBuf> = match &self.project_dir {
                 Some(dir) => Some(dir.clone()),

@@ -7,11 +7,11 @@
 
 use super::doc_md;
 use crate::app::{AppIde, ProjectFileId};
-use crate::editor::gui::{show_diagnostics_overlay, show_inlay_hint};
 use crate::editor::gui::text_pos::{
     diags_for_file, lsp_completion_prefix, lsp_cursor_pos, lsp_kind_icon, lsp_line_end_char_idx,
     lsp_word_start, selected_file_rel_path,
 };
+use crate::editor::gui::{show_diagnostics_overlay, show_inlay_hint};
 use crate::lsp;
 use eframe::egui;
 use egui::text_edit::TextEditOutput;
@@ -96,8 +96,7 @@ impl AppIde {
                 //   let my_value: Option<u32> = get_param_value(tx, rx, …);
                 // Elsewhere the plain call is inserted, unchanged.
                 let mut annotation: Option<(usize, String)> = None;
-                if super::let_annotation::is_callable_kind(item.kind)
-                    && insert_text.ends_with(')')
+                if super::let_annotation::is_callable_kind(item.kind) && insert_text.ends_with(')')
                 {
                     if let Some(ann_at) = super::let_annotation::let_context(&chars, word_start) {
                         if let Some(ret) = super::let_annotation::return_type(&item.detail) {
@@ -137,7 +136,8 @@ impl AppIde {
                 st.store(ui.ctx(), editor_resp.response.id);
                 // Mouse accepts move focus to the popup — hand it back so the
                 // user can type the argument straight away.
-                ui.ctx().memory_mut(|m| m.request_focus(editor_resp.response.id));
+                ui.ctx()
+                    .memory_mut(|m| m.request_focus(editor_resp.response.id));
 
                 // Persist the change in memory so the write-back picks it up; the
                 // debounced LSP flush (3 s idle / Project Save) handles disk + RA.
@@ -287,7 +287,13 @@ impl AppIde {
                         .char_range()
                         .map(|cr| {
                             let clamped = cr.primary.index.min(
-                                editor_resp.galley.job.text.chars().count().saturating_sub(1),
+                                editor_resp
+                                    .galley
+                                    .job
+                                    .text
+                                    .chars()
+                                    .count()
+                                    .saturating_sub(1),
                             );
                             let local = editor_resp
                                 .galley
@@ -494,8 +500,7 @@ impl AppIde {
 
                                             // Mouse click → deferred insert.
                                             if row_resp.clicked() {
-                                                self.completion_pending_insert =
-                                                    Some(item.clone());
+                                                self.completion_pending_insert = Some(item.clone());
                                                 self.completion_open = false;
                                             }
 
@@ -559,10 +564,9 @@ impl AppIde {
                                         // documentation off for no reason,
                                         // while the hover tooltip it replaced
                                         // was screen-bounded and read better.
-                                        let room = (ui.ctx().content_rect().bottom()
-                                            - popup_pos.y
-                                            - 24.0)
-                                            .max(120.0);
+                                        let room =
+                                            (ui.ctx().content_rect().bottom() - popup_pos.y - 24.0)
+                                                .max(120.0);
                                         // `max_height` ALONE is not enough, and
                                         // silently does nothing here: ScrollArea
                                         // takes `available_rect_before_wrap()
@@ -689,7 +693,10 @@ impl AppIde {
         // back with nothing (most often: the file has no `mod …;` declaration,
         // so rust-analyzer does not analyze it at all). Cleared by its timeout,
         // by typing, or by the next successful popup.
-        if let Some((note, at)) = self.completion_note.clone().filter(|_| self.completion_owner == slot)
+        if let Some((note, at)) = self
+            .completion_note
+            .clone()
+            .filter(|_| self.completion_owner == slot)
         {
             if at.elapsed().as_secs_f32() > 6.0 || editor_resp.response.changed() {
                 self.completion_note = None;
@@ -700,7 +707,13 @@ impl AppIde {
                     .char_range()
                     .map(|cr| {
                         let clamped = cr.primary.index.min(
-                            editor_resp.galley.job.text.chars().count().saturating_sub(1),
+                            editor_resp
+                                .galley
+                                .job
+                                .text
+                                .chars()
+                                .count()
+                                .saturating_sub(1),
                         );
                         let local = editor_resp
                             .galley
@@ -793,7 +806,9 @@ impl AppIde {
                                 )
                             })
                             .filter(|d| {
-                                d.source == "rust-analyzer" || d.is_rustc_error_code() || !flycheck_stale
+                                d.source == "rust-analyzer"
+                                    || d.is_rustc_error_code()
+                                    || !flycheck_stale
                             })
                             // A flycheck (rustc/clippy) diagnostic carries the
                             // line/col from the LAST completed cargo check. If
@@ -806,8 +821,7 @@ impl AppIde {
                             // is exactly why they used to stick to commented
                             // lines until the next Save.
                             .filter(|d| {
-                                d.source == "rust-analyzer"
-                                    || !line_is_gone(&display_code, d.line)
+                                d.source == "rust-analyzer" || !line_is_gone(&display_code, d.line)
                             })
                             .collect()
                     } else {
@@ -1040,11 +1054,7 @@ fn render_doc(ui: &mut egui::Ui, md: &str) {
             }
 
             doc_md::DocKind::Body => {
-                ui.label(
-                    egui::RichText::new(&lines[i].text)
-                        .size(11.0)
-                        .color(BODY),
-                );
+                ui.label(egui::RichText::new(&lines[i].text).size(11.0).color(BODY));
                 i += 1;
             }
         }

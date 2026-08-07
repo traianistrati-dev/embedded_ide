@@ -121,8 +121,7 @@ pub fn show_card(ui: &mut egui::Ui, msg: &str, extra: impl FnOnce(&mut egui::Ui)
                         .on_hover_text("Check / install this dependency")
                         .clicked()
                 {
-                    ui.ctx()
-                        .data_mut(|d| d.insert_temp(open_tools_id(), true));
+                    ui.ctx().data_mut(|d| d.insert_temp(open_tools_id(), true));
                 }
                 extra(ui);
             });
@@ -155,7 +154,12 @@ mod tests {
     /// module fixes for `[MSVC_LIBS]`).
     #[test]
     fn table_covers_every_emitted_tag() {
-        for tag in ["[MSVC_LIBS]", "[CLIPPY_MISSING]", "[BLOAT_MISSING]", "[DISK_FULL]"] {
+        for tag in [
+            "[MSVC_LIBS]",
+            "[CLIPPY_MISSING]",
+            "[BLOAT_MISSING]",
+            "[DISK_FULL]",
+        ] {
             assert!(
                 HINTS.iter().any(|h| h.tag == tag),
                 "{tag} has no hint entry"

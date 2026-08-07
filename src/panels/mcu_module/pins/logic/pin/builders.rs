@@ -1,7 +1,7 @@
 //! Pin constructors and builder methods.
 
-use super::model::Pin;
 use super::super::pin_function::PinFunction;
+use super::model::Pin;
 
 impl Pin {
     /// Create a standard GPIO pin with Input and Output capabilities.

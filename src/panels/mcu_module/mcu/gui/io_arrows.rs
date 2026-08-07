@@ -206,7 +206,11 @@ pub fn draw_io_arrows(
         painter.circle_filled(it.anchor, 2.5, it.color);
         let (from, to) = if routed {
             let edge = nearest_edge(field_rect, it.anchor);
-            if it.outbound { (it.anchor, edge) } else { (edge, it.anchor) }
+            if it.outbound {
+                (it.anchor, edge)
+            } else {
+                (edge, it.anchor)
+            }
         } else if it.outbound {
             (it.anchor, it.anchor + it.dir * ARROW_LEN)
         } else {

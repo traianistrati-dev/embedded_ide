@@ -11,7 +11,7 @@
 //! GPIO bindings round-trip through [`super::parse_main_rs`], so the Pins canvas
 //! restores on reopen.
 
-use super::{mcu_id_marker_line, pin_binding, GEN_BEGIN, GEN_END, USER_TAIL};
+use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding};
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 

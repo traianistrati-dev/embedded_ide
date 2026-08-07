@@ -10,7 +10,7 @@
 //! reverted the hunk; revert now lives in the Git tab's diff view (+ Ctrl+Z).
 
 use crate::app::{AppIde, ProjectFileId};
-use crate::git::{compute_hunks, fetch_baseline, BaselineFetch, DiffHunk};
+use crate::git::{BaselineFetch, DiffHunk, compute_hunks, fetch_baseline};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
@@ -81,13 +81,8 @@ impl AppIde {
     /// is a distinct repo — its files aren't blobs in the project repo, so the
     /// baseline must be read from the library repo with the prefix stripped.
     /// Everything else stays on the project repo with the path unchanged.
-    fn diff_repo_for(
-        &self,
-        root: &std::path::Path,
-        path: String,
-    ) -> (std::path::PathBuf, String) {
-        let members =
-            crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
+    fn diff_repo_for(&self, root: &std::path::Path, path: String) -> (std::path::PathBuf, String) {
+        let members = crate::panels::mcu_module::project_gen::workspace_members(&self.cargo_toml);
         let detached = crate::project_tree::extract_crate::detached_libs(
             &self.project_tree.user_src_files,
             &members,
@@ -193,7 +188,13 @@ impl AppIde {
         let painter = ui.painter().with_clip_rect(clip);
 
         let starts = &self.diff_gutter.line_starts;
-        let ci_of = |line: usize| starts.get(line).copied().unwrap_or(total_chars).min(total_chars);
+        let ci_of = |line: usize| {
+            starts
+                .get(line)
+                .copied()
+                .unwrap_or(total_chars)
+                .min(total_chars)
+        };
         let y_of = |ci: usize| {
             let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
             (gp.y + loc.min.y, gp.y + loc.max.y)
@@ -253,13 +254,13 @@ impl AppIde {
             // tab's diff view (+ Ctrl+Z). Being hover-only, this no longer fights
             // the breakpoint gutter's click strip (painted after → owns clicks in
             // this overlapping area).
-            let hit = egui::Rect::from_min_max(
-                egui::pos2(x - 3.0, y_top),
-                egui::pos2(x + 6.0, y_bot),
-            );
+            let hit =
+                egui::Rect::from_min_max(egui::pos2(x - 3.0, y_top), egui::pos2(x + 6.0, y_bot));
             let resp = ui.interact(
                 hit,
-                egui::Id::new("diff_gutter").with(self.selected_file_key()).with(i),
+                egui::Id::new("diff_gutter")
+                    .with(self.selected_file_key())
+                    .with(i),
                 egui::Sense::hover(),
             );
             let baseline = self.diff_gutter.baseline_text.as_deref().unwrap_or("");
@@ -270,12 +271,12 @@ impl AppIde {
                 } else {
                     format!("în HEAD ({} lin.):", hk.old_len)
                 };
-                ui.label(egui::RichText::new(head).size(10.5).color(egui::Color32::from_gray(150)));
-                for l in baseline
-                    .lines()
-                    .skip(hk.old_start)
-                    .take(hk.old_len.min(12))
-                {
+                ui.label(
+                    egui::RichText::new(head)
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(150)),
+                );
+                for l in baseline.lines().skip(hk.old_start).take(hk.old_len.min(12)) {
                     ui.label(
                         egui::RichText::new(l)
                             .monospace()

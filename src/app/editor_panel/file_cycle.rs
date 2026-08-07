@@ -219,7 +219,10 @@ mod tests {
         let e = HistEntry::from_id(crate::app::ProjectFileId::UserFile(1), &files).unwrap();
         assert_eq!(e, user("b.rs"));
         files.remove(0); // b.rs shifts to index 0
-        assert_eq!(e.to_id(&files), Some(crate::app::ProjectFileId::UserFile(0)));
+        assert_eq!(
+            e.to_id(&files),
+            Some(crate::app::ProjectFileId::UserFile(0))
+        );
         files.clear();
         assert_eq!(e.to_id(&files), None); // deleted → unresolvable
     }

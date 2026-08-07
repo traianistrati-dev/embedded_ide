@@ -316,11 +316,9 @@ pub fn make_generated_section(
         pin_section.push('\n');
     }
 
-    // Peripheral helper functions (init_usartN, init_spiN, init_i2cN,
-    // init_adc1) are NO LONGER emitted inside this generated block. They are
-    // placed in the editable region AFTER `fn main` (see `helper_defs` /
-    // `ensure_helper_defs`) so the user can tweak them. `fn_calls` below still
-    // references them by name.
+    // Peripheral helper functions (init_usartN, init_spiN, init_i2cN) are NOT
+    // emitted here: USART/SPI/I2C init lives in `src/pins/configs/` and the ADC
+    // is constructed inline below (one plain `Adc::adc1` line — no helper fn).
 
     // ── Peripheral init calls (inside fn main) ───────────────────────────────
     let mut fn_calls = String::new();
@@ -435,7 +433,8 @@ pub fn make_generated_section(
 
     if has_adc {
         header!();
-        fn_calls.push_str("    let mut _adc1 = init_adc1(dp.ADC1, clocks);\n");
+        // Plain one-liner — `Adc::adc1` takes `Clocks` BY VALUE (Clocks is Copy).
+        fn_calls.push_str("    let mut _adc1 = adc::Adc::adc1(dp.ADC1, clocks);\n");
         for (p, meta) in configured
             .iter()
             .filter(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
@@ -555,8 +554,8 @@ pub fn make_generated_section(
     // Virtual Module — no longer emitted in main.rs.
 
     // ── Put it all together ──────────────────────────────────────────────────
-    // Only the ADC init helper is appended after `fn main` (by
-    // `ensure_helper_defs`); USART/SPI/I2C init live in `src/pins/configs/`.
+    // Nothing is appended after `fn main` any more: USART/SPI/I2C init live in
+    // `src/pins/configs/` and the ADC is a single line inside the GEN block.
     format!(
         "{GEN_BEGIN}\n\
          use stm32f1xx_hal::{{\n\
@@ -595,42 +594,6 @@ fn make_default_gen_section(mcu_name: &str, clock: &ClockConfig) -> String {
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n"
     )
-}
-
-// ── Editable peripheral init helper (ADC only — placed after `fn main`) ───────
-
-/// Peripheral init helper(s) that stay inline in `main.rs` — only the ADC one
-/// now (it has no Virtual-Module config and takes `Clocks` by value). Each entry
-/// is `(fn_name, full_definition)`, added additively by [`ensure_helper_defs`]
-/// to the user-editable region after `fn main`. USART/SPI/I2C init moved to the
-/// per-peripheral modules under `src/pins/configs/` (see `config_files`).
-
-pub fn helper_defs(all_pins: &[&Pin]) -> Vec<(String, String)> {
-    let funcs: Vec<&PinFunction> = all_pins
-        .iter()
-        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
-        .map(|p| &p.selected_function)
-        .collect();
-
-    let mut defs: Vec<(String, String)> = Vec::new();
-
-    // USART / SPI / I2C init now live in `src/pins/configs/` (see `config_files`).
-    // Only the ADC helper stays inline here — `Adc::adc1` takes `Clocks` BY VALUE
-    // (Clocks is Copy), not `&Clocks`, and ADC has no Virtual-Module config.
-    if funcs
-        .iter()
-        .any(|f| matches!(f, PinFunction::AdcChannel { .. }))
-    {
-        defs.push((
-            "init_adc1".to_string(),
-            "fn init_adc1(adc1: pac::ADC1, clocks: Clocks) -> adc::Adc<pac::ADC1> {
-    adc::Adc::adc1(adc1, clocks)
-}"
-            .to_string(),
-        ));
-    }
-
-    defs
 }
 
 // ── Per-peripheral config files (src/pins/configs/) ───────────────────────────
@@ -1303,42 +1266,67 @@ where
 }
 "#;
 
-/// Append any **missing** helper functions to `file`, after `fn main`, in the
-/// user-editable region. Helpers already present (matched by `fn <name>(`) are
-/// left untouched so user edits survive every regeneration — only brand-new
-/// ones are appended. A section header is inserted once.
-pub fn ensure_helper_defs(mut file: String, all_pins: &[&Pin]) -> String {
-    let defs = helper_defs(all_pins);
-    // A helper is "present" if its `fn <name>` is followed by either `(` (plain
-    // fns like `init_adc1`) or `<` (generic fns like `init_spi1<PINS>` /
-    // `init_i2c1<PINS>`). Checking only `(` missed the generic ones, so they
-    // were re-appended on every regen — the infinite-growth bug. (The config
-    // constants the helpers reference live in the regenerated GEN block, not
-    // here, so they track the module config live.)
-    let missing: Vec<&(String, String)> = defs
-        .iter()
-        .filter(|(name, _)| {
-            !(file.contains(&format!("fn {name}(")) || file.contains(&format!("fn {name}<")))
+/// The section header older versions inserted before the appended helpers.
+const HELPERS_HEADER: &str = "── Peripheral init helpers";
+
+/// Helper fns older versions appended after `fn main`. All of them are dead code
+/// now: USART/SPI/I2C init moved to `src/pins/configs/` and the ADC is built by
+/// a plain `adc::Adc::adc1(dp.ADC1, clocks)` line inside the GENERATED block.
+const OBSOLETE_HELPERS: &[&str] = &["init_usart", "init_spi", "init_i2c", "init_adc"];
+
+/// Strip the obsolete peripheral init helpers (and their now-empty section
+/// header) from an existing `main.rs`. These were generated code, so they are
+/// removed whole — body included — rather than left behind as dead fns the
+/// project can no longer compile (their `Clocks` parameter has no import).
+pub fn strip_obsolete_helpers(file: String) -> String {
+    let is_obsolete_fn = |line: &str| {
+        line.trim_start().strip_prefix("fn ").is_some_and(|rest| {
+            OBSOLETE_HELPERS.iter().any(|name| {
+                rest.starts_with(name)
+                    && rest[name.len()..].starts_with(|c: char| c.is_ascii_digit())
+            })
         })
-        .collect();
-    if missing.is_empty() {
+    };
+    if !file.lines().any(is_obsolete_fn) {
         return file;
     }
 
-    if !file.ends_with('\n') {
-        file.push('\n');
+    // Drop each helper from its `fn` line through its closing brace.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut depth = 0i32;
+    let mut in_helper = false;
+    for line in file.lines() {
+        if !in_helper && is_obsolete_fn(line) {
+            in_helper = true;
+            depth = 0;
+        }
+        if in_helper {
+            depth += line.matches('{').count() as i32;
+            depth -= line.matches('}').count() as i32;
+            // `depth == 0` before the opening brace too (multi-line signature),
+            // so only a line that actually closed a brace ends the helper.
+            if depth <= 0 && line.contains('}') {
+                in_helper = false;
+            }
+            continue;
+        }
+        kept.push(line);
     }
-    if !file.contains("── Peripheral init helpers") {
-        file.push_str(
-            "\n// ── Peripheral init helpers (editable — tweak as needed) ────────────────\n",
-        );
+
+    // The section header is only there to introduce the helpers — drop it (and
+    // the blank lines around it) once nothing follows it any more.
+    if let Some(hdr) = kept.iter().position(|l| l.contains(HELPERS_HEADER)) {
+        if kept[hdr + 1..].iter().all(|l| l.trim().is_empty()) {
+            kept.truncate(hdr);
+        }
     }
-    for (_, def) in missing {
-        file.push('\n');
-        file.push_str(def);
-        file.push('\n');
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
     }
-    file
+
+    let mut out = kept.join("\n");
+    out.push('\n');
+    out
 }
 
 // ── Pin helpers ───────────────────────────────────────────────────────────────

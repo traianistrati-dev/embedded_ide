@@ -599,12 +599,16 @@ mod tests {
 
     #[test]
     fn strict_main_exemption_wraps_entry_only_when_strict() {
-        let code = "// GEN\nuse foo;\n#[entry]\nfn main() -> ! {\n    let dp = take().unwrap();\n}\n";
+        let code =
+            "// GEN\nuse foo;\n#[entry]\nfn main() -> ! {\n    let dp = take().unwrap();\n}\n";
         // Off → unchanged.
         assert_eq!(strict_main_exemption(code.to_string(), false), code);
         // On → an #[allow(...)] appears immediately before #[entry].
         let on = strict_main_exemption(code.to_string(), true);
-        assert!(on.contains("#[allow(clippy::pedantic"), "allow added:\n{on}");
+        assert!(
+            on.contains("#[allow(clippy::pedantic"),
+            "allow added:\n{on}"
+        );
         assert!(on.contains("clippy::unwrap_used"), "lints listed:\n{on}");
         let allow_pos = on.find("#[allow(").unwrap();
         let entry_pos = on.find("#[entry]").unwrap();
@@ -630,7 +634,10 @@ mod tests {
         let attr = on.find("#![allow(clippy::").unwrap();
         let marker = on.find("// <<< GENERATED>>>").unwrap();
         let konst = on.find("const BAUDRATE").unwrap();
-        assert!(marker < attr && attr < konst, "attr between marker and const:\n{on}");
+        assert!(
+            marker < attr && attr < konst,
+            "attr between marker and const:\n{on}"
+        );
     }
 
     #[test]

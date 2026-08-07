@@ -60,45 +60,181 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
         };
 
     item(ui, ph::SCISSORS, "Cut", "Ctrl+X", EditorAction::Cut);
-    item(ui, ph::SCISSORS, "Cut line", "Ctrl+Shift+X", EditorAction::DeleteLine);
-    item(ui, ph::COPY_SIMPLE, "Duplicate line", "Ctrl+D", EditorAction::DuplicateLine);
-    item(ui, ph::CODE, "Toggle comment", "Ctrl+/", EditorAction::Comment);
-    item(ui, ph::ARROW_UP, "Move line up", "Ctrl+Up", EditorAction::MoveUp);
-    item(ui, ph::ARROW_DOWN, "Move line down", "Ctrl+Down", EditorAction::MoveDown);
+    item(
+        ui,
+        ph::SCISSORS,
+        "Cut line",
+        "Ctrl+Shift+X",
+        EditorAction::DeleteLine,
+    );
+    item(
+        ui,
+        ph::COPY_SIMPLE,
+        "Duplicate line",
+        "Ctrl+D",
+        EditorAction::DuplicateLine,
+    );
+    item(
+        ui,
+        ph::CODE,
+        "Toggle comment",
+        "Ctrl+/",
+        EditorAction::Comment,
+    );
+    item(
+        ui,
+        ph::ARROW_UP,
+        "Move line up",
+        "Ctrl+Up",
+        EditorAction::MoveUp,
+    );
+    item(
+        ui,
+        ph::ARROW_DOWN,
+        "Move line down",
+        "Ctrl+Down",
+        EditorAction::MoveDown,
+    );
 
     ui.separator();
-    item(ui, ph::ARROW_RIGHT, "Next file (recent)", "Ctrl+Tab", EditorAction::NextFile);
-    item(ui, ph::ARROW_LEFT, "Previous file (recent)", "Ctrl+Shift+Tab", EditorAction::PrevFile);
+    item(
+        ui,
+        ph::ARROW_RIGHT,
+        "Next file (recent)",
+        "Ctrl+Tab",
+        EditorAction::NextFile,
+    );
+    item(
+        ui,
+        ph::ARROW_LEFT,
+        "Previous file (recent)",
+        "Ctrl+Shift+Tab",
+        EditorAction::PrevFile,
+    );
 
     ui.separator();
-    item(ui, ph::MAGNIFYING_GLASS, "Find", "Ctrl+F", EditorAction::Find);
-    item(ui, ph::ARROWS_LEFT_RIGHT, "Replace", "Ctrl+H", EditorAction::Replace);
-    item(ui, ph::MAGNIFYING_GLASS_PLUS, "Find in project", "Ctrl+Shift+F", EditorAction::FindInProject);
-    item(ui, ph::ARROWS_CLOCKWISE, "Replace in project", "Ctrl+Shift+H", EditorAction::ReplaceInProject);
+    item(
+        ui,
+        ph::MAGNIFYING_GLASS,
+        "Find",
+        "Ctrl+F",
+        EditorAction::Find,
+    );
+    item(
+        ui,
+        ph::ARROWS_LEFT_RIGHT,
+        "Replace",
+        "Ctrl+H",
+        EditorAction::Replace,
+    );
+    item(
+        ui,
+        ph::MAGNIFYING_GLASS_PLUS,
+        "Find in project",
+        "Ctrl+Shift+F",
+        EditorAction::FindInProject,
+    );
+    item(
+        ui,
+        ph::ARROWS_CLOCKWISE,
+        "Replace in project",
+        "Ctrl+Shift+H",
+        EditorAction::ReplaceInProject,
+    );
 
     if is_rs {
         ui.separator();
-        item(ui, ph::TEXT_INDENT, "Format code", "Shift+Alt+F", EditorAction::Format);
-        item(ui, ph::PENCIL_SIMPLE, "Rename symbol", "Ctrl+R", EditorAction::Rename);
-        item(ui, ph::ARROW_SQUARE_OUT, "Go to definition", "F12", EditorAction::GoToDef);
-        item(ui, ph::PUZZLE_PIECE, "Go to implementation", "Ctrl+F12", EditorAction::GoToImpl);
-        item(ui, ph::EYE, "Add to Watch (Debug)", "", EditorAction::AddWatch);
+        item(
+            ui,
+            ph::TEXT_INDENT,
+            "Format code",
+            "Shift+Alt+F",
+            EditorAction::Format,
+        );
+        item(
+            ui,
+            ph::PENCIL_SIMPLE,
+            "Rename symbol",
+            "Ctrl+R",
+            EditorAction::Rename,
+        );
+        item(
+            ui,
+            ph::ARROW_SQUARE_OUT,
+            "Go to definition",
+            "F12",
+            EditorAction::GoToDef,
+        );
+        item(
+            ui,
+            ph::PUZZLE_PIECE,
+            "Go to implementation",
+            "Ctrl+F12",
+            EditorAction::GoToImpl,
+        );
+        item(
+            ui,
+            ph::EYE,
+            "Add to Watch (Debug)",
+            "",
+            EditorAction::AddWatch,
+        );
     }
     if is_rs || is_cargo {
         ui.separator();
-        let label = if is_cargo { "Dependency completion" } else { "Code suggestions" };
-        item(ui, ph::LIST_BULLETS, label, "Ctrl+Space", EditorAction::Completion);
+        let label = if is_cargo {
+            "Dependency completion"
+        } else {
+            "Code suggestions"
+        };
+        item(
+            ui,
+            ph::LIST_BULLETS,
+            label,
+            "Ctrl+Space",
+            EditorAction::Completion,
+        );
     }
 
     ui.separator();
     item(ui, ph::COPY, "Copy", "Ctrl+C", EditorAction::Copy);
-    item(ui, ph::BRACKETS_CURLY, "Select & copy block", "Ctrl+[", EditorAction::SelectBlock);
-    item(ui, ph::SELECTION_ALL, "Select all", "Ctrl+A", EditorAction::SelectAll);
+    item(
+        ui,
+        ph::BRACKETS_CURLY,
+        "Select & copy block",
+        "Ctrl+[",
+        EditorAction::SelectBlock,
+    );
+    item(
+        ui,
+        ph::SELECTION_ALL,
+        "Select all",
+        "Ctrl+A",
+        EditorAction::SelectAll,
+    );
 
     ui.separator();
-    item(ui, ph::MAGNIFYING_GLASS_PLUS, "Zoom in", "Ctrl++", EditorAction::ZoomIn);
-    item(ui, ph::MAGNIFYING_GLASS_MINUS, "Zoom out", "Ctrl+-", EditorAction::ZoomOut);
-    item(ui, ph::ARROW_COUNTER_CLOCKWISE, "Reset zoom", "Ctrl+0", EditorAction::ZoomReset);
+    item(
+        ui,
+        ph::MAGNIFYING_GLASS_PLUS,
+        "Zoom in",
+        "Ctrl++",
+        EditorAction::ZoomIn,
+    );
+    item(
+        ui,
+        ph::MAGNIFYING_GLASS_MINUS,
+        "Zoom out",
+        "Ctrl+-",
+        EditorAction::ZoomOut,
+    );
+    item(
+        ui,
+        ph::ARROW_COUNTER_CLOCKWISE,
+        "Reset zoom",
+        "Ctrl+0",
+        EditorAction::ZoomReset,
+    );
 
     chosen
 }

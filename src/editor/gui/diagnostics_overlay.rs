@@ -105,7 +105,10 @@ pub fn show_diagnostics_overlay(
     };
     // F12 definition line — translucent yellow (matches the Definition tab).
     if let Some(line) = def_line {
-        band(line, egui::Color32::from_rgba_unmultiplied(255, 214, 90, 32));
+        band(
+            line,
+            egui::Color32::from_rgba_unmultiplied(255, 214, 90, 32),
+        );
     }
     // Clicked-diagnostic line — translucent band, colour keyed by severity.
     if let Some((line, color)) = highlight {
@@ -327,5 +330,11 @@ pub fn show_inlay_hint(
     let max_x = (text_clip_rect.right() - text_w - 4.0).max(text_clip_rect.left());
     let x = eol_x.min(max_x);
     let y_mid = (y_top + y_bot) * 0.5;
-    painter.text(egui::pos2(x, y_mid), egui::Align2::LEFT_CENTER, label, font, color);
+    painter.text(
+        egui::pos2(x, y_mid),
+        egui::Align2::LEFT_CENTER,
+        label,
+        font,
+        color,
+    );
 }

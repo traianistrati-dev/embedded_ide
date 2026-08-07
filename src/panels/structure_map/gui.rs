@@ -295,9 +295,7 @@ pub fn show(
         }
         // Search: matching nodes get a gold border, matching rows a gold tint.
         ui.separator();
-        ui.label(
-            egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS).size(11.0),
-        );
+        ui.label(egui::RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS).size(11.0));
         ui.add(
             egui::TextEdit::singleline(&mut view.search)
                 .desired_width(110.0)
@@ -307,10 +305,8 @@ pub fn show(
         if !view.search.is_empty()
             && ui
                 .add(
-                    egui::Button::new(
-                        egui::RichText::new(egui_phosphor::regular::X).size(10.0),
-                    )
-                    .frame(false),
+                    egui::Button::new(egui::RichText::new(egui_phosphor::regular::X).size(10.0))
+                        .frame(false),
                 )
                 .clicked()
         {
@@ -973,38 +969,38 @@ fn show_canvas(
                          skip_b: usize,
                          polys: &[Vec<egui::Pos2>]|
          -> (f32, bool) {
-                let mut cost = 0.0;
-                for w in pts.windows(2) {
-                    cost += w[0].distance(w[1]);
-                }
-                for (oi, other) in polys.iter().enumerate() {
-                    let penalty = if oi < module_polys_len { 60.0 } else { 400.0 };
-                    'pair: for w1 in pts.windows(2) {
-                        for w2 in other.windows(2) {
-                            if segments_cross(
-                                (w1[0].x, w1[0].y),
-                                (w1[1].x, w1[1].y),
-                                (w2[0].x, w2[0].y),
-                                (w2[1].x, w2[1].y),
-                            ) {
-                                cost += penalty;
-                                break 'pair;
-                            }
+            let mut cost = 0.0;
+            for w in pts.windows(2) {
+                cost += w[0].distance(w[1]);
+            }
+            for (oi, other) in polys.iter().enumerate() {
+                let penalty = if oi < module_polys_len { 60.0 } else { 400.0 };
+                'pair: for w1 in pts.windows(2) {
+                    for w2 in other.windows(2) {
+                        if segments_cross(
+                            (w1[0].x, w1[0].y),
+                            (w1[1].x, w1[1].y),
+                            (w2[0].x, w2[0].y),
+                            (w2[1].x, w2[1].y),
+                        ) {
+                            cost += penalty;
+                            break 'pair;
                         }
                     }
                 }
-                let mut cuts = false;
-                for (i, r) in node_rects.iter().enumerate() {
-                    // Near-prohibitive: at 900 a box cut could still beat 3
-                    // call-crossings (1200) on the near side and the route
-                    // sailed OVER the node face. Crossing a node never wins.
-                    if path_cuts_box(pts, *r, i == skip_a || i == skip_b, anchor_slack) {
-                        cost += 2600.0;
-                        cuts = true;
-                    }
+            }
+            let mut cuts = false;
+            for (i, r) in node_rects.iter().enumerate() {
+                // Near-prohibitive: at 900 a box cut could still beat 3
+                // call-crossings (1200) on the near side and the route
+                // sailed OVER the node face. Crossing a node never wins.
+                if path_cuts_box(pts, *r, i == skip_a || i == skip_b, anchor_slack) {
+                    cost += 2600.0;
+                    cuts = true;
                 }
-                (cost, cuts)
-            };
+            }
+            (cost, cuts)
+        };
         // Routed edges collected first (route + coarse polyline + kind
         // colour), then drawn in a second pass so hover-focus can dim the
         // unrelated ones. The polyline serves cost + hover; beziers draw
@@ -1081,7 +1077,7 @@ fn show_canvas(
             // (vertical drop from the corner, right-angle turn, horizontal run
             // into the row) — added only when the source corner sits clearly
             // beside the target's x-range, so the horizontal leg is real.
-// SIDE exit (user fix): the source may also leave through the
+            // SIDE exit (user fix): the source may also leave through the
             // node's LEFT/RIGHT edge — but only at HEADER height, never beside
             // the symbol-row zone. Horizontal takeoff, straight into the
             // target row: the shortest shape when the nodes sit side by side.
@@ -1164,12 +1160,7 @@ fn show_canvas(
                 let from = src_at(toward_right, !below);
                 let lane_y = lane_y_for(below, from.y, from.x);
                 let cy = (8.0 * lane_y - from.y - hl_to.y) / 6.0;
-                [
-                    from,
-                    egui::pos2(from.x, cy),
-                    egui::pos2(hl_turn, cy),
-                    hl_to,
-                ]
+                [from, egui::pos2(from.x, cy), egui::pos2(hl_turn, cy), hl_to]
             };
             // Rounded-orthogonal LANE routes (user mockup): out the side at
             // header height, rounded bend, vertical run in the outer lane,
@@ -1522,7 +1513,11 @@ fn lane_y(
         .enumerate()
         .filter(|(i, r)| *i != skip && r.right() >= lo && r.left() <= hi)
     {
-        y = if below { y.max(r.bottom()) } else { y.min(r.top()) };
+        y = if below {
+            y.max(r.bottom())
+        } else {
+            y.min(r.top())
+        };
     }
     y + if below { clearance } else { -clearance }
 }
@@ -1607,9 +1602,9 @@ fn arrowhead(
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_rel, lane_exits_below, lane_y, path_cuts_box, rounded_path, FIT_PAD};
+    use super::{FIT_PAD, clamp_rel, lane_exits_below, lane_y, path_cuts_box, rounded_path};
     use crate::panels::structure_map::layout::seg_hits_rect;
-    use eframe::egui::{pos2, vec2, Pos2, Rect};
+    use eframe::egui::{Pos2, Rect, pos2, vec2};
 
     /// True when any segment of `pts` touches `r` — the predicate the router's
     /// cost function uses to price a box cut.
@@ -1700,11 +1695,9 @@ mod tests {
     /// cost-governed; all-cutting-Polys falls back to the cheapest.
     #[test]
     fn straight_routes_never_cross_nodes_curved_stay_priced() {
-        use super::{pick_route, Route};
+        use super::{Route, pick_route};
         // Identifiable candidates: the polyline length doubles as an id.
-        let poly = |n: usize| {
-            Route::Poly(vec![pos2(0.0, 0.0); n])
-        };
+        let poly = |n: usize| Route::Poly(vec![pos2(0.0, 0.0); n]);
         let marker = |r: &[Pos2]| r.len();
 
         // A cutting Poly at cost 100 vs a clean Poly at cost 3000 → the rule
@@ -1719,7 +1712,12 @@ mod tests {
         // cost) — cheapest of the allowed set wins.
         let (r, pts) = pick_route(vec![
             (poly(2), vec![pos2(0.0, 0.0); 2], 100.0, true), // banned
-            (Route::Bez([pos2(0.0, 0.0); 4]), vec![pos2(0.0, 0.0); 9], 2700.0, true),
+            (
+                Route::Bez([pos2(0.0, 0.0); 4]),
+                vec![pos2(0.0, 0.0); 9],
+                2700.0,
+                true,
+            ),
             (poly(4), vec![pos2(0.0, 0.0); 4], 2900.0, false),
         ]);
         assert!(matches!(r, Route::Bez(_)));
@@ -1817,7 +1815,10 @@ mod tests {
         let exit = [pos2(300.0, data.top()), pos2(300.0, data.top() - 90.0)];
         assert!(!path_cuts_box(&exit, data, true, slack));
         // …while a leg dropped down THROUGH the node is not.
-        let through = [pos2(300.0, data.top() - 20.0), pos2(300.0, data.bottom() + 20.0)];
+        let through = [
+            pos2(300.0, data.top() - 20.0),
+            pos2(300.0, data.bottom() + 20.0),
+        ];
         assert!(path_cuts_box(&through, data, true, slack));
 
         // A third node in the way is granted no slack: a shallow clip of its
@@ -1866,7 +1867,12 @@ mod tests {
         // The outer-lane shape it replaces: out the caller's left side, down
         // the outer lane, then a long leg back across `radar` into the row.
         let outer = rounded_path(
-            &[pos2(radar.left(), 60.0), pos2(40.0, 60.0), pos2(40.0, row_y), to],
+            &[
+                pos2(radar.left(), 60.0),
+                pos2(40.0, 60.0),
+                pos2(40.0, row_y),
+                to,
+            ],
             12.0,
         );
         assert!(path_cuts_box(&outer, radar, true, slack));

@@ -1,10 +1,10 @@
 //! Chip body and pin rendering — draws the MCU chip and its pins on 4 sides.
 
-use eframe::egui;
-use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
-use crate::panels::mcu_module::pins::logic::pin::{Pin, PIN_FONT_SIZE};
 use super::layout;
 use super::rotate::{Rot, RotMode, ScreenSide};
+use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+use crate::panels::mcu_module::pins::logic::pin::{PIN_FONT_SIZE, Pin};
+use eframe::egui;
 
 // ── Pin-number label (drawn INSIDE the chip body) ───────────────────────────
 /// Inset from the chip edge for the number.
@@ -138,19 +138,31 @@ fn render_quarter(
         let (x, y) = (rr.min.x, rr.min.y);
         let hit = match ScreenSide::from_outward(rot.vec(lp.outward)) {
             ScreenSide::Right => {
-                lp.pin.draw_right(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel).1
+                lp.pin
+                    .draw_right(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel)
+                    .1
             }
             ScreenSide::Left => {
-                lp.pin.draw_left(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel).1
+                lp.pin
+                    .draw_left(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel)
+                    .1
             }
             ScreenSide::Top => {
-                lp.pin.draw_top(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel).1
+                lp.pin
+                    .draw_top(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel)
+                    .1
             }
             ScreenSide::Bottom => {
-                lp.pin.draw_bottom(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel).1
+                lp.pin
+                    .draw_bottom(painter, x, y, PIN_HEIGHT, PIN_WIDTH, Some(ui), is_sel)
+                    .1
             }
         };
-        let col = if lp.pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
+        let col = if lp.pin.has_bus_function() {
+            NUM_COLOR_BUS
+        } else {
+            NUM_COLOR
+        };
         painter.text(
             rot.apply(lp.num_pos),
             egui::Align2::CENTER_CENTER,
@@ -221,11 +233,8 @@ fn render_diamond(
         } else {
             (lp.pin.get_text_color(), PIN_FONT_SIZE)
         };
-        let galley = painter.layout_no_wrap(
-            lp.pin.name.clone(),
-            egui::FontId::monospace(tsize),
-            tcol,
-        );
+        let galley =
+            painter.layout_no_wrap(lp.pin.name.clone(), egui::FontId::monospace(tsize), tcol);
         let (pos_local, base) = if lp.outward.y == 0.0 {
             // left/right → default horizontal label (LEFT_CENTER at mid-height)
             (
@@ -256,7 +265,11 @@ fn render_diamond(
         });
         // Pin number, upright, nudged further inside the body (−outward) so the
         // rotated stub doesn't sit on top of it.
-        let ncol = if lp.pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
+        let ncol = if lp.pin.has_bus_function() {
+            NUM_COLOR_BUS
+        } else {
+            NUM_COLOR
+        };
         painter.text(
             rot.apply(lp.num_pos - lp.outward * 7.0),
             egui::Align2::CENTER_CENTER,
@@ -296,7 +309,11 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, right-aligned just inside the right edge.
-        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
+        let num_color = if pin.has_bus_function() {
+            NUM_COLOR_BUS
+        } else {
+            NUM_COLOR
+        };
         painter.text(
             egui::pos2(chip_rect.right() - NUM_MARGIN, y + PIN_WIDTH / 2.0),
             egui::Align2::RIGHT_CENTER,
@@ -323,7 +340,11 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, left-aligned just inside the left edge.
-        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
+        let num_color = if pin.has_bus_function() {
+            NUM_COLOR_BUS
+        } else {
+            NUM_COLOR
+        };
         painter.text(
             egui::pos2(chip_rect.left() + NUM_MARGIN, y + PIN_WIDTH / 2.0),
             egui::Align2::LEFT_CENTER,
@@ -350,7 +371,11 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, just below the top edge.
-        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
+        let num_color = if pin.has_bus_function() {
+            NUM_COLOR_BUS
+        } else {
+            NUM_COLOR
+        };
         painter.text(
             egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.top() + NUM_MARGIN),
             egui::Align2::CENTER_TOP,
@@ -377,7 +402,11 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, just above the bottom edge.
-        let num_color = if pin.has_bus_function() { NUM_COLOR_BUS } else { NUM_COLOR };
+        let num_color = if pin.has_bus_function() {
+            NUM_COLOR_BUS
+        } else {
+            NUM_COLOR
+        };
         painter.text(
             egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.bottom() - NUM_MARGIN),
             egui::Align2::CENTER_BOTTOM,

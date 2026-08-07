@@ -20,9 +20,9 @@
 
 use crate::build::no_window;
 use crate::rtt::cargo_build_streamed;
-use crate::terminal::{spawn_reader, LineKind, TerminalState};
+use crate::terminal::{LineKind, TerminalState, spawn_reader};
 use eframe::egui;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -347,8 +347,11 @@ impl Debugger {
         if let Some(stop) = &self.stop {
             stop.store(true, Ordering::Relaxed);
         }
-        self.wire
-            .request("disconnect", json!({"terminateDebuggee": false}), Pending::Other);
+        self.wire.request(
+            "disconnect",
+            json!({"terminateDebuggee": false}),
+            Pending::Other,
+        );
         if let Some(child) = self.build_child.lock().unwrap().as_mut() {
             let _ = child.kill();
         }
@@ -402,13 +405,19 @@ impl Debugger {
     }
 
     pub fn pause(&self) {
-        self.wire
-            .request("pause", json!({"threadId": self.thread_id()}), Pending::Other);
+        self.wire.request(
+            "pause",
+            json!({"threadId": self.thread_id()}),
+            Pending::Other,
+        );
     }
 
     pub fn step_over(&self) {
-        self.wire
-            .request("next", json!({"threadId": self.thread_id()}), Pending::Other);
+        self.wire.request(
+            "next",
+            json!({"threadId": self.thread_id()}),
+            Pending::Other,
+        );
         self.mark_running();
     }
 
@@ -674,10 +683,24 @@ fn run_session(
     // a probe / chip problem aborts the session).
     let done = Arc::new(AtomicUsize::new(0));
     if let Some(out) = server.stdout.take() {
-        spawn_reader(out, LineKind::Notice, Arc::clone(console), Arc::clone(stop), ctx.clone(), Arc::clone(&done));
+        spawn_reader(
+            out,
+            LineKind::Notice,
+            Arc::clone(console),
+            Arc::clone(stop),
+            ctx.clone(),
+            Arc::clone(&done),
+        );
     }
     if let Some(err) = server.stderr.take() {
-        spawn_reader(err, LineKind::Stderr, Arc::clone(console), Arc::clone(stop), ctx.clone(), Arc::clone(&done));
+        spawn_reader(
+            err,
+            LineKind::Stderr,
+            Arc::clone(console),
+            Arc::clone(stop),
+            ctx.clone(),
+            Arc::clone(&done),
+        );
     }
     *server_slot.lock().unwrap() = Some(server);
 

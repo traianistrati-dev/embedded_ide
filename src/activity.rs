@@ -205,7 +205,10 @@ pub struct Committing {
 }
 
 impl Committing {
-    pub fn new(kind: impl Into<String>, log: std::sync::Arc<std::sync::Mutex<ActivityLog>>) -> Self {
+    pub fn new(
+        kind: impl Into<String>,
+        log: std::sync::Arc<std::sync::Mutex<ActivityLog>>,
+    ) -> Self {
         Self {
             rec: Some(Recorder::new(kind)),
             log,
@@ -270,7 +273,12 @@ mod tests {
     fn recorder_collects_phases() {
         let mut r = Recorder::new("Build");
         r.phase("a", || {});
-        r.cmd_phase("cargo check", "cargo check", Duration::from_millis(10), Some(0));
+        r.cmd_phase(
+            "cargo check",
+            "cargo check",
+            Duration::from_millis(10),
+            Some(0),
+        );
         r.mark("marker");
         let a = r.finish();
         assert_eq!(a.kind, "Build");
@@ -308,7 +316,13 @@ pub fn fmt_clock(t: std::time::SystemTime) -> String {
         .map(|d| d.subsec_millis())
         .unwrap_or(0);
     let day = secs % 86_400;
-    format!("{:02}:{:02}:{:02}.{:03}", day / 3600, (day % 3600) / 60, day % 60, ms)
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        day / 3600,
+        (day % 3600) / 60,
+        day % 60,
+        ms
+    )
 }
 
 /// Clears a "work in flight" flag when dropped — **including while unwinding
@@ -338,8 +352,7 @@ impl FlagGuard {
 
 impl Drop for FlagGuard {
     fn drop(&mut self) {
-        self.flag
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.flag.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -370,7 +383,10 @@ mod flag_guard_tests {
         let f = Arc::new(AtomicBool::new(false));
         {
             let _g = FlagGuard::set(Arc::clone(&f));
-            assert!(f.load(Ordering::Acquire), "flag must be set inside the scope");
+            assert!(
+                f.load(Ordering::Acquire),
+                "flag must be set inside the scope"
+            );
         }
         assert!(!f.load(Ordering::Acquire), "flag must clear on drop");
     }

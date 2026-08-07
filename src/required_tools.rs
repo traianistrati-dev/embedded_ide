@@ -41,7 +41,10 @@ pub enum ToolStatus {
     /// Present, but older than the version this IDE needs. Deliberately NOT the
     /// same as missing: the tool may well still work, so it warns rather than
     /// disabling the features that use it.
-    Outdated { found: String, min: &'static str },
+    Outdated {
+        found: String,
+        min: &'static str,
+    },
 }
 
 impl ToolStatus {
@@ -51,25 +54,24 @@ impl ToolStatus {
 
     pub fn label(&self) -> &str {
         match self {
-            ToolStatus::Unknown    => "—",
-            ToolStatus::Checking   => "Checking…",
-            ToolStatus::Ok(_)      => "OK",
-            ToolStatus::Missing    => "Missing",
+            ToolStatus::Unknown => "—",
+            ToolStatus::Checking => "Checking…",
+            ToolStatus::Ok(_) => "OK",
+            ToolStatus::Missing => "Missing",
             ToolStatus::Installing => "Installing…",
-            ToolStatus::Failed(_)  => "Failed",
+            ToolStatus::Failed(_) => "Failed",
             ToolStatus::Outdated { .. } => "Outdated",
         }
     }
 
     pub fn color(&self) -> egui::Color32 {
         match self {
-            ToolStatus::Ok(_)      => egui::Color32::from_rgb(80, 200, 100),
-            ToolStatus::Missing    => egui::Color32::from_rgb(230, 160, 50),
-            ToolStatus::Failed(_)  => egui::Color32::from_rgb(220, 70, 60),
-            ToolStatus::Checking
-            | ToolStatus::Installing => egui::Color32::from_rgb(180, 180, 80),
+            ToolStatus::Ok(_) => egui::Color32::from_rgb(80, 200, 100),
+            ToolStatus::Missing => egui::Color32::from_rgb(230, 160, 50),
+            ToolStatus::Failed(_) => egui::Color32::from_rgb(220, 70, 60),
+            ToolStatus::Checking | ToolStatus::Installing => egui::Color32::from_rgb(180, 180, 80),
             ToolStatus::Outdated { .. } => egui::Color32::from_rgb(215, 165, 70),
-            ToolStatus::Unknown    => egui::Color32::GRAY,
+            ToolStatus::Unknown => egui::Color32::GRAY,
         }
     }
 }
@@ -106,18 +108,18 @@ impl Severity {
 }
 
 pub struct RequiredTool {
-    pub name:         &'static str,
-    pub description:  &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
     /// `None` = required for all toolchains.
-    pub toolchain:    Option<ToolchainKind>,
+    pub toolchain: Option<ToolchainKind>,
     /// How much breaks without it.
-    pub severity:     Severity,
+    pub severity: Severity,
     /// What the user LOSES when it's missing, in plain words — the answer to
     /// "why do I need this?" (shown in the Tools tab + the startup banner).
-    pub impact:       &'static str,
+    pub impact: &'static str,
     // ── Check ────────────────────────────────────────────────────────────────
-    pub check_cmd:    &'static str,
-    pub check_args:   &'static [&'static str],
+    pub check_cmd: &'static str,
+    pub check_args: &'static [&'static str],
     /// If non-empty: stdout+stderr must contain this substring after a
     /// successful exit code for the tool to be considered present.
     /// Used for `rustup target list --installed` pattern checks.
@@ -126,12 +128,12 @@ pub struct RequiredTool {
     /// version-check — the honest default: an invented minimum would nag users
     /// whose older build works fine. Only set it where the requirement is real
     /// and documented.
-    pub min_version:  Option<&'static str>,
+    pub min_version: Option<&'static str>,
     // ── Install ──────────────────────────────────────────────────────────────
     /// `None` = cannot be auto-installed; direct the user to `manual_url`.
-    pub install_cmd:  Option<&'static str>,
+    pub install_cmd: Option<&'static str>,
     pub install_args: &'static [&'static str],
-    pub manual_url:   &'static str,
+    pub manual_url: &'static str,
     // ── Runtime state (mutated by background threads) ─────────────────────────
     pub status: ToolStatus,
 }
@@ -140,7 +142,7 @@ pub struct RequiredTool {
 
 pub struct ToolsState {
     pub tools: Vec<RequiredTool>,
-    pub log:   Vec<String>,
+    pub log: Vec<String>,
 }
 
 impl ToolsState {
@@ -157,7 +159,10 @@ impl ToolsState {
     /// reports nothing. `toolchain` filters to the chip in use (`None` = don't
     /// filter). `Outdated` warns here but never disables a feature (see
     /// [`Self::unavailable`]).
-    pub fn problems(&self, toolchain: Option<&ToolchainKind>) -> Vec<(&'static str, Severity, &'static str)> {
+    pub fn problems(
+        &self,
+        toolchain: Option<&ToolchainKind>,
+    ) -> Vec<(&'static str, Severity, &'static str)> {
         self.tools
             .iter()
             .filter(|t| {
@@ -176,7 +181,10 @@ impl ToolsState {
     }
 
     /// Blocking problems only — what the startup banner reports.
-    pub fn blocking_problems(&self, toolchain: Option<&ToolchainKind>) -> Vec<(&'static str, Severity, &'static str)> {
+    pub fn blocking_problems(
+        &self,
+        toolchain: Option<&ToolchainKind>,
+    ) -> Vec<(&'static str, Severity, &'static str)> {
         self.problems(toolchain)
             .into_iter()
             .filter(|(_, s, _)| *s == Severity::Blocking)
@@ -212,14 +220,14 @@ impl ToolsState {
 
 /// A cheap snapshot of one tool row used for lock-free egui rendering.
 pub struct ToolRow {
-    pub name:             &'static str,
-    pub description:      &'static str,
-    pub toolchain:        Option<ToolchainKind>,
-    pub severity:         Severity,
-    pub impact:           &'static str,
-    pub status:           ToolStatus,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub toolchain: Option<ToolchainKind>,
+    pub severity: Severity,
+    pub impact: &'static str,
+    pub status: ToolStatus,
     pub can_auto_install: bool,
-    pub manual_url:       &'static str,
+    pub manual_url: &'static str,
 }
 
 impl ToolsState {
@@ -227,14 +235,14 @@ impl ToolsState {
         self.tools
             .iter()
             .map(|t| ToolRow {
-                name:             t.name,
-                description:      t.description,
-                toolchain:        t.toolchain.clone(),
-                severity:         t.severity,
-                impact:           t.impact,
-                status:           t.status.clone(),
+                name: t.name,
+                description: t.description,
+                toolchain: t.toolchain.clone(),
+                severity: t.severity,
+                impact: t.impact,
+                status: t.status.clone(),
                 can_auto_install: t.install_cmd.is_some(),
-                manual_url:       t.manual_url,
+                manual_url: t.manual_url,
             })
             .collect()
     }
@@ -245,144 +253,144 @@ impl ToolsState {
 pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
     #[allow(unused_mut)]
     let mut tools = vec![
-            // ── Common to all toolchains ─────────────────────────────────────
-            RequiredTool {
-                name:          "rustup",
-                description:   "Rust toolchain installer — manages Rust versions and targets",
-                toolchain:     None,
-                severity:      Severity::Blocking,
-                impact:        "No Rust toolchain management: targets can't be installed and nothing builds.",
-                check_cmd:     "rustup",
-                check_args:    &["--version"],
-                check_pattern: "",
-                min_version:   None,
-                install_cmd:   None, // must be installed manually from rustup.rs
-                install_args:  &[],
-                manual_url:    "https://rustup.rs",
-                status:        ToolStatus::Unknown,
-            },
-            RequiredTool {
-                name:          "rustc",
-                description:   "Rust compiler (stable toolchain)",
-                toolchain:     None,
-                severity:      Severity::Blocking,
-                impact:        "No Rust compiler: Build, Check, Clippy and Flash all fail.",
-                check_cmd:     "rustc",
-                check_args:    &["--version"],
-                check_pattern: "",
-                min_version:   Some("1.74"), // Cargo `[lints]` table (strict-lints)
-                install_cmd:   Some("rustup"),
-                install_args:  &["install", "stable"],
-                manual_url:    "https://www.rust-lang.org/tools/install",
-                status:        ToolStatus::Unknown,
-            },
-            RequiredTool {
-                name:          "git",
-                description:   "Version control — powers the Git tab (commit / push / pull)",
-                toolchain:     None,
-                severity:      Severity::Feature,
-                impact:        "The Git tab (commit / push / pull) and library cloning are unavailable.",
-                check_cmd:     "git",
-                check_args:    &["--version"],
-                check_pattern: "",
-                min_version:   None,
-                install_cmd:   None, // installed manually from git-scm.com
-                install_args:  &[],
-                manual_url:    "https://git-scm.com",
-                status:        ToolStatus::Unknown,
-            },
-            RequiredTool {
-                name:          "cargo-bloat",
-                description:   "Code-size profiler — powers the Profile tab (.text/Flash per function)",
-                toolchain:     None,
-                severity:      Severity::Feature,
-                impact:        "The Profile tab's Static (size) view can't run; the rest of the IDE is fine.",
-                check_cmd:     "cargo",
-                check_args:    &["bloat", "--version"],
-                check_pattern: "",
-                min_version:   None,
-                install_cmd:   Some("cargo"),
-                install_args:  &["install", "cargo-bloat"],
-                manual_url:    "https://github.com/RazrFalcon/cargo-bloat",
-                status:        ToolStatus::Unknown,
-            },
-            // ── RustEmbedded (STM32 / ARM Cortex-M) ─────────────────────────
-            RequiredTool {
-                name:          "thumbv7m-none-eabi",
-                description:   "Rust target for ARM Cortex-M3 (STM32F1xx bare-metal)",
-                toolchain:     Some(ToolchainKind::RustEmbedded),
-                severity:      Severity::Blocking,
-                impact:        "This STM32 chip cannot be compiled at all until the target is installed.",
-                check_cmd:     "rustup",
-                check_args:    &["target", "list", "--installed"],
-                check_pattern: "thumbv7m-none-eabi",
-                min_version:   None,
-                install_cmd:   Some("rustup"),
-                install_args:  &["target", "add", "thumbv7m-none-eabi"],
-                manual_url:    "https://docs.rust-embedded.org/book/intro/install.html",
-                status:        ToolStatus::Unknown,
-            },
-            RequiredTool {
-                name:          "probe-rs",
-                description:   "Debug probe runner — powers the RTT tab (defmt logs) and SWD/JTAG flashing",
-                toolchain:     Some(ToolchainKind::RustEmbedded),
-                severity:      Severity::Feature,
-                impact:        "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing.",
-                check_cmd:     "probe-rs",
-                check_args:    &["--version"],
-                check_pattern: "",
-                min_version:   None,
-                install_cmd:   Some("cargo"),
-                install_args:  &["install", "probe-rs-tools", "--locked"],
-                manual_url:    "https://probe.rs/docs/getting-started/installation/",
-                status:        ToolStatus::Unknown,
-            },
-            // ── EspRust (ESP32-C3 / RISC-V) ──────────────────────────────────
-            RequiredTool {
-                name:          "riscv32imc-unknown-none-elf",
-                description:   "Rust target for RISC-V ESP32-C3 bare-metal",
-                toolchain:     Some(ToolchainKind::EspRust),
-                severity:      Severity::Blocking,
-                impact:        "This ESP32-C3 chip cannot be compiled at all until the target is installed.",
-                check_cmd:     "rustup",
-                check_args:    &["target", "list", "--installed"],
-                check_pattern: "riscv32imc-unknown-none-elf",
-                min_version:   None,
-                install_cmd:   Some("rustup"),
-                install_args:  &["target", "add", "riscv32imc-unknown-none-elf"],
-                manual_url:    "https://esp-rs.github.io/book/installation/riscv.html",
-                status:        ToolStatus::Unknown,
-            },
-            RequiredTool {
-                name:          "rust-src",
-                description:   "Rust source component — required by build-std for ESP32-C3",
-                toolchain:     Some(ToolchainKind::EspRust),
-                severity:      Severity::Blocking,
-                impact:        "ESP32-C3 builds fail: build-std needs the Rust source component.",
-                check_cmd:     "rustup",
-                check_args:    &["component", "list", "--installed"],
-                check_pattern: "rust-src",
-                min_version:   None,
-                install_cmd:   Some("rustup"),
-                install_args:  &["component", "add", "rust-src"],
-                manual_url:    "https://esp-rs.github.io/book/installation/riscv.html",
-                status:        ToolStatus::Unknown,
-            },
-            RequiredTool {
-                name:          "espflash",
-                description:   "ESP32 USB flash tool — programs the chip over the built-in USB serial",
-                toolchain:     Some(ToolchainKind::EspRust),
-                severity:      Severity::Feature,
-                impact:        "The ESP32 cannot be flashed from the Flash tab.",
-                check_cmd:     "espflash",
-                check_args:    &["--version"],
-                check_pattern: "",
-                min_version:   None,
-                install_cmd:   Some("cargo"),
-                install_args:  &["install", "espflash"],
-                manual_url:    "https://github.com/esp-rs/espflash",
-                status:        ToolStatus::Unknown,
-            },
+        // ── Common to all toolchains ─────────────────────────────────────
+        RequiredTool {
+            name: "rustup",
+            description: "Rust toolchain installer — manages Rust versions and targets",
+            toolchain: None,
+            severity: Severity::Blocking,
+            impact: "No Rust toolchain management: targets can't be installed and nothing builds.",
+            check_cmd: "rustup",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: None, // must be installed manually from rustup.rs
+            install_args: &[],
+            manual_url: "https://rustup.rs",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "rustc",
+            description: "Rust compiler (stable toolchain)",
+            toolchain: None,
+            severity: Severity::Blocking,
+            impact: "No Rust compiler: Build, Check, Clippy and Flash all fail.",
+            check_cmd: "rustc",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: Some("1.74"), // Cargo `[lints]` table (strict-lints)
+            install_cmd: Some("rustup"),
+            install_args: &["install", "stable"],
+            manual_url: "https://www.rust-lang.org/tools/install",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "git",
+            description: "Version control — powers the Git tab (commit / push / pull)",
+            toolchain: None,
+            severity: Severity::Feature,
+            impact: "The Git tab (commit / push / pull) and library cloning are unavailable.",
+            check_cmd: "git",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: None, // installed manually from git-scm.com
+            install_args: &[],
+            manual_url: "https://git-scm.com",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "cargo-bloat",
+            description: "Code-size profiler — powers the Profile tab (.text/Flash per function)",
+            toolchain: None,
+            severity: Severity::Feature,
+            impact: "The Profile tab's Static (size) view can't run; the rest of the IDE is fine.",
+            check_cmd: "cargo",
+            check_args: &["bloat", "--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: Some("cargo"),
+            install_args: &["install", "cargo-bloat"],
+            manual_url: "https://github.com/RazrFalcon/cargo-bloat",
+            status: ToolStatus::Unknown,
+        },
+        // ── RustEmbedded (STM32 / ARM Cortex-M) ─────────────────────────
+        RequiredTool {
+            name: "thumbv7m-none-eabi",
+            description: "Rust target for ARM Cortex-M3 (STM32F1xx bare-metal)",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            severity: Severity::Blocking,
+            impact: "This STM32 chip cannot be compiled at all until the target is installed.",
+            check_cmd: "rustup",
+            check_args: &["target", "list", "--installed"],
+            check_pattern: "thumbv7m-none-eabi",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["target", "add", "thumbv7m-none-eabi"],
+            manual_url: "https://docs.rust-embedded.org/book/intro/install.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "probe-rs",
+            description: "Debug probe runner — powers the RTT tab (defmt logs) and SWD/JTAG flashing",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            severity: Severity::Feature,
+            impact: "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing.",
+            check_cmd: "probe-rs",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: Some("cargo"),
+            install_args: &["install", "probe-rs-tools", "--locked"],
+            manual_url: "https://probe.rs/docs/getting-started/installation/",
+            status: ToolStatus::Unknown,
+        },
+        // ── EspRust (ESP32-C3 / RISC-V) ──────────────────────────────────
+        RequiredTool {
+            name: "riscv32imc-unknown-none-elf",
+            description: "Rust target for RISC-V ESP32-C3 bare-metal",
+            toolchain: Some(ToolchainKind::EspRust),
+            severity: Severity::Blocking,
+            impact: "This ESP32-C3 chip cannot be compiled at all until the target is installed.",
+            check_cmd: "rustup",
+            check_args: &["target", "list", "--installed"],
+            check_pattern: "riscv32imc-unknown-none-elf",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["target", "add", "riscv32imc-unknown-none-elf"],
+            manual_url: "https://esp-rs.github.io/book/installation/riscv.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "rust-src",
+            description: "Rust source component — required by build-std for ESP32-C3",
+            toolchain: Some(ToolchainKind::EspRust),
+            severity: Severity::Blocking,
+            impact: "ESP32-C3 builds fail: build-std needs the Rust source component.",
+            check_cmd: "rustup",
+            check_args: &["component", "list", "--installed"],
+            check_pattern: "rust-src",
+            min_version: None,
+            install_cmd: Some("rustup"),
+            install_args: &["component", "add", "rust-src"],
+            manual_url: "https://esp-rs.github.io/book/installation/riscv.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "espflash",
+            description: "ESP32 USB flash tool — programs the chip over the built-in USB serial",
+            toolchain: Some(ToolchainKind::EspRust),
+            severity: Severity::Feature,
+            impact: "The ESP32 cannot be flashed from the Flash tab.",
+            check_cmd: "espflash",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: Some("cargo"),
+            install_args: &["install", "espflash"],
+            manual_url: "https://github.com/esp-rs/espflash",
+            status: ToolStatus::Unknown,
+        },
     ];
 
     // ── Windows host linker prerequisite ─────────────────────────────────────
@@ -517,7 +525,10 @@ pub fn start_install_missing(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) 
     let count = state.lock().unwrap().tools.len();
     thread::spawn(move || {
         {
-            state.lock().unwrap().push_log("> Installing missing tools…");
+            state
+                .lock()
+                .unwrap()
+                .push_log("> Installing missing tools…");
         }
         ctx.request_repaint();
 
@@ -853,9 +864,15 @@ mod tests {
 
     #[test]
     fn version_is_scanned_out_of_any_banner() {
-        assert_eq!(parse_version("rustc 1.89.0 (abc 2026-01-01)").as_deref(), Some("1.89.0"));
+        assert_eq!(
+            parse_version("rustc 1.89.0 (abc 2026-01-01)").as_deref(),
+            Some("1.89.0")
+        );
         assert_eq!(parse_version("probe-rs 0.31.0").as_deref(), Some("0.31.0"));
-        assert_eq!(parse_version("git version 2.45.1.windows.1").as_deref(), Some("2.45.1"));
+        assert_eq!(
+            parse_version("git version 2.45.1.windows.1").as_deref(),
+            Some("2.45.1")
+        );
         // A trailing dot is punctuation, not part of the number.
         assert_eq!(parse_version("v1.2. done").as_deref(), Some("1.2"));
         // Nothing dotted → nothing claimed.
@@ -865,10 +882,16 @@ mod tests {
 
     #[test]
     fn versions_compare_numerically_not_as_strings() {
-        assert!(version_lt("1.9.0", "1.10.0"), "1.9 < 1.10 (string compare gets this wrong)");
+        assert!(
+            version_lt("1.9.0", "1.10.0"),
+            "1.9 < 1.10 (string compare gets this wrong)"
+        );
         assert!(!version_lt("1.10.0", "1.9.0"));
         assert!(version_lt("1.73.0", "1.74"));
-        assert!(!version_lt("1.74.0", "1.74"), "missing components count as 0");
+        assert!(
+            !version_lt("1.74.0", "1.74"),
+            "missing components count as 0"
+        );
         assert!(!version_lt("1.74", "1.74.0"));
         assert!(!version_lt("2.0", "1.99"));
         // Unreadable input must never be called outdated.
@@ -883,10 +906,16 @@ mod tests {
         let s = make_tools_state();
         let mut s = s.lock().unwrap();
         if let Some(t) = s.tools.iter_mut().find(|t| t.name == "rustc") {
-            t.status = ToolStatus::Outdated { found: "1.70.0".into(), min: "1.74" };
+            t.status = ToolStatus::Outdated {
+                found: "1.70.0".into(),
+                min: "1.74",
+            };
         }
         let names: Vec<&str> = s.problems(None).into_iter().map(|(n, _, _)| n).collect();
-        assert!(names.contains(&"rustc"), "outdated must be reported: {names:?}");
+        assert!(
+            names.contains(&"rustc"),
+            "outdated must be reported: {names:?}"
+        );
         assert!(
             !s.unavailable().contains(&"rustc"),
             "outdated must NOT gate features"
@@ -905,7 +934,11 @@ mod tests {
             .filter(|t| t.min_version.is_some())
             .map(|t| t.name)
             .collect();
-        assert_eq!(with_min, vec!["rustc"], "unexpected min_version set: {with_min:?}");
+        assert_eq!(
+            with_min,
+            vec!["rustc"],
+            "unexpected min_version set: {with_min:?}"
+        );
         // And the one we declare must itself be parseable by our comparator.
         assert!(!version_lt("1.74.0", "1.74"));
     }
@@ -948,9 +981,15 @@ mod tests {
             .into_iter()
             .map(|(n, _, _)| n)
             .collect();
-        assert!(stm.contains(&"rustup"), "common tools always count: {stm:?}");
+        assert!(
+            stm.contains(&"rustup"),
+            "common tools always count: {stm:?}"
+        );
         assert!(stm.contains(&"probe-rs"), "{stm:?}");
-        assert!(!stm.contains(&"espflash"), "ESP tool leaked into STM32: {stm:?}");
+        assert!(
+            !stm.contains(&"espflash"),
+            "ESP tool leaked into STM32: {stm:?}"
+        );
 
         let esp: Vec<&str> = s
             .problems(Some(&ToolchainKind::EspRust))
@@ -958,11 +997,19 @@ mod tests {
             .map(|(n, _, _)| n)
             .collect();
         assert!(esp.contains(&"espflash"), "{esp:?}");
-        assert!(!esp.contains(&"probe-rs"), "STM32 tool leaked into ESP: {esp:?}");
+        assert!(
+            !esp.contains(&"probe-rs"),
+            "STM32 tool leaked into ESP: {esp:?}"
+        );
 
         // Blocking is a strict subset of all problems.
         let all = s.problems(Some(&ToolchainKind::RustEmbedded)).len();
-        let blocking = s.blocking_problems(Some(&ToolchainKind::RustEmbedded)).len();
-        assert!(blocking > 0 && blocking < all, "all={all} blocking={blocking}");
+        let blocking = s
+            .blocking_problems(Some(&ToolchainKind::RustEmbedded))
+            .len();
+        assert!(
+            blocking > 0 && blocking < all,
+            "all={all} blocking={blocking}"
+        );
     }
 }

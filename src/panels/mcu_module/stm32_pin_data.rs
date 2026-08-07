@@ -41,7 +41,11 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
         .attribute("RefName")
         .ok_or("XML has no RefName attribute")?
         .trim();
-    let family = mcu.attribute("Family").unwrap_or("").trim().to_ascii_lowercase();
+    let family = mcu
+        .attribute("Family")
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let package = mcu.attribute("Package").unwrap_or("").trim().to_string();
     let line = mcu.attribute("Line").unwrap_or("").trim().to_string();
 
@@ -157,7 +161,10 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
             sides[2].clone(),
             sides[3].clone(),
         ];
-        chips.push(ConvertedChip { form, warnings: base_warnings.clone() });
+        chips.push(ConvertedChip {
+            form,
+            warnings: base_warnings.clone(),
+        });
     }
     Ok(chips)
 }
@@ -608,9 +615,15 @@ mod tests {
         let form = &convert_xml(F103).unwrap()[0].form;
         // GPIO → in out; peripheral signals mapped; EXTI/SMBA/CHyN dropped.
         assert_eq!(find(form, "PA9").functions, "tim1_2 usart1_tx in out");
-        assert_eq!(find(form, "PA11").functions, "can_rx tim1_4 usart1_cts usb_dm in out");
+        assert_eq!(
+            find(form, "PA11").functions,
+            "can_rx tim1_4 usart1_cts usb_dm in out"
+        );
         // Not-natively-modelled signals are CARRIED as generic `af:` tokens.
-        assert_eq!(find(form, "PB6").functions, "i2c1_scl af:i2c1_smba tim4_1 in out");
+        assert_eq!(
+            find(form, "PB6").functions,
+            "i2c1_scl af:i2c1_smba tim4_1 in out"
+        );
         assert_eq!(find(form, "PB13").functions, "spi2_sck af:tim1_ch1n in out");
         assert_eq!(find(form, "PA13").functions, "swdio in out");
         assert_eq!(find(form, "PA5").functions, "adc1_5 adc2_5 spi1_sck in out");
@@ -635,7 +648,10 @@ mod tests {
     fn qfp_side_distribution_matches_the_bundled_layout() {
         // 8 pins → 2 per side: left 1-2, bottom 3-4, right 5-6, top 8-7.
         let rows: Vec<PinRow> = (1..=8)
-            .map(|i| PinRow { number: i.to_string(), ..Default::default() })
+            .map(|i| PinRow {
+                number: i.to_string(),
+                ..Default::default()
+            })
             .collect();
         let [top, bottom, left, right] = distribute_sides(&rows);
         let nums = |s: &[PinRow]| s.iter().map(|r| r.number.clone()).collect::<Vec<_>>();
@@ -650,7 +666,10 @@ mod tests {
         // SO8N-style: 8 pins → left 1-4 (top→bottom), right 8-5 (top→bottom,
         // counting UP from the bottom), no top/bottom.
         let rows: Vec<PinRow> = (1..=8)
-            .map(|i| PinRow { number: i.to_string(), ..Default::default() })
+            .map(|i| PinRow {
+                number: i.to_string(),
+                ..Default::default()
+            })
             .collect();
         let [top, bottom, left, right] = distribute_sides_2row(&rows);
         let nums = |s: &[PinRow]| s.iter().map(|r| r.number.clone()).collect::<Vec<_>>();
@@ -661,7 +680,9 @@ mod tests {
 
     #[test]
     fn two_row_package_detection() {
-        for p in ["SO8N", "TSSOP20", "SOIC8", "SSOP28", "MSOP10", "DIP8", "SOT23-6"] {
+        for p in [
+            "SO8N", "TSSOP20", "SOIC8", "SSOP28", "MSOP10", "DIP8", "SOT23-6",
+        ] {
             assert!(is_two_row_package(p), "{p} should be two-row");
         }
         for p in ["LQFP64", "UFQFPN48", "UFBGA100", "WLCSP25", "TFBGA216"] {
@@ -707,9 +728,15 @@ mod tests {
         assert_eq!(map_signal("USART2_RTS_DE").as_deref(), Some("usart2_rts"));
         assert_eq!(map_signal("SPI1_RDY").as_deref(), Some("spi1_rdy"));
         assert_eq!(map_signal("SPI3_RDY").as_deref(), Some("spi3_rdy"));
-        assert_eq!(core_to_target("Arm Cortex-M33"), "thumbv8m.main-none-eabihf");
+        assert_eq!(
+            core_to_target("Arm Cortex-M33"),
+            "thumbv8m.main-none-eabihf"
+        );
         assert_eq!(core_to_target("Arm Cortex-M0+"), "thumbv6m-none-eabi");
-        assert_eq!(expand_variants("STM32F103CBTx"), vec![("STM32F103CBTx".to_string(), 0)]);
+        assert_eq!(
+            expand_variants("STM32F103CBTx"),
+            vec![("STM32F103CBTx".to_string(), 0)]
+        );
         assert_eq!(embassy_chip_feature("STM32F411RETx"), "stm32f411re");
         assert_eq!(embassy_chip_feature("STM32G0B1RETx"), "stm32g0b1re");
     }
@@ -717,7 +744,12 @@ mod tests {
     #[test]
     fn hal_dep_picks_the_right_crate_per_family() {
         // F1 keeps stm32f1xx-hal; the F103 fixture proves it end-to-end.
-        assert!(convert_xml(F103).unwrap()[0].form.hal_dep.contains("stm32f1xx-hal"));
+        assert!(
+            convert_xml(F103).unwrap()[0]
+                .form
+                .hal_dep
+                .contains("stm32f1xx-hal")
+        );
         // Any other STM32 family → embassy-stm32 with the chip feature.
         let g0 = hal_dep_for("stm32g0", "STM32G0B1", "STM32G0B1RETx");
         assert!(g0.contains("embassy-stm32"), "{g0}");
@@ -735,7 +767,10 @@ mod tests {
         assert!(f1.contains("\"stm32f103\""), "{f1}");
         // Other STM32 families → embassy-stm32 with the per-chip feature.
         let g0 = hal_dep_for_name("stm32g0", "STM32G0B1RETx");
-        assert!(g0.contains("embassy-stm32") && g0.contains("\"stm32g0b1re\""), "{g0}");
+        assert!(
+            g0.contains("embassy-stm32") && g0.contains("\"stm32g0b1re\""),
+            "{g0}"
+        );
         // An F1 family with an unusable name → editable TODO, never `["", "rt"]`.
         let bad = hal_dep_for_name("stm32f1", "STM32");
         assert!(bad.contains("TODO") && !bad.contains("\"\""), "{bad}");

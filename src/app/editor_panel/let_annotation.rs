@@ -107,9 +107,7 @@ pub fn let_context(chars: &[char], word_start: usize) -> Option<usize> {
 /// `kw` present at `i` (within `end`) and followed by whitespace.
 fn keyword_at(chars: &[char], i: usize, end: usize, kw: &str) -> bool {
     let k: Vec<char> = kw.chars().collect();
-    i + k.len() < end
-        && chars[i..i + k.len()] == k[..]
-        && chars[i + k.len()].is_whitespace()
+    i + k.len() < end && chars[i..i + k.len()] == k[..] && chars[i + k.len()].is_whitespace()
 }
 
 /// If the STATEMENT enclosing `cursor` is a `let [mut] <ident> = …` binding
@@ -243,13 +241,22 @@ mod tests {
         let clocks2 = src.find("clocks2").unwrap();
         let on_freeze = src.find("freeze").unwrap();
         let on_pclk1 = src.find("pclk1").unwrap();
-        assert_eq!(let_binding_pos(&src.chars().collect::<Vec<_>>(), on_freeze), Some(clocks2));
-        assert_eq!(let_binding_pos(&src.chars().collect::<Vec<_>>(), on_pclk1), Some(clocks2));
+        assert_eq!(
+            let_binding_pos(&src.chars().collect::<Vec<_>>(), on_freeze),
+            Some(clocks2)
+        );
+        assert_eq!(
+            let_binding_pos(&src.chars().collect::<Vec<_>>(), on_pclk1),
+            Some(clocks2)
+        );
         // A statement BEFORE this one terminates the backward scan.
         let two = "let a = 1;\nlet b = obj.foo()\n    .bar();";
         let b = two.find('b').unwrap();
         let on_bar = two.find("bar").unwrap();
-        assert_eq!(let_binding_pos(&two.chars().collect::<Vec<_>>(), on_bar), Some(b));
+        assert_eq!(
+            let_binding_pos(&two.chars().collect::<Vec<_>>(), on_bar),
+            Some(b)
+        );
     }
 
     #[test]

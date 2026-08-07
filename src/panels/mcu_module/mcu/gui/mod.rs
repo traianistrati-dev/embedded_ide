@@ -15,10 +15,10 @@ pub mod modules;
 pub mod panel;
 pub mod rotate;
 
-use eframe::egui;
-use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT};
 use crate::panels::mcu_module::mcu::logic::partner_functions;
+use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+use eframe::egui;
 
 impl Mcu {
     /// Main rendering method — draws the chip and handles user interactions.
@@ -30,7 +30,8 @@ impl Mcu {
         // Drop any module wire whose pin was re-purposed away from USART.
         self.reconcile_modules();
 
-        let (mcu_width, mcu_height, base_w, base_h) = layout::calculate_layout(top_count, left_count);
+        let (mcu_width, mcu_height, base_w, base_h) =
+            layout::calculate_layout(top_count, left_count);
 
         // Diagram rotation (view-only): a 2-sided chip turns 90°, a 4-sided one
         // becomes a 45° diamond. `local_chip` is the un-rotated body used to
@@ -197,22 +198,22 @@ impl Mcu {
             // ── Function button list (scrollable) ──────────────────────────
             // TODO: Move this to gui/panel.rs component
             let info_btn_w = 22.0;
-            let gap       = 4.0;
-            let btn_h     = 28.0;
-            let item_h    = btn_h + 6.0;
-            let btn_x     = content_rect.left() + 12.0;
+            let gap = 4.0;
+            let btn_h = 28.0;
+            let item_h = btn_h + 6.0;
+            let btn_x = content_rect.left() + 12.0;
 
-            let content_top    = sep_y + 12.0;
+            let content_top = sep_y + 12.0;
             let content_bottom = content_rect.bottom() - 8.0;
-            let available_h    = (content_bottom - content_top).max(0.0);
-            let total_h        = funcs.len() as f32 * item_h;
-            let max_scroll     = (total_h - available_h).max(0.0);
+            let available_h = (content_bottom - content_top).max(0.0);
+            let total_h = funcs.len() as f32 * item_h;
+            let max_scroll = (total_h - available_h).max(0.0);
 
             self.fn_scroll_offset = self.fn_scroll_offset.clamp(0.0, max_scroll);
 
-            let sb_w   = 4.0;
+            let sb_w = 4.0;
             let sb_gap = 3.0;
-            let btn_w  = content_rect.width() - 24.0 - info_btn_w - gap - sb_w - sb_gap;
+            let btn_w = content_rect.width() - 24.0 - info_btn_w - gap - sb_w - sb_gap;
 
             let list_rect = egui::Rect::from_min_max(
                 egui::pos2(btn_x - 4.0, content_top),
@@ -221,25 +222,25 @@ impl Mcu {
 
             // Handle mouse-wheel scrolling
             let pointer_in_list = ui.input(|i| {
-                i.pointer.hover_pos()
+                i.pointer
+                    .hover_pos()
                     .map(|p| list_rect.contains(p))
                     .unwrap_or(false)
             });
             if pointer_in_list && max_scroll > 0.0 {
                 let delta = ui.input(|i| i.smooth_scroll_delta.y);
                 if delta != 0.0 {
-                    self.fn_scroll_offset =
-                        (self.fn_scroll_offset - delta).clamp(0.0, max_scroll);
+                    self.fn_scroll_offset = (self.fn_scroll_offset - delta).clamp(0.0, max_scroll);
                 }
             }
 
             // Scrollbar thumb
             if max_scroll > 0.0 {
-                let sb_x        = content_rect.right() - sb_w - 2.0;
-                let track_h     = available_h;
-                let thumb_h     = ((available_h / total_h) * track_h).max(16.0);
-                let thumb_top   = content_top
-                    + (self.fn_scroll_offset / max_scroll) * (track_h - thumb_h);
+                let sb_x = content_rect.right() - sb_w - 2.0;
+                let track_h = available_h;
+                let thumb_h = ((available_h / total_h) * track_h).max(16.0);
+                let thumb_top =
+                    content_top + (self.fn_scroll_offset / max_scroll) * (track_h - thumb_h);
                 painter.rect_filled(
                     egui::Rect::from_min_size(
                         egui::pos2(sb_x, thumb_top),
@@ -254,17 +255,14 @@ impl Mcu {
             let mut btn_y = content_top - self.fn_scroll_offset;
 
             for (i, func) in funcs.iter().enumerate() {
-                let btn_rect = egui::Rect::from_min_size(
-                    egui::pos2(btn_x, btn_y),
-                    egui::vec2(btn_w, btn_h),
-                );
+                let btn_rect =
+                    egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, btn_h));
                 let info_rect = egui::Rect::from_min_size(
                     egui::pos2(btn_x + btn_w + gap, btn_y),
                     egui::vec2(info_btn_w, btn_h),
                 );
 
-                let visible = btn_rect.bottom() > content_top
-                    && btn_rect.top() < content_bottom;
+                let visible = btn_rect.bottom() > content_top && btn_rect.top() < content_bottom;
 
                 let is_sel: bool = func == &selected_func;
                 let bg: egui::Color32 = if is_sel {
@@ -294,11 +292,7 @@ impl Mcu {
                 let ic = info_rect.center();
                 let ir = 7.5_f32;
                 list_painter.circle_stroke(ic, ir, egui::Stroke::new(1.5, egui::Color32::WHITE));
-                list_painter.circle_filled(
-                    egui::pos2(ic.x, ic.y - 2.5),
-                    1.3,
-                    egui::Color32::WHITE,
-                );
+                list_painter.circle_filled(egui::pos2(ic.x, ic.y - 2.5), 1.3, egui::Color32::WHITE);
                 list_painter.line_segment(
                     [egui::pos2(ic.x, ic.y - 0.5), egui::pos2(ic.x, ic.y + 4.0)],
                     egui::Stroke::new(1.8, egui::Color32::WHITE),
@@ -359,8 +353,8 @@ impl Mcu {
         }
 
         // Apply the selected function to the pin (sets partners + clears info).
-        let pin_changed = new_function
-            .and_then(|(pin_num, func)| self.apply_pin_function(pin_num, func));
+        let pin_changed =
+            new_function.and_then(|(pin_num, func)| self.apply_pin_function(pin_num, func));
 
         // Toggle the info popup
         if let Some(func) = toggle_info {

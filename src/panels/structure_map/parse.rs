@@ -180,7 +180,13 @@ pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGrap
     // `file_rel` is project-root-relative, like every other path the app
     // handles — the Structure tab feeds it straight to the LSP error lookup and
     // to click-to-open, so a bare "main.rs" would resolve to nothing.
-    let mut nodes = vec![make_node(String::new(), "main", "src/main.rs", None, main_rs)];
+    let mut nodes = vec![make_node(
+        String::new(),
+        "main",
+        "src/main.rs",
+        None,
+        main_rs,
+    )];
     for (i, (rel, content)) in user_files.iter().enumerate() {
         if !rel.ends_with(".rs") {
             continue; // defensive: only Rust files become modules
@@ -246,10 +252,7 @@ pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGrap
     // A dep edge that duplicates a containment edge adds only clutter — the
     // dashed containment line already links the pair.
     let deps: Vec<(usize, usize)> = {
-        let mut v: Vec<_> = deps
-            .into_iter()
-            .filter(|e| !contains.contains(e))
-            .collect();
+        let mut v: Vec<_> = deps.into_iter().filter(|e| !contains.contains(e)).collect();
         v.sort_unstable();
         v
     };
@@ -259,7 +262,11 @@ pub fn build_graph(main_rs: &str, user_files: &[(String, String)]) -> ModuleGrap
         v
     };
 
-    ModuleGraph { nodes, deps, contains }
+    ModuleGraph {
+        nodes,
+        deps,
+        contains,
+    }
 }
 
 fn make_node(
@@ -290,11 +297,7 @@ fn make_node(
 /// segment is lowercase, has ≥ 2 segments, and resolves to NO local module —
 /// uppercase firsts (types/variants like `State::Idle`) are skipped, and
 /// `crate::`/`super::`/`self::` chains are local by definition.
-pub fn add_external_nodes(
-    graph: &mut ModuleGraph,
-    main_rs: &str,
-    user_files: &[(String, String)],
-) {
+pub fn add_external_nodes(graph: &mut ModuleGraph, main_rs: &str, user_files: &[(String, String)]) {
     let by_path: HashMap<String, usize> = graph
         .nodes
         .iter()
@@ -322,10 +325,7 @@ pub fn add_external_nodes(
         .map(|(i, n)| {
             let text = match n.file {
                 None => main_rs,
-                Some(fi) => user_files
-                    .get(fi)
-                    .map(|(_, c)| c.as_str())
-                    .unwrap_or(""),
+                Some(fi) => user_files.get(fi).map(|(_, c)| c.as_str()).unwrap_or(""),
             };
             (i, text)
         })
@@ -383,9 +383,7 @@ pub fn add_external_nodes(
 /// main`). Items inside `impl`/`mod` blocks sit at depth ≥ 1, so the badge
 /// counts them but the symbol list skips them. Braces inside string literals
 /// can skew the depth — badge-grade accuracy, and they usually balance out.
-fn scan_items(
-    text: &str,
-) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, usize, usize)>) {
+fn scan_items(text: &str) -> (usize, usize, Vec<SymbolItem>, Vec<(usize, usize, usize)>) {
     let mut fns = 0;
     let mut tys = 0;
     let mut symbols: Vec<SymbolItem> = Vec::new();
@@ -694,7 +692,10 @@ fn main() {
 }
 ";
         let files = vec![
-            ("pins/mod.rs".into(), "pub mod configs;\npub fn setup() {}\n".into()),
+            (
+                "pins/mod.rs".into(),
+                "pub mod configs;\npub fn setup() {}\n".into(),
+            ),
             ("pins/configs/mod.rs".into(), "pub mod usart1;\n".into()),
             ("pins/configs/usart1.rs".into(), "pub fn init() {}\n".into()),
             (
@@ -705,7 +706,10 @@ fn main() {
                 "mw_radar/read_report.rs".into(),
                 "use super::utils::checksum;\npub struct HmmdFrame;\n".into(),
             ),
-            ("mw_radar/utils.rs".into(), "pub fn checksum() -> u8 { 0 }\n".into()),
+            (
+                "mw_radar/utils.rs".into(),
+                "pub fn checksum() -> u8 { 0 }\n".into(),
+            ),
         ];
         (main_rs.to_owned(), files)
     }
@@ -762,20 +766,29 @@ fn main() {
     fn use_super_item_depends_on_parent_module() {
         let main_rs = "mod a;\n".to_owned();
         let files = vec![
-            ("a/mod.rs".into(), "pub mod b;\npub const K: u8 = 1;\n".into()),
+            (
+                "a/mod.rs".into(),
+                "pub mod b;\npub const K: u8 = 1;\n".into(),
+            ),
             ("a/b.rs".into(), "use super::K;\n".into()),
         ];
         let g = build_graph(&main_rs, &files);
         let a = idx(&g, "a");
         let b = idx(&g, "a::b");
-        assert!(g.deps.contains(&(b, a)), "super::ITEM should point at parent");
+        assert!(
+            g.deps.contains(&(b, a)),
+            "super::ITEM should point at parent"
+        );
     }
 
     #[test]
     fn ignores_external_crates_and_counts_items() {
         let main_rs = "use cortex_m::asm;\nfn main() { cortex_m::asm::nop(); }\n";
         let g = build_graph(main_rs, &[]);
-        assert!(g.deps.is_empty(), "external crate paths must not create edges");
+        assert!(
+            g.deps.is_empty(),
+            "external crate paths must not create edges"
+        );
         assert_eq!(g.nodes[0].fn_count, 1);
     }
 
@@ -834,10 +847,7 @@ fn main() {
         let mut g = build_graph(&main_rs, &files);
         let before = g.nodes.len();
         add_external_nodes(&mut g, &main_rs, &files);
-        let externs: Vec<&str> = g.nodes[before..]
-            .iter()
-            .map(|n| n.name.as_str())
-            .collect();
+        let externs: Vec<&str> = g.nodes[before..].iter().map(|n| n.name.as_str()).collect();
         assert!(externs.contains(&"cortex_m"), "use-line crate: {externs:?}");
         assert!(externs.contains(&"core"), "inline crate path: {externs:?}");
         assert!(!externs.contains(&"a"), "local module must not ghost");
@@ -893,7 +903,11 @@ impl core::fmt::Display for External {
 ";
         let g = build_graph(text, &[]);
         let node = &g.nodes[0];
-        let parser = node.symbols.iter().position(|s| s.name == "Parser").unwrap();
+        let parser = node
+            .symbols
+            .iter()
+            .position(|s| s.name == "Parser")
+            .unwrap();
         let frame = node
             .symbols
             .iter()
@@ -961,10 +975,26 @@ pub fn other(
             vec![("main", 2, 7), ("other", 8, 12)],
             "col-0 statements must not end main's span; multi-line signature spans to its brace"
         );
-        assert_eq!(node.enclosing_row(5), Some(0), "closure site belongs to main");
-        assert_eq!(node.enclosing_row(3), Some(0), "col-0 statement belongs to main");
-        assert_eq!(node.enclosing_row(11), Some(1), "body of the multi-line-sig fn");
-        assert_eq!(node.enclosing_row(1), None, "the attr line is outside any item");
+        assert_eq!(
+            node.enclosing_row(5),
+            Some(0),
+            "closure site belongs to main"
+        );
+        assert_eq!(
+            node.enclosing_row(3),
+            Some(0),
+            "col-0 statement belongs to main"
+        );
+        assert_eq!(
+            node.enclosing_row(11),
+            Some(1),
+            "body of the multi-line-sig fn"
+        );
+        assert_eq!(
+            node.enclosing_row(1),
+            None,
+            "the attr line is outside any item"
+        );
     }
 
     #[test]
@@ -1027,13 +1057,19 @@ pub fn other(
     fn module_path_strips_the_crate_source_root() {
         // The firmware is the graph's root crate — bare module paths.
         assert_eq!(module_path_of("src/app.rs"), "app");
-        assert_eq!(module_path_of("src/pins/configs/usart1.rs"), "pins::configs::usart1");
+        assert_eq!(
+            module_path_of("src/pins/configs/usart1.rs"),
+            "pins::configs::usart1"
+        );
         assert_eq!(module_path_of("src/pins/mod.rs"), "pins");
         // A library crate is namespaced under its own name — which is both how
         // you reach it from the firmware and what makes its `mod x;` resolve.
         assert_eq!(module_path_of("mw_radar/src/lib.rs"), "mw_radar");
         assert_eq!(module_path_of("mw_radar/src/frame.rs"), "mw_radar::frame");
-        assert_eq!(module_path_of("mw_radar/src/proto/mod.rs"), "mw_radar::proto");
+        assert_eq!(
+            module_path_of("mw_radar/src/proto/mod.rs"),
+            "mw_radar::proto"
+        );
         // crates.io allows `-`; a module path does not.
         assert_eq!(module_path_of("mw-radar/src/frame.rs"), "mw_radar::frame");
     }

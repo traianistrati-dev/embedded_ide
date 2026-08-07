@@ -1,7 +1,7 @@
 //! MCU chip layout calculations — geometry and positioning.
 
+use crate::panels::mcu_module::mcu::model::{PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
 use eframe::egui;
-use crate::panels::mcu_module::mcu::model::{PIN_HEIGHT, PIN_WIDTH, PIN_SPACING};
 
 /// Smallest chip-body span, in "pin units", along an edge that carries few (or
 /// no) pins. Without it a dual-in-line layout (all pins on left+right, so
@@ -32,10 +32,7 @@ pub fn pin_x_position(i: usize) -> f32 {
 }
 
 /// Calculate scrollable area bounds for function list.
-pub fn function_panel_bounds(
-    chip_rect: egui::Rect,
-    sep_y: f32,
-) -> (f32, f32, f32) {
+pub fn function_panel_bounds(chip_rect: egui::Rect, sep_y: f32) -> (f32, f32, f32) {
     let content_top = sep_y + 12.0;
     let content_bottom = chip_rect.bottom() - 8.0;
     let available_h = (content_bottom - content_top).max(0.0);
@@ -50,7 +47,7 @@ pub fn button_layout(
 ) -> (f32, f32, f32, f32, f32) {
     let item_h = btn_h + 6.0;
     let total_h = func_count as f32 * item_h;
-    let content_top = chip_rect.top() + 50.0;  // approx header height
+    let content_top = chip_rect.top() + 50.0; // approx header height
     let content_bottom = chip_rect.bottom() - 8.0;
     let available_h = (content_bottom - content_top).max(0.0);
     let max_scroll = (total_h - available_h).max(0.0);

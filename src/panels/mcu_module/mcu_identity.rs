@@ -52,7 +52,12 @@ pub fn identity_from_name(
 ) -> Option<(String, &'static str, ToolchainKind, &'static str)> {
     let family = family_from_name(name)?;
     let cpu = cpu_for_family(&family)?;
-    Some((family, cpu, ToolchainKind::RustEmbedded, target_for_cpu(cpu)))
+    Some((
+        family,
+        cpu,
+        ToolchainKind::RustEmbedded,
+        target_for_cpu(cpu),
+    ))
 }
 
 #[cfg(test)]
@@ -61,9 +66,15 @@ mod tests {
 
     #[test]
     fn family_from_name_covers_single_and_multi_letter() {
-        assert_eq!(family_from_name("STM32WBA55CG").as_deref(), Some("stm32wba"));
+        assert_eq!(
+            family_from_name("STM32WBA55CG").as_deref(),
+            Some("stm32wba")
+        );
         assert_eq!(family_from_name("STM32F411RE").as_deref(), Some("stm32f4"));
-        assert_eq!(family_from_name("STM32F103C8T6").as_deref(), Some("stm32f1"));
+        assert_eq!(
+            family_from_name("STM32F103C8T6").as_deref(),
+            Some("stm32f1")
+        );
         assert_eq!(family_from_name("STM32G0B1RE").as_deref(), Some("stm32g0"));
         assert_eq!(family_from_name("STM32H743ZI").as_deref(), Some("stm32h7"));
         assert_eq!(family_from_name("stm32wb55").as_deref(), Some("stm32wb"));
@@ -83,10 +94,16 @@ mod tests {
         assert_eq!(target, "thumbv8m.main-none-eabihf");
 
         let (fam, cpu, _, target) = identity_from_name("STM32F411RE").unwrap();
-        assert_eq!((fam.as_str(), cpu, target), ("stm32f4", "Cortex-M4", "thumbv7em-none-eabihf"));
+        assert_eq!(
+            (fam.as_str(), cpu, target),
+            ("stm32f4", "Cortex-M4", "thumbv7em-none-eabihf")
+        );
 
         let (fam, cpu, _, target) = identity_from_name("STM32F103C8").unwrap();
-        assert_eq!((fam.as_str(), cpu, target), ("stm32f1", "Cortex-M3", "thumbv7m-none-eabi"));
+        assert_eq!(
+            (fam.as_str(), cpu, target),
+            ("stm32f1", "Cortex-M3", "thumbv7m-none-eabi")
+        );
 
         let (_, cpu, _, target) = identity_from_name("STM32G0B1RE").unwrap();
         assert_eq!((cpu, target), ("Cortex-M0+", "thumbv6m-none-eabi"));

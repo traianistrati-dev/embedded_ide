@@ -134,7 +134,8 @@ pub fn import_file(path: &Path) -> Result<McuDefinition, String> {
 /// when no user dir resolves.
 pub fn save_definition(def: &McuDefinition) -> Result<PathBuf, String> {
     let dir = user_mcus_dir().ok_or("could not resolve the user config folder")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let text = ron::ser::to_string_pretty(def, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("RON serialize error: {e}"))?;
     let dest = dir.join(format!("{}.ron", def.id));
@@ -185,7 +186,10 @@ mod tests {
         merge_def(&mut defs, patched);
         assert_eq!(defs.len(), before);
         assert_eq!(
-            defs.iter().find(|d| d.id == "stm32f103c8t6").unwrap().display_name,
+            defs.iter()
+                .find(|d| d.id == "stm32f103c8t6")
+                .unwrap()
+                .display_name,
             "PATCHED"
         );
     }

@@ -109,7 +109,7 @@ impl ClockDef {
     /// STM32F1 HSE-range label).
     fn to_config(&self, limits: &ClockLimits) -> ClockConfig {
         use super::clock::graph::{
-            esp32c3_graph, esp32c3_layout, layout::stm32f1_layout, stm32f1_graph, GraphClock,
+            GraphClock, esp32c3_graph, esp32c3_layout, layout::stm32f1_layout, stm32f1_graph,
         };
         match self {
             ClockDef::Stm32f1(c) => ClockConfig::Graph(GraphClock {
@@ -272,9 +272,18 @@ mod tests {
                 })
         };
         assert!(same(&built.top_pins, &factory.top_pins), "top pins differ");
-        assert!(same(&built.bottom_pins, &factory.bottom_pins), "bottom pins differ");
-        assert!(same(&built.left_pins, &factory.left_pins), "left pins differ");
-        assert!(same(&built.right_pins, &factory.right_pins), "right pins differ");
+        assert!(
+            same(&built.bottom_pins, &factory.bottom_pins),
+            "bottom pins differ"
+        );
+        assert!(
+            same(&built.left_pins, &factory.left_pins),
+            "left pins differ"
+        );
+        assert!(
+            same(&built.right_pins, &factory.right_pins),
+            "right pins differ"
+        );
         assert_eq!(built.clock, factory.clock, "clock differs");
     }
 
@@ -288,7 +297,10 @@ mod tests {
 
         let mcu = def.build_mcu();
         assert_eq!(mcu.clock_limits, ClockLimits::default());
-        assert!(mcu.clock_presets.is_empty(), "empty → family presets in the GUI");
+        assert!(
+            mcu.clock_presets.is_empty(),
+            "empty → family presets in the GUI"
+        );
     }
 
     /// Custom limits and presets declared in a definition reach the runtime Mcu.
@@ -338,7 +350,10 @@ mod tests {
     #[test]
     fn clock_fields_round_trip_in_ron() {
         let mut def = stm_def();
-        def.clock_limits = ClockLimits { adcclk_max: 12_000_000, ..ClockLimits::default() };
+        def.clock_limits = ClockLimits {
+            adcclk_max: 12_000_000,
+            ..ClockLimits::default()
+        };
         def.clock_presets = vec![ClockPresetDef {
             name: "p".to_owned(),
             description: "d".to_owned(),
@@ -359,9 +374,9 @@ mod tests {
     /// RON and builds into a runtime `ClockConfig::Graph`.
     #[test]
     fn graph_clock_def_round_trips_and_builds() {
-        use crate::panels::mcu_module::clock::graph::layout::stm32f1_layout;
-        use crate::panels::mcu_module::clock::graph::{stm32f1_graph, GraphClock};
         use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::layout::stm32f1_layout;
+        use crate::panels::mcu_module::clock::graph::{GraphClock, stm32f1_graph};
 
         let gc = GraphClock {
             graph: stm32f1_graph(&Stm32f1Clock::default()),
@@ -371,10 +386,16 @@ mod tests {
         def.clock = ClockDef::Graph(gc);
 
         let mcu = def.build_mcu();
-        assert!(matches!(mcu.clock, ClockConfig::Graph(_)), "build_mcu yields a graph clock");
+        assert!(
+            matches!(mcu.clock, ClockConfig::Graph(_)),
+            "build_mcu yields a graph clock"
+        );
 
         let ron = ron::to_string(&def).expect("serialize def with graph clock");
         let back: McuDefinition = ron::from_str(&ron).expect("parse def with graph clock");
-        assert_eq!(def, back, "definition with embedded graph + layout must round-trip");
+        assert_eq!(
+            def, back,
+            "definition with embedded graph + layout must round-trip"
+        );
     }
 }

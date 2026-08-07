@@ -11,7 +11,11 @@ pub fn duplicate_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usi
     let lo = sel_lo.min(n).min(sel_hi.min(n));
     let hi = sel_lo.min(n).max(sel_hi.min(n));
     // A non-empty selection ending at a line start shouldn't pull in that line.
-    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' { hi - 1 } else { hi };
+    let hi_eff = if hi > lo && hi > 0 && chars[hi - 1] == '\n' {
+        hi - 1
+    } else {
+        hi
+    };
 
     // A trailing '\n' is structural; operate on the lines before it and re-add.
     let had_trailing = chars.last() == Some(&'\n');
@@ -43,8 +47,7 @@ pub fn duplicate_lines(text: &str, sel_lo: usize, sel_hi: usize) -> (String, usi
 
     let block = &lines[first..=last];
     // Char length of the duplicated block joined with '\n'.
-    let block_len: usize =
-        block.iter().map(|l| l.chars().count()).sum::<usize>() + (last - first);
+    let block_len: usize = block.iter().map(|l| l.chars().count()).sum::<usize>() + (last - first);
 
     // lines[..=last] + (copy of the block) + lines[last+1..]
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + (last - first + 1));

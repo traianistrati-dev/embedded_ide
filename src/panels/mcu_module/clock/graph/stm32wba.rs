@@ -12,9 +12,7 @@
 //! Default selections = the max-performance preset: HSE 32 / M=2 (ref 16) /
 //! N=25 (VCO 400) / R=4 → **SYSCLK 100 MHz**, all bus prescalers /1.
 
-use super::layout::{
-    BlockDef, ClockLayout, LabelDef, OutputDef, TagDef, ValueSrc, Widget,
-};
+use super::layout::{BlockDef, ClockLayout, LabelDef, OutputDef, TagDef, ValueSrc, Widget};
 use super::model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
 use crate::panels::mcu_module::clock::model::ClockLimits;
 
@@ -23,16 +21,34 @@ const M: u32 = 1_000_000;
 pub const WBA_SYSCLK_MAX: u32 = 100 * M;
 
 fn n(id: &str, kind: NodeKind, state: NodeState) -> Node {
-    Node { id: id.into(), kind, state, limit: None }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: None,
+    }
 }
 fn n_lim(id: &str, kind: NodeKind, state: NodeState, limit: LimitKey) -> Node {
-    Node { id: id.into(), kind, state, limit: Some(limit) }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: Some(limit),
+    }
 }
 fn e(from: &str, to: &str) -> Edge {
-    Edge { from: from.into(), to: to.into(), input: 0 }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input: 0,
+    }
 }
 fn e_in(from: &str, to: &str, input: usize) -> Edge {
-    Edge { from: from.into(), to: to.into(), input }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input,
+    }
 }
 
 /// Datasheet ceilings for the WBA55 — shipped in the definition so the
@@ -62,19 +78,35 @@ pub fn stm32wba_graph() -> ClockGraph {
         // ── Sources ──
         n(
             "hsi",
-            NodeKind::Source { min_hz: 16 * M, max_hz: 16 * M, gated: false },
-            NodeState::Source { enabled: true, hz: 16 * M },
+            NodeKind::Source {
+                min_hz: 16 * M,
+                max_hz: 16 * M,
+                gated: false,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 16 * M,
+            },
         ),
         n(
             "hse",
-            NodeKind::Source { min_hz: 32 * M, max_hz: 32 * M, gated: true },
-            NodeState::Source { enabled: true, hz: 32 * M },
+            NodeKind::Source {
+                min_hz: 32 * M,
+                max_hz: 32 * M,
+                gated: true,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 32 * M,
+            },
         ),
         // ── PLL1 chain: src mux → /M → ×N → /R ──
         n("pllsrc", NodeKind::Mux { inputs: 2 }, NodeState::Index(1)), // HSE
         n(
             "pllm",
-            NodeKind::Divider { options: pll_div.clone() },
+            NodeKind::Divider {
+                options: pll_div.clone(),
+            },
             NodeState::Index(1), // /2 → ref 16 MHz
         ),
         n(
@@ -84,51 +116,115 @@ pub fn stm32wba_graph() -> ClockGraph {
         ),
         n(
             "pllr",
-            NodeKind::Divider { options: pll_div.clone() },
+            NodeKind::Divider {
+                options: pll_div.clone(),
+            },
             NodeState::Index(3), // /4 → 100 MHz
         ),
-        n_lim("pll1r", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
+        n_lim(
+            "pll1r",
+            NodeKind::Tap,
+            NodeState::Fixed,
+            LimitKey::SysclkMax,
+        ),
         // ── SYSCLK + buses ──
         n("sw", NodeKind::Mux { inputs: 3 }, NodeState::Index(2)), // PLL1R
-        n_lim("sysclk", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
+        n_lim(
+            "sysclk",
+            NodeKind::Tap,
+            NodeState::Fixed,
+            LimitKey::SysclkMax,
+        ),
         n(
             "ahb",
-            NodeKind::Divider { options: bus_div.clone() },
+            NodeKind::Divider {
+                options: bus_div.clone(),
+            },
             NodeState::Index(0),
         ),
-        n_lim("hclk", NodeKind::Output, NodeState::Fixed, LimitKey::HclkMax),
+        n_lim(
+            "hclk",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::HclkMax,
+        ),
         n(
             "apb1",
-            NodeKind::Divider { options: bus_div.clone() },
+            NodeKind::Divider {
+                options: bus_div.clone(),
+            },
             NodeState::Index(0),
         ),
-        n_lim("pclk1", NodeKind::Output, NodeState::Fixed, LimitKey::Pclk1Max),
+        n_lim(
+            "pclk1",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::Pclk1Max,
+        ),
         n(
             "apb2",
-            NodeKind::Divider { options: bus_div.clone() },
+            NodeKind::Divider {
+                options: bus_div.clone(),
+            },
             NodeState::Index(0),
         ),
-        n_lim("pclk2", NodeKind::Output, NodeState::Fixed, LimitKey::Pclk2Max),
+        n_lim(
+            "pclk2",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::Pclk2Max,
+        ),
         n(
             "apb7",
             NodeKind::Divider { options: bus_div },
             NodeState::Index(0),
         ),
         // Same 100 MHz ceiling as HCLK — LimitKey has no dedicated PCLK7 slot.
-        n_lim("pclk7", NodeKind::Output, NodeState::Fixed, LimitKey::HclkMax),
+        n_lim(
+            "pclk7",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::HclkMax,
+        ),
         // ── Timer ×2 rule ──
-        n("tim_apb1", NodeKind::TimerMul { prescaler: "apb1".into() }, NodeState::Fixed),
-        n("tim_apb2", NodeKind::TimerMul { prescaler: "apb2".into() }, NodeState::Fixed),
+        n(
+            "tim_apb1",
+            NodeKind::TimerMul {
+                prescaler: "apb1".into(),
+            },
+            NodeState::Fixed,
+        ),
+        n(
+            "tim_apb2",
+            NodeKind::TimerMul {
+                prescaler: "apb2".into(),
+            },
+            NodeState::Fixed,
+        ),
         // ── Low-speed (display only) ──
         n(
             "lse",
-            NodeKind::Source { min_hz: 32_768, max_hz: 32_768, gated: true },
-            NodeState::Source { enabled: true, hz: 32_768 },
+            NodeKind::Source {
+                min_hz: 32_768,
+                max_hz: 32_768,
+                gated: true,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 32_768,
+            },
         ),
         n(
             "lsi",
-            NodeKind::Source { min_hz: 32_000, max_hz: 32_000, gated: false },
-            NodeState::Source { enabled: true, hz: 32_000 },
+            NodeKind::Source {
+                min_hz: 32_000,
+                max_hz: 32_000,
+                gated: false,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 32_000,
+            },
         ),
     ];
 
@@ -162,9 +258,14 @@ pub fn stm32wba_graph() -> ClockGraph {
 /// sources left, PLL chain across the middle, SYSCLK mux, bus dividers and
 /// the delivered clocks down the right margin.
 pub fn stm32wba_layout() -> ClockLayout {
-    let combo = |node: &str, x: f32, y: f32, w: f32, options: Vec<(String, NodeState)>| {
-        Widget::Combo { node: node.into(), x, y, w, options }
-    };
+    let combo =
+        |node: &str, x: f32, y: f32, w: f32, options: Vec<(String, NodeState)>| Widget::Combo {
+            node: node.into(),
+            x,
+            y,
+            w,
+            options,
+        };
     let div_opts = |values: &[u32]| -> Vec<(String, NodeState)> {
         values
             .iter()
@@ -185,57 +286,196 @@ pub fn stm32wba_layout() -> ClockLayout {
 
     ClockLayout {
         blocks: vec![
-            BlockDef { x: 40.0, y: 150.0, w: 130.0, h: 40.0, label: "HSI16\n16 MHz RC".into() },
-            BlockDef { x: 40.0, y: 260.0, w: 130.0, h: 40.0, label: "HSE\n32 MHz crystal".into() },
-            BlockDef { x: 40.0, y: 620.0, w: 130.0, h: 34.0, label: "LSE 32.768 kHz".into() },
-            BlockDef { x: 40.0, y: 680.0, w: 130.0, h: 34.0, label: "LSI 32 kHz".into() },
+            BlockDef {
+                x: 40.0,
+                y: 150.0,
+                w: 130.0,
+                h: 40.0,
+                label: "HSI16\n16 MHz RC".into(),
+            },
+            BlockDef {
+                x: 40.0,
+                y: 260.0,
+                w: 130.0,
+                h: 40.0,
+                label: "HSE\n32 MHz crystal".into(),
+            },
+            BlockDef {
+                x: 40.0,
+                y: 620.0,
+                w: 130.0,
+                h: 34.0,
+                label: "LSE 32.768 kHz".into(),
+            },
+            BlockDef {
+                x: 40.0,
+                y: 680.0,
+                w: 130.0,
+                h: 34.0,
+                label: "LSI 32 kHz".into(),
+            },
         ],
         outputs: vec![
-            OutputDef { x: 850.0, y: 120.0, w: 130.0, h: 34.0, label: "SYSCLK".into(),
-                src: ValueSrc::Node("sysclk".into()), limit: Some(LimitKey::SysclkMax) },
-            OutputDef { x: 850.0, y: 180.0, w: 130.0, h: 34.0, label: "HCLK (AHB)".into(),
-                src: ValueSrc::Node("hclk".into()), limit: Some(LimitKey::HclkMax) },
-            OutputDef { x: 850.0, y: 240.0, w: 130.0, h: 34.0, label: "PCLK1 (APB1)".into(),
-                src: ValueSrc::Node("pclk1".into()), limit: Some(LimitKey::Pclk1Max) },
-            OutputDef { x: 850.0, y: 300.0, w: 130.0, h: 34.0, label: "PCLK2 (APB2)".into(),
-                src: ValueSrc::Node("pclk2".into()), limit: Some(LimitKey::Pclk2Max) },
-            OutputDef { x: 850.0, y: 360.0, w: 130.0, h: 34.0, label: "PCLK7 (APB7)".into(),
-                src: ValueSrc::Node("pclk7".into()), limit: Some(LimitKey::HclkMax) },
-            OutputDef { x: 850.0, y: 420.0, w: 130.0, h: 34.0, label: "APB1 timers".into(),
-                src: ValueSrc::Node("tim_apb1".into()), limit: None },
-            OutputDef { x: 850.0, y: 480.0, w: 130.0, h: 34.0, label: "APB2 timers".into(),
-                src: ValueSrc::Node("tim_apb2".into()), limit: None },
+            OutputDef {
+                x: 850.0,
+                y: 120.0,
+                w: 130.0,
+                h: 34.0,
+                label: "SYSCLK".into(),
+                src: ValueSrc::Node("sysclk".into()),
+                limit: Some(LimitKey::SysclkMax),
+            },
+            OutputDef {
+                x: 850.0,
+                y: 180.0,
+                w: 130.0,
+                h: 34.0,
+                label: "HCLK (AHB)".into(),
+                src: ValueSrc::Node("hclk".into()),
+                limit: Some(LimitKey::HclkMax),
+            },
+            OutputDef {
+                x: 850.0,
+                y: 240.0,
+                w: 130.0,
+                h: 34.0,
+                label: "PCLK1 (APB1)".into(),
+                src: ValueSrc::Node("pclk1".into()),
+                limit: Some(LimitKey::Pclk1Max),
+            },
+            OutputDef {
+                x: 850.0,
+                y: 300.0,
+                w: 130.0,
+                h: 34.0,
+                label: "PCLK2 (APB2)".into(),
+                src: ValueSrc::Node("pclk2".into()),
+                limit: Some(LimitKey::Pclk2Max),
+            },
+            OutputDef {
+                x: 850.0,
+                y: 360.0,
+                w: 130.0,
+                h: 34.0,
+                label: "PCLK7 (APB7)".into(),
+                src: ValueSrc::Node("pclk7".into()),
+                limit: Some(LimitKey::HclkMax),
+            },
+            OutputDef {
+                x: 850.0,
+                y: 420.0,
+                w: 130.0,
+                h: 34.0,
+                label: "APB1 timers".into(),
+                src: ValueSrc::Node("tim_apb1".into()),
+                limit: None,
+            },
+            OutputDef {
+                x: 850.0,
+                y: 480.0,
+                w: 130.0,
+                h: 34.0,
+                label: "APB2 timers".into(),
+                src: ValueSrc::Node("tim_apb2".into()),
+                limit: None,
+            },
         ],
         tags: vec![
-            TagDef { x: 545.0, y: 285.0, name: "PLL1R".into(),
-                src: ValueSrc::Node("pll1r".into()), limit: Some(LimitKey::SysclkMax) },
-            TagDef { x: 455.0, y: 250.0, name: "VCO".into(),
-                src: ValueSrc::Node("plln".into()), limit: None },
+            TagDef {
+                x: 545.0,
+                y: 285.0,
+                name: "PLL1R".into(),
+                src: ValueSrc::Node("pll1r".into()),
+                limit: Some(LimitKey::SysclkMax),
+            },
+            TagDef {
+                x: 455.0,
+                y: 250.0,
+                name: "VCO".into(),
+                src: ValueSrc::Node("plln".into()),
+                limit: None,
+            },
         ],
         labels_above: vec![
-            LabelDef { x: 250.0, y: 292.0, text: "PLL /M".into() },
-            LabelDef { x: 340.0, y: 292.0, text: "PLL xN".into() },
-            LabelDef { x: 430.0, y: 292.0, text: "PLL /R".into() },
-            LabelDef { x: 620.0, y: 445.0, text: "AHB".into() },
-            LabelDef { x: 700.0, y: 445.0, text: "APB1".into() },
-            LabelDef { x: 620.0, y: 515.0, text: "APB2".into() },
-            LabelDef { x: 700.0, y: 515.0, text: "APB7".into() },
+            LabelDef {
+                x: 250.0,
+                y: 292.0,
+                text: "PLL /M".into(),
+            },
+            LabelDef {
+                x: 340.0,
+                y: 292.0,
+                text: "PLL xN".into(),
+            },
+            LabelDef {
+                x: 430.0,
+                y: 292.0,
+                text: "PLL /R".into(),
+            },
+            LabelDef {
+                x: 620.0,
+                y: 445.0,
+                text: "AHB".into(),
+            },
+            LabelDef {
+                x: 700.0,
+                y: 445.0,
+                text: "APB1".into(),
+            },
+            LabelDef {
+                x: 620.0,
+                y: 515.0,
+                text: "APB2".into(),
+            },
+            LabelDef {
+                x: 700.0,
+                y: 515.0,
+                text: "APB7".into(),
+            },
         ],
         mux_titles: vec![
-            LabelDef { x: 250.0, y: 195.0, text: "PLLSRC".into() },
-            LabelDef { x: 640.0, y: 135.0, text: "SYSCLK mux".into() },
+            LabelDef {
+                x: 250.0,
+                y: 195.0,
+                text: "PLLSRC".into(),
+            },
+            LabelDef {
+                x: 640.0,
+                y: 135.0,
+                text: "SYSCLK mux".into(),
+            },
         ],
         wires: vec![
             // HSI → PLLSRC(0) / SYSCLK mux(0)
-            vec![(170.0, 170.0), (215.0, 170.0), (215.0, 210.0), (235.0, 210.0)],
+            vec![
+                (170.0, 170.0),
+                (215.0, 170.0),
+                (215.0, 210.0),
+                (235.0, 210.0),
+            ],
             vec![(215.0, 170.0), (580.0, 155.0)],
             // HSE → PLLSRC(1) / SYSCLK mux(1)
-            vec![(170.0, 280.0), (215.0, 280.0), (215.0, 240.0), (235.0, 240.0)],
-            vec![(215.0, 280.0), (560.0, 280.0), (560.0, 175.0), (580.0, 175.0)],
+            vec![
+                (170.0, 280.0),
+                (215.0, 280.0),
+                (215.0, 240.0),
+                (235.0, 240.0),
+            ],
+            vec![
+                (215.0, 280.0),
+                (560.0, 280.0),
+                (560.0, 175.0),
+                (580.0, 175.0),
+            ],
             // PLL chain
             vec![(320.0, 225.0), (335.0, 310.0)],
             vec![(415.0, 310.0), (425.0, 310.0)],
-            vec![(505.0, 310.0), (540.0, 310.0), (540.0, 195.0), (580.0, 195.0)],
+            vec![
+                (505.0, 310.0),
+                (540.0, 310.0),
+                (540.0, 195.0),
+                (580.0, 195.0),
+            ],
             // SYSCLK mux → SYSCLK out + AHB
             vec![(700.0, 175.0), (850.0, 137.0)],
             vec![(770.0, 175.0), (770.0, 470.0), (615.0, 470.0)],
@@ -245,7 +485,11 @@ pub fn stm32wba_layout() -> ClockLayout {
         widgets: vec![
             Widget::MuxRadios {
                 node: "pllsrc".into(),
-                x: 235.0, y: 200.0, w: 85.0, h: 55.0, flip: false,
+                x: 235.0,
+                y: 200.0,
+                w: 85.0,
+                h: 55.0,
+                flip: false,
                 inputs: vec![
                     ("HSI16".into(), 10.0, NodeState::Index(0)),
                     ("HSE32".into(), 40.0, NodeState::Index(1)),
@@ -256,7 +500,11 @@ pub fn stm32wba_layout() -> ClockLayout {
             combo("pllr", 430.0, 296.0, 70.0, div_opts(&pll)),
             Widget::MuxRadios {
                 node: "sw".into(),
-                x: 580.0, y: 140.0, w: 120.0, h: 70.0, flip: false,
+                x: 580.0,
+                y: 140.0,
+                w: 120.0,
+                h: 70.0,
+                flip: false,
                 inputs: vec![
                     ("HSI16".into(), 15.0, NodeState::Index(0)),
                     ("HSE32".into(), 35.0, NodeState::Index(1)),

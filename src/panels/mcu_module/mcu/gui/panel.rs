@@ -1,7 +1,7 @@
 //! Function selection panel — scrollable list of pin functions with buttons.
 
-use eframe::egui;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+use eframe::egui;
 
 /// State returned from panel rendering.
 pub struct PanelState {
@@ -53,7 +53,7 @@ pub fn render_function_buttons(
     let btn_h = 28.0;
     let item_h = btn_h + 6.0;
     let btn_x = chip_rect.left() + 12.0;
-    let sep_y = chip_rect.top() + 50.0;  // approx header height
+    let sep_y = chip_rect.top() + 50.0; // approx header height
     let content_top = sep_y + 12.0;
     let content_bottom = chip_rect.bottom() - 8.0;
     let sb_w = 4.0;
@@ -68,10 +68,8 @@ pub fn render_function_buttons(
     let mut btn_y = content_top - fn_scroll_offset;
 
     for (i, func) in funcs.iter().enumerate() {
-        let btn_rect = egui::Rect::from_min_size(
-            egui::pos2(btn_x, btn_y),
-            egui::vec2(btn_w, btn_h),
-        );
+        let btn_rect =
+            egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, btn_h));
         let info_rect = egui::Rect::from_min_size(
             egui::pos2(btn_x + btn_w + gap, btn_y),
             egui::vec2(info_btn_w, btn_h),
@@ -106,11 +104,7 @@ pub fn render_function_buttons(
         let ic = info_rect.center();
         let ir = 7.5_f32;
         list_painter.circle_stroke(ic, ir, egui::Stroke::new(1.5, egui::Color32::WHITE));
-        list_painter.circle_filled(
-            egui::pos2(ic.x, ic.y - 2.5),
-            1.3,
-            egui::Color32::WHITE,
-        );
+        list_painter.circle_filled(egui::pos2(ic.x, ic.y - 2.5), 1.3, egui::Color32::WHITE);
         list_painter.line_segment(
             [egui::pos2(ic.x, ic.y - 0.5), egui::pos2(ic.x, ic.y + 4.0)],
             egui::Stroke::new(1.8, egui::Color32::WHITE),
@@ -181,10 +175,7 @@ pub fn draw_scrollbar(
         let thumb_h = ((available_h / total_h) * track_h).max(16.0);
         let thumb_top = content_top + (fn_scroll_offset / max_scroll) * (track_h - thumb_h);
         painter.rect_filled(
-            egui::Rect::from_min_size(
-                egui::pos2(sb_x, thumb_top),
-                egui::vec2(sb_w, thumb_h),
-            ),
+            egui::Rect::from_min_size(egui::pos2(sb_x, thumb_top), egui::vec2(sb_w, thumb_h)),
             sb_w / 2.0,
             egui::Color32::from_rgba_premultiplied(180, 180, 210, 140),
         );

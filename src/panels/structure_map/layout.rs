@@ -229,7 +229,11 @@ pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> Graph
             }
             let up = up_total <= down_total;
             for &m in members {
-                row[m] = if up { -(ring[m] as i32) } else { ring[m] as i32 };
+                row[m] = if up {
+                    -(ring[m] as i32)
+                } else {
+                    ring[m] as i32
+                };
             }
             if up {
                 up_total += members.len();
@@ -428,7 +432,12 @@ pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> Graph
         .map(|i| centers[i] - width_of(i) / 2.0)
         .fold(f32::MAX, f32::min);
     let mut pos = vec![
-        NodePos { x: 0.0, y: 0.0, w: 0.0, h: HEADER_H };
+        NodePos {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: HEADER_H
+        };
         n
     ];
     let mut max_x = 0.0f32;
@@ -442,7 +451,11 @@ pub fn layout_with_calls(graph: &ModuleGraph, calls: &[(usize, usize)]) -> Graph
         max_y = max_y.max(y + h);
     }
 
-    GraphLayout { pos, width: max_x + MARGIN, height: max_y + MARGIN }
+    GraphLayout {
+        pos,
+        width: max_x + MARGIN,
+        height: max_y + MARGIN,
+    }
 }
 
 // ── Manual position overrides (drag & drop) ─────────────────────────────────
@@ -499,8 +512,7 @@ pub fn segments_cross(p1: (f32, f32), p2: (f32, f32), q1: (f32, f32), q2: (f32, 
 /// `true` when segment `p1–p2` passes through the `(x, y, w, h)` rectangle
 /// (an endpoint strictly inside, or a proper crossing of any side).
 pub fn seg_hits_rect(p1: (f32, f32), p2: (f32, f32), x: f32, y: f32, w: f32, h: f32) -> bool {
-    let inside =
-        |p: (f32, f32)| p.0 > x && p.0 < x + w && p.1 > y && p.1 < y + h;
+    let inside = |p: (f32, f32)| p.0 > x && p.0 < x + w && p.1 > y && p.1 < y + h;
     if inside(p1) || inside(p2) {
         return true;
     }
@@ -603,7 +615,10 @@ use crate::m::report::decode;
         let a = g.nodes.iter().position(|n| n.path == "a").unwrap();
         let b = g.nodes.iter().position(|n| n.path == "b").unwrap();
         let lay = layout(&g);
-        assert_eq!(lay.pos[b].h, HEADER_H, "no symbols → compact header-only box");
+        assert_eq!(
+            lay.pos[b].h, HEADER_H,
+            "no symbols → compact header-only box"
+        );
         assert!(
             lay.pos[a].h > HEADER_H,
             "symbol rows must grow the node height"
@@ -628,14 +643,36 @@ use crate::m::report::decode;
     #[test]
     fn segment_geometry_helpers() {
         // An X-crossing…
-        assert!(segments_cross((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0)));
+        assert!(segments_cross(
+            (0.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (10.0, 0.0)
+        ));
         // …parallel lines don't cross, and a shared endpoint doesn't count.
-        assert!(!segments_cross((0.0, 0.0), (10.0, 0.0), (0.0, 5.0), (10.0, 5.0)));
-        assert!(!segments_cross((0.0, 0.0), (10.0, 10.0), (10.0, 10.0), (20.0, 0.0)));
+        assert!(!segments_cross(
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (0.0, 5.0),
+            (10.0, 5.0)
+        ));
+        assert!(!segments_cross(
+            (0.0, 0.0),
+            (10.0, 10.0),
+            (10.0, 10.0),
+            (20.0, 0.0)
+        ));
         // Through the box, ending inside it, and missing it entirely.
         assert!(seg_hits_rect((0.0, 5.0), (20.0, 5.0), 5.0, 0.0, 10.0, 10.0));
         assert!(seg_hits_rect((0.0, 0.0), (8.0, 5.0), 5.0, 0.0, 10.0, 10.0));
-        assert!(!seg_hits_rect((0.0, 20.0), (20.0, 20.0), 5.0, 0.0, 10.0, 10.0));
+        assert!(!seg_hits_rect(
+            (0.0, 20.0),
+            (20.0, 20.0),
+            5.0,
+            0.0,
+            10.0,
+            10.0
+        ));
     }
 
     /// The dep edges `a→y` and `b→x` start out crossed (creation order puts

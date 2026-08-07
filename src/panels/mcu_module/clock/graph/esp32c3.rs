@@ -10,13 +10,26 @@ use super::layout::{BlockDef, ClockLayout, LabelDef, OutputDef, TagDef, ValueSrc
 use super::model::{ClockGraph, Edge, Node, NodeKind, NodeState};
 
 fn n(id: &str, kind: NodeKind, state: NodeState) -> Node {
-    Node { id: id.into(), kind, state, limit: None }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: None,
+    }
 }
 fn e(from: &str, to: &str) -> Edge {
-    Edge { from: from.into(), to: to.into(), input: 0 }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input: 0,
+    }
 }
 fn e_in(from: &str, to: &str, input: usize) -> Edge {
-    Edge { from: from.into(), to: to.into(), input }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input,
+    }
 }
 
 /// The ESP32-C3 clock graph (default selections).
@@ -25,16 +38,66 @@ pub fn esp32c3_graph() -> ClockGraph {
 
     let nodes = vec![
         // ── Oscillators ──
-        n("xtal", NodeKind::Source { min_hz: 40_000_000, max_hz: 40_000_000, gated: false }, src(40_000_000)),
-        n("rc_fast", NodeKind::Source { min_hz: 17_500_000, max_hz: 17_500_000, gated: false }, src(17_500_000)),
-        n("rc_slow", NodeKind::Source { min_hz: 136_000, max_hz: 136_000, gated: false }, src(136_000)),
-        n("xtal32k", NodeKind::Source { min_hz: 32_768, max_hz: 32_768, gated: true }, src(32_768)),
-        n("rc32k", NodeKind::Source { min_hz: 32_000, max_hz: 32_000, gated: false }, src(32_000)),
+        n(
+            "xtal",
+            NodeKind::Source {
+                min_hz: 40_000_000,
+                max_hz: 40_000_000,
+                gated: false,
+            },
+            src(40_000_000),
+        ),
+        n(
+            "rc_fast",
+            NodeKind::Source {
+                min_hz: 17_500_000,
+                max_hz: 17_500_000,
+                gated: false,
+            },
+            src(17_500_000),
+        ),
+        n(
+            "rc_slow",
+            NodeKind::Source {
+                min_hz: 136_000,
+                max_hz: 136_000,
+                gated: false,
+            },
+            src(136_000),
+        ),
+        n(
+            "xtal32k",
+            NodeKind::Source {
+                min_hz: 32_768,
+                max_hz: 32_768,
+                gated: true,
+            },
+            src(32_768),
+        ),
+        n(
+            "rc32k",
+            NodeKind::Source {
+                min_hz: 32_000,
+                max_hz: 32_000,
+                gated: false,
+            },
+            src(32_000),
+        ),
         // ── SPLL (480 MHz) ──
-        n("pll", NodeKind::Multiplier { min: 12, max: 12 }, NodeState::Value(12)),
+        n(
+            "pll",
+            NodeKind::Multiplier { min: 12, max: 12 },
+            NodeState::Value(12),
+        ),
         // ── CPU clock: PLL ÷{3,6} → mux{xtal, pll_div, rc_fast} ──
-        n("cpu_div", NodeKind::Divider { options: vec![3, 6] }, NodeState::Index(0)), // 480/3 = 160
-        n("cpu", NodeKind::Mux { inputs: 3 }, NodeState::Index(1)),                   // PLL path
+        n(
+            "cpu_div",
+            NodeKind::Divider {
+                options: vec![3, 6],
+            },
+            NodeState::Index(0),
+        ), // 480/3 = 160
+        n("cpu", NodeKind::Mux { inputs: 3 }, NodeState::Index(1)), // PLL path
         // ── APB (PLL/6 = 80 MHz) ──
         n("apb", NodeKind::FixedDiv { by: 6 }, NodeState::Fixed),
         // ── RTC fast/slow ──
@@ -63,24 +126,44 @@ pub fn esp32c3_graph() -> ClockGraph {
 
 /// A clean left→right diagram layout for the ESP32-C3 clock tree.
 pub fn esp32c3_layout() -> ClockLayout {
-    let blk = |x, y, w, h, label: &str| BlockDef { x, y, w, h, label: label.to_owned() };
+    let blk = |x, y, w, h, label: &str| BlockDef {
+        x,
+        y,
+        w,
+        h,
+        label: label.to_owned(),
+    };
     let out = |x, y, w, h, label: &str, node: &str| OutputDef {
-        x, y, w, h,
+        x,
+        y,
+        w,
+        h,
         label: label.to_owned(),
         src: ValueSrc::Node(node.to_owned()),
         limit: None,
     };
     let tag = |x, y, name: &str, node: &str| TagDef {
-        x, y,
+        x,
+        y,
         name: name.to_owned(),
         src: ValueSrc::Node(node.to_owned()),
         limit: None,
     };
-    let lbl = |x, y, text: &str| LabelDef { x, y, text: text.to_owned() };
+    let lbl = |x, y, text: &str| LabelDef {
+        x,
+        y,
+        text: text.to_owned(),
+    };
     // CubeMX-style trapezoid mux (many inputs → 1 output). Inputs are labelled
     // stubs (label, dy, mux index) so no long crossing wires are needed.
-    let mux = |node: &str, x, y, w, h, inputs: Vec<(String, f32, NodeState)>| {
-        Widget::MuxRadios { node: node.to_owned(), x, y, w, h, flip: false, inputs }
+    let mux = |node: &str, x, y, w, h, inputs: Vec<(String, f32, NodeState)>| Widget::MuxRadios {
+        node: node.to_owned(),
+        x,
+        y,
+        w,
+        h,
+        flip: false,
+        inputs,
     };
     let mi = |label: &str, dy: f32, i: usize| (label.to_owned(), dy, NodeState::Index(i));
 
@@ -105,10 +188,7 @@ pub fn esp32c3_layout() -> ClockLayout {
             tag(655.0, 120.0, "CPU", "cpu"),
             tag(505.0, 214.0, "APB", "apb"),
         ],
-        labels_above: vec![
-            lbl(220.0, 86.0, "PLL ×12"),
-            lbl(390.0, 91.0, "CPU divider"),
-        ],
+        labels_above: vec![lbl(220.0, 86.0, "PLL ×12"), lbl(390.0, 91.0, "CPU divider")],
         // Mux names (CENTER_BOTTOM-anchored above each trapezoid).
         mux_titles: vec![
             lbl(582.0, 76.0, "CPU Mux"),
@@ -116,47 +196,67 @@ pub fn esp32c3_layout() -> ClockLayout {
             lbl(422.0, 452.0, "RTC Slow"),
         ],
         wires: vec![
-            vec![(148.0, 110.0), (220.0, 110.0)],                  // xtal → pll
-            vec![(340.0, 110.0), (390.0, 110.0)],                  // pll → cpu_div
-            vec![(485.0, 110.0), (536.0, 110.0)],                  // cpu_div → cpu mux (PLL input)
-            vec![(605.0, 120.0), (720.0, 120.0)],                  // cpu mux → CPU_CLK
-            vec![(280.0, 128.0), (280.0, 214.0), (390.0, 214.0)],  // pll → apb
-            vec![(485.0, 214.0), (720.0, 214.0)],                  // apb → APB_CLK
-            vec![(88.0, 128.0), (88.0, 262.0), (220.0, 262.0)],    // xtal → /2
-            vec![(445.0, 318.0), (720.0, 318.0)],                  // RTC_FAST mux → out
-            vec![(445.0, 500.0), (720.0, 500.0)],                  // RTC_SLOW mux → out
+            vec![(148.0, 110.0), (220.0, 110.0)], // xtal → pll
+            vec![(340.0, 110.0), (390.0, 110.0)], // pll → cpu_div
+            vec![(485.0, 110.0), (536.0, 110.0)], // cpu_div → cpu mux (PLL input)
+            vec![(605.0, 120.0), (720.0, 120.0)], // cpu mux → CPU_CLK
+            vec![(280.0, 128.0), (280.0, 214.0), (390.0, 214.0)], // pll → apb
+            vec![(485.0, 214.0), (720.0, 214.0)], // apb → APB_CLK
+            vec![(88.0, 128.0), (88.0, 262.0), (220.0, 262.0)], // xtal → /2
+            vec![(445.0, 318.0), (720.0, 318.0)], // RTC_FAST mux → out
+            vec![(445.0, 500.0), (720.0, 500.0)], // RTC_SLOW mux → out
         ],
         widgets: vec![
             Widget::Combo {
                 node: "cpu_div".to_owned(),
-                x: 390.0, y: 97.0, w: 95.0,
+                x: 390.0,
+                y: 97.0,
+                w: 95.0,
                 options: vec![
                     ("/3 → 160 MHz".to_owned(), NodeState::Index(0)),
                     ("/6 → 80 MHz".to_owned(), NodeState::Index(1)),
                 ],
             },
-            mux("cpu", 560.0, 84.0, 45.0, 72.0, vec![
-                mi("XTAL", 10.0, 0),
-                mi("PLL ÷N", 26.0, 1),
-                mi("RC_FAST", 52.0, 2),
-            ]),
-            mux("rtc_fast", 400.0, 292.0, 45.0, 52.0, vec![
-                mi("XTAL/2", 14.0, 0),
-                mi("RC_FAST", 38.0, 1),
-            ]),
-            mux("rtc_slow", 400.0, 460.0, 45.0, 80.0, vec![
-                mi("RC_SLOW", 16.0, 0),
-                mi("XTAL32K", 40.0, 1),
-                mi("RC32K", 64.0, 2),
-            ]),
+            mux(
+                "cpu",
+                560.0,
+                84.0,
+                45.0,
+                72.0,
+                vec![
+                    mi("XTAL", 10.0, 0),
+                    mi("PLL ÷N", 26.0, 1),
+                    mi("RC_FAST", 52.0, 2),
+                ],
+            ),
+            mux(
+                "rtc_fast",
+                400.0,
+                292.0,
+                45.0,
+                52.0,
+                vec![mi("XTAL/2", 14.0, 0), mi("RC_FAST", 38.0, 1)],
+            ),
+            mux(
+                "rtc_slow",
+                400.0,
+                460.0,
+                45.0,
+                80.0,
+                vec![
+                    mi("RC_SLOW", 16.0, 0),
+                    mi("XTAL32K", 40.0, 1),
+                    mi("RC32K", 64.0, 2),
+                ],
+            ),
         ],
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::eval::evaluate;
+    use super::*;
 
     #[test]
     fn esp32c3_default_frequencies() {
@@ -194,7 +294,10 @@ mod tests {
         let g = esp32c3_graph();
         for w in &esp32c3_layout().widgets {
             let node = w.node_id();
-            assert!(g.node(node).is_some(), "widget references missing node {node}");
+            assert!(
+                g.node(node).is_some(),
+                "widget references missing node {node}"
+            );
             if let Widget::Combo { options, .. } = w {
                 assert!(!options.is_empty(), "widget {node} has no options");
             }

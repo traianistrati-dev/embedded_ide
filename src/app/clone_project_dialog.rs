@@ -89,7 +89,10 @@ impl AppIde {
             return Err("Enter a destination folder.".into());
         }
         if dest.exists() {
-            return Err(format!("{} already exists — pick another name.", dest.display()));
+            return Err(format!(
+                "{} already exists — pick another name.",
+                dest.display()
+            ));
         }
         // Copying a folder into itself (or a subfolder) would recurse forever.
         if dest.starts_with(src) {

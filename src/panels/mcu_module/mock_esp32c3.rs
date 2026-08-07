@@ -87,12 +87,30 @@ use super::pins::logic::pin_function::PinFunction;
 fn matrix_fns() -> Vec<PinFunction> {
     vec![
         // ── LEDC (LED PWM Controller) — 6 independent channels ────────────────
-        PinFunction::TimerPwm { timer: 0, channel: 0 },
-        PinFunction::TimerPwm { timer: 0, channel: 1 },
-        PinFunction::TimerPwm { timer: 0, channel: 2 },
-        PinFunction::TimerPwm { timer: 0, channel: 3 },
-        PinFunction::TimerPwm { timer: 0, channel: 4 },
-        PinFunction::TimerPwm { timer: 0, channel: 5 },
+        PinFunction::TimerPwm {
+            timer: 0,
+            channel: 0,
+        },
+        PinFunction::TimerPwm {
+            timer: 0,
+            channel: 1,
+        },
+        PinFunction::TimerPwm {
+            timer: 0,
+            channel: 2,
+        },
+        PinFunction::TimerPwm {
+            timer: 0,
+            channel: 3,
+        },
+        PinFunction::TimerPwm {
+            timer: 0,
+            channel: 4,
+        },
+        PinFunction::TimerPwm {
+            timer: 0,
+            channel: 5,
+        },
         // ── UART0 — default pins GPIO20/GPIO21, but re-routable ──────────────
         PinFunction::UsartTx(0),
         PinFunction::UsartRx(0),

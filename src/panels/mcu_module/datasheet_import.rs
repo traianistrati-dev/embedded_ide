@@ -197,7 +197,10 @@ fn de_string_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Erro
 pub fn build_prompt(family_hint: &str, package: &str) -> String {
     let mut hint = String::new();
     if !family_hint.trim().is_empty() {
-        hint.push_str(&format!("\nFamily hint (may be wrong): {}", family_hint.trim()));
+        hint.push_str(&format!(
+            "\nFamily hint (may be wrong): {}",
+            family_hint.trim()
+        ));
     }
     let pkg = package.trim();
     if !pkg.is_empty() {
@@ -317,20 +320,17 @@ pub const MAX_PDF_BYTES: usize = 20 * 1024 * 1024;
 
 /// The short user-message text that accompanies a PDF document block.
 /// PDF instruction for a CLOCK-tree extraction.
-const CLOCK_PDF_INSTRUCTION: &str =
-    "This is a microcontroller datasheet (PDF). Extract the main clock-tree \
+const CLOCK_PDF_INSTRUCTION: &str = "This is a microcontroller datasheet (PDF). Extract the main clock-tree \
      SPINE (sources, PLL chain, SYSCLK mux, AHB and APB dividers) following the \
      system instructions and the required JSON schema. Do not model the \
      peripheral kernel clocks.";
 
-const PDF_INSTRUCTION: &str =
-    "This is a microcontroller datasheet (PDF). Extract the chip identity, \
+const PDF_INSTRUCTION: &str = "This is a microcontroller datasheet (PDF). Extract the chip identity, \
      memory map, and full pin / alternate-function table following the system \
      instructions and the required JSON schema.";
 
 /// PDF instruction for the PACKAGE-LIST pre-pass.
-const PACKAGES_PDF_INSTRUCTION: &str =
-    "This is a microcontroller datasheet (PDF). List the DISTINCT packages it \
+const PACKAGES_PDF_INSTRUCTION: &str = "This is a microcontroller datasheet (PDF). List the DISTINCT packages it \
      describes (pin-table column headers and pinout figure titles) following the \
      system instructions and the required JSON schema. Do not extract pins.";
 
@@ -693,12 +693,7 @@ pub fn parse_api_envelope(provider: Provider, resp_json: &str) -> Result<String,
             .map(str::to_string),
     };
 
-    text.ok_or_else(|| {
-        format!(
-            "no text content in the {} API response",
-            provider.label()
-        )
-    })
+    text.ok_or_else(|| format!("no text content in the {} API response", provider.label()))
 }
 
 /// Extract the first balanced `{ … }` JSON object from arbitrary model text
@@ -778,17 +773,37 @@ pub struct ApplyReport {
 pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
     let mut r = ApplyReport::default();
 
-    patch(&mut form.display_name, &chip.display_name, "Display name", &mut r);
+    patch(
+        &mut form.display_name,
+        &chip.display_name,
+        "Display name",
+        &mut r,
+    );
     // NOTE: `package` is deliberately NOT patched from the extraction — it is a
     // USER input that drives which pin-number column the model reads, so the
     // model's echo must never override it.
-    patch(&mut form.flash_origin, &chip.flash_origin, "Flash origin", &mut r);
+    patch(
+        &mut form.flash_origin,
+        &chip.flash_origin,
+        "Flash origin",
+        &mut r,
+    );
     // Sizes go through a sanitizer: the model occasionally trails junk onto the
     // value (e.g. "8K probe_chip"), which would fail the memory-value check and
     // block Save. Keep just the leading `0x…` / `<n>` / `<n>K|M` token.
-    patch(&mut form.flash_size, &sanitize_mem_size(&chip.flash_size), "Flash size", &mut r);
+    patch(
+        &mut form.flash_size,
+        &sanitize_mem_size(&chip.flash_size),
+        "Flash size",
+        &mut r,
+    );
     patch(&mut form.ram_origin, &chip.ram_origin, "RAM origin", &mut r);
-    patch(&mut form.ram_size, &sanitize_mem_size(&chip.ram_size), "RAM size", &mut r);
+    patch(
+        &mut form.ram_size,
+        &sanitize_mem_size(&chip.ram_size),
+        "RAM size",
+        &mut r,
+    );
     patch(&mut form.probe_chip, &chip.probe_chip, "Probe chip", &mut r);
 
     // Identity + the build-critical fields the model doesn't reliably return.
@@ -885,7 +900,11 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
             "{total} signal type(s) kept as generic alternate functions (no native driver \
              support — the pin is still configured): {}{}",
             names.join(", "),
-            if extra > 0 { format!(", and {extra} more") } else { String::new() }
+            if extra > 0 {
+                format!(", and {extra} more")
+            } else {
+                String::new()
+            }
         ));
     }
     // Sort by package position, then lay out: a dual-in-line package (SO8N,
@@ -950,7 +969,11 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
              exact variant name and extract again.",
             dups.len(),
             shown.join(", "),
-            if dups.len() > shown.len() { ", …" } else { "" }
+            if dups.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            }
         ));
     }
 
@@ -965,7 +988,6 @@ fn patch(dst: &mut String, value: &str, label: &str, r: &mut ApplyReport) {
         r.patched.push(format!("{label} = {v}"));
     }
 }
-
 
 /// Keep only the leading memory-size token from a possibly-noisy model value:
 /// a `0x…` hex literal, or `<digits>` optionally followed (across spaces) by a
@@ -1042,8 +1064,10 @@ fn package_pin_count(package: &str) -> Option<usize> {
 /// Anthropic's slug yields `anthropic_api_key` — the exact name used before
 /// providers existed, so keys already on disk keep working with no migration.
 pub fn api_key_path(provider: Provider) -> Option<PathBuf> {
-    super::registry::user_mcus_dir()
-        .and_then(|d| d.parent().map(|p| p.join(format!("{}_api_key", provider.slug()))))
+    super::registry::user_mcus_dir().and_then(|d| {
+        d.parent()
+            .map(|p| p.join(format!("{}_api_key", provider.slug())))
+    })
 }
 
 /// Load a provider's API key: its env var takes precedence, else the stored
@@ -1292,7 +1316,11 @@ pub fn cache_entries() -> Vec<CacheEntry> {
         if p.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
-        let key = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let key = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
         let meta = e.metadata().ok();
         let label = cache_label_file(&key)
             .and_then(|l| std::fs::read_to_string(l).ok())
@@ -1341,7 +1369,10 @@ pub fn clear_cache() -> Result<usize, String> {
         return Ok(0);
     }
     let mut removed = 0usize;
-    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+    for e in std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let p = e.path();
         // Count the reply files; the `.label` sidecars are removed with them
         // but not double-counted.
@@ -1467,7 +1498,10 @@ pub fn call_ai_clock(
     if use_cache {
         if let Some(cached) = load_cached(&key) {
             if let Ok(gc) = build_from(&cached) {
-                return Ok(ClockExtraction { clock: gc, from_cache: true });
+                return Ok(ClockExtraction {
+                    clock: gc,
+                    from_cache: true,
+                });
             }
         }
     }
@@ -1487,7 +1521,10 @@ pub fn call_ai_clock(
         }
     );
     save_cached(&key, &model_text, &label);
-    Ok(ClockExtraction { clock: gc, from_cache: false })
+    Ok(ClockExtraction {
+        clock: gc,
+        from_cache: false,
+    })
 }
 
 /// A package-list pre-pass result plus whether it came from the cache.
@@ -1521,7 +1558,9 @@ pub fn call_ai_packages(
     }
     match source {
         Source::Text(t) if t.trim().is_empty() => {
-            return Err("Nothing to scan — paste the datasheet text or pick a PDF first.".to_string());
+            return Err(
+                "Nothing to scan — paste the datasheet text or pick a PDF first.".to_string(),
+            );
         }
         Source::Pdf(b) if b.is_empty() => return Err("The selected PDF is empty.".to_string()),
         Source::Pdf(b) if b.len() > MAX_PDF_BYTES => {
@@ -1551,12 +1590,21 @@ pub fn call_ai_packages(
     if use_cache {
         if let Some(cached) = load_cached(&key) {
             if let Ok(v) = build_from(&cached) {
-                return Ok(PackageList { packages: v, from_cache: true });
+                return Ok(PackageList {
+                    packages: v,
+                    from_cache: true,
+                });
             }
         }
     }
 
-    let body = build_request_body(provider, model, &build_packages_prompt(), source, ExtractKind::Packages);
+    let body = build_request_body(
+        provider,
+        model,
+        &build_packages_prompt(),
+        source,
+        ExtractKind::Packages,
+    );
     let model_text = post_and_parse(provider, api_key, model, &body)?;
     let v = build_from(&model_text)?;
     let label = format!(
@@ -1569,7 +1617,10 @@ pub fn call_ai_packages(
         }
     );
     save_cached(&key, &model_text, &label);
-    Ok(PackageList { packages: v, from_cache: false })
+    Ok(PackageList {
+        packages: v,
+        from_cache: false,
+    })
 }
 
 /// Call the selected provider and parse the extraction. Blocking — the dialog
@@ -1624,7 +1675,10 @@ pub fn call_ai(
     if use_cache {
         if let Some(cached) = load_cached(&key) {
             if let Ok(chip) = parse_response(&cached) {
-                return Ok(Extraction { chip, from_cache: true });
+                return Ok(Extraction {
+                    chip,
+                    from_cache: true,
+                });
             }
             // A corrupt / stale entry just falls through to a fresh call.
         }
@@ -1638,7 +1692,10 @@ pub fn call_ai(
     // the cache list is readable.
     let label = cache_label(provider, model, package_hint, source, &chip);
     save_cached(&key, &model_text, &label);
-    Ok(Extraction { chip, from_cache: false })
+    Ok(Extraction {
+        chip,
+        from_cache: false,
+    })
 }
 
 #[cfg(test)]
@@ -1655,7 +1712,12 @@ mod tests {
         assert_eq!(sanitize_mem_size(""), "");
         assert_eq!(sanitize_mem_size("unknown"), "");
         // The result must round-trip through the form's validator.
-        assert!(crate::panels::mcu_module::mcu_form::parse_ld_number(&sanitize_mem_size("8K probe_chip")).is_some());
+        assert!(
+            crate::panels::mcu_module::mcu_form::parse_ld_number(&sanitize_mem_size(
+                "8K probe_chip"
+            ))
+            .is_some()
+        );
     }
 
     #[test]
@@ -1666,10 +1728,14 @@ mod tests {
         assert!(p.contains("UFQFPN48 SMPS")); // variant discipline demonstrated
         // Schema: additionalProperties present for strict providers, absent for
         // Gemini's responseSchema subset (same rule as the pin schema).
-        assert_eq!(packages_schema(true)["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            packages_schema(true)["additionalProperties"],
+            serde_json::json!(false)
+        );
         assert!(packages_schema(false).get("additionalProperties").is_none());
         // Parse tolerates a fenced reply and keeps variant names distinct.
-        let reply = "```json\n{ \"packages\": [\"UFQFPN48\", \"UFQFPN48 SMPS\", \"UFBGA59\"] }\n```";
+        let reply =
+            "```json\n{ \"packages\": [\"UFQFPN48\", \"UFQFPN48 SMPS\", \"UFBGA59\"] }\n```";
         let ex = parse_packages_reply(reply).unwrap();
         assert_eq!(ex.packages, ["UFQFPN48", "UFQFPN48 SMPS", "UFBGA59"]);
     }
@@ -1714,9 +1780,22 @@ mod tests {
         let chip = ExtractedChip {
             package: "UFQFPN48".into(),
             pins: vec![
-                ExtractedPin { number: "A1".into(), name: "VSSSMPS".into(), reserved: true, ..Default::default() },
-                ExtractedPin { number: "H7".into(), name: "PB5".into(), ..Default::default() },
-                ExtractedPin { number: "12".into(), name: "PA1".into(), ..Default::default() },
+                ExtractedPin {
+                    number: "A1".into(),
+                    name: "VSSSMPS".into(),
+                    reserved: true,
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "H7".into(),
+                    name: "PB5".into(),
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "12".into(),
+                    name: "PA1".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -1724,7 +1803,9 @@ mod tests {
         form.package = "UFQFPN48".into();
         let r = apply_to_form(&chip, &mut form);
         assert!(
-            r.warnings.iter().any(|w| w.contains("2 pin(s) have non-integer numbers")),
+            r.warnings
+                .iter()
+                .any(|w| w.contains("2 pin(s) have non-integer numbers")),
             "{:?}",
             r.warnings
         );
@@ -1751,7 +1832,10 @@ mod tests {
         assert!(label.contains("STM32G031Fx"), "{label}");
         assert!(label.contains("TSSOP20"), "{label}");
         assert!(!label.contains("LQFP48"), "chip package must win: {label}");
-        assert!(label.contains("Google (Gemini)/gemini-3.5-flash"), "{label}");
+        assert!(
+            label.contains("Google (Gemini)/gemini-3.5-flash"),
+            "{label}"
+        );
         assert!(label.contains("PDF 2.0 MB"), "{label}");
     }
 
@@ -1780,33 +1864,72 @@ mod tests {
         let doc = Source::Text("PIN TABLE".into());
         let base = cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &doc);
         // Same inputs → same key (a retry hits the cache).
-        assert_eq!(base, cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &doc));
+        assert_eq!(
+            base,
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &doc)
+        );
         // Whitespace around model/package doesn't split the cache.
-        assert_eq!(base, cache_key(Anthropic, " claude-opus-4-8 ", " UFQFPN48 ", "", &doc));
+        assert_eq!(
+            base,
+            cache_key(Anthropic, " claude-opus-4-8 ", " UFQFPN48 ", "", &doc)
+        );
         // A different package reads a different column → different key.
-        assert_ne!(base, cache_key(Anthropic, "claude-opus-4-8", "UFBGA59", "", &doc));
-        // A different model or document → different key.
-        assert_ne!(base, cache_key(Anthropic, "claude-sonnet-5", "UFQFPN48", "", &doc));
         assert_ne!(
             base,
-            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &Source::Text("OTHER".into()))
+            cache_key(Anthropic, "claude-opus-4-8", "UFBGA59", "", &doc)
+        );
+        // A different model or document → different key.
+        assert_ne!(
+            base,
+            cache_key(Anthropic, "claude-sonnet-5", "UFQFPN48", "", &doc)
+        );
+        assert_ne!(
+            base,
+            cache_key(
+                Anthropic,
+                "claude-opus-4-8",
+                "UFQFPN48",
+                "",
+                &Source::Text("OTHER".into())
+            )
         );
         // Text and PDF sources never collide.
         assert_ne!(
             base,
-            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "", &Source::Pdf(b"PIN TABLE".to_vec()))
+            cache_key(
+                Anthropic,
+                "claude-opus-4-8",
+                "UFQFPN48",
+                "",
+                &Source::Pdf(b"PIN TABLE".to_vec())
+            )
         );
         // Same model NAME on a different provider is a different extraction —
         // model ids are not unique across backends.
-        assert_ne!(base, cache_key(Gemini, "claude-opus-4-8", "UFQFPN48", "", &doc));
-        assert_ne!(base, cache_key(OpenAi, "claude-opus-4-8", "UFQFPN48", "", &doc));
+        assert_ne!(
+            base,
+            cache_key(Gemini, "claude-opus-4-8", "UFQFPN48", "", &doc)
+        );
+        assert_ne!(
+            base,
+            cache_key(OpenAi, "claude-opus-4-8", "UFQFPN48", "", &doc)
+        );
         // A different supplementary prompt must re-extract, not reuse the reply.
         assert_ne!(
             base,
-            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "ignore SMPS", &doc)
+            cache_key(
+                Anthropic,
+                "claude-opus-4-8",
+                "UFQFPN48",
+                "ignore SMPS",
+                &doc
+            )
         );
         // Whitespace around the extra prompt doesn't split the cache.
-        assert_eq!(base, cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "  ", &doc));
+        assert_eq!(
+            base,
+            cache_key(Anthropic, "claude-opus-4-8", "UFQFPN48", "  ", &doc)
+        );
     }
 
     #[test]
@@ -1876,7 +1999,10 @@ mod tests {
         assert_eq!(parts[0]["inlineData"]["mimeType"], "application/pdf");
         assert_eq!(parts[0]["inlineData"]["data"], base64_encode(b"%PDF-1.4"));
         assert!(parts[1]["text"].is_string());
-        assert_eq!(v["generationConfig"]["responseMimeType"], "application/json");
+        assert_eq!(
+            v["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
         assert!(v["generationConfig"]["responseSchema"]["properties"]["pins"].is_object());
     }
 
@@ -1897,7 +2023,13 @@ mod tests {
         );
         // …while the providers that REQUIRE it still get it.
         for p in [Provider::Anthropic, Provider::OpenAi] {
-            let b = build_request_body(p, "m", "SYS", &Source::Text("PASTE".into()), ExtractKind::Pins);
+            let b = build_request_body(
+                p,
+                "m",
+                "SYS",
+                &Source::Text("PASTE".into()),
+                ExtractKind::Pins,
+            );
             assert!(b.contains("additionalProperties"), "{p:?} lost the keyword");
         }
     }
@@ -1930,9 +2062,11 @@ mod tests {
     #[test]
     fn endpoints_are_provider_shaped() {
         // Gemini is the odd one: the model is part of the path.
-        assert!(Provider::Gemini
-            .endpoint("gemini-3.5-flash")
-            .ends_with("/models/gemini-3.5-flash:generateContent"));
+        assert!(
+            Provider::Gemini
+                .endpoint("gemini-3.5-flash")
+                .ends_with("/models/gemini-3.5-flash:generateContent")
+        );
         assert!(Provider::Anthropic.endpoint("x").ends_with("/v1/messages"));
         assert!(Provider::OpenAi.endpoint("x").ends_with("/v1/responses"));
     }
@@ -1966,11 +2100,16 @@ mod tests {
     #[test]
     fn envelope_extracts_text_and_surfaces_errors() {
         let ok = r#"{"content":[{"type":"text","text":"hello"}]}"#;
-        assert_eq!(parse_api_envelope(Provider::Anthropic, ok).unwrap(), "hello");
+        assert_eq!(
+            parse_api_envelope(Provider::Anthropic, ok).unwrap(),
+            "hello"
+        );
         let err = r#"{"type":"error","error":{"type":"authentication_error","message":"bad key"}}"#;
-        assert!(parse_api_envelope(Provider::Anthropic, err)
-            .unwrap_err()
-            .contains("bad key"));
+        assert!(
+            parse_api_envelope(Provider::Anthropic, err)
+                .unwrap_err()
+                .contains("bad key")
+        );
     }
 
     #[test]
@@ -1984,9 +2123,11 @@ mod tests {
             "{\"a\":1}"
         );
         let err = r#"{"error":{"code":400,"message":"bad schema"}}"#;
-        assert!(parse_api_envelope(Provider::Gemini, err)
-            .unwrap_err()
-            .contains("bad schema"));
+        assert!(
+            parse_api_envelope(Provider::Gemini, err)
+                .unwrap_err()
+                .contains("bad schema")
+        );
     }
 
     #[test]
@@ -1997,9 +2138,11 @@ mod tests {
             {"type":"message","content":[{"type":"output_text","text":"hello"}]}]}"#;
         assert_eq!(parse_api_envelope(Provider::OpenAi, ok).unwrap(), "hello");
         let err = r#"{"error":{"message":"bad key"}}"#;
-        assert!(parse_api_envelope(Provider::OpenAi, err)
-            .unwrap_err()
-            .contains("bad key"));
+        assert!(
+            parse_api_envelope(Provider::OpenAi, err)
+                .unwrap_err()
+                .contains("bad key")
+        );
     }
 
     #[test]
@@ -2069,7 +2212,17 @@ mod tests {
                 pin("3", "PB6", &["I2C1_SCL", "I2C1_SMBA", "GPIO"]),
                 // LPUART / SPI_RDY / RTS_DE now MAP (grammar extension);
                 // SAI still has no token → dropped, but REPORTED.
-                pin("4", "PA2", &["LPUART1_TX", "SPI1_RDY", "USART3_RTS_DE", "SAI1_SD_A", "GPIO"]),
+                pin(
+                    "4",
+                    "PA2",
+                    &[
+                        "LPUART1_TX",
+                        "SPI1_RDY",
+                        "USART3_RTS_DE",
+                        "SAI1_SD_A",
+                        "GPIO",
+                    ],
+                ),
                 // Pure noise → dropped SILENTLY (no report spam).
                 pin("5", "PC14", &["RCC_OSC32_IN", "EVENTOUT", "GPIO"]),
                 pin("6", "PA5", &["ADC1_IN5", "ADC2_IN5", "SPI1_SCK", "GPIO"]),
@@ -2118,17 +2271,19 @@ mod tests {
         assert!(r.raw_notes.iter().any(|n| n.contains("SAI1_SD_A")));
         // …not the ones the grammar now covers, and not noise.
         assert!(
-            !r.raw_notes
-                .iter()
-                .any(|n| n.contains("LPUART1_TX")
-                    || n.contains("SPI1_RDY")
-                    || n.contains("EVENTOUT")
-                    || n.contains("RCC_OSC32_IN")),
+            !r.raw_notes.iter().any(|n| n.contains("LPUART1_TX")
+                || n.contains("SPI1_RDY")
+                || n.contains("EVENTOUT")
+                || n.contains("RCC_OSC32_IN")),
             "mapped signals and noise must not be reported: {:?}",
             r.raw_notes
         );
         // The model can no longer produce invalid tokens, so no token warnings.
-        assert!(!r.warnings.iter().any(|w| w.contains("unknown function token")));
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.contains("unknown function token"))
+        );
     }
 
     #[test]
@@ -2165,7 +2320,11 @@ mod tests {
         let chip = ExtractedChip {
             display_name: "STM32G0B1RE".into(),
             family: "".into(), // model didn't say — name-derivation must fill it
-            pins: vec![ExtractedPin { number: "1".into(), name: "PA0".into(), ..Default::default() }],
+            pins: vec![ExtractedPin {
+                number: "1".into(),
+                name: "PA0".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let mut form = McuForm::blank(); // starts as stm32f1 / thumbv7m / stm32f1xx-hal
@@ -2235,31 +2394,75 @@ mod tests {
     fn exposed_thermal_pad_is_not_a_pin() {
         let chip = ExtractedChip {
             pins: vec![
-                ExtractedPin { number: "1".into(), name: "VSS".into(), reserved: true, ..Default::default() },
-                ExtractedPin { number: "".into(), name: "exposed pad VSS".into(), reserved: true, ..Default::default() },
-                ExtractedPin { number: "".into(), name: "EPAD".into(), reserved: true, ..Default::default() },
-                ExtractedPin { number: "2".into(), name: "PA0".into(), ..Default::default() },
+                ExtractedPin {
+                    number: "1".into(),
+                    name: "VSS".into(),
+                    reserved: true,
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "".into(),
+                    name: "exposed pad VSS".into(),
+                    reserved: true,
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "".into(),
+                    name: "EPAD".into(),
+                    reserved: true,
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "2".into(),
+                    name: "PA0".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
         let mut form = McuForm::blank();
         let r = apply_to_form(&chip, &mut form);
         assert_eq!(r.pins_added, 2, "only the two real pins");
-        let names: Vec<&str> = form.pins.iter().flatten().map(|p| p.name.as_str()).collect();
+        let names: Vec<&str> = form
+            .pins
+            .iter()
+            .flatten()
+            .map(|p| p.name.as_str())
+            .collect();
         assert!(names.contains(&"VSS"), "a numbered VSS pin must survive");
         assert!(!names.iter().any(|n| n.to_ascii_uppercase().contains("PAD")));
-        assert!(r.raw_notes.iter().any(|n| n.contains("2 exposed thermal-pad entries")));
+        assert!(
+            r.raw_notes
+                .iter()
+                .any(|n| n.contains("2 exposed thermal-pad entries"))
+        );
         // …and no bogus "non-integer number" warning from the pad's empty slot.
-        assert!(!r.warnings.iter().any(|w| w.contains("non-integer numbers")), "{:?}", r.warnings);
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("non-integer numbers")),
+            "{:?}",
+            r.warnings
+        );
     }
 
     #[test]
     fn duplicate_numbers_are_flagged() {
         let chip = ExtractedChip {
             pins: vec![
-                ExtractedPin { number: "1".into(), name: "A".into(), ..Default::default() },
-                ExtractedPin { number: "1".into(), name: "B".into(), ..Default::default() },
-                ExtractedPin { number: "2".into(), name: "C".into(), ..Default::default() },
+                ExtractedPin {
+                    number: "1".into(),
+                    name: "A".into(),
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "1".into(),
+                    name: "B".into(),
+                    ..Default::default()
+                },
+                ExtractedPin {
+                    number: "2".into(),
+                    name: "C".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };

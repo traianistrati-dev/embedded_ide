@@ -207,7 +207,11 @@ impl AppIde {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     let can = !busy && !dlg.url.trim().is_empty() && !dlg.dir.trim().is_empty();
-                    let label = if dlg.as_submodule { "Add submodule" } else { "Clone" };
+                    let label = if dlg.as_submodule {
+                        "Add submodule"
+                    } else {
+                        "Clone"
+                    };
                     if ui
                         .add_enabled(
                             can,
@@ -345,13 +349,10 @@ impl AppIde {
                 }
             }
 
-            let err = dlg
-                .error
-                .clone()
-                .or_else(|| match &ren_plan {
-                    Some(Err(e)) => Some(e.clone()),
-                    _ => None,
-                });
+            let err = dlg.error.clone().or_else(|| match &ren_plan {
+                Some(Err(e)) => Some(e.clone()),
+                _ => None,
+            });
             if let Some(e) = &err {
                 ui.add_space(6.0);
                 ui.label(
@@ -468,10 +469,7 @@ impl AppIde {
         }
     }
 
-    fn apply_delete_crate(
-        &mut self,
-        plan: extract_crate::DeleteCratePlan,
-    ) -> Result<(), String> {
+    fn apply_delete_crate(&mut self, plan: extract_crate::DeleteCratePlan) -> Result<(), String> {
         let root = self.require_project_dir()?;
         // A library cloned as a git submodule owns a `.gitmodules` entry + a
         // gitlink in the index; a plain `remove_dir_all` would leave those
@@ -500,10 +498,7 @@ impl AppIde {
         Ok(())
     }
 
-    fn apply_rename_crate(
-        &mut self,
-        plan: extract_crate::RenameCratePlan,
-    ) -> Result<(), String> {
+    fn apply_rename_crate(&mut self, plan: extract_crate::RenameCratePlan) -> Result<(), String> {
         let root = self.require_project_dir()?;
         std::fs::rename(root.join(&plan.old_dir), root.join(&plan.new_dir))
             .map_err(|e| format!("Could not rename {}: {e}", plan.old_dir))?;
@@ -699,7 +694,11 @@ impl AppIde {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     let can = error_text.is_none();
-                    let label = if folder.is_some() { "Extract" } else { "Create" };
+                    let label = if folder.is_some() {
+                        "Extract"
+                    } else {
+                        "Create"
+                    };
                     if ui
                         .add_enabled(
                             can,
@@ -826,9 +825,11 @@ impl AppIde {
 
         // Remember what was selected: the indices below shift under it.
         let selected_path = match self.selected_file {
-            ProjectFileId::UserFile(i) => {
-                self.project_tree.user_src_files.get(i).map(|(p, _)| p.clone())
-            }
+            ProjectFileId::UserFile(i) => self
+                .project_tree
+                .user_src_files
+                .get(i)
+                .map(|(p, _)| p.clone()),
             _ => None,
         };
 

@@ -34,7 +34,11 @@ pub enum LimitKey {
 pub enum NodeKind {
     /// Oscillator / clock source. `gated` sources can be turned off; a fixed
     /// source uses `min_hz == max_hz`. The live frequency lives in the state.
-    Source { min_hz: u32, max_hz: u32, gated: bool },
+    Source {
+        min_hz: u32,
+        max_hz: u32,
+        gated: bool,
+    },
     /// 1-of-N selector. Inputs arrive via edges, addressed by their `input` index.
     Mux { inputs: usize },
     /// Configurable integer divider chosen from a discrete option set.

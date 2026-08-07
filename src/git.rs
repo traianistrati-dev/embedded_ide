@@ -109,10 +109,16 @@ pub struct GitChange {
 pub const COMMIT_TYPES: &[(&str, &str)] = &[
     ("feat:", "A new feature for the user."),
     ("fix:", "A bug fix for the user."),
-    ("refactor:", "A code change that neither fixes a bug nor adds a feature."),
+    (
+        "refactor:",
+        "A code change that neither fixes a bug nor adds a feature.",
+    ),
     ("perf:", "A change that improves performance."),
     ("docs:", "Documentation-only changes."),
-    ("style:", "Formatting / whitespace only — no code-behaviour change."),
+    (
+        "style:",
+        "Formatting / whitespace only — no code-behaviour change.",
+    ),
     ("test:", "Adding or correcting tests."),
     ("build:", "Changes to the build system or dependencies."),
     ("ci:", "Changes to CI configuration or scripts."),
@@ -555,16 +561,25 @@ pub fn parse_porcelain_v2(text: &str) -> GitStatus {
                 tail
             };
             if !path.is_empty() {
-                st.changes.push(GitChange { code: xy, path: path.to_owned() });
+                st.changes.push(GitChange {
+                    code: xy,
+                    path: path.to_owned(),
+                });
             }
         } else if let Some(rest) = line.strip_prefix("u ") {
             // Unmerged (conflict): `u XY sub m1 m2 m3 mW h1 h2 h3 path`.
             let xy = rest.split(' ').next().unwrap_or("UU").to_owned();
             if let Some(path) = rest.splitn(11, ' ').nth(9) {
-                st.changes.push(GitChange { code: xy, path: path.to_owned() });
+                st.changes.push(GitChange {
+                    code: xy,
+                    path: path.to_owned(),
+                });
             }
         } else if let Some(path) = line.strip_prefix("? ") {
-            st.changes.push(GitChange { code: "??".into(), path: path.to_owned() });
+            st.changes.push(GitChange {
+                code: "??".into(),
+                path: path.to_owned(),
+            });
         }
         // `! ignored` and `# branch.oid` are skipped.
     }
@@ -628,7 +643,12 @@ fn commands_for(
         GitOp::SwitchBranch => vec![vec!["switch".into(), branch.to_owned()]],
         // Force-delete a local branch (you can't delete the one you're on).
         GitOp::DeleteBranch => vec![vec!["branch".into(), "-D".into(), branch.to_owned()]],
-        GitOp::SetRemote => vec![vec!["remote".into(), "add".into(), "origin".into(), remote.to_owned()]],
+        GitOp::SetRemote => vec![vec![
+            "remote".into(),
+            "add".into(),
+            "origin".into(),
+            remote.to_owned(),
+        ]],
         // Repoint origin, then drop the stale upstream — it names a branch in
         // the OLD repository, and leaving it makes the next Push fail. Only
         // when one actually exists: `--unset-upstream` errors out otherwise,
@@ -962,7 +982,8 @@ pub fn run_op(
                 Err(e) => {
                     let missing = e.kind() == std::io::ErrorKind::NotFound;
                     let note = if missing {
-                        "[error] `git` not found on PATH — install from https://git-scm.com".to_owned()
+                        "[error] `git` not found on PATH — install from https://git-scm.com"
+                            .to_owned()
                     } else {
                         format!("[error] couldn't launch git: {e}")
                     };
@@ -990,7 +1011,12 @@ pub fn run_op(
             if let Some((lib, proj_dir)) = &mirror {
                 let mirrored = mirror_message(&msg, lib);
                 let steps = [
-                    vec!["add".to_string(), "-A".to_string(), "--".to_string(), lib.clone()],
+                    vec![
+                        "add".to_string(),
+                        "-A".to_string(),
+                        "--".to_string(),
+                        lib.clone(),
+                    ],
                     vec![
                         "commit".to_string(),
                         "-m".to_string(),
@@ -1092,13 +1118,14 @@ pub fn run_op(
                 // success alone would report a library as "already a repo" —
                 // the enclosing project's. Only the repo ROOT counts here.
                 let own_repo = out.status.success()
-                    && run_git(&project_dir, &["rev-parse".into(), "--show-toplevel".into()])
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| {
-                            is_repo_root(&String::from_utf8_lossy(&o.stdout), &project_dir)
-                        })
-                        .unwrap_or(false);
+                    && run_git(
+                        &project_dir,
+                        &["rev-parse".into(), "--show-toplevel".into()],
+                    )
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| is_repo_root(&String::from_utf8_lossy(&o.stdout), &project_dir))
+                    .unwrap_or(false);
                 let parsed =
                     own_repo.then(|| parse_porcelain_v2(&String::from_utf8_lossy(&out.stdout)));
                 let mut st = state.lock().unwrap();
@@ -1129,11 +1156,14 @@ pub fn run_op(
         let owns = state.lock().unwrap().is_repo;
         let remote_url = owns
             .then(|| {
-                run_git(&project_dir, &["remote".into(), "get-url".into(), "origin".into()])
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-                    .filter(|u| !u.is_empty())
+                run_git(
+                    &project_dir,
+                    &["remote".into(), "get-url".into(), "origin".into()],
+                )
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .filter(|u| !u.is_empty())
             })
             .flatten();
 
@@ -1143,7 +1173,11 @@ pub fn run_op(
             .then(|| {
                 run_git(
                     &project_dir,
-                    &["for-each-ref".into(), "--format=%(refname:short)".into(), "refs/heads".into()],
+                    &[
+                        "for-each-ref".into(),
+                        "--format=%(refname:short)".into(),
+                        "refs/heads".into(),
+                    ],
                 )
                 .ok()
                 .filter(|o| o.status.success())
@@ -1168,7 +1202,10 @@ pub fn run_op(
             st.busy = None;
             // Commit / pull / init move HEAD or rewrite the worktree — the
             // editor's gutter-diff baseline must refetch.
-            if matches!(op, GitOp::Commit | GitOp::CommitPush | GitOp::Pull | GitOp::Init) {
+            if matches!(
+                op,
+                GitOp::Commit | GitOp::CommitPush | GitOp::Pull | GitOp::Init
+            ) {
                 st.op_gen += 1;
             }
             // Switching branches rewrote the worktree (new HEAD content): refetch
@@ -1221,7 +1258,11 @@ pub fn run_clone_library(
                     GitLine::Notice,
                     format!(
                         "[ok] {} into {}",
-                        if l.is_submodule { "added submodule" } else { "cloned" },
+                        if l.is_submodule {
+                            "added submodule"
+                        } else {
+                            "cloned"
+                        },
                         l.dir
                     ),
                 ),
@@ -1254,7 +1295,10 @@ pub fn run_clone_library(
         } else {
             vec!["clone".into(), url.clone(), dir.clone()]
         };
-        state.lock().unwrap().push(GitLine::Cmd, format!("> git {}", args.join(" ")));
+        state
+            .lock()
+            .unwrap()
+            .push(GitLine::Cmd, format!("> git {}", args.join(" ")));
         let out = match run_git(&project_dir, &args) {
             Ok(o) => o,
             Err(e) => return finish(Err(format!("could not run git: {e}"))),
@@ -1266,7 +1310,11 @@ pub fn run_clone_library(
             }
         }
         if !out.status.success() {
-            let what = if submodule { "git submodule add" } else { "git clone" };
+            let what = if submodule {
+                "git submodule add"
+            } else {
+                "git clone"
+            };
             return finish(Err(format!("{what} failed — see the output above")));
         }
 
@@ -1277,11 +1325,15 @@ pub fn run_clone_library(
             Err(_) => {
                 return finish(Err(format!(
                     "the cloned repo has no Cargo.toml — `{dir}` is not a Rust crate"
-                )))
+                )));
             }
         };
         match parse_package_name(&toml) {
-            Some(name) => finish(Ok(ClonedLibrary { dir, name, is_submodule: submodule })),
+            Some(name) => finish(Ok(ClonedLibrary {
+                dir,
+                name,
+                is_submodule: submodule,
+            })),
             None => finish(Err(format!(
                 "`{dir}/Cargo.toml` has no [package] name — not a library crate"
             ))),
@@ -1321,7 +1373,11 @@ fn gitmodules_paths(gitmodules: &str) -> Vec<String> {
     gitmodules
         .lines()
         .filter_map(|line| {
-            let rest = line.trim().strip_prefix("path")?.trim_start().strip_prefix('=')?;
+            let rest = line
+                .trim()
+                .strip_prefix("path")?
+                .trim_start()
+                .strip_prefix('=')?;
             Some(rest.trim().trim_matches('"').to_string())
         })
         .collect()
@@ -1350,7 +1406,13 @@ pub fn remove_submodule(project_dir: &Path, dir: &str) {
     // Unregister: empties the working tree and drops the `.git/config` entry.
     let _ = run_git(
         project_dir,
-        &["submodule".into(), "deinit".into(), "-f".into(), "--".into(), dir.to_owned()],
+        &[
+            "submodule".into(),
+            "deinit".into(),
+            "-f".into(),
+            "--".into(),
+            dir.to_owned(),
+        ],
     );
     // Drop the gitlink from the index AND the `.gitmodules` entry (staged), and
     // remove the working tree. Modern git (>=1.8.5) rewrites `.gitmodules` here.
@@ -1379,9 +1441,17 @@ pub fn parse_unified_diff(text: &str) -> (Vec<DiffRow>, usize, usize) {
             in_hunk = true;
             for part in rest.split_whitespace() {
                 if let Some(a) = part.strip_prefix('-') {
-                    old_no = a.split(',').next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                    old_no = a
+                        .split(',')
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(1);
                 } else if let Some(c) = part.strip_prefix('+') {
-                    new_no = c.split(',').next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                    new_no = c
+                        .split(',')
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(1);
                 }
             }
             rows.push(DiffRow::Hunk(line.to_owned()));
@@ -1534,7 +1604,12 @@ fn synthesized_added(path: &str, content: &str) -> FileDiff {
         .map(|(i, l)| DiffRow::Add(i as u32 + 1, l.to_owned()))
         .collect();
     let added = rows.len();
-    FileDiff { path: path.to_owned(), rows, added, removed: 0 }
+    FileDiff {
+        path: path.to_owned(),
+        rows,
+        added,
+        removed: 0,
+    }
 }
 
 /// Open the diff (disk vs HEAD — exactly what a commit would record) for one
@@ -1576,13 +1651,21 @@ pub fn run_diff(
             .map(|out| {
                 let (rows, added, removed) =
                     parse_unified_diff(&String::from_utf8_lossy(&out.stdout));
-                FileDiff { path: path.clone(), rows, added, removed }
+                FileDiff {
+                    path: path.clone(),
+                    rows,
+                    added,
+                    removed,
+                }
             })
         };
         let mut st = state.lock().unwrap();
         match diff {
             Some(d) if d.rows.is_empty() => {
-                st.push(GitLine::Notice, format!("no differences vs HEAD for {path}"));
+                st.push(
+                    GitLine::Notice,
+                    format!("no differences vs HEAD for {path}"),
+                );
                 st.diff = None;
             }
             Some(d) => st.diff = Some(d),
@@ -1650,11 +1733,15 @@ pub fn run_commit_files(
                     // A merge shows nothing against its first parent.
                     st.push(
                         GitLine::Notice,
-                        "[info] no file changes against the first parent (merge commit?)".to_owned(),
+                        "[info] no file changes against the first parent (merge commit?)"
+                            .to_owned(),
                     );
                 }
             }
-            _ => st.push(GitLine::Notice, format!("[error] couldn't read commit {sha}")),
+            _ => st.push(
+                GitLine::Notice,
+                format!("[error] couldn't read commit {sha}"),
+            ),
         }
         st.busy = None;
         drop(st);
@@ -1706,10 +1793,18 @@ pub fn run_commit_file_diff(
                     );
                     st.diff = None;
                 } else {
-                    st.diff = Some(FileDiff { path, rows, added, removed });
+                    st.diff = Some(FileDiff {
+                        path,
+                        rows,
+                        added,
+                        removed,
+                    });
                 }
             }
-            _ => st.push(GitLine::Notice, format!("[error] couldn't diff {path} at {sha}")),
+            _ => st.push(
+                GitLine::Notice,
+                format!("[error] couldn't diff {path} at {sha}"),
+            ),
         }
         st.busy = None;
         drop(st);
@@ -1830,19 +1925,32 @@ pub fn compute_hunks(old: &str, new: &str) -> Vec<DiffHunk> {
         .iter()
         .filter_map(|op| match *op {
             DiffOp::Equal { .. } => None,
-            DiffOp::Delete { old_index, old_len, new_index } => Some(DiffHunk {
+            DiffOp::Delete {
+                old_index,
+                old_len,
+                new_index,
+            } => Some(DiffHunk {
                 old_start: old_index,
                 old_len,
                 new_start: new_index,
                 new_len: 0,
             }),
-            DiffOp::Insert { old_index, new_index, new_len } => Some(DiffHunk {
+            DiffOp::Insert {
+                old_index,
+                new_index,
+                new_len,
+            } => Some(DiffHunk {
                 old_start: old_index,
                 old_len: 0,
                 new_start: new_index,
                 new_len,
             }),
-            DiffOp::Replace { old_index, old_len, new_index, new_len } => Some(DiffHunk {
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => Some(DiffHunk {
                 old_start: old_index,
                 old_len,
                 new_start: new_index,
@@ -2011,9 +2119,18 @@ mod tests {
         assert_eq!(
             st.changes,
             vec![
-                GitChange { code: ".M".into(), path: "src/main.rs".into() },
-                GitChange { code: "M.".into(), path: "Cargo.toml".into() },
-                GitChange { code: "??".into(), path: "src/new_file.rs".into() },
+                GitChange {
+                    code: ".M".into(),
+                    path: "src/main.rs".into()
+                },
+                GitChange {
+                    code: "M.".into(),
+                    path: "Cargo.toml".into()
+                },
+                GitChange {
+                    code: "??".into(),
+                    path: "src/new_file.rs".into()
+                },
             ]
         );
     }
@@ -2049,7 +2166,10 @@ mod tests {
         // deletions matching them); everything-checked keeps plain `add -A`.
         let picked = Some(vec!["src/main.rs".to_owned(), "Cargo.toml".to_owned()]);
         let cmds = commands_for(GitOp::Commit, "m", "", "", true, &picked);
-        assert_eq!(cmds[0], vec!["add", "-A", "--", "src/main.rs", "Cargo.toml"]);
+        assert_eq!(
+            cmds[0],
+            vec!["add", "-A", "--", "src/main.rs", "Cargo.toml"]
+        );
         assert_eq!(cmds[1], vec!["commit", "-m", "m"]);
     }
 
@@ -2060,7 +2180,10 @@ mod tests {
             commands_for(GitOp::Push, "", "", "", false, &None),
             vec![vec!["push", "-u", "origin", "HEAD"]]
         );
-        assert_eq!(commands_for(GitOp::Push, "", "", "", true, &None), vec![vec!["push"]]);
+        assert_eq!(
+            commands_for(GitOp::Push, "", "", "", true, &None),
+            vec![vec!["push"]]
+        );
         // Commit & Push uses the same upstream-aware push as its last step.
         let cmds = commands_for(GitOp::CommitPush, "m", "", "", false, &None);
         assert_eq!(cmds[2], vec!["push", "-u", "origin", "HEAD"]);
@@ -2069,8 +2192,20 @@ mod tests {
     #[test]
     fn set_remote_adds_origin_with_the_draft_url() {
         assert_eq!(
-            commands_for(GitOp::SetRemote, "", "https://github.com/u/r.git", "", true, &None),
-            vec![vec!["remote", "add", "origin", "https://github.com/u/r.git"]]
+            commands_for(
+                GitOp::SetRemote,
+                "",
+                "https://github.com/u/r.git",
+                "",
+                true,
+                &None
+            ),
+            vec![vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/u/r.git"
+            ]]
         );
     }
 
@@ -2104,12 +2239,18 @@ mod tests {
         // Empty message → just the prefix + space.
         assert_eq!(apply_commit_prefix("", "feat:"), "feat: ");
         // Plain text → prefix prepended.
-        assert_eq!(apply_commit_prefix("add blinker", "feat:"), "feat: add blinker");
+        assert_eq!(
+            apply_commit_prefix("add blinker", "feat:"),
+            "feat: add blinker"
+        );
         // Existing conventional prefix is REPLACED, not stacked.
         assert_eq!(apply_commit_prefix("feat: add x", "fix:"), "fix: add x");
         // Leading whitespace + existing prefix are stripped; the rest is kept
         // verbatim (only the front is trimmed).
-        assert_eq!(apply_commit_prefix("  refactor:  tidy ", "chore:"), "chore: tidy ");
+        assert_eq!(
+            apply_commit_prefix("  refactor:  tidy ", "chore:"),
+            "chore: tidy "
+        );
         // A non-prefix colon word is left alone.
         assert_eq!(apply_commit_prefix("note: hi", "feat:"), "feat: note: hi");
     }
@@ -2246,9 +2387,9 @@ index abc..def 100644
             DiffRow::Add(51, "y".into()),
         ];
         let p = hunk_patch("src/main.rs", &rows, 0).unwrap();
-        assert!(p.starts_with(
-            "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@ fn main() {\n"
-        ));
+        assert!(
+            p.starts_with("--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@ fn main() {\n")
+        );
         assert!(p.contains(" ctx line\n"));
         assert!(p.contains("-old line\n"));
         assert!(p.contains("+new line\n"));
@@ -2285,14 +2426,32 @@ index abc..def 100644
             hunks,
             vec![
                 // b → B: replace at old line 1 / new line 1
-                DiffHunk { old_start: 1, old_len: 1, new_start: 1, new_len: 1 },
+                DiffHunk {
+                    old_start: 1,
+                    old_len: 1,
+                    new_start: 1,
+                    new_len: 1
+                },
                 // appended line after d
-                DiffHunk { old_start: 4, old_len: 0, new_start: 4, new_len: 1 },
+                DiffHunk {
+                    old_start: 4,
+                    old_len: 0,
+                    new_start: 4,
+                    new_len: 1
+                },
             ]
         );
         // Pure deletion → new_len == 0 marker at the boundary.
         let hunks = compute_hunks("a\nb\nc\n", "a\nc\n");
-        assert_eq!(hunks, vec![DiffHunk { old_start: 1, old_len: 1, new_start: 1, new_len: 0 }]);
+        assert_eq!(
+            hunks,
+            vec![DiffHunk {
+                old_start: 1,
+                old_len: 1,
+                new_start: 1,
+                new_len: 0
+            }]
+        );
         // Identical → no hunks.
         assert!(compute_hunks("x\n", "x\n").is_empty());
     }
@@ -2323,7 +2482,10 @@ index abc..def 100644
         let hunks = compute_hunks(baseline, current);
         let restored = revert_hunk(current, baseline, hunks.last().unwrap());
         assert!(restored.ends_with("b\n"));
-        assert!(restored.contains("a\n"), "separator restored, not glued: {restored:?}");
+        assert!(
+            restored.contains("a\n"),
+            "separator restored, not glued: {restored:?}"
+        );
     }
 
     #[test]
@@ -2437,7 +2599,10 @@ index abc..def 100644
         assert_eq!(RepoTarget::Project.prefix(), "");
         assert_eq!(RepoTarget::Library("mw_radar".into()).prefix(), "mw_radar/");
         // A trailing slash in the member name must not double up.
-        assert_eq!(RepoTarget::Library("mw_radar/".into()).prefix(), "mw_radar/");
+        assert_eq!(
+            RepoTarget::Library("mw_radar/".into()).prefix(),
+            "mw_radar/"
+        );
     }
 
     #[test]
@@ -2463,7 +2628,10 @@ index abc..def 100644
         );
         // The project repo legitimately tracks the library's files too, so
         // nothing is filtered out there.
-        assert_eq!(snapshot_for_target(snap.clone(), &RepoTarget::Project), snap);
+        assert_eq!(
+            snapshot_for_target(snap.clone(), &RepoTarget::Project),
+            snap
+        );
     }
 
     #[test]
@@ -2594,12 +2762,15 @@ index abc..def 100644
         std::fs::write(dir.join("Cargo.toml"), "old").unwrap();
 
         let snapshot = vec![
-            ("src/main.rs".to_owned(), "same".to_owned()),      // identical
-            ("Cargo.toml".to_owned(), "new".to_owned()),        // differs
+            ("src/main.rs".to_owned(), "same".to_owned()), // identical
+            ("Cargo.toml".to_owned(), "new".to_owned()),   // differs
             ("src/missing.rs".to_owned(), "anything".to_owned()), // not on disk
         ];
         let unsaved = unsaved_changes(&dir, &snapshot);
-        assert_eq!(unsaved, vec!["Cargo.toml".to_owned(), "src/missing.rs".to_owned()]);
+        assert_eq!(
+            unsaved,
+            vec!["Cargo.toml".to_owned(), "src/missing.rs".to_owned()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2622,7 +2793,11 @@ index abc..def 100644
             ("Cargo.toml".to_owned(), "a\nb\n".to_owned()),
         ];
         let unsaved = unsaved_changes(&dir, &snapshot);
-        assert_eq!(unsaved, vec!["Cargo.toml".to_owned()], "only the real edit is unsaved");
+        assert_eq!(
+            unsaved,
+            vec!["Cargo.toml".to_owned()],
+            "only the real edit is unsaved"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

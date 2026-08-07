@@ -16,8 +16,9 @@ impl Pin {
                 "VBAT" => egui::Color32::from_rgb(220, 100, 100),
                 "VSS" | "VSSA" => egui::Color32::from_rgb(30, 30, 30),
                 // ESP32-C3 power / ground names
-                "VDD3P3" | "VDD3P3_CPU"
-                | "VDD3P3_RTC" | "VDD_SPI" => egui::Color32::from_rgb(200, 50, 50),
+                "VDD3P3" | "VDD3P3_CPU" | "VDD3P3_RTC" | "VDD_SPI" => {
+                    egui::Color32::from_rgb(200, 50, 50)
+                }
                 "GND" => egui::Color32::from_rgb(30, 30, 30),
                 // Misc reserved (NRST, BOOT0, CHIP_PU, LNA_IN, …)
                 _ => egui::Color32::LIGHT_GRAY,

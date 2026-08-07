@@ -18,16 +18,34 @@ use super::model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
 const M: u32 = 1_000_000;
 
 fn n(id: &str, kind: NodeKind, state: NodeState) -> Node {
-    Node { id: id.into(), kind, state, limit: None }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: None,
+    }
 }
 fn n_lim(id: &str, kind: NodeKind, state: NodeState, limit: LimitKey) -> Node {
-    Node { id: id.into(), kind, state, limit: Some(limit) }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: Some(limit),
+    }
 }
 fn e(from: &str, to: &str) -> Edge {
-    Edge { from: from.into(), to: to.into(), input: 0 }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input: 0,
+    }
 }
 fn e_in(from: &str, to: &str, input: usize) -> Edge {
-    Edge { from: from.into(), to: to.into(), input }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input,
+    }
 }
 
 /// Build the G0 graph with the crystal-free 64 MHz HSI→PLL preset selected.
@@ -41,29 +59,89 @@ pub fn stm32g0_graph() -> ClockGraph {
         // ── Sources ──
         n(
             "hsi",
-            NodeKind::Source { min_hz: 16 * M, max_hz: 16 * M, gated: false },
-            NodeState::Source { enabled: true, hz: 16 * M },
+            NodeKind::Source {
+                min_hz: 16 * M,
+                max_hz: 16 * M,
+                gated: false,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 16 * M,
+            },
         ),
         n(
             "hse",
-            NodeKind::Source { min_hz: 4 * M, max_hz: 48 * M, gated: true },
-            NodeState::Source { enabled: false, hz: 8 * M },
+            NodeKind::Source {
+                min_hz: 4 * M,
+                max_hz: 48 * M,
+                gated: true,
+            },
+            NodeState::Source {
+                enabled: false,
+                hz: 8 * M,
+            },
         ),
         // ── Main PLL: src mux → /M → ×N → /R ──
         n("pllsrc", NodeKind::Mux { inputs: 2 }, NodeState::Index(0)), // HSI
-        n("pllm", NodeKind::Divider { options: pll_m }, NodeState::Index(0)), // /1 → 16 MHz
-        n("plln", NodeKind::Multiplier { min: 8, max: 86 }, NodeState::Value(8)), // VCO 128
-        n("pllr", NodeKind::Divider { options: pll_r }, NodeState::Index(0)), // /2 → 64 MHz
-        n_lim("pllclk", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
+        n(
+            "pllm",
+            NodeKind::Divider { options: pll_m },
+            NodeState::Index(0),
+        ), // /1 → 16 MHz
+        n(
+            "plln",
+            NodeKind::Multiplier { min: 8, max: 86 },
+            NodeState::Value(8),
+        ), // VCO 128
+        n(
+            "pllr",
+            NodeKind::Divider { options: pll_r },
+            NodeState::Index(0),
+        ), // /2 → 64 MHz
+        n_lim(
+            "pllclk",
+            NodeKind::Tap,
+            NodeState::Fixed,
+            LimitKey::SysclkMax,
+        ),
         // ── SYSCLK + single APB bus ──
         n("sw", NodeKind::Mux { inputs: 3 }, NodeState::Index(2)), // PLLCLK
-        n_lim("sysclk", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
-        n("ahb", NodeKind::Divider { options: ahb_div }, NodeState::Index(0)),
-        n_lim("hclk", NodeKind::Output, NodeState::Fixed, LimitKey::HclkMax),
-        n("apb1", NodeKind::Divider { options: bus_div }, NodeState::Index(0)),
-        n_lim("pclk1", NodeKind::Output, NodeState::Fixed, LimitKey::Pclk1Max),
+        n_lim(
+            "sysclk",
+            NodeKind::Tap,
+            NodeState::Fixed,
+            LimitKey::SysclkMax,
+        ),
+        n(
+            "ahb",
+            NodeKind::Divider { options: ahb_div },
+            NodeState::Index(0),
+        ),
+        n_lim(
+            "hclk",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::HclkMax,
+        ),
+        n(
+            "apb1",
+            NodeKind::Divider { options: bus_div },
+            NodeState::Index(0),
+        ),
+        n_lim(
+            "pclk1",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::Pclk1Max,
+        ),
         // ── Timer ×2 rule (single bus) ──
-        n("tim_apb1", NodeKind::TimerMul { prescaler: "apb1".into() }, NodeState::Fixed),
+        n(
+            "tim_apb1",
+            NodeKind::TimerMul {
+                prescaler: "apb1".into(),
+            },
+            NodeState::Fixed,
+        ),
     ];
 
     let edges = vec![

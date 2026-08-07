@@ -150,7 +150,10 @@ mod tests {
 
     #[test]
     fn plain_prose_is_body() {
-        assert_eq!(kinds("Writes 9-bit words to the UART."), vec![DocKind::Body]);
+        assert_eq!(
+            kinds("Writes 9-bit words to the UART."),
+            vec![DocKind::Body]
+        );
     }
 
     #[test]
@@ -272,8 +275,7 @@ tx.write_u16(0x1FF).unwrap();
 
 Returns `Err` when the peripheral is busy.";
         let lines = parse_doc(md);
-        let got: Vec<(DocKind, &str)> =
-            lines.iter().map(|l| (l.kind, l.text.as_str())).collect();
+        let got: Vec<(DocKind, &str)> = lines.iter().map(|l| (l.kind, l.text.as_str())).collect();
         assert_eq!(
             got,
             vec![

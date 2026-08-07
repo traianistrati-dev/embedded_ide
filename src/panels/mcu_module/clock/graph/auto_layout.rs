@@ -55,9 +55,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
     let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut indeg = vec![0usize; n];
     for e in &graph.edges {
-        if let (Some(&u), Some(&v)) =
-            (idx_of.get(e.from.as_str()), idx_of.get(e.to.as_str()))
-        {
+        if let (Some(&u), Some(&v)) = (idx_of.get(e.from.as_str()), idx_of.get(e.to.as_str())) {
             succ[u].push(v);
             pred[v].push(u);
             indeg[v] += 1;
@@ -144,7 +142,11 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
     // ── Emit one control + label + freq tag per node ─────────────────────────
     for (i, node) in graph.nodes.iter().enumerate() {
         let (x, y) = pos[i];
-        lay.labels_above.push(LabelDef { x, y: y - 3.0, text: node.id.clone() });
+        lay.labels_above.push(LabelDef {
+            x,
+            y: y - 3.0,
+            text: node.id.clone(),
+        });
         lay.tags.push(TagDef {
             x,
             y: y + NODE_H + 12.0,
@@ -178,7 +180,13 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                         (label, NodeState::Index(k))
                     })
                     .collect();
-                lay.widgets.push(Widget::Combo { node: node.id.clone(), x, y, w: NODE_W, options });
+                lay.widgets.push(Widget::Combo {
+                    node: node.id.clone(),
+                    x,
+                    y,
+                    w: NODE_W,
+                    options,
+                });
             }
             NodeKind::Divider { options } => {
                 let opts = options
@@ -186,22 +194,46 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                     .enumerate()
                     .map(|(k, v)| (format!("/{v}"), NodeState::Index(k)))
                     .collect();
-                lay.widgets.push(Widget::Combo { node: node.id.clone(), x, y, w: NODE_W, options: opts });
+                lay.widgets.push(Widget::Combo {
+                    node: node.id.clone(),
+                    x,
+                    y,
+                    w: NODE_W,
+                    options: opts,
+                });
             }
             NodeKind::Choice { ratios } => {
                 let opts = ratios
                     .iter()
                     .enumerate()
                     .map(|(k, (num, den))| {
-                        let label = if *den == 1 { format!("×{num}") } else { format!("×{num}/{den}") };
+                        let label = if *den == 1 {
+                            format!("×{num}")
+                        } else {
+                            format!("×{num}/{den}")
+                        };
                         (label, NodeState::Index(k))
                     })
                     .collect();
-                lay.widgets.push(Widget::Combo { node: node.id.clone(), x, y, w: NODE_W, options: opts });
+                lay.widgets.push(Widget::Combo {
+                    node: node.id.clone(),
+                    x,
+                    y,
+                    w: NODE_W,
+                    options: opts,
+                });
             }
             NodeKind::Multiplier { min, max } => {
-                let opts = (*min..=*max).map(|v| (format!("×{v}"), NodeState::Value(v))).collect();
-                lay.widgets.push(Widget::Combo { node: node.id.clone(), x, y, w: NODE_W, options: opts });
+                let opts = (*min..=*max)
+                    .map(|v| (format!("×{v}"), NodeState::Value(v)))
+                    .collect();
+                lay.widgets.push(Widget::Combo {
+                    node: node.id.clone(),
+                    x,
+                    y,
+                    w: NODE_W,
+                    options: opts,
+                });
             }
             // Non-editable nodes render as a static labelled box.
             NodeKind::FixedDiv { by } => {
@@ -218,9 +250,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
 
     // ── Orthogonal 3-segment wires along the edges ───────────────────────────
     for e in &graph.edges {
-        if let (Some(&u), Some(&v)) =
-            (idx_of.get(e.from.as_str()), idx_of.get(e.to.as_str()))
-        {
+        if let (Some(&u), Some(&v)) = (idx_of.get(e.from.as_str()), idx_of.get(e.to.as_str())) {
             let (xu, yu) = pos[u];
             let (xv, yv) = pos[v];
             let sx = xu + NODE_W;
@@ -228,7 +258,8 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
             let tx = xv;
             let ty = yv + NODE_H / 2.0;
             let midx = (sx + tx) / 2.0;
-            lay.wires.push(vec![(sx, sy), (midx, sy), (midx, ty), (tx, ty)]);
+            lay.wires
+                .push(vec![(sx, sy), (midx, sy), (midx, ty), (tx, ty)]);
         }
     }
 
@@ -236,7 +267,13 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
 }
 
 fn box_at(x: f32, y: f32, label: String) -> BlockDef {
-    BlockDef { x, y, w: NODE_W, h: NODE_H, label }
+    BlockDef {
+        x,
+        y,
+        w: NODE_W,
+        h: NODE_H,
+        label,
+    }
 }
 
 /// Mean row of `neigh`; falls back to `own` (keep position) when a node has no
@@ -254,15 +291,27 @@ mod tests {
     use crate::panels::mcu_module::clock::graph::model::{Edge, Node};
 
     fn node(id: &str, kind: NodeKind, state: NodeState) -> Node {
-        Node { id: id.into(), kind, state, limit: None }
+        Node {
+            id: id.into(),
+            kind,
+            state,
+            limit: None,
+        }
     }
     fn edge(from: &str, to: &str) -> Edge {
-        Edge { from: from.into(), to: to.into(), input: 0 }
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            input: 0,
+        }
     }
 
     #[test]
     fn empty_graph_yields_empty_layout() {
-        let lay = auto_layout(&ClockGraph { nodes: vec![], edges: vec![] });
+        let lay = auto_layout(&ClockGraph {
+            nodes: vec![],
+            edges: vec![],
+        });
         assert!(lay.is_empty());
     }
 
@@ -270,9 +319,25 @@ mod tests {
     fn source_divider_output_lays_out_left_to_right_and_in_canvas() {
         let g = ClockGraph {
             nodes: vec![
-                node("hsi", NodeKind::Source { min_hz: 16_000_000, max_hz: 16_000_000, gated: true },
-                    NodeState::Source { enabled: true, hz: 16_000_000 }),
-                node("ahb", NodeKind::Divider { options: vec![1, 2, 4] }, NodeState::Index(0)),
+                node(
+                    "hsi",
+                    NodeKind::Source {
+                        min_hz: 16_000_000,
+                        max_hz: 16_000_000,
+                        gated: true,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 16_000_000,
+                    },
+                ),
+                node(
+                    "ahb",
+                    NodeKind::Divider {
+                        options: vec![1, 2, 4],
+                    },
+                    NodeState::Index(0),
+                ),
                 node("hclk", NodeKind::Output, NodeState::Fixed),
             ],
             edges: vec![edge("hsi", "ahb"), edge("ahb", "hclk")],
@@ -294,7 +359,10 @@ mod tests {
 
         // Everything stays inside the virtual canvas.
         for l in &lay.labels_above {
-            assert!(l.x >= 0.0 && l.x <= VW && l.y >= 0.0 && l.y <= VH, "{l:?} off canvas");
+            assert!(
+                l.x >= 0.0 && l.x <= VW && l.y >= 0.0 && l.y <= VH,
+                "{l:?} off canvas"
+            );
         }
     }
 }

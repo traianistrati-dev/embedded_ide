@@ -50,11 +50,7 @@ pub fn whole_word_lines(content: &str, name: &str) -> Vec<usize> {
             let end = start + name.len();
             // Boundaries are checked on CHARS, so a multi-byte neighbour can't
             // be mistaken for a word break.
-            let before_ok = start == 0
-                || !line[..start]
-                    .chars()
-                    .next_back()
-                    .is_some_and(is_id);
+            let before_ok = start == 0 || !line[..start].chars().next_back().is_some_and(is_id);
             let after_ok = end >= bytes.len() || !line[end..].chars().next().is_some_and(is_id);
             if before_ok && after_ok {
                 out.push(n + 1);

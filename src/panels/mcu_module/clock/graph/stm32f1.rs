@@ -8,21 +8,39 @@
 
 use super::model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
 use crate::panels::mcu_module::clock::model::{
-    Mco, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre, ADC_PRESCALERS,
-    AHB_PRESCALERS, APB_PRESCALERS, HSE_MAX_HZ, HSE_MIN_HZ, HSI_HZ, PLL_MUL_MAX, PLL_MUL_MIN,
+    ADC_PRESCALERS, AHB_PRESCALERS, APB_PRESCALERS, HSE_MAX_HZ, HSE_MIN_HZ, HSI_HZ, Mco,
+    PLL_MUL_MAX, PLL_MUL_MIN, PllSrc, RtcSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre,
 };
 
 fn n(id: &str, kind: NodeKind, state: NodeState) -> Node {
-    Node { id: id.into(), kind, state, limit: None }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: None,
+    }
 }
 fn n_lim(id: &str, kind: NodeKind, state: NodeState, limit: LimitKey) -> Node {
-    Node { id: id.into(), kind, state, limit: Some(limit) }
+    Node {
+        id: id.into(),
+        kind,
+        state,
+        limit: Some(limit),
+    }
 }
 fn e(from: &str, to: &str) -> Edge {
-    Edge { from: from.into(), to: to.into(), input: 0 }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input: 0,
+    }
 }
 fn e_in(from: &str, to: &str, input: usize) -> Edge {
-    Edge { from: from.into(), to: to.into(), input }
+    Edge {
+        from: from.into(),
+        to: to.into(),
+        input,
+    }
 }
 
 /// Build the STM32F103 clock graph with selections taken from `c`.
@@ -66,42 +84,185 @@ pub fn stm32f1_graph(c: &Stm32f1Clock) -> ClockGraph {
 
     let nodes = vec![
         // ── Oscillators ──
-        n("hsi", NodeKind::Source { min_hz: HSI_HZ, max_hz: HSI_HZ, gated: false },
-          NodeState::Source { enabled: true, hz: HSI_HZ }),
-        n("hse", NodeKind::Source { min_hz: HSE_MIN_HZ, max_hz: HSE_MAX_HZ, gated: true },
-          NodeState::Source { enabled: c.hse_enabled, hz: c.hse_hz }),
+        n(
+            "hsi",
+            NodeKind::Source {
+                min_hz: HSI_HZ,
+                max_hz: HSI_HZ,
+                gated: false,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: HSI_HZ,
+            },
+        ),
+        n(
+            "hse",
+            NodeKind::Source {
+                min_hz: HSE_MIN_HZ,
+                max_hz: HSE_MAX_HZ,
+                gated: true,
+            },
+            NodeState::Source {
+                enabled: c.hse_enabled,
+                hz: c.hse_hz,
+            },
+        ),
         // ── PLL input chain ──
         n("hsi_div2", NodeKind::FixedDiv { by: 2 }, NodeState::Fixed),
-        n("pllxtpre", NodeKind::Choice { ratios: vec![(1, 1), (1, 2)] }, NodeState::Index(pllxtpre_idx)),
-        n("pllsrc", NodeKind::Mux { inputs: 2 }, NodeState::Index(pll_src_idx)),
-        n("pllmul", NodeKind::Multiplier { min: PLL_MUL_MIN as u32, max: PLL_MUL_MAX as u32 },
-          NodeState::Value(c.pll_mul as u32)),
-        n_lim("pllclk", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
+        n(
+            "pllxtpre",
+            NodeKind::Choice {
+                ratios: vec![(1, 1), (1, 2)],
+            },
+            NodeState::Index(pllxtpre_idx),
+        ),
+        n(
+            "pllsrc",
+            NodeKind::Mux { inputs: 2 },
+            NodeState::Index(pll_src_idx),
+        ),
+        n(
+            "pllmul",
+            NodeKind::Multiplier {
+                min: PLL_MUL_MIN as u32,
+                max: PLL_MUL_MAX as u32,
+            },
+            NodeState::Value(c.pll_mul as u32),
+        ),
+        n_lim(
+            "pllclk",
+            NodeKind::Tap,
+            NodeState::Fixed,
+            LimitKey::SysclkMax,
+        ),
         // ── System clock + buses ──
         n("sw", NodeKind::Mux { inputs: 3 }, NodeState::Index(sw_idx)),
-        n_lim("sysclk", NodeKind::Tap, NodeState::Fixed, LimitKey::SysclkMax),
-        n("ahb", NodeKind::Divider { options: ahb.clone() }, NodeState::Index(idx(&ahb, c.ahb_pre as u32))),
-        n_lim("hclk", NodeKind::Output, NodeState::Fixed, LimitKey::HclkMax),
-        n("apb1", NodeKind::Divider { options: apb.clone() }, NodeState::Index(idx(&apb, c.apb1_pre as u32))),
-        n_lim("pclk1", NodeKind::Output, NodeState::Fixed, LimitKey::Pclk1Max),
-        n("apb2", NodeKind::Divider { options: apb.clone() }, NodeState::Index(idx(&apb, c.apb2_pre as u32))),
-        n_lim("pclk2", NodeKind::Output, NodeState::Fixed, LimitKey::Pclk2Max),
-        n("adc", NodeKind::Divider { options: adc.clone() }, NodeState::Index(idx(&adc, c.adc_pre as u32))),
-        n_lim("adcclk", NodeKind::Output, NodeState::Fixed, LimitKey::AdcclkMax),
+        n_lim(
+            "sysclk",
+            NodeKind::Tap,
+            NodeState::Fixed,
+            LimitKey::SysclkMax,
+        ),
+        n(
+            "ahb",
+            NodeKind::Divider {
+                options: ahb.clone(),
+            },
+            NodeState::Index(idx(&ahb, c.ahb_pre as u32)),
+        ),
+        n_lim(
+            "hclk",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::HclkMax,
+        ),
+        n(
+            "apb1",
+            NodeKind::Divider {
+                options: apb.clone(),
+            },
+            NodeState::Index(idx(&apb, c.apb1_pre as u32)),
+        ),
+        n_lim(
+            "pclk1",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::Pclk1Max,
+        ),
+        n(
+            "apb2",
+            NodeKind::Divider {
+                options: apb.clone(),
+            },
+            NodeState::Index(idx(&apb, c.apb2_pre as u32)),
+        ),
+        n_lim(
+            "pclk2",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::Pclk2Max,
+        ),
+        n(
+            "adc",
+            NodeKind::Divider {
+                options: adc.clone(),
+            },
+            NodeState::Index(idx(&adc, c.adc_pre as u32)),
+        ),
+        n_lim(
+            "adcclk",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::AdcclkMax,
+        ),
         // ── Timer clocks (×2 rule) ──
-        n("tim_apb1", NodeKind::TimerMul { prescaler: "apb1".into() }, NodeState::Fixed),
-        n("tim_apb2", NodeKind::TimerMul { prescaler: "apb2".into() }, NodeState::Fixed),
+        n(
+            "tim_apb1",
+            NodeKind::TimerMul {
+                prescaler: "apb1".into(),
+            },
+            NodeState::Fixed,
+        ),
+        n(
+            "tim_apb2",
+            NodeKind::TimerMul {
+                prescaler: "apb2".into(),
+            },
+            NodeState::Fixed,
+        ),
         // ── USB / SysTick / Flash ──
-        n("usb", NodeKind::Choice { ratios: vec![(2, 3), (1, 1)] }, NodeState::Index(usb_idx)),
-        n_lim("usbclk", NodeKind::Output, NodeState::Fixed, LimitKey::UsbclkHz),
-        n("systick", NodeKind::Choice { ratios: vec![(1, 8), (1, 1)] }, NodeState::Index(systick_idx)),
+        n(
+            "usb",
+            NodeKind::Choice {
+                ratios: vec![(2, 3), (1, 1)],
+            },
+            NodeState::Index(usb_idx),
+        ),
+        n_lim(
+            "usbclk",
+            NodeKind::Output,
+            NodeState::Fixed,
+            LimitKey::UsbclkHz,
+        ),
+        n(
+            "systick",
+            NodeKind::Choice {
+                ratios: vec![(1, 8), (1, 1)],
+            },
+            NodeState::Index(systick_idx),
+        ),
         n("flitfclk", NodeKind::Tap, NodeState::Fixed),
         // ── Low-speed oscillators + RTC / MCO (diagram-only outputs) ──
-        n("lse", NodeKind::Source { min_hz: 32_768, max_hz: 32_768, gated: true },
-          NodeState::Source { enabled: true, hz: 32_768 }),
-        n("lsi", NodeKind::Source { min_hz: 40_000, max_hz: 40_000, gated: false },
-          NodeState::Source { enabled: true, hz: 40_000 }),
-        n("hse_div128", NodeKind::FixedDiv { by: 128 }, NodeState::Fixed),
+        n(
+            "lse",
+            NodeKind::Source {
+                min_hz: 32_768,
+                max_hz: 32_768,
+                gated: true,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 32_768,
+            },
+        ),
+        n(
+            "lsi",
+            NodeKind::Source {
+                min_hz: 40_000,
+                max_hz: 40_000,
+                gated: false,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 40_000,
+            },
+        ),
+        n(
+            "hse_div128",
+            NodeKind::FixedDiv { by: 128 },
+            NodeState::Fixed,
+        ),
         n("pll_div2", NodeKind::FixedDiv { by: 2 }, NodeState::Fixed),
         n("rtc", NodeKind::Mux { inputs: 3 }, rtc_state),
         n("mco", NodeKind::Mux { inputs: 4 }, mco_state),
@@ -222,11 +383,13 @@ fn divisor_of(g: &ClockGraph, id: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::eval::evaluate;
     use super::super::model::ClockGraph;
+    use super::*;
     use crate::panels::mcu_module::clock::compute::frequencies;
-    use crate::panels::mcu_module::clock::model::{PllSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre};
+    use crate::panels::mcu_module::clock::model::{
+        PllSrc, Stm32f1Clock, SysclkSrc, SystickSrc, UsbPre,
+    };
 
     /// The generic graph evaluator must reproduce `compute::frequencies` exactly.
     fn assert_equiv(c: &Stm32f1Clock) {
@@ -265,7 +428,7 @@ mod tests {
     /// state is one of the widget's options (so the dropdown shows a real label).
     #[test]
     fn f103_widgets_match_graph_nodes() {
-        use super::super::layout::{stm32f1_layout, Widget};
+        use super::super::layout::{Widget, stm32f1_layout};
         use crate::panels::mcu_module::clock::model::ClockLimits;
 
         let g = stm32f1_graph(&Stm32f1Clock::default());
@@ -273,7 +436,9 @@ mod tests {
         assert!(!lay.widgets.is_empty(), "F103 graph should expose widgets");
         for w in &lay.widgets {
             let node = w.node_id();
-            let n = g.node(node).unwrap_or_else(|| panic!("widget node {node} missing"));
+            let n = g
+                .node(node)
+                .unwrap_or_else(|| panic!("widget node {node} missing"));
             match w {
                 Widget::Combo { options, .. } => assert!(
                     options.iter().any(|(_, st)| st == &n.state),
@@ -477,7 +642,7 @@ mod tests {
     fn graph_matches_compute_and_validate_across_config_space() {
         use super::super::validate::over_limits;
         use crate::panels::mcu_module::clock::model::ClockLimits;
-        use crate::panels::mcu_module::clock::validate::{warnings, Severity};
+        use crate::panels::mcu_module::clock::validate::{Severity, warnings};
         use std::collections::BTreeSet;
 
         let limits = ClockLimits::default();
@@ -520,10 +685,11 @@ mod tests {
                                         assert_eq!(get("tim_apb2"), fr.tim_apb2, "tim2 {c:?}");
 
                                         // Ceiling violations must match.
-                                        let graph_over: BTreeSet<&str> = over_limits(&g, &limits, &fg)
-                                            .iter()
-                                            .filter_map(|o| ceiling_clock(&o.node))
-                                            .collect();
+                                        let graph_over: BTreeSet<&str> =
+                                            over_limits(&g, &limits, &fg)
+                                                .iter()
+                                                .filter_map(|o| ceiling_clock(&o.node))
+                                                .collect();
                                         let real_over: BTreeSet<&str> = warnings(&c, &fr, &limits)
                                             .iter()
                                             .filter(|w| w.severity == Severity::Error)
@@ -540,6 +706,9 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 1000, "sweep should cover a broad space (got {checked})");
+        assert!(
+            checked > 1000,
+            "sweep should cover a broad space (got {checked})"
+        );
     }
 }

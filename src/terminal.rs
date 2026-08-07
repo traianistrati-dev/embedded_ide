@@ -169,7 +169,10 @@ impl TerminalConsole {
             Ok(c) => c,
             Err(e) => {
                 let mut s = self.state.lock().unwrap();
-                s.push_plain(LineKind::Notice, format!("[error] couldn't launch powershell: {e}"));
+                s.push_plain(
+                    LineKind::Notice,
+                    format!("[error] couldn't launch powershell: {e}"),
+                );
                 self.stop = None;
                 return;
             }
@@ -187,12 +190,26 @@ impl TerminalConsole {
         // prints the exit status once BOTH pipes hit EOF (child exited).
         let done = Arc::new(std::sync::atomic::AtomicUsize::new(0)); // pipes finished
         if let Some(out) = stdout {
-            spawn_reader(out, LineKind::Stdout, Arc::clone(&self.state), Arc::clone(&stop), ctx.clone(), Arc::clone(&done));
+            spawn_reader(
+                out,
+                LineKind::Stdout,
+                Arc::clone(&self.state),
+                Arc::clone(&stop),
+                ctx.clone(),
+                Arc::clone(&done),
+            );
         } else {
             done.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(err) = stderr {
-            spawn_reader(err, LineKind::Stderr, Arc::clone(&self.state), Arc::clone(&stop), ctx.clone(), Arc::clone(&done));
+            spawn_reader(
+                err,
+                LineKind::Stderr,
+                Arc::clone(&self.state),
+                Arc::clone(&stop),
+                ctx.clone(),
+                Arc::clone(&done),
+            );
         } else {
             done.fetch_add(1, Ordering::Relaxed);
         }
@@ -215,7 +232,12 @@ impl TerminalConsole {
                 Some(Ok(st)) if st.success() => s.push_plain(LineKind::Notice, "[exit 0]"),
                 Some(Ok(st)) => s.push_plain(
                     LineKind::Notice,
-                    format!("[exit {}]", st.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".into())),
+                    format!(
+                        "[exit {}]",
+                        st.code()
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "signal".into())
+                    ),
                 ),
                 _ => {}
             }
@@ -257,7 +279,10 @@ impl TerminalConsole {
                 let shown = self.cwd.to_string_lossy().replace(r"\\?\", "");
                 s.push_plain(LineKind::Notice, format!("[cwd] {shown}"));
             }
-            _ => s.push_plain(LineKind::Notice, format!("[error] no such directory: {target}")),
+            _ => s.push_plain(
+                LineKind::Notice,
+                format!("[error] no such directory: {target}"),
+            ),
         }
     }
 }

@@ -43,9 +43,7 @@ pub fn duplicate_path(path: &str, exists: impl Fn(&str) -> bool) -> String {
 fn strip_copy_suffix(stem: &str) -> &str {
     match stem.rfind('_') {
         Some(i)
-            if i > 0
-                && i + 1 < stem.len()
-                && stem[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+            if i > 0 && i + 1 < stem.len() && stem[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
         {
             &stem[..i]
         }
@@ -638,7 +636,10 @@ mod duplicate_name_tests {
 
     #[test]
     fn stays_in_the_source_folder() {
-        assert_eq!(duplicate_path("drivers/uart.rs", |_| false), "drivers/uart_1.rs");
+        assert_eq!(
+            duplicate_path("drivers/uart.rs", |_| false),
+            "drivers/uart_1.rs"
+        );
     }
 
     /// A trailing `_` or an all-digit stem is NOT a copy suffix.
@@ -1311,7 +1312,11 @@ mod tests {
         let path = "src/pins/configs/usart1.rs";
         // Blocking (portable) template — its init lives BELOW the markers.
         let portable = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse portable;\npub fn init() -> SerialIo { /* portable */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), portable.to_string())], false, &[]);
+        state.sync_config_files(
+            &[("usart1.rs".to_string(), portable.to_string())],
+            false,
+            &[],
+        );
 
         // Apply switches the runtime → a completely different (native) template.
         let native = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse native;\npub fn init() -> (Tx, Rx) { /* native */ }\n";

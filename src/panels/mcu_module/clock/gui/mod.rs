@@ -15,10 +15,12 @@ use egui_phosphor::regular as ph;
 use super::compute::frequencies;
 use super::graph::layout::ValueSrc;
 use super::graph::validate::ceiling_for;
-use super::graph::{evaluate, graph_to_stm32f1, over_limits, stm32f1_graph, value_from_graph, GraphClock};
+use super::graph::{
+    GraphClock, evaluate, graph_to_stm32f1, over_limits, stm32f1_graph, value_from_graph,
+};
 use super::model::ClockLimits;
-use super::presets::{stm32f1_presets, ClockPreset};
-use super::validate::{warnings, Severity};
+use super::presets::{ClockPreset, stm32f1_presets};
+use super::validate::{Severity, warnings};
 
 /// Render the Clock tab for a graph clock. Returns `true` if anything changed
 /// (the caller relies on `init_frame` to regenerate `main.rs`).
@@ -85,9 +87,11 @@ pub fn draw_graph_clock(
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.strong("Frequencies");
-                        egui::ScrollArea::vertical().id_salt("gfreq_scroll").show(ui, |ui| {
-                            graph_freq_table(ui, gc, limits, &freqs);
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("gfreq_scroll")
+                            .show(ui, |ui| {
+                                graph_freq_table(ui, gc, limits, &freqs);
+                            });
                     },
                 );
                 ui.separator();
@@ -96,9 +100,11 @@ pub fn draw_graph_clock(
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.strong("Info");
-                        egui::ScrollArea::vertical().id_salt("ginfo_scroll").show(ui, |ui| {
-                            graph_info_zone(ui, gc, limits, &freqs, is_stm32f1);
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("ginfo_scroll")
+                            .show(ui, |ui| {
+                                graph_info_zone(ui, gc, limits, &freqs, is_stm32f1);
+                            });
                     },
                 );
             });
@@ -114,7 +120,11 @@ pub fn draw_graph_clock(
         if ui.small_button("−").clicked() {
             zoom = (zoom / 1.15).max(0.4);
         }
-        if ui.small_button(format!("{:.0}%", zoom * 100.0)).on_hover_text("Reset to 100%").clicked() {
+        if ui
+            .small_button(format!("{:.0}%", zoom * 100.0))
+            .on_hover_text("Reset to 100%")
+            .clicked()
+        {
             zoom = 1.0;
         }
         if ui.small_button("+").clicked() {
@@ -132,7 +142,9 @@ pub fn draw_graph_clock(
         .show(ui, |ui| {
             let (rect, tf) = {
                 let resolve = |src: &ValueSrc| value_from_graph(src, &freqs);
-                diagram::draw_static_diagram(ui, &gc.layout, limits, avail_w, avail_h, zoom, resolve)
+                diagram::draw_static_diagram(
+                    ui, &gc.layout, limits, avail_w, avail_h, zoom, resolve,
+                )
             };
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 ui.set_clip_rect(rect.intersect(ui.clip_rect()));
@@ -235,7 +247,13 @@ fn graph_info_zone(
             for o in issues {
                 ui.colored_label(
                     egui::Color32::from_rgb(230, 90, 80),
-                    format!("{}  {} = {} exceeds {}", ph::X_CIRCLE, o.node, fmt_mhz(o.hz), fmt_mhz(o.limit)),
+                    format!(
+                        "{}  {} = {} exceeds {}",
+                        ph::X_CIRCLE,
+                        o.node,
+                        fmt_mhz(o.hz),
+                        fmt_mhz(o.limit)
+                    ),
                 );
             }
         }
@@ -254,8 +272,14 @@ fn graph_info_zone(
         mhz_num(l.usbclk_hz),
     )];
     if is_stm32f1 {
-        lines.insert(0, "HSE = high-speed external · HSI = high-speed internal".to_owned());
-        lines.insert(1, "LSE = low-speed external · LSI = low-speed internal".to_owned());
+        lines.insert(
+            0,
+            "HSE = high-speed external · HSI = high-speed internal".to_owned(),
+        );
+        lines.insert(
+            1,
+            "LSE = low-speed external · LSI = low-speed internal".to_owned(),
+        );
         lines.push(format!(
             "USB needs HSE+PLL with USBCLK = {} MHz · ADC 1 µs needs PCLK2 in {{14,28,56}}",
             mhz_num(l.usbclk_hz)

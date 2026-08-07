@@ -59,12 +59,7 @@ pub fn show_panel(ui: &mut egui::Ui, id: &str, rows: &[HelpRow], notes: &[&str])
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
                     for (name, color, text) in rows {
-                        ui.label(
-                            egui::RichText::new(*name)
-                                .size(11.0)
-                                .strong()
-                                .color(*color),
-                        );
+                        ui.label(egui::RichText::new(*name).size(11.0).strong().color(*color));
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(*text)
