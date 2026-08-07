@@ -421,15 +421,24 @@ impl ProjectTreeState {
             .map(|(name, _)| name.trim_end_matches(".rs").to_string())
             .collect();
 
+        // Does `stem` belong to a Custom module? Its file is `custom_<name>` at
+        // revision 0 and `custom_<name>_<n>` after the n-th Update, and
+        // `keep_prefixes` holds exactly those `custom_<name>` roots — so the same
+        // test that keeps old revisions on disk also tells a hand-authored module
+        // apart from a peripheral one, with no name-prefix guesswork.
+        let is_custom_stem = |stem: &str| {
+            keep_prefixes
+                .iter()
+                .any(|p| stem == p || stem.starts_with(&format!("{p}_")))
+        };
+
         // 3. Drop config files no longer configured.
         self.user_src_files.retain(|(path, _)| {
             let Some(rest) = path.strip_prefix("src/pins/configs/") else {
                 return true;
             };
             let stem = rest.trim_end_matches(".rs");
-            rest == "mod.rs"
-                || active.iter().any(|a| a == stem)
-                || keep_prefixes.iter().any(|p| stem == p || stem.starts_with(&format!("{p}_")))
+            rest == "mod.rs" || active.iter().any(|a| a == stem) || is_custom_stem(stem)
         });
 
         // 4. Create / update each config file. The codegen `body` already wraps
@@ -464,7 +473,23 @@ impl ProjectTreeState {
         }
 
         // 5. Rebuild configs/mod.rs (`pub mod usart1;` …), preserving user code.
-        let gen_section: String = active.iter().map(|s| format!("pub mod {s};\n")).collect();
+        //
+        // A Custom module ALSO gets `pub use <stem>::*;`, so its struct is
+        // reachable as `pins::configs::MyThing` — main.rs calls it through the
+        // full path, but the user's own code shouldn't have to name a file whose
+        // stem changes on every Update. The peripheral configs deliberately do
+        // NOT get this: they all define `init` / `get_config`, and glob-importing
+        // two of them into one namespace is a compile error.
+        let gen_section: String = active
+            .iter()
+            .map(|s| {
+                if is_custom_stem(s) {
+                    format!("pub mod {s};\npub use {s}::*;\n")
+                } else {
+                    format!("pub mod {s};\n")
+                }
+            })
+            .collect();
         let wrapped_mod = format!("{GEN_BEGIN}\n{}\n{GEN_END}\n", gen_section.trim());
         if let Some((_, mod_content)) = self.user_src_files.iter_mut().find(|(p, _)| p == MOD_PATH)
         {
@@ -1204,6 +1229,34 @@ mod tests {
             "ADC pin should have function label comment on PinType: {}",
             entry.1
         );
+    }
+
+    /// `configs/mod.rs` re-exports a Custom module's contents so its struct is
+    /// reachable as `pins::configs::MyThing` — the stem changes on every Update,
+    /// so user code must not have to name it. Peripheral configs must NOT get the
+    /// glob: they all define `init`, and two of them in one namespace won't build.
+    #[test]
+    fn configs_mod_reexports_custom_modules_only() {
+        let mut state = ProjectTreeState::new();
+        let body = "// <<< GENERATED>>>\n// <<< GENERATED END >>>\n";
+        state.sync_config_files(
+            &[
+                ("usart1.rs".to_string(), body.to_string()),
+                ("custom_led_2.rs".to_string(), body.to_string()),
+            ],
+            false,
+            &["custom_led".to_string()],
+        );
+        let mod_rs = &state
+            .user_src_files
+            .iter()
+            .find(|(p, _)| p == "src/pins/configs/mod.rs")
+            .unwrap()
+            .1;
+        assert!(mod_rs.contains("pub mod custom_led_2;"), "{mod_rs}");
+        assert!(mod_rs.contains("pub use custom_led_2::*;"), "{mod_rs}");
+        assert!(mod_rs.contains("pub mod usart1;"), "{mod_rs}");
+        assert!(!mod_rs.contains("pub use usart1::*;"), "{mod_rs}");
     }
 
     /// A config file's constants (inside the GENERATED block) regenerate on a

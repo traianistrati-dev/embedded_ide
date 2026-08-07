@@ -32,6 +32,9 @@ use crate::panels::mcu_module::codegen::{pin_binding, sanitize_label};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 
+/// Shared with the chip pins and the module boxes — one selection look.
+use crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE as SEL_SCALE;
+
 const ARROW_LEN: f32 = 24.0;
 const GAP: f32 = 5.0;
 const FIELD_W: f32 = 88.0;
@@ -175,6 +178,9 @@ pub fn draw_io_arrows(
     let mut drag_updates: Vec<(usize, (f32, f32))> = Vec::new();
     let mut reset_updates: Vec<usize> = Vec::new();
     let mut goto_request: Option<usize> = None;
+    // The pin the user has selected on the chip: its field group out here is
+    // called out the same way as the pin itself and as a selected module box.
+    let selected_pin = mcu.selected_pin;
 
     for it in items {
         // Field centre: the user's dragged offset, else the packed diamond
@@ -252,7 +258,14 @@ pub fn draw_io_arrows(
                 }
             });
         }
-        let pcol = if resp.hovered() {
+        // A selected pin's group (variable name + rename field) is drawn WHITE
+        // and `SELECTED_TEXT_SCALE` larger, exactly like the pin on the chip and
+        // like a selected module box.
+        let selected = selected_pin == Some(it.num);
+        let scale = if selected { SEL_SCALE } else { 1.0 };
+        let pcol = if selected {
+            egui::Color32::WHITE
+        } else if resp.hovered() {
             egui::Color32::from_rgb(205, 205, 215)
         } else {
             egui::Color32::from_rgb(140, 140, 150)
@@ -262,7 +275,7 @@ pub fn draw_io_arrows(
             field_rect.left_top() - egui::vec2(0.0, 2.0),
             egui::Align2::LEFT_BOTTOM,
             preview,
-            egui::FontId::proportional(9.0),
+            egui::FontId::proportional(9.0 * scale),
             pcol,
         );
 
@@ -272,9 +285,21 @@ pub fn draw_io_arrows(
                     field_rect,
                     egui::TextEdit::singleline(&mut pin.custom_label)
                         .hint_text("name")
-                        .font(egui::FontId::proportional(10.0)),
+                        .font(egui::FontId::proportional(10.0 * scale)),
                 );
             });
+        }
+
+        // One border around the WHOLE group — the variable-name strip on top and
+        // the rename field under it — so the selection reads as one item (the
+        // module box's white border, applied to a lone pin).
+        if selected {
+            painter.rect_stroke(
+                field_rect.union(handle_rect).expand(3.0),
+                4.0,
+                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                egui::StrokeKind::Middle,
+            );
         }
     }
     // Apply drag / reset now the per-item `mcu` borrows have ended.

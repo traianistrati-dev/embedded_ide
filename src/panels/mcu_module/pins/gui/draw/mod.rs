@@ -12,9 +12,11 @@ use eframe::egui;
 /// A selected pin is called out in WHITE — text and border alike — so it reads
 /// as the focused item from across the diagram.
 const SELECTION_COLOR: egui::Color32 = egui::Color32::WHITE;
-/// Its name is drawn 10 % larger than an idle pin's, and its border twice as
-/// thick, on top of the colour.
-pub const SELECTED_TEXT_SCALE: f32 = 1.1;
+/// Its name is drawn 15 % larger than an idle pin's, and its border twice as
+/// thick, on top of the colour. The SAME scale grows every text of a selected
+/// element attached to the chip — a module box's title / summary / preview /
+/// fields, and a single pin's rename field beside its arrow.
+pub const SELECTED_TEXT_SCALE: f32 = 1.15;
 const STROKE_W: f32 = 2.0;
 const SELECTED_STROKE_W: f32 = STROKE_W * 2.0;
 

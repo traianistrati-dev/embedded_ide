@@ -496,8 +496,9 @@ fn draw_box(
     // background pulses red so it's obvious on the diagram which one is being
     // removed. `None` = normal.
     removing_blink: Option<f32>,
-    // The box the user clicked last: white title 10 % larger and a border twice
-    // as thick, matching how a selected pin is called out on the chip.
+    // The box the user clicked last: white title and a border twice as thick,
+    // matching how a selected pin is called out on the chip. EVERY text in the
+    // box grows by `SELECTED_TEXT_SCALE`, not just the title.
     selected: bool,
 ) {
     // Background: normal dark, or a red pulse (dark ↔ red by `t`) while the
@@ -527,16 +528,15 @@ fn draw_box(
     painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Middle);
 
     const TITLE_SIZE: f32 = 13.0;
-    let (title_color, title_size) = if selected {
-        (
-            egui::Color32::WHITE,
-            TITLE_SIZE * crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE,
-        )
+    let scale = text_scale(selected);
+    let title_color = if selected {
+        egui::Color32::WHITE
     } else if connected {
-        (color, TITLE_SIZE)
+        color
     } else {
-        (egui::Color32::from_rgb(175, 150, 150), TITLE_SIZE)
+        egui::Color32::from_rgb(175, 150, 150)
     };
+    let title_size = TITLE_SIZE * scale;
     painter.text(
         rect.center_top() + egui::vec2(0.0, 13.0),
         egui::Align2::CENTER_CENTER,
@@ -553,7 +553,7 @@ fn draw_box(
         rect.center_top() + egui::vec2(0.0, 30.0),
         egui::Align2::CENTER_CENTER,
         summary,
-        egui::FontId::proportional(10.0),
+        egui::FontId::proportional(10.0 * scale),
         egui::Color32::from_rgb(150, 150, 160),
     );
     // Live preview of the resulting variable name(s) above the rename field —
@@ -563,9 +563,20 @@ fn draw_box(
         egui::pos2(rect.left() + 10.0, rect.bottom() - 26.0),
         egui::Align2::LEFT_BOTTOM,
         handle_preview(m, native_forced),
-        egui::FontId::proportional(9.0),
+        egui::FontId::proportional(9.0 * scale),
         egui::Color32::from_rgb(140, 140, 150),
     );
+}
+
+/// Font multiplier for a module box's texts: 1 normally, `SELECTED_TEXT_SCALE`
+/// while the box is selected. Shared by the box painter and the (separate)
+/// mutable pass that puts the rename fields, so the two never drift apart.
+fn text_scale(selected: bool) -> f32 {
+    if selected {
+        crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE
+    } else {
+        1.0
+    }
 }
 
 /// Draw each module beside the chip, on the side of the pins it connects to,
@@ -803,6 +814,11 @@ pub fn draw_modules(
     // The typed text is appended to the module's generated variable name(s);
     // regenerated every frame by `update_main_rs`, so it updates as you type.
     for (i, box_rect) in field_pass {
+        // Same selection state the box was painted with, so its fields grow with
+        // the rest of it. Read BEFORE the mutable `find_pin_mut` borrows below.
+        let selected = mcu.selected_module.as_deref() == Some(mcu.modules[i].id.as_str());
+        let scale = text_scale(selected);
+        let selected_pin = mcu.selected_pin;
         // A Custom module groups its PINS' rename fields inside the box, under
         // the module name — instead of each pin floating separately beside the
         // chip (io_arrows skips them, see `custom_module_pins`).
@@ -817,12 +833,21 @@ pub fn draw_modules(
                     .find_pin(*num)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| format!("pin{num}"));
+                // A pin selected on the chip is called out HERE too — its row
+                // (pin name + rename field) gets the same white border a lone
+                // pin's field group gets out in the margin.
+                let pin_sel = selected_pin == Some(*num);
+                let row_scale = scale.max(text_scale(pin_sel));
                 painter.text(
                     egui::pos2(box_rect.left() + 8.0, r.center().y),
                     egui::Align2::LEFT_CENTER,
                     name,
-                    egui::FontId::monospace(9.5),
-                    egui::Color32::from_rgb(170, 175, 190),
+                    egui::FontId::monospace(9.5 * row_scale),
+                    if pin_sel {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(170, 175, 190)
+                    },
                 );
                 if let Some(pin) = mcu.find_pin_mut(*num) {
                     ui.push_id(("custom_pin_label", i, num), |ui| {
@@ -830,9 +855,20 @@ pub fn draw_modules(
                             r,
                             egui::TextEdit::singleline(&mut pin.custom_label)
                                 .hint_text("name")
-                                .font(egui::FontId::proportional(9.5)),
+                                .font(egui::FontId::proportional(9.5 * row_scale)),
                         );
                     });
+                }
+                if pin_sel {
+                    painter.rect_stroke(
+                        egui::Rect::from_min_max(
+                            egui::pos2(box_rect.left() + 4.0, r.top() - 2.0),
+                            egui::pos2(r.right() + 2.0, r.bottom() + 2.0),
+                        ),
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                        egui::StrokeKind::Middle,
+                    );
                 }
             }
         }
@@ -843,7 +879,7 @@ pub fn draw_modules(
                 field_rect,
                 egui::TextEdit::singleline(label)
                     .hint_text("name")
-                    .font(egui::FontId::proportional(10.0)),
+                    .font(egui::FontId::proportional(10.0 * scale)),
             );
         });
     }
