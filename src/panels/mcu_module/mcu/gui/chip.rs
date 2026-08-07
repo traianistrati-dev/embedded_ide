@@ -200,11 +200,12 @@ fn render_diamond(
             egui::Stroke::NONE,
         ));
         if is_sel || hovered {
-            let c = if is_sel { egui::Color32::YELLOW } else { egui::Color32::WHITE };
+            // Selected and hovered are both white here (see `SELECTION_COLOR`),
+            // so the DOUBLE-thick border is what tells them apart.
             painter.add(egui::Shape::convex_polygon(
                 rot.quad(lp.rect),
                 egui::Color32::TRANSPARENT,
-                egui::Stroke::new(1.5, c),
+                egui::Stroke::new(if is_sel { 3.0 } else { 1.5 }, egui::Color32::WHITE),
             ));
         }
         // Label positioned exactly like the un-rotated layout (over the pin,
@@ -212,10 +213,17 @@ fn render_diamond(
         // pos/angle are the DEFAULT per-side placement carried through `rot`:
         // the base rotation pivots on the layout origin, so `pos = rot·pos_local`
         // + `angle = base + θ` reproduces the default rotated exactly.
-        let tcol = if is_sel { egui::Color32::YELLOW } else { lp.pin.get_text_color() };
+        let (tcol, tsize) = if is_sel {
+            (
+                egui::Color32::WHITE,
+                PIN_FONT_SIZE * crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE,
+            )
+        } else {
+            (lp.pin.get_text_color(), PIN_FONT_SIZE)
+        };
         let galley = painter.layout_no_wrap(
             lp.pin.name.clone(),
-            egui::FontId::monospace(PIN_FONT_SIZE),
+            egui::FontId::monospace(tsize),
             tcol,
         );
         let (pos_local, base) = if lp.outward.y == 0.0 {

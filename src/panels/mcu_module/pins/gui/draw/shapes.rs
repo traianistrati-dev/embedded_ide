@@ -18,11 +18,12 @@ pub fn draw_rect_stroke(
     rect: egui::Rect,
     rounding: f32,
     stroke_color: egui::Color32,
+    width: f32,
 ) {
     painter.rect_stroke(
         rect,
         rounding,
-        egui::Stroke::new(2.0, stroke_color),
+        egui::Stroke::new(width, stroke_color),
         egui::StrokeKind::Middle,
     );
 }

@@ -97,6 +97,7 @@ impl Mcu {
             module_remove_confirm: None,
             pin_goto: None,
             module_goto: None,
+            selected_module: None,
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
         }

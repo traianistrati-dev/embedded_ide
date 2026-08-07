@@ -698,18 +698,36 @@ impl AppIde {
                         &dead_ranges,
                     )
                 } else {
-                    CodeEditor::default()
+                    // Config files (Cargo.toml, .cargo/config.toml, .gitignore)
+                    // on the stock editor. `show_with_completer` would drive the
+                    // crate's keyword popup unconditionally — which is how
+                    // Cargo.toml kept popping up a list of Rust keywords + words
+                    // from the file on EVERY character typed, ignoring the
+                    // `suppress_keyword_completer` decision the Rust path honours.
+                    // Inline the two completer calls instead, behind the same
+                    // flag. Cargo.toml keeps its OWN crate/version completion on
+                    // Ctrl+Space (`handle_cargo_completion`), untouched by this.
+                    let mut out = CodeEditor::default()
                         .id_source(editor_id.clone())
                         .with_rows(editor_rows)
                         .with_fontsize(font_size)
                         .with_theme(ColorTheme::GRUVBOX)
                         .with_numlines(true)
-                        .show_with_completer(
-                            ui,
-                            &mut display_code,
+                        .show(ui, &mut display_code, &display_syntax);
+                    // Set even when suppressed: the completer keys its popup to
+                    // this id, and a stale one from another editor would misplace
+                    // it the moment the flag flips back on.
+                    self.completer.text_edit_id = Some(out.response.id);
+                    if !suppress_keyword_completer {
+                        self.completer.handle_input(ui.ctx());
+                        self.completer.show(
                             &display_syntax,
-                            &mut self.completer,
-                        )
+                            &ColorTheme::GRUVBOX,
+                            font_size,
+                            &mut out,
+                        );
+                    }
+                    out
                 };
 
                 // ── Keep the caret in view when it moves off-screen ───────────

@@ -496,6 +496,9 @@ fn draw_box(
     // background pulses red so it's obvious on the diagram which one is being
     // removed. `None` = normal.
     removing_blink: Option<f32>,
+    // The box the user clicked last: white title 10 % larger and a border twice
+    // as thick, matching how a selected pin is called out on the chip.
+    selected: bool,
 ) {
     // Background: normal dark, or a red pulse (dark ↔ red by `t`) while the
     // remove-confirm for this module is open.
@@ -510,8 +513,12 @@ fn draw_box(
     // stay rounded, so the two kinds are told apart at a glance.
     let radius = if m.kind.is_custom() { 0.0 } else { 6.0 };
     painter.rect_filled(rect, radius, fill);
+    // A pending removal outranks the selection: the box is about to disappear,
+    // which is the more urgent thing to say about it.
     let stroke = if removing_blink.is_some() {
         egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 70, 70)) // pending removal
+    } else if selected {
+        egui::Stroke::new(2.8, egui::Color32::WHITE) // 2× the connected border
     } else if connected {
         egui::Stroke::new(1.4, color) // border matches the pin colour
     } else {
@@ -519,16 +526,22 @@ fn draw_box(
     };
     painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Middle);
 
-    let title_color = if connected {
-        color
+    const TITLE_SIZE: f32 = 13.0;
+    let (title_color, title_size) = if selected {
+        (
+            egui::Color32::WHITE,
+            TITLE_SIZE * crate::panels::mcu_module::pins::gui::draw::SELECTED_TEXT_SCALE,
+        )
+    } else if connected {
+        (color, TITLE_SIZE)
     } else {
-        egui::Color32::from_rgb(175, 150, 150)
+        (egui::Color32::from_rgb(175, 150, 150), TITLE_SIZE)
     };
     painter.text(
         rect.center_top() + egui::vec2(0.0, 13.0),
         egui::Align2::CENTER_CENTER,
         module_base_name(m),
-        egui::FontId::proportional(13.0),
+        egui::FontId::proportional(title_size),
         title_color,
     );
     let summary = if connected {
@@ -703,6 +716,7 @@ pub fn draw_modules(
             module_color(m.kind, inst),
             native_forced,
             removing.then_some(blink),
+            mcu.selected_module.as_deref() == Some(m.id.as_str()),
         );
 
         for (sig, anchor, anchor_pin) in conns {
@@ -834,12 +848,17 @@ pub fn draw_modules(
         });
     }
 
-    if clicked_id.is_some() {
-        // Same click does two things: expand the module's entry in the list
-        // below, and light up every line its pins bind in the code — the module
-        // equivalent of clicking one pin.
-        mcu.expand_module = clicked_id.clone();
-        mcu.module_goto = clicked_id;
+    if let Some(id) = clicked_id {
+        // One click does three things: select the box (click again to deselect,
+        // like a pin), expand the module's entry in the list below, and light up
+        // every line its pins bind in the code.
+        mcu.selected_module = if mcu.selected_module.as_deref() == Some(id.as_str()) {
+            None
+        } else {
+            Some(id.clone())
+        };
+        mcu.expand_module = Some(id.clone());
+        mcu.module_goto = Some(id);
     }
 }
 

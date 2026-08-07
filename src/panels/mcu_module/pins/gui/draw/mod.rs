@@ -9,7 +9,31 @@ use super::super::logic::pin::Pin;
 use super::listeners;
 use eframe::egui;
 
-const SELECTION_COLOR: egui::Color32 = egui::Color32::YELLOW;
+/// A selected pin is called out in WHITE — text and border alike — so it reads
+/// as the focused item from across the diagram.
+const SELECTION_COLOR: egui::Color32 = egui::Color32::WHITE;
+/// Its name is drawn 10 % larger than an idle pin's, and its border twice as
+/// thick, on top of the colour.
+pub const SELECTED_TEXT_SCALE: f32 = 1.1;
+const STROKE_W: f32 = 2.0;
+const SELECTED_STROKE_W: f32 = STROKE_W * 2.0;
+
+/// `(text colour, font size, border width)` for a pin in either state.
+fn selection_style(pin: &Pin, is_selected: bool) -> (egui::Color32, f32, f32) {
+    if is_selected {
+        (
+            SELECTION_COLOR,
+            super::super::logic::pin::PIN_FONT_SIZE * SELECTED_TEXT_SCALE,
+            SELECTED_STROKE_W,
+        )
+    } else {
+        (
+            pin.get_text_color(),
+            super::super::logic::pin::PIN_FONT_SIZE,
+            STROKE_W,
+        )
+    }
+}
 
 impl Pin {
     /// Draws pin on the right side. Returns (rect, clicked).
@@ -28,11 +52,17 @@ impl Pin {
 
         let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
 
-        let text_color = if is_selected { SELECTION_COLOR } else { self.get_text_color() };
-        text::draw_horizontal_text_colored(self, painter, layout::text_position_horizontal(rect), text_color);
+        let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
+        text::draw_horizontal_text_colored(
+            self,
+            painter,
+            layout::text_position_horizontal(rect),
+            text_color,
+            font_size,
+        );
 
         if is_selected {
-            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR);
+            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR, stroke_w);
         }
 
         (rect, clicked)
@@ -54,11 +84,17 @@ impl Pin {
 
         let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
 
-        let text_color = if is_selected { SELECTION_COLOR } else { self.get_text_color() };
-        text::draw_horizontal_text_colored(self, painter, layout::text_position_horizontal(rect), text_color);
+        let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
+        text::draw_horizontal_text_colored(
+            self,
+            painter,
+            layout::text_position_horizontal(rect),
+            text_color,
+            font_size,
+        );
 
         if is_selected {
-            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR);
+            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR, stroke_w);
         }
 
         (rect, clicked)
@@ -80,11 +116,17 @@ impl Pin {
 
         let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
 
-        let text_color = if is_selected { SELECTION_COLOR } else { self.get_text_color() };
-        text::draw_vertical_text_colored(self, painter, layout::text_position_vertical(rect), text_color);
+        let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
+        text::draw_vertical_text_colored(
+            self,
+            painter,
+            layout::text_position_vertical(rect),
+            text_color,
+            font_size,
+        );
 
         if is_selected {
-            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR);
+            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR, stroke_w);
         }
 
         (rect, clicked)
@@ -106,11 +148,17 @@ impl Pin {
 
         let clicked = ui.map_or(false, |ui| listeners::listen_on_rect(self, painter, ui, rect, is_selected));
 
-        let text_color = if is_selected { SELECTION_COLOR } else { self.get_text_color() };
-        text::draw_vertical_text_colored(self, painter, layout::text_position_vertical(rect), text_color);
+        let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
+        text::draw_vertical_text_colored(
+            self,
+            painter,
+            layout::text_position_vertical(rect),
+            text_color,
+            font_size,
+        );
 
         if is_selected {
-            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR);
+            shapes::draw_rect_stroke(painter, rect, 0.0, SELECTION_COLOR, stroke_w);
         }
 
         (rect, clicked)

@@ -205,6 +205,10 @@ pub struct Mcu {
     /// Transient: id of a module the user just clicked, requesting the same jump
     /// for EVERY pin it wires. Same consumer as [`Mcu::pin_goto`].
     pub module_goto: Option<String>,
+    /// Id of the module currently selected on the canvas — drawn white, bigger
+    /// and double-bordered, the module counterpart of [`Mcu::selected_pin`].
+    /// Clicking it again clears it. View state only; not persisted.
+    pub selected_module: Option<String>,
     /// Diagram rotation toggle (persisted in `mcu.config` `@rotation`). `false`
     /// = default orientation. `true` = rotated one step clockwise: a 4-sided
     /// (QFP) chip becomes a 45° diamond, a 2-sided (DIP) chip turns 90°
