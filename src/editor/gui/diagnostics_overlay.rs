@@ -22,6 +22,42 @@ fn rustc_error_doc_url(code: &str) -> Option<String> {
     }
 }
 
+/// Paint one full-width translucent band over `line` (1-based) of the editor.
+///
+/// The band lands OVER the text, so `color` must stay translucent — an opaque
+/// fill hides the very line it is pointing at.
+///
+/// Standalone (rather than only inside [`show_diagnostics_overlay`]) so a
+/// highlight can be drawn on a file rust-analyzer doesn't track, or while the
+/// inline-errors toggle is off — neither has anything to do with wanting to see
+/// where a jump landed.
+pub fn show_line_band(
+    ui: &egui::Ui,
+    galley_pos: egui::Pos2,
+    text_clip_rect: egui::Rect,
+    galley: &egui::text::Galley,
+    display_code: &str,
+    line: u32,
+    color: egui::Color32,
+) {
+    let total_chars = display_code.chars().count();
+    let ci = lsp_pos_to_char_idx(display_code, line, 1).min(total_chars);
+    let loc = galley.pos_from_cursor(egui::text::CCursor::new(ci));
+    let y_top = galley_pos.y + loc.min.y;
+    let y_bot = galley_pos.y + loc.max.y;
+    if y_bot < text_clip_rect.top() || y_top > text_clip_rect.bottom() {
+        return; // scrolled out of view
+    }
+    ui.painter().with_clip_rect(text_clip_rect).rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(text_clip_rect.left(), y_top),
+            egui::pos2(text_clip_rect.right(), y_bot),
+        ),
+        0.0,
+        color,
+    );
+}
+
 pub fn show_diagnostics_overlay(
     ui: &mut egui::Ui,
     galley_pos: egui::Pos2,

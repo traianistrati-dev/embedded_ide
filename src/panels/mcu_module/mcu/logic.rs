@@ -95,6 +95,8 @@ impl Mcu {
             expand_module: None,
             module_undo: Vec::new(),
             module_remove_confirm: None,
+            pin_goto: None,
+            module_goto: None,
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
         }
@@ -683,6 +685,19 @@ impl Mcu {
                     pin.selected_function = PinFunction::Unset;
                 }
             }
+        }
+    }
+
+    /// Ask the editor to jump to the line that defines pin `pin_num`'s variable.
+    /// A no-op for a pin with no function — it has no generated binding yet, and
+    /// silently doing nothing is better than scrolling somewhere arbitrary.
+    /// Consumed by `AppIde` (the panel owns the editor, the MCU doesn't).
+    pub fn request_pin_goto(&mut self, pin_num: usize) {
+        let configured = self
+            .find_pin(pin_num)
+            .is_some_and(|p| p.selected_function != PinFunction::Unset);
+        if configured {
+            self.pin_goto = Some(pin_num);
         }
     }
 

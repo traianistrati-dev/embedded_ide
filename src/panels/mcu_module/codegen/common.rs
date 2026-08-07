@@ -263,32 +263,61 @@ pub fn pin_binding(base_var: &str, func: &PinFunction, custom_label: &str) -> St
     s
 }
 
-/// Recover the user labels embedded in generated binding names, mirroring
-/// [`parse_main_rs`]. Scans the GEN block's per-pin `let` bindings and, for each
-/// one carrying a `<base>_<type>_<label>` suffix, returns `(pin_name, label)`.
-/// Only GPIO/PWM bindings (the ones the rename field targets) can carry a label.
-pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
+/// One per-pin `let` binding found inside a generated `main.rs` GEN block.
+pub struct GenBinding<'a> {
+    /// 1-based line number in the FULL source (not just the block).
+    pub line: usize,
+    /// The binding variable, e.g. `pc13_out_led`.
+    pub var: &'a str,
+    /// MCU pin the binding belongs to, e.g. `PC13` / `GPIO20`.
+    pub pin_name: String,
+    /// The trimmed source line.
+    pub text: &'a str,
+}
+
+/// Scan the GEN block of a generated `main.rs` for its per-pin `let` bindings.
+///
+/// Covers both shapes the backends emit — `let [mut] pXY… = …` (STM32 blocking
+/// and embassy) and `let [mut] gpioNN… = …` (ESP) — and, importantly, `let mut`
+/// as well as plain `let`: embassy and ESP bind every OUTPUT as `let mut`.
+///
+/// This is the single place that knows what a generated binding line looks like;
+/// [`parse_pin_labels`] and [`find_pin_binding_line`] both read through it, so a
+/// lookup can't drift away from the generator.
+pub fn gen_let_bindings(source: &str) -> Vec<GenBinding<'_>> {
     let (Some(begin_pos), Some(end_pos)) = (source.find(GEN_BEGIN), source.find(GEN_END)) else {
         return vec![];
     };
     if begin_pos >= end_pos {
         return vec![];
     }
+    // Lines fully before the block — the offset that turns a block-local index
+    // into an absolute 1-based line number.
+    let base_line = source[..begin_pos].lines().count();
 
-    let mut result = Vec::new();
-    for line in source[begin_pos..end_pos].lines() {
+    let mut out = Vec::new();
+    for (i, line) in source[begin_pos..end_pos].lines().enumerate() {
         let trimmed = line.trim();
+        let after_let = match trimmed.strip_prefix("let mut ") {
+            Some(r) => r,
+            None => match trimmed.strip_prefix("let ") {
+                Some(r) => r,
+                None => continue,
+            },
+        };
+        let Some(eq_pos) = after_let.find(" =") else {
+            continue;
+        };
+        let var = after_let[..eq_pos].trim();
 
-        // Identify the binding var + pin name for the two `let`-binding shapes.
-        let (var, pin_name) = if trimmed.starts_with("let p") {
-            let after_let = &trimmed["let ".len()..];
-            let Some(eq_pos) = after_let.find(" =") else {
-                continue;
-            };
-            let var = after_let[..eq_pos].trim();
-            if var.len() < 3 || !var.starts_with('p') {
+        // `pXY…` → port letter + number; `gpioNN…` → number.
+        let pin_name = if let Some(rest) = var.strip_prefix("gpio") {
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if num.is_empty() {
                 continue;
             }
+            format!("GPIO{num}")
+        } else if var.len() >= 3 && var.starts_with('p') {
             let port_lc = match var.chars().nth(1) {
                 Some(c) if c.is_ascii_lowercase() => c,
                 _ => continue,
@@ -300,29 +329,77 @@ pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
             if num.is_empty() {
                 continue;
             }
-            (var, format!("P{}{}", port_lc.to_ascii_uppercase(), num))
-        } else if trimmed.starts_with("let mut gpio") || trimmed.starts_with("let gpio") {
-            let after_let = if trimmed.starts_with("let mut ") {
-                &trimmed["let mut ".len()..]
-            } else {
-                &trimmed["let ".len()..]
-            };
-            let Some(eq_pos) = after_let.find(" =") else {
-                continue;
-            };
-            let var = after_let[..eq_pos].trim();
-            let rest = match var.strip_prefix("gpio") {
-                Some(r) if r.starts_with(|c: char| c.is_ascii_digit()) => r,
-                _ => continue,
-            };
-            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if num.is_empty() {
-                continue;
-            }
-            (var, format!("GPIO{num}"))
+            format!("P{}{}", port_lc.to_ascii_uppercase(), num)
         } else {
             continue;
         };
+
+        out.push(GenBinding {
+            line: base_line + i + 1,
+            var,
+            pin_name,
+            text: trimmed,
+        });
+    }
+    out
+}
+
+/// Line (1-based) + binding name of a pin's `let` in the generated GEN block —
+/// what "jump to where this pin is defined" lands on. `None` when the pin has no
+/// binding of its own (unconfigured, or consumed inline by a peripheral).
+pub fn find_pin_binding_line(source: &str, pin_name: &str) -> Option<(usize, String)> {
+    gen_let_bindings(source)
+        .into_iter()
+        .find(|b| b.pin_name.eq_ignore_ascii_case(pin_name))
+        .map(|b| (b.line, b.var.to_owned()))
+}
+
+/// Fallback for a pin with no `let` of its own: the first GEN-block line that
+/// mentions it as a whole token — `p.PB6`, `peripherals.GPIO20`, `gpiob.pb6`.
+/// ESP hands bus pins straight to their driver (`.with_rx(peripherals.GPIO20)`),
+/// so that call IS the definition site.
+pub fn find_pin_mention_line(source: &str, pin_name: &str) -> Option<usize> {
+    let (Some(begin_pos), Some(end_pos)) = (source.find(GEN_BEGIN), source.find(GEN_END)) else {
+        return None;
+    };
+    if begin_pos >= end_pos {
+        return None;
+    }
+    let base_line = source[..begin_pos].lines().count();
+    let upper = pin_name.to_ascii_uppercase();
+    let lower = pin_name.to_ascii_lowercase();
+    // Whole-token match, so `GPIO2` never lights up on `GPIO20` and the bare
+    // `pb6` never matches the binding `pb6_out` (that one is case 1's job).
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let hit = |line: &str, needle: &str| {
+        let mut from = 0;
+        while let Some(rel) = line[from..].find(needle) {
+            let s = from + rel;
+            let e = s + needle.len();
+            let before_ok = s == 0 || !line[..s].ends_with(is_word);
+            let after_ok = e >= line.len() || !line[e..].starts_with(is_word);
+            if before_ok && after_ok {
+                return true;
+            }
+            from = s + 1;
+        }
+        false
+    };
+    source[begin_pos..end_pos]
+        .lines()
+        .enumerate()
+        .find(|(_, l)| hit(l, &upper) || hit(l, &lower))
+        .map(|(i, _)| base_line + i + 1)
+}
+
+/// Recover the user labels embedded in generated binding names, mirroring
+/// [`parse_main_rs`]. Scans the GEN block's per-pin `let` bindings and, for each
+/// one carrying a `<base>_<type>_<label>` suffix, returns `(pin_name, label)`.
+/// Only GPIO/PWM bindings (the ones the rename field targets) can carry a label.
+pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for b in gen_let_bindings(source) {
+        let (var, pin_name, trimmed) = (b.var, b.pin_name, b.text);
 
         // Function from the comment, then strip the `<base>_<type>` prefix; the
         // remaining `_<label>` (if any) is the user's custom name.
@@ -627,5 +704,96 @@ mod tests {
             parse_pin_labels(&src),
             vec![("PC13".to_owned(), "my_pin_7".to_owned())]
         );
+    }
+
+    /// The shape each backend emits, so "jump to this pin" lands on the right
+    /// line no matter which one generated main.rs. The `let mut` cases are the
+    /// ones that matter: embassy and ESP bind every OUTPUT that way.
+    #[test]
+    fn find_pin_binding_line_covers_every_backend_shape() {
+        // (source line inside the block, pin, expected binding)
+        let cases: [(&str, &str, &str); 4] = [
+            // STM32 blocking
+            (
+                "    let pc13_out_led = gpioc.pc13.into_push_pull_output(&mut gpioc.crh); // GPIO Output",
+                "PC13",
+                "pc13_out_led",
+            ),
+            // embassy output (`let mut`)
+            (
+                "    let mut pa5_out = Output::new(p.PA5, Level::Low, Speed::Low); // GPIO Output",
+                "PA5",
+                "pa5_out",
+            ),
+            // embassy input
+            (
+                "    let pb6_in = Input::new(p.PB6, Pull::None); // GPIO Input",
+                "PB6",
+                "pb6_in",
+            ),
+            // ESP output (`let mut`, gpioNN naming)
+            (
+                "    let mut gpio2_out = Output::new(peripherals.GPIO2, Level::High, OutputConfig::default()); // GPIO Output",
+                "GPIO2",
+                "gpio2_out",
+            ),
+        ];
+        for (line, pin, binding) in cases {
+            let src = format!("#![no_std]\nfn x() {{}}\n{GEN_BEGIN}\n{line}\n{GEN_END}\n");
+            assert_eq!(
+                find_pin_binding_line(&src, pin),
+                // 1: #![no_std], 2: fn x, 3: GEN_BEGIN, 4: the binding
+                Some((4, binding.to_owned())),
+                "{pin} in `{line}`"
+            );
+        }
+    }
+
+    #[test]
+    fn find_pin_binding_line_ignores_non_pin_lets() {
+        let src = format!(
+            "{GEN_BEGIN}\n\
+             let peripherals = esp_hal::init(config);\n\
+             let mut gpioc = dp.GPIOC.split();\n\
+             let p = embassy_stm32::init(config);\n\
+             let mut _adc1 = init_adc1(dp.ADC1, clocks);\n\
+             let pc14_out = gpioc.pc14.into_push_pull_output(&mut gpioc.crh); // GPIO Output\n\
+             {GEN_END}\n"
+        );
+        assert_eq!(gen_let_bindings(&src).len(), 1);
+        assert_eq!(
+            find_pin_binding_line(&src, "PC14"),
+            Some((6, "pc14_out".to_owned()))
+        );
+        assert_eq!(find_pin_binding_line(&src, "PC13"), None);
+    }
+
+    /// A pin handed straight to its driver has no `let` of its own — the call
+    /// that consumes it is the definition site.
+    #[test]
+    fn find_pin_mention_line_falls_back_to_the_consuming_call() {
+        let src = format!(
+            "{GEN_BEGIN}\n\
+             let mut _uart1 = Uart::new(peripherals.UART1, cfg)\n\
+             .with_rx(peripherals.GPIO20)\n\
+             .with_tx(peripherals.GPIO21);\n\
+             {GEN_END}\n"
+        );
+        assert_eq!(find_pin_binding_line(&src, "GPIO20"), None);
+        assert_eq!(find_pin_mention_line(&src, "GPIO20"), Some(3));
+        assert_eq!(find_pin_mention_line(&src, "GPIO21"), Some(4));
+        // Whole-token only: GPIO2 must not light up on GPIO20 / GPIO21.
+        assert_eq!(find_pin_mention_line(&src, "GPIO2"), None);
+    }
+
+    #[test]
+    fn pin_lookups_ignore_code_outside_the_gen_block() {
+        let src = format!(
+            "{GEN_BEGIN}\n{GEN_END}\n\
+             let pc13_out = something(); // GPIO Output\n\
+             let x = p.PC13;\n"
+        );
+        assert_eq!(find_pin_binding_line(&src, "PC13"), None);
+        assert_eq!(find_pin_mention_line(&src, "PC13"), None);
     }
 }

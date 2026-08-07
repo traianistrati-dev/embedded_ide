@@ -130,6 +130,13 @@ impl Mcu {
             if prev != self.selected_pin {
                 self.fn_scroll_offset = 0.0;
             }
+            // Selecting a CONFIGURED pin also asks the editor to jump to the
+            // line that binds its variable. Only on the click that selects: the
+            // second click deselects, and jumping again there would be noise. An
+            // Unset pin has no binding to jump to.
+            if self.selected_pin == Some(n) {
+                self.request_pin_goto(n);
+            }
         }
 
         // ── Inner chip panel ─────────────────────────────────────────────────

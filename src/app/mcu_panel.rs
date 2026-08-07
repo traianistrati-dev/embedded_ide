@@ -516,18 +516,21 @@ impl AppIde {
                                                     // ask) so the hand-authored
                                                     // panel reads apart from the
                                                     // peripheral ones.
-                                                    let bold = m.kind.is_custom();
-                                                    let mut t = egui::RichText::new("Name:");
-                                                    if bold {
-                                                        t = t.strong();
+                                                    // Fixed-width label there, so
+                                                    // this field and the Struct
+                                                    // one below it (a different
+                                                    // container) line up.
+                                                    if m.kind.is_custom() {
+                                                        mod_gui::custom_field_label(ui, "Name:");
+                                                    } else {
+                                                        ui.label("Name:");
                                                     }
-                                                    ui.label(t);
                                                     ui.add(
                                                         egui::TextEdit::singleline(
                                                             m.config.custom_label_mut(),
                                                         )
                                                         .hint_text("variable name")
-                                                        .desired_width(160.0),
+                                                        .desired_width(mod_gui::CUSTOM_FIELD_W),
                                                     );
                                                 });
                                                 let pending = local_pending
@@ -1432,6 +1435,7 @@ impl AppIde {
             false,
             None,
             None,
+            Vec::new(),
             crate::app::EditorSlot::Reference,
             id,
         );

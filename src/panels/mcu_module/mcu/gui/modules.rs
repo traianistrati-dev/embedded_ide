@@ -83,6 +83,28 @@ pub fn custom_pins_sig(pins: &[usize], pin_sigs: &HashMap<usize, String>) -> Str
         .join(";")
 }
 
+/// Width reserved for a Custom module's field labels ("Name:", "Struct"), so the
+/// boxes beside them start on one vertical line. Wide enough for the longest of
+/// them in bold.
+const CUSTOM_LABEL_W: f32 = 52.0;
+/// Width of those fields — the same for Name and Struct, so they also END on one
+/// line.
+pub const CUSTOM_FIELD_W: f32 = 160.0;
+
+/// The left column of a Custom module's `label + field` row: bold, left-aligned,
+/// fixed width. `Name:` lives in the module list (`mcu_panel`) and `Struct` in
+/// the config grid here — two different containers, so only a shared width keeps
+/// their fields aligned.
+pub fn custom_field_label(ui: &mut egui::Ui, text: &str) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(CUSTOM_LABEL_W, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.label(egui::RichText::new(text).strong());
+        },
+    );
+}
+
 /// Rect of the rename field for the `i`-th pin row inside a Custom box.
 fn custom_pin_row(box_rect: egui::Rect, i: usize) -> egui::Rect {
     let top = box_rect.top() + 44.0 + i as f32 * CUSTOM_ROW_H;
@@ -813,7 +835,11 @@ pub fn draw_modules(
     }
 
     if clicked_id.is_some() {
-        mcu.expand_module = clicked_id;
+        // Same click does two things: expand the module's entry in the list
+        // below, and light up every line its pins bind in the code — the module
+        // equivalent of clicking one pin.
+        mcu.expand_module = clicked_id.clone();
+        mcu.module_goto = clicked_id;
     }
 }
 
@@ -1101,12 +1127,17 @@ pub fn module_config_ui(
                     // Every label in a Custom module's panel is BOLD (user's ask).
                     // Struct name — pre-filled from the module name, then the
                     // user's own (so renaming the module can't break their impls).
-                    ui.label(egui::RichText::new("Struct").strong());
+                    //
+                    // Label AND field share ONE grid cell: put the field in the
+                    // second column and the pin rows below (which are wide, and
+                    // live in the first) stretch that column, shoving this box to
+                    // the far right, away from the Name field it belongs beside.
                     ui.horizontal(|ui| {
+                        custom_field_label(ui, "Struct");
                         let hint = derived_struct_name(&cfg.custom_label, cfg.instance);
                         ui.add(
                             egui::TextEdit::singleline(&mut cfg.struct_name)
-                                .desired_width(150.0)
+                                .desired_width(CUSTOM_FIELD_W)
                                 .hint_text(hint)
                                 .font(egui::FontId::proportional(11.0)),
                         )

@@ -133,6 +133,27 @@ pub fn diag_highlight_color(sev: lsp::DiagSeverity) -> egui::Color32 {
     }
 }
 
+/// The lines lit up by a jump from the Pins canvas: one for a pin click, one per
+/// wired pin for a module click. All in the same file — the editor shows one, and
+/// a band nobody can see is worse than a missing line.
+struct PinHighlight {
+    file: ProjectFileId,
+    /// 1-based, sorted, deduplicated.
+    lines: Vec<usize>,
+    /// `Context::input().time` when the pulse started.
+    start: f64,
+}
+
+/// How long the "here is your pin" band pulses before clearing itself — about
+/// four pulses at [`PIN_PULSE_HZ`], long enough to catch the eye without leaving
+/// a permanent stripe behind.
+const PIN_PULSE_SECS: f64 = 2.5;
+const PIN_PULSE_HZ: f64 = 1.5;
+/// Peak alpha of that band. The band is painted OVER the text, so a genuinely
+/// opaque yellow would hide the very line it points at — 80/255 (≈31 %) reads as
+/// a clear wash while the code stays perfectly legible.
+const PIN_PULSE_ALPHA: f32 = 80.0;
+
 /// Lift persisted paths from `src/`-relative to PROJECT-ROOT-relative.
 ///
 /// Paths in `user_src_files` used to be relative to `src/`; they are now
@@ -721,6 +742,8 @@ pub struct AppIde {
     /// project file. Highlighted with a translucent yellow band (like the
     /// Definition tab) until the next F12.
     highlighted_def_line: Option<(ProjectFileId, usize)>,
+    /// The pulsing "here is your pin" highlight, or `None` when none is running.
+    highlighted_pin_lines: Option<PinHighlight>,
     /// Live "usages" analysis (fn/struct/enum/const/… fade-if-unused + a
     /// "references" popup) for whichever `.rs` file is currently displayed. See
     /// `editor_panel::usages`.
@@ -1227,6 +1250,7 @@ impl AppIde {
             pending_scroll_to_line: None,
             highlighted_error_line: None,
             highlighted_def_line: None,
+            highlighted_pin_lines: None,
             usages: editor_panel::usages::UsagesState::default(),
             build_text_snapshot: HashMap::new(),
             extra_cursors: Vec::new(),
@@ -1539,6 +1563,86 @@ impl AppIde {
         }
     }
 
+    /// File + 1-based line of the code that defines pin `pin_num`'s variable, or
+    /// `None` when nothing has been generated for it yet (an unconfigured pin, or
+    /// a project that has never been generated) — that stays silent rather than
+    /// scrolling somewhere arbitrary.
+    ///
+    /// Targets, in order:
+    /// 1. the pin's own `let <binding> = …` in main.rs's GEN block — the actual
+    ///    definition, and what every backend emits for a configured pin;
+    /// 2. the first GEN-block line that mentions the pin (ESP hands bus pins
+    ///    straight to their driver, e.g. `.with_rx(peripherals.GPIO20)`, so that
+    ///    call IS the definition site);
+    /// 3. the peripheral / Custom-module config file under `src/pins/configs/`
+    ///    that names the binding.
+    fn locate_pin(&self, pin_num: usize) -> Option<(ProjectFileId, usize)> {
+        use crate::panels::mcu_module::codegen::common;
+        let (name, binding) = self.mcu.as_ref().and_then(|m| {
+            m.find_pin(pin_num).map(|p| {
+                (
+                    p.name.clone(),
+                    common::pin_binding(
+                        &p.name.to_ascii_lowercase(),
+                        &p.selected_function,
+                        &p.custom_label,
+                    ),
+                )
+            })
+        })?;
+
+        let main_hit = common::find_pin_binding_line(&self.generated_code, &name)
+            .map(|(line, _)| line)
+            .or_else(|| common::find_pin_mention_line(&self.generated_code, &name));
+        if let Some(line) = main_hit {
+            return Some((ProjectFileId::MainRs, line));
+        }
+
+        self.project_tree
+            .user_src_files
+            .iter()
+            .enumerate()
+            .find_map(|(i, (path, content))| {
+                if !path.contains("pins/configs/") {
+                    return None;
+                }
+                content
+                    .lines()
+                    .position(|l| l.contains(&binding))
+                    .map(|li| (ProjectFileId::UserFile(i), li + 1))
+            })
+    }
+
+    /// Open the code for a whole GROUP of pins — one pin for a pin click, a
+    /// module's whole wiring for a module click — scroll to the first of them and
+    /// pulse every one of their lines.
+    ///
+    /// Pins that resolve to a DIFFERENT file than the first hit are dropped: the
+    /// editor shows one file, and a band the user can't see is worse than one
+    /// missing line. In practice every pin of a module binds in main.rs anyway.
+    fn goto_pins_in_code(&mut self, pins: &[usize], now: f64) {
+        let hits: Vec<(ProjectFileId, usize)> =
+            pins.iter().filter_map(|n| self.locate_pin(*n)).collect();
+        let Some(&(file, _)) = hits.first() else {
+            return;
+        };
+        let mut lines: Vec<usize> = hits
+            .iter()
+            .filter(|(f, _)| *f == file)
+            .map(|(_, l)| *l)
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+
+        self.selected_file = file;
+        self.pending_scroll_to_line = Some((file, lines[0]));
+        self.highlighted_pin_lines = Some(PinHighlight {
+            file,
+            lines,
+            start: now,
+        });
+    }
+
     // ── Frame initialization (frame state, LSP, MCU synchronization) ───────────
     /// Calculate a hash of the MCU state (pins + clock + modules) for change detection
     fn calculate_mcu_state_hash(&self, mcu: &Mcu) -> u64 {
@@ -1579,7 +1683,7 @@ impl AppIde {
         hasher.finish()
     }
 
-    fn init_frame(&mut self, _ui: &mut egui::Ui) {
+    fn init_frame(&mut self, ui: &mut egui::Ui) {
         // ── Poll filesystem watcher events ────────────────────────────────────
         self.poll_fs_events();
 
@@ -1811,6 +1915,40 @@ impl AppIde {
         // codegen to stabilise before it fires.
         if mcu_changed {
             self.last_workspace_change = Some(std::time::Instant::now());
+        }
+
+        // ── "Show me this pin in the code" ────────────────────────────────────
+        // Deliberately AFTER the regen above: a click that also assigns the pin's
+        // function leaves main.rs one frame stale, so the request is queued on the
+        // MCU and resolved here, against freshly generated sources.
+        // A module click resolves to the pins it wires, so both requests end up
+        // as the same "light these pins up" call.
+        let goto_pins: Vec<usize> = match &mut self.mcu {
+            Some(m) => {
+                let pin = m.pin_goto.take();
+                let module = m.module_goto.take();
+                match (pin, module) {
+                    (Some(n), _) => vec![n],
+                    (None, Some(id)) => m
+                        .modules
+                        .iter()
+                        .find(|md| md.id == id)
+                        .map(|md| {
+                            let mut v: Vec<usize> =
+                                md.connections.iter().map(|c| c.mcu_pin).collect();
+                            v.sort_unstable();
+                            v.dedup();
+                            v
+                        })
+                        .unwrap_or_default(),
+                    (None, None) => Vec::new(),
+                }
+            }
+            None => Vec::new(),
+        };
+        if !goto_pins.is_empty() {
+            let now = ui.input(|i| i.time);
+            self.goto_pins_in_code(&goto_pins, now);
         }
 
         // Tick flash counters down

@@ -49,6 +49,11 @@ impl AppIde {
         highlight: Option<(u32, egui::Color32)>,
         // 1-based line of the F12 definition to highlight (yellow), if in this file.
         def_line: Option<u32>,
+        // (1-based line, band colour) per line of the pulsing "here is your pin"
+        // highlight that follows a jump from the Pins canvas — one line for a pin
+        // click, one per wired pin for a module click. The alpha is recomputed
+        // every frame by the caller, so these are just colours to paint.
+        pin_pulse: Vec<(u32, egui::Color32)>,
         // Which editor drew `editor_resp`, and which project file it holds.
         //
         // The MAIN editor passes `(Main, self.selected_file)` — identical to the
@@ -721,6 +726,24 @@ impl AppIde {
                 // Keep frames coming so the timeout fires without input.
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(400));
+            }
+        }
+
+        // ── Pin-jump pulse band ───────────────────────────────────────
+        // Painted OUTSIDE the diagnostics gate below: it must show up on any
+        // file the editor can display, whether or not rust-analyzer tracks it
+        // and whether or not the inline-errors toggle is on.
+        if is_main {
+            for (line, color) in pin_pulse {
+                crate::editor::gui::show_line_band(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &editor_resp.galley,
+                    &display_code,
+                    line,
+                    color,
+                );
             }
         }
 

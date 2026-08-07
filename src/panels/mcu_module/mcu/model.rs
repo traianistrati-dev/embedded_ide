@@ -198,6 +198,13 @@ pub struct Mcu {
     /// Transient: id of the module whose "Remove" button is armed and awaiting
     /// an inline confirmation (delete resets its pins, so it's confirmed first).
     pub module_remove_confirm: Option<String>,
+    /// Transient: number of a pin the user just clicked, requesting a jump to the
+    /// line that defines its variable in the generated code. Consumed + cleared
+    /// by the panel (`AppIde`), which owns the editor. Not part of project state.
+    pub pin_goto: Option<usize>,
+    /// Transient: id of a module the user just clicked, requesting the same jump
+    /// for EVERY pin it wires. Same consumer as [`Mcu::pin_goto`].
+    pub module_goto: Option<String>,
     /// Diagram rotation toggle (persisted in `mcu.config` `@rotation`). `false`
     /// = default orientation. `true` = rotated one step clockwise: a 4-sided
     /// (QFP) chip becomes a 45° diamond, a 2-sided (DIP) chip turns 90°

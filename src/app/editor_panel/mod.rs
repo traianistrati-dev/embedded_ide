@@ -1192,6 +1192,7 @@ impl AppIde {
                         Some((f, line)) if f == displayed_file => Some(line as u32),
                         _ => None,
                     };
+                    let pin_pulse = self.pin_pulse_bands(ui.ctx(), displayed_file);
                     self.handle_editor_completion(
                         ui,
                         &editor_resp,
@@ -1205,6 +1206,7 @@ impl AppIde {
                         ctrl_f12_pressed,
                         highlight,
                         def_line,
+                        pin_pulse,
                         crate::app::EditorSlot::Main,
                         displayed_file,
                     );
@@ -1341,6 +1343,37 @@ impl AppIde {
         ui.painter()
             .with_clip_rect(clip)
             .line_segment([egui::pos2(x, y_top), egui::pos2(x, y_bot)], stroke);
+    }
+
+    /// The lines + band colour of the "here is your pin" pulse on
+    /// `displayed_file` — one line for a pin click, one per wired pin for a
+    /// module click. Empty when there is nothing to pulse.
+    ///
+    /// The alpha follows a sine so the bands fade in and out instead of blinking
+    /// on/off, and the whole highlight clears itself after `PIN_PULSE_SECS` — a
+    /// permanent stripe would just become another thing to dismiss. Repaints are
+    /// requested while it runs, otherwise egui would idle mid-pulse.
+    fn pin_pulse_bands(
+        &mut self,
+        ctx: &egui::Context,
+        displayed_file: ProjectFileId,
+    ) -> Vec<(u32, egui::Color32)> {
+        let Some(hl) = &self.highlighted_pin_lines else {
+            return Vec::new();
+        };
+        let elapsed = ctx.input(|i| i.time) - hl.start;
+        if elapsed >= crate::app::PIN_PULSE_SECS {
+            self.highlighted_pin_lines = None;
+            return Vec::new();
+        }
+        ctx.request_repaint();
+        if hl.file != displayed_file {
+            return Vec::new(); // still counting down, just not on screen
+        }
+        let phase = (elapsed * std::f64::consts::TAU * crate::app::PIN_PULSE_HZ).sin();
+        let alpha = ((0.5 + 0.5 * phase) as f32 * crate::app::PIN_PULSE_ALPHA) as u8;
+        let color = egui::Color32::from_rgba_unmultiplied(255, 214, 90, alpha);
+        hl.lines.iter().map(|l| (*l as u32, color)).collect()
     }
 
     /// Apply a queued "jump to diagnostic line": scroll the editor so the target
