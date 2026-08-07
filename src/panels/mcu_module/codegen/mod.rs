@@ -74,6 +74,24 @@ impl Mcu {
         self.is_native() || self.gpio_api == ApiStyle::Native
     }
 
+    /// Keep the GPIO api in step with the Runtime: **Native binds every GPIO
+    /// raw**, so "Portable" is not a live choice there — the System tab locks
+    /// the selector, but the stored value used to stay `Portable`, which showed
+    /// a setting the build does not use AND left `embedded-hal` looking needed.
+    /// Snapping it to `Native` makes the panel honest and lets the unused
+    /// dependency be dropped. Idempotent; called every frame from `init_frame`.
+    /// Both the applied and the staged value follow, so the locked selector
+    /// updates the moment Native is picked (before Apply).
+    pub fn normalize_gpio_api(&mut self) {
+        use crate::panels::mcu_module::modules::ApiStyle;
+        if self.is_native() {
+            self.gpio_api = ApiStyle::Native;
+        }
+        if self.pending_is_native() {
+            self.pending_gpio_api = ApiStyle::Native;
+        }
+    }
+
     /// Build a brand-new `src/main.rs` (called when the MCU type is first
     /// selected or reset). Dispatches on `self.family` + `self.runtime`; families
     /// without a registered backend produce an empty file.
@@ -724,6 +742,45 @@ mod tests {
         );
         // The bare-field form must NOT be used for the binding name.
         assert_not_contains_substring(&code, "let pa0 = &mut gpioa.pa0");
+    }
+
+    /// The Native runtime binds every GPIO raw, so the GPIO api must not be left
+    /// reading "Portable": the System tab locks that selector, and a stale value
+    /// both misreports the build and keeps `embedded-hal` looking needed. User
+    /// report: switching Runtime to Native left the choice on Portable, so the
+    /// dependency lingered until the GPIO selector happened to be touched.
+    #[test]
+    fn native_runtime_snaps_gpio_api_to_native() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::mcu::model::Runtime;
+        use crate::panels::mcu_module::modules::ApiStyle;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        assert_eq!(mcu.gpio_api, ApiStyle::Portable, "default");
+
+        // Blocking: the choice is live and untouched.
+        mcu.normalize_gpio_api();
+        assert_eq!(mcu.gpio_api, ApiStyle::Portable, "Blocking keeps the choice");
+
+        // Native: snapped, and no io.rs bridge is emitted any more.
+        mcu.runtime = Runtime::Native;
+        mcu.pending_runtime = Runtime::Native;
+        mcu.normalize_gpio_api();
+        assert_eq!(mcu.gpio_api, ApiStyle::Native, "applied value follows the runtime");
+        assert_eq!(
+            mcu.pending_gpio_api,
+            ApiStyle::Native,
+            "the STAGED value follows too, so the locked selector shows it"
+        );
+        assert!(
+            !mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
+            "no io.rs on the Native runtime — so `embedded-hal` is no longer needed"
+        );
+        // Idempotent.
+        let before = (mcu.gpio_api, mcu.pending_gpio_api);
+        mcu.normalize_gpio_api();
+        assert_eq!((mcu.gpio_api, mcu.pending_gpio_api), before);
     }
 
     /// The GPIO api toggle switches the binding shape AND the io.rs emission:

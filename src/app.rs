@@ -1614,6 +1614,13 @@ impl AppIde {
         // frame — full codegen of every configs/*.rs plus Cargo.toml dep
         // checks, just to no-op compare — which, under spinner-driven
         // continuous repaint, was a big share of the per-frame CPU cost.
+        // The Native runtime binds every GPIO raw, so the GPIO In/Out choice is
+        // not live there — snap the stored value to Native BEFORE hashing, so the
+        // (locked) selector shows what the build does and the now-unused
+        // `embedded-hal` is dropped in the same pass. Idempotent.
+        if let Some(m) = &mut self.mcu {
+            m.normalize_gpio_api();
+        }
         let mut mcu_changed = false;
         if let Some(mcu) = &self.mcu {
             let current_hash = self.calculate_mcu_state_hash(mcu);
@@ -1717,15 +1724,22 @@ impl AppIde {
                 && all_pins
                     .iter()
                     .any(|(_, _, f)| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
-            // Every source the project compiles — a dependency referenced by
-            // this code is never stripped, whatever the feature flags say (a
-            // Runtime switch used to silently delete a hand-added
-            // `embedded-hal`). See `project_gen::is_crate_referenced`.
+            // The user's own sources — a dependency referenced by THIS code is
+            // never stripped, whatever the feature flags say (a Runtime switch
+            // used to silently delete a hand-added `embedded-hal`). See
+            // `project_gen::is_crate_referenced`.
+            //
+            // `src/pins/**` is excluded on purpose: those files are generated
+            // from the model and rewritten on the next sync, so a bridge the IDE
+            // is about to stop emitting must not keep its crate alive (that is
+            // what left `embedded-hal` behind after switching to the Native
+            // runtime).
             let sources: Vec<&str> = std::iter::once(self.generated_code.as_str())
                 .chain(
                     self.project_tree
                         .user_src_files
                         .iter()
+                        .filter(|(path, _)| !path.starts_with("src/pins/"))
                         .map(|(_, body)| body.as_str()),
                 )
                 .collect();
