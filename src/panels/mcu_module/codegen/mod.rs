@@ -23,6 +23,27 @@ pub use common::{
     var_suffix, GEN_BEGIN, GEN_END, MCU_ID_MARKER, USER_TAIL,
 };
 
+/// Type-parameter name for a pin in a Custom module's struct: the pin's own name
+/// (`PC15` → `PC15`), uppercased and sanitised to a valid Rust identifier.
+fn generic_param_name(pin_name: &str) -> String {
+    let mut s: String = pin_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        s.push('P');
+    } else if s.starts_with(|c: char| c.is_ascii_digit()) {
+        s.insert(0, 'P');
+    }
+    s
+}
+
 // ── Public API on Mcu ─────────────────────────────────────────────────────────
 
 impl Mcu {
@@ -126,13 +147,260 @@ impl Mcu {
     /// Per-peripheral init module bodies for `src/pins/configs/` — `(file_name,
     /// generated_body)`. Empty for families without separate config files.
     pub fn config_files(&self) -> Vec<(String, String)> {
-        self.backend()
-            .map(|b| b.config_files(self))
-            .unwrap_or_default()
+        let mut files = self.backend().map(|b| b.config_files(self)).unwrap_or_default();
+        // User-authored Custom modules produce a file each. They are generated
+        // HERE rather than in a family backend because the struct is generic
+        // over its pin types — no HAL type is named, so the same code is valid
+        // on every family and on both the Portable and Native paths.
+        files.extend(self.custom_module_files());
+        files
             .into_iter()
             // Strict-lints: exempt each generated peripheral config module.
             .map(|(name, body)| (name, common::strict_config_exemption(body, self.strict_lints)))
             .collect()
+    }
+
+    /// `let <name> = <Struct>::new(<pin bindings…>);` for every Custom module —
+    /// the lines spliced into main.rs's generated section, right after the pin
+    /// bindings the call consumes.
+    ///
+    /// Only pins that main.rs binds as an INDEPENDENT variable can be passed:
+    /// GPIO In/Out and PWM. A peripheral pin (USART TX, SPI SCK…) is moved into
+    /// its `pins::configs::*::init(…)` call, so handing it to a custom struct
+    /// too would not compile — those modules get a commented line explaining it
+    /// instead of code that breaks the build.
+    pub fn custom_module_inits(&self) -> String {
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        let mut out = String::new();
+        for m in self.modules.iter().filter(|m| m.kind == ModuleKind::Custom) {
+            let ModuleConfig::Custom(cfg) = &m.config else {
+                continue;
+            };
+            if cfg.applied_pins.is_empty() {
+                continue;
+            }
+            let var = super::mcu::gui::modules::custom_var_name(m);
+            let struct_name = super::mcu::gui::modules::custom_struct_name(m);
+            let pins: Vec<_> = cfg
+                .applied_pins
+                .iter()
+                .filter_map(|n| self.find_pin(*n))
+                .collect();
+            if pins.len() != cfg.applied_pins.len() {
+                continue; // a pin vanished from the chip
+            }
+            // Independently-bound pins only.
+            let taken: Vec<&str> = pins
+                .iter()
+                .filter(|p| {
+                    !matches!(
+                        p.selected_function,
+                        PinFunction::GpioInput | PinFunction::GpioOutput | PinFunction::TimerPwm { .. }
+                    )
+                })
+                .map(|p| p.name.as_str())
+                .collect();
+            if !taken.is_empty() {
+                out.push_str(&format!(
+                    "    // Custom module `{var}` not built here: {} {} owned by a \
+                     peripheral init,\n    // so {} cannot also be moved into \
+                     `{struct_name}`. Use GPIO In/Out or PWM pins,\n    // or construct it \
+                     yourself after that peripheral.\n",
+                    taken.join(", "),
+                    if taken.len() == 1 { "is" } else { "are" },
+                    if taken.len() == 1 { "it" } else { "they" },
+                ));
+                continue;
+            }
+            let args: Vec<String> = pins
+                .iter()
+                .map(|p| {
+                    common::pin_binding(
+                        &p.name.to_ascii_lowercase(),
+                        &p.selected_function,
+                        &p.custom_label,
+                    )
+                })
+                .collect();
+            // The module path follows the CURRENT revision, so main.rs always
+            // calls the file this Update just wrote.
+            out.push_str(&format!(
+                "    let mut {var} = pins::configs::{stem}::{struct_name}::new({});\n",
+                args.join(", "),
+                stem = super::mcu::gui::modules::custom_file_stem(m),
+            ));
+        }
+        out
+    }
+
+    /// `configs/custom_<name>.rs` for every Custom module that has at least one
+    /// pin: a struct with one field per pin (named `<pin>_<type>`, e.g.
+    /// `pa0_out`) plus a `new(…)` taking them in the order the user added them.
+    ///
+    /// Each field gets its OWN type parameter, so the struct holds whatever the
+    /// pin binding happens to be — a raw `stm32f1xx-hal` pin on the Native path,
+    /// a `DigitalOut` bridge on the Portable one — without this generator having
+    /// to know or track HAL types.
+    fn custom_module_files(&self) -> Vec<(String, String)> {
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        let mut out = Vec::new();
+        for m in self.modules.iter().filter(|m| m.kind == ModuleKind::Custom) {
+            let ModuleConfig::Custom(cfg) = &m.config else {
+                continue;
+            };
+            if cfg.applied_pins.is_empty() {
+                continue; // nothing committed yet — press Update
+            }
+            // Field name per pin: `<pin name lowercased>_<function suffix>`.
+            // `<pin>_<type>_<label>` — the SAME name main.rs binds, so the
+            // generated `::new(…)` call reads as a straight hand-over.
+            let fields: Vec<String> = cfg
+                .applied_pins
+                .iter()
+                .filter_map(|n| self.find_pin(*n))
+                .map(|p| {
+                    common::pin_binding(
+                        &p.name.to_ascii_lowercase(),
+                        &p.selected_function,
+                        &p.custom_label,
+                    )
+                })
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let struct_name = super::mcu::gui::modules::custom_struct_name(m);
+            // One type parameter per pin, NAMED AFTER THE PIN (`PC15`, `PD0`, …)
+            // instead of `P0, P1, P2` — the impl bounds then read against the pin
+            // you actually wired, which is what the user reads them for.
+            let generics: Vec<String> = cfg
+                .applied_pins
+                .iter()
+                .filter_map(|n| self.find_pin(*n))
+                .map(|p| generic_param_name(&p.name))
+                .collect();
+            let gen_list = generics.join(", ");
+            let decl = fields
+                .iter()
+                .zip(&generics)
+                .map(|(f, g)| format!("    pub {f}: {g},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let params = fields
+                .iter()
+                .zip(&generics)
+                .map(|(f, g)| format!("{f}: {g}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let init = fields
+                .iter()
+                .map(|f| format!("            {f},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // ── impl skeleton with the right embedded-hal bounds ─────────────
+            // The struct itself stays bound-free (bounds on a struct propagate
+            // everywhere); the READY-TO-EDIT impl below carries them, chosen per
+            // pin direction: an input pin gets `InputPin`, an output `OutputPin`.
+            // Written into the editable tail, so it is created once and then it
+            // is the user's — a later pin change only re-splices the GEN block.
+            let bounds: Vec<Option<&str>> = cfg
+                .applied_pins
+                .iter()
+                .filter_map(|n| self.find_pin(*n))
+                .map(|p| match p.selected_function {
+                    PinFunction::GpioInput => Some("InputPin"),
+                    PinFunction::GpioOutput | PinFunction::TimerPwm { .. } => Some("OutputPin"),
+                    _ => None,
+                })
+                .collect();
+            let bounded: Vec<String> = generics
+                .iter()
+                .zip(&bounds)
+                .map(|(g, b)| match b {
+                    Some(t) => format!("{g}: {t}"),
+                    None => g.clone(),
+                })
+                .collect();
+            let mut traits: Vec<&str> = bounds.iter().flatten().copied().collect();
+            traits.sort_unstable();
+            traits.dedup();
+            let use_line = if traits.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "use embedded_hal::digital::{{{}}};\n\n",
+                    traits.join(", ")
+                )
+            };
+            // One commented example call per pin, using its real field name.
+            let examples: Vec<String> = fields
+                .iter()
+                .zip(&bounds)
+                .filter_map(|(f, b)| match b {
+                    Some("InputPin") => {
+                        Some(format!("        // let {f} = self.{f}.is_high().unwrap_or(false);"))
+                    }
+                    Some("OutputPin") => {
+                        Some(format!("        // let _ = self.{f}.set_high();"))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let skeleton = format!(
+                "{use_line}\
+                 // Your own methods for this module. The bounds come from each pin's\n\
+                 // direction, so `.is_high()` / `.set_high()` are available here.\n\
+                 // NB: if you add or remove pins and press Update, adjust this generic\n\
+                 // list to match the regenerated struct above.\n\
+                 impl<{bounded_list}> {struct_name}<{gen_list}> {{\n\
+                 \x20   pub fn update(&mut self) {{\n\
+                 {examples}\n\
+                 \x20   }}\n\
+                 }}\n",
+                bounded_list = bounded.join(", "),
+                examples = if examples.is_empty() {
+                    "        // …".to_owned()
+                } else {
+                    examples.join("\n")
+                },
+            );
+            let body = format!(
+                "{begin}\n\
+                 // Custom module \"{name}\" — one field per pin, in the order they\n\
+                 // were added in the Virtual-module panel. Generic over each pin's\n\
+                 // type, so it compiles whatever the pins bind to.\n\
+                 pub struct {struct_name}<{gen_list}> {{\n\
+                 {decl}\n\
+                 }}\n\
+                 \n\
+                 impl<{gen_list}> {struct_name}<{gen_list}> {{\n\
+                 \x20   pub fn new({params}) -> Self {{\n\
+                 \x20       Self {{\n\
+                 {init}\n\
+                 \x20       }}\n\
+                 \x20   }}\n\
+                 }}\n\
+                 {end}\n\
+                 \n\
+                 // Everything below is editable — your changes are preserved on\n\
+                 // regeneration.\n\
+                 {skeleton}",
+                // A `pins/configs/*.rs` file must carry the CONFIG-file markers —
+                // `ProjectTree::sync_config_files` re-splices the block it finds
+                // between exactly these. Using main.rs's longer `GEN_BEGIN` made
+                // `extract_gen_block` return None, so an existing file was never
+                // updated: the struct regenerated only when the module was newly
+                // added (that path writes the whole file).
+                begin = "// <<< GENERATED>>>",
+                end = common::GEN_END,
+                name = m.config.custom_label(),
+            );
+            out.push((format!("{}.rs", super::mcu::gui::modules::custom_file_stem(m)), body));
+        }
+        out
     }
 
     /// Kept for any remaining call sites — delegates to `fresh_main_rs`.
@@ -742,6 +1010,385 @@ mod tests {
         );
         // The bare-field form must NOT be used for the binding name.
         assert_not_contains_substring(&code, "let pa0 = &mut gpioa.pa0");
+    }
+
+    /// A Custom module generates `configs/custom_<name>.rs` holding a struct with
+    /// one field per pin and a `new(...)` in the same order — generic over each
+    /// pin type, so no HAL type is baked in.
+    #[test]
+    fn custom_module_generates_generic_struct_file() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        mcu.apply_pin_function(11, PinFunction::GpioInput); // PA1
+
+        assert!(mcu.add_module(ModuleKind::Custom), "custom module always addable");
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "temp sensor".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10, 11];
+            c.applied_pins = c.pins.clone(); // what the Update button does
+        }
+
+        let files = mcu.config_files();
+        let (name, body) = files
+            .iter()
+            .find(|(n, _)| n.starts_with("custom_"))
+            .expect("custom config file generated");
+        assert_eq!(name, "custom_temp_sensor.rs");
+
+        // Struct + impl, generic over one type parameter per pin.
+        assert_contains_substring(body, "pub struct TempSensor<PA0, PA1>");
+        assert_contains_substring(body, "pub pa0_out: PA0,");
+        assert_contains_substring(body, "pub pa1_in: PA1,");
+        assert_contains_substring(body, "TempSensor<PA0, PA1>");
+        assert_contains_substring(body, "pub fn new(pa0_out: PA0, pa1_in: PA1) -> Self");
+        // No HAL type is named — that is what makes it work on every family.
+        assert_not_contains_substring(body, "stm32f1xx_hal");
+        // Editable tail after the generated block, like every config file.
+        assert_contains_substring(body, GEN_END);
+    }
+
+    /// Editing the pin list is a DRAFT: nothing is generated until Update
+    /// commits it (so a half-finished edit never rewrites the user's file), and
+    /// an explicit struct name wins over the module name.
+    #[test]
+    fn pins_are_staged_until_update_and_struct_name_is_explicit() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "panel".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10]; // drafted, NOT applied
+        }
+
+        // Draft only → no file, no instantiation.
+        assert!(mcu.config_files().iter().all(|(n, _)| !n.starts_with("custom_")));
+        assert!(mcu.custom_module_inits().is_empty());
+
+        // Update commits it.
+        if let Some(ModuleConfig::Custom(c)) =
+            mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).map(|m| &mut m.config)
+        {
+            // The signature is what the panel computes from the live pins; an
+            // empty one here just exercises the list comparison.
+            assert!(c.has_pending_pins(""), "the button must be offered");
+            c.applied_pins = c.pins.clone();
+            assert!(!c.has_pending_pins(""));
+        }
+        assert!(mcu.config_files().iter().any(|(n, _)| n == "custom_panel.rs"));
+
+        // An explicit struct name overrides the module-derived one.
+        if let Some(ModuleConfig::Custom(c)) =
+            mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).map(|m| &mut m.config)
+        {
+            c.struct_name = "encoder nav".to_owned();
+        }
+        let files = mcu.config_files();
+        let (_, body) = files.iter().find(|(n, _)| n.starts_with("custom_")).unwrap();
+        assert_contains_substring(body, "pub struct EncoderNav<PA0>");
+        assert_contains_substring(&mcu.custom_module_inits(), "EncoderNav::new(");
+    }
+
+    /// Every Update writes a NEW file (`custom_x.rs` -> `_1` -> `_2`), and both
+    /// the generated file name and main.rs's call follow the current revision —
+    /// so a regenerated struct never has to be merged into the previous file.
+    #[test]
+    fn each_update_targets_a_new_revision_file() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "menu".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10];
+            c.applied_pins = c.pins.clone(); // first Update: revision stays 0
+        }
+        let files = mcu.config_files();
+        assert!(files.iter().any(|(n, _)| n == "custom_menu.rs"), "{files:?}");
+        assert_contains_substring(&mcu.custom_module_inits(), "pins::configs::custom_menu::");
+
+        // Second Update (a pin was added) → revision 1 → a fresh file.
+        mcu.apply_pin_function(11, PinFunction::GpioInput);
+        if let Some(ModuleConfig::Custom(c)) = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .map(|m| &mut m.config)
+        {
+            c.pins = vec![10, 11];
+            c.revision += 1;
+            c.applied_pins = c.pins.clone();
+        }
+        let files = mcu.config_files();
+        assert!(files.iter().any(|(n, _)| n == "custom_menu_1.rs"), "{files:?}");
+        // Only the CURRENT revision is emitted, so `configs/mod.rs` declares one
+        // module and the build can never see two copies of the struct.
+        assert_eq!(files.iter().filter(|(n, _)| n.starts_with("custom_")).count(), 1);
+        assert_contains_substring(&mcu.custom_module_inits(), "pins::configs::custom_menu_1::");
+        assert_not_contains_substring(&mcu.custom_module_inits(), "custom_menu::");
+    }
+
+    /// The custom file must carry the CONFIG-file GEN markers, or
+    /// `ProjectTree::sync_config_files` can't find the block to re-splice — the
+    /// struct then regenerates only when the module is first added (the reported
+    /// bug: editing a pin afterwards changed nothing on disk).
+    #[test]
+    fn custom_file_uses_the_config_gen_markers() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "demo".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10];
+            c.applied_pins = c.pins.clone();
+        }
+        let files = mcu.config_files();
+        let (_, body) = files.iter().find(|(n, _)| n.starts_with("custom_")).unwrap();
+
+        // EXACTLY the marker `extract_gen_block` looks for (not main.rs's longer
+        // "GENERATED BEGIN — do not edit…" form).
+        assert_contains_substring(body, "// <<< GENERATED>>>");
+        assert_not_contains_substring(body, "GENERATED BEGIN");
+        assert_contains_substring(body, "// <<< GENERATED END >>>");
+        // Same shape as the other config files, so the splice path treats it alike.
+        let other = files.iter().find(|(n, _)| n == "io.rs");
+        if let Some((_, io)) = other {
+            assert!(io.contains("// <<< GENERATED>>>"));
+        }
+    }
+
+    /// main.rs gets the instantiation line, using the REAL binding names (which
+    /// carry the pin's user label) and placed after the bindings it consumes.
+    #[test]
+    fn custom_module_is_instantiated_in_main() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        mcu.apply_pin_function(11, PinFunction::GpioInput); // PA1
+        // A user label must be reflected in the ARGUMENT (the real variable),
+        // while the struct field stays label-free.
+        if let Some(p) = mcu.find_pin_mut(10) {
+            p.custom_label = "led".to_owned();
+        }
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "panel".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10, 11];
+            c.applied_pins = c.pins.clone(); // what the Update button does
+        }
+
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(
+            &code,
+            "let mut panel = pins::configs::custom_panel::Panel::new(pa0_out_led, pa1_in);",
+        );
+        // …and it comes AFTER the bindings it consumes.
+        let bind = code.find("let pa0_out_led").expect("binding emitted");
+        let init = code.find("Panel::new").unwrap();
+        assert!(bind < init, "instantiation must follow the bindings");
+    }
+
+    /// The instantiation lines must reach EVERY backend's generated section, not
+    /// just the STM32F1 blocking one — async (embassy) and ESP32-C3 too.
+    #[test]
+    fn custom_inits_are_appended_by_every_backend_section() {
+        use super::super::mock_mcu;
+        use super::{embassy_async, embassy_common};
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        let pins: Vec<&Pin> = mcu.iter_all_pins().collect();
+        let line = "    let mut demo = pins::configs::custom_demo::Demo::new(pa0_out);
+";
+
+        // Blocking embassy (non-F1 STM32).
+        let blocking = embassy_common::make_generated_section("X", &pins, "", line);
+        assert!(blocking.contains(line), "embassy blocking:
+{blocking}");
+        assert!(blocking.contains("Custom modules"));
+
+        // Async embassy.
+        let async_ = embassy_async::make_generated_section("X", &pins, "", "", line);
+        assert!(async_.contains(line), "embassy async:
+{async_}");
+
+        // ESP32-C3.
+        let esp = crate::panels::mcu_module::codegen_esp::fresh_esp32c3_main_rs(
+            &pins,
+            &mcu.clock,
+            "esp32c3",
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            line,
+        );
+        assert!(esp.contains(line), "esp:
+{esp}");
+
+        // In every case the line sits INSIDE the generated block.
+        for code in [&blocking, &async_, &esp] {
+            let b = code.find(GEN_BEGIN).expect("begin");
+            let e = code.find(GEN_END).expect("end");
+            let at = code.find(line).expect("line");
+            assert!(b < at && at < e, "must be inside the GEN block");
+        }
+    }
+
+    /// A pin owned by a peripheral init is MOVED there, so it can't also go into
+    /// a custom struct — emit an explanation instead of code that won't compile.
+    #[test]
+    fn custom_module_with_peripheral_pin_emits_a_note_not_broken_code() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        // A USART TX pin is consumed by `pins::configs::usart1::init`.
+        mcu.apply_pin_function(30, PinFunction::UsartTx(1));
+        let usart_pin = mcu
+            .iter_all_pins()
+            .find(|p| matches!(p.selected_function, PinFunction::UsartTx(_)))
+            .map(|p| p.number)
+            .expect("a USART TX pin");
+
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "mix".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10, usart_pin];
+            c.applied_pins = c.pins.clone();
+        }
+
+        let inits = mcu.custom_module_inits();
+        assert!(
+            inits.contains("not built here"),
+            "expected an explanatory note, got:
+{inits}"
+        );
+        assert!(!inits.contains("Mix::new("), "must NOT emit a broken call:
+{inits}");
+    }
+
+    /// Field names must carry the pin LABEL, so they match the variables main.rs
+    /// binds (`pc15_in_clk`, not `pc15_in`) — the user reported the mismatch. And
+    /// the editable tail ships a ready `impl` whose bounds follow each pin's
+    /// direction.
+    #[test]
+    fn custom_fields_carry_labels_and_tail_has_bounded_impl() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        // Two inputs + one output, each with a user label.
+        for (n, f, lbl) in [
+            (10usize, PinFunction::GpioInput, "clk"),
+            (11, PinFunction::GpioInput, "dt"),
+            (12, PinFunction::GpioOutput, "led"),
+        ] {
+            mcu.apply_pin_function(n, f);
+            if let Some(p) = mcu.find_pin_mut(n) {
+                p.custom_label = lbl.to_owned();
+            }
+        }
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        *m.config.custom_label_mut() = "menu controler".to_owned();
+        *m.config.custom_label_mut() = "menu controler".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.struct_name = "Encoder".to_owned();
+            c.pins = vec![10, 11, 12];
+            c.applied_pins = c.pins.clone();
+        }
+
+        let files = mcu.config_files();
+        let (name, body) = files.iter().find(|(n, _)| n.starts_with("custom_")).unwrap();
+        assert_eq!(name, "custom_menu_controler.rs");
+
+        // Fields + `new` params carry the labels…
+        // Type parameters are NAMED AFTER THE PINS (PA0, PA1, PA2).
+        assert_contains_substring(body, "pub struct Encoder<PA0, PA1, PA2>");
+        assert_contains_substring(body, "pub pa0_in_clk: PA0,");
+        assert_contains_substring(body, "pub pa1_in_dt: PA1,");
+        assert_contains_substring(body, "pub pa2_out_led: PA2,");
+        assert_contains_substring(
+            body,
+            "pub fn new(pa0_in_clk: PA0, pa1_in_dt: PA1, pa2_out_led: PA2)",
+        );
+        // …and match EXACTLY what main.rs passes.
+        assert_contains_substring(
+            &mcu.custom_module_inits(),
+            "Encoder::new(pa0_in_clk, pa1_in_dt, pa2_out_led)",
+        );
+
+        // Editable tail: bounds per direction + the import, outside the GEN block.
+        assert_contains_substring(body, "use embedded_hal::digital::{InputPin, OutputPin};");
+        assert_contains_substring(
+            body,
+            "impl<PA0: InputPin, PA1: InputPin, PA2: OutputPin> Encoder<PA0, PA1, PA2>",
+        );
+        let end = body.find(GEN_END).unwrap();
+        assert!(
+            body.find("impl<PA0: InputPin").unwrap() > end,
+            "skeleton must be in the editable tail"
+        );
+    }
+
+    /// A custom module is user-authored, so `reconcile_modules` (which rebuilds
+    /// the peripheral modules FROM the pins) must never delete it — and it keeps
+    /// its wires in step with its own pin list.
+    #[test]
+    fn reconcile_keeps_custom_modules_and_syncs_their_wires() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::Custom));
+        if let Some(m) = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom) {
+            if let ModuleConfig::Custom(c) = &mut m.config {
+                c.pins = vec![10, 11];
+            }
+        }
+        // No peripheral pins at all: every derived module would be dropped here.
+        mcu.reconcile_modules();
+        let m = mcu
+            .modules
+            .iter()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .expect("custom module survived reconcile");
+        assert_eq!(m.connections.len(), 2, "wires mirror the pin list");
+        assert!(m.connections.iter().all(|c| [10, 11].contains(&c.mcu_pin)));
+
+        // Empty the pin list → wires go, module stays.
+        if let Some(m) = mcu.modules.iter_mut().find(|m| m.kind == ModuleKind::Custom) {
+            if let ModuleConfig::Custom(c) = &mut m.config {
+                c.pins.clear();
+            }
+        }
+        mcu.reconcile_modules();
+        let m = mcu.modules.iter().find(|m| m.kind == ModuleKind::Custom).unwrap();
+        assert!(m.connections.is_empty());
+        assert!(
+            mcu.config_files().iter().all(|(n, _)| !n.starts_with("custom_")),
+            "no file for a module with no pins"
+        );
     }
 
     /// The Native runtime binds every GPIO raw, so the GPIO api must not be left

@@ -19,6 +19,78 @@ const BOX_W: f32 = 170.0;
 /// bottom.
 const BOX_H: f32 = 98.0;
 const BOX_GAP: f32 = 14.0;
+/// Height of one pin row inside a Custom module's box (its rename field).
+const CUSTOM_ROW_H: f32 = 21.0;
+
+/// Height of a module's box. A Custom module grows by one row per pin, because
+/// its pins' rename fields live INSIDE the box, grouped under the module name,
+/// instead of floating separately beside the chip.
+fn box_h(m: &VirtualModule) -> f32 {
+    if m.kind.is_custom() {
+        let n = match &m.config {
+            ModuleConfig::Custom(c) => c.pins.len(),
+            _ => 0,
+        };
+        BOX_H + n as f32 * CUSTOM_ROW_H
+    } else {
+        BOX_H
+    }
+}
+
+/// Every pin claimed by a Custom module — their rename fields are drawn INSIDE
+/// that module's box, so `io_arrows` must not also float one beside the chip.
+pub fn custom_module_pins(mcu: &Mcu) -> std::collections::HashSet<usize> {
+    mcu.modules
+        .iter()
+        .filter(|m| m.kind.is_custom())
+        .flat_map(|m| match &m.config {
+            ModuleConfig::Custom(c) => c.pins.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Module path stem of a Custom module's generated file — `custom_<name>` at
+/// revision 0, `custom_<name>_<n>` after the n-th **Update**. Every Update lands
+/// in a FRESH file; only the current stem is declared in `configs/mod.rs` and
+/// called from main.rs, so older revisions sit on disk as history without ever
+/// producing a duplicate struct in the build.
+pub fn custom_file_stem(m: &VirtualModule) -> String {
+    let var = custom_var_name(m);
+    match &m.config {
+        ModuleConfig::Custom(c) if c.revision > 0 => format!("custom_{var}_{}", c.revision),
+        _ => format!("custom_{var}"),
+    }
+}
+
+/// The prefix every revision of a Custom module's file shares — used to keep the
+/// older ones when the project tree prunes config files.
+pub fn custom_file_prefix(m: &VirtualModule) -> String {
+    format!("custom_{}", custom_var_name(m))
+}
+
+/// Fingerprint of a Custom module's pin list — each pin's number plus its
+/// `function|label`. Compared against `applied_sig` to decide whether **Update**
+/// has anything to do: renaming a pin or flipping it In→Out changes the
+/// generated field names just as much as adding one does.
+pub fn custom_pins_sig(pins: &[usize], pin_sigs: &HashMap<usize, String>) -> String {
+    pins.iter()
+        .map(|n| {
+            let s = pin_sigs.get(n).map(String::as_str).unwrap_or("?");
+            format!("{n}:{s}")
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Rect of the rename field for the `i`-th pin row inside a Custom box.
+fn custom_pin_row(box_rect: egui::Rect, i: usize) -> egui::Rect {
+    let top = box_rect.top() + 44.0 + i as f32 * CUSTOM_ROW_H;
+    egui::Rect::from_min_max(
+        egui::pos2(box_rect.left() + 52.0, top),
+        egui::pos2(box_rect.right() - 8.0, top + CUSTOM_ROW_H - 4.0),
+    )
+}
 /// Gap between the pin tips and a module box.
 const PIN_GAP: f32 = 18.0;
 /// Canvas margin reserved around the chip for modules (so boxes + wires sit
@@ -46,7 +118,7 @@ pub fn dragged_half_extent(mcu: &Mcu) -> egui::Vec2 {
     for m in &mcu.modules {
         if m.pos != (0.0, 0.0) {
             hx = hx.max(m.pos.0.abs()).max((m.pos.0 + BOX_W).abs());
-            hy = hy.max(m.pos.1.abs()).max((m.pos.1 + BOX_H).abs());
+            hy = hy.max(m.pos.1.abs()).max((m.pos.1 + box_h(m)).abs());
         }
     }
     egui::vec2(hx, hy)
@@ -124,6 +196,21 @@ fn pin_anchor_local(
     None
 }
 
+/// A fixed-size arrowhead at `to`, pointing along `from → to`. Used on custom
+/// module wires to show which way the data flows (the line itself is drawn by
+/// the caller). Fixed size — a long wire must not grow a huge head.
+fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
+    let v = to - from;
+    if v.length() < 1.0 {
+        return;
+    }
+    let dir = v.normalized();
+    let rot = egui::emath::Rot2::from_angle(std::f32::consts::TAU / 12.0);
+    let stroke = egui::Stroke::new(1.6, color);
+    painter.line_segment([to, to - 7.0 * (rot * dir)], stroke);
+    painter.line_segment([to, to - 7.0 * (rot.inverse() * dir)], stroke);
+}
+
 /// Snap a (rotated) outward vector to the nearest chip side.
 fn side_from_outward(v: egui::Vec2) -> Side {
     if v.x.abs() >= v.y.abs() {
@@ -156,6 +243,9 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceCan => PinFunction::CanTx,
         ModuleKind::GenericInterfaceUsb => PinFunction::UsbDp,
+        // A custom module has no peripheral colour of its own — a neutral slate
+        // reads as "user-authored", matching its square corners.
+        ModuleKind::Custom => return egui::Color32::from_rgb(150, 160, 180),
     };
     f.color()
 }
@@ -164,10 +254,16 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
 /// the side axis) but **nudged forward** past `cursor` so same-side boxes never
 /// overlap. `cursor` tracks the trailing edge of the previously placed box on
 /// this side and is advanced here. Call with boxes pre-sorted by `along`.
-fn packed_rect(chip_rect: egui::Rect, side: Side, along: f32, cursor: &mut f32) -> egui::Rect {
+fn packed_rect(
+    chip_rect: egui::Rect,
+    side: Side,
+    along: f32,
+    cursor: &mut f32,
+    h: f32,
+) -> egui::Rect {
     match side {
         Side::Right | Side::Left => {
-            let half = BOX_H / 2.0;
+            let half = h / 2.0;
             let mut cy = along;
             if cy - half < *cursor + BOX_GAP {
                 cy = *cursor + BOX_GAP + half;
@@ -178,7 +274,7 @@ fn packed_rect(chip_rect: egui::Rect, side: Side, along: f32, cursor: &mut f32) 
             } else {
                 chip_rect.left() - PIN_HEIGHT - PIN_GAP - BOX_W
             };
-            egui::Rect::from_min_size(egui::pos2(x, cy - half), egui::vec2(BOX_W, BOX_H))
+            egui::Rect::from_min_size(egui::pos2(x, cy - half), egui::vec2(BOX_W, h))
         }
         Side::Top | Side::Bottom => {
             let half = BOX_W / 2.0;
@@ -188,11 +284,11 @@ fn packed_rect(chip_rect: egui::Rect, side: Side, along: f32, cursor: &mut f32) 
             }
             *cursor = cx + half;
             let y = if side == Side::Top {
-                chip_rect.top() - PIN_HEIGHT - PIN_GAP - BOX_H
+                chip_rect.top() - PIN_HEIGHT - PIN_GAP - h
             } else {
                 chip_rect.bottom() + PIN_HEIGHT + PIN_GAP
             };
-            egui::Rect::from_min_size(egui::pos2(cx - half, y), egui::vec2(BOX_W, BOX_H))
+            egui::Rect::from_min_size(egui::pos2(cx - half, y), egui::vec2(BOX_W, h))
         }
     }
 }
@@ -286,7 +382,77 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
+        // The generated struct is named after the module, so the preview shows
+        // the handle the user will bind: `let my_mod = MyMod::new(…)`.
+        ModuleKind::Custom => {
+            let name = custom_struct_name(m);
+            format!("{}: {name}", custom_var_name(m))
+        }
     }
+}
+
+/// Sanitised snake_case identifier for a custom module's variable, derived from
+/// its name (empty / invalid → `custom{instance}`).
+pub fn custom_var_name(m: &VirtualModule) -> String {
+    let lbl = sanitize_label(m.config.custom_label());
+    if lbl.is_empty() {
+        format!("custom{}", m.instance())
+    } else {
+        lbl
+    }
+}
+
+/// `CamelCase` struct name implied by a module label — the hint shown in the
+/// Struct field while the user hasn't typed one.
+pub fn derived_struct_name(label: &str, instance: u8) -> String {
+    let lbl = sanitize_label(label);
+    let base = if lbl.is_empty() {
+        format!("custom{instance}")
+    } else {
+        lbl
+    };
+    base.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Struct name for a custom module: the user's explicit choice when set,
+/// otherwise `CamelCase` of the module name (`temp sensor` → `TempSensor`).
+pub fn custom_struct_name(m: &VirtualModule) -> String {
+    // An explicit name wins, so renaming the module never renames the struct
+    // (and the user's own `impl` blocks keep compiling).
+    if let ModuleConfig::Custom(c) = &m.config {
+        let explicit = sanitize_label(&c.struct_name);
+        if !explicit.is_empty() {
+            let mut s = String::new();
+            for w in explicit.split('_').filter(|w| !w.is_empty()) {
+                let mut ch = w.chars();
+                if let Some(f) = ch.next() {
+                    s.push_str(&f.to_uppercase().collect::<String>());
+                    s.push_str(ch.as_str());
+                }
+            }
+            return s;
+        }
+    }
+    let var = custom_var_name(m);
+    var.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 /// The rename-field rect at the bottom of a module box (edited in a later pass).
@@ -318,7 +484,10 @@ fn draw_box(
         }
         None => egui::Color32::from_rgb(38, 42, 50),
     };
-    painter.rect_filled(rect, 6.0, fill);
+    // SQUARE corners mark a user-authored (Custom) module; the peripheral ones
+    // stay rounded, so the two kinds are told apart at a glance.
+    let radius = if m.kind.is_custom() { 0.0 } else { 6.0 };
+    painter.rect_filled(rect, radius, fill);
     let stroke = if removing_blink.is_some() {
         egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 70, 70)) // pending removal
     } else if connected {
@@ -326,7 +495,7 @@ fn draw_box(
     } else {
         egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 90, 90)) // disconnected
     };
-    painter.rect_stroke(rect, 6.0, stroke, egui::StrokeKind::Middle);
+    painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Middle);
 
     let title_color = if connected {
         color
@@ -384,7 +553,7 @@ pub fn draw_modules(
     //       floating (no wired pins). `conns` keeps the wire endpoints.
     struct Sided {
         idx: usize,
-        conns: Vec<(ModuleSignal, egui::Pos2)>,
+        conns: Vec<(ModuleSignal, egui::Pos2, usize)>,
         side: Side,
         along: f32,
     }
@@ -394,18 +563,19 @@ pub fn draw_modules(
     // Modules the user has dragged to a manual position (`pos != (0,0)`, stored
     // as an offset from the chip centre) are placed there directly, skipping the
     // auto-packing. Their wire conns are kept so the wires still track the pins.
-    let mut manual_mods: Vec<(usize, Vec<(ModuleSignal, egui::Pos2)>)> = Vec::new();
+    let mut manual_mods: Vec<(usize, Vec<(ModuleSignal, egui::Pos2, usize)>)> = Vec::new();
 
     for (i, m) in mcu.modules.iter().enumerate() {
-        let conns: Vec<(ModuleSignal, egui::Pos2, Side)> = m
+        let conns: Vec<(ModuleSignal, egui::Pos2, Side, usize)> = m
             .connections
             .iter()
             .filter_map(|c| {
-                pin_anchor_side(mcu, local_chip, rot, c.mcu_pin).map(|(p, s)| (c.signal, p, s))
+                pin_anchor_side(mcu, local_chip, rot, c.mcu_pin)
+                    .map(|(p, s)| (c.signal, p, s, c.mcu_pin))
             })
             .collect();
         if m.pos != (0.0, 0.0) {
-            let conns2 = conns.iter().map(|(sig, p, _)| (*sig, *p)).collect();
+            let conns2 = conns.iter().map(|(sig, p, _, n)| (*sig, *p, *n)).collect();
             manual_mods.push((i, conns2));
             continue;
         }
@@ -417,14 +587,14 @@ pub fn draw_modules(
         // Centroid along the side axis, from the pins actually on that side.
         let on_side: Vec<f32> = conns
             .iter()
-            .filter(|(_, _, s)| *s == side)
-            .map(|(_, p, _)| match side {
+            .filter(|(_, _, s, _)| *s == side)
+            .map(|(_, p, _, _)| match side {
                 Side::Top | Side::Bottom => p.x,
                 Side::Left | Side::Right => p.y,
             })
             .collect();
         let along = on_side.iter().sum::<f32>() / on_side.len().max(1) as f32;
-        let conns2 = conns.iter().map(|(sig, p, _)| (*sig, *p)).collect();
+        let conns2 = conns.iter().map(|(sig, p, _, n)| (*sig, *p, *n)).collect();
         sided.push(Sided {
             idx: i,
             conns: conns2,
@@ -438,7 +608,7 @@ pub fn draw_modules(
     let mut boxes: Vec<(
         usize,
         egui::Rect,
-        Vec<(ModuleSignal, egui::Pos2)>,
+        Vec<(ModuleSignal, egui::Pos2, usize)>,
         Side,
         bool,
         bool,
@@ -448,7 +618,7 @@ pub fn draw_modules(
         group.sort_by(|a, b| a.along.total_cmp(&b.along));
         let mut cursor = f32::MIN;
         for e in group {
-            let rect = packed_rect(chip_rect, e.side, e.along, &mut cursor);
+            let rect = packed_rect(chip_rect, e.side, e.along, &mut cursor, box_h(&mcu.modules[e.idx]));
             boxes.push((e.idx, rect, e.conns.clone(), e.side, true, false));
         }
     }
@@ -456,10 +626,11 @@ pub fn draw_modules(
     let mut fy = chip_rect.top();
     for i in floating_idx {
         let min = egui::pos2(chip_rect.right() + PIN_HEIGHT + PIN_GAP, fy);
-        fy += BOX_H + BOX_GAP;
+        let h = box_h(&mcu.modules[i]);
+        fy += h + BOX_GAP;
         boxes.push((
             i,
-            egui::Rect::from_min_size(min, egui::vec2(BOX_W, BOX_H)),
+            egui::Rect::from_min_size(min, egui::vec2(BOX_W, h)),
             Vec::new(),
             Side::Right,
             false,
@@ -470,7 +641,10 @@ pub fn draw_modules(
     for (i, conns) in manual_mods {
         let p = mcu.modules[i].pos;
         let rect =
-            egui::Rect::from_min_size(chip_center + egui::vec2(p.0, p.1), egui::vec2(BOX_W, BOX_H));
+            egui::Rect::from_min_size(
+            chip_center + egui::vec2(p.0, p.1),
+            egui::vec2(BOX_W, box_h(&mcu.modules[i])),
+        );
         let connected = !conns.is_empty();
         boxes.push((i, rect, conns, Side::Right, connected, true));
     }
@@ -509,7 +683,7 @@ pub fn draw_modules(
             removing.then_some(blink),
         );
 
-        for (sig, anchor) in conns {
+        for (sig, anchor, anchor_pin) in conns {
             let color = signal_color(*sig, inst);
             // A dragged box's stored side no longer implies an edge, so aim the
             // wire at the box edge nearest the pin; auto boxes keep their side.
@@ -521,6 +695,24 @@ pub fn draw_modules(
             painter.circle_filled(term, 3.5, color);
             painter.circle_filled(*anchor, 3.5, color);
             painter.line_segment([term, *anchor], egui::Stroke::new(1.6, color));
+            // Custom modules show the DATA DIRECTION: an MCU input is driven by
+            // the device (module → pin), an output is driven by the MCU
+            // (pin → module). Peripheral buses are bidirectional, so no head.
+            if m.kind.is_custom() {
+                let dir = mcu
+                    .find_pin(*anchor_pin)
+                    .map(|p| p.selected_function.clone());
+                let (from, to) = match dir {
+                    Some(PinFunction::GpioInput) => (term, *anchor),
+                    Some(PinFunction::GpioOutput) | Some(PinFunction::TimerPwm { .. }) => {
+                        (*anchor, term)
+                    }
+                    _ => (term, term), // unknown direction → plain wire
+                };
+                if from != to {
+                    arrow_head(painter, from, to, color);
+                }
+            }
         }
 
         // Drag the header area (above the rename field) to MOVE the box; a plain
@@ -575,6 +767,39 @@ pub fn draw_modules(
     // The typed text is appended to the module's generated variable name(s);
     // regenerated every frame by `update_main_rs`, so it updates as you type.
     for (i, box_rect) in field_pass {
+        // A Custom module groups its PINS' rename fields inside the box, under
+        // the module name — instead of each pin floating separately beside the
+        // chip (io_arrows skips them, see `custom_module_pins`).
+        if mcu.modules[i].kind.is_custom() {
+            let pins: Vec<usize> = match &mcu.modules[i].config {
+                ModuleConfig::Custom(c) => c.pins.clone(),
+                _ => Vec::new(),
+            };
+            for (row, num) in pins.iter().enumerate() {
+                let r = custom_pin_row(box_rect, row);
+                let name = mcu
+                    .find_pin(*num)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| format!("pin{num}"));
+                painter.text(
+                    egui::pos2(box_rect.left() + 8.0, r.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    name,
+                    egui::FontId::monospace(9.5),
+                    egui::Color32::from_rgb(170, 175, 190),
+                );
+                if let Some(pin) = mcu.find_pin_mut(*num) {
+                    ui.push_id(("custom_pin_label", i, num), |ui| {
+                        ui.put(
+                            r,
+                            egui::TextEdit::singleline(&mut pin.custom_label)
+                                .hint_text("name")
+                                .font(egui::FontId::proportional(9.5)),
+                        );
+                    });
+                }
+            }
+        }
         let field_rect = label_field_rect(box_rect);
         let label = mcu.modules[i].config.custom_label_mut();
         ui.push_id(("module_label", i), |ui| {
@@ -592,15 +817,15 @@ pub fn draw_modules(
     }
 }
 
-fn dominant_side(conns: &[(ModuleSignal, egui::Pos2, Side)]) -> Side {
+fn dominant_side(conns: &[(ModuleSignal, egui::Pos2, Side, usize)]) -> Side {
     let mut count: HashMap<Side, usize> = HashMap::new();
-    for (_, _, s) in conns {
+    for (_, _, s, _) in conns {
         *count.entry(*s).or_insert(0) += 1;
     }
     // Most common; ties resolved by the first connection's side.
     conns
         .iter()
-        .map(|(_, _, s)| *s)
+        .map(|(_, _, s, _)| *s)
         .max_by_key(|s| count[s])
         .unwrap_or(Side::Right)
 }
@@ -626,12 +851,30 @@ pub fn module_config_ui(
     ui: &mut egui::Ui,
     m: &mut VirtualModule,
     pin_names: &HashMap<usize, String>,
+    // Per-pin `function|label` fingerprint — a Custom module compares it with
+    // what its generated code was built from (see `has_pending_pins`).
+    pin_sigs: &HashMap<usize, String>,
+    // Pins a Custom module may not take: reserved, assigned, or owned elsewhere.
+    pin_blocked: &std::collections::HashSet<usize>,
+    // Editable per-pin labels — a Custom module's rows mirror the name field
+    // inside its box on the canvas; the caller writes the changes back.
+    pin_labels: &mut HashMap<usize, String>,
+    // Each pin's CURRENT function — a Custom module needs it to tell a configured
+    // pin from one still waiting for In / Out / ADC / PWM.
+    pin_funcs_current: &HashMap<usize, PinFunction>,
+    // Functions selectable per pin, behind the pin-name buttons.
+    pin_funcs: &HashMap<usize, Vec<PinFunction>>,
+    // Set when a function is picked from a pin button; the caller applies it.
+    pin_fn_choice: &mut Option<(usize, PinFunction)>,
     is_async: bool,
     is_native: bool,
     // The STAGED `(api_style, async_mode)` for this module — the api/async row
     // edit THIS, not `m.config`, so nothing regenerates until "Apply".
     pending: &mut (ApiStyle, AsyncBusMode),
 ) {
+    // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
+    let is_custom = m.kind.is_custom();
+    let m_id = m.id.clone();
     // Connection rows (generic over kind), computed before borrowing config.
     let conn_rows: Vec<(&'static str, String)> = m
         .connections
@@ -850,12 +1093,289 @@ pub fn module_config_ui(
                     ui.add(egui::DragValue::new(&mut cfg.pid).hexadecimal(4, false, true));
                     ui.end_row();
                 }
+                // ── Custom: a hand-picked pin list ────────────────────────
+                // No auto-wiring and no peripheral config — just the pins, in
+                // the order they were added (that order is the generated
+                // struct's field order and `new()`'s parameter order).
+                ModuleConfig::Custom(cfg) => {
+                    // Every label in a Custom module's panel is BOLD (user's ask).
+                    // Struct name — pre-filled from the module name, then the
+                    // user's own (so renaming the module can't break their impls).
+                    ui.label(egui::RichText::new("Struct").strong());
+                    ui.horizontal(|ui| {
+                        let hint = derived_struct_name(&cfg.custom_label, cfg.instance);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cfg.struct_name)
+                                .desired_width(150.0)
+                                .hint_text(hint)
+                                .font(egui::FontId::proportional(11.0)),
+                        )
+                        .on_hover_text(
+                            "Name of the generated struct. Empty = follow the module name.",
+                        );
+                    });
+                    ui.end_row();
+
+                    // "Pins" sits on its OWN row right under Struct, and the
+                    // rows below start at the far left — the panel then reads as
+                    // a list instead of a label with a block hanging off it.
+                    ui.label(egui::RichText::new("Pins").strong());
+                    ui.end_row();
+
+                    let mut remove: Option<usize> = None;
+                    for (i, pin) in cfg.pins.iter().enumerate() {
+                        let num = *pin;
+                        let name = pin_names
+                            .get(&num)
+                            .cloned()
+                            .unwrap_or_else(|| format!("pin{num}"));
+                        let cur = pin_funcs_current.get(&num);
+                        let configured = cur.is_some_and(|f| *f != PinFunction::Unset);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{num}"))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_gray(140)),
+                            );
+                            // The pin NAME is a button opening the same function
+                            // list the chip shows, so a pin can be configured
+                            // without hunting for it on the canvas. Amber while
+                            // it still has no function.
+                            let btn_col = if configured {
+                                egui::Color32::from_rgb(120, 180, 235)
+                            } else {
+                                egui::Color32::from_rgb(230, 170, 70)
+                            };
+                            ui.menu_button(
+                                egui::RichText::new(&name).size(10.5).strong().color(btn_col),
+                                |ui| {
+                                    ui.set_min_width(210.0);
+                                    ui.label(
+                                        egui::RichText::new(format!("{name} - function"))
+                                            .size(10.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    ui.separator();
+                                    for f in pin_funcs.get(&num).into_iter().flatten() {
+                                        let selected = cur == Some(f);
+                                        if ui
+                                            .selectable_label(
+                                                selected,
+                                                egui::RichText::new(format!(
+                                                    "{}  -  {}",
+                                                    f.short_label(),
+                                                    f.label()
+                                                ))
+                                                .size(10.5)
+                                                .color(f.color()),
+                                            )
+                                            .clicked()
+                                        {
+                                            *pin_fn_choice = Some((num, f.clone()));
+                                            ui.close();
+                                        }
+                                    }
+                                },
+                            )
+                            .response
+                            .on_hover_text(if configured {
+                                "Change this pin's function"
+                            } else {
+                                "This pin has NO function yet - pick one before Update"
+                            });
+                            if ui
+                                .small_button(egui::RichText::new(ph::X).size(10.0))
+                                .on_hover_text("Remove this pin from the module")
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                            // Mirror of the field inside the module's box.
+                            let label = pin_labels.entry(num).or_default();
+                            ui.add(
+                                egui::TextEdit::singleline(label)
+                                    .desired_width(110.0)
+                                    .hint_text("name")
+                                    .font(egui::FontId::proportional(10.0)),
+                            )
+                            .on_hover_text(
+                                "Name appended to this pin's generated variable (and to its \
+                                 field in the struct).",
+                            );
+                        });
+                        ui.end_row();
+                    }
+                    if let Some(i) = remove {
+                        cfg.pins.remove(i);
+                    }
+                    if cfg.pins.is_empty() {
+                        ui.label(
+                            egui::RichText::new("no pins yet - add at least one")
+                                .size(10.0)
+                                .italics()
+                                .color(egui::Color32::from_rgb(220, 180, 90)),
+                        );
+                        ui.end_row();
+                    }
+
+                    // "+ Add pin" - only FREE pins (see `pin_blocked`).
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("custom_add_pin", m_id.clone()))
+                            .selected_text(
+                                egui::RichText::new(format!("{} Add pin", ph::PLUS)).size(10.5),
+                            )
+                            .show_ui(ui, |ui| {
+                                let mut nums: Vec<usize> = pin_names.keys().copied().collect();
+                                nums.sort_unstable();
+                                let mut any = false;
+                                for n in nums {
+                                    if cfg.pins.contains(&n) || pin_blocked.contains(&n) {
+                                        continue;
+                                    }
+                                    any = true;
+                                    let nm = &pin_names[&n];
+                                    if ui
+                                        .selectable_label(
+                                            false,
+                                            egui::RichText::new(format!("{n}  {nm}"))
+                                                .size(10.5)
+                                                .monospace(),
+                                        )
+                                        .clicked()
+                                    {
+                                        cfg.pins.push(n);
+                                    }
+                                }
+                                if !any {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "no free pin left - only unassigned, non-reserved \
+                                             pins can be added",
+                                        )
+                                        .size(10.0)
+                                        .italics(),
+                                    );
+                                }
+                            });
+                    });
+                    ui.end_row();
+
+                    // Generating with an unconfigured pin would declare a field
+                    // for a variable main.rs never binds, so Update turns AMBER
+                    // and reports instead, naming the pins to fix.
+                    let unconfigured: Vec<String> = cfg
+                        .pins
+                        .iter()
+                        .filter(|n| {
+                            pin_funcs_current
+                                .get(n)
+                                .map(|f| *f == PinFunction::Unset)
+                                .unwrap_or(true)
+                        })
+                        .map(|n| pin_names.get(n).cloned().unwrap_or_else(|| format!("pin{n}")))
+                        .collect();
+                    let incomplete = !unconfigured.is_empty();
+                    let current_sig = custom_pins_sig(&cfg.pins, pin_sigs);
+                    let pending = cfg.has_pending_pins(&current_sig);
+                    let warn_id = egui::Id::new(("custom_update_warn", m_id.clone()));
+                    ui.horizontal(|ui| {
+                        let btn = ui.add_enabled(
+                            pending && !cfg.pins.is_empty(),
+                            egui::Button::new(
+                                egui::RichText::new(format!("{} Update", ph::ARROWS_CLOCKWISE))
+                                    .size(10.5)
+                                    .color(if !pending {
+                                        egui::Color32::GRAY
+                                    } else if incomplete {
+                                        egui::Color32::from_rgb(240, 165, 60)
+                                    } else {
+                                        egui::Color32::from_rgb(120, 210, 140)
+                                    }),
+                            ),
+                        );
+                        if btn
+                            .on_hover_text(
+                                "Generate the struct from the pins above into a NEW file \
+                                 (`configs/custom_<name>_<n>.rs`) and point main.rs at it. \
+                                 Earlier revisions stay on disk, uncompiled.",
+                            )
+                            .on_disabled_hover_text("No pin changes to apply.")
+                            .clicked()
+                        {
+                            if incomplete {
+                                ui.ctx()
+                                    .data_mut(|d| d.insert_temp(warn_id, unconfigured.join(", ")));
+                            } else {
+                                if !cfg.applied_pins.is_empty() {
+                                    cfg.revision += 1;
+                                }
+                                cfg.applied_pins = cfg.pins.clone();
+                                cfg.applied_sig = current_sig.clone();
+                            }
+                        }
+                        if pending {
+                            ui.label(
+                                egui::RichText::new("pin changes not generated yet")
+                                    .size(9.5)
+                                    .italics()
+                                    .color(egui::Color32::from_rgb(220, 180, 90)),
+                            );
+                        }
+                    });
+                    ui.end_row();
+
+                    // The "Not all pins configured" dialog raised above.
+                    if let Some(list) = ui.ctx().data(|d| d.get_temp::<String>(warn_id)) {
+                        let mut open = true;
+                        let mut dismiss = false;
+                        egui::Window::new("Not all pins configured")
+                            .collapsible(false)
+                            .resizable(false)
+                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                            .open(&mut open)
+                            .show(ui.ctx(), |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "These pins have no function yet, so the struct can't \
+                                         be generated for them:",
+                                    )
+                                    .size(11.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(&list)
+                                        .strong()
+                                        .monospace()
+                                        .color(egui::Color32::from_rgb(240, 165, 60)),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Click a pin's name above (or the pin on the chip) and \
+                                         choose In / Out / ADC / PWM...",
+                                    )
+                                    .size(10.5)
+                                    .color(egui::Color32::GRAY),
+                                );
+                                ui.add_space(6.0);
+                                if ui.button("OK").clicked() {
+                                    dismiss = true;
+                                }
+                            });
+                        if !open || dismiss {
+                            ui.ctx().data_mut(|d| d.remove::<String>(warn_id));
+                        }
+                    }
+                }
             }
 
-            for (sig, pin) in &conn_rows {
-                ui.label(format!("{sig} {} pin", ph::ARROW_RIGHT));
-                ui.label(pin);
-                ui.end_row();
+            // Peripheral modules list their wired pins here; a custom module
+            // already shows (and edits) its own pins above.
+            if !is_custom {
+                for (sig, pin) in &conn_rows {
+                    ui.label(format!("{sig} {} pin", ph::ARROW_RIGHT));
+                    ui.label(pin);
+                    ui.end_row();
+                }
             }
         });
 

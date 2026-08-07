@@ -84,10 +84,21 @@ pub(super) const NO_PINS_PLACEHOLDER: &str =
 /// caller-supplied `clock_block` (which must define `let p = …` and end in
 /// `\n`), and one `let` binding per configured pin. Opens `fn main()` —
 /// `USER_TAIL` closes it with the editable loop.
-pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock_block: &str) -> String {
+pub fn make_generated_section(
+    mcu_name: &str,
+    pins: &[&Pin],
+    clock_block: &str,
+    // `let x = Foo::new(pa0_out, …);` lines for the Custom modules — appended
+    // after the pin bindings they consume (see `Mcu::custom_module_inits`).
+    custom_inits: &str,
+) -> String {
     let (use_line, mut body) = gpio_bindings(pins);
     if body.is_empty() {
         body.push_str(NO_PINS_PLACEHOLDER);
+    }
+    if !custom_inits.is_empty() {
+        body.push_str("\n    // ── Custom modules ──\n");
+        body.push_str(custom_inits);
     }
     format!(
         "{GEN_BEGIN}\n\

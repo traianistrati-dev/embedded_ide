@@ -96,7 +96,16 @@ impl FamilyBackend for Stm32f1Backend {
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
         let gen_ = stm32::make_generated_section(
-            &mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can, &usb, mcu.gpio_native(),
+            &mcu.name,
+            &all,
+            &mcu.clock,
+            &usart,
+            &spi,
+            &i2c,
+            &can,
+            &usb,
+            mcu.gpio_native(),
+            &mcu.custom_module_inits(),
         );
         let base = format!(
             "{header}{gen_}\n{tail}",
@@ -114,7 +123,16 @@ impl FamilyBackend for Stm32f1Backend {
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
         let new_section = stm32::make_generated_section(
-            &mcu.name, &all, &mcu.clock, &usart, &spi, &i2c, &can, &usb, mcu.gpio_native(),
+            &mcu.name,
+            &all,
+            &mcu.clock,
+            &usart,
+            &spi,
+            &i2c,
+            &can,
+            &usb,
+            mcu.gpio_native(),
+            &mcu.custom_module_inits(),
         );
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Add the ADC helper if newly needed; preserve user-edited ones.
@@ -141,7 +159,15 @@ impl FamilyBackend for Esp32Backend {
         let usart = modules::usart_configs(&mcu.modules);
         let spi = modules::spi_configs(&mcu.modules);
         let i2c = modules::i2c_configs(&mcu.modules);
-        codegen_esp::fresh_esp32c3_main_rs(&pins_of(mcu), &mcu.clock, &mcu.id, &usart, &spi, &i2c)
+        codegen_esp::fresh_esp32c3_main_rs(
+            &pins_of(mcu),
+            &mcu.clock,
+            &mcu.id,
+            &usart,
+            &spi,
+            &i2c,
+            &mcu.custom_module_inits(),
+        )
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
@@ -156,6 +182,7 @@ impl FamilyBackend for Esp32Backend {
             &usart,
             &spi,
             &i2c,
+            &mcu.custom_module_inits(),
         )
     }
 }
@@ -173,14 +200,20 @@ impl FamilyBackend for WbaBackend {
         format!(
             "{header}{section}\n{tail}",
             header = wba::invariant_header(&mcu.name, &mcu.id),
-            section = wba::make_generated_section(&mcu.name, &all, &mcu.clock),
+            section = wba::make_generated_section(
+                &mcu.name,
+                &all,
+                &mcu.clock,
+                &mcu.custom_module_inits(),
+            ),
             tail = USER_TAIL,
         )
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
-        let section = wba::make_generated_section(&mcu.name, &all, &mcu.clock);
+        let section =
+            wba::make_generated_section(&mcu.name, &all, &mcu.clock, &mcu.custom_module_inits());
         wba::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
     // No per-peripheral config files yet — bus init is documented inline (v1).
@@ -217,6 +250,7 @@ impl FamilyBackend for StmEmbassyBackend {
                 &mcu.name,
                 &all,
                 &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+                &mcu.custom_module_inits(),
             ),
             tail = USER_TAIL,
         )
@@ -228,6 +262,7 @@ impl FamilyBackend for StmEmbassyBackend {
             &mcu.name,
             &all,
             &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+            &mcu.custom_module_inits(),
         );
         embassy_common::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
@@ -299,6 +334,7 @@ fn async_section(mcu: &Mcu) -> String {
         &gpio_pins,
         &rcc::graph_clock_block(&mcu.family, &mcu.clock),
         &periphs.init_calls,
+        &mcu.custom_module_inits(),
     )
 }
 

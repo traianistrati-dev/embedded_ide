@@ -29,11 +29,17 @@ pub use embassy_common::{invariant_header, splice_section};
 /// block spliced in. The RCC mapping is now the FAMILY-keyed
 /// [`super::rcc::graph_clock_block`] (`"stm32wba"` → `ReadSpec::wba()` +
 /// `RccDescriptor::wba()`), so this no longer sniffs the graph's shape.
-pub fn make_generated_section(mcu_name: &str, pins: &[&Pin], clock: &ClockConfig) -> String {
+pub fn make_generated_section(
+    mcu_name: &str,
+    pins: &[&Pin],
+    clock: &ClockConfig,
+    custom_inits: &str,
+) -> String {
     embassy_common::make_generated_section(
         mcu_name,
         pins,
         &super::rcc::graph_clock_block("stm32wba", clock),
+        custom_inits,
     )
 }
 
@@ -63,7 +69,7 @@ mod tests {
         let pc13 = pin("PC13", PinFunction::GpioInput);
         let pa9 = pin("PA9", PinFunction::UsartTx(1));
         let refs: Vec<&Pin> = vec![&pb5, &pc13, &pa9];
-        let section = make_generated_section("STM32WBA55CG", &refs, &ClockConfig::None);
+        let section = make_generated_section("STM32WBA55CG", &refs, &ClockConfig::None, "");
 
         // Shape: gpio imports (both kinds), embassy init, one line per pin.
         assert!(section.contains("use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};"));
@@ -89,7 +95,7 @@ mod tests {
     /// No configured pins → no gpio import, a placeholder comment, still valid.
     #[test]
     fn empty_config_omits_imports() {
-        let section = make_generated_section("STM32WBA55CG", &[], &ClockConfig::None);
+        let section = make_generated_section("STM32WBA55CG", &[], &ClockConfig::None, "");
         assert!(!section.contains("use embassy_stm32::gpio"));
         assert!(section.contains("No pins configured yet"));
         assert!(section.contains("fn main() -> !"));
@@ -107,7 +113,7 @@ mod tests {
 
         // 100 MHz preset (the shipped default selections).
         let gc = GraphClock { graph: stm32wba_graph(), layout: Default::default() };
-        let section = make_generated_section("WBA", &[], &ClockConfig::Graph(gc.clone()));
+        let section = make_generated_section("WBA", &[], &ClockConfig::Graph(gc.clone()), "");
         for needle in [
             "config.rcc.hse = Some(rcc::Hse { prescaler: rcc::HsePrescaler::DIV1 });",
             "source: rcc::PllSource::HSE,",
@@ -128,7 +134,7 @@ mod tests {
         let mut gc2 = gc.clone();
         gc2.graph.node_mut("sw").unwrap().state =
             crate::panels::mcu_module::clock::graph::NodeState::Index(1);
-        let s2 = make_generated_section("WBA", &[], &ClockConfig::Graph(gc2));
+        let s2 = make_generated_section("WBA", &[], &ClockConfig::Graph(gc2), "");
         assert!(s2.contains("config.rcc.sys = rcc::Sysclk::HSE;"));
         assert!(!s2.contains("config.rcc.pll1"));
         assert!(s2.contains("VoltageScale::RANGE1"));
@@ -142,7 +148,7 @@ mod tests {
                 enabled: false,
                 hz: 32_000_000,
             };
-        let s3 = make_generated_section("WBA", &[], &ClockConfig::Graph(gc3));
+        let s3 = make_generated_section("WBA", &[], &ClockConfig::Graph(gc3), "");
         assert!(s3.contains("embassy_stm32::init(Default::default())"), "{s3}");
     }
 
@@ -152,7 +158,7 @@ mod tests {
         let v1 = format!(
             "{}{}\n{USER_TAIL}",
             invariant_header("X", "x"),
-            make_generated_section("X", &[], &ClockConfig::None)
+            make_generated_section("X", &[], &ClockConfig::None, "")
         );
         let edited = v1.replace(
             "// Your main loop code here.",
@@ -161,7 +167,7 @@ mod tests {
         let pb5 = pin("PB5", PinFunction::GpioOutput);
         let v2 = splice_section(
             &edited,
-            &make_generated_section("X", &[&pb5], &ClockConfig::None),
+            &make_generated_section("X", &[&pb5], &ClockConfig::None, ""),
             "X",
             "x",
         );

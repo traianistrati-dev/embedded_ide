@@ -20,17 +20,31 @@ pub enum ModuleKind {
     GenericInterfaceCan,
     /// USB full-speed device (D-/D+) — "USB".
     GenericInterfaceUsb,
+    /// A user-authored module with an arbitrary list of pins — "Custom".
+    ///
+    /// Unlike every kind above, this one is NOT derived from the pin functions:
+    /// the user creates it and picks its pins, so `reconcile_modules` must leave
+    /// it alone (a peripheral module disappears when its pins go; a custom one
+    /// only when the user removes it).
+    Custom,
 }
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 5] = [
+    pub const ALL: [ModuleKind; 6] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
         ModuleKind::GenericInterfaceCan,
         ModuleKind::GenericInterfaceUsb,
+        ModuleKind::Custom,
     ];
+
+    /// User-authored (not derived from the pin functions) — see
+    /// [`ModuleKind::Custom`].
+    pub fn is_custom(self) -> bool {
+        matches!(self, ModuleKind::Custom)
+    }
 
     /// The `(required, optional)` signals this kind needs to auto-wire.
     /// Single source of truth: `Mcu::add_module` wires from it, and the palette
@@ -44,6 +58,8 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => (&[Scl, Sda], &[]),
             ModuleKind::GenericInterfaceCan => (&[CanRx, CanTx], &[]),
             ModuleKind::GenericInterfaceUsb => (&[UsbDm, UsbDp], &[]),
+            // Nothing is auto-wired: the user picks the pins by hand.
+            ModuleKind::Custom => (&[], &[]),
         }
     }
 
@@ -65,6 +81,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => "I2C",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
+            ModuleKind::Custom => "Custom",
         }
     }
 
@@ -78,6 +95,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceCan => ModuleConfig::Can(CanModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceUsb => ModuleConfig::Usb(UsbModuleConfig::new(instance)),
+            ModuleKind::Custom => ModuleConfig::Custom(CustomModuleConfig::new(instance)),
         }
     }
 }
@@ -128,6 +146,9 @@ pub enum ModuleSignal {
     // USB
     UsbDm,
     UsbDp,
+    /// A pin of a user-authored [`ModuleKind::Custom`] module — it carries no
+    /// peripheral meaning, so the pin keeps whatever function the user gave it.
+    CustomPin,
 }
 
 impl ModuleSignal {
@@ -145,6 +166,7 @@ impl ModuleSignal {
             ModuleSignal::CanTx => "TX",
             ModuleSignal::UsbDm => "D-",
             ModuleSignal::UsbDp => "D+",
+            ModuleSignal::CustomPin => "PIN",
         }
     }
 
@@ -165,6 +187,9 @@ impl ModuleSignal {
             // USB pin functions carry no instance (single USB FS on STM32F1).
             ModuleSignal::UsbDm => PinFunction::UsbDm,
             ModuleSignal::UsbDp => PinFunction::UsbDp,
+            // A custom pin imposes nothing; report GPIO so callers that colour
+            // by function still get a sensible value.
+            ModuleSignal::CustomPin => PinFunction::GpioOutput,
         }
     }
 }
@@ -394,6 +419,76 @@ impl UsbModuleConfig {
     }
 }
 
+/// A user-authored module: a name and an arbitrary list of MCU pins.
+///
+/// Nothing here is derived from the pin functions — the user adds pins by hand
+/// (min 1, max = the chip's pin count) and each becomes a field of the generated
+/// `configs/custom_<name>.rs` struct.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomModuleConfig {
+    /// Kept only so `ModuleConfig::instance()` has an answer; custom modules are
+    /// distinguished by their name, not by a peripheral instance.
+    pub instance: u8,
+    /// The MCU pin numbers wired to this module, in the order the user added
+    /// them — that order is the order of the generated struct fields and of
+    /// `new()`'s parameters. EDITED freely; nothing is generated from it until
+    /// the user presses **Update** (see [`Self::applied_pins`]).
+    #[serde(default)]
+    pub pins: Vec<usize>,
+    /// The pin list the generated code currently reflects. `pins` is the draft,
+    /// this is what `custom_<name>.rs` and the `::new(…)` call were built from —
+    /// so adding a pin doesn't silently rewrite code the user may be mid-edit
+    /// in; **Update** commits `pins` here.
+    #[serde(default)]
+    pub applied_pins: Vec<usize>,
+    /// Name of the generated struct. Empty = follow the module name; once the
+    /// user types here it stays put even if the module is renamed.
+    #[serde(default)]
+    pub struct_name: String,
+    /// Fingerprint of the pins the generated code was built from — each pin's
+    /// number, FUNCTION and LABEL. The pin list alone isn't enough: renaming a
+    /// pin or flipping it In→Out changes the generated field names, parameter
+    /// order stays but the code differs, so Update must light up for those too.
+    #[serde(default)]
+    pub applied_sig: String,
+    /// How many times **Update** has regenerated this module. The generated file
+    /// is `custom_<name>.rs` at revision 0 and `custom_<name>_<n>.rs` after that,
+    /// so every Update lands in a FRESH file (the previous ones stay on disk as
+    /// history — only the current one is declared in `configs/mod.rs` and called
+    /// from main.rs, so there are never duplicate structs in the build).
+    #[serde(default)]
+    pub revision: u32,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// The module's name — also the generated file (`custom_<label>.rs`) and
+    /// struct name, so it must sanitize to a valid Rust identifier.
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl CustomModuleConfig {
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            pins: Vec::new(),
+            applied_pins: Vec::new(),
+            struct_name: String::new(),
+            applied_sig: String::new(),
+            revision: 0,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    /// Anything the generated code depends on changed since the last **Update**:
+    /// the pin list, or one of those pins' function / label (`current_sig`, built
+    /// by the caller which can see the pins). That is what enables the button.
+    pub fn has_pending_pins(&self, current_sig: &str) -> bool {
+        self.pins != self.applied_pins || self.applied_sig != current_sig
+    }
+}
+
 /// Per-kind configuration payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleConfig {
@@ -402,6 +497,7 @@ pub enum ModuleConfig {
     I2c(I2cModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
+    Custom(CustomModuleConfig),
 }
 
 impl ModuleConfig {
@@ -413,6 +509,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
+            ModuleConfig::Custom(c) => c.instance,
         }
     }
 
@@ -423,6 +520,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
+            ModuleConfig::Custom(c) => &c.rx_model,
         }
     }
 
@@ -433,6 +531,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
+            ModuleConfig::Custom(c) => &c.tx_model,
         }
     }
 
@@ -443,6 +542,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
+            ModuleConfig::Custom(c) => &mut c.rx_model,
         }
     }
 
@@ -453,6 +553,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
+            ModuleConfig::Custom(c) => &mut c.tx_model,
         }
     }
 
@@ -464,6 +565,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
+            ModuleConfig::Custom(c) => &c.custom_label,
         }
     }
 
@@ -474,6 +576,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
+            ModuleConfig::Custom(c) => &mut c.custom_label,
         }
     }
 
@@ -490,6 +593,11 @@ impl ModuleConfig {
                 )
             }
             ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
+            ModuleConfig::Custom(c) => format!(
+                "custom  ·  {} pin{}",
+                c.pins.len(),
+                if c.pins.len() == 1 { "" } else { "s" }
+            ),
             ModuleConfig::Can(c) => {
                 format!("CAN{}  ·  {} kbit", c.instance, c.bitrate / 1_000)
             }

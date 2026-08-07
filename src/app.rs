@@ -1785,7 +1785,20 @@ impl AppIde {
             // (blocking ⇄ async ⇄ native init) — force a FULL rewrite so the old
             // `init()` in the editable region is replaced, not just the consts.
             let force_configs = self.mcu.as_ref().is_some_and(|m| m.config_regen_forced);
-            self.project_tree.sync_config_files(&config_files, force_configs);
+            // Older revisions of each Custom module's file stay on disk.
+            let keep: Vec<String> = self
+                .mcu
+                .as_ref()
+                .map(|m| {
+                    m.modules
+                        .iter()
+                        .filter(|md| md.kind.is_custom())
+                        .map(crate::panels::mcu_module::mcu::gui::modules::custom_file_prefix)
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.project_tree
+                .sync_config_files(&config_files, force_configs, &keep);
             self.project_tree.sync_pin_files(&all_pins);
             if force_configs {
                 if let Some(m) = &mut self.mcu {

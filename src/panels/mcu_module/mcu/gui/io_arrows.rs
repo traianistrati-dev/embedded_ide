@@ -77,9 +77,12 @@ pub fn draw_io_arrows(
         color: egui::Color32,
         preview_base: String,
     }
+    // Pins belonging to a Custom module are rendered inside THAT module's box
+    // (grouped under its name), so they must not also get a floating field here.
+    let owned = super::modules::custom_module_pins(mcu);
     let mut items: Vec<Item> = Vec::new();
     for p in mcu.iter_all_pins() {
-        if p.reserved {
+        if p.reserved || owned.contains(&p.number) {
             continue;
         }
         let Some(outbound) = io_outbound(&p.selected_function) else {

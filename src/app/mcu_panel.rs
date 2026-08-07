@@ -241,6 +241,7 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
                                         ModuleKind::GenericInterfaceCan => "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
                                         ModuleKind::GenericInterfaceUsb => "Add a virtual USB device and auto-wire it to the USB D-/D+ pins",
+                                        ModuleKind::Custom => "Add a CUSTOM module — nothing is auto-wired: name it, add the pins you want, and a `configs/custom_<name>.rs` struct is generated for them",
                                     };
                                     // Colour the button's TEXT with the peripheral's
                                     // colour ONLY when a module of this kind is already
@@ -370,6 +371,73 @@ impl AppIde {
                                     .iter_all_pins()
                                     .map(|p| (p.number, p.name.clone()))
                                     .collect();
+                                // Per-pin fingerprint (function + label) so a
+                                // Custom module's Update button also lights up
+                                // when a pin is renamed or flipped In->Out —
+                                // both change the generated field names.
+                                // Pins a Custom module must NOT offer — only FREE
+                                // pins can be claimed:
+                                //  • reserved (power / NRST — no user code),
+                                //  • already assigned a function (a peripheral
+                                //    pin is moved into its own `init(…)`, and a
+                                //    configured GPIO already belongs somewhere),
+                                //  • already claimed by another virtual module.
+                                // Add the pin first, then give it its function —
+                                // its rename field lives inside the module box.
+                                let pin_blocked: std::collections::HashSet<usize> = mcu
+                                    .iter_all_pins()
+                                    .filter(|p| {
+                                        p.reserved
+                                            || p.selected_function
+                                                != crate::panels::mcu_module::pins::logic::pin_function::PinFunction::Unset
+                                    })
+                                    .map(|p| p.number)
+                                    .chain(mcu.modules.iter().flat_map(|other| {
+                                        other.connections.iter().map(|c| c.mcu_pin)
+                                    }))
+                                    .collect();
+                                // Editable copy of the per-pin labels: a Custom
+                                // module's pin rows edit them here, mirroring the
+                                // field inside its box on the canvas. Written back
+                                // after the loop (which borrows `mcu.modules`).
+                                let mut pin_labels: std::collections::HashMap<usize, String> = mcu
+                                    .iter_all_pins()
+                                    .map(|p| (p.number, p.custom_label.clone()))
+                                    .collect();
+                                let pin_labels_before = pin_labels.clone();
+                                // Selectable functions per pin — a Custom module's
+                                // pin buttons open this list, mirroring the picker
+                                // inside the chip.
+                                let pin_funcs: std::collections::HashMap<
+                                    usize,
+                                    Vec<crate::panels::mcu_module::pins::logic::pin_function::PinFunction>,
+                                > = mcu
+                                    .iter_all_pins()
+                                    .filter(|p| !p.reserved)
+                                    .map(|p| (p.number, p.available_functions.clone()))
+                                    .collect();
+                                // Set when the user picks one; applied after the
+                                // loop (which holds `mcu.modules` mutably).
+                                let pin_funcs_current: std::collections::HashMap<
+                                    usize,
+                                    crate::panels::mcu_module::pins::logic::pin_function::PinFunction,
+                                > = mcu
+                                    .iter_all_pins()
+                                    .map(|p| (p.number, p.selected_function.clone()))
+                                    .collect();
+                                let mut pin_fn_choice: Option<(
+                                    usize,
+                                    crate::panels::mcu_module::pins::logic::pin_function::PinFunction,
+                                )> = None;
+                                let pin_sigs: std::collections::HashMap<usize, String> = mcu
+                                    .iter_all_pins()
+                                    .map(|p| {
+                                        (
+                                            p.number,
+                                            format!("{:?}|{}", p.selected_function, p.custom_label),
+                                        )
+                                    })
+                                    .collect();
                                 // Removal is confirmed inline (it resets the module's
                                 // pins). `confirm_id` = the module currently showing
                                 // the confirm; the loop can't touch `mcu` while it
@@ -443,7 +511,17 @@ impl AppIde {
                                                 // Rename field — appended to the generated
                                                 // variable name(s); also shown in the title.
                                                 ui.horizontal(|ui| {
-                                                    ui.label("Name:");
+                                                    // Custom modules label their
+                                                    // fields in BOLD (the user's
+                                                    // ask) so the hand-authored
+                                                    // panel reads apart from the
+                                                    // peripheral ones.
+                                                    let bold = m.kind.is_custom();
+                                                    let mut t = egui::RichText::new("Name:");
+                                                    if bold {
+                                                        t = t.strong();
+                                                    }
+                                                    ui.label(t);
                                                     ui.add(
                                                         egui::TextEdit::singleline(
                                                             m.config.custom_label_mut(),
@@ -455,7 +533,12 @@ impl AppIde {
                                                 let pending = local_pending
                                                     .get_mut(&m.id)
                                                     .expect("pending entry seeded above");
-                                                mod_gui::module_config_ui(ui, m, &pin_names, is_async, is_native, pending);
+                                                mod_gui::module_config_ui(
+                                                    ui, m, &pin_names, &pin_sigs, &pin_blocked,
+                                                    &mut pin_labels, &pin_funcs_current,
+                                                    &pin_funcs, &mut pin_fn_choice, is_async,
+                                                    is_native, pending,
+                                                );
                                                 ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {
                                                     // Armed → inline confirm (removing
@@ -504,6 +587,23 @@ impl AppIde {
                                 });
                                 // Write the edited staged styles back onto the MCU.
                                 mcu.pending_module_styles = local_pending;
+                                // A function picked from a Custom module's pin
+                                // button — same path as clicking the pin on the
+                                // chip, so partners/labels stay consistent.
+                                if let Some((num, func)) = pin_fn_choice {
+                                    mcu.apply_pin_function(num, func);
+                                    modules_changed = true;
+                                }
+                                // Pin labels a Custom module's rows edited (the
+                                // mirror of the field inside its canvas box) —
+                                // applied now that `mcu.modules` is free again.
+                                for (num, label) in &pin_labels {
+                                    if pin_labels_before.get(num) != Some(label) {
+                                        if let Some(p) = mcu.find_pin_mut(*num) {
+                                            p.custom_label = label.clone();
+                                        }
+                                    }
+                                }
                                 // Apply the inline remove-confirm signals.
                                 if let Some(id) = arm_confirm {
                                     mcu.module_remove_confirm = Some(id);

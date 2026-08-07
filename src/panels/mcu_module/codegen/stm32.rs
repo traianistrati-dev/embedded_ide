@@ -148,6 +148,9 @@ pub fn make_generated_section(
     can: &BTreeMap<u8, CanModuleConfig>,
     usb: &BTreeMap<u8, UsbModuleConfig>,
     gpio_native: bool,
+    // `let x = Foo::new(pa0_out, …);` lines for the Custom modules — appended
+    // last, after every binding/init they consume (see `Mcu::custom_module_inits`).
+    custom_inits: &str,
 ) -> String {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
@@ -516,6 +519,15 @@ pub fn make_generated_section(
     }
 
     if any_call {
+        fn_calls.push('\n');
+    }
+
+    // ── Custom modules ───────────────────────────────────────────────────────
+    // Last, so every pin binding and peripheral init they consume already
+    // exists above.
+    if !custom_inits.is_empty() {
+        fn_calls.push_str("    // ── Custom modules ──\n");
+        fn_calls.push_str(custom_inits);
         fn_calls.push('\n');
     }
 

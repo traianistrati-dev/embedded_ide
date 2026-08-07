@@ -73,8 +73,9 @@ pub fn fresh_esp32c3_main_rs(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    custom_inits: &str,
 ) -> String {
-    let section = make_gen_section(pins, clock, usart, spi, i2c);
+    let section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits);
     format!("{}{section}\n{USER_TAIL}", invariant_header(id))
 }
 
@@ -88,8 +89,9 @@ pub fn update_esp32c3_main_rs(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    custom_inits: &str,
 ) -> String {
-    let new_section = make_gen_section(pins, clock, usart, spi, i2c);
+    let new_section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
@@ -132,6 +134,8 @@ fn make_gen_section(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
+    custom_inits: &str,
 ) -> String {
     let configured: Vec<&Pin> = pins
         .iter()
@@ -469,6 +473,13 @@ fn make_gen_section(
         body.push_str("    // ── USB — configured automatically by the USB peripheral ──\n");
     }
 
+    // ── Custom modules ── last, after every binding/init they consume.
+    if !custom_inits.is_empty() {
+        body.push('\n');
+        body.push_str("    // ── Custom modules ──\n");
+        body.push_str(custom_inits);
+    }
+
     // Blank line before GEN_END
     body.push('\n');
 
@@ -614,6 +625,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert!(
             code.contains("CpuClock::_160MHz"),
@@ -632,6 +644,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert!(
             code.contains("CpuClock::_80MHz"),
@@ -650,6 +663,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert!(code.contains("CpuClock::max()"), "{code}");
     }
@@ -665,6 +679,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert_eq!(parse_mcu_id(&fresh).as_deref(), Some("esp32c3-graph"));
         let updated = update_esp32c3_main_rs(
@@ -675,6 +690,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert_eq!(parse_mcu_id(&updated).as_deref(), Some("esp32c3-graph"));
     }
@@ -700,6 +716,7 @@ mod tests {
             &usart,
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert!(
             code.contains("with_baudrate(9600)"),
@@ -714,6 +731,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            "",
         );
         assert!(
             plain.contains("UartConfig::default())"),

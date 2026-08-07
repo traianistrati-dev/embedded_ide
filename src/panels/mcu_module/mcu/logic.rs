@@ -129,6 +129,10 @@ impl Mcu {
     /// chip simply doesn't have.
     pub fn supports_module(&self, kind: crate::panels::mcu_module::modules::ModuleKind) -> bool {
         use crate::panels::mcu_module::modules::autowire;
+        // A custom module needs no particular peripheral — any chip can host it.
+        if kind.is_custom() {
+            return true;
+        }
         let (required, optional) = kind.signals();
         autowire::pick_pins(
             self,
@@ -149,6 +153,10 @@ impl Mcu {
         use crate::panels::mcu_module::modules::autowire;
         if kind.is_single_instance() && self.modules.iter().any(|m| m.kind == kind) {
             return false;
+        }
+        // Custom modules claim no peripheral, so you can always add another.
+        if kind.is_custom() {
+            return true;
         }
         let (required, optional) = kind.signals();
         let used: std::collections::HashSet<usize> = self
@@ -176,6 +184,30 @@ impl Mcu {
         // from grabbing the alternate pins — refuse it here.
         if kind.is_single_instance() && self.modules.iter().any(|m| m.kind == kind) {
             return false;
+        }
+
+        // A CUSTOM module wires nothing: it is created empty and the user adds
+        // pins in its config panel, so the auto-wiring path below doesn't apply.
+        if kind.is_custom() {
+            use crate::panels::mcu_module::modules::VirtualModule;
+            let inst = (self
+                .modules
+                .iter()
+                .filter(|m| m.kind.is_custom())
+                .map(|m| m.instance())
+                .max()
+                .unwrap_or(0))
+                + 1;
+            let idx = self.modules.len() + 1;
+            self.modules.push(VirtualModule {
+                id: format!("custom_{idx}"),
+                kind,
+                name: format!("Custom{inst}"),
+                pos: (0.0, 0.0),
+                config: kind.default_config(inst),
+                connections: Vec::new(),
+            });
+            return true;
         }
 
         let (required, optional) = kind.signals();
@@ -717,9 +749,28 @@ impl Mcu {
             }
         }
 
-        // Drop modules whose peripheral no longer has any assigned pins.
+        // Drop modules whose peripheral no longer has any assigned pins — but
+        // NEVER a Custom one: it is authored by the user, not derived from the
+        // pins, so only an explicit Remove takes it away.
         self.modules
-            .retain(|m| wanted.contains_key(&(m.kind, m.instance())));
+            .retain(|m| m.kind.is_custom() || wanted.contains_key(&(m.kind, m.instance())));
+
+        // A custom module's wires mirror its own pin list (which the config
+        // panel edits), so rebuild them here — the canvas then draws them with
+        // the same machinery as every peripheral module.
+        for m in self.modules.iter_mut().filter(|m| m.kind.is_custom()) {
+            let pins: Vec<usize> = match &m.config {
+                crate::panels::mcu_module::modules::ModuleConfig::Custom(c) => c.pins.clone(),
+                _ => Vec::new(),
+            };
+            m.connections = pins
+                .into_iter()
+                .map(|mcu_pin| Connection {
+                    signal: ModuleSignal::CustomPin,
+                    mcu_pin,
+                })
+                .collect();
+        }
 
         // Ensure a module per wanted peripheral and re-sync its connections.
         for ((kind, inst), mut conns) in wanted {

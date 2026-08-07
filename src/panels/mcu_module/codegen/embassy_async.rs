@@ -61,6 +61,9 @@ pub fn make_generated_section(
     pins: &[&Pin],
     clock_block: &str,
     periph_calls: &str,
+    // Custom-module `let x = Foo::new(…);` lines — last, after every binding
+    // and peripheral init they consume (see `Mcu::custom_module_inits`).
+    custom_inits: &str,
 ) -> String {
     let (use_line, mut body) = gpio_bindings(pins);
     if !periph_calls.is_empty() {
@@ -71,6 +74,10 @@ pub fn make_generated_section(
     }
     if body.is_empty() {
         body.push_str(NO_PINS_PLACEHOLDER);
+    }
+    if !custom_inits.is_empty() {
+        body.push_str("\n    // ── Custom modules ──\n");
+        body.push_str(custom_inits);
     }
     // No fn-level `#[allow]` — the macro would drop it; the crate attribute in
     // `invariant_header` covers the unused-pin / unused-`p` cases instead.

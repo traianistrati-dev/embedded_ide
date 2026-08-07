@@ -382,7 +382,16 @@ impl ProjectTreeState {
     /// constants-only splice would leave the old implementation in place. A
     /// normal (baud/param) change passes `false` so user edits below the markers
     /// survive.
-    pub fn sync_config_files(&mut self, files: &[(String, String)], force: bool) {
+    pub fn sync_config_files(
+        &mut self,
+        files: &[(String, String)],
+        force: bool,
+        // Stems whose OLDER files must survive the prune below — a Custom module
+        // writes each Update to a new `custom_<name>_<n>.rs`, and the previous
+        // revisions are kept on disk (they are not in `configs/mod.rs`, so they
+        // are never compiled and can't clash with the current struct).
+        keep_prefixes: &[String],
+    ) {
         const DIR: &str = "src/pins/configs";
         const MOD_PATH: &str = "src/pins/configs/mod.rs";
         const GEN_BEGIN: &str = "// <<< GENERATED>>>";
@@ -417,7 +426,10 @@ impl ProjectTreeState {
             let Some(rest) = path.strip_prefix("src/pins/configs/") else {
                 return true;
             };
-            rest == "mod.rs" || active.iter().any(|a| a == rest.trim_end_matches(".rs"))
+            let stem = rest.trim_end_matches(".rs");
+            rest == "mod.rs"
+                || active.iter().any(|a| a == stem)
+                || keep_prefixes.iter().any(|p| stem == p || stem.starts_with(&format!("{p}_")))
         });
 
         // 4. Create / update each config file. The codegen `body` already wraps
@@ -1202,7 +1214,7 @@ mod tests {
         let mut state = ProjectTreeState::new();
         let path = "src/pins/configs/usart1.rs";
         let v1 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), v1.to_string())], false);
+        state.sync_config_files(&[("usart1.rs".to_string(), v1.to_string())], false, &[]);
         assert!(state.user_src_files.iter().any(|(p, _)| p == path));
 
         // User edits the EDITABLE part (below the markers).
@@ -1217,7 +1229,7 @@ mod tests {
 
         // Regenerate with a new baud rate (only the constants block changes).
         let v2 = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 9600;\n// <<< GENERATED END >>>\n\nuse foo;\npub fn init() { /* orig */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), v2.to_string())], false);
+        state.sync_config_files(&[("usart1.rs".to_string(), v2.to_string())], false, &[]);
 
         let body = &state
             .user_src_files
@@ -1246,11 +1258,11 @@ mod tests {
         let path = "src/pins/configs/usart1.rs";
         // Blocking (portable) template — its init lives BELOW the markers.
         let portable = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse portable;\npub fn init() -> SerialIo { /* portable */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), portable.to_string())], false);
+        state.sync_config_files(&[("usart1.rs".to_string(), portable.to_string())], false, &[]);
 
         // Apply switches the runtime → a completely different (native) template.
         let native = "// <<< GENERATED>>>\nconst BAUDRATE: u32 = 115200;\n// <<< GENERATED END >>>\n\nuse native;\npub fn init() -> (Tx, Rx) { /* native */ }\n";
-        state.sync_config_files(&[("usart1.rs".to_string(), native.to_string())], true);
+        state.sync_config_files(&[("usart1.rs".to_string(), native.to_string())], true, &[]);
 
         let body = &state
             .user_src_files
