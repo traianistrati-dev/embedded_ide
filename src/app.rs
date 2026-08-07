@@ -1033,6 +1033,16 @@ pub struct AppIde {
     allow_close: bool,
     /// Close the window as soon as the in-flight Save finishes.
     close_after_save: bool,
+    /// `true` while the same "unsaved changes" prompt is up for **Open Project**
+    /// (the click was intercepted). Opening replaces everything in memory, so it
+    /// is as destructive as closing.
+    open_prompt: bool,
+    /// Run the Open-Project folder picker as soon as the in-flight Save finishes.
+    open_after_save: bool,
+    /// Same gate in front of **New Project**, which clears every user file.
+    new_prompt: bool,
+    /// Open the New Project dialog as soon as the in-flight Save finishes.
+    new_after_save: bool,
     /// A Save requested from somewhere other than the toolbar (the exit
     /// prompt); OR-ed into `save_clicked` for one frame.
     request_save: bool,
@@ -1370,6 +1380,10 @@ impl AppIde {
             exit_prompt: false,
             allow_close: false,
             close_after_save: false,
+            open_prompt: false,
+            open_after_save: false,
+            new_prompt: false,
+            new_after_save: false,
             request_save: false,
             last_saved_deps: None,
             project_name: persisted.project_name,
@@ -2812,20 +2826,25 @@ impl eframe::App for AppIde {
 
         // ── Handle toolbar button clicks ──────────────────────────────────────
 
-        // "New Project" → ask for confirmation; default chip selection = Empty
-        if new_project_clicked {
-            self.confirm_new_project = true;
-            self.pending_mcu_id = None;
+        // "New Project" → its own confirmation (chip picker) says the user files
+        // are cleared, but never said WHAT would be lost — so the unsaved-changes
+        // gate comes first, exactly as for Open Project.
+        if new_project_clicked && self.save_in_progress.is_none() {
+            if self.unsaved_files().is_empty() {
+                self.begin_new_project();
+            } else {
+                self.new_prompt = true;
+            }
         }
 
-        // "Open Project" → show native folder picker, then load files
-        if open_project_clicked {
-            if let Some(folder) = rfd::FileDialog::new()
-                .set_title("Open Embedded IDE Project — pick the project root folder")
-                .pick_folder()
-            {
-                self.load_project_from_dir(&folder);
-                save_project_needed = true;
+        // "Open Project" → folder picker, then load files. Loading REPLACES
+        // everything in memory, so unsaved work is warned about first with the
+        // same modal the window close uses.
+        if open_project_clicked && self.save_in_progress.is_none() {
+            if self.unsaved_files().is_empty() {
+                self.pick_and_open_project(&mut save_project_needed);
+            } else {
+                self.open_prompt = true;
             }
         }
 
@@ -2955,15 +2974,31 @@ impl eframe::App for AppIde {
                         self.allow_close = true;
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
+                    // "Save and open…" / "Save and continue…": same deal — the
+                    // work is safely on disk, so the project it belongs to can
+                    // now be replaced or cleared.
+                    if self.open_after_save {
+                        self.open_after_save = false;
+                        self.open_prompt = false;
+                        self.pick_and_open_project(&mut save_project_needed);
+                    }
+                    if self.new_after_save {
+                        self.new_after_save = false;
+                        self.new_prompt = false;
+                        self.begin_new_project();
+                    }
                 }
                 Err(e) => {
                     self.export_msg = format!("{}  {e}", egui_phosphor::regular::X_CIRCLE);
                     self.export_status_until =
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
                     self.save_dest = None;
-                    // Don't close on a failed save — leave the prompt up so the
-                    // user sees the error and can still discard deliberately.
+                    // Don't close (or open another project) on a failed save —
+                    // leave the prompt up so the user sees the error and can
+                    // still discard deliberately.
                     self.close_after_save = false;
+                    self.open_after_save = false;
+                    self.new_after_save = false;
                 }
             }
         }
@@ -2985,6 +3020,8 @@ impl eframe::App for AppIde {
         self.show_library_action_dialog(ui);
         self.show_workspace_add_error_dialog(ui);
         self.show_exit_prompt(ui);
+        self.show_open_project_prompt(ui, &mut save_project_needed);
+        self.show_new_project_prompt(ui);
 
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).

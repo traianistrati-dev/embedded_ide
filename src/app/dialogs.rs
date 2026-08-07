@@ -10,6 +10,108 @@ use crate::panels::mcu_module::{codegen, registry, stm32_pin_data};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
+/// What the user picked in an [`unsaved_changes_modal`].
+#[derive(PartialEq)]
+pub(super) enum UnsavedChoice {
+    /// Still open, or the save it started is still running.
+    None,
+    Save,
+    Discard,
+    Cancel,
+}
+
+/// The shared "N files changed since the last save" modal.
+///
+/// Two things put it up — closing the app and opening another project — and both
+/// ask the same question, so they share one body: same list, same three buttons,
+/// same order. Only the wording and what happens afterwards differ.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn unsaved_changes_modal(
+    ui: &egui::Ui,
+    id: &str,
+    unsaved: &[String],
+    // A save started by THIS prompt is still running: the buttons are replaced
+    // by a spinner so the action can't be started twice or interrupted mid-write.
+    saving: bool,
+    saving_note: &str,
+    // Save writes the WHOLE project from the current build config; without one
+    // (chip not supported for export) there is nothing to save to.
+    can_save: bool,
+    save_label: &str,
+    discard_label: &str,
+) -> UnsavedChoice {
+    let mut choice = UnsavedChoice::None;
+    egui::Window::new("Unsaved changes")
+        .id(egui::Id::new(id))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} file{} changed since the last save:",
+                    unsaved.len(),
+                    if unsaved.len() == 1 { "" } else { "s" }
+                ))
+                .size(12.0),
+            );
+            ui.add_space(4.0);
+            // A long list would grow the modal past the window — cap it.
+            const MAX_LISTED: usize = 8;
+            for path in unsaved.iter().take(MAX_LISTED) {
+                ui.label(
+                    egui::RichText::new(format!("  {path}"))
+                        .monospace()
+                        .size(11.0),
+                );
+            }
+            if unsaved.len() > MAX_LISTED {
+                ui.label(
+                    egui::RichText::new(format!("  … and {} more", unsaved.len() - MAX_LISTED))
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                );
+            }
+            ui.add_space(10.0);
+
+            if saving {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(saving_note);
+                });
+                return;
+            }
+            ui.horizontal(|ui| {
+                let resp = ui
+                    .add_enabled(
+                        can_save,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} {save_label}", ph::EXPORT))
+                                .color(egui::Color32::from_rgb(120, 200, 140)),
+                        ),
+                    )
+                    .on_disabled_hover_text("This chip has no export configuration to save");
+                if resp.clicked() {
+                    choice = UnsavedChoice::Save;
+                }
+                if ui
+                    .button(
+                        egui::RichText::new(format!("{} {discard_label}", ph::TRASH))
+                            .color(egui::Color32::from_rgb(230, 130, 90)),
+                    )
+                    .clicked()
+                {
+                    choice = UnsavedChoice::Discard;
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = UnsavedChoice::Cancel;
+                }
+            });
+        });
+    choice
+}
+
 impl AppIde {
     /// "Unsaved changes" modal shown when the window close was intercepted
     /// (see `AppIde::ui`). Save and close / Close without saving / Cancel.
@@ -32,98 +134,147 @@ impl AppIde {
             return;
         }
 
-        let saving = self.save_in_progress.is_some();
-        // Save writes the WHOLE project from the current build config; without
-        // one (chip not supported for export) there is nothing to save to.
-        let can_save = self.selected_build_cfg().is_some();
-        let mut save_and_close = false;
-        let mut discard = false;
-        let mut cancel = false;
+        match unsaved_changes_modal(
+            ui,
+            "exit_unsaved_confirm",
+            &unsaved,
+            self.save_in_progress.is_some(),
+            "Saving — the app closes when it's done…",
+            self.selected_build_cfg().is_some(),
+            "Save and close",
+            "Close without saving",
+        ) {
+            UnsavedChoice::Save => {
+                self.request_save = true;
+                self.close_after_save = true;
+                // The save trigger sits EARLIER in the frame than this dialog,
+                // so it runs next frame — make sure there is one.
+                ui.ctx().request_repaint();
+            }
+            UnsavedChoice::Discard => {
+                self.exit_prompt = false;
+                self.allow_close = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            UnsavedChoice::Cancel => {
+                self.exit_prompt = false;
+                self.close_after_save = false;
+            }
+            UnsavedChoice::None => {}
+        }
+    }
 
-        egui::Window::new("Unsaved changes")
-            .id(egui::Id::new("exit_unsaved_confirm"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ui.ctx(), |ui| {
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{} file{} changed since the last save:",
-                        unsaved.len(),
-                        if unsaved.len() == 1 { "" } else { "s" }
-                    ))
-                    .size(12.0),
-                );
-                ui.add_space(4.0);
-                // A long list would grow the modal past the window — cap it.
-                const MAX_LISTED: usize = 8;
-                for path in unsaved.iter().take(MAX_LISTED) {
-                    ui.label(
-                        egui::RichText::new(format!("  {path}"))
-                            .monospace()
-                            .size(11.0),
-                    );
-                }
-                if unsaved.len() > MAX_LISTED {
-                    ui.label(
-                        egui::RichText::new(format!("  … and {} more", unsaved.len() - MAX_LISTED))
-                            .size(11.0)
-                            .color(egui::Color32::GRAY),
-                    );
-                }
-                ui.add_space(10.0);
+    /// The same modal for **Tools → Open Project**: opening another project
+    /// replaces everything in memory, so unsaved work would be gone with no
+    /// warning at all — the one destructive path that had none.
+    ///
+    /// `Save and open` starts the async save and arms `open_after_save`; the
+    /// folder picker runs where the save worker's result is applied, so the
+    /// files are on disk before the current project is dropped.
+    pub(super) fn show_open_project_prompt(&mut self, ui: &egui::Ui, save_needed: &mut bool) {
+        if !self.open_prompt {
+            return;
+        }
+        let unsaved = self.unsaved_files();
+        // Saved from another route (Ctrl+S) while the prompt was up.
+        if unsaved.is_empty() && self.save_in_progress.is_none() {
+            self.open_prompt = false;
+            self.pick_and_open_project(save_needed);
+            return;
+        }
 
-                if saving {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Saving — the app closes when it's done…");
-                    });
-                    return;
-                }
-                ui.horizontal(|ui| {
-                    let resp = ui
-                        .add_enabled(
-                            can_save,
-                            egui::Button::new(
-                                egui::RichText::new(format!("{} Save and close", ph::EXPORT))
-                                    .color(egui::Color32::from_rgb(120, 200, 140)),
-                            ),
-                        )
-                        .on_disabled_hover_text("This chip has no export configuration to save");
-                    if resp.clicked() {
-                        save_and_close = true;
-                    }
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} Close without saving", ph::TRASH))
-                                .color(egui::Color32::from_rgb(230, 130, 90)),
-                        )
-                        .clicked()
-                    {
-                        discard = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
+        match unsaved_changes_modal(
+            ui,
+            "open_unsaved_confirm",
+            &unsaved,
+            self.save_in_progress.is_some(),
+            "Saving — the folder picker opens when it's done…",
+            self.selected_build_cfg().is_some(),
+            "Save and open…",
+            "Open without saving",
+        ) {
+            UnsavedChoice::Save => {
+                self.request_save = true;
+                self.open_after_save = true;
+                ui.ctx().request_repaint();
+            }
+            UnsavedChoice::Discard => {
+                self.open_prompt = false;
+                self.pick_and_open_project(save_needed);
+            }
+            UnsavedChoice::Cancel => {
+                self.open_prompt = false;
+                self.open_after_save = false;
+            }
+            UnsavedChoice::None => {}
+        }
+    }
 
-        if save_and_close {
-            self.request_save = true;
-            self.close_after_save = true;
-            // The save trigger sits EARLIER in the frame than this dialog, so
-            // it runs next frame — make sure there is one.
+    /// And once more for **Tools → New Project**, which clears every user file
+    /// and folder. Its own confirmation says so, but it never said WHAT would be
+    /// lost — this gate names the files and offers to save them first.
+    ///
+    /// Unlike the other two, "continue" only opens the New Project dialog; the
+    /// clearing happens when the user confirms there.
+    pub(super) fn show_new_project_prompt(&mut self, ui: &egui::Ui) {
+        if !self.new_prompt {
+            return;
+        }
+        let unsaved = self.unsaved_files();
+        // Saved from another route (Ctrl+S) while the prompt was up.
+        if unsaved.is_empty() && self.save_in_progress.is_none() {
+            self.new_prompt = false;
+            self.begin_new_project();
+            // The New Project dialog is rendered EARLIER in the frame than this
+            // gate, so it first appears next frame — guarantee there is one.
             ui.ctx().request_repaint();
+            return;
         }
-        if discard {
-            self.exit_prompt = false;
-            self.allow_close = true;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+
+        match unsaved_changes_modal(
+            ui,
+            "new_project_unsaved_confirm",
+            &unsaved,
+            self.save_in_progress.is_some(),
+            "Saving — New Project continues when it's done…",
+            self.selected_build_cfg().is_some(),
+            "Save and continue…",
+            "Continue without saving",
+        ) {
+            UnsavedChoice::Save => {
+                self.request_save = true;
+                self.new_after_save = true;
+                ui.ctx().request_repaint();
+            }
+            UnsavedChoice::Discard => {
+                self.new_prompt = false;
+                self.begin_new_project();
+                ui.ctx().request_repaint();
+            }
+            UnsavedChoice::Cancel => {
+                self.new_prompt = false;
+                self.new_after_save = false;
+            }
+            UnsavedChoice::None => {}
         }
-        if cancel {
-            self.exit_prompt = false;
-            self.close_after_save = false;
+    }
+
+    /// Open the New Project dialog (chip picker + its own "cannot be undone"
+    /// confirmation), defaulting the chip selection to Empty.
+    pub(super) fn begin_new_project(&mut self) {
+        self.confirm_new_project = true;
+        self.pending_mcu_id = None;
+    }
+
+    /// Native folder picker → load that project. Cancelling the picker leaves
+    /// the current project untouched.
+    pub(super) fn pick_and_open_project(&mut self, save_needed: &mut bool) {
+        if let Some(folder) = rfd::FileDialog::new()
+            .set_title("Open Embedded IDE Project — pick the project root folder")
+            .pick_folder()
+        {
+            self.load_project_from_dir(&folder);
+            *save_needed = true;
         }
     }
 
