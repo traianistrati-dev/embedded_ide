@@ -279,7 +279,11 @@ pub fn draw_io_arrows(
             egui::Color32::from_rgb(140, 140, 150)
         };
         // Left-aligned with the field's left edge, so a column's labels line up.
-        painter.text(
+        // `Painter::text` hands back the rect it painted — the variable name is
+        // free text and routinely WIDER than the fixed-width field below it
+        // (`pc14_out_power_led_light`), so the selection border is sized from
+        // this rect, not from the field alone.
+        let name_rect = painter.text(
             field_rect.left_top() - egui::vec2(0.0, 2.0),
             egui::Align2::LEFT_BOTTOM,
             preview,
@@ -300,10 +304,11 @@ pub fn draw_io_arrows(
 
         // One border around the WHOLE group — the variable-name strip on top and
         // the rename field under it — so the selection reads as one item (the
-        // module box's white border, applied to a lone pin).
+        // module box's white border, applied to a lone pin). It takes the WIDER
+        // of the two (the name usually), so a long binding is never clipped.
         if selected {
             painter.rect_stroke(
-                field_rect.union(handle_rect).expand(3.0),
+                field_rect.union(handle_rect).union(name_rect).expand(3.0),
                 4.0,
                 // Same 2.8 px as a selected module box's border.
                 egui::Stroke::new(2.8, egui::Color32::WHITE),
