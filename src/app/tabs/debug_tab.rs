@@ -249,8 +249,15 @@ pub fn show_debug_tab(
                     "building…".to_owned(),
                     egui::Color32::from_rgb(220, 180, 60),
                 ),
+                // What the adapter is actually doing, when it says so (DAP
+                // progress events) — `launch` is minutes long on a debug-
+                // friendly build and a bare spinner says nothing about whether
+                // it is still making headway.
                 DebugPhase::Launching => (
-                    "flashing + attaching…".to_owned(),
+                    match dbg.progress() {
+                        Some(p) => format!("flashing + attaching… {p}"),
+                        None => "flashing + attaching…".to_owned(),
+                    },
                     egui::Color32::from_rgb(220, 180, 60),
                 ),
                 DebugPhase::Running => (

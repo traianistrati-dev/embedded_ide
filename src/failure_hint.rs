@@ -66,7 +66,32 @@ pub const HINTS: &[Hint] = &[
         title: "The debug probe could not be opened",
         tool: Some("probe-rs"), // a probe-rs version change is one of the fixes
     },
+    Hint {
+        tag: "[LAUNCH_STALLED]",
+        title: "The debug session never started",
+        tool: None, // nothing to install — it is a build/probe situation
+    },
 ];
+
+/// The tagged message for a `launch` that the adapter never answered. `elf_mb`
+/// is the size of the binary handed to it, because that is usually the whole
+/// story: probe-rs flashes the image AND parses its debug info here, and a
+/// debug-friendly build makes both much bigger.
+pub fn launch_stalled_message(waited_s: u64, elf_mb: f64) -> String {
+    format!(
+        "[LAUNCH_STALLED] probe-rs accepted the connection but has not answered `launch` in \
+         {waited_s}s.\n\n\
+         That step flashes the chip and loads the ELF's debug info ({elf_mb:.1} MB here); it \
+         reports nothing while it works, so a stall and a slow start look identical from the \
+         outside.\n\n\
+         -> Turn \"Debug-friendly build\" OFF in the toolbar: opt-level = 1 makes both the \
+         image and its debug info much bigger, which is the usual cause of a very long launch.\n\
+         -> Check the probe still answers: Scan in the probe selector (`probe-rs list`).\n\
+         -> Unplug and replug the probe, then Debug again — a wedged ST-Link accepts the \
+         connection and then goes quiet.\n\
+         -> Make sure nothing else holds it (a second IDE, STM32CubeProgrammer, OpenOCD)."
+    )
+}
 
 /// probe-rs failing to OPEN the probe (as opposed to not finding one), with the
 /// innermost cause it reported — `None` when the output holds no such failure.
@@ -317,6 +342,7 @@ mod tests {
             "[FLASH_FULL]",
             "[PROBE_RS_PANIC]",
             "[PROBE_OPEN_FAILED]",
+            "[LAUNCH_STALLED]",
         ] {
             assert!(
                 HINTS.iter().any(|h| h.tag == tag),

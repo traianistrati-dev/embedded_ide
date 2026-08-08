@@ -112,6 +112,11 @@ pub struct DebugState {
     pub nav: Option<(String, u32)>,
     /// The frame whose scopes are currently shown (highlighted in the list).
     pub sel_frame: Option<i64>,
+    /// What the adapter is doing right now, from its DAP progress events
+    /// ("Erasing sectors 40%", "Loading debug info", …). Shown next to the phase
+    /// badge, because `launch` — flash + parse the ELF's debug info — is by far
+    /// the longest step and otherwise reports nothing at all.
+    pub progress: Option<String>,
     /// What probe-rs answered for each requested breakpoint, per file:
     /// `rel path → requested line → status`. Filled from every `setBreakpoints`
     /// response; empty outside a session (nothing has been asked yet).
@@ -281,6 +286,12 @@ impl Debugger {
 
     pub fn is_busy(&self) -> bool {
         !matches!(self.phase(), DebugPhase::Idle | DebugPhase::Error(_))
+    }
+
+    /// What the adapter says it is doing right now (DAP progress events), for
+    /// the phase badge. `None` outside a reported operation.
+    pub fn progress(&self) -> Option<String> {
+        self.state.lock().unwrap().progress.clone()
     }
 
     /// Take the pending halt-location navigation (UI consumes it once).
@@ -760,6 +771,15 @@ fn run_session(
     });
     *cfg_slot.lock().unwrap() = Some(Arc::clone(&cfg));
 
+    // Bounds the one step that can hang silently (see the fn's note).
+    spawn_launch_watchdog(
+        Arc::clone(state),
+        Arc::clone(console),
+        Arc::clone(stop),
+        cfg.elf.clone(),
+        ctx.clone(),
+    );
+
     // ── 4. Reader thread drives the handshake from here ──────────────────────
     spawn_dap_reader(
         read_half,
@@ -780,11 +800,80 @@ fn run_session(
             "linesStartAt1": true,
             "columnsStartAt1": true,
             "pathFormat": "path",
-            "supportsProgressReporting": false,
+            // Ask for progress events. probe-rs only sends `progressStart` /
+            // `progressUpdate` / `progressEnd` when the CLIENT advertises this,
+            // and they are the only detail there is while `launch` runs: its
+            // own log goes to the "Debug Console" (DAP `output` events) and
+            // stays silent at the default `probe_rs=warn`. Without this the
+            // whole flash + debug-info load is a spinner and nothing else.
+            "supportsProgressReporting": true,
         }),
         Pending::Initialize,
     );
     Ok(())
+}
+
+/// Warn, then give up, on a `launch` that never answers.
+///
+/// `launch` (flash + load debug info) is the one step that can take minutes and
+/// reports nothing on failure: a wedged probe accepts the TCP connection and
+/// then goes silent, which is indistinguishable from a slow start. Without this
+/// the tab sits on "flashing + attaching…" forever — the worst failure mode
+/// there is, because it never tells the user whether waiting is still worth it.
+fn spawn_launch_watchdog(
+    state: Arc<Mutex<DebugState>>,
+    console: Arc<Mutex<TerminalState>>,
+    stop: Arc<AtomicBool>,
+    elf: PathBuf,
+    ctx: egui::Context,
+) {
+    /// How long before saying "still working"; how long before calling it dead.
+    const NOTE_AFTER: Duration = Duration::from_secs(20);
+    const FAIL_AFTER: Duration = Duration::from_secs(120);
+
+    thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let mut noted = false;
+        loop {
+            thread::sleep(Duration::from_millis(500));
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            // Only watches the launch window; any other phase means it answered.
+            if !matches!(state.lock().unwrap().phase, DebugPhase::Launching) {
+                return;
+            }
+            let waited = started.elapsed();
+            if !noted && waited >= NOTE_AFTER {
+                noted = true;
+                console.lock().unwrap().push_plain(
+                    LineKind::Notice,
+                    format!(
+                        "[still launching after {}s — probe-rs is flashing the chip and loading \
+                         the ELF's debug info; it reports nothing while it works]",
+                        waited.as_secs()
+                    ),
+                );
+                ctx.request_repaint();
+            }
+            if waited >= FAIL_AFTER {
+                let mb = std::fs::metadata(&elf)
+                    .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+                    .unwrap_or(0.0);
+                let msg = crate::failure_hint::launch_stalled_message(waited.as_secs(), mb);
+                let mut st = state.lock().unwrap();
+                st.progress = None;
+                st.phase = DebugPhase::Error(msg);
+                drop(st);
+                console.lock().unwrap().push_plain(
+                    LineKind::Stderr,
+                    "[giving up on launch — the adapter never answered]",
+                );
+                ctx.request_repaint();
+                return;
+            }
+        }
+    });
 }
 
 /// An unused localhost port (bind to 0, read back, release).
@@ -1188,17 +1277,64 @@ fn handle_event(
                 c.push_plain(kind, line);
             }
         }
+        // ── Progress (flashing, loading debug info) ──────────────────────────
+        // The only running commentary `launch` produces. Start and end go to the
+        // console; the updates only refresh the badge, since probe-rs sends one
+        // per percent and a console line each would bury everything else.
+        Some("progressStart") => {
+            let title = msg["body"]["title"].as_str().unwrap_or("working");
+            state.lock().unwrap().progress = Some(title.to_owned());
+            console
+                .lock()
+                .unwrap()
+                .push_plain(LineKind::Notice, format!("[{title}…]"));
+        }
+        Some("progressUpdate") => {
+            let text = progress_text(msg);
+            if let Some(t) = text {
+                state.lock().unwrap().progress = Some(t);
+            }
+        }
+        Some("progressEnd") => {
+            let mut st = state.lock().unwrap();
+            let done = st.progress.take();
+            drop(st);
+            if let Some(d) = done {
+                let msg_text = msg["body"]["message"].as_str().unwrap_or("");
+                let line = if msg_text.is_empty() {
+                    format!("[{} — done]", d.split(" · ").next().unwrap_or(&d))
+                } else {
+                    format!("[{msg_text}]")
+                };
+                console.lock().unwrap().push_plain(LineKind::Notice, line);
+            }
+        }
         Some("terminated") | Some("exited") => {
             let mut st = state.lock().unwrap();
             if !matches!(st.phase, DebugPhase::Error(_)) {
                 st.phase = DebugPhase::Idle;
             }
+            st.progress = None;
+            drop(st);
             console
                 .lock()
                 .unwrap()
                 .push_plain(LineKind::Notice, "[target terminated]");
         }
         _ => {}
+    }
+}
+
+/// `"Erasing sectors · 42%"` from a DAP `progressUpdate` body — `None` when it
+/// carries neither a message nor a percentage (nothing to show, keep the last).
+fn progress_text(msg: &Value) -> Option<String> {
+    let message = msg["body"]["message"].as_str().filter(|m| !m.is_empty());
+    let pct = msg["body"]["percentage"].as_f64();
+    match (message, pct) {
+        (Some(m), Some(p)) => Some(format!("{m} · {p:.0}%")),
+        (Some(m), None) => Some(m.to_owned()),
+        (None, Some(p)) => Some(format!("{p:.0}%")),
+        (None, None) => None,
     }
 }
 
@@ -1218,6 +1354,28 @@ fn rel_of(path: &str, project_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The badge text while flashing: a message, a percentage, or both — and
+    /// nothing at all when the event carries neither, so the last useful line
+    /// stays put instead of blinking away.
+    #[test]
+    fn progress_updates_render_message_and_percent() {
+        let ev = |body: Value| json!({"event": "progressUpdate", "body": body});
+        assert_eq!(
+            progress_text(&ev(json!({"message": "Erasing sectors", "percentage": 41.7}))),
+            Some("Erasing sectors · 42%".to_owned())
+        );
+        assert_eq!(
+            progress_text(&ev(json!({"message": "Loading debug info"}))),
+            Some("Loading debug info".to_owned())
+        );
+        assert_eq!(
+            progress_text(&ev(json!({"percentage": 8.0}))),
+            Some("8%".to_owned())
+        );
+        assert_eq!(progress_text(&ev(json!({}))), None);
+        assert_eq!(progress_text(&ev(json!({"message": ""}))), None);
+    }
 
     /// The DAP answer is positional and carries no line of its own for a
     /// breakpoint the debugger refused — so the request's lines drive the
