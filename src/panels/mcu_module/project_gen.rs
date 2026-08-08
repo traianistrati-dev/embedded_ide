@@ -608,12 +608,24 @@ pub fn ensure_strict_lints(cargo_toml: &str, enabled: bool) -> String {
 // ── Debug-friendly release profile ────────────────────────────────────────────
 
 /// The `[profile.release]` keys the Debug tab's "Debug-friendly build" toggle
-/// owns, and the value each takes while it is ON. `opt-level = 0` keeps a line
-/// of code per source line (so breakpoints can be armed), `lto = false` stops
-/// cross-crate inlining from dissolving them, and `debug = true` guarantees the
-/// DWARF the debugger reads.
-const DEBUG_BUILD_KEYS: [(&str, &str); 3] =
-    [("opt-level", "0"), ("lto", "false"), ("debug", "true")];
+/// owns, and the value each takes while it is ON.
+///
+/// `opt-level = 1` — NOT `0`. Level 1 already stops the statement folding and
+/// loop unrolling that leave plain lines without code of their own (that is what
+/// makes breakpoints unarmable), while `0` bloats the binary several times over:
+/// on a 64 KB part like the STM32F103C8 it simply does not link
+/// (`section '.text' will not fit in region 'FLASH'`).
+///
+/// `lto` is deliberately NOT in this list — link-time optimisation is the single
+/// biggest size lever, and turning it off is what pushes a mid-size project over
+/// its Flash budget. It costs some debuggability (cross-crate inlining), which is
+/// the better trade when the alternative is a build that can't link at all.
+const DEBUG_BUILD_KEYS: [(&str, &str); 2] = [("opt-level", "1"), ("debug", "true")];
+
+/// Keys an EARLIER version of this toggle managed. They are only ever restored
+/// (never written), so a project that still carries `lto = false  # <…was: …>`
+/// from that version gets its own value back on the next pass.
+const DEBUG_BUILD_LEGACY_KEYS: [&str; 1] = ["lto"];
 
 /// Marker written after a line this toggle overrode, parking the ORIGINAL LINE
 /// verbatim (padding and all) so switching back restores the project's own
@@ -688,6 +700,20 @@ pub fn ensure_debug_build(cargo_toml: &str, enabled: bool) -> String {
                 "{key} = {debug_value}  {DEBUG_BUILD_TAG} {DEBUG_BUILD_ABSENT}>"
             )),
             (None, false) => {}
+        }
+    }
+    // Keys this toggle no longer manages: hand them back whatever the toggle's
+    // state, so an older project stops carrying an override nothing maintains.
+    for key in DEBUG_BUILD_LEGACY_KEYS {
+        let Some(i) = body.iter().position(|l| line_key(l).as_deref() == Some(key)) else {
+            continue;
+        };
+        match tagged_original(&body[i]) {
+            Some(was) if was.trim() == DEBUG_BUILD_ABSENT => {
+                body.remove(i);
+            }
+            Some(was) => body[i] = was,
+            None => {}
         }
     }
     lines.splice(body_start..body_end, body);
@@ -1327,10 +1353,11 @@ mod tests {
 
         let on = ensure_debug_build(base, true);
         // Overridden — and the file's column alignment is kept.
-        assert!(on.contains("opt-level     = 0  "), "{on}");
-        assert!(on.contains("lto           = false  "), "{on}");
+        assert!(on.contains("opt-level     = 1  "), "{on}");
         assert!(on.contains("debug         = true  "), "{on}");
-        // Keys it does NOT own are left exactly as they were.
+        // Keys it does NOT own are left exactly as they were — `lto` above all:
+        // dropping it is what overflows Flash on a 64 KB part.
+        assert!(on.contains("lto           = true\n"), "{on}");
         assert!(on.contains("panic         = \"abort\"\n"), "{on}");
         assert!(on.contains("codegen-units = 1\n"), "{on}");
         // The other profile is never touched.
@@ -1349,13 +1376,15 @@ mod tests {
     }
 
     /// A profile that lacks a key gets one while the toggle is on — and loses it
-    /// again on the way out, rather than being left with an invented `lto`.
+    /// again on the way out, rather than being left with an invented `debug`.
     #[test]
     fn debug_build_invents_and_removes_missing_keys() {
         let base = "[package]\nname = \"x\"\n\n[profile.release]\nopt-level = 3\n";
         let on = ensure_debug_build(base, true);
-        assert!(on.contains("lto = false"), "{on}");
-        assert!(on.contains(&format!("lto = false  {DEBUG_BUILD_TAG} absent>")), "{on}");
+        assert!(
+            on.contains(&format!("debug = true  {DEBUG_BUILD_TAG} absent>")),
+            "{on}"
+        );
         assert_eq!(ensure_debug_build(&on, false), base);
 
         // A user's custom value is restored verbatim, not replaced by a default.
@@ -1374,11 +1403,35 @@ mod tests {
         assert_eq!(ensure_debug_build(base, false), base);
         let on = ensure_debug_build(base, true);
         assert_eq!(on.matches("[profile.release]").count(), 1, "{on}");
-        assert!(on.contains("opt-level = 0"), "{on}");
+        assert!(on.contains("opt-level = 1"), "{on}");
         // Every key it invented is marked absent → the section empties out again.
         let off = ensure_debug_build(&on, false);
         assert!(!off.contains("opt-level"), "{off}");
-        assert!(!off.contains("lto"), "{off}");
+        assert!(!off.contains("debug"), "{off}");
+    }
+
+    /// An `lto = false` written by the FIRST version of this toggle (which owned
+    /// that key and made mid-size projects overflow Flash) is handed back on the
+    /// next pass, whichever way the toggle is set.
+    #[test]
+    fn debug_build_restores_legacy_lto_override() {
+        let legacy = format!(
+            "[profile.release]\nopt-level     = 1  {DEBUG_BUILD_TAG} opt-level     = \"s\">\n\
+             lto           = false  {DEBUG_BUILD_TAG} lto           = true>\n"
+        );
+        for on in [true, false] {
+            let fixed = ensure_debug_build(&legacy, on);
+            assert!(
+                fixed.contains("lto           = true\n"),
+                "lto handed back (on={on}):\n{fixed}"
+            );
+            assert!(!fixed.contains("lto           = false"), "{fixed}");
+        }
+        // With the toggle off, the whole profile is the user's own again.
+        assert_eq!(
+            ensure_debug_build(&legacy, false),
+            "[profile.release]\nopt-level     = \"s\"\nlto           = true\n"
+        );
     }
 
     #[test]

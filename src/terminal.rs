@@ -59,6 +59,18 @@ impl TerminalState {
     pub(crate) fn push_plain(&mut self, kind: LineKind, text: impl Into<String>) {
         self.push(kind, vec![(text.into(), None)]);
     }
+
+    /// The last `n` lines as plain text (colour spans flattened), oldest first.
+    /// For post-mortems on a console a subprocess wrote into — a crash is always
+    /// at the END, and a long session's scrollback isn't worth walking.
+    pub(crate) fn tail_text(&self, n: usize) -> String {
+        let start = self.lines.len().saturating_sub(n);
+        self.lines[start..]
+            .iter()
+            .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// The console UI + process state (owned by `AppIde.terminal`).

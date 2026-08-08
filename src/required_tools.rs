@@ -332,14 +332,20 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         },
         RequiredTool {
             name: "probe-rs",
-            description: "Debug probe runner — powers the RTT tab (defmt logs) and SWD/JTAG flashing",
+            description: "Debug probe runner — powers the Debug + RTT tabs (breakpoints, defmt logs) and SWD/JTAG flashing",
             toolchain: Some(ToolchainKind::RustEmbedded),
             severity: Severity::Feature,
-            impact: "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing.",
+            impact: "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing. \
+                     Below 0.32 the Debug tab is unreliable: 0.31.0 panics inside its own USB \
+                     probe enumeration (glasgow/mux.rs), which kills the session before it starts.",
             check_cmd: "probe-rs",
             check_args: &["--version"],
             check_pattern: "",
-            min_version: None,
+            // A REAL, reproduced minimum, not an invented one: probe-rs 0.31.0
+            // aborts with `unreachable!()` while enumerating probes, so the
+            // dap-server dies on launch. See `failure_hint`'s [PROBE_RS_PANIC].
+            // Installing again (`cargo install probe-rs-tools --locked`) upgrades.
+            min_version: Some("0.32.0"),
             install_cmd: Some("cargo"),
             install_args: &["install", "probe-rs-tools", "--locked"],
             manual_url: "https://probe.rs/docs/getting-started/installation/",
@@ -936,11 +942,30 @@ mod tests {
             .collect();
         assert_eq!(
             with_min,
-            vec!["rustc"],
+            // probe-rs: 0.31.0 panics (`unreachable!()`) while enumerating USB
+            // probes, so the Debug tab's dap-server dies on launch — a minimum
+            // backed by a reproduction, which is the bar for adding one here.
+            vec!["rustc", "probe-rs"],
             "unexpected min_version set: {with_min:?}"
         );
-        // And the one we declare must itself be parseable by our comparator.
+        // And the ones we declare must be parseable by our comparator.
         assert!(!version_lt("1.74.0", "1.74"));
+        // The real banners: 0.31.0 is flagged, 0.32.0 is not.
+        let probe_rs_min = s
+            .tools
+            .iter()
+            .find(|t| t.name == "probe-rs")
+            .and_then(|t| t.min_version)
+            .expect("probe-rs carries a minimum");
+        let ver = |banner: &str| parse_version(banner).expect("version in banner");
+        assert!(version_lt(
+            &ver("probe-rs 0.31.0 (git commit: crates.io)"),
+            probe_rs_min
+        ));
+        assert!(!version_lt(
+            &ver("probe-rs 0.32.0 (git commit: crates.io)"),
+            probe_rs_min
+        ));
     }
 
     /// A tool must be gated ONLY on proof of absence: `Unknown` (before the

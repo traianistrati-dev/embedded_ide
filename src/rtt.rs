@@ -207,6 +207,9 @@ pub(crate) fn cargo_build_streamed(
     // The JSON stream (this thread): ELF path + rendered compile errors.
     let mut elf: Option<PathBuf> = None;
     let mut success = false;
+    // Set when the link overflowed the chip's memory — that failure deserves a
+    // real explanation, not "fix the errors above".
+    let mut flash_note: Option<String> = None;
     if let Some(out) = cargo_stdout {
         for line in std::io::BufReader::new(out).lines().flatten() {
             if stop.load(Ordering::Relaxed) {
@@ -224,6 +227,11 @@ pub(crate) fn cargo_build_streamed(
                 Some("compiler-message") => {
                     if v["message"]["level"].as_str() == Some("error") {
                         if let Some(r) = v["message"]["rendered"].as_str() {
+                            // A memory.x overflow hides inside the linker dump —
+                            // keep the one line that says so for the failure below.
+                            if flash_note.is_none() {
+                                flash_note = crate::failure_hint::flash_overflow(r);
+                            }
                             let mut s = state.lock().unwrap();
                             for l in r.lines() {
                                 s.push_plain(LineKind::Stderr, l);
@@ -247,10 +255,20 @@ pub(crate) fn cargo_build_streamed(
         return Ok(None);
     }
     if !(success && cargo_ok) {
+        if let Some(detail) = flash_note {
+            return Err(crate::failure_hint::flash_full_message(&detail));
+        }
         return Err("build failed — fix the errors above and try again".into());
     }
     elf.map(Some)
         .ok_or_else(|| "build produced no executable artifact".to_string())
+}
+
+/// The probe-rs panic in a console it wrote into, if it crashed. Shared with the
+/// Debug tab: a dying probe-rs looks like an ordinary exit / socket close, so
+/// both orchestrators have to go looking for the crash themselves.
+pub(crate) fn probe_rs_crash(console: &TerminalState) -> Option<String> {
+    crate::failure_hint::probe_rs_panic(&console.tail_text(60))
 }
 
 /// The orchestrator body: build, then stream probe-rs until it exits.
@@ -365,12 +383,19 @@ fn run_session(
                 .push_plain(LineKind::Notice, "[probe-rs exited]");
             Ok(())
         }
-        Some(Ok(st)) => Err(format!(
-            "probe-rs exited with {} — check the probe connection / chip name",
-            st.code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into())
-        )),
+        Some(Ok(st)) => {
+            // probe-rs can die of its own panic (a bug in its USB enumeration,
+            // say) — that is not "check your wiring", so say what it really was.
+            if let Some(detail) = probe_rs_crash(&state.lock().unwrap()) {
+                return Err(crate::failure_hint::probe_rs_panic_message(&detail));
+            }
+            Err(format!(
+                "probe-rs exited with {} — check the probe connection / chip name",
+                st.code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".into())
+            ))
+        }
         _ => Err("probe-rs could not be reaped".into()),
     }
 }

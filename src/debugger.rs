@@ -827,13 +827,31 @@ fn spawn_dap_reader(
         }
         // Socket closed: session over (server exit / disconnect / error).
         if !stop.load(Ordering::Relaxed) {
+            // A dap-server that PANICKED closes the socket exactly like a clean
+            // disconnect does — so before calling it "ended", look for the crash
+            // in what the server printed. Without this the user gets a backtrace
+            // of `<unknown>` frames and a calm "[debug session ended]".
+            let crash = crate::rtt::probe_rs_crash(&console.lock().unwrap());
             let mut st = state.lock().unwrap();
             if !matches!(st.phase, DebugPhase::Error(_) | DebugPhase::Idle) {
-                st.phase = DebugPhase::Idle;
-                console
-                    .lock()
-                    .unwrap()
-                    .push_plain(LineKind::Notice, "[debug session ended]");
+                match crash {
+                    Some(detail) => {
+                        st.phase = DebugPhase::Error(
+                            crate::failure_hint::probe_rs_panic_message(&detail),
+                        );
+                        console.lock().unwrap().push_plain(
+                            LineKind::Stderr,
+                            "[probe-rs crashed — the session died with it]",
+                        );
+                    }
+                    None => {
+                        st.phase = DebugPhase::Idle;
+                        console
+                            .lock()
+                            .unwrap()
+                            .push_plain(LineKind::Notice, "[debug session ended]");
+                    }
+                }
             }
         }
         // The verdicts describe the session that just ended — keeping them would

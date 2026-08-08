@@ -153,7 +153,12 @@ pub fn show_rtt_tab(
                     egui::Color32::from_rgb(80, 200, 100),
                 ),
                 RttPhase::Error(e) => (
-                    format!("{} {}", ph::X_CIRCLE, e.lines().next().unwrap_or("error")),
+                    // Without `strip` the badge would lead with the raw `[TAG]`.
+                    format!(
+                        "{} {}",
+                        ph::X_CIRCLE,
+                        crate::failure_hint::strip(e).lines().next().unwrap_or("error")
+                    ),
                     egui::Color32::from_rgb(230, 90, 80),
                 ),
             };
@@ -224,6 +229,15 @@ pub fn show_rtt_tab(
     );
 
     ui.separator();
+
+    // ── Tagged failure card ───────────────────────────────────────────────────
+    // Same builder as the Debug tab, so the same explanations reach here (a
+    // Flash overflow above all) instead of a raw linker dump in the log.
+    if let RttPhase::Error(e) = &phase {
+        if crate::failure_hint::show_card(ui, e, |_| {}) {
+            ui.add_space(4.0);
+        }
+    }
 
     // ── Log scrollback ────────────────────────────────────────────────────────
     if rtt.state.lock().unwrap().lines.is_empty() {

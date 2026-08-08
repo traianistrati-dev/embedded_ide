@@ -199,14 +199,16 @@ pub fn show_debug_tab(
                 ),
             )
             .on_hover_text(
-                "Relax the project's [profile.release] for stepping: opt-level = 0, \
-                 lto = false, debug = true.\nEvery source line then keeps code of its \
-                 own, so breakpoints on plain statements and loop headers actually \
-                 arm.\n\nCost: the binary grows several times over (it may no longer \
-                 fit in Flash) and timing-sensitive code behaves differently — this \
-                 is NOT the firmware you want to ship. Turn it back off and your own \
-                 profile values are restored.\n\nWrites Cargo.toml; Save + rebuild to \
-                 apply.",
+                "Relax the project's [profile.release] for stepping: opt-level = 1 \
+                 and debug = true.\nLevel 1 stops the statement folding and loop \
+                 unrolling that leave plain lines without code of their own, so \
+                 breakpoints on them actually arm.\n\nlto stays as you set it: \
+                 turning it off costs several KB and can overflow Flash on a small \
+                 part.\n\nCost: the binary still grows and timing-sensitive code \
+                 behaves differently — this is NOT the firmware to ship. If the link \
+                 fails with \"will not fit in region 'FLASH'\", turn it back off; \
+                 your own profile values are restored exactly.\n\nWrites Cargo.toml; \
+                 Save + rebuild to apply.",
             )
             .on_disabled_hover_text("Stop the session first — it rewrites Cargo.toml.");
         if toggle.changed() {
@@ -260,7 +262,15 @@ pub fn show_debug_tab(
                     egui::Color32::from_rgb(230, 180, 60),
                 ),
                 DebugPhase::Error(e) => (
-                    format!("{} {}", ph::X_CIRCLE, e.lines().next().unwrap_or("error")),
+                    // Without `strip` the badge would lead with the raw `[TAG]`.
+                    format!(
+                        "{} {}",
+                        ph::X_CIRCLE,
+                        crate::failure_hint::strip(e)
+                            .lines()
+                            .next()
+                            .unwrap_or("error")
+                    ),
                     egui::Color32::from_rgb(230, 90, 80),
                 ),
             };
@@ -305,13 +315,17 @@ pub fn show_debug_tab(
             (
                 "Debug-friendly build",
                 egui::Color32::from_rgb(220, 180, 60),
-                "Rewrites the project's [profile.release] to opt-level = 0, \
-                 lto = false, debug = true, so every source line keeps code of \
-                 its own and can hold a breakpoint. The optimised default folds \
-                 plain statements and loop headers away — that is why some \
-                 breakpoints never arm. The binary grows several times over and \
-                 timing changes, so turn it off before shipping; your original \
-                 profile values are restored when you do.",
+                "Rewrites the project's [profile.release] to opt-level = 1 and \
+                 debug = true, so plain statements and loop headers keep code \
+                 of their own and can hold a breakpoint — the optimised default \
+                 folds them away, which is why some breakpoints never arm. lto \
+                 is left alone (dropping it costs several KB and can overflow a \
+                 small Flash). The binary still grows and timing changes, so \
+                 turn it off before shipping; your original profile values come \
+                 back exactly as you wrote them. If the link fails with \"will \
+                 not fit in region 'FLASH'\", the part is too small for this \
+                 build — debug on a bigger chip, or breakpoint on lines that \
+                 call something.",
             ),
             (
                 "Continue",
@@ -371,6 +385,16 @@ pub fn show_debug_tab(
     );
 
     ui.separator();
+
+    // ── Tagged failure card ───────────────────────────────────────────────────
+    // A build that overflowed the chip's Flash gets the explanation (and the
+    // "turn the Debug-friendly toggle off" pointer) right under the checkbox
+    // that caused it — the console below only holds the raw linker dump.
+    if let DebugPhase::Error(e) = &phase {
+        if crate::failure_hint::show_card(ui, e, |_| {}) {
+            ui.add_space(4.0);
+        }
+    }
 
     // ── Breakpoint list ───────────────────────────────────────────────────────
     // Above the empty-state return on purpose: breakpoints exist (and are worth

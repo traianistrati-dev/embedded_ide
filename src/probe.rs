@@ -49,6 +49,13 @@ pub fn list_probes() -> Result<Vec<ProbeInfo>, String> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    // `probe-rs list` can panic inside its own USB enumeration. Parsing that
+    // output would just report "no probes attached" — a crash has to be told
+    // apart from an empty bench, since the fix is a probe-rs version, not a
+    // cable.
+    if let Some(detail) = crate::failure_hint::probe_rs_panic(&text) {
+        return Err(crate::failure_hint::probe_rs_panic_message(&detail));
+    }
     Ok(parse_list(&text))
 }
 

@@ -402,6 +402,23 @@ fn run_cargo(
         );
     }
 
+    // The link overflowed the memory declared in memory.x. It arrives as an
+    // ordinary `error` diagnostic, so without this it would land in the list as
+    // a wall of linker arguments with the one useful line buried inside.
+    // Checked before the `saw_build_finished` block: this failure DOES emit one.
+    let linker_text = format!(
+        "{stderr_text}\n{}",
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.rendered.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    if let Some(detail) = crate::failure_hint::flash_overflow(&linker_text) {
+        return BuildState::Failed(crate::failure_hint::flash_full_message(&detail));
+    }
+
     if !saw_build_finished {
         // clippy not installed → cargo prints "no such command" / "not provided".
         if subcommand == "clippy"

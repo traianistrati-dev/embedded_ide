@@ -158,11 +158,19 @@ pub(crate) fn probe_selector_ui(
         );
 
     if let Some(err) = scan_err {
+        // A tagged failure (a probe-rs crash) carries a whole explanation — the
+        // toolbar shows its first line, the full text sits on the hover.
+        let plain = crate::failure_hint::strip(err);
         ui.label(
-            egui::RichText::new(format!("{} {err}", ph::WARNING))
-                .size(10.5)
-                .color(egui::Color32::from_rgb(210, 150, 90)),
-        );
+            egui::RichText::new(format!(
+                "{} {}",
+                ph::WARNING,
+                plain.lines().next().unwrap_or(plain)
+            ))
+            .size(10.5)
+            .color(egui::Color32::from_rgb(210, 150, 90)),
+        )
+        .on_hover_text(plain);
     }
 }
 
