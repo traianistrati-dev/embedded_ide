@@ -1,13 +1,22 @@
 //! Debug tab — on-target debugging via `probe-rs dap-server`.
-//! Toolbar (start/stop/continue/pause/step) + three panes: console (build +
-//! DAP output), stack frames (click → jump + show its variables), variables
-//! (locals + registers). See [`crate::debugger::Debugger`].
+//! Toolbar (start/stop/continue/pause/step) + the breakpoint list (click a row
+//! → jump to that line) + three panes: console (build + DAP output), stack
+//! frames (click → jump + show its variables), variables (locals + registers).
+//! See [`crate::debugger::Debugger`].
 
 use super::terminal_tab::render_scrollback;
 use crate::app::helpers::help_panel;
 use crate::debugger::{DebugPhase, Debugger, Frame};
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Breakpoint dot colour — the same red the editor gutter paints.
+const BP_FILL: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
+
+/// The breakpoint the target is currently halted on — same amber as the
+/// "stopped" phase badge, as a row tint + a caret marker.
+const HALT_AMBER: egui::Color32 = egui::Color32::from_rgb(230, 180, 60);
 
 /// Memory key of this tab's help panel.
 const HELP_ID: &str = "debug";
@@ -30,6 +39,14 @@ pub fn show_debug_tab(
     // Set when Start is clicked; the caller writes the project and calls
     // `start_debug` (the `build_go` signal pattern).
     debug_go: &mut bool,
+    // Every breakpoint in the project (rel path → 1-based lines), listed under
+    // the toolbar as clickable rows; a click sets `bp_jump` and the caller
+    // opens that file at that line. The row's ✕ sets `bp_remove` and "Remove
+    // all" sets `bp_clear` — the caller owns the map and re-syncs the session.
+    breakpoints: &BTreeMap<String, BTreeSet<u32>>,
+    bp_jump: &mut Option<(String, u32)>,
+    bp_remove: &mut Option<(String, u32)>,
+    bp_clear: &mut bool,
     can_run: bool,
     chip: &str,
     // Shared probe selector (RTT + Debug): the scanned list, the chosen
@@ -232,7 +249,11 @@ pub fn show_debug_tab(
                 "Click left of a line number in the editor: a red dot appears \
                  (click it again to remove). They can be set before OR during a \
                  session — changes are pushed to the running session \
-                 immediately. Only Rust source files can hold one.",
+                 immediately. Only Rust source files can hold one. The list \
+                 under the toolbar collects them all: click a row to jump to \
+                 that line, the row's X button to remove that one, Remove all \
+                 to clear them. While the target is halted, the breakpoint it \
+                 stopped on is highlighted amber with a caret.",
             ),
             (
                 "Continue",
@@ -292,6 +313,32 @@ pub fn show_debug_tab(
     );
 
     ui.separator();
+
+    // ── Breakpoint list ───────────────────────────────────────────────────────
+    // Above the empty-state return on purpose: breakpoints exist (and are worth
+    // navigating) long before a session does.
+    //
+    // Where the target sits right now, so the list can mark that row: the
+    // innermost frame WITH source, the same one the halt navigation jumps to
+    // (`debugger.rs`, the stackTrace arm). Only while halted — a running target
+    // has no location, and a stale mark would lie.
+    let halted_at: Option<(String, u32)> = stopped
+        .then(|| {
+            let st = dbg.state.lock().unwrap();
+            st.stack
+                .iter()
+                .find(|f| f.file_rel.is_some())
+                .map(|f| (f.file_rel.clone().unwrap_or_default(), f.line))
+        })
+        .flatten();
+    breakpoint_list(
+        ui,
+        breakpoints,
+        halted_at.as_ref(),
+        bp_jump,
+        bp_remove,
+        bp_clear,
+    );
 
     // ── Empty-state hint ──────────────────────────────────────────────────────
     let no_content = {
@@ -607,6 +654,144 @@ fn split_widths(usable: f32, b: [f32; 3]) -> [f32; 4] {
     ]
 }
 
+/// Longest `path:line` label a row shows in full — see [`short_loc`]. Budgeted
+/// for the rest of the row (the ✕ button and the dot) too.
+const LOC_MAX_CHARS: usize = 38;
+
+/// Red dot + `path:line` link for every breakpoint, newest file order being the
+/// map's (sorted, so rows don't dance between frames). Clicking one raises
+/// `bp_jump`; the caller opens that file and scrolls to the line. The row's ✕
+/// raises `bp_remove` and the header's trash raises `bp_clear` — removal is the
+/// caller's (it owns the map and pushes the new set into a live session).
+/// `halted_at` is where the target sits right now (`None` unless it is halted);
+/// the row that matches gets an amber tint, a caret and white text.
+/// Renders nothing when there are no breakpoints — the empty-state hint below
+/// already explains how to set one.
+fn breakpoint_list(
+    ui: &mut egui::Ui,
+    breakpoints: &BTreeMap<String, BTreeSet<u32>>,
+    halted_at: Option<&(String, u32)>,
+    bp_jump: &mut Option<(String, u32)>,
+    bp_remove: &mut Option<(String, u32)>,
+    bp_clear: &mut bool,
+) {
+    let total: usize = breakpoints.values().map(|s| s.len()).sum();
+    if total == 0 {
+        return;
+    }
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!("Breakpoints ({total})"))
+            .size(10.5)
+            .color(BP_FILL),
+    )
+    .id_salt("debug_bp_list")
+    .default_open(true)
+    .show(ui, |ui| {
+        if ui
+            .button(
+                egui::RichText::new(format!("{} Remove all", ph::TRASH))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(220, 150, 140)),
+            )
+            .on_hover_text(format!(
+                "Remove all {total} breakpoints.\nThey are session-only — the dots \
+                 come back only by clicking the gutter again."
+            ))
+            .clicked()
+        {
+            *bp_clear = true;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("debug_bp_list_scroll")
+            // Four-ish rows, then it scrolls — the panes below keep their room.
+            .max_height(84.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (rel, lines) in breakpoints {
+                    for &line in lines {
+                        // The halted frame's exact file+line. A step that landed
+                        // between breakpoints (or a line probe-rs relocated)
+                        // simply marks nothing — better than marking a guess.
+                        let here = halted_at.is_some_and(|(r, l)| r == rel && *l == line);
+                        // `Frame` reserves its background shape BEFORE the row,
+                        // so the tint lands under the text, not over it.
+                        egui::Frame::new()
+                            .fill(if here {
+                                HALT_AMBER.gamma_multiply(0.16)
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .inner_margin(egui::Margin::symmetric(2, 0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .small_button(egui::RichText::new(ph::X).size(10.0))
+                                        .on_hover_text("Remove this breakpoint")
+                                        .clicked()
+                                    {
+                                        *bp_remove = Some((rel.clone(), line));
+                                    }
+                                    // Fixed-width slot so every row's dot lines
+                                    // up, caret or not.
+                                    ui.add_sized(
+                                        egui::vec2(9.0, 12.0),
+                                        egui::Label::new(
+                                            egui::RichText::new(if here {
+                                                ph::CARET_RIGHT
+                                            } else {
+                                                ""
+                                            })
+                                            .size(10.0)
+                                            .color(HALT_AMBER),
+                                        ),
+                                    );
+                                    let (dot, _) = ui.allocate_exact_size(
+                                        egui::vec2(9.0, 9.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(dot.center(), 3.5, BP_FILL);
+                                    let loc = format!("{rel}:{line}");
+                                    // Truncated: a long path must not out-demand
+                                    // the panel width (the side-panel feedback
+                                    // noted at the pane row below). Full text
+                                    // stays on hover.
+                                    let mut text = egui::RichText::new(short_loc(
+                                        &loc,
+                                        LOC_MAX_CHARS,
+                                    ))
+                                    .size(10.5)
+                                    .monospace();
+                                    if here {
+                                        text = text.color(egui::Color32::WHITE).strong();
+                                    }
+                                    let resp = ui.link(text);
+                                    if resp.clicked() {
+                                        *bp_jump = Some((rel.clone(), line));
+                                    }
+                                    resp.on_hover_text(if here {
+                                        format!("{loc}\nHalted HERE — jump to the line")
+                                    } else {
+                                        format!("{loc}\nJump to this breakpoint")
+                                    });
+                                });
+                            });
+                    }
+                }
+            });
+    });
+}
+
+/// Shorten a `path:line` label to at most `max` characters, keeping the END
+/// (the file name and line — the part that identifies the row) behind a `…`.
+fn short_loc(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max || max == 0 {
+        return s.to_owned();
+    }
+    let tail: String = s.chars().skip(n - (max - 1)).collect();
+    format!("…{tail}")
+}
+
 fn pane_title(ui: &mut egui::Ui, title: &str) {
     ui.label(
         egui::RichText::new(title)
@@ -638,7 +823,22 @@ fn var_row(ui: &mut egui::Ui, v: &crate::debugger::VarRow, name_color: egui::Col
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_SPLIT, clamp_splits, split_widths};
+    use super::{LOC_MAX_CHARS, MIN_SPLIT, clamp_splits, short_loc, split_widths};
+
+    /// A breakpoint row never renders wider than its budget, and what survives
+    /// is the tail — `main.rs:42` identifies the row, the leading folders don't.
+    #[test]
+    fn loc_labels_stay_short_and_keep_the_line() {
+        assert_eq!(short_loc("src/main.rs:42", LOC_MAX_CHARS), "src/main.rs:42");
+        let long = "src/drivers/sensors/very/deep/module/path/reader.rs:1207";
+        let cut = short_loc(long, LOC_MAX_CHARS);
+        assert_eq!(cut.chars().count(), LOC_MAX_CHARS);
+        assert!(cut.starts_with('…'), "{cut}");
+        assert!(cut.ends_with("reader.rs:1207"), "{cut}");
+        // Degenerate budgets don't panic or slice mid-char.
+        assert_eq!(short_loc("src/main.rs:42", 0), "src/main.rs:42");
+        assert_eq!(short_loc("ăăăă:9", 3), "…:9");
+    }
 
     /// The four panes must fit the row EXACTLY at every width — the runaway this
     /// replaced came from floors that out-demanded a narrow panel, and the Code

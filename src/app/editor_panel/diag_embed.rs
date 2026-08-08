@@ -152,6 +152,11 @@ impl AppIde {
         let mut rtt_go: Option<crate::rtt::RttMode> = None;
         // Debug-tab Start button.
         let mut debug_go = false;
+        // Debug-tab breakpoint-list row click: `(rel path, 1-based line)`.
+        let mut bp_jump: Option<(String, u32)> = None;
+        // Same list's ✕ (one row) and "Remove all" buttons.
+        let mut bp_remove: Option<(String, u32)> = None;
+        let mut bp_clear = false;
         // Shared RTT/Debug probe-selector Scan button.
         let mut probe_scan = false;
         // Profile-tab "Analyze" (cargo bloat) + "Sample" (flamegraph) buttons.
@@ -268,6 +273,10 @@ impl AppIde {
                     &rtt_chip,
                     &mut self.debugger,
                     &mut debug_go,
+                    &self.breakpoints,
+                    &mut bp_jump,
+                    &mut bp_remove,
+                    &mut bp_clear,
                     &self.probe_list,
                     &mut self.selected_probe,
                     &mut probe_scan,
@@ -402,6 +411,48 @@ impl AppIde {
         // Profile-tab "Sample" button → on-target flamegraph.
         if profile_sample {
             self.start_flame();
+        }
+        // Breakpoint-list removals — same bookkeeping as a gutter toggle: drop
+        // the line (and the file's entry once empty), then push that file's NEW
+        // set into a live session (`sync_breakpoints` no-ops without one).
+        if let Some((rel, line)) = bp_remove {
+            if let Some(set) = self.breakpoints.get_mut(&rel) {
+                set.remove(&line);
+                if set.is_empty() {
+                    self.breakpoints.remove(&rel);
+                }
+            }
+            let lines: Vec<u32> = self
+                .breakpoints
+                .get(&rel)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default();
+            self.debugger.sync_breakpoints(&rel, &lines);
+        }
+        // "Remove all": every FILE that had one must be told it now has none —
+        // clearing the map alone would leave the running session's breakpoints
+        // armed on the target.
+        if bp_clear {
+            let files: Vec<String> = self.breakpoints.keys().cloned().collect();
+            self.breakpoints.clear();
+            for rel in files {
+                self.debugger.sync_breakpoints(&rel, &[]);
+            }
+        }
+        // Debug-tab breakpoint-list row click: open that file at the line, with
+        // the same band the halt navigation below paints (no session needed —
+        // this is plain navigation).
+        if let Some((rel, line)) = bp_jump {
+            if let Some(id) = crate::app::resolve_diag_file(&rel, &self.project_tree.user_src_files)
+            {
+                self.selected_file = id;
+                self.pending_scroll_to_line = Some((id, line as usize));
+                self.highlighted_error_line = Some((
+                    id,
+                    line as usize,
+                    egui::Color32::from_rgba_unmultiplied(200, 50, 50, 40),
+                ));
+            }
         }
         // Debugger halt location (breakpoint / step landed): jump the editor
         // there with a translucent GREEN band — same path as a diagnostic-row

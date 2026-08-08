@@ -121,6 +121,14 @@ pub(super) fn show_diag_panel(
     // Debug tab: session + Start signal (caller runs `start_debug`).
     debugger: &mut crate::debugger::Debugger,
     debug_go: &mut bool,
+    // Debug tab's breakpoint list: every breakpoint (rel path → 1-based lines)
+    // and the row the user clicked — the caller opens it in the editor. The
+    // row's ✕ raises `bp_remove`, "Remove all" raises `bp_clear`; the caller
+    // owns the map and re-syncs a live session.
+    breakpoints: &std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
+    bp_jump: &mut Option<(String, u32)>,
+    bp_remove: &mut Option<(String, u32)>,
+    bp_clear: &mut bool,
     // Shared probe selector (RTT + Debug): scanned probe list, chosen `--probe`
     // selector, a "scan" click signal (caller runs `scan_probes`), last error.
     probe_list: &[crate::probe::ProbeInfo],
@@ -680,6 +688,10 @@ pub(super) fn show_diag_panel(
                 ui,
                 debugger,
                 debug_go,
+                breakpoints,
+                bp_jump,
+                bp_remove,
+                bp_clear,
                 can_flash,
                 rtt_chip,
                 probe_list,
