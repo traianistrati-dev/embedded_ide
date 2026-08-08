@@ -605,6 +605,123 @@ pub fn ensure_strict_lints(cargo_toml: &str, enabled: bool) -> String {
     s
 }
 
+// ── Debug-friendly release profile ────────────────────────────────────────────
+
+/// The `[profile.release]` keys the Debug tab's "Debug-friendly build" toggle
+/// owns, and the value each takes while it is ON. `opt-level = 0` keeps a line
+/// of code per source line (so breakpoints can be armed), `lto = false` stops
+/// cross-crate inlining from dissolving them, and `debug = true` guarantees the
+/// DWARF the debugger reads.
+const DEBUG_BUILD_KEYS: [(&str, &str); 3] =
+    [("opt-level", "0"), ("lto", "false"), ("debug", "true")];
+
+/// Marker written after a line this toggle overrode, parking the ORIGINAL LINE
+/// verbatim (padding and all) so switching back restores the project's own
+/// profile byte for byte — not a guess at what the default "should" be. A key
+/// the file didn't have at all is recorded as `absent` and removed again.
+const DEBUG_BUILD_TAG: &str = "# <embedded-ide debug-build was:";
+const DEBUG_BUILD_ABSENT: &str = "absent";
+
+/// Turn the debug-friendly `[profile.release]` on or off, in place.
+///
+/// Only ever touches the three keys in [`DEBUG_BUILD_KEYS`], and only inside
+/// `[profile.release]`. Every value it overwrites is parked in a trailing
+/// [`DEBUG_BUILD_TAG`] comment, so turning the toggle back off puts the user's
+/// original numbers back even if they were custom (the reason this isn't just
+/// "write `s`/`true` on the way out"). Idempotent both ways; a project with no
+/// `[profile.release]` gets one while the toggle is on.
+pub fn ensure_debug_build(cargo_toml: &str, enabled: bool) -> String {
+    let mut lines: Vec<String> = cargo_toml.lines().map(str::to_owned).collect();
+    // Bounds of the `[profile.release]` body (exclusive end).
+    let header = lines
+        .iter()
+        .position(|l| l.trim() == "[profile.release]");
+    let (body_start, body_end) = match header {
+        Some(h) => {
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(h + 1)
+                .find(|(_, l)| l.trim_start().starts_with('['))
+                .map_or(lines.len(), |(i, _)| i);
+            (h + 1, end)
+        }
+        None if enabled => {
+            // No profile at all: append one, then fill it below.
+            if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[profile.release]".to_owned());
+            (lines.len(), lines.len())
+        }
+        // Nothing to restore in a file that never had the section.
+        None => return cargo_toml.to_owned(),
+    };
+
+    let mut body: Vec<String> = lines[body_start..body_end].to_vec();
+    for (key, debug_value) in DEBUG_BUILD_KEYS {
+        let at = body.iter().position(|l| line_key(l).as_deref() == Some(key));
+        match (at, enabled) {
+            // Present: override it (parking the original) or restore it.
+            (Some(i), true) => {
+                // An already-tagged line keeps its FIRST original — re-running
+                // must not park our own override as if it were the user's.
+                let was = tagged_original(&body[i]).unwrap_or_else(|| body[i].clone());
+                // Everything up to the `=` is reused, so the file's column
+                // alignment survives the round trip.
+                let lhs = body[i]
+                    .split_once('=')
+                    .map_or_else(|| format!("{key} "), |(l, _)| l.to_owned());
+                body[i] = format!("{lhs}= {debug_value}  {DEBUG_BUILD_TAG} {was}>");
+            }
+            (Some(i), false) => match tagged_original(&body[i]) {
+                // Ours: put the original line back, or drop a key we invented.
+                Some(was) if was.trim() == DEBUG_BUILD_ABSENT => {
+                    body.remove(i);
+                }
+                Some(was) => body[i] = was,
+                // The user's own line — never touched, never reverted.
+                None => {}
+            },
+            // Missing: invent it while on; nothing to do while off.
+            (None, true) => body.push(format!(
+                "{key} = {debug_value}  {DEBUG_BUILD_TAG} {DEBUG_BUILD_ABSENT}>"
+            )),
+            (None, false) => {}
+        }
+    }
+    lines.splice(body_start..body_end, body);
+
+    let mut s = lines.join("\n");
+    // Preserve the original trailing-newline shape.
+    if cargo_toml.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+/// The key of a `key = value` TOML line, or `None` for a comment / blank /
+/// header / anything without a `=`.
+fn line_key(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let (k, _) = t.split_once('=')?;
+    Some(k.trim().to_owned())
+}
+
+/// The line parked in this line's [`DEBUG_BUILD_TAG`], verbatim — `None` when
+/// the toggle didn't write it. Terminated by the LAST `>`, so an original that
+/// carried its own `>` (inside a comment) still comes back whole.
+fn tagged_original(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once(DEBUG_BUILD_TAG)?;
+    // Exactly the one separating space is ours; the rest is the original's.
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    let (was, _) = rest.rsplit_once('>')?;
+    Some(was.to_owned())
+}
+
 /// A stable fingerprint of every DEPENDENCY line in `cargo_toml` — the bodies of
 /// `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]` and any
 /// `[dependencies.<name>]` sub-tables. Comments + blank lines + surrounding
@@ -1193,6 +1310,75 @@ mod tests {
             !stripped.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "needs_eh=false would strip it (the bug this guards):\n{stripped}"
         );
+    }
+
+    /// The whole point of parking the old value in the marker: turning the
+    /// toggle back off has to restore the project's OWN profile, including
+    /// values the user typed, and leave the file byte-identical.
+    #[test]
+    fn debug_build_round_trips_the_release_profile() {
+        let base = "[package]\nname = \"x\"\n\n[profile.release]\n\
+                    panic         = \"abort\"\n\
+                    codegen-units = 1\n\
+                    debug         = true\n\
+                    lto           = true\n\
+                    opt-level     = \"s\"\n\
+                    \n[profile.dev]\nopt-level = 1\n";
+
+        let on = ensure_debug_build(base, true);
+        // Overridden — and the file's column alignment is kept.
+        assert!(on.contains("opt-level     = 0  "), "{on}");
+        assert!(on.contains("lto           = false  "), "{on}");
+        assert!(on.contains("debug         = true  "), "{on}");
+        // Keys it does NOT own are left exactly as they were.
+        assert!(on.contains("panic         = \"abort\"\n"), "{on}");
+        assert!(on.contains("codegen-units = 1\n"), "{on}");
+        // The other profile is never touched.
+        assert!(on.contains("[profile.dev]\nopt-level = 1"), "{on}");
+        // Idempotent, and the ORIGINAL line survives a second pass.
+        assert_eq!(ensure_debug_build(&on, true), on);
+        assert!(
+            on.contains("was: opt-level     = \"s\">"),
+            "original parked verbatim:\n{on}"
+        );
+
+        // Off → exactly the file we started from.
+        assert_eq!(ensure_debug_build(&on, false), base);
+        // Off on an untouched file is a no-op.
+        assert_eq!(ensure_debug_build(base, false), base);
+    }
+
+    /// A profile that lacks a key gets one while the toggle is on — and loses it
+    /// again on the way out, rather than being left with an invented `lto`.
+    #[test]
+    fn debug_build_invents_and_removes_missing_keys() {
+        let base = "[package]\nname = \"x\"\n\n[profile.release]\nopt-level = 3\n";
+        let on = ensure_debug_build(base, true);
+        assert!(on.contains("lto = false"), "{on}");
+        assert!(on.contains(&format!("lto = false  {DEBUG_BUILD_TAG} absent>")), "{on}");
+        assert_eq!(ensure_debug_build(&on, false), base);
+
+        // A user's custom value is restored verbatim, not replaced by a default.
+        let custom = "[profile.release]\nopt-level = 3\nlto = \"fat\"\n";
+        assert_eq!(
+            ensure_debug_build(&ensure_debug_build(custom, true), false),
+            custom
+        );
+    }
+
+    /// A Cargo.toml with no release profile at all: one is created while on, and
+    /// nothing happens while off (there is nothing to restore).
+    #[test]
+    fn debug_build_creates_a_missing_profile() {
+        let base = "[package]\nname = \"x\"\n";
+        assert_eq!(ensure_debug_build(base, false), base);
+        let on = ensure_debug_build(base, true);
+        assert_eq!(on.matches("[profile.release]").count(), 1, "{on}");
+        assert!(on.contains("opt-level = 0"), "{on}");
+        // Every key it invented is marked absent → the section empties out again.
+        let off = ensure_debug_build(&on, false);
+        assert!(!off.contains("opt-level"), "{off}");
+        assert!(!off.contains("lto"), "{off}");
     }
 
     #[test]

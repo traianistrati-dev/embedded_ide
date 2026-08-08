@@ -12,6 +12,12 @@ use eframe::egui;
 /// Breakpoint dot colour (the classic red).
 const BP_FILL: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
 const BP_RADIUS: f32 = 4.0;
+/// Band tint over a line that holds a breakpoint: yellow at 85 % transparency
+/// (alpha 38/255). The band lands OVER the code — like every other editor band
+/// (`show_line_band`) — so it has to stay a tint; an opaque fill would hide the
+/// line it marks.
+const BP_BAND_RGB: (u8, u8, u8) = (235, 205, 60);
+const BP_BAND_ALPHA: u8 = 38;
 
 /// The workspace-relative path breakpoints are keyed by — only Rust sources
 /// can hold one (a breakpoint in Cargo.toml means nothing to the debugger).
@@ -79,7 +85,16 @@ impl AppIde {
         let painter = ui.painter().with_clip_rect(clip);
 
         // ── Existing breakpoints ──────────────────────────────────────────────
+        // Each one gets the dot plus a translucent yellow band across its line,
+        // so a breakpoint is visible while reading the code, not only from the
+        // gutter column.
         if let Some(set) = self.breakpoints.get(&rel) {
+            let band = egui::Color32::from_rgba_unmultiplied(
+                BP_BAND_RGB.0,
+                BP_BAND_RGB.1,
+                BP_BAND_RGB.2,
+                BP_BAND_ALPHA,
+            );
             for &line in set {
                 let Some((top, bot)) = y_range_of(line.saturating_sub(1) as usize) else {
                     continue; // line beyond the current text — keep, don't draw
@@ -88,6 +103,16 @@ impl AppIde {
                 if cy < clip.top() || cy > clip.bottom() {
                     continue;
                 }
+                // Starts right of the gutter strip so the line numbers stay
+                // legible, and runs to the editor's right edge.
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(dot_x + BP_RADIUS, top),
+                        egui::pos2(clip.right(), bot),
+                    ),
+                    0.0,
+                    band,
+                );
                 painter.circle_filled(egui::pos2(dot_x, cy), BP_RADIUS, BP_FILL);
             }
         }

@@ -92,6 +92,7 @@ impl Mcu {
             config_regen_forced: false,
             auto_build: crate::panels::mcu_module::mcu::model::AutoBuild::default(),
             strict_lints: false,
+            debug_build: false,
             expand_module: None,
             module_undo: Vec::new(),
             module_remove_confirm: None,
@@ -411,6 +412,14 @@ impl Mcu {
             }
             s.push_str(&strict);
         }
+        // Debug-friendly release profile (`@debugbuild`) — workflow setting.
+        let debug_build = mcu_config::debug_build_section(self.debug_build);
+        if !debug_build.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&debug_build);
+        }
         // Diagram rotation (`@rotation`) — view preference, same append pattern.
         let rotation = mcu_config::rotation_section(self.rotated);
         if !rotation.is_empty() {
@@ -451,6 +460,8 @@ impl Mcu {
         self.auto_build = mcu_config::parse_autobuild(text);
         // Strict-lints preference (`@strict`) — missing restores the default OFF.
         self.strict_lints = mcu_config::parse_strict(text);
+        // Debug-friendly release profile (`@debugbuild`) — missing = OFF.
+        self.debug_build = mcu_config::parse_debug_build(text);
         // Diagram rotation (`@rotation`) — missing restores the default (0°).
         self.rotated = mcu_config::parse_rotation(text);
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.

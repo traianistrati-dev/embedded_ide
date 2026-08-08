@@ -112,12 +112,35 @@ pub struct DebugState {
     pub nav: Option<(String, u32)>,
     /// The frame whose scopes are currently shown (highlighted in the list).
     pub sel_frame: Option<i64>,
+    /// What probe-rs answered for each requested breakpoint, per file:
+    /// `rel path → requested line → status`. Filled from every `setBreakpoints`
+    /// response; empty outside a session (nothing has been asked yet).
+    pub bp_status: BTreeMap<String, BTreeMap<u32, BpStatus>>,
+}
+
+/// probe-rs's verdict on ONE requested breakpoint. A red dot in the gutter only
+/// means "the IDE asked for it" — this is whether the target actually got it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BpStatus {
+    /// The debugger armed it. `false` = the line has no code of its own (very
+    /// common in the optimised `--release` build the Debug tab produces), or the
+    /// core ran out of hardware breakpoint comparators.
+    pub verified: bool,
+    /// Where it ACTUALLY landed, when probe-rs moved it to the nearest line that
+    /// has code. `None` when it stayed put.
+    pub moved_to: Option<u32>,
+    /// probe-rs's own explanation, when the response carried one.
+    pub message: Option<String>,
 }
 
 // ── Wire (writer half + request bookkeeping) ──────────────────────────────────
 
 /// What a pending request's response should be routed to.
-#[derive(Clone, Copy, PartialEq)]
+///
+/// NOT `Copy` since `Breakpoints` carries the request's path + lines: the DAP
+/// response lists results positionally, with no source path of its own, so the
+/// question has to travel with the answer.
+#[derive(Clone, PartialEq)]
 enum Pending {
     Initialize,
     Launch,
@@ -131,6 +154,9 @@ enum Pending {
     /// `evaluate` for a hover tooltip; the `u64` is the hover generation so a
     /// stale reply (pointer already moved on) is dropped.
     Hover(u64),
+    /// `setBreakpoints` for one file: `(rel path, the lines we asked for, in
+    /// request order)`. The response's array is positional against that list.
+    Breakpoints(String, Vec<u32>),
     Other,
 }
 
@@ -618,7 +644,7 @@ fn send_breakpoints(wire: &Wire, project_dir: &Path, rel_path: &str, lines: &[u3
             "source": { "path": abs.to_string_lossy() },
             "breakpoints": bps,
         }),
-        Pending::Other,
+        Pending::Breakpoints(rel_path.to_owned(), lines.to_vec()),
     );
 }
 
@@ -810,6 +836,9 @@ fn spawn_dap_reader(
                     .push_plain(LineKind::Notice, "[debug session ended]");
             }
         }
+        // The verdicts describe the session that just ended — keeping them would
+        // mark rows "not armed" while nothing is even attached.
+        state.lock().unwrap().bp_status.clear();
         kill_server(&server_slot);
         *wire.writer.lock().unwrap() = None;
         ctx.request_repaint();
@@ -1019,8 +1048,71 @@ fn handle_response(
                 }
             }
         }
+        Pending::Breakpoints(rel, asked) => {
+            let answers = msg["body"]["breakpoints"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let statuses = bp_statuses(&asked, &answers);
+            let unarmed: Vec<u32> = statuses
+                .iter()
+                .filter(|(_, s)| !s.verified)
+                .map(|(l, _)| *l)
+                .collect();
+            // One console line when something did NOT take — otherwise the red
+            // dot is the only feedback and it lies (see the Debug tab's list).
+            if !unarmed.is_empty() {
+                let list = unarmed
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                console.lock().unwrap().push_plain(
+                    LineKind::Stderr,
+                    format!(
+                        "[breakpoints] {rel}: {} of {} armed — line(s) {list} could not be set \
+                         (no code there in the optimised --release build, or the core is out of \
+                         hardware breakpoints)",
+                        asked.len() - unarmed.len(),
+                        asked.len()
+                    ),
+                );
+            }
+            // This response is the whole truth for that FILE: replace its map so
+            // a removed breakpoint can't leave a stale row behind.
+            state.lock().unwrap().bp_status.insert(rel, statuses);
+        }
         Pending::Other => {}
     }
+}
+
+/// Zip the lines we asked for with the DAP `setBreakpoints` answers, which come
+/// back positionally (the response carries no line of its own for a breakpoint
+/// the debugger refused). A missing answer counts as unverified — silence is
+/// not confirmation.
+fn bp_statuses(asked: &[u32], answers: &[Value]) -> BTreeMap<u32, BpStatus> {
+    asked
+        .iter()
+        .enumerate()
+        .map(|(i, &line)| {
+            let a = answers.get(i);
+            (
+                line,
+                BpStatus {
+                    verified: a.and_then(|a| a["verified"].as_bool()).unwrap_or(false),
+                    // Only a DIFFERENT line is a relocation worth showing.
+                    moved_to: a
+                        .and_then(|a| a["line"].as_u64())
+                        .map(|l| l as u32)
+                        .filter(|l| *l != line),
+                    message: a
+                        .and_then(|a| a["message"].as_str())
+                        .filter(|m| !m.trim().is_empty())
+                        .map(str::to_owned),
+                },
+            )
+        })
+        .collect()
 }
 
 fn handle_event(
@@ -1102,6 +1194,35 @@ fn rel_of(path: &str, project_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The DAP answer is positional and carries no line of its own for a
+    /// breakpoint the debugger refused — so the request's lines drive the
+    /// mapping, a shorter answer array leaves the rest unverified, and only a
+    /// DIFFERENT reported line counts as a relocation.
+    #[test]
+    fn breakpoint_verdicts_zip_with_the_request() {
+        let asked = [265, 282, 286, 300];
+        let answers = vec![
+            json!({"verified": false, "message": "no code at this line"}),
+            json!({"verified": true, "line": 282}),
+            json!({"verified": true, "line": 291}),
+            // 300: probe-rs sent nothing back for it.
+        ];
+        let got = bp_statuses(&asked, &answers);
+
+        assert_eq!(got.len(), 4);
+        let b265 = &got[&265];
+        assert!(!b265.verified);
+        assert_eq!(b265.message.as_deref(), Some("no code at this line"));
+        // Reported line == requested line → not a relocation.
+        assert!(got[&282].verified);
+        assert_eq!(got[&282].moved_to, None);
+        // Moved to the nearest line with code.
+        assert_eq!(got[&286].moved_to, Some(291));
+        // A missing answer is NOT a confirmation.
+        assert_eq!(got[&300], BpStatus::default());
+        assert!(!got[&300].verified);
+    }
 
     #[test]
     fn eval_result_placeholders_are_flagged_unresolved() {

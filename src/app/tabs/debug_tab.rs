@@ -6,7 +6,7 @@
 
 use super::terminal_tab::render_scrollback;
 use crate::app::helpers::help_panel;
-use crate::debugger::{DebugPhase, Debugger, Frame};
+use crate::debugger::{BpStatus, DebugPhase, Debugger, Frame};
 use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +17,10 @@ const BP_FILL: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
 /// The breakpoint the target is currently halted on — same amber as the
 /// "stopped" phase badge, as a row tint + a caret marker.
 const HALT_AMBER: egui::Color32 = egui::Color32::from_rgb(230, 180, 60);
+
+/// A breakpoint probe-rs refused to arm: warning glyph amber + muted row.
+const UNARMED_AMBER: egui::Color32 = egui::Color32::from_rgb(215, 150, 60);
+const UNARMED_GREY: egui::Color32 = egui::Color32::from_gray(120);
 
 /// Memory key of this tab's help panel.
 const HELP_ID: &str = "debug";
@@ -47,6 +51,11 @@ pub fn show_debug_tab(
     bp_jump: &mut Option<(String, u32)>,
     bp_remove: &mut Option<(String, u32)>,
     bp_clear: &mut bool,
+    // "Debug-friendly build": the project's current setting, and the new value
+    // when the user flips it — the caller writes it onto the Mcu, which
+    // regenerates `[profile.release]` in Cargo.toml.
+    debug_build: bool,
+    debug_build_set: &mut Option<bool>,
     can_run: bool,
     chip: &str,
     // Shared probe selector (RTT + Debug): the scanned list, the chosen
@@ -170,6 +179,41 @@ pub fn show_debug_tab(
         }
 
         ui.separator();
+
+        // Debug-friendly release profile. Disabled mid-session: the toggle
+        // rewrites Cargo.toml, and the binary on the chip would no longer be
+        // the one being debugged.
+        let mut want = debug_build;
+        let toggle = ui
+            .add_enabled(
+                !busy,
+                egui::Checkbox::new(
+                    &mut want,
+                    egui::RichText::new("Debug-friendly build")
+                        .size(10.5)
+                        .color(if debug_build {
+                            egui::Color32::from_rgb(220, 180, 60)
+                        } else {
+                            egui::Color32::from_gray(170)
+                        }),
+                ),
+            )
+            .on_hover_text(
+                "Relax the project's [profile.release] for stepping: opt-level = 0, \
+                 lto = false, debug = true.\nEvery source line then keeps code of its \
+                 own, so breakpoints on plain statements and loop headers actually \
+                 arm.\n\nCost: the binary grows several times over (it may no longer \
+                 fit in Flash) and timing-sensitive code behaves differently — this \
+                 is NOT the firmware you want to ship. Turn it back off and your own \
+                 profile values are restored.\n\nWrites Cargo.toml; Save + rebuild to \
+                 apply.",
+            )
+            .on_disabled_hover_text("Stop the session first — it rewrites Cargo.toml.");
+        if toggle.changed() {
+            *debug_build_set = Some(want);
+        }
+
+        ui.separator();
         help_panel::toggle_button(ui, HELP_ID);
 
         ui.separator();
@@ -253,7 +297,21 @@ pub fn show_debug_tab(
                  under the toolbar collects them all: click a row to jump to \
                  that line, the row's X button to remove that one, Remove all \
                  to clear them. While the target is halted, the breakpoint it \
-                 stopped on is highlighted amber with a caret.",
+                 stopped on is highlighted amber with a caret. A row that is \
+                 greyed and struck through was NOT armed by probe-rs — hover it \
+                 for the reason; `line -> N` means it was moved to the nearest \
+                 line that has code.",
+            ),
+            (
+                "Debug-friendly build",
+                egui::Color32::from_rgb(220, 180, 60),
+                "Rewrites the project's [profile.release] to opt-level = 0, \
+                 lto = false, debug = true, so every source line keeps code of \
+                 its own and can hold a breakpoint. The optimised default folds \
+                 plain statements and loop headers away — that is why some \
+                 breakpoints never arm. The binary grows several times over and \
+                 timing changes, so turn it off before shipping; your original \
+                 profile values are restored when you do.",
             ),
             (
                 "Continue",
@@ -322,19 +380,25 @@ pub fn show_debug_tab(
     // innermost frame WITH source, the same one the halt navigation jumps to
     // (`debugger.rs`, the stackTrace arm). Only while halted — a running target
     // has no location, and a stale mark would lie.
-    let halted_at: Option<(String, u32)> = stopped
-        .then(|| {
-            let st = dbg.state.lock().unwrap();
-            st.stack
-                .iter()
-                .find(|f| f.file_rel.is_some())
-                .map(|f| (f.file_rel.clone().unwrap_or_default(), f.line))
-        })
-        .flatten();
+    // `bp_status` rides along in the same lock: probe-rs's verdict per requested
+    // line (empty outside a session).
+    let (halted_at, bp_status) = {
+        let st = dbg.state.lock().unwrap();
+        let halted: Option<(String, u32)> = stopped
+            .then(|| {
+                st.stack
+                    .iter()
+                    .find(|f| f.file_rel.is_some())
+                    .map(|f| (f.file_rel.clone().unwrap_or_default(), f.line))
+            })
+            .flatten();
+        (halted, st.bp_status.clone())
+    };
     breakpoint_list(
         ui,
         breakpoints,
         halted_at.as_ref(),
+        &bp_status,
         bp_jump,
         bp_remove,
         bp_clear,
@@ -665,12 +729,17 @@ const LOC_MAX_CHARS: usize = 38;
 /// caller's (it owns the map and pushes the new set into a live session).
 /// `halted_at` is where the target sits right now (`None` unless it is halted);
 /// the row that matches gets an amber tint, a caret and white text.
+/// `bp_status` is probe-rs's answer per requested line (empty outside a
+/// session): a line it could NOT arm is greyed and struck through, and one it
+/// moved shows `-> <line>`, because the red dot alone claims a breakpoint that
+/// the target may never hit.
 /// Renders nothing when there are no breakpoints — the empty-state hint below
 /// already explains how to set one.
 fn breakpoint_list(
     ui: &mut egui::Ui,
     breakpoints: &BTreeMap<String, BTreeSet<u32>>,
     halted_at: Option<&(String, u32)>,
+    bp_status: &BTreeMap<String, BTreeMap<u32, BpStatus>>,
     bp_jump: &mut Option<(String, u32)>,
     bp_remove: &mut Option<(String, u32)>,
     bp_clear: &mut bool,
@@ -679,11 +748,28 @@ fn breakpoint_list(
     if total == 0 {
         return;
     }
-    egui::CollapsingHeader::new(
-        egui::RichText::new(format!("Breakpoints ({total})"))
-            .size(10.5)
-            .color(BP_FILL),
-    )
+    // Only breakpoints the session actually answered about count as unarmed —
+    // an empty `bp_status` means "nothing asked yet", not "nothing works".
+    let unarmed: usize = breakpoints
+        .iter()
+        .map(|(rel, lines)| {
+            lines
+                .iter()
+                .filter(|l| {
+                    bp_status
+                        .get(rel)
+                        .and_then(|m| m.get(l))
+                        .is_some_and(|s| !s.verified)
+                })
+                .count()
+        })
+        .sum();
+    let title = if unarmed > 0 {
+        format!("Breakpoints ({total}, {unarmed} not armed)")
+    } else {
+        format!("Breakpoints ({total})")
+    };
+    egui::CollapsingHeader::new(egui::RichText::new(title).size(10.5).color(BP_FILL))
     .id_salt("debug_bp_list")
     .default_open(true)
     .show(ui, |ui| {
@@ -709,10 +795,18 @@ fn breakpoint_list(
             .show(ui, |ui| {
                 for (rel, lines) in breakpoints {
                     for &line in lines {
+                        let status = bp_status.get(rel).and_then(|m| m.get(&line));
+                        // Not asked yet (no session) reads as "fine" — only an
+                        // explicit `verified: false` is a problem.
+                        let unarmed = status.is_some_and(|s| !s.verified);
+                        let moved_to = status.and_then(|s| s.moved_to);
+                        // Compare the halt against where the breakpoint REALLY
+                        // is: probe-rs reports the line it moved it to.
+                        let effective = moved_to.unwrap_or(line);
                         // The halted frame's exact file+line. A step that landed
-                        // between breakpoints (or a line probe-rs relocated)
-                        // simply marks nothing — better than marking a guess.
-                        let here = halted_at.is_some_and(|(r, l)| r == rel && *l == line);
+                        // between breakpoints simply marks nothing — better than
+                        // marking a guess.
+                        let here = halted_at.is_some_and(|(r, l)| r == rel && *l == effective);
                         // `Frame` reserves its background shape BEFORE the row,
                         // so the tint lands under the text, not over it.
                         egui::Frame::new()
@@ -732,53 +826,106 @@ fn breakpoint_list(
                                         *bp_remove = Some((rel.clone(), line));
                                     }
                                     // Fixed-width slot so every row's dot lines
-                                    // up, caret or not.
+                                    // up: halt caret, else an unarmed warning.
+                                    let (marker, marker_color) = if here {
+                                        (ph::CARET_RIGHT, HALT_AMBER)
+                                    } else if unarmed {
+                                        (ph::WARNING, UNARMED_AMBER)
+                                    } else {
+                                        ("", HALT_AMBER)
+                                    };
                                     ui.add_sized(
                                         egui::vec2(9.0, 12.0),
                                         egui::Label::new(
-                                            egui::RichText::new(if here {
-                                                ph::CARET_RIGHT
-                                            } else {
-                                                ""
-                                            })
-                                            .size(10.0)
-                                            .color(HALT_AMBER),
+                                            egui::RichText::new(marker)
+                                                .size(10.0)
+                                                .color(marker_color),
                                         ),
                                     );
                                     let (dot, _) = ui.allocate_exact_size(
                                         egui::vec2(9.0, 9.0),
                                         egui::Sense::hover(),
                                     );
-                                    ui.painter().circle_filled(dot.center(), 3.5, BP_FILL);
+                                    // Hollow dot = asked for but NOT armed on the
+                                    // target; filled = the real thing.
+                                    if unarmed {
+                                        ui.painter().circle_stroke(
+                                            dot.center(),
+                                            3.5,
+                                            egui::Stroke::new(1.2, UNARMED_GREY),
+                                        );
+                                    } else {
+                                        ui.painter().circle_filled(dot.center(), 3.5, BP_FILL);
+                                    }
                                     let loc = format!("{rel}:{line}");
+                                    // A relocated breakpoint shows both numbers —
+                                    // ASCII arrow, raw Unicode renders as tofu.
+                                    let label = match moved_to {
+                                        Some(m) => format!("{loc} -> {m}"),
+                                        None => loc.clone(),
+                                    };
                                     // Truncated: a long path must not out-demand
                                     // the panel width (the side-panel feedback
                                     // noted at the pane row below). Full text
                                     // stays on hover.
                                     let mut text = egui::RichText::new(short_loc(
-                                        &loc,
+                                        &label,
                                         LOC_MAX_CHARS,
                                     ))
                                     .size(10.5)
                                     .monospace();
-                                    if here {
+                                    if unarmed {
+                                        text = text.color(UNARMED_GREY).strikethrough();
+                                    } else if here {
                                         text = text.color(egui::Color32::WHITE).strong();
                                     }
                                     let resp = ui.link(text);
                                     if resp.clicked() {
                                         *bp_jump = Some((rel.clone(), line));
                                     }
-                                    resp.on_hover_text(if here {
-                                        format!("{loc}\nHalted HERE — jump to the line")
-                                    } else {
-                                        format!("{loc}\nJump to this breakpoint")
-                                    });
+                                    resp.on_hover_text(bp_hover(&loc, here, status));
                                 });
                             });
                     }
                 }
             });
     });
+}
+
+/// The row tooltip: where it is, plus what probe-rs did with it. The reason an
+/// unarmed breakpoint gives is the point of the whole verdict plumbing — a red
+/// dot that never hits is otherwise indistinguishable from one that works.
+fn bp_hover(loc: &str, here: bool, status: Option<&BpStatus>) -> String {
+    let mut s = loc.to_owned();
+    match status {
+        Some(st) if !st.verified => {
+            s.push_str(
+                "\nNOT armed on the target. Usually the line has no code of its own in \
+                 the optimised --release build the Debug tab produces (a plain `let`, a \
+                 loop header, an inlined closure) — put it on a line that calls \
+                 something. It can also mean the core is out of hardware breakpoints \
+                 (6 on Cortex-M3/M4, 4 on M0/M0+).",
+            );
+        }
+        Some(st) => {
+            if let Some(m) = st.moved_to {
+                s.push_str(&format!(
+                    "\nprobe-rs moved it to line {m} — the nearest line that has code."
+                ));
+            }
+            s.push_str(if here {
+                "\nHalted HERE — click to jump to the line."
+            } else {
+                "\nArmed. Click to jump to the line."
+            });
+        }
+        // No session has answered for this one yet.
+        None => s.push_str("\nJump to this breakpoint."),
+    }
+    if let Some(msg) = status.and_then(|st| st.message.as_deref()) {
+        s.push_str(&format!("\nprobe-rs: {msg}"));
+    }
+    s
 }
 
 /// Shorten a `path:line` label to at most `max` characters, keeping the END

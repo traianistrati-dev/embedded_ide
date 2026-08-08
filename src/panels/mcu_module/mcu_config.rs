@@ -28,6 +28,7 @@ const RUNTIME_HEADER: &str = "@runtime";
 const GPIO_HEADER: &str = "@gpio";
 const AUTOBUILD_HEADER: &str = "@autobuild";
 const STRICT_HEADER: &str = "@strict";
+const DEBUGBUILD_HEADER: &str = "@debugbuild";
 const ROTATION_HEADER: &str = "@rotation";
 const IOPINS_HEADER: &str = "@iopins";
 
@@ -65,6 +66,23 @@ pub fn strict_section(strict: bool) -> String {
 /// `on` is OFF (the default).
 pub fn parse_strict(text: &str) -> bool {
     section_body(text, STRICT_HEADER).as_deref() == Some("on")
+}
+
+/// The `@debugbuild` section text (or "" for the default OFF) — the Debug tab's
+/// "Debug-friendly build" toggle, which relaxes `[profile.release]` so every
+/// source line can hold a breakpoint. Appended like `@autobuild`.
+pub fn debug_build_section(debug_build: bool) -> String {
+    if debug_build {
+        format!("{DEBUGBUILD_HEADER}\non\n")
+    } else {
+        String::new()
+    }
+}
+
+/// The debug-build preference recorded in `@debugbuild`; missing / anything but
+/// `on` is OFF (the optimised profile that gets flashed).
+pub fn parse_debug_build(text: &str) -> bool {
+    section_body(text, DEBUGBUILD_HEADER).as_deref() == Some("on")
 }
 
 /// The `@rotation` section text (or "" for the default un-rotated) — the diagram

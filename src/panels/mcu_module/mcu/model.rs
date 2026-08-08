@@ -187,6 +187,14 @@ pub struct Mcu {
     /// is exempted with `#[allow]` so only the user's own code is linted.
     /// Default `false`. See `project_gen::ensure_strict_lints`.
     pub strict_lints: bool,
+    /// Debug-friendly `[profile.release]` (Debug-tab toggle, persisted). When
+    /// on, the project's release profile is relaxed to `opt-level = 0`,
+    /// `lto = false`, `debug = true` so every source line keeps code of its own
+    /// and can hold a breakpoint. Off (default) is the optimised profile that
+    /// normally gets flashed — smaller and correctly timed, but breakpoints on
+    /// lines the optimiser folded away never arm.
+    /// See `project_gen::ensure_debug_build`.
+    pub debug_build: bool,
     /// Transient: id of a module the user clicked on the canvas, so the module
     /// list (below the chip) expands its entry next frame. Consumed + cleared by
     /// the panel. Not part of project state.

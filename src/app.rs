@@ -1678,6 +1678,9 @@ impl AppIde {
         // `[lints.clippy]` block AND the `#[allow]` exemptions injected into the
         // generated main.rs / config files, so it must trigger regeneration.
         mcu.strict_lints.hash(&mut hasher);
+        // Debug-friendly build toggle: rewrites `[profile.release]` in the
+        // Cargo.toml, so the same regeneration pass has to run.
+        mcu.debug_build.hash(&mut hasher);
 
         // Hash modules
         for module in &mcu.modules {
@@ -1899,6 +1902,9 @@ impl AppIde {
             // Strict-lints `[lints.clippy]` block (MCU System toggle).
             let strict = self.mcu.as_ref().is_some_and(|m| m.strict_lints);
             let new_toml = project_gen::ensure_strict_lints(&new_toml, strict);
+            // Debug-friendly `[profile.release]` (Debug tab toggle).
+            let debug_build = self.mcu.as_ref().is_some_and(|m| m.debug_build);
+            let new_toml = project_gen::ensure_debug_build(&new_toml, debug_build);
             if new_toml != self.cargo_toml {
                 self.cargo_toml = new_toml;
                 self.invalidate_project_files_cache();

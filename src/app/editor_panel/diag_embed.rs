@@ -157,6 +157,9 @@ impl AppIde {
         // Same list's ✕ (one row) and "Remove all" buttons.
         let mut bp_remove: Option<(String, u32)> = None;
         let mut bp_clear = false;
+        // Debug tab's "Debug-friendly build" checkbox.
+        let debug_build = self.mcu.as_ref().is_some_and(|m| m.debug_build);
+        let mut debug_build_set: Option<bool> = None;
         // Shared RTT/Debug probe-selector Scan button.
         let mut probe_scan = false;
         // Profile-tab "Analyze" (cargo bloat) + "Sample" (flamegraph) buttons.
@@ -277,6 +280,8 @@ impl AppIde {
                     &mut bp_jump,
                     &mut bp_remove,
                     &mut bp_clear,
+                    debug_build,
+                    &mut debug_build_set,
                     &self.probe_list,
                     &mut self.selected_probe,
                     &mut probe_scan,
@@ -411,6 +416,14 @@ impl AppIde {
         // Profile-tab "Sample" button → on-target flamegraph.
         if profile_sample {
             self.start_flame();
+        }
+        // "Debug-friendly build" flipped: the Mcu owns the preference, and the
+        // codegen pass hashes it → `[profile.release]` is rewritten next frame,
+        // exactly like the System tab's Strict-lints checkbox.
+        if let Some(on) = debug_build_set {
+            if let Some(mcu) = &mut self.mcu {
+                mcu.debug_build = on;
+            }
         }
         // Breakpoint-list removals — same bookkeeping as a gutter toggle: drop
         // the line (and the file's entry once empty), then push that file's NEW

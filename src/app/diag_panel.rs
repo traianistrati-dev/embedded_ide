@@ -129,6 +129,10 @@ pub(super) fn show_diag_panel(
     bp_jump: &mut Option<(String, u32)>,
     bp_remove: &mut Option<(String, u32)>,
     bp_clear: &mut bool,
+    // Debug tab's "Debug-friendly build" toggle: the project's current setting
+    // and the value the user picked (the caller applies it to the Mcu).
+    debug_build: bool,
+    debug_build_set: &mut Option<bool>,
     // Shared probe selector (RTT + Debug): scanned probe list, chosen `--probe`
     // selector, a "scan" click signal (caller runs `scan_probes`), last error.
     probe_list: &[crate::probe::ProbeInfo],
@@ -692,6 +696,8 @@ pub(super) fn show_diag_panel(
                 bp_jump,
                 bp_remove,
                 bp_clear,
+                debug_build,
+                debug_build_set,
                 can_flash,
                 rtt_chip,
                 probe_list,
