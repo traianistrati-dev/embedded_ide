@@ -72,8 +72,13 @@ impl Mcu {
         let drag_ext = modules::dragged_half_extent(self).max(io_arrows::dragged_half_extent(self));
         let half_w = (canvas_w / 2.0 + mx).max(drag_ext.x + 16.0);
         let half_h = (canvas_h / 2.0 + my).max(drag_ext.y + 16.0);
+        // The canvas senses CLICKS so empty space can clear the selection. Sensing
+        // click (not drag) leaves the Scene's drag-pan alone: egui hit-tests click
+        // and drag targets separately, and every pin / module / field registers
+        // its own `interact` LATER, i.e. above this one — so a click only reaches
+        // the background when it landed on none of them.
         let (response, painter) =
-            ui.allocate_painter(egui::vec2(2.0 * half_w, 2.0 * half_h), egui::Sense::hover());
+            ui.allocate_painter(egui::vec2(2.0 * half_w, 2.0 * half_h), egui::Sense::click());
 
         let rect = response.rect;
         let center = rect.center();
@@ -138,6 +143,20 @@ impl Mcu {
             if self.selected_pin == Some(n) {
                 self.request_pin_goto(n);
             }
+        }
+
+        // A click that reached the BACKGROUND — no pin, no module box, no pin
+        // field took it — means "focus nothing": drop both selections and ask the
+        // module list to collapse, so the canvas and the list agree. Clicks on the
+        // chip BODY are excluded: the selected pin's function panel lives there,
+        // and closing it from under the pointer would fight the user.
+        let on_body = response
+            .interact_pointer_pos()
+            .is_some_and(|p| display_chip.contains(p));
+        if response.clicked() && !on_body {
+            self.selected_pin = None;
+            self.selected_module = None;
+            self.collapse_modules = true;
         }
 
         // ── Inner chip panel ─────────────────────────────────────────────────

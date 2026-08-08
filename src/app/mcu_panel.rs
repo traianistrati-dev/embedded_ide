@@ -359,6 +359,9 @@ impl AppIde {
                             // TOGGLE its list entry this frame (expand if closed,
                             // collapse if open), then it's user-controlled again.
                             let to_open = mcu.expand_module.take();
+                            // Empty-canvas click last frame → close EVERY entry
+                            // (the canvas cleared its selection at the same time).
+                            let collapse_all = std::mem::take(&mut mcu.collapse_modules);
                             // The module selectors follow the STAGED runtime (what
                             // the user is about to Apply), not the applied one.
                             let is_async = mcu.pending_is_async();
@@ -484,7 +487,14 @@ impl AppIde {
                                                 cs_id,
                                                 false,
                                             );
-                                        if toggle {
+                                        // "Collapse everything" outranks the
+                                        // per-module toggle: both can't be true
+                                        // in one frame (a canvas click either hit
+                                        // a box or the background), but if they
+                                        // ever were, closing is the safe answer.
+                                        if collapse_all {
+                                            state.set_open(false);
+                                        } else if toggle {
                                             state.toggle(ui);
                                         }
                                         state

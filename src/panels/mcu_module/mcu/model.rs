@@ -209,6 +209,11 @@ pub struct Mcu {
     /// and double-bordered, the module counterpart of [`Mcu::selected_pin`].
     /// Clicking it again clears it. View state only; not persisted.
     pub selected_module: Option<String>,
+    /// Transient one-shot: a click on EMPTY canvas (beside the chip, on no
+    /// module box and no pin field) cleared the selection, so the module list
+    /// below should collapse every entry too — the canvas and the list show the
+    /// same "nothing is focused" state. Consumed + cleared by the panel.
+    pub collapse_modules: bool,
     /// Diagram rotation toggle (persisted in `mcu.config` `@rotation`). `false`
     /// = default orientation. `true` = rotated one step clockwise: a 4-sided
     /// (QFP) chip becomes a 45° diamond, a 2-sided (DIP) chip turns 90°

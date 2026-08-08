@@ -98,6 +98,7 @@ impl Mcu {
             pin_goto: None,
             module_goto: None,
             selected_module: None,
+            collapse_modules: false,
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
         }
