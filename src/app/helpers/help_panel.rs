@@ -19,17 +19,23 @@ fn id_of(id: &str) -> egui::Id {
     egui::Id::new("help_panel").with(id)
 }
 
-fn is_open(ui: &egui::Ui, id: &str) -> bool {
+pub fn is_open(ui: &egui::Ui, id: &str) -> bool {
     ui.data(|d| d.get_temp::<bool>(id_of(id)).unwrap_or(false))
 }
 
 /// The toolbar toggle button.
 pub fn toggle_button(ui: &mut egui::Ui, id: &str) {
+    toggle_button_with(ui, id, "Help", "What does each command do?");
+}
+
+/// Same toggle under another name — for a tab whose panel is a reference table
+/// rather than a command list ("Info").
+pub fn toggle_button_with(ui: &mut egui::Ui, id: &str, label: &str, hover: &str) {
     let open = is_open(ui, id);
     if ui
         .selectable_label(
             open,
-            egui::RichText::new(format!("{} Help", ph::INFO))
+            egui::RichText::new(format!("{} {label}", ph::INFO))
                 .size(10.5)
                 .color(if open {
                     egui::Color32::from_rgb(120, 170, 240)
@@ -37,11 +43,25 @@ pub fn toggle_button(ui: &mut egui::Ui, id: &str) {
                     egui::Color32::from_gray(150)
                 }),
         )
-        .on_hover_text("What does each command do?")
+        .on_hover_text(hover)
         .clicked()
     {
         ui.data_mut(|d| d.insert_temp(id_of(id), !open));
     }
+}
+
+/// The panel's frame with arbitrary content — for a panel that needs more than
+/// the two-column row list (a comparison table, say). No-op while closed.
+pub fn custom_panel(ui: &mut egui::Ui, id: &str, body: impl FnOnce(&mut egui::Ui)) {
+    if !is_open(ui, id) {
+        return;
+    }
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(28, 32, 40))
+        .inner_margin(egui::Margin::same(8))
+        .corner_radius(egui::CornerRadius::same(4))
+        .show(ui, body);
+    ui.add_space(2.0);
 }
 
 /// The panel body — a no-op while the toggle is off.

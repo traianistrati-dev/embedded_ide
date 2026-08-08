@@ -82,8 +82,27 @@ pub(crate) fn probe_selector_ui(
     scan_err: Option<&str>,
     toolchain: &ToolchainKind,
 ) {
+    probe_selector_ui_with(
+        ui, "Probe:", probes, selected, scan_go, scan_err, toolchain, |_| {},
+    );
+}
+
+/// [`probe_selector_ui`] with a caller-chosen label and room for one more button
+/// between Scan and the list — the Flash tab puts its "Flash (probe-rs)" there,
+/// so its Probe row reads like the Programmer row above it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn probe_selector_ui_with(
+    ui: &mut egui::Ui,
+    label: &str,
+    probes: &[crate::probe::ProbeInfo],
+    selected: &mut Option<String>,
+    scan_go: &mut bool,
+    scan_err: Option<&str>,
+    toolchain: &ToolchainKind,
+    after_scan: impl FnOnce(&mut egui::Ui),
+) {
     ui.label(
-        egui::RichText::new("Probe:")
+        egui::RichText::new(label)
             .size(10.5)
             .color(egui::Color32::GRAY),
     );
@@ -95,6 +114,7 @@ pub(crate) fn probe_selector_ui(
     {
         *scan_go = true;
     }
+    after_scan(ui);
 
     // The label for the currently selected probe (or Auto).
     let current = selected
@@ -110,7 +130,10 @@ pub(crate) fn probe_selector_ui(
 
     egui::ComboBox::from_id_salt("probe_selector")
         .selected_text(egui::RichText::new(current).size(10.5).monospace())
-        .width(320.0)
+        // Never wider than what is left: a widget that out-demands its region
+        // re-widens the Code Editor side panel every frame (see `debug_tab`'s
+        // pane note). 320 stays the look when there IS room.
+        .width(ui.available_width().min(320.0).max(0.0))
         .show_ui(ui, |ui| {
             if ui
                 .selectable_label(selected.is_none(), "Auto (first found)")

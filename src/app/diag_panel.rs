@@ -669,6 +669,17 @@ pub(super) fn show_diag_panel(
                 probe_scan_err,
                 probe_flash_state,
                 probe_flash_go,
+                // A live probe-rs session owns the probe exclusively — the Flash
+                // buttons go red rather than failing with "probe in use".
+                if debugger.is_busy() {
+                    Some("Debug")
+                } else if rtt.is_busy() {
+                    Some("RTT")
+                } else if flame_state.lock().unwrap().is_busy() {
+                    Some("Profile sampling")
+                } else {
+                    None
+                },
                 missing_tools,
             );
         }

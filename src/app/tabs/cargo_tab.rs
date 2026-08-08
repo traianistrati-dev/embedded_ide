@@ -327,6 +327,55 @@ pub(super) fn render_size_row(ui: &mut egui::Ui, state: &SizeState) {
     }
 }
 
+/// ONE side of [`render_size_row`] — for a layout that stacks Flash over RAM
+/// instead of placing them side by side (the Flash tab puts each next to its own
+/// programmer row). Same states as the full row, so a measurement in progress or
+/// a failure still says so rather than showing a stale bar.
+pub(super) fn render_size_bar(ui: &mut egui::Ui, state: &SizeState, flash: bool) {
+    let label = if flash { "Flash" } else { "RAM" };
+    let muted = |ui: &mut egui::Ui, text: String, color: egui::Color32| {
+        ui.label(
+            egui::RichText::new(format!("{label}  {text}"))
+                .size(10.5)
+                .color(color),
+        )
+    };
+    match state {
+        SizeState::Idle => {
+            muted(ui, "—".to_owned(), egui::Color32::from_gray(110))
+                .on_hover_text("Not measured yet — press Size (it also runs after every flash).");
+        }
+        SizeState::Building => {
+            muted(ui, "measuring…".to_owned(), egui::Color32::from_gray(170));
+        }
+        SizeState::Failed(msg) => {
+            // The reason belongs on ONE line, not repeated under both bars.
+            if flash {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Size: {}",
+                        ph::X_CIRCLE,
+                        msg.lines().next().unwrap_or("failed")
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(230, 90, 80)),
+                )
+                .on_hover_text(msg);
+            } else {
+                muted(ui, "—".to_owned(), egui::Color32::from_gray(110));
+            }
+        }
+        SizeState::Done(u) => {
+            let (used, limit) = if flash {
+                (u.flash_used, u.limits.flash.map(|r| r.length))
+            } else {
+                (u.ram_used, u.limits.ram.map(|r| r.length))
+            };
+            usage_bar(ui, label, used, limit, u, flash);
+        }
+    }
+}
+
 /// One labelled usage bar: `Flash ▓▓░░ 34.2 KB / 64 KB · 53%`. Green under
 /// 70%, amber under 90%, red above. Hover lists the matching ELF sections.
 fn usage_bar(

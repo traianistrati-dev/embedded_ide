@@ -579,15 +579,29 @@ impl ProgrammerInfo {
     }
 
     /// Contextual guidance shown below the ComboBox.
+    /// What this programmer kind can do here, shown in the Flash tab's **Info**
+    /// panel (it used to sit under the row as a permanent line, where it read as
+    /// a warning and still told the user to reach for an external OpenOCD —
+    /// this tab has had a Flash SWD button for a while).
     pub fn guidance(&self) -> &'static str {
         match self.kind.as_str() {
-            "DFU Bootloader" => "DFU bootloader detected — click Flash USB to program.",
-            "ST-Link" => {
-                "ST-Link connected. DFU flashing needs the MCU in bootloader mode \
-                 (BOOT0=1 + reset). For SWD: use OpenOCD."
+            "DFU Bootloader" => {
+                "DFU bootloader detected — the MCU is already in bootloader mode, so it can \
+                 be programmed over USB with no probe at all."
             }
-            "J-Link" => "J-Link detected. Use J-Flash or OpenOCD for SWD/JTAG flashing.",
-            "CMSIS-DAP" => "CMSIS-DAP / DAPLink detected. Use pyOCD or OpenOCD for SWD flashing.",
+            "ST-Link" => {
+                "ST-Link connected — use Flash SWD (OpenOCD) or Flash (probe-rs); both program \
+                 the running chip over SWD, no bootloader mode needed. It is also the probe the \
+                 Debug and RTT tabs use. DFU flashing is a different path and would need the \
+                 MCU in bootloader mode (BOOT0 = 1 + reset)."
+            }
+            "J-Link" => {
+                "J-Link detected — use Flash SWD (OpenOCD) or Flash (probe-rs); both drive it \
+                 over SWD/JTAG."
+            }
+            "CMSIS-DAP" => {
+                "CMSIS-DAP / DAPLink detected — use Flash SWD (OpenOCD) or Flash (probe-rs)."
+            }
             "USB-Serial" => {
                 "USB-Serial adapter. STM32 UART boot: STM32CubeProgrammer. \
                  ESP32: esptool.py. Arduino: avrdude."
