@@ -111,6 +111,9 @@ pub fn start_flash(
         let mut cargo_cmd = Command::new("cargo");
         cargo_cmd
             .current_dir(&project_dir)
+            // The Flash tab's log renders plain strings — colours would arrive
+            // as ANSI escapes and read as garbage (see `terminal::strip_ansi`).
+            .env("CARGO_TERM_COLOR", "never")
             //.args(["build", "--release"])
             .args([
                 "build",

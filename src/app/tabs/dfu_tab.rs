@@ -142,27 +142,27 @@ pub fn show_dfu_tab(
                 .then(|| "a probe-rs flash is running".to_owned())
         });
 
-    // ── Two rows, aligned: programmer / probe on the left, memory on the right ─
-    let right_w = (ui.available_width() * 0.42).clamp(190.0, 380.0);
+    // ── Two rows: [Scan] <device list> [Flash …] | usage bar + button ────────
+    // Both rows use the same fixed widths, so Scan, the list and the Flash
+    // button line up in three columns.
+    let panel_w = ui.available_width();
+    let combo_w = combo_width(panel_w);
+    // On a narrow panel the usage bars + Size/Info don't fit beside the rows;
+    // they get a wrapped row of their own underneath instead of being clipped.
+    let compact = right_block_w(panel_w) <= 0.0;
 
     // Row 1 — the USB programmer (OpenOCD SWD / DFU / espflash) + Flash usage.
     split_row(
         ui,
-        right_w,
         |ui| {
-            // ui.label(
-            //     egui::RichText::new("SWD Programmer:")
-            //         .size(10.5)
-            //         .color(egui::Color32::GRAY),
-            // );
-
             // Scan USB (detect DFU / ST-Link / J-Link / CMSIS-DAP / USB-serial).
             if ui
                 .add_enabled(
                     !dfu_busy,
                     egui::Button::new(
                         egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5),
-                    ),
+                    )
+                    .min_size(egui::vec2(SCAN_W, ROW_H)),
                 )
                 .on_hover_text(
                     "Scan for connected USB programmers:\n\
@@ -175,11 +175,14 @@ pub fn show_dfu_tab(
                 *scan_out = true;
             }
 
+            programmer_combo(ui, combo_w, &progs, dfu_sel_programmer, toolchain);
+
             // Toolchain-specific Flash button.
             match toolchain {
                 ToolchainKind::RustEmbedded => {
                     if flash_button(
                         ui,
+                        "Flash SWD",
                         format!("{} Flash SWD", ph::LIGHTNING),
                         swd_reason.as_deref(),
                         "Build --release, then program via SWD (OpenOCD).\n\
@@ -192,6 +195,7 @@ pub fn show_dfu_tab(
                 ToolchainKind::EspRust => {
                     if flash_button(
                         ui,
+                        "Flash ESP32",
                         format!("{} Flash ESP32", ph::LIGHTNING),
                         esp_reason.as_deref(),
                         "Build --release, then flash via espflash.\n\
@@ -203,42 +207,15 @@ pub fn show_dfu_tab(
                 }
                 ToolchainKind::SdccC => {}
             }
-
-            programmer_combo(ui, &progs, dfu_sel_programmer, toolchain);
         },
+        // Right block is laid out RIGHT to left: the button first, so it lands
+        // on the panel edge; the bar then fills what is left, left to right.
+        // The right block holds ONLY the usage bar: its buttons moved down to
+        // the config row (next to Clear), where they don't share a clip region
+        // with a bar that grows with the numbers in it.
         |ui| {
-            render_size_bar(ui, &size_snapshot, true);
-            // ── Size — same measurement as the Cargo tab's button ─────────
-            // It also runs on its own after every flash; this is for
-            // re-checking without programming the board.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let size_enabled = !size_busy && !any_busy && can_flash;
-                if ui
-                    .add_enabled(
-                        size_enabled,
-                        egui::Button::new(
-                            egui::RichText::new(if size_busy {
-                                "Measuring…".to_owned()
-                            } else {
-                                format!("{} Size", ph::RULER)
-                            })
-                            .size(10.5)
-                            .color(if size_enabled {
-                                egui::Color32::from_rgb(120, 170, 210)
-                            } else {
-                                egui::Color32::GRAY
-                            }),
-                        ),
-                    )
-                    .on_hover_text(
-                        "Measure Flash/RAM usage: `cargo build --release`, then read \
-                         the ELF section sizes against the memory.x limits.\n\
-                         Runs automatically after every flash.",
-                    )
-                    .clicked()
-                {
-                    *size_out = true;
-                }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                render_size_bar(ui, &size_snapshot, true);
             });
         },
     );
@@ -246,21 +223,22 @@ pub fn show_dfu_tab(
     // Row 2 — the probe-rs probe (shared with Debug / RTT) + RAM usage.
     split_row(
         ui,
-        right_w,
         |ui| {
             if matches!(toolchain, ToolchainKind::RustEmbedded) {
                 super::probe_selector_ui_with(
                     ui,
-                    // "RS Probe:",
                     "",
                     probe_list,
                     selected_probe,
                     probe_scan,
                     probe_scan_err,
                     toolchain,
+                    SCAN_W,
+                    combo_w,
                     |ui| {
                         if flash_button(
                             ui,
+                            "Flash (probe-rs)",
                             format!("{} Flash (probe-rs)", ph::LIGHTNING),
                             probe_reason.as_deref(),
                             "Build --release, then flash over the selected debug probe with \
@@ -269,75 +247,52 @@ pub fn show_dfu_tab(
                         ) {
                             *probe_flash_out = true;
                         }
+                        // Status of the last/ongoing probe-rs flash.
+                        if !matches!(pf_state, crate::probe_flash::ProbeFlashState::Idle) {
+                            ui.label(
+                                egui::RichText::new(pf_state.label())
+                                    .size(10.5)
+                                    .color(pf_state.color()),
+                            );
+                            if pf_state.is_busy() {
+                                ui.spinner();
+                                ui.ctx()
+                                    .request_repaint_after(std::time::Duration::from_millis(120));
+                            }
+                        }
                     },
                 );
-                // Status of the last/ongoing probe-rs flash.
-                if !matches!(pf_state, crate::probe_flash::ProbeFlashState::Idle) {
-                    ui.label(
-                        egui::RichText::new(pf_state.label())
-                            .size(10.5)
-                            .color(pf_state.color()),
-                    );
-                    if pf_state.is_busy() {
-                        ui.spinner();
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(120));
-                    }
-                }
             } else {
                 ui.label(
-                    egui::RichText::new("RS Probe: — probe-rs path is for the ARM toolchain")
+                    egui::RichText::new("probe-rs path is for the ARM toolchain")
                         .size(10.5)
                         .color(egui::Color32::from_gray(110)),
                 );
             }
         },
         |ui| {
-            render_size_bar(ui, &size_snapshot, false);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                crate::app::helpers::help_panel::toggle_button_with(
-                    ui,
-                    INFO_ID,
-                    "Info",
-                    "How the flashing paths differ, and what each programmer kind can do",
-                );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                render_size_bar(ui, &size_snapshot, false);
             });
         },
     );
+    // Narrow panel: the usage bars get their own wrapped row rather than a
+    // clipped column beside the rows above.
+    if compact {
+        ui.horizontal_wrapped(|ui| {
+            render_size_bar(ui, &size_snapshot, true);
+            ui.separator();
+            render_size_bar(ui, &size_snapshot, false);
+        });
+    }
     if size_busy {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(120));
     }
 
-    // ── Why a Flash button is red ────────────────────────────────────────────
-    for (what, reason) in [
-        (
-            match toolchain {
-                ToolchainKind::EspRust => "Flash ESP32",
-                _ => "Flash SWD",
-            },
-            match toolchain {
-                ToolchainKind::EspRust => &esp_reason,
-                _ => &swd_reason,
-            },
-        ),
-        ("Flash (probe-rs)", &probe_reason),
-    ] {
-        // The probe-rs row doesn't exist off the ARM toolchain.
-        if what == "Flash (probe-rs)" && !matches!(toolchain, ToolchainKind::RustEmbedded) {
-            continue;
-        }
-        if matches!(toolchain, ToolchainKind::SdccC) {
-            continue;
-        }
-        if let Some(r) = reason {
-            ui.label(
-                egui::RichText::new(format!("{} {what}: {r}.", ph::WARNING))
-                    .size(10.0)
-                    .color(egui::Color32::from_rgb(230, 110, 100)),
-            );
-        }
-    }
+    // A red Flash button explains itself on CLICK (see `flash_button`), so the
+    // reason no longer takes a permanent line here.
+    blocked_dialog(ui);
 
     // A tagged probe-rs failure (a probe that won't open, a crash) gets its
     // explanation here — the log below only holds the raw cause.
@@ -347,8 +302,6 @@ pub fn show_dfu_tab(
         }
     }
 
-    // ── Info panel (toggled on the right of the Probe row) ───────────────────
-    flash_info_panel(ui, progs.get(dfu_sel_programmer));
 
     // The old per-programmer guidance line lived here; it is part of the Info
     // panel now (it explained the DFU/SWD split, which the table covers).
@@ -357,6 +310,12 @@ pub fn show_dfu_tab(
     ui.separator();
     // ── Config row — adaptive: ESP32 / SWD (OpenOCD) / DFU ───────────────────
     ui.horizontal(|ui| {
+        // One height for the whole row. Every interactive widget takes its
+        // minimum from here (a Button sizes to its text, then grows to at least
+        // `interact_size`), so Size, Info, Clear, the presets and the address
+        // field all come out the same — text fields need `add_sized`, they
+        // measure themselves from the font instead.
+        ui.spacing_mut().interact_size.y = ROW_H;
         let build_done = log.iter().any(|l| l.contains("[OK] Build OK"));
 
         // Helper: render a phase indicator icon + label
@@ -425,10 +384,9 @@ pub fn show_dfu_tab(
                     .size(10.5)
                     .color(egui::Color32::GRAY),
             );
-            ui.add(
-                egui::TextEdit::singleline(openocd_target_cfg)
-                    .desired_width(140.0)
-                    .font(egui::TextStyle::Monospace),
+            ui.add_sized(
+                egui::vec2(140.0, ROW_H),
+                egui::TextEdit::singleline(openocd_target_cfg).font(egui::TextStyle::Monospace),
             )
             .on_hover_text(
                 "OpenOCD target config file.\n\
@@ -488,10 +446,9 @@ pub fn show_dfu_tab(
                     .size(10.5)
                     .color(egui::Color32::GRAY),
             );
-            ui.add(
-                egui::TextEdit::singleline(dfu_flash_addr)
-                    .desired_width(90.0)
-                    .font(egui::TextStyle::Monospace),
+            ui.add_sized(
+                egui::vec2(90.0, ROW_H),
+                egui::TextEdit::singleline(dfu_flash_addr).font(egui::TextStyle::Monospace),
             )
             .on_hover_text(
                 "Start address passed to dfu-util.\n\
@@ -565,7 +522,9 @@ pub fn show_dfu_tab(
             phase_widget(ui, f_icon, "Flash", f_col);
         }
 
-        // Clear button — right-aligned, always visible, resets both states + log
+        // Right-aligned tail of the config row: Size · Info · Clear. Laid out
+        // right to left, so Clear stays on the edge and the other two sit just
+        // before it — away from the usage bars they used to overlap.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::new(
@@ -580,8 +539,20 @@ pub fn show_dfu_tab(
                 *openocd_state.lock().unwrap() = OpenOcdState::Idle;
                 *espflash_state.lock().unwrap() = EspFlashState::Idle;
             }
+            crate::app::helpers::help_panel::toggle_button_with(
+                ui,
+                INFO_ID,
+                "Info",
+                "How the flashing paths differ, and what each programmer kind can do",
+            );
+            if size_button(ui, size_busy, !size_busy && !any_busy && can_flash) {
+                *size_out = true;
+            }
         });
     });
+
+    // ── Info panel — right under the button that opens it ────────────────────
+    flash_info_panel(ui, progs.get(dfu_sel_programmer));
     /*
         // ── ESP32 port selector ───────────────────────────────────────────────────
         // Shown only for EspRust.  Lets the user type a COM port (e.g. "COM3") so
@@ -790,6 +761,10 @@ pub fn show_dfu_tab(
     egui::ScrollArea::vertical()
         .id_salt("dfu_log_scroll")
         .stick_to_bottom(true)
+        // Full panel width: with the default auto-shrink the area is only as
+        // wide as its longest line, which put the scrollbar in the middle of
+        // the panel.
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             if log.is_empty() {
                 ui.add_space(8.0);
@@ -807,6 +782,12 @@ pub fn show_dfu_tab(
             }
 
             for line in &log {
+                // A tool that colours its output (cargo through `cargo flash`,
+                // espflash) sends ANSI escapes; this console renders plain
+                // strings, so they would show up as literal `[1m[93m` noise.
+                // The colour below comes from the line's CONTENT instead.
+                let line = crate::terminal::strip_ansi(line);
+                let line = line.as_str();
                 // Colour-code lines by content prefix.
                 //
                 // IMPORTANT: cargo prints "   Compiling proc-macro-error-attr2"
@@ -833,12 +814,7 @@ pub fn show_dfu_tab(
                 } else {
                     egui::Color32::from_rgb(175, 180, 192) // grey   — normal output
                 };
-                ui.label(
-                    egui::RichText::new(line.as_str())
-                        .size(10.5)
-                        .monospace()
-                        .color(color),
-                );
+                ui.label(egui::RichText::new(line).size(10.5).monospace().color(color));
             }
         });
 }
@@ -846,67 +822,231 @@ pub fn show_dfu_tab(
 /// Memory key of this tab's Info panel.
 const INFO_ID: &str = "flash";
 
-/// A Flash button that says WHY it can't run: `reason` is `None` when it can,
-/// otherwise the text goes red (bright, because egui draws a disabled widget
-/// faded) and the sentence becomes its disabled hover. Returns true on click.
-fn flash_button(ui: &mut egui::Ui, label: String, reason: Option<&str>, hover: &str) -> bool {
-    let enabled = reason.is_none();
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(label).size(10.5).color(if enabled {
-            egui::Color32::from_rgb(255, 165, 50)
-        } else {
-            egui::Color32::from_rgb(255, 90, 80)
-        })),
-    )
-    .on_hover_text(hover)
-    .on_disabled_hover_text(reason.unwrap_or_default())
-    .clicked()
+/// Height of everything on the two rows — buttons AND the ComboBoxes, which take
+/// theirs from `spacing().interact_size.y`. Without pinning it, the buttons come
+/// out visibly thinner than the dropdowns next to them.
+const ROW_H: f32 = 22.0;
+/// Fixed widths so the two rows line up column for column.
+const SCAN_W: f32 = 76.0;
+const FLASH_W: f32 = 146.0;
+/// Right-hand block: the Flash/RAM bar plus the Size / Info button.
+const RIGHT_W: f32 = 300.0;
+/// Below this panel width the right-hand block would leave the device list
+/// nothing, so it moves to a row of its own instead (see [`right_block_w`]).
+const COMPACT_BELOW: f32 = 700.0;
+
+/// Width of the right-hand block for a panel `total` px wide — `0.0` when the
+/// panel is too narrow to carry it beside the rows. Splitting the row is only
+/// worth it while BOTH halves stay usable; the alternative is what the user
+/// saw before this: the Size button pushed out of the clipped region.
+fn right_block_w(total: f32) -> f32 {
+    if total < COMPACT_BELOW { 0.0 } else { RIGHT_W }
+}
+
+/// Width left for the device ComboBox once Scan, the Flash button, the gaps and
+/// the right-hand block have taken theirs — capped at [`COMBO_MAX_FRACTION`] of
+/// the panel, since a list that eats half the tab is no easier to read than a
+/// truncated one. Shared by both rows so their lists are the same size.
+fn combo_width(total: f32) -> f32 {
+    let left = (total - right_block_w(total) - 8.0 - SCAN_W - FLASH_W - 24.0).max(40.0);
+    left.min((total * COMBO_MAX_FRACTION).max(40.0))
+}
+
+/// The device lists never take more than this share of the panel width.
+const COMBO_MAX_FRACTION: f32 = 0.40;
+
+/// A Flash button that says WHY it can't run. `reason` is `None` when it can;
+/// otherwise the text goes red and a click OPENS THE EXPLANATION instead of
+/// flashing — the button stays enabled on purpose. A disabled button is drawn
+/// faded (so the red barely reads as red), it can't be hovered for its own
+/// tooltip on some platforms, and clicking it does nothing at all — which is
+/// exactly when a user most wants to be told why. Returns true only when the
+/// caller should actually flash.
+fn flash_button(
+    ui: &mut egui::Ui,
+    what: &str,
+    label: String,
+    reason: Option<&str>,
+    hover: &str,
+) -> bool {
+    let color = match reason {
+        Some(_) => egui::Color32::from_rgb(235, 85, 75),
+        None => egui::Color32::from_rgb(255, 165, 50),
+    };
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(label).size(10.5).color(color))
+            .min_size(egui::vec2(FLASH_W, ROW_H)),
+    );
+    match reason {
+        Some(r) => {
+            resp.on_hover_text(format!("{what} can't run right now — click for details.\n\n{r}"))
+                .clicked()
+                .then(|| open_blocked_dialog(ui, what, r));
+            false
+        }
+        None => resp.on_hover_text(hover).clicked(),
+    }
+}
+
+fn blocked_dialog_id() -> egui::Id {
+    egui::Id::new("flash_blocked_dialog")
+}
+
+/// Remember what to explain; [`blocked_dialog`] draws it at the end of the tab.
+/// Kept in egui memory rather than an out-param so the button helper stays a
+/// plain function — the tab render fn already carries enough signals.
+fn open_blocked_dialog(ui: &egui::Ui, what: &str, reason: &str) {
+    ui.data_mut(|d| d.insert_temp(blocked_dialog_id(), (what.to_owned(), reason.to_owned())));
+}
+
+/// The "why can't this run" dialog — a real window on the context, so it floats
+/// above the panel that opened it.
+fn blocked_dialog(ui: &mut egui::Ui) {
+    let Some((what, reason)) = ui.data(|d| d.get_temp::<(String, String)>(blocked_dialog_id()))
+    else {
+        return;
+    };
+    let mut open = true;
+    let mut dismissed = false;
+    egui::Window::new(format!("{} {what}", ph::WARNING))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(440.0);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{what} can't run: {reason}."))
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(230, 200, 190)),
+                )
+                .wrap(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    dismissed = true;
+                }
+                ui.label(
+                    egui::RichText::new("Info explains the flashing paths.")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(130)),
+                );
+            });
+        });
+    if !open || dismissed {
+        ui.data_mut(|d| d.remove_temp::<(String, String)>(blocked_dialog_id()));
+    }
 }
 
 /// One row split in two: the left block takes what is left, the right block a
-/// fixed width. Both rows use the same `right_w`, so the separators — and the
-/// Flash/RAM indicators behind them — line up in one column, which a plain
-/// `ui.horizontal` can't do.
+/// fixed width. Both rows use the same split, so their contents line up column
+/// for column.
+///
+/// The row is allocated at EXACTLY the visible width and both halves are child
+/// uis at fixed rects (`new_child` + `set_clip_rect`) — the pattern from
+/// `debug_tab`'s pane row. A child's `min_rect` does not feed back into the
+/// parent, which is what stops this tab from re-widening the Code Editor side
+/// panel every frame (egui side panels adopt their content's width, so a row
+/// that asks for one pixel too many grows forever). The right block is laid out
+/// RIGHT to left, so its button sits on the panel edge and stays visible.
 fn split_row(
     ui: &mut egui::Ui,
-    right_w: f32,
     left: impl FnOnce(&mut egui::Ui),
     right: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.horizontal(|ui| {
-        let h = ui.spacing().interact_size.y;
-        // Never demand more than the panel has: content wider than the region
-        // re-widens the surrounding side panel every frame.
-        let right_w = right_w.min((ui.available_width() - 60.0).max(0.0));
-        let left_w = (ui.available_width() - right_w - 12.0).max(60.0);
-        // Wrapping, not a plain row: a narrow panel makes the buttons + combo
-        // spill onto a second line instead of demanding width the region hasn't
-        // got (which would re-widen the editor side panel every frame).
-        ui.allocate_ui_with_layout(
-            egui::vec2(left_w, h),
-            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
-            |ui| {
-                ui.set_max_width(left_w);
-                left(ui);
-            },
-        );
-        ui.separator();
-        ui.allocate_ui_with_layout(
-            egui::vec2(right_w, h),
+    let total_w = ui.available_width();
+    let gap = 8.0;
+    let right_w = right_block_w(total_w);
+    let left_w = (total_w - right_w - if right_w > 0.0 { gap } else { 0.0 }).max(0.0);
+    let (row, _) = ui.allocate_exact_size(egui::vec2(total_w, ROW_H), egui::Sense::hover());
+
+    let child = |ui: &mut egui::Ui, rect: egui::Rect, layout: egui::Layout| {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+        c.set_clip_rect(rect.intersect(ui.clip_rect()));
+        c.spacing_mut().interact_size.y = ROW_H;
+        c
+    };
+
+    let left_rect = egui::Rect::from_min_size(row.min, egui::vec2(left_w, ROW_H));
+    {
+        let ui = &mut child(
+            ui,
+            left_rect,
             egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_max_width(right_w);
-                right(ui);
-            },
         );
-    });
+        left(ui);
+    }
+    if right_w > 0.0 {
+        let x = row.min.x + left_w + gap * 0.5;
+        ui.painter()
+            .vline(x, row.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+        let right_rect = egui::Rect::from_min_size(
+            egui::pos2(row.min.x + left_w + gap, row.min.y),
+            egui::vec2(right_w, ROW_H),
+        );
+        let ui = &mut child(
+            ui,
+            right_rect,
+            egui::Layout::right_to_left(egui::Align::Center),
+        );
+        right(ui);
+    }
+}
+
+/// The Size button — the same measurement as the Cargo tab's, which also runs
+/// on its own after every flash; this is for re-checking without programming the
+/// board. Lives in a function because it has two homes: the right-hand block on
+/// a wide panel, the wrapped row below on a narrow one.
+fn size_button(ui: &mut egui::Ui, busy: bool, enabled: bool) -> bool {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(
+            egui::RichText::new(if busy {
+                "Measuring…".to_owned()
+            } else {
+                format!("{} Size", ph::RULER)
+            })
+            .size(10.5)
+            .color(if enabled {
+                egui::Color32::from_rgb(120, 170, 210)
+            } else {
+                egui::Color32::GRAY
+            }),
+        )
+        // Height from the row, not a constant of its own — that is what made it
+        // taller than Clear and Info next to it.
+        .min_size(egui::vec2(72.0, ui.spacing().interact_size.y)),
+    )
+    .on_hover_text(
+        "Measure Flash/RAM usage: `cargo build --release`, then read the ELF \
+         section sizes against the memory.x limits.\nRuns automatically after \
+         every flash.",
+    )
+    .clicked()
+}
+
+/// Fit `text` into `width` px of the UI's monospace font, ending in `…` when it
+/// has to be cut. A ComboBox does not truncate its selected text on its own, and
+/// these labels carry a name + VID:PID + port + details — so without this the
+/// row's width demand would follow whatever USB device happens to be plugged in.
+pub(crate) fn ellipsize(text: &str, width: f32) -> String {
+    // Monospace at size 10.5; the arrow + frame padding eat ~26 px.
+    const CHAR_W: f32 = 6.3;
+    let max = (((width - 26.0) / CHAR_W).floor() as i64).max(4) as usize;
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let keep: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{keep}…")
 }
 
 /// The programmer ComboBox (USB scan results), split out of the row so the row
 /// itself stays readable.
 fn programmer_combo(
     ui: &mut egui::Ui,
+    width: f32,
     progs: &HashMap<String, dfu::ProgrammerInfo>,
     dfu_sel_programmer: &mut String,
     toolchain: &ToolchainKind,
@@ -922,10 +1062,15 @@ fn programmer_combo(
         };
 
         egui::ComboBox::from_id_salt("dfu_programmer_selector")
-            .selected_text(egui::RichText::new(&combo_label).size(10.5).monospace())
-            // No floor: a width bigger than the region re-widens the editor
-            // side panel every frame (the panel-growth rule).
-            .width((ui.available_width() - 2.0).max(0.0))
+            // Truncated to the column: programmer labels are long, and a
+            // ComboBox that sizes to its text would re-widen the editor side
+            // panel every frame (the panel-growth rule). Full text on hover.
+            .selected_text(
+                egui::RichText::new(ellipsize(&combo_label, width))
+                    .size(10.5)
+                    .monospace(),
+            )
+            .width(width)
             .height(progs.len() as f32 * 30.0)
             .show_ui(ui, |ui| {
                 if progs.is_empty() {
@@ -1003,44 +1148,51 @@ fn programmer_combo(
 /// OpenOCD — this tab has had a button for it for a while).
 fn flash_info_panel(ui: &mut egui::Ui, selected: Option<&dfu::ProgrammerInfo>) {
     crate::app::helpers::help_panel::custom_panel(ui, INFO_ID, |ui| {
-        let head = |ui: &mut egui::Ui, t: &str| {
-            ui.label(
-                egui::RichText::new(t)
-                    .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(200, 210, 230)),
+        // Explicit column widths. An `egui::Grid` sizes its columns from the
+        // content, and a WRAPPED label reports a tiny minimum — which is what
+        // squeezed the "Flash SWD" column into one word per line. Fixed widths
+        // that add up to the available space fix the shape AND keep the table
+        // from out-demanding the panel.
+        let total = ui.available_width().max(240.0);
+        let w_aspect = (total * 0.17).clamp(80.0, 190.0);
+        let w_col = ((total - w_aspect - 28.0) * 0.5).max(90.0);
+        let cell = |ui: &mut egui::Ui, w: f32, text: &str, rich: fn(egui::RichText) -> egui::RichText| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(w, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(w);
+                    ui.add(egui::Label::new(rich(egui::RichText::new(text).size(10.5))).wrap());
+                },
             );
         };
-        let cell = |ui: &mut egui::Ui, t: &str| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(t)
-                        .size(10.5)
-                        .color(egui::Color32::from_gray(195)),
-                )
-                .wrap(),
-            );
-        };
-        egui::Grid::new("flash_info_table")
-            .num_columns(3)
-            .spacing([12.0, 6.0])
-            .striped(true)
-            .show(ui, |ui| {
-                head(ui, "");
-                head(ui, "Flash SWD");
-                head(ui, "Flash (probe-rs)");
-                ui.end_row();
-                for (aspect, swd, prs) in FLASH_COMPARISON {
-                    ui.label(
-                        egui::RichText::new(*aspect)
-                            .size(10.5)
-                            .color(egui::Color32::from_gray(150)),
-                    );
-                    cell(ui, swd);
-                    cell(ui, prs);
-                    ui.end_row();
-                }
-            });
+        let head = |t: egui::RichText| t.strong().color(egui::Color32::from_rgb(200, 210, 230));
+        let body = |t: egui::RichText| t.color(egui::Color32::from_gray(195));
+        let aspect = |t: egui::RichText| t.color(egui::Color32::from_gray(150));
+
+        ui.horizontal_top(|ui| {
+            cell(ui, w_aspect, "", head);
+            cell(ui, w_col, "Flash SWD", head);
+            cell(ui, w_col, "Flash (probe-rs)", head);
+        });
+        for (i, (asp, swd, prs)) in FLASH_COMPARISON.iter().enumerate() {
+            // Zebra striping, painted behind the row.
+            let bg = if i % 2 == 0 {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            egui::Frame::new()
+                .fill(bg)
+                .inner_margin(egui::Margin::symmetric(0, 2))
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        cell(ui, w_aspect, asp, aspect);
+                        cell(ui, w_col, swd, body);
+                        cell(ui, w_col, prs, body);
+                    });
+                });
+        }
         ui.add_space(6.0);
         for note in FLASH_NOTES {
             ui.add(
@@ -1122,3 +1274,70 @@ const FLASH_NOTES: &[&str] = &[
     "Flash ESP32 (espflash) replaces Flash SWD on the ESP toolchain: it goes over \
      the serial port with the board in download mode, not over SWD.",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        COMBO_MAX_FRACTION, FLASH_W, RIGHT_W, SCAN_W, combo_width, ellipsize, right_block_w,
+    };
+
+    /// A ComboBox does not truncate its own text, so a long programmer label
+    /// would size the widget past its column and re-widen the editor side panel
+    /// every frame. The cut keeps the HEAD (kind + name identify the device) and
+    /// must never exceed what the column can show.
+    #[test]
+    fn combo_labels_are_cut_to_their_column() {
+        let long = "[ST-Link] 3 ST-Link v2  [0483:3748] 'STMicroelectronics, 19, STM32 STLink'";
+        let cut = ellipsize(long, 200.0);
+        assert!(cut.ends_with('…'), "{cut}");
+        assert!(cut.chars().count() < long.chars().count());
+        assert!(cut.starts_with("[ST-Link]"), "{cut}");
+        // Wider column → more text survives; the same text always fits at some
+        // width and is then returned untouched.
+        assert!(ellipsize(long, 400.0).chars().count() > cut.chars().count());
+        assert_eq!(ellipsize(long, 2000.0), long);
+        assert_eq!(ellipsize("short", 200.0), "short");
+        // A degenerate column doesn't panic or slice mid-char.
+        assert!(!ellipsize("ăăăăăăăăăă", 0.0).is_empty());
+    }
+
+    /// The columns must FIT at every panel width — content wider than the row is
+    /// what pushed the Size button out of the clipped region (and, before the
+    /// exact-rect rows, re-widened the editor panel forever). Below
+    /// `COMPACT_BELOW` the right-hand block steps aside instead of squeezing the
+    /// device list to nothing.
+    #[test]
+    fn the_row_columns_fit_every_panel_width() {
+        for total in [240.0_f32, 360.0, 500.0, 699.0, 700.0, 900.0, 1600.0] {
+            let right = right_block_w(total);
+            let combo = combo_width(total);
+            let used = right + combo + SCAN_W + FLASH_W + 32.0;
+            assert!(
+                used <= total.max(SCAN_W + FLASH_W + 72.0) + 0.5,
+                "columns demand {used} of {total} (right={right}, combo={combo})"
+            );
+            assert!(combo >= 40.0, "the device list vanished at {total}");
+        }
+        // The split only happens when both halves stay usable.
+        assert_eq!(right_block_w(699.0), 0.0);
+        assert_eq!(right_block_w(700.0), RIGHT_W);
+        // …and then the list still has room for a real label.
+        assert!(combo_width(700.0) >= 140.0, "{}", combo_width(700.0));
+    }
+
+    /// The device list never takes more than its share of the panel, however
+    /// much room the row has left — a list that eats half the tab is no easier
+    /// to read than a truncated one.
+    #[test]
+    fn the_device_list_is_capped_at_its_share() {
+        for total in [700.0_f32, 900.0, 1200.0, 1600.0, 2400.0] {
+            let w = combo_width(total);
+            assert!(
+                w <= total * COMBO_MAX_FRACTION + 0.5,
+                "list took {w} of {total}"
+            );
+        }
+        // On a wide panel the cap is what binds, not the leftover space.
+        assert!((combo_width(2400.0) - 2400.0 * COMBO_MAX_FRACTION).abs() < 0.5);
+    }
+}

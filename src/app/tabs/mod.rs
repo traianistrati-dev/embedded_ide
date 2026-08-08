@@ -90,13 +90,17 @@ pub(crate) fn probe_selector_ui(
         scan_go,
         scan_err,
         toolchain,
+        0.0,
+        0.0,
         |_| {},
     );
 }
 
-/// [`probe_selector_ui`] with a caller-chosen label and room for one more button
-/// between Scan and the list — the Flash tab puts its "Flash (probe-rs)" there,
-/// so its Probe row reads like the Programmer row above it.
+/// [`probe_selector_ui`] with a caller-chosen label, fixed Scan/ComboBox widths
+/// (`0.0` = size to content, what the RTT and Debug toolbars use) and room for a
+/// trailing widget AFTER the list — the Flash tab puts its "Flash (probe-rs)"
+/// there, so its Probe row reads `[Scan] <list> [Flash]` like the Programmer row
+/// above it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn probe_selector_ui_with(
     ui: &mut egui::Ui,
@@ -106,7 +110,9 @@ pub(crate) fn probe_selector_ui_with(
     scan_go: &mut bool,
     scan_err: Option<&str>,
     toolchain: &ToolchainKind,
-    after_scan: impl FnOnce(&mut egui::Ui),
+    scan_w: f32,
+    combo_w: f32,
+    trailing: impl FnOnce(&mut egui::Ui),
 ) {
     if !label.is_empty() {
         ui.label(
@@ -116,14 +122,19 @@ pub(crate) fn probe_selector_ui_with(
         );
     }
 
+    let mut scan = egui::Button::new(
+        egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5),
+    );
+    if scan_w > 0.0 {
+        scan = scan.min_size(egui::vec2(scan_w, ui.spacing().interact_size.y));
+    }
     if ui
-        .button(egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5))
+        .add(scan)
         .on_hover_text("Enumerate connected debug probes (`probe-rs list`).")
         .clicked()
     {
         *scan_go = true;
     }
-    after_scan(ui);
 
     // The label for the currently selected probe (or Auto).
     let current = selected
@@ -137,12 +148,21 @@ pub(crate) fn probe_selector_ui_with(
         })
         .unwrap_or_else(|| "Auto (first found)".to_owned());
 
+    // Never wider than what is left: a widget that out-demands its region
+    // re-widens the Code Editor side panel every frame (see `debug_tab`'s pane
+    // note). A caller-given `combo_w` wins, so two rows can share one column.
+    let width = if combo_w > 0.0 {
+        combo_w
+    } else {
+        ui.available_width().min(320.0).max(0.0)
+    };
     egui::ComboBox::from_id_salt("probe_selector")
-        .selected_text(egui::RichText::new(current).size(10.5).monospace())
-        // Never wider than what is left: a widget that out-demands its region
-        // re-widens the Code Editor side panel every frame (see `debug_tab`'s
-        // pane note). 320 stays the look when there IS room.
-        .width(ui.available_width().min(320.0).max(0.0))
+        .selected_text(
+            egui::RichText::new(crate::app::tabs::dfu_tab::ellipsize(&current, width))
+                .size(10.5)
+                .monospace(),
+        )
+        .width(width)
         .show_ui(ui, |ui| {
             if ui
                 .selectable_label(selected.is_none(), "Auto (first found)")
@@ -184,10 +204,13 @@ pub(crate) fn probe_selector_ui_with(
             }
         })
         .response
-        .on_hover_text(
-            "Which debug probe to use when several are attached. Auto lets \
-             probe-rs pick the only one — ambiguous with more than one.",
-        );
+        .on_hover_text(format!(
+            "{current}\n\nWhich debug probe to use when several are attached. Auto lets \
+             probe-rs pick the only one — ambiguous with more than one."
+        ));
+
+    // Whatever the caller wants after the list (the Flash tab's Flash button).
+    trailing(ui);
 
     if let Some(err) = scan_err {
         // A tagged failure (a probe-rs crash) carries a whole explanation — the

@@ -85,6 +85,10 @@ pub fn start_probe_flash(
         command
             .current_dir(&project_dir)
             .args(&args)
+            // The log renders plain strings: without this, cargo's colours
+            // arrive as ANSI escapes and read as garbage around every word.
+            // Covers the build `cargo flash` runs internally too.
+            .env("CARGO_TERM_COLOR", "never")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

@@ -378,6 +378,17 @@ pub(crate) fn spawn_reader(
     });
 }
 
+/// The line's visible text, with every ANSI escape sequence removed — for the
+/// consoles that render plain `String`s (the Flash tab's log) rather than the
+/// parsed spans. A tool that colours its output would otherwise show its escape
+/// codes as literal garbage around every word.
+pub(crate) fn strip_ansi(line: &str) -> String {
+    if !line.contains('\u{1b}') {
+        return line.to_owned();
+    }
+    parse_ansi(line).into_iter().map(|(t, _)| t).collect()
+}
+
 /// Split a line into `(text, colour)` runs by parsing ANSI SGR (`\x1b[…m`)
 /// sequences. Non-SGR escape sequences (cursor moves, `\x1b[K`, …) are dropped.
 /// Only the common colour attributes are honoured; unknown ones reset to default.

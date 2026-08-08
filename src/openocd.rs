@@ -357,6 +357,9 @@ fn run_cargo_build(
 ) -> bool {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_dir)
+        // The Flash tab's log renders plain strings — colours would arrive as
+        // ANSI escapes and read as garbage (see `terminal::strip_ansi`).
+        .env("CARGO_TERM_COLOR", "never")
         .args([
             "build",
             "--release", //, "--verbose"
