@@ -186,7 +186,16 @@ impl Wire {
         self.pending.lock().unwrap().insert(seq, kind);
         if let Some(stream) = self.writer.lock().unwrap().as_mut() {
             let body = msg.to_string();
-            let _ = write!(stream, "Content-Length: {}\r\n\r\n{body}", body.len());
+            // ONE `write_all` for header + body, never `write!` with a format
+            // string: that issues a syscall per piece ("Content-Length: ", the
+            // number, "\r\n\r\n", the body), so the header can reach the server
+            // split across TCP segments. probe-rs's dap-server reads its two
+            // header lines with `read_line` on a NON-blocking socket (0.29's
+            // `receive_data`), and a partial line desyncs that state machine for
+            // good — the next read returns a bare "\n" and the session dies with
+            // `Failed to read content length from header '\n'`.
+            let frame = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(frame.as_bytes());
             let _ = stream.flush();
         }
     }
@@ -247,10 +256,11 @@ pub struct Debugger {
     build_child: Arc<Mutex<Option<Child>>>,
     stop: Option<Arc<AtomicBool>>,
     cfg: Arc<Mutex<Option<Arc<SessionCfg>>>>,
-    /// Debug-tab pane split boundaries as fractions of the row width (three
-    /// separators → four panes: Console | Call stack | Variables | Watch).
-    /// UI-only, single-threaded. Draggable; see `debug_tab::split_widths`.
-    pub pane_splits: [f32; 3],
+    /// Debug-tab pane split boundaries as fractions of the row width (four
+    /// separators → five panes: Console | Breakpoints | Call stack | Variables |
+    /// Watch). UI-only, single-threaded. Draggable; see
+    /// `debug_tab::split_widths`.
+    pub pane_splits: [f32; 4],
     /// The Watch pane's "add expression" input text. UI-only.
     pub watch_draft: String,
     /// Monotonic generation for hover-evaluate requests (drops stale replies).
@@ -271,8 +281,8 @@ impl Default for Debugger {
             build_child: Arc::new(Mutex::new(None)),
             stop: None,
             cfg: Arc::new(Mutex::new(None)),
-            // Console widest; stack / variables / watch share the rest.
-            pane_splits: [0.34, 0.56, 0.78],
+            // Console widest; breakpoints / stack / variables / watch share it.
+            pane_splits: [0.28, 0.45, 0.62, 0.81],
             watch_draft: String::new(),
             hover_gen: AtomicU64::new(0),
         }

@@ -403,16 +403,12 @@ pub fn show_debug_tab(
         }
     }
 
-    // ── Breakpoint list ───────────────────────────────────────────────────────
-    // Above the empty-state return on purpose: breakpoints exist (and are worth
-    // navigating) long before a session does.
-    //
-    // Where the target sits right now, so the list can mark that row: the
-    // innermost frame WITH source, the same one the halt navigation jumps to
-    // (`debugger.rs`, the stackTrace arm). Only while halted — a running target
-    // has no location, and a stale mark would lie.
-    // `bp_status` rides along in the same lock: probe-rs's verdict per requested
-    // line (empty outside a session).
+    // Where the target sits right now, so the Breakpoints pane can mark that
+    // row: the innermost frame WITH source, the same one the halt navigation
+    // jumps to (`debugger.rs`, the stackTrace arm). Only while halted — a
+    // running target has no location, and a stale mark would lie. `bp_status`
+    // rides along in the same lock: probe-rs's verdict per requested line
+    // (empty outside a session).
     let (halted_at, bp_status) = {
         let st = dbg.state.lock().unwrap();
         let halted: Option<(String, u32)> = stopped
@@ -425,22 +421,15 @@ pub fn show_debug_tab(
             .flatten();
         (halted, st.bp_status.clone())
     };
-    breakpoint_list(
-        ui,
-        breakpoints,
-        halted_at.as_ref(),
-        &bp_status,
-        bp_jump,
-        bp_remove,
-        bp_clear,
-    );
 
     // ── Empty-state hint ──────────────────────────────────────────────────────
     let no_content = {
         let st = dbg.state.lock().unwrap();
         st.stack.is_empty() && dbg.console.lock().unwrap().lines.is_empty()
     };
-    if no_content {
+    // Breakpoints alone are worth the pane row: they exist (and are worth
+    // navigating) long before a session does.
+    if no_content && breakpoints.is_empty() {
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(
@@ -456,7 +445,7 @@ pub fn show_debug_tab(
         return;
     }
 
-    // ── Three panes: console | stack | variables ──────────────────────────────
+    // ── Five panes: console | breakpoints | stack | variables | watch ─────────
     // The row is allocated EXACTLY the visible size and the panes are placed
     // inside it at fixed rects. Nothing here may ask for more width than the
     // panel has: the Code Editor is an egui side panel, which stores the rect
@@ -467,10 +456,10 @@ pub fn show_debug_tab(
     let avail_h = ui.available_height();
     let total_w = ui.available_width();
     let gap = ui.spacing().item_spacing.x.max(4.0);
-    // Four panes → three gaps. Widths come from the draggable split boundaries.
-    let usable = (total_w - 3.0 * gap).max(0.0);
+    // Five panes → four gaps. Widths come from the draggable split boundaries.
+    let usable = (total_w - 4.0 * gap).max(0.0);
     let splits = clamp_splits(dbg.pane_splits);
-    let [console_w, stack_w, vars_w, watch_w] = split_widths(usable, splits);
+    let [console_w, bps_w, stack_w, vars_w, watch_w] = split_widths(usable, splits);
     let body_h = (avail_h - 18.0).max(24.0); // minus the pane title row
 
     // Snapshot the state once (short lock) — the panes render from the copy.
@@ -489,11 +478,12 @@ pub fn show_debug_tab(
     let mut watch_remove: Option<usize> = None;
 
     let (row, _) = ui.allocate_exact_size(egui::vec2(total_w, avail_h), egui::Sense::hover());
-    // Pane left edges: Console | Call stack | Variables | Watch.
+    // Pane left edges: Console | Breakpoints | Call stack | Variables | Watch.
     let x0 = row.left();
     let x1 = x0 + console_w + gap;
-    let x2 = x1 + stack_w + gap;
-    let x3 = x2 + vars_w + gap;
+    let x2 = x1 + bps_w + gap;
+    let x3 = x2 + stack_w + gap;
+    let x4 = x3 + vars_w + gap;
     // Child uis at explicit rects: their content never feeds back into the
     // parent's min_rect (unlike `ui.vertical`, which grows it).
     let pane = |ui: &mut egui::Ui, x: f32, w: f32| -> egui::Ui {
@@ -514,9 +504,25 @@ pub fn show_debug_tab(
         render_scrollback(ui, &dbg.console, "debug_console", body_h);
     }
 
+    // Breakpoints — next to the console, the pane the user reads while the
+    // target runs.
+    {
+        let ui = &mut pane(ui, x1, bps_w);
+        breakpoint_pane(
+            ui,
+            body_h,
+            breakpoints,
+            halted_at.as_ref(),
+            &bp_status,
+            bp_jump,
+            bp_remove,
+            bp_clear,
+        );
+    }
+
     // Stack frames.
     {
-        let ui = &mut pane(ui, x1, stack_w);
+        let ui = &mut pane(ui, x2, stack_w);
         pane_title(ui, "Call stack");
         egui::ScrollArea::vertical()
             .id_salt("debug_stack")
@@ -558,7 +564,7 @@ pub fn show_debug_tab(
 
     // Variables: locals then registers.
     {
-        let ui = &mut pane(ui, x2, vars_w);
+        let ui = &mut pane(ui, x3, vars_w);
         pane_title(ui, "Variables");
         egui::ScrollArea::vertical()
             .id_salt("debug_vars")
@@ -591,7 +597,7 @@ pub fn show_debug_tab(
 
     // Watch: user expressions evaluated against the selected frame.
     {
-        let ui = &mut pane(ui, x3, watch_w);
+        let ui = &mut pane(ui, x4, watch_w);
         pane_title(ui, "Watch");
         // Add row: "+" button and an expression field (Enter also adds).
         ui.horizontal(|ui| {
@@ -677,9 +683,14 @@ pub fn show_debug_tab(
     let sep = ui.visuals().widgets.noninteractive.bg_stroke;
     let accent = egui::Color32::from_rgb(90, 140, 210);
     let mut new_splits = splits;
-    for (k, sx) in [x1 - gap * 0.5, x2 - gap * 0.5, x3 - gap * 0.5]
-        .into_iter()
-        .enumerate()
+    for (k, sx) in [
+        x1 - gap * 0.5,
+        x2 - gap * 0.5,
+        x3 - gap * 0.5,
+        x4 - gap * 0.5,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let handle = egui::Rect::from_min_max(
             egui::pos2(sx - 3.0, row.top()),
@@ -719,39 +730,56 @@ pub fn show_debug_tab(
     }
 }
 
-/// Minimum fraction of the row each of the four panes keeps — the drag can't
-/// squeeze one below this, so nothing ever collapses to zero.
-const MIN_SPLIT: f32 = 0.08;
+/// Minimum fraction of the row each of the five panes keeps — the drag can't
+/// squeeze one below this, so nothing ever collapses to zero. Five panes at
+/// 0.07 leave 0.65 to distribute, which is still a usable spread.
+const MIN_SPLIT: f32 = 0.07;
 
-/// Sanitize the three split boundaries (fractions of the row, ascending) so the
-/// four panes each keep at least [`MIN_SPLIT`] and stay ordered. Idempotent —
+/// Sanitize the four split boundaries (fractions of the row, ascending) so the
+/// five panes each keep at least [`MIN_SPLIT`] and stay ordered. Idempotent —
 /// re-clamping an already-valid array is a no-op.
-fn clamp_splits(mut b: [f32; 3]) -> [f32; 3] {
-    b[0] = b[0].clamp(MIN_SPLIT, 1.0 - 3.0 * MIN_SPLIT);
-    b[1] = b[1].clamp(b[0] + MIN_SPLIT, 1.0 - 2.0 * MIN_SPLIT);
-    b[2] = b[2].clamp(b[1] + MIN_SPLIT, 1.0 - MIN_SPLIT);
+fn clamp_splits(mut b: [f32; 4]) -> [f32; 4] {
+    // Two sweeps of `max`/`min`, NOT `f32::clamp` per boundary: with five panes
+    // the per-boundary bounds (`prev + MIN` vs `1 - k*MIN`) meet exactly at the
+    // extremes, where float drift can put the low bound a hair ABOVE the high
+    // one — and `clamp` panics on crossed bounds.
+    let mut prev = 0.0;
+    for x in b.iter_mut() {
+        *x = x.max(prev + MIN_SPLIT);
+        prev = *x;
+    }
+    let mut next = 1.0;
+    for x in b.iter_mut().rev() {
+        *x = x.min(next - MIN_SPLIT);
+        next = *x;
+    }
     b
 }
 
-/// The four pane widths for a row `usable` px wide (row minus its three gaps),
+/// The five pane widths for a row `usable` px wide (row minus its four gaps),
 /// derived from the split boundaries `b`. They sum to EXACTLY `usable` and are
 /// never negative — the panes shrink together on a narrow panel instead of
 /// holding a floor, because a row wider than the panel makes egui re-widen the
 /// Code Editor side panel from its content rect, forever (note at the call
 /// site). Callers pass boundaries already through [`clamp_splits`].
-fn split_widths(usable: f32, b: [f32; 3]) -> [f32; 4] {
+fn split_widths(usable: f32, b: [f32; 4]) -> [f32; 5] {
     let usable = usable.max(0.0);
     [
         b[0] * usable,
         (b[1] - b[0]) * usable,
         (b[2] - b[1]) * usable,
-        (1.0 - b[2]) * usable,
+        (b[3] - b[2]) * usable,
+        (1.0 - b[3]) * usable,
     ]
 }
 
-/// Longest `path:line` label a row shows in full — see [`short_loc`]. Budgeted
-/// for the rest of the row (the ✕ button and the dot) too.
+/// Longest `path:line` label a row shows in full when the pane's width can't be
+/// measured — see [`short_loc`]. The pane normally derives its own budget from
+/// the space it actually has.
 const LOC_MAX_CHARS: usize = 38;
+
+/// Characters that fit in one pixel-width of the monospace UI font at size 10.5.
+const CHARS_PER_PX: f32 = 1.0 / 6.3;
 
 /// Red dot + `path:line` link for every breakpoint, newest file order being the
 /// map's (sorted, so rows don't dance between frames). Clicking one raises
@@ -764,10 +792,13 @@ const LOC_MAX_CHARS: usize = 38;
 /// session): a line it could NOT arm is greyed and struck through, and one it
 /// moved shows `-> <line>`, because the red dot alone claims a breakpoint that
 /// the target may never hit.
-/// Renders nothing when there are no breakpoints — the empty-state hint below
-/// already explains how to set one.
-fn breakpoint_list(
+/// It is a PANE of its own (next to the console) rather than a strip above the
+/// row: the list is what the user reads while the target runs, and it is the
+/// only place that says whether a breakpoint was actually armed.
+#[allow(clippy::too_many_arguments)]
+fn breakpoint_pane(
     ui: &mut egui::Ui,
+    body_h: f32,
     breakpoints: &BTreeMap<String, BTreeSet<u32>>,
     halted_at: Option<&(String, u32)>,
     bp_status: &BTreeMap<String, BTreeMap<u32, BpStatus>>,
@@ -776,9 +807,6 @@ fn breakpoint_list(
     bp_clear: &mut bool,
 ) {
     let total: usize = breakpoints.values().map(|s| s.len()).sum();
-    if total == 0 {
-        return;
-    }
     // Only breakpoints the session actually answered about count as unarmed —
     // an empty `bp_status` means "nothing asked yet", not "nothing works".
     let unarmed: usize = breakpoints
@@ -795,35 +823,56 @@ fn breakpoint_list(
                 .count()
         })
         .sum();
-    let title = if unarmed > 0 {
-        format!("Breakpoints ({total}, {unarmed} not armed)")
-    } else {
-        format!("Breakpoints ({total})")
-    };
-    egui::CollapsingHeader::new(egui::RichText::new(title).size(10.5).color(BP_FILL))
-    .id_salt("debug_bp_list")
-    .default_open(true)
-    .show(ui, |ui| {
-        if ui
-            .button(
-                egui::RichText::new(format!("{} Remove all", ph::TRASH))
-                    .size(10.0)
-                    .color(egui::Color32::from_rgb(220, 150, 140)),
-            )
-            .on_hover_text(format!(
-                "Remove all {total} breakpoints.\nThey are session-only — the dots \
-                 come back only by clicking the gutter again."
-            ))
-            .clicked()
-        {
-            *bp_clear = true;
+    // Title row: the count, plus a Remove-all that stays out of the way.
+    ui.horizontal(|ui| {
+        let title = if unarmed > 0 {
+            format!("Breakpoints ({total}, {unarmed} not armed)")
+        } else {
+            format!("Breakpoints ({total})")
+        };
+        ui.label(egui::RichText::new(title).size(10.0).color(if unarmed > 0 {
+            UNARMED_AMBER
+        } else {
+            egui::Color32::from_gray(140)
+        }));
+        if total > 0 {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button(
+                        egui::RichText::new(ph::TRASH)
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(220, 150, 140)),
+                    )
+                    .on_hover_text(format!(
+                        "Remove all {total} breakpoints.\nThey are session-only — the dots \
+                         come back only by clicking the gutter again."
+                    ))
+                    .clicked()
+                {
+                    *bp_clear = true;
+                }
+            });
         }
+    });
+    // The label budget follows the pane: a dragged-narrow column shows less
+    // path, not a row wider than the pane it lives in.
+    let loc_max = ((ui.available_width() - 46.0) * CHARS_PER_PX) as i64;
+    let loc_max = loc_max.clamp(8, LOC_MAX_CHARS as i64) as usize;
+    {
         egui::ScrollArea::vertical()
             .id_salt("debug_bp_list_scroll")
-            // Four-ish rows, then it scrolls — the panes below keep their room.
-            .max_height(84.0)
-            .auto_shrink([false, true])
+            .max_height((body_h - 22.0).max(24.0))
+            .auto_shrink([false, false])
             .show(ui, |ui| {
+                if total == 0 {
+                    ui.label(
+                        egui::RichText::new(
+                            "none — click left of a line number in the editor to set one",
+                        )
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(110)),
+                    );
+                }
                 for (rel, lines) in breakpoints {
                     for &line in lines {
                         let status = bp_status.get(rel).and_then(|m| m.get(&line));
@@ -899,12 +948,10 @@ fn breakpoint_list(
                                     // the panel width (the side-panel feedback
                                     // noted at the pane row below). Full text
                                     // stays on hover.
-                                    let mut text = egui::RichText::new(short_loc(
-                                        &label,
-                                        LOC_MAX_CHARS,
-                                    ))
-                                    .size(10.5)
-                                    .monospace();
+                                    let mut text =
+                                        egui::RichText::new(short_loc(&label, loc_max))
+                                            .size(10.5)
+                                            .monospace();
                                     if unarmed {
                                         text = text.color(UNARMED_GREY).strikethrough();
                                     } else if here {
@@ -920,7 +967,7 @@ fn breakpoint_list(
                     }
                 }
             });
-    });
+    }
 }
 
 /// The row tooltip: where it is, plus what probe-rs did with it. The reason an
@@ -1018,13 +1065,13 @@ mod tests {
         assert_eq!(short_loc("ăăăă:9", 3), "…:9");
     }
 
-    /// The four panes must fit the row EXACTLY at every width — the runaway this
+    /// The five panes must fit the row EXACTLY at every width — the runaway this
     /// replaced came from floors that out-demanded a narrow panel, and the Code
     /// Editor side panel adopts its content's width, so the row re-widened it
     /// every frame until the MCU and Project panels hit their minimum.
     #[test]
     fn panes_always_fit_the_row() {
-        let splits = clamp_splits([0.34, 0.56, 0.78]);
+        let splits = clamp_splits([0.28, 0.45, 0.62, 0.81]);
         for usable in [
             0.0_f32, 1.0, 80.0, 200.0, 418.0, 500.0, 900.0, 1600.0, 4000.0,
         ] {
@@ -1040,29 +1087,30 @@ mod tests {
             );
         }
         // A degenerate/negative row (panel dragged to nothing) stays at zero.
-        assert_eq!(split_widths(-50.0, splits), [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(split_widths(-50.0, splits), [0.0; 5]);
     }
 
     /// Clamping keeps every pane ≥ MIN_SPLIT and the boundaries ascending, even
     /// from garbage input (out of order, out of range, all-collapsed).
     #[test]
-    fn clamp_keeps_four_panes_alive() {
+    fn clamp_keeps_five_panes_alive() {
         for raw in [
-            [0.34, 0.56, 0.78], // already valid
-            [0.9, 0.1, 0.5],    // out of order
-            [-1.0, 2.0, 0.0],   // out of range
-            [0.0, 0.0, 0.0],    // all collapsed left
-            [1.0, 1.0, 1.0],    // all collapsed right
+            [0.28, 0.45, 0.62, 0.81], // already valid
+            [0.9, 0.1, 0.5, 0.2],     // out of order
+            [-1.0, 2.0, 0.0, 9.0],    // out of range
+            [0.0, 0.0, 0.0, 0.0],     // all collapsed left
+            [1.0, 1.0, 1.0, 1.0],     // all collapsed right
         ] {
             let b = clamp_splits(raw);
-            // Ascending with a MIN_SPLIT gap between each of the four panes.
+            // Ascending with a MIN_SPLIT gap between each of the five panes.
             assert!(b[0] >= MIN_SPLIT - 1e-6, "{b:?}");
             assert!(b[1] - b[0] >= MIN_SPLIT - 1e-6, "{b:?}");
             assert!(b[2] - b[1] >= MIN_SPLIT - 1e-6, "{b:?}");
-            assert!(1.0 - b[2] >= MIN_SPLIT - 1e-6, "{b:?}");
+            assert!(b[3] - b[2] >= MIN_SPLIT - 1e-6, "{b:?}");
+            assert!(1.0 - b[3] >= MIN_SPLIT - 1e-6, "{b:?}");
         }
         // Idempotent.
-        let once = clamp_splits([0.9, 0.1, 0.5]);
+        let once = clamp_splits([0.9, 0.1, 0.5, 0.2]);
         assert_eq!(clamp_splits(once), once);
     }
 }
