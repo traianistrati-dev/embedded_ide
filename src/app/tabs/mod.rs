@@ -83,7 +83,14 @@ pub(crate) fn probe_selector_ui(
     toolchain: &ToolchainKind,
 ) {
     probe_selector_ui_with(
-        ui, "Probe:", probes, selected, scan_go, scan_err, toolchain, |_| {},
+        ui,
+        "Probe:",
+        probes,
+        selected,
+        scan_go,
+        scan_err,
+        toolchain,
+        |_| {},
     );
 }
 
@@ -101,11 +108,13 @@ pub(crate) fn probe_selector_ui_with(
     toolchain: &ToolchainKind,
     after_scan: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.label(
-        egui::RichText::new(label)
-            .size(10.5)
-            .color(egui::Color32::GRAY),
-    );
+    if !label.is_empty() {
+        ui.label(
+            egui::RichText::new(label)
+                .size(10.5)
+                .color(egui::Color32::GRAY),
+        );
+    }
 
     if ui
         .button(egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5))

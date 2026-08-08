@@ -827,21 +827,20 @@ fn spawn_dap_reader(
         }
         // Socket closed: session over (server exit / disconnect / error).
         if !stop.load(Ordering::Relaxed) {
-            // A dap-server that PANICKED closes the socket exactly like a clean
-            // disconnect does — so before calling it "ended", look for the crash
-            // in what the server printed. Without this the user gets a backtrace
-            // of `<unknown>` frames and a calm "[debug session ended]".
-            let crash = crate::rtt::probe_rs_crash(&console.lock().unwrap());
+            // A dap-server that PANICKED — or that refused to open the probe —
+            // closes the socket exactly like a clean disconnect does. So before
+            // calling it "ended", look for the real failure in what the server
+            // printed; otherwise the user gets a calm "[debug session ended]"
+            // after a wall of `<unknown>` frames or a WinUSB complaint.
+            let crash = crate::rtt::probe_rs_failure(&console.lock().unwrap());
             let mut st = state.lock().unwrap();
             if !matches!(st.phase, DebugPhase::Error(_) | DebugPhase::Idle) {
                 match crash {
-                    Some(detail) => {
-                        st.phase = DebugPhase::Error(
-                            crate::failure_hint::probe_rs_panic_message(&detail),
-                        );
+                    Some(msg) => {
+                        st.phase = DebugPhase::Error(msg);
                         console.lock().unwrap().push_plain(
                             LineKind::Stderr,
-                            "[probe-rs crashed — the session died with it]",
+                            "[probe-rs failed — the session died with it]",
                         );
                     }
                     None => {
@@ -910,7 +909,14 @@ fn handle_response(
             .push_plain(LineKind::Stderr, format!("[dap] {err}"));
         // A failed launch is fatal; anything else just logs.
         if kind == Pending::Launch {
-            state.lock().unwrap().phase = DebugPhase::Error(err);
+            // The DAP layer only says "cancelled" — the REASON (a probe that
+            // won't open, a probe-rs crash) is in the server's own output that
+            // came before it.
+            let real = {
+                let c = console.lock().unwrap();
+                crate::rtt::probe_rs_failure(&c)
+            };
+            state.lock().unwrap().phase = DebugPhase::Error(real.unwrap_or(err));
         }
         return;
     }

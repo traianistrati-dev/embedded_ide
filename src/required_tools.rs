@@ -336,16 +336,20 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             toolchain: Some(ToolchainKind::RustEmbedded),
             severity: Severity::Feature,
             impact: "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing. \
-                     Below 0.32 the Debug tab is unreliable: 0.31.0 panics inside its own USB \
-                     probe enumeration (glasgow/mux.rs), which kills the session before it starts.",
+                     NEWER IS NOT ALWAYS BETTER here: 0.31.0 panics inside its own USB probe \
+                     enumeration, and 0.32.0 can't open an ST-Link bound to the WinUSB driver \
+                     (\"reset not supported by WinUSB\"). 0.29.0 is the version verified to work \
+                     on such a setup: cargo install probe-rs-tools --locked --version 0.29.0",
             check_cmd: "probe-rs",
             check_args: &["--version"],
             check_pattern: "",
-            // A REAL, reproduced minimum, not an invented one: probe-rs 0.31.0
-            // aborts with `unreachable!()` while enumerating probes, so the
-            // dap-server dies on launch. See `failure_hint`'s [PROBE_RS_PANIC].
-            // Installing again (`cargo install probe-rs-tools --locked`) upgrades.
-            min_version: Some("0.32.0"),
+            // Deliberately NONE. A minimum here would mark a WORKING install
+            // (0.29.0) "Outdated" and offer an upgrade that breaks debugging on
+            // a WinUSB-bound ST-Link — the failures are version RANGES, not a
+            // floor. `failure_hint`'s [PROBE_RS_PANIC] / [PROBE_OPEN_FAILED]
+            // name the actual problem when it happens, which is the honest way
+            // to handle "some releases are broken for some hardware".
+            min_version: None,
             install_cmd: Some("cargo"),
             install_args: &["install", "probe-rs-tools", "--locked"],
             manual_url: "https://probe.rs/docs/getting-started/installation/",
@@ -942,30 +946,22 @@ mod tests {
             .collect();
         assert_eq!(
             with_min,
-            // probe-rs: 0.31.0 panics (`unreachable!()`) while enumerating USB
-            // probes, so the Debug tab's dap-server dies on launch — a minimum
-            // backed by a reproduction, which is the bar for adding one here.
-            vec!["rustc", "probe-rs"],
+            vec!["rustc"],
             "unexpected min_version set: {with_min:?}"
         );
-        // And the ones we declare must be parseable by our comparator.
+        // And the one we declare must itself be parseable by our comparator.
         assert!(!version_lt("1.74.0", "1.74"));
-        // The real banners: 0.31.0 is flagged, 0.32.0 is not.
-        let probe_rs_min = s
-            .tools
-            .iter()
-            .find(|t| t.name == "probe-rs")
-            .and_then(|t| t.min_version)
-            .expect("probe-rs carries a minimum");
-        let ver = |banner: &str| parse_version(banner).expect("version in banner");
-        assert!(version_lt(
-            &ver("probe-rs 0.31.0 (git commit: crates.io)"),
-            probe_rs_min
-        ));
-        assert!(!version_lt(
-            &ver("probe-rs 0.32.0 (git commit: crates.io)"),
-            probe_rs_min
-        ));
+        // probe-rs deliberately carries NONE: its breakages are version RANGES
+        // (0.31.0 panics enumerating, 0.32.0 can't open a WinUSB-bound ST-Link),
+        // so a floor would mark the WORKING 0.29.0 outdated and push an upgrade
+        // that breaks debugging. The failure hints name the problem instead.
+        assert!(
+            s.tools
+                .iter()
+                .find(|t| t.name == "probe-rs")
+                .is_some_and(|t| t.min_version.is_none()),
+            "probe-rs must not carry a minimum — see the comment in the catalog"
+        );
     }
 
     /// A tool must be gated ONLY on proof of absence: `Unknown` (before the

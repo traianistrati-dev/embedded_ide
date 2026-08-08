@@ -56,6 +56,9 @@ pub fn list_probes() -> Result<Vec<ProbeInfo>, String> {
     if let Some(detail) = crate::failure_hint::probe_rs_panic(&text) {
         return Err(crate::failure_hint::probe_rs_panic_message(&detail));
     }
+    if let Some(detail) = crate::failure_hint::probe_open_failure(&text) {
+        return Err(crate::failure_hint::probe_open_message(&detail));
+    }
     Ok(parse_list(&text))
 }
 

@@ -125,7 +125,23 @@ pub fn start_probe_flash(
         *state.lock().unwrap() = if ok {
             ProbeFlashState::Success
         } else {
-            ProbeFlashState::Error("cargo flash failed — see the log above".into())
+            // A probe that won't open (or a probe-rs crash) has an explanation
+            // worth more than "see the log above" — the log is where the raw
+            // cause is buried.
+            let tail = {
+                let l = log.lock().unwrap();
+                let start = l.len().saturating_sub(60);
+                l[start..].join("\n")
+            };
+            let explained = crate::failure_hint::probe_rs_panic(&tail)
+                .map(|d| crate::failure_hint::probe_rs_panic_message(&d))
+                .or_else(|| {
+                    crate::failure_hint::probe_open_failure(&tail)
+                        .map(|d| crate::failure_hint::probe_open_message(&d))
+                });
+            ProbeFlashState::Error(
+                explained.unwrap_or_else(|| "cargo flash failed — see the log above".into()),
+            )
         };
         ctx.request_repaint();
     });

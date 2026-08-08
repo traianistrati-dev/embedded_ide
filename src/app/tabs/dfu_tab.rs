@@ -113,18 +113,20 @@ pub fn show_dfu_tab(
         })
     };
     let no_cfg = || {
-        (!can_flash).then(|| "no buildable chip configuration yet — set the MCU up first".to_owned())
+        (!can_flash)
+            .then(|| "no buildable chip configuration yet — set the MCU up first".to_owned())
     };
     let busy_note = || any_busy.then(|| "another flash is already running".to_owned());
-    let swd_reason: Option<String> = held("OpenOCD")
-        .or_else(no_cfg)
-        .or_else(busy_note)
-        .or_else(|| {
-            (!is_swd).then(|| {
+    let swd_reason: Option<String> =
+        held("OpenOCD")
+            .or_else(no_cfg)
+            .or_else(busy_note)
+            .or_else(|| {
+                (!is_swd).then(|| {
                 "pick an ST-Link / J-Link / CMSIS-DAP in the Programmer list (Scan USB finds them)"
                     .to_owned()
             })
-        });
+            });
     let esp_reason: Option<String> = super::tool_missing(missing_tools, "espflash")
         .then(|| super::needs_tool_hint("espflash"))
         .or_else(no_cfg)
@@ -134,7 +136,11 @@ pub fn show_dfu_tab(
         .or_else(|| held("cargo flash"))
         .or_else(no_cfg)
         .or_else(busy_note)
-        .or_else(|| pf_state.is_busy().then(|| "a probe-rs flash is running".to_owned()));
+        .or_else(|| {
+            pf_state
+                .is_busy()
+                .then(|| "a probe-rs flash is running".to_owned())
+        });
 
     // ── Two rows, aligned: programmer / probe on the left, memory on the right ─
     let right_w = (ui.available_width() * 0.42).clamp(190.0, 380.0);
@@ -144,19 +150,18 @@ pub fn show_dfu_tab(
         ui,
         right_w,
         |ui| {
-            ui.label(
-                egui::RichText::new("SWD Programmer:")
-                    .size(10.5)
-                    .color(egui::Color32::GRAY),
-            );
+            // ui.label(
+            //     egui::RichText::new("SWD Programmer:")
+            //         .size(10.5)
+            //         .color(egui::Color32::GRAY),
+            // );
 
             // Scan USB (detect DFU / ST-Link / J-Link / CMSIS-DAP / USB-serial).
             if ui
                 .add_enabled(
                     !dfu_busy,
                     egui::Button::new(
-                        egui::RichText::new(format!("{} Scan USB", ph::MAGNIFYING_GLASS))
-                            .size(10.5),
+                        egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5),
                     ),
                 )
                 .on_hover_text(
@@ -246,7 +251,8 @@ pub fn show_dfu_tab(
             if matches!(toolchain, ToolchainKind::RustEmbedded) {
                 super::probe_selector_ui_with(
                     ui,
-                    "RS Probe:",
+                    // "RS Probe:",
+                    "",
                     probe_list,
                     selected_probe,
                     probe_scan,
@@ -330,6 +336,14 @@ pub fn show_dfu_tab(
                     .size(10.0)
                     .color(egui::Color32::from_rgb(230, 110, 100)),
             );
+        }
+    }
+
+    // A tagged probe-rs failure (a probe that won't open, a crash) gets its
+    // explanation here — the log below only holds the raw cause.
+    if let crate::probe_flash::ProbeFlashState::Error(e) = &pf_state {
+        if crate::failure_hint::show_card(ui, e, |_| {}) {
+            ui.add_space(4.0);
         }
     }
 
@@ -1082,7 +1096,11 @@ const FLASH_COMPARISON: &[(&str, &str, &str)] = &[
         "the target .cfg you type below (e.g. target/stm32f1x.cfg)",
         "the project's probe-rs chip name (e.g. STM32F103C8)",
     ),
-    ("Needs installed", "OpenOCD in PATH", "probe-rs-tools in PATH"),
+    (
+        "Needs installed",
+        "OpenOCD in PATH",
+        "probe-rs-tools in PATH",
+    ),
     (
         "Use it when",
         "probe-rs doesn't know your chip, or you need OpenOCD-specific adapter \
@@ -1104,4 +1122,3 @@ const FLASH_NOTES: &[&str] = &[
     "Flash ESP32 (espflash) replaces Flash SWD on the ESP toolchain: it goes over \
      the serial port with the board in download mode, not over SWD.",
 ];
-

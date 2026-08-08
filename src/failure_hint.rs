@@ -61,7 +61,70 @@ pub const HINTS: &[Hint] = &[
         title: "probe-rs crashed (upstream bug)",
         tool: Some("probe-rs"), // the catalog row reinstalls / updates it
     },
+    Hint {
+        tag: "[PROBE_OPEN_FAILED]",
+        title: "The debug probe could not be opened",
+        tool: Some("probe-rs"), // a probe-rs version change is one of the fixes
+    },
 ];
+
+/// probe-rs failing to OPEN the probe (as opposed to not finding one), with the
+/// innermost cause it reported — `None` when the output holds no such failure.
+///
+/// Worth telling apart from every other probe error: enumeration works, the
+/// cable is fine, and the firmware is irrelevant — something between probe-rs
+/// and the USB driver refuses. The user sees only `[dap] cancelled` otherwise.
+pub fn probe_open_failure(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let i = lines.iter().position(|l| {
+        l.contains("Failed to open the debug probe") || l.contains("Failed to open probe")
+    })?;
+    // The cause chain is printed under it, most specific LAST; quotes and
+    // `N:` numbering are probe-rs's own formatting.
+    let cause = lines[i + 1..]
+        .iter()
+        .take(8)
+        .map(|l| l.trim_start_matches(|c: char| c.is_ascii_digit() || c == ':').trim())
+        .map(|l| l.trim_matches('"'))
+        .filter(|l| !l.is_empty() && !l.starts_with("Caused by") && !l.starts_with("Stack backtrace"))
+        .next_back()
+        .unwrap_or("");
+    Some(if cause.is_empty() {
+        "Failed to open the debug probe".to_owned()
+    } else {
+        format!("Failed to open the debug probe — {cause}")
+    })
+}
+
+/// The tagged message for a probe that enumerates but won't open. The WinUSB
+/// case is called out by name because it is deterministic (every attach fails
+/// the same way) and its two fixes are not guessable from the error text.
+pub fn probe_open_message(detail: &str) -> String {
+    let winusb = detail.contains("reset not supported by WinUSB");
+    let mut s = format!("[PROBE_OPEN_FAILED] {detail}\n\n");
+    if winusb {
+        s.push_str(
+            "probe-rs asks the USB stack to reset the probe when it opens it, and the WinUSB \
+             driver bound to your ST-Link does not support that operation. `probe-rs list` still \
+             works (enumeration doesn't open anything) — every attach fails.\n\n\
+             -> Install a probe-rs release from before that behaviour:\n   \
+             cargo install probe-rs-tools --locked --version 0.29.0\n\
+             -> Or rebind the probe to the libusbK driver with Zadig (it does support reset). \
+             That can upset STM32CubeProgrammer / ST-Link Utility, and is undone from Device \
+             Manager -> Update driver.\n\n\
+             Nothing is wrong with your firmware, wiring or the Debug-friendly build.",
+        );
+    } else {
+        s.push_str(
+            "The probe was found but could not be opened. Usual causes:\n\
+             -> Another program is holding it — a Debug or RTT session in this IDE, \
+             STM32CubeProgrammer / ST-Link Utility, OpenOCD, or a leftover probe-rs process.\n\
+             -> The USB driver bound to it can't do what probe-rs asks (see Device Manager).\n\
+             -> The probe is wedged: unplug it and plug it back in.",
+        );
+    }
+    s
+}
 
 /// The `panicked at <where>` line of a probe-rs crash, plus the message under
 /// it — `None` when the output holds no panic.
@@ -253,6 +316,7 @@ mod tests {
             "[DISK_FULL]",
             "[FLASH_FULL]",
             "[PROBE_RS_PANIC]",
+            "[PROBE_OPEN_FAILED]",
         ] {
             assert!(
                 HINTS.iter().any(|h| h.tag == tag),
@@ -307,6 +371,35 @@ mod tests {
         assert!(body.contains("probe-rs-tools --locked"), "{body}");
         // Ordinary probe-rs chatter is not a crash.
         assert!(probe_rs_panic("probe-rs-debug: Listening on port 54529").is_none());
+    }
+
+    /// The WinUSB open failure: the innermost cause is what identifies it, and
+    /// the card must name the two fixes — neither is guessable from the text
+    /// probe-rs prints.
+    #[test]
+    fn probe_open_failure_keeps_the_innermost_cause() {
+        let out = "probe-rs-debug: Starting debug session from: 127.0.0.1:55402\n\
+                   Failed to open the debug probe.\n\
+                   \t\"An error which is specific to the debug probe in use occurred.\"\n\
+                   \t\t\"USB error.\"\n\
+                   \t\t\t\"reset not supported by WinUSB\"\n";
+        let detail = probe_open_failure(out).expect("detected");
+        assert!(detail.contains("reset not supported by WinUSB"), "{detail}");
+
+        let msg = probe_open_message(&detail);
+        let (hint, body) = parse(&msg).expect("tagged");
+        assert_eq!(hint.tag, "[PROBE_OPEN_FAILED]");
+        assert!(body.contains("--version 0.29.0"), "{body}");
+        assert!(body.contains("libusbK"), "{body}");
+
+        // A different open failure still gets the generic checklist.
+        let other = probe_open_failure("Failed to open probe: device busy").expect("detected");
+        let generic = probe_open_message(&other);
+        assert!(generic.contains("Another program is holding it"), "{generic}");
+        assert!(!generic.contains("libusbK"), "{generic}");
+
+        // "no probe found" is a different problem and must not match.
+        assert!(probe_open_failure("Error: no debug probe was found").is_none());
     }
 
     /// A hint that names a tool must name one that actually exists in the

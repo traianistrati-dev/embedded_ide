@@ -264,11 +264,20 @@ pub(crate) fn cargo_build_streamed(
         .ok_or_else(|| "build produced no executable artifact".to_string())
 }
 
-/// The probe-rs panic in a console it wrote into, if it crashed. Shared with the
-/// Debug tab: a dying probe-rs looks like an ordinary exit / socket close, so
-/// both orchestrators have to go looking for the crash themselves.
-pub(crate) fn probe_rs_crash(console: &TerminalState) -> Option<String> {
-    crate::failure_hint::probe_rs_panic(&console.tail_text(60))
+/// The tagged explanation for whatever probe-rs failure is visible in `console`
+/// — a crash, or a probe that enumerates but won't open. `None` when the output
+/// shows neither, so the caller keeps its own error text.
+///
+/// Shared with the Debug tab: probe-rs dying of its own bug looks exactly like
+/// an ordinary exit / socket close, so both orchestrators have to go looking for
+/// the real reason themselves.
+pub(crate) fn probe_rs_failure(console: &TerminalState) -> Option<String> {
+    let tail = console.tail_text(60);
+    if let Some(detail) = crate::failure_hint::probe_rs_panic(&tail) {
+        return Some(crate::failure_hint::probe_rs_panic_message(&detail));
+    }
+    crate::failure_hint::probe_open_failure(&tail)
+        .map(|d| crate::failure_hint::probe_open_message(&d))
 }
 
 /// The orchestrator body: build, then stream probe-rs until it exits.
@@ -384,10 +393,10 @@ fn run_session(
             Ok(())
         }
         Some(Ok(st)) => {
-            // probe-rs can die of its own panic (a bug in its USB enumeration,
-            // say) — that is not "check your wiring", so say what it really was.
-            if let Some(detail) = probe_rs_crash(&state.lock().unwrap()) {
-                return Err(crate::failure_hint::probe_rs_panic_message(&detail));
+            // probe-rs can die of its own panic, or refuse to open a probe it
+            // just listed — neither is "check your wiring", so say what it was.
+            if let Some(msg) = probe_rs_failure(&state.lock().unwrap()) {
+                return Err(msg);
             }
             Err(format!(
                 "probe-rs exited with {} — check the probe connection / chip name",
