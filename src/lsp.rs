@@ -1099,15 +1099,10 @@ impl LspState {
         // kill lands; the kill below is the guarantee.
         self.send_raw(r#"{"jsonrpc":"2.0","method":"exit"}"#.to_owned());
         if let Some(mut child) = self.child.take() {
-            // Kill the whole process TREE first (/T): rust-analyzer spawns
-            // helpers (proc-macro server, flycheck cargo) that survive a plain
-            // `kill()` of the parent on Windows and then linger as orphans.
-            #[cfg(windows)]
-            {
-                let _ = crate::build::no_window(&mut Command::new("taskkill"))
-                    .args(["/F", "/T", "/PID", &child.id().to_string()])
-                    .output();
-            }
+            // Kill the whole process TREE first: rust-analyzer spawns helpers
+            // (proc-macro server, flycheck cargo) that survive a plain `kill()`
+            // of the parent and then linger as orphans. See `kill_process_tree`.
+            kill_process_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -1215,10 +1210,15 @@ fn launch(
     // Observed live: three orphaned RA pairs from prior sessions, each
     // re-analyzing every Save and competing for the flycheck target-dir lock —
     // the "save time grows past 20 s over time" degradation. Runs on this
-    // background thread (tasklist/taskkill cost ~100 ms each).
+    // background thread (the per-pid `tasklist` / `ps` probe costs ~100 ms).
     sweep_stale_ras(&workspace_dir);
 
-    let mut child = match crate::build::no_window(&mut Command::new("rust-analyzer"))
+    let mut ra_cmd = Command::new("rust-analyzer");
+    crate::build::no_window(&mut ra_cmd);
+    // Own process group (unix) so the tree can be killed as one — see
+    // `spawn_in_own_group` / `kill_process_tree`.
+    spawn_in_own_group(&mut ra_cmd);
+    let mut child = match ra_cmd
         .current_dir(&workspace_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1450,14 +1450,64 @@ fn launch(
     }
 }
 
+// ── Process-tree control (per platform) ──────────────────────────────────────
+// rust-analyzer is never one process: it spawns a proc-macro server and a
+// flycheck `cargo`, and killing only the parent leaves those behind. Windows
+// gets that from `taskkill /T`; the unixes have no such flag, so RA is put in
+// its OWN PROCESS GROUP at spawn and the whole group is signalled at once.
+
+/// Put the child in its own process group, so it can later be killed as a tree.
+/// No-op on Windows, where `taskkill /T` walks the tree instead.
+///
+/// Side effect worth knowing: a process in its own group no longer receives the
+/// terminal's signals (a Ctrl+C aimed at the IDE won't reach RA). That is what
+/// we want — RA's lifetime is managed explicitly here — and the case it leaves
+/// open, the IDE dying without cleaning up, is exactly what `sweep_stale_ras`
+/// covers on the next launch.
+fn spawn_in_own_group(cmd: &mut Command) -> &mut Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0); // 0 = new group whose pgid is the child's pid
+    }
+    cmd
+}
+
+/// Kill `pid` **and its children**, forcefully.
+///
+/// Unix: signal the process GROUP (negative pid) — that is the tree, because
+/// [`spawn_in_own_group`] made the child a group leader. Falls back to the lone
+/// process for a pid that isn't one (an RA registered by an older build of this
+/// IDE, before the group existed).
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = crate::build::no_window(&mut Command::new("taskkill"))
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        // SIGKILL, not SIGTERM: the polite path is the LSP `exit` notification
+        // sent before this, mirroring the `/F` on the Windows side.
+        let group = -(pid as i32);
+        let killed = unsafe { libc::kill(group, libc::SIGKILL) };
+        if killed != 0 {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    let _ = pid;
+}
+
 // ── Stale rust-analyzer sweep (pid file) ─────────────────────────────────────
 // Every RA spawn is registered in `<workspace>/ra.pids`; every launch first
 // kills any registered pid that is STILL a live rust-analyzer. This is what
 // catches orphans across app restarts — `kill_child` covers only the clean
 // paths (in-session restart, `on_exit`), so a crash or a Task-Manager kill
 // used to leave RA pairs alive for days, all re-analyzing this workspace on
-// every Save. PID-reuse safety: a pid is killed only after `tasklist` confirms
-// its image name is still rust-analyzer.
+// every Save. PID-reuse safety: a pid is killed only after the OS confirms its
+// image name is still rust-analyzer — a recycled pid must never be shot.
 
 fn ra_pid_file(workspace_dir: &Path) -> PathBuf {
     workspace_dir.join("ra.pids")
@@ -1477,18 +1527,36 @@ fn tasklist_image_name(csv_line: &str) -> Option<String> {
     (!name.is_empty() && !name.starts_with("INFO:")).then(|| name.to_owned())
 }
 
-/// Kill every pid registered in the workspace pid file that is still a live
-/// rust-analyzer (`/T` takes its helper children — proc-macro server,
-/// flycheck cargo — down with it), then clear the file. Windows-only; a no-op
-/// elsewhere.
-fn sweep_stale_ras(workspace_dir: &Path) {
-    let path = ra_pid_file(workspace_dir);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
+/// Does `ps -p <pid> -o comm=` output name rust-analyzer?
+///
+/// The two unixes disagree on what `comm` is: Linux prints the bare command
+/// (truncated to 15 chars — `rust-analyzer` is 13, so it survives whole), macOS
+/// prints the full executable PATH. Taking the last path component handles both.
+/// Empty output = no such process, which is the common case.
+///
+/// Compiled everywhere (only the unixes CALL it) so the parser stays testable
+/// on this host — the same reasoning as the udev scan in [`crate::required_tools`].
+#[cfg_attr(windows, allow(dead_code))]
+fn ps_comm_is_rust_analyzer(ps_output: &str) -> bool {
+    ps_output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .any(|l| {
+            l.rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(l)
+                .starts_with("rust-analyzer")
+        })
+}
+
+/// Is `pid` still a live rust-analyzer? The guard against PID reuse: between
+/// the pid being written and this sweep, the OS may have handed that number to
+/// something else entirely.
+fn pid_is_rust_analyzer(pid: u32) -> bool {
     #[cfg(windows)]
-    for pid in parse_pid_lines(&text) {
-        let is_ra = crate::build::no_window(&mut Command::new("tasklist"))
+    {
+        crate::build::no_window(&mut Command::new("tasklist"))
             .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
             .output()
             .ok()
@@ -1498,15 +1566,34 @@ fn sweep_stale_ras(workspace_dir: &Path) {
                     .filter_map(tasklist_image_name)
                     .any(|name| name.to_lowercase().starts_with("rust-analyzer"))
             })
-            .unwrap_or(false);
-        if is_ra {
-            let _ = crate::build::no_window(&mut Command::new("taskkill"))
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .output();
-        }
+            .unwrap_or(false)
     }
     #[cfg(not(windows))]
-    let _ = text;
+    {
+        // `ps` rather than /proc: macOS has no /proc, and this one command is
+        // specified by POSIX, so it answers on every unix the IDE can run on.
+        Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .ok()
+            .map(|out| ps_comm_is_rust_analyzer(&String::from_utf8_lossy(&out.stdout)))
+            .unwrap_or(false)
+    }
+}
+
+/// Kill every pid registered in the workspace pid file that is still a live
+/// rust-analyzer (its helper children — proc-macro server, flycheck cargo — go
+/// with it), then clear the file.
+fn sweep_stale_ras(workspace_dir: &Path) {
+    let path = ra_pid_file(workspace_dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    for pid in parse_pid_lines(&text) {
+        if pid_is_rust_analyzer(pid) {
+            kill_process_tree(pid);
+        }
+    }
     let _ = std::fs::remove_file(&path);
 }
 
@@ -2484,7 +2571,35 @@ mod diagnostic_headline_tests {
 
 #[cfg(test)]
 mod ra_sweep_tests {
-    use super::{parse_pid_lines, tasklist_image_name};
+    use super::{parse_pid_lines, ps_comm_is_rust_analyzer, tasklist_image_name};
+
+    /// The unix half of the PID-reuse guard. Tested on every host (the parser is
+    /// portable even though only the unixes run `ps`), because getting it wrong
+    /// means SIGKILL-ing whatever process inherited the recycled pid.
+    #[test]
+    fn ps_comm_recognises_rust_analyzer_on_both_unixes() {
+        // Linux: bare command name (comm is truncated to 15 chars; this fits).
+        assert!(ps_comm_is_rust_analyzer("rust-analyzer\n"));
+        // macOS: full executable path.
+        assert!(ps_comm_is_rust_analyzer(
+            "/Users/me/.cargo/bin/rust-analyzer\n"
+        ));
+        // The proc-macro server counts too — same tree, same sweep.
+        assert!(ps_comm_is_rust_analyzer("rust-analyzer-proc-macro-srv\n"));
+    }
+
+    #[test]
+    fn ps_comm_rejects_anything_else() {
+        // No such process → `ps -p <pid> -o comm=` prints nothing at all. This
+        // is the case that MUST answer false: a dead pid may have been reused.
+        assert!(!ps_comm_is_rust_analyzer(""));
+        assert!(!ps_comm_is_rust_analyzer("\n  \n"));
+        assert!(!ps_comm_is_rust_analyzer("cargo\n"));
+        assert!(!ps_comm_is_rust_analyzer("/usr/bin/firefox\n"));
+        // A path CONTAINING the name but not being it — only the last component
+        // is the program.
+        assert!(!ps_comm_is_rust_analyzer("/opt/rust-analyzer/bin/helper\n"));
+    }
 
     #[test]
     fn pid_lines_parse_and_skip_junk() {

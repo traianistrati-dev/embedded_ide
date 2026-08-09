@@ -1014,6 +1014,7 @@ dependencies = [
  "egui",
  "egui-phosphor",
  "egui_code_editor",
+ "libc",
  "notify",
  "rfd",
  "ron 0.8.1",

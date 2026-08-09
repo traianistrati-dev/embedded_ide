@@ -386,7 +386,17 @@ fn send(
     let msg = json!({"seq": *seq, "type": "request", "command": command, "arguments": arguments});
     *seq += 1;
     let body = msg.to_string();
-    write!(stream, "Content-Length: {}\r\n\r\n{body}", body.len()).map_err(|e| e.to_string())?;
+    // ONE `write_all` for header + body, never `write!` with a format string:
+    // that issues a syscall per piece, so the header can reach the server split
+    // across TCP segments. probe-rs's dap-server (0.29) parses its two header
+    // lines with `read_line` on a NON-blocking socket, and a partial line
+    // desyncs that reader for good — it then drops the connection, which
+    // arrives here as `dap-server closed waiting for 'initialized'`. Same fix
+    // as `debugger.rs`'s `Wire::request`.
+    let frame = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+    stream
+        .write_all(frame.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())
 }
 

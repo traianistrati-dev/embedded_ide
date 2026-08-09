@@ -20,6 +20,13 @@ rusb = "0.9"
 ureq = "2"
 roxmltree = "0.20"
 
+# Killing a PROCESS GROUP (the rust-analyzer tree) has no std equivalent — the
+# Windows side shells out to `taskkill /T`, the unixes need `kill(-pgid)`.
+# Already in the tree transitively (rusb / serialport / eframe), so this costs
+# nothing to build; unix-only so the Windows build is untouched.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 
 [dev-dependencies]
 tempfile = "3.8"
