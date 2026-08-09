@@ -329,6 +329,65 @@ fn inline_focus_id(is_folder: bool) -> egui::Id {
     })
 }
 
+// ── Context-menu icon palette ────────────────────────────────────────────────
+// Only the ICON of a menu entry carries a colour; the label keeps the theme's
+// own text colour so it still brightens on hover and dims when disabled. Each
+// colour marks a FAMILY of command, and where the tree already paints the thing
+// the entry acts on, the menu reuses that exact colour — "Extract to library
+// crate…" gets the green of the member-library PACKAGE icon, "Detach from
+// workspace" the amber of a detached one — so an entry reads as "this is about
+// THAT kind of item".
+
+/// Creating a new file.
+const ICON_NEW: egui::Color32 = egui::Color32::from_rgb(120, 200, 145);
+/// Folders — the same gold the tree paints folder rows with.
+const ICON_FOLDER: egui::Color32 = egui::Color32::from_rgb(200, 165, 70);
+/// Leaves the IDE (the OS file manager).
+const ICON_EXTERNAL: egui::Color32 = egui::Color32::from_rgb(110, 170, 240);
+/// Neutral clipboard-ish utilities (Copy path, Duplicate).
+const ICON_UTIL: egui::Color32 = egui::Color32::from_rgb(150, 165, 190);
+/// Opens another view of the same file (Reference pane).
+const ICON_VIEW: egui::Color32 = egui::Color32::from_rgb(110, 195, 205);
+/// Workspace-member library — the green of the tree's PACKAGE icon.
+const ICON_LIBRARY: egui::Color32 = egui::Color32::from_rgb(140, 190, 145);
+/// Detached library — the amber of the tree's detached PACKAGE icon.
+const ICON_LIBRARY_DETACHED: egui::Color32 = egui::Color32::from_rgb(190, 165, 110);
+/// Editing an existing item in place (Rename).
+const ICON_EDIT: egui::Color32 = egui::Color32::from_rgb(175, 160, 235);
+/// Destructive (Delete).
+const ICON_DANGER: egui::Color32 = egui::Color32::from_rgb(220, 80, 60);
+
+/// Text size shared by every context-menu entry.
+const MENU_TEXT_SIZE: f32 = 11.5;
+
+/// Label for a context-menu entry: `icon` painted in `icon_color`, the text
+/// left at [`egui::Color32::PLACEHOLDER`] — egui substitutes the button's own
+/// colour there when it paints the galley, so the label keeps reacting to
+/// hover / enabled state exactly like an uncoloured `RichText` would.
+fn menu_label(icon: &str, text: &str, icon_color: egui::Color32) -> egui::text::LayoutJob {
+    let font = egui::FontId::proportional(MENU_TEXT_SIZE);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        icon,
+        0.0,
+        egui::TextFormat {
+            font_id: font.clone(),
+            color: icon_color,
+            ..Default::default()
+        },
+    );
+    job.append(
+        text,
+        4.0, // gap between glyph and label, was a literal space in the format!()
+        egui::TextFormat {
+            font_id: font,
+            color: egui::Color32::PLACEHOLDER,
+            ..Default::default()
+        },
+    );
+    job
+}
+
 /// The "Show in Explorer" + "Copy path" pair, shared by the file and folder
 /// context menus and by the LIBRARIES header.
 ///
@@ -343,13 +402,24 @@ fn reveal_menu_items(ui: &mut egui::Ui, project_dir: Option<&std::path::Path>, r
     let abs = project_dir.map(|d| d.join(rel));
     let enabled = abs.is_some();
     let disabled_hint = "Save the project first (Ctrl+S) — it has no folder on disk yet";
+    // The label dims itself (PLACEHOLDER colour), the icon has to be dimmed by
+    // hand or a disabled entry would still show a fully saturated glyph.
+    let icon = |c: egui::Color32| {
+        if enabled {
+            c
+        } else {
+            c.gamma_multiply(0.4)
+        }
+    };
 
     let reveal = ui
         .add_enabled(
             enabled,
-            egui::Button::new(
-                egui::RichText::new(format!("{} Show in Explorer", ph::FOLDER_OPEN)).size(11.5),
-            ),
+            egui::Button::new(menu_label(
+                ph::FOLDER_OPEN,
+                "Show in Explorer",
+                icon(ICON_EXTERNAL),
+            )),
         )
         .on_disabled_hover_text(disabled_hint);
     if reveal.clicked() {
@@ -367,7 +437,7 @@ fn reveal_menu_items(ui: &mut egui::Ui, project_dir: Option<&std::path::Path>, r
     let copy = ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new(format!("{} Copy path", ph::COPY)).size(11.5)),
+            egui::Button::new(menu_label(ph::COPY, "Copy path", icon(ICON_UTIL))),
         )
         .on_disabled_hover_text(disabled_hint);
     if copy.clicked() {
@@ -881,7 +951,7 @@ pub fn show_project_tree(
 
             src_ch.header_response.context_menu(|ui| {
                 if ui
-                    .button(egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5))
+                    .button(menu_label(ph::FILE_PLUS, "New File", ICON_NEW))
                     .clicked()
                 {
                     begin_inline_new(ui, false, "", new_src_name, new_file_parent_folder);
@@ -890,9 +960,7 @@ pub fn show_project_tree(
                     ui.close();
                 }
                 if ui
-                    .button(
-                        egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS)).size(11.5),
-                    )
+                    .button(menu_label(ph::FOLDER_PLUS, "New Folder", ICON_FOLDER))
                     .clicked()
                 {
                     begin_inline_new(ui, true, "", new_src_folder_name, new_folder_parent_folder);
@@ -1163,9 +1231,7 @@ pub fn show_project_tree(
                 // happened). The label reliably fires `secondary_clicked`.
                 header.inner.context_menu(|ui| {
                     if ui
-                        .button(
-                            egui::RichText::new(format!("{} New File", ph::FILE_PLUS)).size(11.5),
-                        )
+                        .button(menu_label(ph::FILE_PLUS, "New File", ICON_NEW))
                         .clicked()
                     {
                         begin_inline_new(ui, false, lib, new_src_name, new_file_parent_folder);
@@ -1174,10 +1240,7 @@ pub fn show_project_tree(
                         ui.close();
                     }
                     if ui
-                        .button(
-                            egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS))
-                                .size(11.5),
-                        )
+                        .button(menu_label(ph::FOLDER_PLUS, "New Folder", ICON_FOLDER))
                         .clicked()
                     {
                         begin_inline_new(
@@ -1193,23 +1256,18 @@ pub fn show_project_tree(
                     }
                     ui.separator();
                     if ui
-                        .button(
-                            egui::RichText::new(format!("{} Rename library…", ph::PENCIL_SIMPLE))
-                                .size(11.5),
-                        )
+                        .button(menu_label(ph::PENCIL_SIMPLE, "Rename library…", ICON_EDIT))
                         .clicked()
                     {
                         *library_action = Some((lib.clone(), true));
                         ui.close();
                     }
                     if ui
-                        .button(
-                            egui::RichText::new(format!(
-                                "{} Detach from workspace",
-                                ph::LINK_BREAK
-                            ))
-                            .size(11.5),
-                        )
+                        .button(menu_label(
+                            ph::LINK_BREAK,
+                            "Detach from workspace",
+                            ICON_LIBRARY_DETACHED,
+                        ))
                         .on_hover_text(
                             "Remove it from [workspace] members + any path dependency (keeps the \
                      files) — use this if it broke rust-analyzer / the build.",
@@ -1220,11 +1278,7 @@ pub fn show_project_tree(
                         ui.close();
                     }
                     if ui
-                        .button(
-                            egui::RichText::new(format!("{} Delete library…", ph::TRASH))
-                                .size(11.5)
-                                .color(egui::Color32::from_rgb(230, 130, 115)),
-                        )
+                        .button(menu_label(ph::TRASH, "Delete library…", ICON_DANGER))
                         .clicked()
                     {
                         *library_action = Some((lib.clone(), false));
@@ -1345,14 +1399,13 @@ pub fn show_project_tree(
                         if ui
                             .add_enabled(
                                 ws_add_pending.is_none(),
-                                egui::Button::new(
-                                    egui::RichText::new(format!(
-                                        "{} Add to workspace",
-                                        ph::PLUGS_CONNECTED
-                                    ))
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(140, 210, 160)),
-                                ),
+                                egui::Button::new(menu_label(
+                                    ph::PLUGS_CONNECTED,
+                                    "Add to workspace",
+                                    // The green of a workspace-MEMBER library:
+                                    // the state this entry moves it into.
+                                    ICON_LIBRARY,
+                                )),
                             )
                             .on_hover_text(
                                 "Wire it in as a [workspace] member + path dependency (runs a \
@@ -1370,24 +1423,14 @@ pub fn show_project_tree(
                         }
                         ui.separator();
                         if ui
-                            .button(
-                                egui::RichText::new(format!(
-                                    "{} Rename library…",
-                                    ph::PENCIL_SIMPLE
-                                ))
-                                .size(11.5),
-                            )
+                            .button(menu_label(ph::PENCIL_SIMPLE, "Rename library…", ICON_EDIT))
                             .clicked()
                         {
                             *library_action = Some((lib.clone(), true));
                             ui.close();
                         }
                         if ui
-                            .button(
-                                egui::RichText::new(format!("{} Delete library…", ph::TRASH))
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(230, 130, 115)),
-                            )
+                            .button(menu_label(ph::TRASH, "Delete library…", ICON_DANGER))
                             .clicked()
                         {
                             *library_action = Some((lib.clone(), false));
@@ -1770,10 +1813,7 @@ fn render_tree_node(
 
                     ch.header_response.context_menu(|ui| {
                         if ui
-                            .button(
-                                egui::RichText::new(format!("{} New File", ph::FILE_PLUS))
-                                    .size(11.5),
-                            )
+                            .button(menu_label(ph::FILE_PLUS, "New File", ICON_NEW))
                             .clicked()
                         {
                             begin_inline_new(
@@ -1789,10 +1829,7 @@ fn render_tree_node(
                             ui.close();
                         }
                         if ui
-                            .button(
-                                egui::RichText::new(format!("{} New Folder", ph::FOLDER_PLUS))
-                                    .size(11.5),
-                            )
+                            .button(menu_label(ph::FOLDER_PLUS, "New Folder", ICON_FOLDER))
                             .clicked()
                         {
                             begin_inline_new(
@@ -1830,13 +1867,13 @@ fn render_tree_node(
                         ui.separator();
                         // Turn this folder into a sibling crate you can publish.
                         if ui
-                            .button(
-                                egui::RichText::new(format!(
-                                    "{} Extract to library crate…",
-                                    ph::PACKAGE
-                                ))
-                                .size(11.5),
-                            )
+                            .button(menu_label(
+                                ph::PACKAGE,
+                                "Extract to library crate…",
+                                // Same green as the PACKAGE icon of the library
+                                // rows below — the thing this folder becomes.
+                                ICON_LIBRARY,
+                            ))
                             .on_hover_text(
                                 "Move this folder into its own Cargo crate next to src/, \
                                  wire it up as a workspace member + path dependency, and \
@@ -1849,10 +1886,7 @@ fn render_tree_node(
                         }
                         ui.separator();
                         if ui
-                            .button(
-                                egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE))
-                                    .size(11.5),
-                            )
+                            .button(menu_label(ph::PENCIL_SIMPLE, "Rename", ICON_EDIT))
                             .clicked()
                         {
                             *renaming_folder = Some((folder_path.clone(), name.clone()));
@@ -1863,11 +1897,7 @@ fn render_tree_node(
                         }
                         ui.separator();
                         if ui
-                            .button(
-                                egui::RichText::new(format!("{} Delete", ph::TRASH))
-                                    .size(11.5)
-                                    .color(egui::Color32::from_rgb(220, 80, 60)),
-                            )
+                            .button(menu_label(ph::TRASH, "Delete", ICON_DANGER))
                             .clicked()
                         {
                             // Delete folder and all contents
@@ -2076,7 +2106,7 @@ fn user_file_row(
         }
         resp.context_menu(|ui| {
             if ui
-                .button(egui::RichText::new(format!("{} Rename", ph::PENCIL_SIMPLE)).size(11.5))
+                .button(menu_label(ph::PENCIL_SIMPLE, "Rename", ICON_EDIT))
                 .clicked()
             {
                 *renaming = Some((idx, name.to_string()));
@@ -2087,7 +2117,7 @@ fn user_file_row(
             }
             if can_duplicate
                 && ui
-                    .button(egui::RichText::new(format!("{} Duplicate", ph::COPY)).size(11.5))
+                    .button(menu_label(ph::COPY, "Duplicate", ICON_UTIL))
                     .on_hover_text("Copy this file next to it as <name>_1")
                     .clicked()
             {
@@ -2096,7 +2126,7 @@ fn user_file_row(
             }
             ui.separator();
             if ui
-                .button(egui::RichText::new(format!("{} Open beside editor", ph::COLUMNS)).size(11.5))
+                .button(menu_label(ph::COLUMNS, "Open beside editor", ICON_VIEW))
                 .on_hover_text(
                     "Show this file READ-ONLY in the Reference tab, so you can consult it                      while editing another one",
                 )
@@ -2109,11 +2139,7 @@ fn user_file_row(
             reveal_menu_items(ui, project_dir, rel_path);
             ui.separator();
             if ui
-                .button(
-                    egui::RichText::new(format!("{} Delete", ph::TRASH))
-                        .size(11.5)
-                        .color(egui::Color32::from_rgb(220, 80, 60)),
-                )
+                .button(menu_label(ph::TRASH, "Delete", ICON_DANGER))
                 .clicked()
             {
                 *to_delete = Some(idx);
