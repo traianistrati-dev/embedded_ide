@@ -354,8 +354,10 @@ const ICON_LIBRARY: egui::Color32 = egui::Color32::from_rgb(140, 190, 145);
 const ICON_LIBRARY_DETACHED: egui::Color32 = egui::Color32::from_rgb(190, 165, 110);
 /// Editing an existing item in place (Rename).
 const ICON_EDIT: egui::Color32 = egui::Color32::from_rgb(175, 160, 235);
-/// Destructive (Delete).
+/// Destructive (Delete) — a file or folder.
 const ICON_DANGER: egui::Color32 = egui::Color32::from_rgb(220, 80, 60);
+/// Destructive on a library — the softer red the library menus already used.
+const ICON_DANGER_LIBRARY: egui::Color32 = egui::Color32::from_rgb(230, 130, 115);
 
 /// Text size shared by every context-menu entry.
 const MENU_TEXT_SIZE: f32 = 11.5;
@@ -365,6 +367,24 @@ const MENU_TEXT_SIZE: f32 = 11.5;
 /// colour there when it paints the galley, so the label keeps reacting to
 /// hover / enabled state exactly like an uncoloured `RichText` would.
 fn menu_label(icon: &str, text: &str, icon_color: egui::Color32) -> egui::text::LayoutJob {
+    menu_label_with_text_color(icon, text, icon_color, egui::Color32::PLACEHOLDER)
+}
+
+/// [`menu_label`] with the LABEL tinted as well — the deliberate exception for
+/// the destructive entries, where a whole red row is the warning. Everything
+/// else keeps a neutral label so the coloured glyph is what tells commands
+/// apart. A fixed label colour means no hover brightening, which is fine (and
+/// was already the case) for a row that must read the same at all times.
+fn menu_label_danger(icon: &str, text: &str, color: egui::Color32) -> egui::text::LayoutJob {
+    menu_label_with_text_color(icon, text, color, color)
+}
+
+fn menu_label_with_text_color(
+    icon: &str,
+    text: &str,
+    icon_color: egui::Color32,
+    text_color: egui::Color32,
+) -> egui::text::LayoutJob {
     let font = egui::FontId::proportional(MENU_TEXT_SIZE);
     let mut job = egui::text::LayoutJob::default();
     job.append(
@@ -381,7 +401,7 @@ fn menu_label(icon: &str, text: &str, icon_color: egui::Color32) -> egui::text::
         4.0, // gap between glyph and label, was a literal space in the format!()
         egui::TextFormat {
             font_id: font,
-            color: egui::Color32::PLACEHOLDER,
+            color: text_color,
             ..Default::default()
         },
     );
@@ -405,11 +425,7 @@ fn reveal_menu_items(ui: &mut egui::Ui, project_dir: Option<&std::path::Path>, r
     // The label dims itself (PLACEHOLDER colour), the icon has to be dimmed by
     // hand or a disabled entry would still show a fully saturated glyph.
     let icon = |c: egui::Color32| {
-        if enabled {
-            c
-        } else {
-            c.gamma_multiply(0.4)
-        }
+        if enabled { c } else { c.gamma_multiply(0.4) }
     };
 
     let reveal = ui
@@ -1278,7 +1294,11 @@ pub fn show_project_tree(
                         ui.close();
                     }
                     if ui
-                        .button(menu_label(ph::TRASH, "Delete library…", ICON_DANGER))
+                        .button(menu_label_danger(
+                            ph::TRASH,
+                            "Delete library…",
+                            ICON_DANGER_LIBRARY,
+                        ))
                         .clicked()
                     {
                         *library_action = Some((lib.clone(), false));
@@ -1430,7 +1450,11 @@ pub fn show_project_tree(
                             ui.close();
                         }
                         if ui
-                            .button(menu_label(ph::TRASH, "Delete library…", ICON_DANGER))
+                            .button(menu_label_danger(
+                                ph::TRASH,
+                                "Delete library…",
+                                ICON_DANGER_LIBRARY,
+                            ))
                             .clicked()
                         {
                             *library_action = Some((lib.clone(), false));
@@ -1897,7 +1921,7 @@ fn render_tree_node(
                         }
                         ui.separator();
                         if ui
-                            .button(menu_label(ph::TRASH, "Delete", ICON_DANGER))
+                            .button(menu_label_danger(ph::TRASH, "Delete", ICON_DANGER))
                             .clicked()
                         {
                             // Delete folder and all contents
@@ -2139,7 +2163,7 @@ fn user_file_row(
             reveal_menu_items(ui, project_dir, rel_path);
             ui.separator();
             if ui
-                .button(menu_label(ph::TRASH, "Delete", ICON_DANGER))
+                .button(menu_label_danger(ph::TRASH, "Delete", ICON_DANGER))
                 .clicked()
             {
                 *to_delete = Some(idx);

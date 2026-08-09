@@ -418,7 +418,13 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             min_version: None,
             install_cmd: per_os(Some("winget"), Some("brew"), None),
             install_args: per_os(
-                &["install", "--id", "dfu-util.dfu-util", "--accept-package-agreements", "--accept-source-agreements"][..],
+                &[
+                    "install",
+                    "--id",
+                    "dfu-util.dfu-util",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ][..],
                 &["install", "dfu-util"][..],
                 &[][..],
             ),
@@ -437,7 +443,13 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             min_version: None,
             install_cmd: per_os(Some("winget"), Some("brew"), None),
             install_args: per_os(
-                &["install", "--id", "OpenOCD.OpenOCD", "--accept-package-agreements", "--accept-source-agreements"][..],
+                &[
+                    "install",
+                    "--id",
+                    "OpenOCD.OpenOCD",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ][..],
                 &["install", "open-ocd"][..],
                 &[][..],
             ),
@@ -596,8 +608,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             description: "Membership of the group that owns /dev/ttyUSB* and /dev/ttyACM*",
             toolchain: None,
             severity: Severity::Feature,
-            impact:
-                "The Serial tab and espflash can't open the port (\"Permission denied\"). \
+            impact: "The Serial tab and espflash can't open the port (\"Permission denied\"). \
                  Run `sudo usermod -aG dialout $USER` — `uucp` instead of `dialout` on Arch and \
                  openSUSE — then log out and back in.",
             check_cmd: "id",

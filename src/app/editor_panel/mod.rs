@@ -95,6 +95,14 @@ impl AppIde {
         };
         let display_syntax = self.selected_file.syntax(&selected_path);
         let selected_is_manifest = self.selected_file.is_cargo_manifest(&selected_path);
+        // Token re-spacing (Shift+Alt+F) is Rust syntax — `:` → `: `, `,` → `, `
+        // would rewrite a linker script (`memory.x`), a .ron or a Markdown table.
+        // Those files still get the indent-only pass.
+        let respace_on_format = match self.selected_file {
+            ProjectFileId::MainRs | ProjectFileId::BuildRs => true,
+            ProjectFileId::UserFile(_) => selected_path.ends_with(".rs"),
+            _ => false,
+        };
         // The file `display_code` was built for. Captured before the bottom diag
         // panel (rendered below) can switch `selected_file` on a diagnostic
         // click, so a queued scroll-to-line only fires once the editor actually
@@ -1112,7 +1120,7 @@ impl AppIde {
                     } else if ctrl_d_pressed {
                         Some(duplicate_line::duplicate_lines(&display_code, lo, hi))
                     } else if format_pressed {
-                        let (new, c) = format::format_code(&display_code, lo);
+                        let (new, c) = format::format_code(&display_code, lo, respace_on_format);
                         Some((new, c, c))
                     } else {
                         None

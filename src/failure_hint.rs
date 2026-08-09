@@ -109,9 +109,14 @@ pub fn probe_open_failure(text: &str) -> Option<String> {
     let cause = lines[i + 1..]
         .iter()
         .take(8)
-        .map(|l| l.trim_start_matches(|c: char| c.is_ascii_digit() || c == ':').trim())
+        .map(|l| {
+            l.trim_start_matches(|c: char| c.is_ascii_digit() || c == ':')
+                .trim()
+        })
         .map(|l| l.trim_matches('"'))
-        .filter(|l| !l.is_empty() && !l.starts_with("Caused by") && !l.starts_with("Stack backtrace"))
+        .filter(|l| {
+            !l.is_empty() && !l.starts_with("Caused by") && !l.starts_with("Stack backtrace")
+        })
         .next_back()
         .unwrap_or("");
     Some(if cause.is_empty() {
@@ -213,7 +218,9 @@ pub fn flash_overflow(text: &str) -> Option<String> {
         .find(|l| l.contains("will not fit in region"))
         .map(|l| {
             // Drop the tool prefix ("rust-lld: error: ") — the card says it.
-            l.rsplit_once("error: ").map_or(l, |(_, rest)| rest).to_owned()
+            l.rsplit_once("error: ")
+                .map_or(l, |(_, rest)| rest)
+                .to_owned()
         })
 }
 
@@ -389,7 +396,10 @@ mod tests {
         assert!(detail.starts_with("probe-rs-0.31.0"), "{detail}");
         assert!(detail.contains("mux.rs:97:13"), "{detail}");
         assert!(detail.contains("entered unreachable code"), "{detail}");
-        assert!(!detail.contains("index.crates.io"), "registry noise:\n{detail}");
+        assert!(
+            !detail.contains("index.crates.io"),
+            "registry noise:\n{detail}"
+        );
 
         let msg = probe_rs_panic_message(&detail);
         let (hint, body) = parse(&msg).expect("tagged");
@@ -421,7 +431,10 @@ mod tests {
         // A different open failure still gets the generic checklist.
         let other = probe_open_failure("Failed to open probe: device busy").expect("detected");
         let generic = probe_open_message(&other);
-        assert!(generic.contains("Another program is holding it"), "{generic}");
+        assert!(
+            generic.contains("Another program is holding it"),
+            "{generic}"
+        );
         assert!(!generic.contains("libusbK"), "{generic}");
 
         // "no probe found" is a different problem and must not match.

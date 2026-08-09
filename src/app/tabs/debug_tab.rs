@@ -948,10 +948,9 @@ fn breakpoint_pane(
                                     // the panel width (the side-panel feedback
                                     // noted at the pane row below). Full text
                                     // stays on hover.
-                                    let mut text =
-                                        egui::RichText::new(short_loc(&label, loc_max))
-                                            .size(10.5)
-                                            .monospace();
+                                    let mut text = egui::RichText::new(short_loc(&label, loc_max))
+                                        .size(10.5)
+                                        .monospace();
                                     if unarmed {
                                         text = text.color(UNARMED_GREY).strikethrough();
                                     } else if here {

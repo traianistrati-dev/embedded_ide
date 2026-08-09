@@ -157,7 +157,10 @@ pub fn show_rtt_tab(
                     format!(
                         "{} {}",
                         ph::X_CIRCLE,
-                        crate::failure_hint::strip(e).lines().next().unwrap_or("error")
+                        crate::failure_hint::strip(e)
+                            .lines()
+                            .next()
+                            .unwrap_or("error")
                     ),
                     egui::Color32::from_rgb(230, 90, 80),
                 ),

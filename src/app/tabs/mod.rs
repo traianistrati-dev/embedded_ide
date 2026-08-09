@@ -122,9 +122,8 @@ pub(crate) fn probe_selector_ui_with(
         );
     }
 
-    let mut scan = egui::Button::new(
-        egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5),
-    );
+    let mut scan =
+        egui::Button::new(egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5));
     if scan_w > 0.0 {
         scan = scan.min_size(egui::vec2(scan_w, ui.spacing().interact_size.y));
     }

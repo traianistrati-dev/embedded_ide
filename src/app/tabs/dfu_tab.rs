@@ -302,7 +302,6 @@ pub fn show_dfu_tab(
         }
     }
 
-
     // The old per-programmer guidance line lived here; it is part of the Info
     // panel now (it explained the DFU/SWD split, which the table covers).
     let _ = &sel_kind;
@@ -814,7 +813,12 @@ pub fn show_dfu_tab(
                 } else {
                     egui::Color32::from_rgb(175, 180, 192) // grey   — normal output
                 };
-                ui.label(egui::RichText::new(line).size(10.5).monospace().color(color));
+                ui.label(
+                    egui::RichText::new(line)
+                        .size(10.5)
+                        .monospace()
+                        .color(color),
+                );
             }
         });
 }
@@ -879,9 +883,11 @@ fn flash_button(
     );
     match reason {
         Some(r) => {
-            resp.on_hover_text(format!("{what} can't run right now — click for details.\n\n{r}"))
-                .clicked()
-                .then(|| open_blocked_dialog(ui, what, r));
+            resp.on_hover_text(format!(
+                "{what} can't run right now — click for details.\n\n{r}"
+            ))
+            .clicked()
+            .then(|| open_blocked_dialog(ui, what, r));
             false
         }
         None => resp.on_hover_text(hover).clicked(),
@@ -980,8 +986,11 @@ fn split_row(
     }
     if right_w > 0.0 {
         let x = row.min.x + left_w + gap * 0.5;
-        ui.painter()
-            .vline(x, row.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+        ui.painter().vline(
+            x,
+            row.y_range(),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        );
         let right_rect = egui::Rect::from_min_size(
             egui::pos2(row.min.x + left_w + gap, row.min.y),
             egui::vec2(right_w, ROW_H),
@@ -1156,16 +1165,17 @@ fn flash_info_panel(ui: &mut egui::Ui, selected: Option<&dfu::ProgrammerInfo>) {
         let total = ui.available_width().max(240.0);
         let w_aspect = (total * 0.17).clamp(80.0, 190.0);
         let w_col = ((total - w_aspect - 28.0) * 0.5).max(90.0);
-        let cell = |ui: &mut egui::Ui, w: f32, text: &str, rich: fn(egui::RichText) -> egui::RichText| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(w, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_width(w);
-                    ui.add(egui::Label::new(rich(egui::RichText::new(text).size(10.5))).wrap());
-                },
-            );
-        };
+        let cell =
+            |ui: &mut egui::Ui, w: f32, text: &str, rich: fn(egui::RichText) -> egui::RichText| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(w, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(w);
+                        ui.add(egui::Label::new(rich(egui::RichText::new(text).size(10.5))).wrap());
+                    },
+                );
+            };
         let head = |t: egui::RichText| t.strong().color(egui::Color32::from_rgb(200, 210, 230));
         let body = |t: egui::RichText| t.color(egui::Color32::from_gray(195));
         let aspect = |t: egui::RichText| t.color(egui::Color32::from_gray(150));

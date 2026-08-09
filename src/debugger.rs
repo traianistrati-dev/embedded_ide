@@ -1372,7 +1372,9 @@ mod tests {
     fn progress_updates_render_message_and_percent() {
         let ev = |body: Value| json!({"event": "progressUpdate", "body": body});
         assert_eq!(
-            progress_text(&ev(json!({"message": "Erasing sectors", "percentage": 41.7}))),
+            progress_text(&ev(
+                json!({"message": "Erasing sectors", "percentage": 41.7})
+            )),
             Some("Erasing sectors · 42%".to_owned())
         );
         assert_eq!(

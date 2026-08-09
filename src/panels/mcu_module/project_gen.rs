@@ -645,9 +645,7 @@ const DEBUG_BUILD_ABSENT: &str = "absent";
 pub fn ensure_debug_build(cargo_toml: &str, enabled: bool) -> String {
     let mut lines: Vec<String> = cargo_toml.lines().map(str::to_owned).collect();
     // Bounds of the `[profile.release]` body (exclusive end).
-    let header = lines
-        .iter()
-        .position(|l| l.trim() == "[profile.release]");
+    let header = lines.iter().position(|l| l.trim() == "[profile.release]");
     let (body_start, body_end) = match header {
         Some(h) => {
             let end = lines
@@ -672,7 +670,9 @@ pub fn ensure_debug_build(cargo_toml: &str, enabled: bool) -> String {
 
     let mut body: Vec<String> = lines[body_start..body_end].to_vec();
     for (key, debug_value) in DEBUG_BUILD_KEYS {
-        let at = body.iter().position(|l| line_key(l).as_deref() == Some(key));
+        let at = body
+            .iter()
+            .position(|l| line_key(l).as_deref() == Some(key));
         match (at, enabled) {
             // Present: override it (parking the original) or restore it.
             (Some(i), true) => {
@@ -705,7 +705,10 @@ pub fn ensure_debug_build(cargo_toml: &str, enabled: bool) -> String {
     // Keys this toggle no longer manages: hand them back whatever the toggle's
     // state, so an older project stops carrying an override nothing maintains.
     for key in DEBUG_BUILD_LEGACY_KEYS {
-        let Some(i) = body.iter().position(|l| line_key(l).as_deref() == Some(key)) else {
+        let Some(i) = body
+            .iter()
+            .position(|l| line_key(l).as_deref() == Some(key))
+        else {
             continue;
         };
         match tagged_original(&body[i]) {
