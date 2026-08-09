@@ -6,12 +6,62 @@
 //! to SPI2 SCK/MOSI/MISO/NSS) shows a single chip with a ▾ menu to pick the
 //! signal, instead of repeating the pin once per signal. This is the mirror of
 //! choosing a function on a pin in the Pins tab.
+//!
+//! Two rules shape the layout, both about spending pins wisely:
+//!
+//! * Categories are split over two columns by [`Complexity`] — single-pin
+//!   functions on the left (where you *spend* pins), multi-pin protocols on the
+//!   right (where you *invest* them) — and every group starts collapsed, so the
+//!   whole chip fits on one screen as a list of group headers.
+//! * Inside a group the pins are ordered by [`pin_cost`]: a pin that can do
+//!   nothing but GPIO is the cheapest one to burn on an LED, while a pin that
+//!   also carries USART/SPI/I2C is a scarce resource. Cheap pins come first and
+//!   are outlined; expensive ones are faded.
 
 use crate::panels::mcu_module::Mcu;
 use crate::panels::mcu_module::Pin;
 use crate::panels::mcu_module::PinFunction;
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Outline of a pin that carries no peripheral beyond GPIO — the one to spend.
+const FREE_PIN: egui::Color32 = egui::Color32::from_rgb(80, 195, 120);
+/// Text colour of a chip by cost tier: free, shared, scarce.
+const TXT_FREE: egui::Color32 = egui::Color32::from_rgb(225, 225, 235);
+const TXT_SHARED: egui::Color32 = egui::Color32::from_rgb(170, 170, 180);
+const TXT_SCARCE: egui::Color32 = egui::Color32::from_rgb(118, 118, 130);
+/// A pin serving this many other categories is treated as scarce.
+const SCARCE_AT: usize = 3;
+
+/// How much of the chip a peripheral ties up, and therefore which column it
+/// lives in: a single-pin function you can spend freely, or a multi-pin
+/// protocol whose pins have to be picked together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Complexity {
+    /// One pin, one job — GPIO, ADC, PWM, MCO.
+    Simple,
+    /// A protocol spread over several pins — USART, SPI, I2C, USB, CAN, SWD.
+    Complex,
+}
+
+/// One row of the ordered category table.
+struct CategoryDef {
+    name: &'static str,
+    rgb: (u8, u8, u8),
+    complexity: Complexity,
+    /// "Is this function mine?"
+    pred: fn(&PinFunction) -> bool,
+}
+
+impl CategoryDef {
+    /// `true` for the two plain GPIO rows. They never count towards a pin's
+    /// cost: every pin does GPIO, so GPIO is never the capability given up.
+    /// Derived from `pred` so adding a category can't forget to update this.
+    fn is_gpio(&self) -> bool {
+        (self.pred)(&PinFunction::GpioInput) || (self.pred)(&PinFunction::GpioOutput)
+    }
+}
 
 /// One signal a pin can take inside a category (e.g. "SPI2  SCK").
 struct PinOption {
@@ -26,6 +76,9 @@ struct PinOption {
 struct PinEntry {
     pin_num: usize,
     pin_name: String,
+    /// How many *other* peripheral categories this pin could serve — the
+    /// versatility given up by spending it here. 0 = GPIO-only, see [`pin_cost`].
+    cost: usize,
     options: Vec<PinOption>,
 }
 
@@ -40,6 +93,7 @@ impl PinEntry {
 struct CategoryView {
     name: &'static str,
     color: egui::Color32,
+    complexity: Complexity,
     pins: Vec<PinEntry>,
 }
 
@@ -73,6 +127,14 @@ pub fn show_peripherals_tab(
     // (pin_num, func) to apply after the UI pass (Unset = clear the pin).
     let mut pending: Option<(usize, PinFunction)> = None;
 
+    // Every group starts closed each time the app opens. egui persists the
+    // open/closed state to disk, so without this a session that ended with ten
+    // groups expanded would come back as a wall of chips. Only the FIRST render
+    // of the tab in this run resets — reopening the tab later keeps whatever the
+    // user expanded.
+    static FIRST_RENDER: AtomicBool = AtomicBool::new(true);
+    let collapse_all = FIRST_RENDER.swap(false, Ordering::Relaxed);
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.add_space(4.0);
         ui.label(
@@ -84,11 +146,25 @@ pub fn show_peripherals_tab(
             .size(11.0)
             .color(egui::Color32::from_rgb(130, 130, 145)),
         );
-        ui.add_space(2.0);
+        ui.add_space(3.0);
+        legend(ui);
+        ui.add_space(6.0);
 
-        for cat in &categories {
-            category_row(ui, cat, &mut pending);
-        }
+        // Simple functions left, protocols right. Each column is its own
+        // vertical stack, so expanding a group grows only that side instead of
+        // shifting everything below it.
+        ui.columns(2, |cols| {
+            for (col, kind) in cols
+                .iter_mut()
+                .zip([Complexity::Simple, Complexity::Complex])
+            {
+                column_title(col, kind);
+                for cat in categories.iter().filter(|c| c.complexity == kind) {
+                    category_row(col, cat, collapse_all, &mut pending);
+                }
+            }
+        });
+        ui.add_space(6.0);
     });
 
     if let Some((pin_num, func)) = pending {
@@ -97,59 +173,161 @@ pub fn show_peripherals_tab(
     None
 }
 
+/// The heading above each of the two category columns.
+fn column_title(ui: &mut egui::Ui, kind: Complexity) {
+    let text = match kind {
+        Complexity::Simple => "SIMPLE  ·  one pin, one job",
+        Complexity::Complex => "PROTOCOLS  ·  pins picked together",
+    };
+    ui.label(
+        egui::RichText::new(text)
+            .size(10.0)
+            .color(egui::Color32::from_rgb(120, 120, 135)),
+    );
+}
+
+/// One-line key for the pin-cost colouring, so the outline and the fading are
+/// readable without hovering a chip.
+fn legend(ui: &mut egui::Ui) {
+    let dim = egui::Color32::from_rgb(120, 120, 135);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Painted, not a glyph: a box character would come out as tofu in the
+        // UI font. This is the same outline the free chips wear.
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.0, FREE_PIN),
+            egui::StrokeKind::Inside,
+        );
+        ui.label(
+            egui::RichText::new("GPIO-only pin — cheapest to spend")
+                .size(10.0)
+                .color(dim),
+        );
+        ui.label(egui::RichText::new("·").size(10.0).color(dim));
+        ui.label(
+            egui::RichText::new(format!(
+                "faded = also serves {SCARCE_AT}+ other peripherals — keep it free"
+            ))
+            .size(10.0)
+            .color(TXT_SCARCE),
+        );
+    });
+}
+
+/// The ordered category table. Built per call (fn-pointer predicates), then
+/// shared by [`build_categories`] and [`pin_cost`] so the cost metric and the
+/// grouping can never drift apart.
+fn category_defs() -> Vec<CategoryDef> {
+    use Complexity::{Complex, Simple};
+    // Rule of thumb for `complexity`: it mirrors `PinFunction::is_bus()` — a
+    // protocol whose pins must be chosen as a set — plus SWD, which is equally
+    // multi-pin but isn't a data bus.
+    vec![
+        CategoryDef {
+            name: "GPIO Output",
+            rgb: (200, 120, 50),
+            complexity: Simple,
+            pred: |f| matches!(f, PinFunction::GpioOutput),
+        },
+        CategoryDef {
+            name: "GPIO Input",
+            rgb: (70, 160, 70),
+            complexity: Simple,
+            pred: |f| matches!(f, PinFunction::GpioInput),
+        },
+        CategoryDef {
+            name: "ADC",
+            rgb: (150, 70, 200),
+            complexity: Simple,
+            pred: |f| matches!(f, PinFunction::AdcChannel { .. }),
+        },
+        CategoryDef {
+            name: "Timers / PWM",
+            rgb: (190, 170, 30),
+            complexity: Simple,
+            pred: |f| matches!(f, PinFunction::TimerPwm { .. }),
+        },
+        CategoryDef {
+            name: "MCO / Clock",
+            rgb: (150, 150, 160),
+            complexity: Simple,
+            pred: |f| matches!(f, PinFunction::Mco),
+        },
+        CategoryDef {
+            name: "USART",
+            rgb: (50, 110, 200),
+            complexity: Complex,
+            pred: |f| {
+                matches!(
+                    f,
+                    PinFunction::UsartTx(_)
+                        | PinFunction::UsartRx(_)
+                        | PinFunction::UsartCts(_)
+                        | PinFunction::UsartRts(_)
+                        | PinFunction::UsartCk(_)
+                )
+            },
+        },
+        CategoryDef {
+            name: "SPI",
+            rgb: (30, 170, 170),
+            complexity: Complex,
+            pred: |f| {
+                matches!(
+                    f,
+                    PinFunction::SpiNss(_)
+                        | PinFunction::SpiSck(_)
+                        | PinFunction::SpiMiso(_)
+                        | PinFunction::SpiMosi(_)
+                )
+            },
+        },
+        CategoryDef {
+            name: "I2C",
+            rgb: (60, 180, 100),
+            complexity: Complex,
+            pred: |f| matches!(f, PinFunction::I2cScl(_) | PinFunction::I2cSda(_)),
+        },
+        CategoryDef {
+            name: "USB",
+            rgb: (190, 50, 160),
+            complexity: Complex,
+            pred: |f| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp),
+        },
+        CategoryDef {
+            name: "CAN",
+            rgb: (200, 130, 20),
+            complexity: Complex,
+            pred: |f| matches!(f, PinFunction::CanRx | PinFunction::CanTx),
+        },
+        CategoryDef {
+            name: "SWD / Debug",
+            rgb: (190, 50, 50),
+            complexity: Complex,
+            pred: |f| matches!(f, PinFunction::SwdIo | PinFunction::SwdClk),
+        },
+    ]
+}
+
+/// How many peripheral categories *other than GPIO* this pin is able to serve.
+///
+/// Counted per category, not per signal: an ESP32-C3 pad the GPIO matrix can
+/// route to SPI2 SCK/MOSI/MISO/NSS costs 1 (one peripheral lost), not 4. `0`
+/// means the pin does nothing but GPIO — the one to burn on an LED or a button.
+fn pin_cost(pin: &Pin, defs: &[CategoryDef]) -> usize {
+    defs.iter()
+        .filter(|d| !d.is_gpio())
+        .filter(|d| pin.available_functions.iter().any(|f| (d.pred)(f)))
+        .count()
+}
+
 /// Build the per-category view from the chip's pins (available functions),
 /// grouping each pin's matching signals into a single [`PinEntry`].
 fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
-    type Pred = fn(&PinFunction) -> bool;
-    // Ordered category table: (display name, RGB, "is this function mine?").
-    let defs: &[(&'static str, (u8, u8, u8), Pred)] = &[
-        ("GPIO Output", (200, 120, 50), |f| {
-            matches!(f, PinFunction::GpioOutput)
-        }),
-        ("GPIO Input", (70, 160, 70), |f| {
-            matches!(f, PinFunction::GpioInput)
-        }),
-        ("ADC", (150, 70, 200), |f| {
-            matches!(f, PinFunction::AdcChannel { .. })
-        }),
-        ("Timers / PWM", (190, 170, 30), |f| {
-            matches!(f, PinFunction::TimerPwm { .. })
-        }),
-        ("USART", (50, 110, 200), |f| {
-            matches!(
-                f,
-                PinFunction::UsartTx(_)
-                    | PinFunction::UsartRx(_)
-                    | PinFunction::UsartCts(_)
-                    | PinFunction::UsartRts(_)
-                    | PinFunction::UsartCk(_)
-            )
-        }),
-        ("SPI", (30, 170, 170), |f| {
-            matches!(
-                f,
-                PinFunction::SpiNss(_)
-                    | PinFunction::SpiSck(_)
-                    | PinFunction::SpiMiso(_)
-                    | PinFunction::SpiMosi(_)
-            )
-        }),
-        ("I2C", (60, 180, 100), |f| {
-            matches!(f, PinFunction::I2cScl(_) | PinFunction::I2cSda(_))
-        }),
-        ("USB", (190, 50, 160), |f| {
-            matches!(f, PinFunction::UsbDm | PinFunction::UsbDp)
-        }),
-        ("CAN", (200, 130, 20), |f| {
-            matches!(f, PinFunction::CanRx | PinFunction::CanTx)
-        }),
-        ("SWD / Debug", (190, 50, 50), |f| {
-            matches!(f, PinFunction::SwdIo | PinFunction::SwdClk)
-        }),
-        ("MCO / Clock", (150, 150, 160), |f| {
-            matches!(f, PinFunction::Mco)
-        }),
-    ];
+    let defs = category_defs();
 
     let pins: Vec<&Pin> = mcu.iter_all_pins().filter(|p| !p.reserved).collect();
 
@@ -167,7 +345,8 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
     };
 
     defs.iter()
-        .filter_map(|(name, (r, g, b), pred)| {
+        .filter_map(|def| {
+            let (name, (r, g, b), pred) = (def.name, def.rgb, def.pred);
             let mut pin_entries = Vec::new();
             for pin in &pins {
                 // A pin already configured for a function belongs to a single
@@ -198,16 +377,22 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
                     pin_entries.push(PinEntry {
                         pin_num: pin.number,
                         pin_name: pin.name.clone(),
+                        cost: pin_cost(pin, &defs),
                         options,
                     });
                 }
             }
+            // Cheapest pins first: the ones you can spend without losing a
+            // peripheral. Pin number breaks ties, so the order is stable.
+            pin_entries.sort_by_key(|p| (p.cost, p.pin_num));
+
             if pin_entries.is_empty() {
                 None
             } else {
                 Some(CategoryView {
                     name,
-                    color: egui::Color32::from_rgb(*r, *g, *b),
+                    color: egui::Color32::from_rgb(r, g, b),
+                    complexity: def.complexity,
                     pins: pin_entries,
                 })
             }
@@ -225,42 +410,57 @@ fn click_action(pin_num: usize, opt: &PinOption) -> (usize, PinFunction) {
     }
 }
 
-/// Draw one category: header (swatch + name + count) and one chip per pin.
-fn category_row(ui: &mut egui::Ui, cat: &CategoryView, pending: &mut Option<(usize, PinFunction)>) {
+/// Draw one category as a collapsed-by-default section: header (swatch + name +
+/// count) always visible, one chip per pin in the body.
+fn category_row(
+    ui: &mut egui::Ui,
+    cat: &CategoryView,
+    collapse: bool,
+    pending: &mut Option<(usize, PinFunction)>,
+) {
     let assigned = cat.pins.iter().filter(|p| p.assigned().is_some()).count();
     let total = cat.pins.len();
 
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 2.0, cat.color);
-        ui.label(
-            egui::RichText::new(cat.name)
-                .size(13.0)
-                .strong()
-                .color(cat.color),
-        );
+    ui.add_space(4.0);
+    let id = ui.make_persistent_id(("periph_cat", cat.name));
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if collapse {
+        state.set_open(false);
+    }
+    state
+        .show_header(ui, |ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, cat.color);
+            ui.label(
+                egui::RichText::new(cat.name)
+                    .size(13.0)
+                    .strong()
+                    .color(cat.color),
+            );
 
-        let badge = if assigned > 0 {
-            format!("{assigned}/{total} pins")
-        } else {
-            format!("{total} pins")
-        };
-        ui.label(
-            egui::RichText::new(badge)
-                .size(11.0)
-                .color(egui::Color32::from_rgb(150, 150, 160)),
-        );
-    });
-
-    // ── One chip per pin; assigned ones highlighted ──
-    ui.horizontal_wrapped(|ui| {
-        for pe in &cat.pins {
-            pin_chip(ui, cat.color, pe, pending);
-        }
-    });
-
-    ui.add_space(2.0);
+            // With the group closed this badge is the only clue about what is
+            // already wired up, so it takes the category colour once something
+            // is assigned.
+            let (badge, badge_col) = if assigned > 0 {
+                (format!("{assigned}/{total} pins"), cat.color)
+            } else {
+                (
+                    format!("{total} pins"),
+                    egui::Color32::from_rgb(150, 150, 160),
+                )
+            };
+            ui.label(egui::RichText::new(badge).size(11.0).color(badge_col));
+        })
+        .body(|ui| {
+            // ── One chip per pin; assigned ones highlighted ──
+            ui.horizontal_wrapped(|ui| {
+                for pe in &cat.pins {
+                    pin_chip(ui, cat.color, pe, pending);
+                }
+            });
+            ui.add_space(2.0);
+        });
     ui.separator();
 }
 
@@ -273,23 +473,27 @@ fn pin_chip(
     pending: &mut Option<(usize, PinFunction)>,
 ) {
     let assigned = pe.assigned();
-    let base = format!("pin{} {}", pe.pin_num, pe.pin_name);
+    // The port name is what you configure against; the physical pin number only
+    // matters when soldering, so it lives in the tooltip. That keeps the chip
+    // narrow enough for two per row inside a half-width column.
+    let base = pe.pin_name.clone();
 
-    let text_col = if assigned.is_some() {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_rgb(170, 170, 180)
-    };
+    let text_col = chip_text(pe.cost, assigned.is_some());
+    let stroke = chip_stroke(pe.cost, assigned.is_some());
 
     if pe.options.len() == 1 {
         // Single role — direct toggle, with the signal shown inline.
         let opt = &pe.options[0];
         let label = format!("{base} · {}", opt.label);
         let btn = egui::Button::new(egui::RichText::new(label).size(11.0).color(text_col))
-            .fill(chip_fill(color, opt.assigned));
+            .fill(chip_fill(color, opt.assigned))
+            .stroke(stroke);
         let resp = ui.add(btn).on_hover_text(format!(
-            "{}\nclick to {}",
+            "{} (pin {})\n{}\n{}\nclick to {}",
+            pe.pin_name,
+            pe.pin_num,
             opt.label,
+            cost_note(pe.cost),
             if opt.assigned { "unassign" } else { "assign" }
         ));
         if resp.clicked() {
@@ -304,8 +508,10 @@ fn pin_chip(
         None => format!("{base} {}", ph::CARET_DOWN),
     };
     let title = egui::RichText::new(label).size(11.0).color(text_col);
-    let button = egui::Button::new(title).fill(chip_fill(color, assigned.is_some()));
-    egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+    let button = egui::Button::new(title)
+        .fill(chip_fill(color, assigned.is_some()))
+        .stroke(stroke);
+    let (resp, _) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
         ui.set_min_width(150.0);
         for opt in &pe.options {
             let mark = if opt.assigned {
@@ -334,6 +540,12 @@ fn pin_chip(
             }
         }
     });
+    resp.on_hover_text(format!(
+        "{} (pin {})\n{}\npick a signal",
+        pe.pin_name,
+        pe.pin_num,
+        cost_note(pe.cost)
+    ));
 }
 
 /// Chip background: category colour when assigned, neutral otherwise.
@@ -342,6 +554,40 @@ fn chip_fill(color: egui::Color32, assigned: bool) -> egui::Color32 {
         color
     } else {
         egui::Color32::from_rgb(45, 45, 52)
+    }
+}
+
+/// Chip label colour by [`pin_cost`]: bright for a pin that costs nothing to
+/// spend, faded for one that would take a scarce peripheral with it. An
+/// assigned chip is filled with the category colour, so it stays white.
+fn chip_text(cost: usize, assigned: bool) -> egui::Color32 {
+    if assigned {
+        egui::Color32::WHITE
+    } else if cost == 0 {
+        TXT_FREE
+    } else if cost >= SCARCE_AT {
+        TXT_SCARCE
+    } else {
+        TXT_SHARED
+    }
+}
+
+/// Outline only the free (GPIO-only) pins, and only while unassigned — an
+/// assigned chip is already a solid block of category colour.
+fn chip_stroke(cost: usize, assigned: bool) -> egui::Stroke {
+    if cost == 0 && !assigned {
+        egui::Stroke::new(1.0, FREE_PIN)
+    } else {
+        egui::Stroke::NONE
+    }
+}
+
+/// Tooltip line explaining what spending this pin costs.
+fn cost_note(cost: usize) -> String {
+    match cost {
+        0 => "GPIO-only pin — cheapest to spend".to_string(),
+        1 => "also serves 1 other peripheral".to_string(),
+        n => format!("also serves {n} other peripherals"),
     }
 }
 
@@ -496,6 +742,115 @@ mod tests {
         assert_eq!(spi.pins.len(), 1, "taken signal hidden on the other pin");
         assert_eq!(spi.pins[0].pin_num, 1);
         assert!(spi.pins[0].assigned().is_some());
+    }
+
+    /// Every category lands in exactly one column, and the split is the one the
+    /// tab promises: single-pin functions left, multi-pin protocols right.
+    #[test]
+    fn every_category_has_a_column() {
+        for def in category_defs() {
+            let expected = match def.name {
+                "GPIO Output" | "GPIO Input" | "ADC" | "Timers / PWM" | "MCO / Clock" => {
+                    Complexity::Simple
+                }
+                _ => Complexity::Complex,
+            };
+            assert_eq!(def.complexity, expected, "wrong column for {}", def.name);
+        }
+        // The complex column is exactly the buses plus SWD.
+        let complex: Vec<_> = category_defs()
+            .into_iter()
+            .filter(|d| d.complexity == Complexity::Complex)
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(
+            complex,
+            ["USART", "SPI", "I2C", "USB", "CAN", "SWD / Debug"]
+        );
+    }
+
+    /// Cost counts *categories*, not signals: a pad routable to four SPI signals
+    /// gives up one peripheral, not four. GPIO never counts.
+    #[test]
+    fn pin_cost_counts_categories_not_signals() {
+        let defs = category_defs();
+
+        let gpio_only = Pin::new(1, "PC13")
+            .with_functions(vec![PinFunction::GpioInput, PinFunction::GpioOutput]);
+        assert_eq!(pin_cost(&gpio_only, &defs), 0);
+
+        let spi_matrix = Pin::new(2, "GPIO21").with_functions(vec![
+            PinFunction::GpioOutput,
+            PinFunction::SpiSck(2),
+            PinFunction::SpiMosi(2),
+            PinFunction::SpiMiso(2),
+            PinFunction::SpiNss(2),
+        ]);
+        assert_eq!(
+            pin_cost(&spi_matrix, &defs),
+            1,
+            "4 SPI signals = 1 category"
+        );
+
+        let busy = Pin::new(3, "PA9").with_functions(vec![
+            PinFunction::GpioOutput,
+            PinFunction::UsartTx(1),
+            PinFunction::TimerPwm {
+                timer: 1,
+                channel: 2,
+            },
+            PinFunction::AdcChannel { adc: 1, channel: 9 },
+        ]);
+        assert_eq!(pin_cost(&busy, &defs), 3, "USART + PWM + ADC");
+    }
+
+    /// Inside a group the cheapest pins come first, ties broken by pin number,
+    /// so the pin you should burn on an LED is the one you reach first.
+    #[test]
+    fn pins_sorted_cheapest_first() {
+        let mcu = Mcu::new(
+            "t".into(),
+            "stm32f1".into(),
+            ToolchainKind::RustEmbedded,
+            vec![],
+            vec![],
+            vec![
+                // Costly: GPIO + USART + timer.
+                Pin::new(1, "PA9").with_functions(vec![
+                    PinFunction::GpioOutput,
+                    PinFunction::UsartTx(1),
+                    PinFunction::TimerPwm {
+                        timer: 1,
+                        channel: 2,
+                    },
+                ]),
+                // Free, but a higher pin number than the other free one.
+                Pin::new(9, "PC14").with_functions(vec![PinFunction::GpioOutput]),
+                // Free.
+                Pin::new(5, "PC13").with_functions(vec![PinFunction::GpioOutput]),
+            ],
+            vec![],
+        );
+
+        let cats = build_categories(&mcu);
+        let out = category(&cats, "GPIO Output");
+        let order: Vec<_> = out.pins.iter().map(|p| p.pin_num).collect();
+        assert_eq!(order, [5, 9, 1], "free pins first, then by pin number");
+        assert_eq!(out.pins[0].cost, 0);
+        assert_eq!(out.pins[2].cost, 2);
+    }
+
+    #[test]
+    fn chip_styling_follows_cost() {
+        // Free pin: bright text + green outline.
+        assert_eq!(chip_text(0, false), TXT_FREE);
+        assert_eq!(chip_stroke(0, false).color, FREE_PIN);
+        // Scarce pin: faded, no outline.
+        assert_eq!(chip_text(SCARCE_AT, false), TXT_SCARCE);
+        assert_eq!(chip_stroke(SCARCE_AT, false), egui::Stroke::NONE);
+        // Assigned chips are solid category colour — white text, no outline.
+        assert_eq!(chip_text(0, true), egui::Color32::WHITE);
+        assert_eq!(chip_stroke(0, true), egui::Stroke::NONE);
     }
 
     #[test]
