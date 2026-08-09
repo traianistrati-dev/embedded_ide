@@ -11,13 +11,18 @@ use eframe::egui;
 
 /// Breakpoint dot colour (the classic red).
 const BP_FILL: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
-const BP_RADIUS: f32 = 4.0;
-/// Band tint over a line that holds a breakpoint: yellow at 85 % transparency
-/// (alpha 38/255). The band lands OVER the code — like every other editor band
-/// (`show_line_band`) — so it has to stay a tint; an opaque fill would hide the
-/// line it marks.
-const BP_BAND_RGB: (u8, u8, u8) = (235, 205, 60);
-const BP_BAND_ALPHA: u8 = 38;
+/// Dot diameter as a share of the line's height — it reads as "this whole line",
+/// which a small fixed dot did not. Under 1.0 so it keeps clear of the rows
+/// above and below and stays mostly inside the gutter.
+const BP_DOT_SHARE: f32 = 0.80;
+/// The hover ghost's radius stays small: it previews the spot, it doesn't claim
+/// the line yet.
+const BP_GHOST_RADIUS: f32 = 4.0;
+/// A breakpoint line is underlined instead of tinted: one rule along the bottom
+/// of the row, dark red at 50 % (premultiplied — `from_rgba_unmultiplied` is not
+/// const). An edge leaves the syntax colours alone, which a band never can.
+const BP_EDGE: egui::Color32 = egui::Color32::from_rgba_premultiplied(70, 0, 0, 128);
+const BP_EDGE_W: f32 = 1.5;
 
 /// The workspace-relative path breakpoints are keyed by — only Rust sources
 /// can hold one (a breakpoint in Cargo.toml means nothing to the debugger).
@@ -57,15 +62,6 @@ impl AppIde {
         // The dot sits to the RIGHT of the line number, on the gutter/code
         // divider (where the diff marks live at `gp.x - 7`).
         let dot_x = gp.x - 6.0;
-        // Clickable strip: the number column PLUS the dot itself (out to
-        // `gp.x - 3`), so clicking the red dot toggles the breakpoint — not just
-        // the digits. The diff bars underneath are hover-only now (their
-        // click-to-revert was removed), so this overlap is safe.
-        let strip = egui::Rect::from_min_max(
-            egui::pos2(clip.left(), clip.top()),
-            egui::pos2(gp.x - 3.0, clip.bottom()),
-        );
-
         // Char index of every line start — line → y via the galley.
         let starts: Vec<usize> = {
             let mut v = vec![0usize];
@@ -82,19 +78,26 @@ impl AppIde {
             Some((gp.y + loc.min.y, gp.y + loc.max.y))
         };
 
+        // Clickable strip: the number column PLUS the dot itself, so clicking
+        // the red dot toggles the breakpoint — not just the digits. The dot is
+        // line-height wide now and pokes a couple of pixels past the gutter, so
+        // the strip follows it instead of a fixed `gp.x - 3`. The diff bars
+        // underneath are hover-only (their click-to-revert was removed), so the
+        // overlap is safe.
+        let dot_r = y_range_of(0)
+            .map(|(t, b)| (b - t) * 0.5 * BP_DOT_SHARE)
+            .unwrap_or(BP_GHOST_RADIUS);
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(clip.left(), clip.top()),
+            egui::pos2(dot_x + dot_r, clip.bottom()),
+        );
+
         let painter = ui.painter().with_clip_rect(clip);
 
         // ── Existing breakpoints ──────────────────────────────────────────────
-        // Each one gets the dot plus a translucent yellow band across its line,
-        // so a breakpoint is visible while reading the code, not only from the
-        // gutter column.
+        // A line-height dot in the gutter, and the line underlined rather than
+        // tinted — so the code keeps its own colours.
         if let Some(set) = self.breakpoints.get(&rel) {
-            let band = egui::Color32::from_rgba_unmultiplied(
-                BP_BAND_RGB.0,
-                BP_BAND_RGB.1,
-                BP_BAND_RGB.2,
-                BP_BAND_ALPHA,
-            );
             for &line in set {
                 let Some((top, bot)) = y_range_of(line.saturating_sub(1) as usize) else {
                     continue; // line beyond the current text — keep, don't draw
@@ -103,17 +106,15 @@ impl AppIde {
                 if cy < clip.top() || cy > clip.bottom() {
                     continue;
                 }
-                // Starts right of the gutter strip so the line numbers stay
-                // legible, and runs to the editor's right edge.
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(dot_x + BP_RADIUS, top),
-                        egui::pos2(clip.right(), bot),
-                    ),
-                    0.0,
-                    band,
+                let r = (bot - top) * 0.5 * BP_DOT_SHARE;
+                // The rule starts clear of the dot and runs to the editor's
+                // right edge; half a stroke inside the row so it isn't clipped.
+                painter.hline(
+                    (dot_x + r + 1.0)..=clip.right(),
+                    bot - BP_EDGE_W * 0.5,
+                    egui::Stroke::new(BP_EDGE_W, BP_EDGE),
                 );
-                painter.circle_filled(egui::pos2(dot_x, cy), BP_RADIUS, BP_FILL);
+                painter.circle_filled(egui::pos2(dot_x, cy), r, BP_FILL);
             }
         }
 
@@ -148,7 +149,7 @@ impl AppIde {
                 if let Some((top, bot)) = y_range_of(line as usize - 1) {
                     painter.circle_stroke(
                         egui::pos2(dot_x, (top + bot) * 0.5),
-                        BP_RADIUS,
+                        BP_GHOST_RADIUS,
                         egui::Stroke::new(1.2, BP_FILL.gamma_multiply(0.6)),
                     );
                 }
