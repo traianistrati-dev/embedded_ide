@@ -58,16 +58,84 @@ pub fn show_tools_tab(
     ui.add_space(2.0);
     ui.separator();
 
-    // ── Tools grid ────────────────────────────────────────────────────────────
-    let available_h = ui.available_height();
-    // Reserve ~30 % of the panel for the log area (min 60 px, max 110 px)
-    let log_h = (available_h * 0.30).clamp(60.0, 110.0);
-    let grid_h = (available_h - log_h - 20.0).max(40.0);
+    // ── Grid on the left, log on the right ────────────────────────────────────
+    // Side by side rather than stacked: the log is a running commentary on the
+    // rows above it, and reading a 110 px strip while the list scrolls away was
+    // the worse half of the deal.
+    //
+    // Both halves are child uis at FIXED rects (`new_child` + `set_clip_rect`),
+    // the pattern from `debug_tab`'s pane row: a child's min_rect never feeds
+    // back into the parent, so nothing here can re-widen the Code Editor side
+    // panel this tab lives inside.
+    let avail_h = ui.available_height();
+    let total_w = ui.available_width();
+    let gap = 8.0;
+    // The split follows the TABLE's own width, measured last frame from the
+    // scroll area's content size: the log then starts right where the rows end,
+    // instead of after a fixed fraction that leaves a gap on a wide panel and
+    // cuts the Action column off on a narrow one. Clamped both ways so neither
+    // half can be squeezed out; one frame of lag on a resize, self-correcting.
+    /// The log is not worth a column narrower than this.
+    const MIN_LOG_W: f32 = 260.0;
+    let measure_id = ui.id().with("tools_grid_width");
+    let measured: f32 = ui.data(|d| d.get_temp(measure_id)).unwrap_or(0.0);
+    let table_w = if measured > 0.0 {
+        measured
+    } else {
+        total_w * 0.62
+    };
+    // Side by side ONLY while the table fits at its natural width AND the log
+    // still gets a usable column. Otherwise the log goes back under the table:
+    // squeezing the split instead would cut the Action column off and read as
+    // the log covering the list.
+    let side_by_side = total_w >= table_w + gap + MIN_LOG_W;
+    let (row, _) = ui.allocate_exact_size(egui::vec2(total_w, avail_h), egui::Sense::hover());
+    let (grid_rect, log_rect) = if side_by_side {
+        let gw = table_w;
+        (
+            egui::Rect::from_min_size(row.min, egui::vec2(gw, avail_h)),
+            egui::Rect::from_min_size(
+                egui::pos2(row.left() + gw + gap, row.top()),
+                egui::vec2(total_w - gw - gap, avail_h),
+            ),
+        )
+    } else {
+        let log_h = (avail_h * 0.32).clamp(70.0, 160.0);
+        let grid_h = (avail_h - log_h - gap).max(40.0);
+        (
+            egui::Rect::from_min_size(row.min, egui::vec2(total_w, grid_h)),
+            egui::Rect::from_min_size(
+                egui::pos2(row.left(), row.top() + grid_h + gap),
+                egui::vec2(total_w, log_h),
+            ),
+        )
+    };
+    let child = |ui: &mut egui::Ui, rect: egui::Rect| -> egui::Ui {
+        let mut c = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        c.set_clip_rect(rect.intersect(ui.clip_rect()));
+        c
+    };
+    let sep = ui.visuals().widgets.noninteractive.bg_stroke;
+    if side_by_side {
+        ui.painter()
+            .vline(grid_rect.right() + gap * 0.5, row.y_range(), sep);
+    } else {
+        ui.painter()
+            .hline(row.x_range(), grid_rect.bottom() + gap * 0.5, sep);
+    }
 
-    egui::ScrollArea::vertical()
+    let grid_ui = &mut child(ui, grid_rect);
+    // Scrolls BOTH ways: the five columns no longer have the whole panel, and a
+    // grid that can't scroll sideways would demand the width instead.
+    let grid_out = egui::ScrollArea::both()
         .id_salt("tools_grid_scroll")
-        .max_height(grid_h)
-        .show(ui, |ui| {
+        .max_height(grid_rect.height())
+        .auto_shrink([false, false])
+        .show(grid_ui, |ui| {
             egui::Grid::new("tools_grid")
                 .num_columns(5)
                 .striped(true)
@@ -221,14 +289,18 @@ pub fn show_tools_tab(
                 });
         });
 
-    // ── Log area ──────────────────────────────────────────────────────────────
-    ui.separator();
+    // What the table actually needed, for next frame's split (plus the room a
+    // vertical scrollbar takes, so the measurement doesn't oscillate).
+    ui.data_mut(|d| d.insert_temp(measure_id, grid_out.content_size.x + 18.0));
 
+    // ── Log area — beside the table, or under it on a narrow panel ────────────
+    let log_ui = &mut child(ui, log_rect);
     egui::ScrollArea::vertical()
         .id_salt("tools_log_scroll")
         .stick_to_bottom(true)
-        .max_height(log_h)
-        .show(ui, |ui| {
+        .max_height(log_rect.height())
+        .auto_shrink([false, false])
+        .show(log_ui, |ui| {
             if log.is_empty() {
                 ui.label(
                     egui::RichText::new(
@@ -250,11 +322,16 @@ pub fn show_tools_tab(
                 } else {
                     egui::Color32::from_rgb(175, 180, 192)
                 };
-                ui.label(
-                    egui::RichText::new(line.as_str())
-                        .monospace()
-                        .size(10.0)
-                        .color(color),
+                // Wrapped: the log is a narrow column now, and a clipped tail
+                // is exactly where the reason for a failure tends to sit.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(line.as_str())
+                            .monospace()
+                            .size(10.0)
+                            .color(color),
+                    )
+                    .wrap(),
                 );
             }
         });
