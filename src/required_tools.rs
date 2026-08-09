@@ -7,15 +7,36 @@
 //!
 //! # Tool catalog
 //!
-//! | Tool                        | Toolchain       | Auto-install |
-//! |-----------------------------|-----------------|--------------|
-//! | rustup                      | All             | No (manual)  |
-//! | rustc                       | All             | Yes          |
-//! | thumbv7m-none-eabi target   | RustEmbedded    | Yes          |
-//! | probe-rs                    | RustEmbedded    | Yes          |
-//! | riscv32imc-unknown-none-elf | EspRust         | Yes          |
-//! | rust-src component          | EspRust         | Yes          |
-//! | espflash                    | EspRust         | Yes          |
+//! | Tool                        | Toolchain    | Auto-install | Platforms |
+//! |-----------------------------|--------------|--------------|-----------|
+//! | rustup                      | All          | No (manual)  | all       |
+//! | rustc                       | All          | Yes          | all       |
+//! | git                         | All          | No (manual)  | all       |
+//! | cargo-bloat                 | All          | Yes (cargo)  | all       |
+//! | host C toolchain            | All          | Win only     | all †     |
+//! | serial port access          | All          | No (manual)  | Linux     |
+//! | thumbv7m-none-eabi target   | RustEmbedded | Yes          | all       |
+//! | probe-rs                    | RustEmbedded | Yes (cargo)  | all       |
+//! | dfu-util                    | RustEmbedded | Win + macOS  | all       |
+//! | openocd                     | RustEmbedded | Win + macOS  | all       |
+//! | objcopy                     | RustEmbedded | Yes (cargo)  | all       |
+//! | USB probe udev rules        | RustEmbedded | No (needs root) | Linux  |
+//! | riscv32imc-unknown-none-elf | EspRust      | Yes          | all       |
+//! | rust-src component          | EspRust      | Yes          | all       |
+//! | espflash                    | EspRust      | Yes (cargo)  | all       |
+//!
+//! † The host C toolchain is a different beast per platform — MSVC on Windows
+//! (file-probed, see [`MSVC_CHECK`]), `cc` from the Xcode Command Line Tools on
+//! macOS, `cc` from build-essential on Linux — so it is ONE catalog entry whose
+//! name, check and installer are chosen for the host.
+//!
+//! # Per-platform policy
+//!
+//! Auto-install is offered only where it can succeed **without root**: `cargo` /
+//! `rustup` everywhere, `winget` on Windows, `brew` on macOS. Linux package
+//! managers need root AND differ per distro (apt / dnf / pacman), so those
+//! entries are deliberately manual — a button that always fails with a sudo
+//! prompt the IDE can't answer is worse than a link that tells you the command.
 
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use eframe::egui;
@@ -248,6 +269,25 @@ impl ToolsState {
     }
 }
 
+// ── Per-platform selection ─────────────────────────────────────────────────────
+
+/// Pick the value for the host OS. Everything that is not Windows or macOS is
+/// treated as Linux — the other unixes this could run on use the same package
+/// managers and the same udev/serial-group story.
+///
+/// A plain runtime `if` rather than `#[cfg]` on every field: the catalog is
+/// built once at startup, and keeping all three variants **visible in one place**
+/// is what stops a platform from quietly losing an entry.
+fn per_os<T>(windows: T, macos: T, linux: T) -> T {
+    if cfg!(target_os = "windows") {
+        windows
+    } else if cfg!(target_os = "macos") {
+        macos
+    } else {
+        linux
+    }
+}
+
 // ── Tool catalog ───────────────────────────────────────────────────────────────
 
 pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
@@ -335,11 +375,21 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             description: "Debug probe runner — powers the Debug + RTT tabs (breakpoints, defmt logs) and SWD/JTAG flashing",
             toolchain: Some(ToolchainKind::RustEmbedded),
             severity: Severity::Feature,
-            impact: "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing. \
-                     NEWER IS NOT ALWAYS BETTER here: 0.31.0 panics inside its own USB probe \
-                     enumeration, and 0.32.0 can't open an ST-Link bound to the WinUSB driver \
-                     (\"reset not supported by WinUSB\"). 0.29.0 is the version verified to work \
-                     on such a setup: cargo install probe-rs-tools --locked --version 0.29.0",
+            // The version advice is WINDOWS-ONLY: both known-bad releases fail on
+            // Windows driver binding (WinUSB), which has no equivalent elsewhere.
+            // Repeating it on Linux/macOS would pin those users to an old release
+            // for a bug they cannot hit.
+            impact: per_os(
+                "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing. \
+                 NEWER IS NOT ALWAYS BETTER here: 0.31.0 panics inside its own USB probe \
+                 enumeration, and 0.32.0 can't open an ST-Link bound to the WinUSB driver \
+                 (\"reset not supported by WinUSB\"). 0.29.0 is the version verified to work \
+                 on such a setup: cargo install probe-rs-tools --locked --version 0.29.0",
+                "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing.",
+                "No RTT logs, on-target Debug, runtime flamegraph or probe-rs flashing. \
+                 If it reports no probe while one is plugged in, the tool is fine — \
+                 see \"USB probe udev rules\" below.",
+            ),
             check_cmd: "probe-rs",
             check_args: &["--version"],
             check_pattern: "",
@@ -353,6 +403,66 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             install_cmd: Some("cargo"),
             install_args: &["install", "probe-rs-tools", "--locked"],
             manual_url: "https://probe.rs/docs/getting-started/installation/",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "dfu-util",
+            description: "USB DFU flasher — programs an STM32 held in its ROM bootloader",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            severity: Severity::Feature,
+            impact: "The Flash tab's DFU (USB bootloader) path can't run; SWD flashing via \
+                     probe-rs is unaffected.",
+            check_cmd: "dfu-util",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: per_os(Some("winget"), Some("brew"), None),
+            install_args: per_os(
+                &["install", "--id", "dfu-util.dfu-util", "--accept-package-agreements", "--accept-source-agreements"][..],
+                &["install", "dfu-util"][..],
+                &[][..],
+            ),
+            manual_url: "https://dfu-util.sourceforge.net/",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "openocd",
+            description: "On-chip debugger — the alternative SWD/JTAG flash path",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            severity: Severity::Feature,
+            impact: "The Flash tab's OpenOCD path can't run; probe-rs flashing is unaffected.",
+            check_cmd: "openocd",
+            check_args: &["--version"],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: per_os(Some("winget"), Some("brew"), None),
+            install_args: per_os(
+                &["install", "--id", "OpenOCD.OpenOCD", "--accept-package-agreements", "--accept-source-agreements"][..],
+                &["install", "open-ocd"][..],
+                &[][..],
+            ),
+            manual_url: "https://openocd.org/pages/getting-openocd.html",
+            status: ToolStatus::Unknown,
+        },
+        RequiredTool {
+            name: "objcopy",
+            description: "ELF → raw binary converter — the step between `cargo build` and a DFU flash",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            severity: Severity::Feature,
+            impact: "DFU flashing stops right after the build: firmware.bin can't be produced. \
+                     Any ONE of llvm-objcopy, arm-none-eabi-objcopy or `cargo objcopy` is enough \
+                     (`cargo objcopy` also needs `rustup component add llvm-tools`).",
+            // Sentinel: the flash path tries three different binaries in order,
+            // so a single-command check would report Missing whenever the user
+            // happens to have one of the other two. See `OBJCOPY_CHECK`.
+            check_cmd: OBJCOPY_CHECK,
+            check_args: &[],
+            check_pattern: "",
+            min_version: None,
+            // cargo-binutils provides fallback #3 and needs no root anywhere.
+            install_cmd: Some("cargo"),
+            install_args: &["install", "cargo-binutils"],
+            manual_url: "https://github.com/rust-embedded/cargo-binutils",
             status: ToolStatus::Unknown,
         },
         // ── EspRust (ESP32-C3 / RISC-V) ──────────────────────────────────
@@ -403,34 +513,105 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         },
     ];
 
-    // ── Windows host linker prerequisite ─────────────────────────────────────
+    // ── Host C toolchain ─────────────────────────────────────────────────────
     // Not an embedded tool: Rust links every build-script / proc-macro for the
-    // HOST with the MSVC linker, so without this NOTHING builds (LNK1104
-    // msvcrt.lib). Probed by file, not by binary presence — see `MSVC_CHECK`.
-    #[cfg(windows)]
+    // HOST, so without a working C toolchain NOTHING builds — on any platform.
+    // Only the shape differs. Windows is probed BY FILE, not by binary presence:
+    // a half-installed Visual Studio has `cl.exe` but no libs/headers, which is
+    // exactly the failure that must be caught (see `MSVC_CHECK`). The unixes just
+    // need `cc` to answer.
     tools.push(RequiredTool {
-        name:          "MSVC build tools",
-        description:   "Microsoft C++ x64 toolchain (msvcrt.lib + headers) — required to link Rust build-scripts on Windows",
-        toolchain:     None,
-        severity:      Severity::Blocking,
-        impact:        "NOTHING builds: every build-script fails to link (LNK1104 msvcrt.lib / C1083 vcruntime.h).",
-        check_cmd:     MSVC_CHECK,
-        check_args:    &[],
+        name: per_os("MSVC build tools", "Xcode Command Line Tools", "C build tools"),
+        description: per_os(
+            "Microsoft C++ x64 toolchain (msvcrt.lib + headers) — required to link Rust build-scripts on Windows",
+            "Apple clang + linker — required to link Rust build-scripts on macOS",
+            "gcc + ld (build-essential) — required to link Rust build-scripts on Linux",
+        ),
+        toolchain: None,
+        severity: Severity::Blocking,
+        impact: per_os(
+            "NOTHING builds: every build-script fails to link (LNK1104 msvcrt.lib / C1083 vcruntime.h).",
+            "NOTHING builds: every build-script fails to link (no linker / missing SDK headers). \
+             Run `xcode-select --install`.",
+            "NOTHING builds: every build-script fails to link (`cc` not found). \
+             Debian/Ubuntu: build-essential · Fedora: @development-tools · Arch: base-devel.",
+        ),
+        check_cmd: per_os(MSVC_CHECK, "cc", "cc"),
+        check_args: per_os(&[][..], &["--version"][..], &["--version"][..]),
         check_pattern: "",
-                min_version:   None,
-        install_cmd:   Some("winget"),
-        install_args:  &[
-            "install",
-            "--id",
-            "Microsoft.VisualStudio.2022.BuildTools",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--override",
-            "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
-        ],
-        manual_url:    "https://visualstudio.microsoft.com/visual-cpp-build-tools/",
-        status:        ToolStatus::Unknown,
+        min_version: None,
+        // macOS: `xcode-select --install` opens a GUI installer and returns
+        // immediately, so it is NOT an auto-install we can report on — manual.
+        // Linux: needs root and the package name differs per distro — manual.
+        install_cmd: per_os(Some("winget"), None, None),
+        install_args: per_os(
+            &[
+                "install",
+                "--id",
+                "Microsoft.VisualStudio.2022.BuildTools",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--override",
+                "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
+            ][..],
+            &[][..],
+            &[][..],
+        ),
+        manual_url: per_os(
+            "https://visualstudio.microsoft.com/visual-cpp-build-tools/",
+            "https://developer.apple.com/xcode/resources/",
+            "https://doc.rust-lang.org/book/ch01-01-installation.html#installing-rustup-on-linux-or-macos",
+        ),
+        status: ToolStatus::Unknown,
     });
+
+    // ── Linux-only: access to the hardware ───────────────────────────────────
+    // Neither of these is a program to install — they are PERMISSIONS, and they
+    // are the number-one reason flashing "doesn't work" on a Linux box that has
+    // every tool present. Windows solves the same problem with drivers (WinUSB /
+    // Zadig) and macOS needs nothing at all, so both entries are Linux-only.
+    if cfg!(target_os = "linux") {
+        tools.push(RequiredTool {
+            name: "USB probe udev rules",
+            description:
+                "udev rules granting non-root access to debug probes (ST-Link, J-Link, CMSIS-DAP, DFU)",
+            toolchain: Some(ToolchainKind::RustEmbedded),
+            severity: Severity::Feature,
+            impact:
+                "Debug probes are visible but cannot be OPENED: probe-rs / OpenOCD / dfu-util fail \
+                 with \"Permission denied\" or find no probe unless run with sudo. Install \
+                 probe-rs' 69-probe-rs.rules (and 60-openocd.rules), then `sudo udevadm control \
+                 --reload && sudo udevadm trigger`.",
+            check_cmd: UDEV_CHECK,
+            check_args: &[],
+            check_pattern: "",
+            min_version: None,
+            install_cmd: None, // writing to /etc/udev/rules.d needs root
+            install_args: &[],
+            manual_url: "https://probe.rs/docs/getting-started/probe-setup/#linux%3A-udev-rules",
+            status: ToolStatus::Unknown,
+        });
+        tools.push(RequiredTool {
+            name: "serial port access",
+            description: "Membership of the group that owns /dev/ttyUSB* and /dev/ttyACM*",
+            toolchain: None,
+            severity: Severity::Feature,
+            impact:
+                "The Serial tab and espflash can't open the port (\"Permission denied\"). \
+                 Run `sudo usermod -aG dialout $USER` — `uucp` instead of `dialout` on Arch and \
+                 openSUSE — then log out and back in.",
+            check_cmd: "id",
+            check_args: &["-nG"],
+            // Substring, so `uucp` on Arch reads as missing even though it works —
+            // the impact text says so rather than silently passing either name.
+            check_pattern: "dialout",
+            min_version: None,
+            install_cmd: None, // needs root, and takes effect only after re-login
+            install_args: &[],
+            manual_url: "https://wiki.archlinux.org/title/Users_and_groups",
+            status: ToolStatus::Unknown,
+        });
+    }
 
     Arc::new(Mutex::new(ToolsState {
         log: Vec::new(),
@@ -581,6 +762,105 @@ pub fn start_install_missing(state: Arc<Mutex<ToolsState>>, ctx: egui::Context) 
 /// instead of a spawned command. See [`crate::msvc`].
 pub const MSVC_CHECK: &str = "@msvc-toolchain";
 
+/// Sentinel for the ELF→bin converter: the DFU flash path tries `llvm-objcopy`,
+/// then `arm-none-eabi-objcopy`, then `cargo objcopy` ([`crate::dfu`]), so the
+/// catalog must answer the same question — "is ANY of the three here?" — instead
+/// of picking one and calling the other two setups broken.
+pub const OBJCOPY_CHECK: &str = "@objcopy-any";
+
+/// Sentinel for the Linux udev rules that grant non-root access to debug probes.
+/// Not a program, so there is nothing to run: it is answered by looking for rules
+/// files on disk.
+pub const UDEV_CHECK: &str = "@udev-rules";
+
+/// The three ELF→bin converters, in the order [`crate::dfu::objcopy`] tries them.
+/// Kept next to the sentinel so the two lists can be compared at a glance.
+const OBJCOPY_CANDIDATES: [(&str, &[&str]); 3] = [
+    ("llvm-objcopy", &["--version"]),
+    ("arm-none-eabi-objcopy", &["--version"]),
+    ("cargo", &["objcopy", "--version"]),
+];
+
+/// `Ok` naming the first converter found, `Missing` when none of the three is.
+fn check_objcopy_any() -> ToolStatus {
+    for (cmd, args) in OBJCOPY_CANDIDATES {
+        let mut c = Command::new(cmd);
+        c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        crate::build::no_window_raw(&mut c);
+        if matches!(c.output(), Ok(out) if out.status.success()) {
+            return ToolStatus::Ok(format!("{cmd} ({args:?} ok)").replace('"', ""));
+        }
+    }
+    ToolStatus::Missing
+}
+
+/// Look for udev rules that mention a debug-probe tool. Both the system
+/// directories and the admin one are searched, because packages install into
+/// `/usr/lib` (or `/lib`) while a hand-installed rule lands in `/etc`.
+///
+/// Deliberately a NAME match, not a parse: rule files are matched by vendor/
+/// product id in a syntax we have no business interpreting, and "a file called
+/// 69-probe-rs.rules exists" is the same thing every setup guide tells the user
+/// to check.
+/// Where udev rules live. Both the system directories and the admin one, because
+/// packages install into `/usr/lib` (or `/lib`) while a hand-installed rule lands
+/// in `/etc`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const UDEV_DIRS: [&str; 3] = [
+    "/etc/udev/rules.d",
+    "/usr/lib/udev/rules.d",
+    "/lib/udev/rules.d",
+];
+
+/// Does this rules-file name look like a debug-probe rule? Pure, so the matching
+/// is testable on any host — only the directory walk around it is Linux-only.
+/// (Compiled everywhere for exactly that reason; only Linux CALLS it.)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn udev_rule_matches(file_name: &str) -> bool {
+    const MARKERS: [&str; 4] = ["probe-rs", "openocd", "stlink", "dfu"];
+    let lower = file_name.to_ascii_lowercase();
+    lower.ends_with(".rules") && MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Probe-related rules files present in `dirs`, sorted and deduplicated.
+///
+/// Compiled on EVERY platform — only the call is Linux-only. A Linux-only body
+/// is a body nobody here can compile, let alone test; keeping the whole walk
+/// portable means a mistake in it fails the build on this machine too.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn scan_udev_dirs(dirs: &[&str]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue; // an absent directory is normal, not an error
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if udev_rule_matches(&name) {
+                found.push(name);
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[cfg(target_os = "linux")]
+fn check_udev_rules() -> ToolStatus {
+    let found = scan_udev_dirs(&UDEV_DIRS);
+    if found.is_empty() {
+        ToolStatus::Missing
+    } else {
+        ToolStatus::Ok(found.join(", "))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_udev_rules() -> ToolStatus {
+    ToolStatus::Ok("n/a (not Linux)".to_string())
+}
+
 /// First dotted number in `text`, e.g. `"rustc 1.89.0 (abc 2026-01-01)"` →
 /// `"1.89.0"`. Tools print their version in wildly different shapes, so we scan
 /// rather than assume a position. `None` when there is no number at all.
@@ -690,8 +970,15 @@ fn run_check_blocking(
     pattern: &str,
     min_version: Option<&'static str>,
 ) -> ToolStatus {
+    // Sentinels: not programs on PATH, so they never reach the spawn below.
     if cmd == MSVC_CHECK {
         return check_msvc_toolchain();
+    }
+    if cmd == OBJCOPY_CHECK {
+        return check_objcopy_any();
+    }
+    if cmd == UDEV_CHECK {
+        return check_udev_rules();
     }
     let mut c = Command::new(cmd);
     c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -829,6 +1116,81 @@ fn do_install_blocking(idx: usize, state: &Arc<Mutex<ToolsState>>, ctx: &egui::C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure mode this per-platform table invites: picking the command
+    /// with `per_os` but forgetting to switch the ARGS with it, leaving a bare
+    /// `winget` / `brew` that installs nothing and reports success.
+    #[test]
+    fn an_auto_installer_always_has_arguments() {
+        let s = make_tools_state();
+        let s = s.lock().unwrap();
+        for t in &s.tools {
+            if t.install_cmd.is_some() {
+                assert!(
+                    !t.install_args.is_empty(),
+                    "{} has an install command but no arguments",
+                    t.name
+                );
+            }
+        }
+    }
+
+    /// The other half: an entry the host can't auto-install MUST tell the user
+    /// where to get it, or the Tools tab has nothing to offer but "Missing".
+    #[test]
+    fn a_manual_tool_always_has_a_url() {
+        let s = make_tools_state();
+        let s = s.lock().unwrap();
+        for t in &s.tools {
+            if t.install_cmd.is_none() {
+                assert!(
+                    t.manual_url.starts_with("http"),
+                    "{} can't be auto-installed and has no manual URL",
+                    t.name
+                );
+            }
+        }
+    }
+
+    /// The host C toolchain is Blocking on every platform — it is the entry that
+    /// explains "nothing builds", and losing it on a platform is exactly the gap
+    /// this table was made to close.
+    #[test]
+    fn the_host_toolchain_entry_exists_everywhere() {
+        let s = make_tools_state();
+        let s = s.lock().unwrap();
+        let host = s
+            .tools
+            .iter()
+            .find(|t| t.check_cmd == MSVC_CHECK || (t.check_cmd == "cc" && t.toolchain.is_none()))
+            .expect("no host C toolchain entry for this platform");
+        assert_eq!(host.severity, Severity::Blocking);
+    }
+
+    /// The directory walk itself, exercised on THIS host: a missing directory is
+    /// skipped rather than treated as an error, and only rule files count.
+    #[test]
+    fn udev_scan_reads_real_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["69-probe-rs.rules", "60-openocd.rules", "README.md"] {
+            std::fs::write(dir.path().join(f), "").unwrap();
+        }
+        let p = dir.path().to_string_lossy().to_string();
+        let found = scan_udev_dirs(&[&p, "/definitely/not/here"]);
+        assert_eq!(found, vec!["60-openocd.rules", "69-probe-rs.rules"]);
+        assert!(scan_udev_dirs(&["/definitely/not/here"]).is_empty());
+    }
+
+    #[test]
+    fn udev_rule_names_are_recognised() {
+        assert!(udev_rule_matches("69-probe-rs.rules"));
+        assert!(udev_rule_matches("60-openocd.rules"));
+        assert!(udev_rule_matches("49-stlinkv2.rules"));
+        // Not a rules file, and not about a probe.
+        assert!(!udev_rule_matches("70-probe-rs.txt"));
+        assert!(!udev_rule_matches("99-systemd.rules"));
+        assert!(!udev_rule_matches(""));
+    }
 
     /// Every catalog entry must carry a non-empty, user-facing `impact` — it is
     /// the answer to "why does the IDE need this?" shown in the banner + Tools.
