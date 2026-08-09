@@ -32,6 +32,7 @@ mod duplicate_line;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
 mod format;
+mod generics;
 mod inlay_hint;
 mod let_annotation;
 mod move_lines;

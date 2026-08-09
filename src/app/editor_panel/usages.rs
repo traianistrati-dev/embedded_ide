@@ -103,6 +103,12 @@ pub struct UsagesState {
     refs_run: u64,
     /// `true` while one reference request is in flight (next is sent on reply).
     refs_inflight: bool,
+    /// Unused generic parameters — see [`generics`](super::generics). Purely
+    /// syntactic, so unlike the RA-driven items above it needs no debounce and
+    /// can never be stale: it is recomputed the moment the text differs from
+    /// `generics_for_text`, and only ever used for that exact text.
+    generic_ranges: Vec<(usize, usize)>,
+    generics_for_text: String,
 }
 
 /// Send the next queued reference lookup, if none is in flight — one at a time
@@ -232,6 +238,19 @@ impl AppIde {
             };
         }
         self.poll_usages();
+
+        // Unused generic parameters: local, LSP-free, so it runs on every edit
+        // instead of waiting out the debounce below (memoized on the text, so
+        // it is one scan per keystroke, not one per frame). `.rs` only — a
+        // library's Cargo.toml also arrives here as a `UserFile`.
+        if self.usages.generics_for_text != text {
+            self.usages.generic_ranges = if rel_path.ends_with(".rs") {
+                super::generics::unused_generic_ranges(text)
+            } else {
+                Vec::new()
+            };
+            self.usages.generics_for_text = text.to_owned();
+        }
 
         if self.usages.last_seen_text != text {
             self.usages.last_seen_text = text.to_owned();
@@ -365,6 +384,13 @@ impl AppIde {
         display_code: &str,
     ) -> Vec<(usize, usize)> {
         let mut ranges = Vec::new();
+
+        // Generic parameters first — computed from this exact text in
+        // `tick_usages`, so no freshness guard is needed (or wanted: it is the
+        // one part of the fade that stays live while you type).
+        if self.usages.generics_for_text == display_code {
+            ranges.extend_from_slice(&self.usages.generic_ranges);
+        }
 
         if self.usages.rel_path == rel_path && self.usages.computed_for_text == display_code {
             ranges.extend(self.usages.items.iter().filter_map(|item| {
