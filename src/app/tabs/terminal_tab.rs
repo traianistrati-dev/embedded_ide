@@ -1,6 +1,6 @@
-//! Terminal tab — a streaming command console. Runs any command via PowerShell
-//! in the project workspace, streaming output live. See
-//! [`crate::terminal::TerminalConsole`].
+//! Terminal tab — a streaming command console. Runs any command in the host's
+//! shell (PowerShell on Windows, `$SHELL` on macOS / Linux) in the project
+//! workspace, streaming output live. See [`crate::terminal::TerminalConsole`].
 
 use crate::terminal::{LineKind, TerminalConsole, TerminalState};
 use eframe::egui;
@@ -103,12 +103,20 @@ pub fn show_terminal_tab(ui: &mut egui::Ui, term: &mut TerminalConsole, ctx: &eg
         // just move the text caret.
         let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
         let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
-        let edit = ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut term.input)
-                .font(egui::TextStyle::Monospace)
-                .hint_text("type a command, Enter to run"),
-        );
+        let edit = ui
+            .add_sized(
+                [ui.available_width(), 22.0],
+                egui::TextEdit::singleline(&mut term.input)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("type a command, Enter to run"),
+            )
+            // Name the shell: the command is passed to it verbatim, so which
+            // dialect to type in is the first thing a user needs to know.
+            .on_hover_text(format!(
+                "Runs in {}. No TTY — a command that prompts will hang \
+                 (Stop kills it).",
+                crate::terminal::shell_name()
+            ));
         if edit.has_focus() {
             if up {
                 term.history_prev();

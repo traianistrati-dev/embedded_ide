@@ -321,7 +321,8 @@ enum BuildPanelTab {
     Clippy,
     /// `cargo bloat` code-size breakdown (Flash per function / crate).
     Profile,
-    /// Built-in command console (streaming `powershell` runner).
+    /// Built-in command console (streaming host-shell runner — PowerShell on
+    /// Windows, `$SHELL` elsewhere).
     Terminal,
     /// Per-action timing breakdown (Save / Build / Flash / Clippy).
     Activity,

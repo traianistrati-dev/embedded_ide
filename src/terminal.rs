@@ -1,11 +1,15 @@
 //! Built-in command console (bottom-panel "Terminal" tab).
 //!
 //! A **streaming command runner** — NOT a full PTY. Each command is a fresh
-//! `powershell -NoProfile -Command <cmd>` spawn whose stdout+stderr are read
+//! shell spawn (`powershell -NoProfile -NonInteractive -Command <cmd>` on
+//! Windows, `$SHELL -c <cmd>` on macOS / Linux) whose stdout+stderr are read
 //! line-by-line on background threads and appended to a scrollback buffer, so
 //! long-running commands (`cargo build`, `probe-rs`, `git`) show output live.
 //! A Stop button kills the child; Up/Down recall history; ANSI SGR colour codes
 //! are parsed for display. It can't answer interactive prompts mid-run (no TTY).
+//!
+//! The command text is the user's own, in their own shell's dialect — the
+//! console does not translate between them.
 //!
 //! Mirrors the reader-thread + throttled-repaint + `AtomicBool` stop pattern of
 //! [`crate::serial`].
@@ -168,9 +172,11 @@ impl TerminalConsole {
         let stop = Arc::new(AtomicBool::new(false));
         self.stop = Some(Arc::clone(&stop));
 
-        let mut command = Command::new("powershell");
+        let (shell, shell_args) = shell_invocation();
+        let mut command = Command::new(&shell);
         command
-            .args(["-NoProfile", "-NonInteractive", "-Command", &cmd])
+            .args(&shell_args)
+            .arg(&cmd)
             .current_dir(&self.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -183,7 +189,7 @@ impl TerminalConsole {
                 let mut s = self.state.lock().unwrap();
                 s.push_plain(
                     LineKind::Notice,
-                    format!("[error] couldn't launch powershell: {e}"),
+                    format!("[error] couldn't launch {shell}: {e}"),
                 );
                 self.stop = None;
                 return;
@@ -299,6 +305,46 @@ impl TerminalConsole {
     }
 }
 
+/// The shell to run one command in: `(program, flags before the command)`.
+///
+/// Windows gets PowerShell with `-NoProfile` (a user profile can print banners
+/// that pollute the scrollback, and it costs startup time on every command) and
+/// `-NonInteractive` (this console has no TTY, so a prompt would hang forever).
+///
+/// The unixes get `$SHELL -c`, so a zsh / fish user types their own dialect
+/// rather than the one this file happens to assume. `/bin/sh` is the fallback,
+/// because `$SHELL` is simply absent when the app is launched from a desktop
+/// entry rather than a login shell. There is no `-NonInteractive` equivalent —
+/// `stdin(Stdio::null())` at the call site is what stops a prompt from hanging.
+fn shell_invocation() -> (String, Vec<String>) {
+    if cfg!(target_os = "windows") {
+        (
+            "powershell".to_string(),
+            ["-NoProfile", "-NonInteractive", "-Command"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    } else {
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "/bin/sh".to_string());
+        (shell, vec!["-c".to_string()])
+    }
+}
+
+/// Display name of the shell commands run in — for the UI, so the user knows
+/// which dialect the console expects. Just the file name (`zsh`, not
+/// `/bin/zsh`), since the path adds nothing at a glance.
+pub fn shell_name() -> String {
+    let (shell, _) = shell_invocation();
+    std::path::Path::new(&shell)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or(shell)
+}
+
 /// Home directory (best-effort, Windows `USERPROFILE` / Unix `HOME`).
 fn dirs_home() -> PathBuf {
     std::env::var_os("USERPROFILE")
@@ -307,20 +353,35 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Recognise a leading `cd <dir>` / `Set-Location <dir>` (the whole command,
-/// no pipes/`;`) → the target. Returns `None` for anything else.
+/// Recognise a whole-command `cd <dir>` (no pipes / `;` / `&`) → the target.
+/// Returns `None` for anything else.
+///
+/// PowerShell's aliases are accepted only ON Windows. `sl` in particular MUST
+/// NOT be treated as a cd on the unixes: it is a real program there, and
+/// swallowing `sl foo` would make the console lie about what it ran.
+///
+/// A bare `cd` means "go home" on the unixes, so it maps to `~` — which
+/// [`TerminalConsole::change_dir`] already resolves. PowerShell's bare `Set-
+/// Location` does the same, so the rule is shared.
 fn parse_cd(cmd: &str) -> Option<String> {
     let c = cmd.trim();
     if c.contains('|') || c.contains(';') || c.contains('&') {
         return None;
     }
-    let rest = c
-        .strip_prefix("cd ")
-        .or_else(|| c.strip_prefix("Set-Location "))
-        .or_else(|| c.strip_prefix("sl "))?;
-    let target = rest.trim().trim_matches('"').trim_matches('\'').trim();
+    // Bare "go home" forms.
+    if c == "cd" || (cfg!(target_os = "windows") && (c == "Set-Location" || c == "sl")) {
+        return Some("~".to_string());
+    }
+    let mut rest = c.strip_prefix("cd ");
+    if cfg!(target_os = "windows") {
+        rest = rest
+            .or_else(|| c.strip_prefix("Set-Location "))
+            .or_else(|| c.strip_prefix("sl "));
+    }
+    let target = rest?.trim().trim_matches('"').trim_matches('\'').trim();
     if target.is_empty() {
-        None
+        // `cd ""` — treat as home rather than an error, same as a bare `cd`.
+        Some("~".to_string())
     } else {
         Some(target.to_string())
     }
@@ -480,10 +541,46 @@ mod tests {
     fn parse_cd_variants() {
         assert_eq!(parse_cd("cd src"), Some("src".into()));
         assert_eq!(parse_cd("cd \"my dir\""), Some("my dir".into()));
-        assert_eq!(parse_cd("Set-Location .."), Some("..".into()));
         assert_eq!(parse_cd("cargo build"), None);
         assert_eq!(parse_cd("cd src && ls"), None); // compound → let the shell run it
-        assert_eq!(parse_cd("cd"), None);
+        // Bare `cd` = go home, on every platform.
+        assert_eq!(parse_cd("cd"), Some("~".into()));
+    }
+
+    /// PowerShell's cd aliases are Windows-only. `sl` is a REAL program on the
+    /// unixes (and `Set-Location` is not a shell builtin there), so intercepting
+    /// either would make the console silently not run what the user typed.
+    #[test]
+    fn powershell_cd_aliases_are_windows_only() {
+        let expected = |v: Option<&str>| v.map(str::to_string);
+        if cfg!(target_os = "windows") {
+            assert_eq!(parse_cd("Set-Location .."), expected(Some("..")));
+            assert_eq!(parse_cd("sl src"), expected(Some("src")));
+            assert_eq!(parse_cd("sl"), expected(Some("~")));
+        } else {
+            assert_eq!(parse_cd("Set-Location .."), None);
+            assert_eq!(parse_cd("sl src"), None);
+            assert_eq!(parse_cd("sl"), None);
+        }
+    }
+
+    /// The invocation must always end with a "run this string" flag, or the
+    /// command would be taken as the name of a script FILE.
+    #[test]
+    fn shell_invocation_takes_a_command_string() {
+        let (shell, args) = shell_invocation();
+        assert!(!shell.trim().is_empty());
+        let last = args.last().expect("no flags before the command");
+        if cfg!(target_os = "windows") {
+            assert_eq!(shell, "powershell");
+            assert_eq!(last, "-Command");
+            // A profile banner would pollute the scrollback; a prompt would hang.
+            assert!(args.iter().any(|a| a == "-NoProfile"));
+            assert!(args.iter().any(|a| a == "-NonInteractive"));
+        } else {
+            assert_eq!(last, "-c");
+            assert_eq!(args.len(), 1);
+        }
     }
 
     #[test]
