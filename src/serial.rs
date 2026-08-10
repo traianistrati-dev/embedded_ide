@@ -30,19 +30,29 @@ pub enum Dir {
     SensorToApp,
 }
 
+/// Default idle gap that ends a block. Comfortably longer than the pauses
+/// INSIDE a frame at common baud rates, comfortably shorter than the turnaround
+/// between a command and its reply.
+pub const DEFAULT_BLOCK_GAP_MS: u64 = 20;
+
 /// One contiguous burst of bytes in one direction.
 ///
 /// Chunks, not a flat buffer: the whole point of Bridge mode is seeing WHO said
 /// what, and a merged stream loses exactly that. Consecutive bursts in the same
-/// direction are coalesced, so a chatty device doesn't produce a chunk per byte.
+/// direction are coalesced while they keep arriving, so a chatty device doesn't
+/// produce a chunk per byte.
 #[derive(Clone, Debug)]
 pub struct LogChunk {
     pub dir: Dir,
     pub bytes: Vec<u8>,
+    /// When the block's FIRST burst was read — what gets displayed.
+    pub at: Instant,
+    /// When its LAST burst was read. The gap rule measures from here, not from
+    /// `at`: a 300 ms frame arriving in 10 ms pieces is one block, not fifteen.
+    pub last: Instant,
 }
 
 /// Shared between the background reader thread and the UI.
-#[derive(Default)]
 pub struct SerialState {
     /// Raw received bytes (capped to the last [`RX_CAP`]).
     pub rx: Vec<u8>,
@@ -56,18 +66,58 @@ pub struct SerialState {
     pub error: Option<String>,
     /// Bridge mode only: the relayed traffic, in order, tagged by direction.
     pub log: Vec<LogChunk>,
+    /// Idle gap (ms) that ends a block. Live-tunable: the right value depends on
+    /// the protocol, and you rarely know it before watching the traffic.
+    pub block_gap_ms: u64,
+    /// `(Instant, SystemTime)` captured at connect, so a block's monotonic
+    /// timestamp can be shown as a wall clock.
+    ///
+    /// Anchored ONCE rather than reading the system clock per burst: that keeps
+    /// the hot relay path free of a syscall, and — more importantly — makes the
+    /// gaps between blocks immune to the wall clock being stepped (NTP, DST)
+    /// mid-capture.
+    pub epoch: Option<(Instant, std::time::SystemTime)>,
+}
+
+impl Default for SerialState {
+    fn default() -> Self {
+        Self {
+            rx: Vec::new(),
+            rx_total: 0,
+            connected: false,
+            error: None,
+            log: Vec::new(),
+            block_gap_ms: DEFAULT_BLOCK_GAP_MS,
+            epoch: None,
+        }
+    }
 }
 
 impl SerialState {
-    /// Append a relayed burst, merging it into the previous chunk when it came
-    /// from the same side, and trimming the oldest chunks past [`LOG_CAP`].
-    pub fn push_log(&mut self, dir: Dir, bytes: &[u8]) {
-        match self.log.last_mut() {
-            Some(last) if last.dir == dir => last.bytes.extend_from_slice(bytes),
-            _ => self.log.push(LogChunk {
+    /// Append a relayed burst at time `now`, and trim past [`LOG_CAP`].
+    ///
+    /// A burst joins the previous block when it came from the same side AND
+    /// arrived within `gap` of that block's last burst; otherwise it starts a
+    /// new one. Serial has no framing at the OS level, so an idle gap is the
+    /// only thing that marks a message boundary — the same rule Modbus RTU uses.
+    /// Splitting purely per `read()` would tear one frame into pieces, since a
+    /// read returns whatever happened to have accumulated.
+    pub fn push_log(&mut self, dir: Dir, bytes: &[u8], now: Instant, gap: Duration) {
+        let join = matches!(
+            self.log.last(),
+            Some(last) if last.dir == dir && now.saturating_duration_since(last.last) <= gap
+        );
+        if join {
+            let last = self.log.last_mut().expect("checked above");
+            last.bytes.extend_from_slice(bytes);
+            last.last = now;
+        } else {
+            self.log.push(LogChunk {
                 dir,
                 bytes: bytes.to_vec(),
-            }),
+                at: now,
+                last: now,
+            });
         }
         // Drop whole chunks from the front rather than splitting one: a
         // half-chunk would show a frame starting mid-byte, which is worse than
@@ -146,6 +196,9 @@ pub struct SerialMonitor {
     /// The live pair. Held here so dropping it (disconnect / app exit) tears
     /// down the `socat` child that owns the PTYs.
     pub pair: Option<crate::serial_bridge::VirtualPair>,
+    /// Show the `[hh:mm:ss.mmm] (+n ms)` prefix on each Bridge block. On by
+    /// default: the one thing a relay capture is always missing is WHEN.
+    pub stamps: bool,
     /// `true` → the RX area shows the drawn "how Bridge works" explainer.
     /// Its own toggle rather than a dialog: the wiring is what you consult it
     /// WHILE setting up, so it has to live where the controls are.
@@ -188,6 +241,7 @@ impl Default for SerialMonitor {
             bridge: false,
             bridge_port: String::new(),
             pair: None,
+            stamps: true,
             info_on: false,
             com0com_pairs: Vec::new(),
         }
@@ -284,6 +338,9 @@ impl SerialMonitor {
             s.error = None;
             s.connected = false;
             s.log.clear();
+            // Anchor the clock for this capture. Re-anchored per connect, so a
+            // long-running app that reconnects doesn't drift.
+            s.epoch = Some((Instant::now(), std::time::SystemTime::now()));
         }
 
         let open = |name: &str, baud: u32| {
@@ -398,6 +455,16 @@ impl SerialMonitor {
             .map(|at| at.saturating_duration_since(Instant::now()))
     }
 
+    /// Idle gap (ms) that ends a Bridge block. Lives in the shared state because
+    /// the relay thread reads it on every burst.
+    pub fn block_gap_ms(&self) -> u64 {
+        self.state.lock().unwrap().block_gap_ms
+    }
+
+    pub fn set_block_gap_ms(&mut self, ms: u64) {
+        self.state.lock().unwrap().block_gap_ms = ms;
+    }
+
     pub fn clear_rx(&mut self) {
         self.state.lock().unwrap().rx.clear();
     }
@@ -482,10 +549,15 @@ fn spawn_bridge_reader(
             match from.read(&mut buf) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(5)),
                 Ok(n) => {
+                    // Timestamp BEFORE forwarding: the read is what we can date,
+                    // and the write that follows is our own latency, not the
+                    // other side's.
+                    let now = Instant::now();
                     let relayed = to.write_all(&buf[..n]).and_then(|()| to.flush());
                     {
                         let mut s = state.lock().unwrap();
-                        s.push_log(dir, &buf[..n]);
+                        let gap = Duration::from_millis(s.block_gap_ms);
+                        s.push_log(dir, &buf[..n], now, gap);
                         if let Err(e) = relayed {
                             // Report but keep relaying the other way: half a
                             // bridge still shows what the live side is saying.
@@ -546,12 +618,45 @@ fn chunk_matches(bytes: &[u8], a: &[u8], b: &[u8]) -> bool {
 /// every 50 ms buries the exchange you care about), and inside the ones kept,
 /// the markers are painted yellow / cyan so a frame's edges are findable at a
 /// glance. Both empty = no filtering, everything shown.
+/// Colour of the `[hh:mm:ss.mmm] (+n ms)` prefix — dim, so it frames the data
+/// without competing with the direction colours.
+pub const STAMP: egui::Color32 = egui::Color32::from_rgb(130, 138, 152);
+
+/// The timestamp prefix for one block: wall clock, plus the gap since the
+/// previous block.
+///
+/// The DELTA is the useful number when reverse-engineering a protocol — "the
+/// reply came 12 ms later" tells you more than the absolute time — so it is
+/// shown alongside, not instead.
+///
+/// `epoch` anchors the monotonic `Instant` to a wall clock; without it only the
+/// delta can be shown, which is still worth having.
+fn stamp_prefix(
+    at: Instant,
+    prev: Option<Instant>,
+    epoch: Option<(Instant, std::time::SystemTime)>,
+) -> String {
+    let clock = match epoch {
+        Some((i0, t0)) => crate::activity::fmt_clock(t0 + at.saturating_duration_since(i0)),
+        None => "--:--:--.---".to_string(),
+    };
+    match prev {
+        Some(p) => format!(
+            "[{clock}] (+{} ms) ",
+            at.saturating_duration_since(p).as_millis()
+        ),
+        None => format!("[{clock}]         "),
+    }
+}
+
 pub fn bridge_log_job(
     log: &[LogChunk],
     hex: bool,
     font_size: f32,
     find_a: &[u8],
     find_b: &[u8],
+    stamps: bool,
+    epoch: Option<(Instant, std::time::SystemTime)>,
 ) -> egui::text::LayoutJob {
     const MAX_CHUNKS: usize = 400;
     let filtering = !find_a.is_empty() || !find_b.is_empty();
@@ -566,11 +671,22 @@ pub fn bridge_log_job(
         .collect();
     let start = kept.len().saturating_sub(MAX_CHUNKS);
 
+    let mut prev: Option<Instant> = None;
     for chunk in &kept[start..] {
         let (arrow, color) = match chunk.dir {
             Dir::AppToSensor => (">>", DIR_APP),
             Dir::SensorToApp => ("<<", DIR_SENSOR),
         };
+        if stamps {
+            // Delta against the previous SHOWN block: with a filter on, the gap
+            // to a burst that was hidden would be a number about nothing.
+            job.append(
+                &stamp_prefix(chunk.at, prev, epoch),
+                0.0,
+                egui::TextFormat::simple(font.clone(), STAMP),
+            );
+            prev = Some(chunk.at);
+        }
         job.append(
             &format!("{arrow} "),
             0.0,
@@ -869,20 +985,46 @@ pub fn text_search_job(
 mod bridge_tests {
     use super::*;
 
+    const GAP: Duration = Duration::from_millis(20);
+
+    /// A controllable clock. `Instant` can only be made by `now()`, so tests
+    /// anchor once and offset from it — which is exactly how the relay treats
+    /// time anyway.
+    struct Clock(Instant);
+    impl Clock {
+        fn new() -> Self {
+            Self(Instant::now())
+        }
+        fn at(&self, ms: u64) -> Instant {
+            self.0 + Duration::from_millis(ms)
+        }
+    }
+
+    /// Push a burst at `ms` on the test clock, with the default gap.
+    fn push(s: &mut SerialState, c: &Clock, dir: Dir, b: &[u8], ms: u64) {
+        s.push_log(dir, b, c.at(ms), GAP);
+    }
+
     fn dirs(s: &SerialState) -> Vec<(Dir, Vec<u8>)> {
         s.log.iter().map(|c| (c.dir, c.bytes.clone())).collect()
     }
 
-    /// Bursts from the SAME side merge; a change of direction starts a new
-    /// chunk. Without the merge a chatty device produces one chunk per read,
-    /// and the view becomes an unreadable column of one-byte arrows.
+    /// Rendered text with no timestamps — for the tests that are about content.
+    fn text_of(s: &SerialState, hex: bool, a: &[u8], b: &[u8]) -> String {
+        bridge_log_job(&s.log, hex, 12.0, a, b, false, None).text
+    }
+
+    /// Bursts from the same side, arriving CLOSE TOGETHER, merge; a change of
+    /// direction starts a new block. Without the merge a chatty device produces
+    /// one block per read and the view becomes a column of one-byte arrows.
     #[test]
     fn same_direction_bursts_coalesce() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::AppToSensor, b"AT");
-        s.push_log(Dir::AppToSensor, b"+RST\r\n");
-        s.push_log(Dir::SensorToApp, b"OK");
-        s.push_log(Dir::AppToSensor, b"X");
+        push(&mut s, &c, Dir::AppToSensor, b"AT", 0);
+        push(&mut s, &c, Dir::AppToSensor, b"+RST\r\n", 5);
+        push(&mut s, &c, Dir::SensorToApp, b"OK", 7);
+        push(&mut s, &c, Dir::AppToSensor, b"X", 9);
         assert_eq!(
             dirs(&s),
             vec![
@@ -893,49 +1035,90 @@ mod bridge_tests {
         );
     }
 
-    /// Trimming drops WHOLE chunks from the front. Splitting one would leave a
+    /// The whole point of the gap rule: silence ends a block even when the
+    /// direction has not changed. Two polls of the same device are two
+    /// messages, not one long one.
+    #[test]
+    fn a_silent_gap_starts_a_new_block() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::SensorToApp, b"first", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"second", 500);
+        assert_eq!(s.log.len(), 2, "{:?}", dirs(&s));
+        assert_eq!(s.log[0].bytes, b"first");
+        assert_eq!(s.log[1].bytes, b"second");
+    }
+
+    /// The gap is measured from the block's LAST burst, not its first — a frame
+    /// dribbling in over 300 ms in 10 ms pieces is one block, not thirty.
+    #[test]
+    fn the_gap_is_measured_from_the_last_burst() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        for i in 0..30 {
+            push(&mut s, &c, Dir::SensorToApp, b"x", i * 10);
+        }
+        assert_eq!(s.log.len(), 1, "a slow frame was torn apart");
+        assert_eq!(s.log[0].bytes.len(), 30);
+        // `at` stays the first burst; `last` follows the newest.
+        assert_eq!(s.log[0].at, c.at(0));
+        assert_eq!(s.log[0].last, c.at(290));
+    }
+
+    /// Exactly at the threshold still joins — the boundary is "longer than".
+    #[test]
+    fn the_threshold_is_inclusive() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"a", 0);
+        push(&mut s, &c, Dir::AppToSensor, b"b", 20);
+        assert_eq!(s.log.len(), 1);
+        push(&mut s, &c, Dir::AppToSensor, b"c", 41);
+        assert_eq!(s.log.len(), 2);
+    }
+
+    /// Trimming drops WHOLE blocks from the front. Splitting one would leave a
     /// frame starting mid-byte, which reads as corruption rather than as history
     /// that scrolled away.
     #[test]
     fn the_log_is_capped_by_dropping_whole_chunks() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        for i in 0..40 {
-            // Alternate so the bursts stay separate chunks rather than merging.
+        for i in 0..40u64 {
             let dir = if i % 2 == 0 {
                 Dir::AppToSensor
             } else {
                 Dir::SensorToApp
             };
-            s.push_log(dir, &vec![i as u8; LOG_CAP / 8]);
+            push(&mut s, &c, dir, &vec![i as u8; LOG_CAP / 8], i);
         }
         let total: usize = s.log.iter().map(|c| c.bytes.len()).sum();
         assert!(total <= LOG_CAP, "log not trimmed: {total}");
-        // Every surviving chunk is intact — none was cut in half.
         assert!(s.log.iter().all(|c| c.bytes.len() == LOG_CAP / 8));
-        // The NEWEST burst always survives; that is the one being watched.
         assert_eq!(s.log.last().unwrap().bytes[0], 39);
     }
 
-    /// A single chunk larger than the cap must not be dropped to nothing —
+    /// A single block larger than the cap must not be dropped to nothing —
     /// otherwise one big frame would clear the view instead of showing.
     #[test]
     fn one_oversized_chunk_survives() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::SensorToApp, &vec![7u8; LOG_CAP * 2]);
+        push(&mut s, &c, Dir::SensorToApp, &vec![7u8; LOG_CAP * 2], 0);
         assert_eq!(s.log.len(), 1);
         assert_eq!(s.log[0].bytes.len(), LOG_CAP * 2);
     }
 
     #[test]
     fn the_log_view_attributes_every_burst_to_a_side() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::AppToSensor, b"ping");
-        s.push_log(Dir::SensorToApp, b"pong");
-        let text = bridge_log_job(&s.log, false, 12.0, b"", b"").text;
+        push(&mut s, &c, Dir::AppToSensor, b"ping", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"pong", 1);
+        let text = text_of(&s, false, b"", b"");
         assert!(text.contains(">> ping"), "{text}");
         assert!(text.contains("<< pong"), "{text}");
-        // Hex mode shows the same bursts as bytes.
-        let hex = bridge_log_job(&s.log, true, 12.0, b"", b"").text;
+        let hex = text_of(&s, true, b"", b"");
         assert!(hex.contains(">> 70 69 6E 67"), "{hex}");
     }
 
@@ -943,10 +1126,11 @@ mod bridge_tests {
     /// silently filter the log the moment one of the two fields is typed in.
     #[test]
     fn empty_markers_do_not_filter() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::AppToSensor, b"alpha");
-        s.push_log(Dir::SensorToApp, b"beta");
-        let all = bridge_log_job(&s.log, false, 12.0, b"", b"").text;
+        push(&mut s, &c, Dir::AppToSensor, b"alpha", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"beta", 1);
+        let all = text_of(&s, false, b"", b"");
         assert!(all.contains("alpha") && all.contains("beta"), "{all}");
     }
 
@@ -954,16 +1138,15 @@ mod bridge_tests {
     /// the exchange you are looking for.
     #[test]
     fn bursts_without_a_marker_are_dropped() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::AppToSensor, b"noise-1");
-        s.push_log(Dir::SensorToApp, b"AT+RST wanted");
-        s.push_log(Dir::AppToSensor, b"noise-2");
-        let t = bridge_log_job(&s.log, false, 12.0, b"AT+", b"").text;
+        push(&mut s, &c, Dir::AppToSensor, b"noise-1", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"AT+RST wanted", 1);
+        push(&mut s, &c, Dir::AppToSensor, b"noise-2", 2);
+        let t = text_of(&s, false, b"AT+", b"");
         assert!(t.contains("wanted"), "{t}");
-        assert!(!t.contains("noise"), "kept an unmatched burst:
-{t}");
-        // Either marker is enough to keep a burst.
-        let t2 = bridge_log_job(&s.log, false, 12.0, b"", b"noise-2").text;
+        assert!(!t.contains("noise"), "kept an unmatched burst:\n{t}");
+        let t2 = text_of(&s, false, b"", b"noise-2");
         assert!(t2.contains("noise-2") && !t2.contains("noise-1"), "{t2}");
     }
 
@@ -971,27 +1154,94 @@ mod bridge_tests {
     /// hundred bursts would leave the view blank.
     #[test]
     fn an_old_match_survives_the_tail_cut() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::AppToSensor, b"NEEDLE here");
-        for i in 0..900 {
-            let dir = if i % 2 == 0 { Dir::SensorToApp } else { Dir::AppToSensor };
-            s.push_log(dir, b"filler");
+        push(&mut s, &c, Dir::AppToSensor, b"NEEDLE here", 0);
+        for i in 0..900u64 {
+            let dir = if i % 2 == 0 {
+                Dir::SensorToApp
+            } else {
+                Dir::AppToSensor
+            };
+            push(&mut s, &c, dir, b"filler", i + 1);
         }
-        let t = bridge_log_job(&s.log, false, 12.0, b"NEEDLE", b"").text;
+        let t = text_of(&s, false, b"NEEDLE", b"");
         assert!(t.contains("NEEDLE"), "old match dropped by the tail cut");
     }
 
-    /// Marker bytes are coloured differently from the rest of their burst, so a
+    /// Marker bytes are coloured differently from the rest of their block, so a
     /// frame's edges are visible inside a long payload.
     #[test]
     fn markers_are_highlighted_inside_a_kept_burst() {
+        let c = Clock::new();
         let mut s = SerialState::default();
-        s.push_log(Dir::SensorToApp, &[0xAA, 0x01, 0x02, 0x55]);
-        let job = bridge_log_job(&s.log, true, 12.0, &[0xAA], &[0x55]);
+        push(&mut s, &c, Dir::SensorToApp, &[0xAA, 0x01, 0x02, 0x55], 0);
+        let job = bridge_log_job(&s.log, true, 12.0, &[0xAA], &[0x55], false, None);
         let colors: Vec<egui::Color32> = job.sections.iter().map(|x| x.format.color).collect();
         assert!(colors.contains(&SEARCH_HIT), "start marker not highlighted");
         assert!(colors.contains(&SEARCH_HIT2), "end marker not highlighted");
         assert!(colors.contains(&DIR_SENSOR), "payload lost its direction colour");
+    }
+
+    /// The delta is the number you actually read when timing a protocol.
+    #[test]
+    fn stamps_show_the_gap_between_blocks() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"cmd", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"reply", 120);
+        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, None).text;
+        assert!(t.contains("(+120 ms)"), "{t}");
+        // The first block has nothing to measure against, so no delta at all.
+        assert_eq!(t.matches("(+").count(), 1, "{t}");
+    }
+
+    /// With a filter on, the delta must be against the previous SHOWN block — a
+    /// gap to a burst the user cannot see is a number about nothing.
+    #[test]
+    fn the_delta_skips_filtered_out_blocks() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"KEEP one", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"hidden", 30);
+        push(&mut s, &c, Dir::AppToSensor, b"KEEP two", 100);
+        let t = bridge_log_job(&s.log, false, 12.0, b"KEEP", b"", true, None).text;
+        assert!(t.contains("(+100 ms)"), "delta should span the hidden block:\n{t}");
+    }
+
+    /// Without an epoch only the delta is knowable; the clock column says so
+    /// rather than inventing a time.
+    #[test]
+    fn a_missing_epoch_still_shows_deltas() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"a", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"b", 7);
+        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, None).text;
+        assert!(t.contains("--:--:--.---"), "{t}");
+        assert!(t.contains("(+7 ms)"), "{t}");
+    }
+
+    /// With an epoch the clock column is a real wall-clock time derived from the
+    /// monotonic instant, not a second reading of the system clock.
+    #[test]
+    fn an_epoch_turns_instants_into_wall_clock() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"a", 0);
+        let epoch = (c.at(0), std::time::UNIX_EPOCH + Duration::from_secs(3661));
+        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, Some(epoch)).text;
+        assert!(t.contains("01:01:01.000"), "{t}");
+    }
+
+    #[test]
+    fn stamps_can_be_turned_off() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"a", 0);
+        let t = text_of(&s, false, b"", b"");
+        assert!(!t.contains('['), "{t}");
+        assert!(t.starts_with(">> a"), "{t}");
     }
 }
 

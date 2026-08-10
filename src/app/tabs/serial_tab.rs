@@ -406,6 +406,30 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
         if ui.button("Clear").clicked() {
             serial.state.lock().unwrap().log.clear();
         }
+        ui.add_space(10.0);
+        ui.checkbox(&mut serial.stamps, "Time").on_hover_text(
+            "Prefix each block with its wall clock and the gap since the previous 
+             one. The time is when the IDE READ the bytes, not when they hit the 
+             wire - good to milliseconds, not better.",
+        );
+        // The block boundary is a guess about the protocol, so it has to be
+        // adjustable while watching the traffic.
+        let mut gap = serial.block_gap_ms();
+        ui.label("Gap:");
+        let resp = ui.add(
+            egui::DragValue::new(&mut gap)
+                .range(1..=2000)
+                .speed(1.0)
+                .suffix(" ms"),
+        );
+        if resp.changed() {
+            serial.set_block_gap_ms(gap);
+        }
+        resp.on_hover_text(
+            "Silence that ends a block. Bytes arriving closer than this join the 
+             block in progress - a frame delivered in several reads stays one 
+             block. Raise it if frames get split, lower it if they run together.",
+        );
         // Say so when the view is filtered — an empty log because a filter is
         // on looks exactly like an empty log because nothing is happening.
         if !serial.search.is_empty() || !serial.search2.is_empty() {
@@ -435,7 +459,7 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
     };
     let job = {
         let st = serial.state.lock().unwrap();
-        bridge_log_job(&st.log, serial.hex, 12.0, &a, &b)
+        bridge_log_job(&st.log, serial.hex, 12.0, &a, &b, serial.stamps, st.epoch)
     };
     egui::ScrollArea::both()
         .id_salt("bridge_log")
