@@ -2282,16 +2282,16 @@ impl AppIde {
         let mut rec =
             crate::activity::Recorder::new("Save (wall clock)").in_session(self.save_session);
         if let Some(t) = w.worker_done {
-            rec.add("click → project written to disk", t - w.started);
+            rec.add("click -> project written to disk", t - w.started);
         }
         if let Some(t) = w.flush_done {
-            rec.add("click → LSP flush finished", t - w.started);
+            rec.add("click -> LSP flush finished", t - w.started);
         }
         if timed_out {
             rec.mark("timed out waiting for the flycheck (rust-analyzer not Ready?)");
         } else {
             rec.add(
-                "click → inline diagnostics fresh (flycheck done)",
+                "click -> inline diagnostics fresh (flycheck done)",
                 now - w.started,
             );
         }

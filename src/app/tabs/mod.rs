@@ -10,6 +10,7 @@ pub mod mcu_tab;
 pub mod profile_tab;
 pub mod ra_tab;
 pub mod rtt_tab;
+pub mod serial_info;
 pub mod serial_tab;
 pub mod terminal_tab;
 pub mod tools_tab;

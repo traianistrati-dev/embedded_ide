@@ -247,7 +247,7 @@ fn main() {
                     to_row: 0
                 },
             ],
-            "main::main → a::helper and b::run → a::helper (use line + external dropped)"
+            "main::main -> a::helper and b::run -> a::helper (use line + external dropped)"
         );
 
         // Duplicates are folded; intra-module sites are skipped.

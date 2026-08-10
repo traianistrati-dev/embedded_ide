@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(mcu.clock_limits, ClockLimits::default());
         assert!(
             mcu.clock_presets.is_empty(),
-            "empty → family presets in the GUI"
+            "empty -> family presets in the GUI"
         );
     }
 

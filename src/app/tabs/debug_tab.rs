@@ -652,7 +652,7 @@ pub fn show_debug_tab(
                 if watches.is_empty() {
                     ui.label(
                         egui::RichText::new(
-                            "Right-click a variable in the editor → Add to Watch, or type \
+                            "Right-click a variable in the editor -> Add to Watch, or type \
                              one above. Use a single in-scope name — hover the info icon \
                              for the rules.",
                         )

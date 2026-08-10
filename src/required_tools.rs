@@ -470,7 +470,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         },
         RequiredTool {
             name: "objcopy",
-            description: "ELF → raw binary converter — the step between `cargo build` and a DFU flash",
+            description: "ELF -> raw binary converter - the step between `cargo build` and a DFU flash",
             toolchain: Some(ToolchainKind::RustEmbedded),
             severity: Severity::Feature,
             impact: "DFU flashing stops right after the build: firmware.bin can't be produced. \
@@ -843,22 +843,41 @@ pub const COM0COM_CHECK: &str = "@com0com";
 #[cfg(windows)]
 fn check_com0com() -> ToolStatus {
     // `reg query` rather than a registry crate: one spawn, no dependency, and
-    // the exit code alone answers the question.
-    let ok = crate::build::no_window(&mut Command::new("reg"))
-        .args([
-            "query",
-            r"HKLM\SYSTEM\CurrentControlSet\Services\com0com",
-        ])
+    // the exit code alone answers "is the driver there?".
+    let installed = crate::build::no_window(&mut Command::new("reg"))
+        .args(["query", r"HKLM\SYSTEM\CurrentControlSet\Services\com0com"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if ok {
-        ToolStatus::Ok("driver installed".to_string())
-    } else {
-        ToolStatus::Missing
+    if !installed {
+        return ToolStatus::Missing;
     }
+    // "Driver installed" is NOT the same as "Bridge can work", and reporting Ok
+    // for it was a false pass found on this very machine: the service key is
+    // present with a pair configured as `COM#` (auto-assign) and NO virtual port
+    // is actually enumerated. Same lesson as the half-installed Visual Studio in
+    // `check_msvc_toolchain` — probe the capability, not the installation.
+    let live: Vec<String> = serialport::available_ports()
+        .map(|ps| ps.into_iter().map(|p| p.port_name).collect())
+        .unwrap_or_default();
+    let pairs = crate::serial_bridge::com0com_pairs(&live);
+    if pairs.is_empty() {
+        return ToolStatus::Failed(
+            "com0com is installed but no pair has two live ports — create one in its setup \
+             (a pair left on the `COM#` placeholder doesn't count until Windows assigns \
+             numbers). Bridge mode stays unavailable until then."
+                .to_string(),
+        );
+    }
+    ToolStatus::Ok(
+        pairs
+            .iter()
+            .map(|(a, b)| format!("{a} <-> {b}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 #[cfg(not(windows))]

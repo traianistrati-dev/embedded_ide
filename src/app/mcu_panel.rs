@@ -950,9 +950,9 @@ impl AppIde {
                                           type) selector on the Pins tab. Portable = the trait wrapper (its .0 \
                                           still hands back the raw HAL object); Native = the concrete HAL type \
                                           for that one module only. SPI/I2C are always blocking here."),
-                    ("GPIO / io.rs:", "GPIO API = Portable (System tab) → src/pins/io.rs wraps the pins as \
+                    ("GPIO / io.rs:", "GPIO API = Portable (System tab) -> src/pins/io.rs wraps the pins as \
                                        DigitalOut / DigitalIn + a Delay over embedded-hal 1.0. GPIO API = Native \
-                                       → raw HAL pins and io.rs is not emitted."),
+                                       -> raw HAL pins and io.rs is not emitted."),
                     ("Cargo.toml:", "Adds embedded-io (serial) + embedded-hal 1.0 (SPI/I2C/GPIO) + the \
                                      embedded-hal-0-2 bridge alias; nb is added only while a Native-mode module \
                                      needs it. The embassy-* async crates are removed."),
@@ -1027,7 +1027,7 @@ impl AppIde {
                     ("Virtual modules:", "USART is always BufferedUart. Each SPI/I2C module gets a Blocking | \
                                           Async-DMA selector on the Pins tab (the Portable/Native Init API is not \
                                           used under Async)."),
-                    ("Async-DMA:", "embassy async SPI/I2C need DMA channels the IDE can't choose → main.rs gets \
+                    ("Async-DMA:", "embassy async SPI/I2C need DMA channels the IDE can't choose -> main.rs gets \
                                     a TODO line to fill (it won't compile until you set channels valid for your chip)."),
                     ("Cargo.toml:", "Adds embassy-executor + embassy-time and toggles the time-driver-any feature \
                                      on embassy-stm32. Async USART adds embedded-io-async + static_cell; SPI/I2C \
@@ -1284,7 +1284,7 @@ impl AppIde {
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(format!(
-                            "{}  Edits inside a config file may be lost if its template changes (e.g. blocking → async).",
+                            "{}  Edits inside a config file may be lost if its template changes (e.g. blocking -> async).",
                             ph::WARNING,
                         ))
                         .size(11.0)

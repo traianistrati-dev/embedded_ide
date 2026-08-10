@@ -146,7 +146,7 @@ impl AppIde {
             super::datasheet_import_dialog::maximize_button(ui, &mut di.maximized);
             ui.label(
                 egui::RichText::new(
-                    "Extracts the clock SPINE (sources → PLL → SYSCLK → AHB → APB) as a \
+                    "Extracts the clock SPINE (sources -> PLL -> SYSCLK -> AHB -> APB) as a \
                          graph and attaches it to this chip. The result is verified against the \
                          datasheet's own default SYSCLK before it is accepted.",
                 )

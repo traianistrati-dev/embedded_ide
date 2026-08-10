@@ -82,7 +82,7 @@ mod tests {
         let gc = sample();
         let text = export_clock_ron(&gc);
         let back = parse_clock_ron(&text).expect("re-import the exported clock");
-        assert_eq!(gc, back, "export → import must be lossless");
+        assert_eq!(gc, back, "export -> import must be lossless");
     }
 
     #[test]

@@ -617,7 +617,7 @@ use crate::m::report::decode;
         let lay = layout(&g);
         assert_eq!(
             lay.pos[b].h, HEADER_H,
-            "no symbols → compact header-only box"
+            "no symbols -> compact header-only box"
         );
         assert!(
             lay.pos[a].h > HEADER_H,
@@ -701,7 +701,7 @@ use crate::m::report::decode;
                 (b.center_x(), b.bottom()),
                 (x.center_x(), x.y),
             ),
-            "a→y and b→x must not cross after ordering"
+            "a->y and b->x must not cross after ordering"
         );
     }
 

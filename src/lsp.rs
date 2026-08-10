@@ -2762,7 +2762,7 @@ mod completion_item_tests {
         });
         let item = parse_completion_item(&with_insert).expect("parses");
         assert_eq!(item.insert_text, "bar");
-        assert!(!item.insert_is_snippet, "no insertTextFormat → plain text");
+        assert!(!item.insert_is_snippet, "no insertTextFormat -> plain text");
 
         let bare = serde_json::json!({ "label": "baz", "kind": 6 });
         let item = parse_completion_item(&bare).expect("parses");

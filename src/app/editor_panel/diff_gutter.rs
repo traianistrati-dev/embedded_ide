@@ -288,7 +288,7 @@ impl AppIde {
                     ui.label(egui::RichText::new("…").size(10.5));
                 }
                 ui.label(
-                    egui::RichText::new("revert: Git tab → diff, or Ctrl+Z")
+                    egui::RichText::new("revert: Git tab -> diff, or Ctrl+Z")
                         .size(10.0)
                         .italics()
                         .color(egui::Color32::from_gray(130)),

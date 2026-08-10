@@ -174,13 +174,13 @@ pub fn esp32c3_layout() -> ClockLayout {
             blk(28.0, 470.0, 120.0, 36.0, "RC_SLOW\n136 kHz"),
             blk(28.0, 550.0, 120.0, 36.0, "XTAL32K\n32.768 kHz"),
             blk(28.0, 630.0, 120.0, 36.0, "RC32K\n~32 kHz"),
-            blk(220.0, 92.0, 120.0, 36.0, "SPLL\n×12 → 480 MHz"),
+            blk(220.0, 92.0, 120.0, 36.0, "SPLL\n×12 -> 480 MHz"),
             blk(220.0, 250.0, 56.0, 24.0, "/2"),
             blk(390.0, 200.0, 95.0, 28.0, "APB /6"),
         ],
         outputs: vec![
-            out(720.0, 105.0, 210.0, 30.0, "CPU_CLK → core", "cpu"),
-            out(720.0, 200.0, 210.0, 30.0, "APB_CLK → peripherals", "apb"),
+            out(720.0, 105.0, 210.0, 30.0, "CPU_CLK -> core", "cpu"),
+            out(720.0, 200.0, 210.0, 30.0, "APB_CLK -> peripherals", "apb"),
             out(720.0, 303.0, 210.0, 30.0, "RTC_FAST_CLK", "rtc_fast"),
             out(720.0, 485.0, 210.0, 30.0, "RTC_SLOW_CLK", "rtc_slow"),
         ],
@@ -213,8 +213,8 @@ pub fn esp32c3_layout() -> ClockLayout {
                 y: 97.0,
                 w: 95.0,
                 options: vec![
-                    ("/3 → 160 MHz".to_owned(), NodeState::Index(0)),
-                    ("/6 → 80 MHz".to_owned(), NodeState::Index(1)),
+                    ("/3 -> 160 MHz".to_owned(), NodeState::Index(0)),
+                    ("/6 -> 80 MHz".to_owned(), NodeState::Index(1)),
                 ],
             },
             mux(

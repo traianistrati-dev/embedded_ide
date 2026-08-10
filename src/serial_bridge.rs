@@ -26,9 +26,12 @@
 
 use std::path::PathBuf;
 use std::process::Child;
-// Only the unix pair-creation path spawns anything.
+// Both platforms spawn something — `socat` on unix, `reg` on Windows — but only
+// the unix path redirects its pipes.
+#[cfg(any(unix, windows))]
+use std::process::Command;
 #[cfg(unix)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// How a virtual pair is obtained on this host.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -188,6 +191,114 @@ pub fn create_socat_pair() -> Result<VirtualPair, String> {
         .to_string())
 }
 
+// ── com0com pair discovery (Windows) ─────────────────────────────────────────
+// A com0com pair is `CNCA<n>` ⇄ `CNCB<n>`, configured in the driver's registry.
+// Asking the user to remember which two COM numbers are mates is exactly the
+// kind of thing the IDE can just look up.
+//
+// The catch found on a real install: `PortName` in the driver's Parameters key
+// is often the literal **`COM#`**, com0com's "assign the next free number"
+// placeholder — the concrete name only exists once Windows has enumerated the
+// device, and it lives under `Enum\com0com\…\Device Parameters\PortName`. So a
+// pair in Parameters is a pair that was CONFIGURED, not one that is USABLE, and
+// both keys have to be read and then cross-checked against the ports the OS
+// actually offers.
+
+/// One side of a pair: `CNCA0` / `CNCB1` …
+fn side_id(key_line: &str) -> Option<(char, u32)> {
+    let up = key_line.to_ascii_uppercase();
+    let pos = up.rfind("CNC")?;
+    let rest = &up[pos + 3..];
+    let ab = rest.chars().next()?;
+    if ab != 'A' && ab != 'B' {
+        return None;
+    }
+    let digits: String = rest[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok().map(|n| (ab, n))
+}
+
+/// Map every `CNCA<n>` / `CNCB<n>` mentioned in `reg query … /s` output to its
+/// `PortName`. Pure, and shape-compatible with BOTH registry locations, so the
+/// Parameters and Enum outputs can be parsed by the same code and merged.
+///
+/// Returns `(side, index) -> port name`.
+pub fn parse_port_names(reg_output: &str) -> std::collections::HashMap<(char, u32), String> {
+    let mut out = std::collections::HashMap::new();
+    let mut current: Option<(char, u32)> = None;
+    for line in reg_output.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Key lines start at column 0; value lines are indented.
+        if !line.starts_with([' ', '\t']) {
+            current = side_id(t);
+            continue;
+        }
+        let Some(id) = current else { continue };
+        // `    PortName    REG_SZ    COM10`
+        let mut parts = t.split_whitespace();
+        if parts.next() != Some("PortName") {
+            continue;
+        }
+        let _ty = parts.next();
+        if let Some(name) = parts.next() {
+            out.insert(id, name.to_string());
+        }
+    }
+    out
+}
+
+/// Pair up resolved side names into `(A, B)` per index, keeping only pairs where
+/// BOTH sides are in `live` — a name that no longer answers is worse than none,
+/// because the user would pick it and get "port not found" on Connect.
+pub fn usable_pairs(
+    names: &std::collections::HashMap<(char, u32), String>,
+    live: &[String],
+) -> Vec<(String, String)> {
+    let is_live = |n: &String| live.iter().any(|l| l.eq_ignore_ascii_case(n));
+    let mut idx: Vec<u32> = names.keys().map(|(_, n)| *n).collect();
+    idx.sort_unstable();
+    idx.dedup();
+    idx.into_iter()
+        .filter_map(|n| {
+            let a = names.get(&('A', n))?;
+            let b = names.get(&('B', n))?;
+            (is_live(a) && is_live(b)).then(|| (a.clone(), b.clone()))
+        })
+        .collect()
+}
+
+/// Every com0com pair whose BOTH ends are live ports, as `(A, B)`.
+///
+/// Enum wins over Parameters: it holds the name Windows actually assigned, which
+/// is the only truth when Parameters says `COM#`.
+#[cfg(windows)]
+pub fn com0com_pairs(live: &[String]) -> Vec<(String, String)> {
+    let query = |key: &str| -> String {
+        crate::build::no_window(&mut Command::new("reg"))
+            .args(["query", key, "/s"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    let mut names = parse_port_names(&query(
+        r"HKLM\SYSTEM\CurrentControlSet\Services\com0com\Parameters",
+    ));
+    // `COM#` is a placeholder, not a port — drop it so Enum can fill the gap.
+    names.retain(|_, v| !v.contains('#'));
+    for (k, v) in parse_port_names(&query(r"HKLM\SYSTEM\CurrentControlSet\Enum\com0com")) {
+        names.insert(k, v);
+    }
+    usable_pairs(&names, live)
+}
+
+#[cfg(not(windows))]
+pub fn com0com_pairs(_live: &[String]) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// One-line instruction for the user, per provider. Shown next to the Bridge
 /// controls, because "what do I point my other app at?" is the only genuinely
 /// confusing part of setting this up.
@@ -198,13 +309,20 @@ pub fn setup_hint(pair: Option<&VirtualPair>) -> String {
             p.app_side, p.ide_side
         ),
         (PairProvider::Socat, None) => {
-            "Press “Create pair” — socat will make two linked PTYs; the IDE takes \
+            "Press 'Create pair' - socat will make two linked PTYs; the IDE takes \
              one and your other application opens the other."
                 .to_string()
         }
-        (PairProvider::Com0com, _) => {
-            "Create a pair in com0com's setup (e.g. COM10 ⇄ COM11), pick ONE of \
-             them here, and point your other application at its mate."
+        // With the pair detected there is nothing left to explain — just name
+        // the port the other application needs.
+        (PairProvider::Com0com, Some(p)) => format!(
+            "Point your other application at  {}  (the IDE holds {}).",
+            p.app_side, p.ide_side
+        ),
+        (PairProvider::Com0com, None) => {
+            "No com0com pair with two live ports was found. Create one in \
+             com0com's setup (e.g. COM10 <-> COM11) - a pair configured with the \
+             `COM#` placeholder does not count until Windows assigns it a number."
                 .to_string()
         }
     }
@@ -254,6 +372,104 @@ mod tests {
         assert!(p.is_alive());
         assert_eq!(p.ide_side, "COM11");
         assert_eq!(p.app_side, "COM10");
+    }
+
+    /// VERBATIM output of `reg query …\Services\com0com\Parameters /s` on this
+    /// machine — a real com0com install whose pair uses the `COM#` placeholder.
+    const REAL_PARAMETERS: &str = "\
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\com0com\\Parameters\\CNCA1
+    PortName    REG_SZ    COM#
+
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\com0com\\Parameters\\CNCB1
+    PortName    REG_SZ    COM#
+";
+
+    #[test]
+    fn parses_the_real_registry_output() {
+        let n = parse_port_names(REAL_PARAMETERS);
+        assert_eq!(n.get(&('A', 1)).map(String::as_str), Some("COM#"));
+        assert_eq!(n.get(&('B', 1)).map(String::as_str), Some("COM#"));
+        assert_eq!(n.len(), 2);
+    }
+
+    /// The finding that shaped this code: a pair configured with `COM#` is not a
+    /// usable pair. Reporting it would send the user to a port that does not
+    /// exist — worse than reporting nothing.
+    #[test]
+    fn a_com_hash_placeholder_is_not_a_usable_pair() {
+        let mut names = parse_port_names(REAL_PARAMETERS);
+        names.retain(|_, v| !v.contains('#'));
+        assert!(usable_pairs(&names, &["COM1".into(), "COM17".into()]).is_empty());
+    }
+
+    #[test]
+    fn a_fully_assigned_pair_is_found_when_both_ends_are_live() {
+        let reg = "\
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\com0com\\port\\CNCA0\\Device Parameters
+    PortName    REG_SZ    COM10
+
+HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\com0com\\port\\CNCB0\\Device Parameters
+    PortName    REG_SZ    COM11
+";
+        let names = parse_port_names(reg);
+        let live = vec!["COM10".to_string(), "COM11".to_string(), "COM3".to_string()];
+        assert_eq!(
+            usable_pairs(&names, &live),
+            vec![("COM10".to_string(), "COM11".to_string())]
+        );
+        // One end unplugged → the pair is unusable, not half-usable.
+        assert!(usable_pairs(&names, &["COM10".to_string()]).is_empty());
+        // Matching is case-insensitive: Windows is inconsistent about "com10".
+        assert_eq!(usable_pairs(&names, &["com10".into(), "com11".into()]).len(), 1);
+    }
+
+    #[test]
+    fn a_half_configured_pair_is_ignored() {
+        // Only the A side exists — nothing to bridge to.
+        let names = parse_port_names(
+            "HKLM\\...\\CNCA2\n    PortName    REG_SZ    COM20\n",
+        );
+        assert!(usable_pairs(&names, &["COM20".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn side_ids_are_read_off_the_key_line() {
+        assert_eq!(side_id("HKLM\\x\\CNCA0"), Some(('A', 0)));
+        assert_eq!(side_id("HKLM\\x\\CNCB12"), Some(('B', 12)));
+        // MUST still resolve with a trailing subkey: the Enum location — the one
+        // holding the actually-assigned port name — is
+        // `…\Enum\com0com\port\CNCA0\Device Parameters`.
+        assert_eq!(side_id("HKLM\\x\\CNCA0\\Device Parameters"), Some(('A', 0)));
+        assert_eq!(side_id("HKLM\\Services\\com0com"), None);
+        assert_eq!(side_id("HKLM\\x\\CNCC0"), None);
+    }
+
+    /// Opt-in diagnostic against the REAL machine, not an assertion:
+    /// `cargo test -- --ignored --nocapture com0com_diagnostic`.
+    ///
+    /// Ignored by default because it depends on hardware/driver state, which a
+    /// test suite must never do. It exists because every other test here runs on
+    /// captured output — this is the one that proves the two `reg query` calls,
+    /// the Enum/Parameters merge and the live-port filter agree on a pair that
+    /// actually exists.
+    #[test]
+    #[ignore = "requires a real com0com pair; run with --ignored"]
+    fn com0com_diagnostic() {
+        let live: Vec<String> = serialport::available_ports()
+            .map(|ps| ps.into_iter().map(|p| p.port_name).collect())
+            .unwrap_or_default();
+        println!("live ports      : {live:?}");
+        let pairs = com0com_pairs(&live);
+        println!("detected pairs  : {pairs:?}");
+        for (a, b) in &pairs {
+            let p = VirtualPair::existing(b.clone(), a.clone());
+            println!("hint            : {}", setup_hint(Some(&p)));
+        }
+        assert!(
+            !pairs.is_empty(),
+            "no usable com0com pair found — create one with:\n  \
+             setupc.exe install PortName=COM20 PortName=COM21"
+        );
     }
 
     #[test]

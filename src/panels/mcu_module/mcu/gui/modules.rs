@@ -1028,7 +1028,7 @@ pub fn module_config_ui(
             .show_ui(ui, |ui| {
                 ui.selectable_value(mode, AsyncBusMode::Blocking, "Blocking (embedded-hal 1.0)")
                     .on_hover_text(
-                        "embassy new_blocking → a STANDARD blocking embedded-hal 1.0 bus. \
+                        "embassy new_blocking -> a STANDARD blocking embedded-hal 1.0 bus. \
                          No DMA — compiles out of the box. Fine inside an async project.",
                     );
                 ui.selectable_value(
@@ -1037,7 +1037,7 @@ pub fn module_config_ui(
                     "Async-DMA (embedded-hal-async)",
                 )
                 .on_hover_text(
-                    "embassy DMA new → an .await-able embedded-hal-async bus. Needs DMA \
+                    "embassy DMA new -> an .await-able embedded-hal-async bus. Needs DMA \
                          channels: main.rs gets a TODO line to fill with channels valid for \
                          this peripheral on your chip (won't compile until you do).",
                 );

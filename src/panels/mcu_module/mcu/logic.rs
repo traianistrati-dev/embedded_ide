@@ -524,14 +524,14 @@ impl Mcu {
         let mut out = Vec::new();
         if self.pending_runtime != self.runtime {
             out.push(format!(
-                "Runtime: {} → {}",
+                "Runtime: {} -> {}",
                 self.runtime.as_token(),
                 self.pending_runtime.as_token()
             ));
         }
         if self.pending_gpio_api != self.gpio_api {
             out.push(format!(
-                "GPIO In/Out: {:?} → {:?}",
+                "GPIO In/Out: {:?} -> {:?}",
                 self.gpio_api, self.pending_gpio_api
             ));
         }
@@ -542,7 +542,7 @@ impl Mcu {
             let (cur_api, cur_async) = module_style(&m.config);
             let name = crate::panels::mcu_module::mcu::gui::modules::module_base_name(m);
             if api != cur_api {
-                out.push(format!("{name} init: {cur_api:?} → {api:?}"));
+                out.push(format!("{name} init: {cur_api:?} -> {api:?}"));
             }
             if asyncm != cur_async
                 && !matches!(
@@ -555,7 +555,7 @@ impl Mcu {
                     AsyncBusMode::AsyncDma => "Async-DMA",
                 };
                 out.push(format!(
-                    "{name} async: {} → {}",
+                    "{name} async: {} -> {}",
                     lbl(cur_async),
                     lbl(asyncm)
                 ));
@@ -590,9 +590,9 @@ impl Mcu {
             } else {
                 "#[entry] fn main() -> !"
             };
-            out.push(format!("↻ main.rs entry → {entry}"));
+            out.push(format!("main.rs entry -> {entry}"));
         } else {
-            out.push("↻ main.rs regenerated (pin bindings)".to_string());
+            out.push("~ main.rs regenerated (pin bindings)".to_string());
         }
 
         // 3. Config-file adds / removes / regenerations — a dry-run of the regen.
@@ -611,9 +611,9 @@ impl Mcu {
         for name in names {
             match (body_of(&before, &name), body_of(&after, &name)) {
                 (None, Some(_)) => out.push(format!("+ src/pins/configs/{name}  (new)")),
-                (Some(_), None) => out.push(format!("− src/pins/configs/{name}  (removed)")),
+                (Some(_), None) => out.push(format!("- src/pins/configs/{name}  (removed)")),
                 (Some(b), Some(a)) if b != a => {
-                    out.push(format!("↻ src/pins/configs/{name}  (regenerated)"))
+                    out.push(format!("~ src/pins/configs/{name}  (regenerated)"))
                 }
                 _ => {}
             }
@@ -621,7 +621,7 @@ impl Mcu {
 
         // 4. Cargo.toml deps follow the choices (embassy / embedded-io / nb / …);
         //    the exact set is applied by `init_frame` after Apply.
-        out.push("↻ Cargo.toml dependencies updated to match".to_string());
+        out.push("~ Cargo.toml dependencies updated to match".to_string());
         out
     }
 
@@ -879,7 +879,7 @@ mod module_support_tests {
         }
         assert!(
             !mcu.supports_module(ModuleKind::GenericInterfaceUsb),
-            "no USB pins → the kind is hidden"
+            "no USB pins -> the kind is hidden"
         );
         // Untouched peripherals still show.
         assert!(mcu.supports_module(ModuleKind::GenericInterfaceUsart));

@@ -97,6 +97,10 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 )
                 .on_disabled_hover_text("Disconnect first to change the wiring");
         });
+        // The explainer stays reachable whether or not Bridge is on — it is
+        // what you read to decide whether you need Bridge at all.
+        ui.toggle_value(&mut serial.info_on, format!("{} Info", ph::INFO))
+            .on_hover_text("How Bridge (MITM) wiring works, with this session's ports");
 
         ui.separator();
         // Plot view: parse numeric lines into live curves (Arduino Serial
@@ -244,6 +248,23 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
 
     // ── Plot / Matrix view (replaces the text/hex view while on; the send
     //    area below keeps working, so commands can be sent meanwhile) ─────────
+    if serial.info_on {
+        // Outranks every other view: it was asked for explicitly, and it is
+        // read while nothing is connected.
+        let (app_side, ide_side) = match &serial.pair {
+            Some(p) => (p.app_side.clone(), p.ide_side.clone()),
+            None => (String::new(), serial.bridge_port.clone()),
+        };
+        super::serial_info::show_bridge_info(
+            ui,
+            section_h,
+            &serial.port,
+            &app_side,
+            &ide_side,
+            !cfg!(windows),
+        );
+        return;
+    }
     if serial.matrix.on {
         // Newest complete Find-start…Find-end payload + how many the buffer
         // holds (the counter makes a live stream visibly tick).
@@ -314,20 +335,54 @@ fn show_bridge_row(ui: &mut egui::Ui, serial: &mut SerialMonitor, connected: boo
                         );
                     }
                 }
-                // Windows: the pair is a driver resource the user made earlier;
-                // all the IDE can do is ask which half to take.
+                // Windows: the pair is a driver resource the user made earlier,
+                // but the IDE can LOOK IT UP — asking someone to remember which
+                // two COM numbers are mates is the part that goes wrong.
                 PairProvider::Com0com => {
+                    let pairs = serial.com0com_pairs.clone();
+                    let label = match &serial.pair {
+                        Some(p) => format!("{} <-> {}", p.ide_side, p.app_side),
+                        None => "—".to_owned(),
+                    };
                     egui::ComboBox::from_id_salt("bridge_pair_port")
-                        .selected_text(if serial.bridge_port.is_empty() {
-                            "—".to_owned()
-                        } else {
-                            serial.bridge_port.clone()
-                        })
+                        .selected_text(label)
                         .show_ui(ui, |ui| {
-                            for p in serial.ports.clone() {
-                                ui.selectable_value(&mut serial.bridge_port, p.clone(), p);
+                            if pairs.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("no com0com pair detected")
+                                        .size(10.5)
+                                        .italics(),
+                                );
+                            }
+                            for (a, b) in &pairs {
+                                // The IDE takes B, the other app gets A — an
+                                // arbitrary but STABLE split; Swap flips it.
+                                if ui.selectable_label(false, format!("{a} <-> {b}")).clicked() {
+                                    serial.bridge_port = b.clone();
+                                    serial.pair = Some(
+                                        crate::serial_bridge::VirtualPair::existing(
+                                            b.clone(),
+                                            a.clone(),
+                                        ),
+                                    );
+                                }
                             }
                         });
+                    if serial.pair.is_some()
+                        && ui
+                            .button(ph::ARROWS_LEFT_RIGHT)
+                            .on_hover_text("Swap which end of the pair the IDE holds")
+                            .clicked()
+                    {
+                        if let Some(p) = serial.pair.take() {
+                            let swapped = crate::serial_bridge::VirtualPair::existing(
+                                p.app_side.clone(),
+                                p.ide_side.clone(),
+                            );
+                            serial.bridge_port = swapped.ide_side.clone();
+                            serial.pair = Some(swapped);
+                        }
+                    }
                 }
             }
         });
@@ -344,17 +399,43 @@ fn show_bridge_row(ui: &mut egui::Ui, serial: &mut SerialMonitor, connected: boo
 fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
     use crate::serial::{DIR_APP, DIR_SENSOR, bridge_log_job};
     ui.horizontal(|ui| {
-        ui.colored_label(DIR_APP, ">> app → device");
+        ui.colored_label(DIR_APP, ">> app -> device");
         ui.add_space(10.0);
-        ui.colored_label(DIR_SENSOR, "<< device → app");
+        ui.colored_label(DIR_SENSOR, "<< device -> app");
         ui.add_space(10.0);
         if ui.button("Clear").clicked() {
             serial.state.lock().unwrap().log.clear();
         }
+        // Say so when the view is filtered — an empty log because a filter is
+        // on looks exactly like an empty log because nothing is happening.
+        if !serial.search.is_empty() || !serial.search2.is_empty() {
+            ui.add_space(10.0);
+            ui.colored_label(
+                SEARCH_HIT,
+                format!(
+                    "{} filtered to bursts containing Find start / Find end",
+                    ph::FUNNEL
+                ),
+            );
+        }
     });
+    // The Find fields mean the same thing here as in the RX view, read in the
+    // mode you are in: hex mode parses them as byte sequences, text mode takes
+    // the typed characters as-is. Same field, no second concept to learn.
+    let (a, b) = if serial.hex {
+        (
+            parse_hex_search(&serial.search),
+            parse_hex_search(&serial.search2),
+        )
+    } else {
+        (
+            serial.search.as_bytes().to_vec(),
+            serial.search2.as_bytes().to_vec(),
+        )
+    };
     let job = {
         let st = serial.state.lock().unwrap();
-        bridge_log_job(&st.log, serial.hex, 12.0)
+        bridge_log_job(&st.log, serial.hex, 12.0, &a, &b)
     };
     egui::ScrollArea::both()
         .id_salt("bridge_log")

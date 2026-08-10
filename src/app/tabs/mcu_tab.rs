@@ -652,7 +652,7 @@ mod tests {
             .find(|p| p.pin_num == 10);
         assert!(
             pa0_in.is_none(),
-            "PA0 is configured as GPIO Output → must not appear under GPIO Input"
+            "PA0 is configured as GPIO Output -> must not appear under GPIO Input"
         );
     }
 
@@ -689,7 +689,7 @@ mod tests {
                 .pins
                 .iter()
                 .any(|p| p.pin_num == 10),
-            "PA0 is taken by ADC → hidden from GPIO Output"
+            "PA0 is taken by ADC -> hidden from GPIO Output"
         );
     }
 

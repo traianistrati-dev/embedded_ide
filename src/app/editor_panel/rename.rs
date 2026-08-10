@@ -187,7 +187,7 @@ let d = obj.raw;
     fn leftover_scan_survives_non_ascii_neighbours() {
         // A multi-byte char next to the match must not panic or be read as a
         // word character.
-        assert_eq!(whole_word_lines("// măsurat: raw() → ok", "raw"), vec![1]);
+        assert_eq!(whole_word_lines("// măsurat: raw() -> ok", "raw"), vec![1]);
     }
 
     #[test]

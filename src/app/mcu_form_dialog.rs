@@ -127,7 +127,7 @@ impl AppIde {
                             )
                             .on_hover_text(
                                 "Set Family / CPU / Toolchain / Target from the chip name \
-                                 (e.g. STM32WBA55CG → stm32wba · Cortex-M33 · thumbv8m.main-none-eabihf)",
+                                 (e.g. STM32WBA55CG -> stm32wba · Cortex-M33 · thumbv8m.main-none-eabihf)",
                             )
                             .clicked()
                         {

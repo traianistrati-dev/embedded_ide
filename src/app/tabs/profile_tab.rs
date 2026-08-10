@@ -301,7 +301,7 @@ fn runtime_view(
             .on_hover_text(
                 "Halt-sample the RUNNING firmware's call stack via probe-rs, then fold it \
                  into a flamegraph.\nThe firmware must already be flashed + running. \
-                 Intrusive (each halt stops the CPU) → a statistical view.",
+                 Intrusive (each halt stops the CPU) -> a statistical view.",
             )
             .on_disabled_hover_text(if no_probe_rs {
                 super::needs_tool_hint("probe-rs")

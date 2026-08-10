@@ -42,6 +42,95 @@ pub mod size;
 pub mod terminal;
 pub mod udev;
 
+/// Guard against the tofu-square bug coming back.
+///
+/// The bundled font has no arrow glyphs, so a raw `→` / `⇄` in a string that
+/// reaches egui renders as an empty box. It has now been introduced and fixed
+/// three times, always the same way: someone reaches for the prettier character
+/// while writing a label. A grep-shaped test is the only thing that catches it
+/// before the user does — the alternative is noticing it in a screenshot.
+///
+/// Comments are free to use arrows; only string LITERALS are checked. Use ASCII
+/// `->` and `<->`, or a phosphor `ph::` icon.
+#[cfg(test)]
+mod glyph_guard {
+    /// Arrow-class characters absent from the bundled font. Em dash, ellipsis
+    /// and `×` are deliberately NOT here — those do render.
+    const BANNED: [char; 7] = ['\u{2192}', '\u{2190}', '\u{2194}', '\u{21c4}', '\u{21c6}', '\u{21d2}', '\u{21bb}'];
+
+    /// Does this line carry a banned glyph INSIDE a double-quoted literal?
+    ///
+    /// Walks the line tracking string state, so `// see "x" -> y` (a comment
+    /// that merely contains quotes) is not flagged and `"a -> b" // note` is.
+    /// A `//` reached outside a string ends the line.
+    fn in_literal(line: &str) -> bool {
+        let mut chars = line.chars().peekable();
+        let mut in_str = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if in_str => {
+                    chars.next(); // escaped char, whatever it is
+                }
+                '"' => in_str = !in_str,
+                '/' if !in_str && chars.peek() == Some(&'/') => return false,
+                c if in_str && BANNED.contains(&c) => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn scan(dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                scan(&p, out);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                let Ok(text) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                for (i, line) in text.lines().enumerate() {
+                    if in_literal(line) {
+                        out.push(format!("{}:{}  {}", p.display(), i + 1, line.trim()));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_scanner_tells_comments_from_literals() {
+        let a = '\u{2192}';
+        assert!(in_literal(&format!("ui.label(\"a {a} b\");")));
+        assert!(in_literal(&format!("x(\"a {a} b\"); // fine")));
+        // Comments are allowed to use arrows, even alongside quotes.
+        assert!(!in_literal(&format!("// \"Restore\" {a} confirm")));
+        assert!(!in_literal(&format!("/// maps `\"x\"` {a} text")));
+        assert!(!in_literal(&format!("let x = 1; // re-open {a} promoted")));
+        // A `//` inside a string is not a comment.
+        assert!(in_literal(&format!("u(\"http://x {a} y\");")));
+        assert!(!in_literal("nothing here at all"));
+    }
+
+    #[test]
+    fn no_arrow_glyphs_in_string_literals() {
+        let mut bad = Vec::new();
+        scan(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut bad,
+        );
+        assert!(
+            bad.is_empty(),
+            "the bundled font has no arrow glyphs - these render as empty boxes.\n\
+             Use ASCII (-> , <->) or a phosphor ph:: icon:\n{}",
+            bad.join("\n")
+        );
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // FIRST, before anything can print: adopt the console we were launched from
     // (if any). A GUI-subsystem binary has no standard handles until this runs.

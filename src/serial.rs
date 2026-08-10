@@ -146,6 +146,17 @@ pub struct SerialMonitor {
     /// The live pair. Held here so dropping it (disconnect / app exit) tears
     /// down the `socat` child that owns the PTYs.
     pub pair: Option<crate::serial_bridge::VirtualPair>,
+    /// `true` → the RX area shows the drawn "how Bridge works" explainer.
+    /// Its own toggle rather than a dialog: the wiring is what you consult it
+    /// WHILE setting up, so it has to live where the controls are.
+    pub info_on: bool,
+    /// Detected com0com pairs (Windows), refreshed with the port list.
+    ///
+    /// CACHED on purpose: discovering them costs two `reg query` spawns, and the
+    /// Bridge row is drawn every frame. Pairs only change when the user edits
+    /// them in com0com's setup — which changes the port list too, so refreshing
+    /// both together is exactly right.
+    pub com0com_pairs: Vec<(String, String)>,
 }
 
 impl Default for SerialMonitor {
@@ -177,6 +188,8 @@ impl Default for SerialMonitor {
             bridge: false,
             bridge_port: String::new(),
             pair: None,
+            info_on: false,
+            com0com_pairs: Vec::new(),
         }
     }
 }
@@ -192,6 +205,9 @@ impl SerialMonitor {
                 self.port = first.clone();
             }
         }
+        // Same trigger, same cadence: a com0com pair appearing IS a port-list
+        // change, so there is no case where one is stale and the other fresh.
+        self.com0com_pairs = crate::serial_bridge::com0com_pairs(&self.ports);
     }
 
     pub fn is_connected(&self) -> bool {
@@ -502,44 +518,105 @@ pub const DIR_APP: egui::Color32 = egui::Color32::from_rgb(235, 180, 90);
 /// Colour of traffic coming FROM the device (its replies).
 pub const DIR_SENSOR: egui::Color32 = egui::Color32::from_rgb(110, 200, 225);
 
+/// Every start index at which `pat` occurs in `hay`. Empty pattern → no hits,
+/// so an empty Find field never "matches everything".
+fn match_positions(hay: &[u8], pat: &[u8]) -> Vec<usize> {
+    if pat.is_empty() || pat.len() > hay.len() {
+        return Vec::new();
+    }
+    (0..=hay.len() - pat.len())
+        .filter(|&i| &hay[i..i + pat.len()] == pat)
+        .collect()
+}
+
+/// Does this burst contain any of the markers? The filter predicate.
+fn chunk_matches(bytes: &[u8], a: &[u8], b: &[u8]) -> bool {
+    !match_positions(bytes, a).is_empty() || !match_positions(bytes, b).is_empty()
+}
+
 /// Render the bridge log: one line per burst, prefixed `>>` for app→device and
 /// `<<` for device→app, in hex or lossy text.
 ///
 /// Two colours and two arrows rather than one merged stream — reading a MITM
 /// capture is entirely about attributing each byte to a side. Only the tail is
 /// laid out: a long session's log is far bigger than any screen.
-pub fn bridge_log_job(log: &[LogChunk], hex: bool, font_size: f32) -> egui::text::LayoutJob {
+///
+/// `find_a` / `find_b` do two jobs at once, which is what makes them useful on a
+/// relay: bursts containing NEITHER marker are dropped (a device that polls
+/// every 50 ms buries the exchange you care about), and inside the ones kept,
+/// the markers are painted yellow / cyan so a frame's edges are findable at a
+/// glance. Both empty = no filtering, everything shown.
+pub fn bridge_log_job(
+    log: &[LogChunk],
+    hex: bool,
+    font_size: f32,
+    find_a: &[u8],
+    find_b: &[u8],
+) -> egui::text::LayoutJob {
     const MAX_CHUNKS: usize = 400;
+    let filtering = !find_a.is_empty() || !find_b.is_empty();
+    let font = egui::FontId::monospace(font_size);
     let mut job = egui::text::LayoutJob::default();
-    let start = log.len().saturating_sub(MAX_CHUNKS);
-    for chunk in &log[start..] {
+
+    // Filter FIRST, then take the tail: taking the tail first would leave a
+    // screen of nothing whenever the matches are older than the last 400 bursts.
+    let kept: Vec<&LogChunk> = log
+        .iter()
+        .filter(|c| !filtering || chunk_matches(&c.bytes, find_a, find_b))
+        .collect();
+    let start = kept.len().saturating_sub(MAX_CHUNKS);
+
+    for chunk in &kept[start..] {
         let (arrow, color) = match chunk.dir {
             Dir::AppToSensor => (">>", DIR_APP),
             Dir::SensorToApp => ("<<", DIR_SENSOR),
         };
-        let body = if hex {
-            chunk
-                .bytes
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        } else {
-            // Trailing newlines would double-space the view: the arrow prefix
-            // already puts each burst on its own line.
-            String::from_utf8_lossy(&chunk.bytes)
-                .trim_end_matches(['\r', '\n'])
-                .to_string()
-        };
         job.append(
-            &format!("{arrow} {body}\n"),
+            &format!("{arrow} "),
             0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::monospace(font_size),
-                color,
-                ..Default::default()
-            },
+            egui::TextFormat::simple(font.clone(), color),
         );
+
+        // One colour per byte: the burst's direction, overridden where a marker
+        // sits. Emitted as RUNS of equal colour so a 1 kB frame is a handful of
+        // sections, not a thousand.
+        let n = chunk.bytes.len();
+        let mut colors = vec![color; n];
+        for (pat, hit) in [(find_a, SEARCH_HIT), (find_b, SEARCH_HIT2)] {
+            for i in match_positions(&chunk.bytes, pat) {
+                for c in colors.iter_mut().skip(i).take(pat.len()) {
+                    *c = hit;
+                }
+            }
+        }
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && colors[j] == colors[i] {
+                j += 1;
+            }
+            let run = &chunk.bytes[i..j];
+            let text = if hex {
+                run.iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    + " "
+            } else {
+                // Trailing newlines would double-space the view: the arrow
+                // prefix already puts each burst on its own line.
+                String::from_utf8_lossy(run)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string()
+            };
+            job.append(
+                &text,
+                0.0,
+                egui::TextFormat::simple(font.clone(), colors[i]),
+            );
+            i = j;
+        }
+        job.append("\n", 0.0, egui::TextFormat::simple(font.clone(), color));
     }
     job
 }
@@ -854,12 +931,67 @@ mod bridge_tests {
         let mut s = SerialState::default();
         s.push_log(Dir::AppToSensor, b"ping");
         s.push_log(Dir::SensorToApp, b"pong");
-        let text = bridge_log_job(&s.log, false, 12.0).text;
+        let text = bridge_log_job(&s.log, false, 12.0, b"", b"").text;
         assert!(text.contains(">> ping"), "{text}");
         assert!(text.contains("<< pong"), "{text}");
         // Hex mode shows the same bursts as bytes.
-        let hex = bridge_log_job(&s.log, true, 12.0).text;
+        let hex = bridge_log_job(&s.log, true, 12.0, b"", b"").text;
         assert!(hex.contains(">> 70 69 6E 67"), "{hex}");
+    }
+
+    /// An EMPTY Find field must never act as "matches everything" — that would
+    /// silently filter the log the moment one of the two fields is typed in.
+    #[test]
+    fn empty_markers_do_not_filter() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::AppToSensor, b"alpha");
+        s.push_log(Dir::SensorToApp, b"beta");
+        let all = bridge_log_job(&s.log, false, 12.0, b"", b"").text;
+        assert!(all.contains("alpha") && all.contains("beta"), "{all}");
+    }
+
+    /// The point of the filter on a relay: a device that polls constantly buries
+    /// the exchange you are looking for.
+    #[test]
+    fn bursts_without_a_marker_are_dropped() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::AppToSensor, b"noise-1");
+        s.push_log(Dir::SensorToApp, b"AT+RST wanted");
+        s.push_log(Dir::AppToSensor, b"noise-2");
+        let t = bridge_log_job(&s.log, false, 12.0, b"AT+", b"").text;
+        assert!(t.contains("wanted"), "{t}");
+        assert!(!t.contains("noise"), "kept an unmatched burst:
+{t}");
+        // Either marker is enough to keep a burst.
+        let t2 = bridge_log_job(&s.log, false, 12.0, b"", b"noise-2").text;
+        assert!(t2.contains("noise-2") && !t2.contains("noise-1"), "{t2}");
+    }
+
+    /// Filtering happens BEFORE the tail cut, or a match older than the last few
+    /// hundred bursts would leave the view blank.
+    #[test]
+    fn an_old_match_survives_the_tail_cut() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::AppToSensor, b"NEEDLE here");
+        for i in 0..900 {
+            let dir = if i % 2 == 0 { Dir::SensorToApp } else { Dir::AppToSensor };
+            s.push_log(dir, b"filler");
+        }
+        let t = bridge_log_job(&s.log, false, 12.0, b"NEEDLE", b"").text;
+        assert!(t.contains("NEEDLE"), "old match dropped by the tail cut");
+    }
+
+    /// Marker bytes are coloured differently from the rest of their burst, so a
+    /// frame's edges are visible inside a long payload.
+    #[test]
+    fn markers_are_highlighted_inside_a_kept_burst() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::SensorToApp, &[0xAA, 0x01, 0x02, 0x55]);
+        let job = bridge_log_job(&s.log, true, 12.0, &[0xAA], &[0x55]);
+        let colors: Vec<egui::Color32> = job.sections.iter().map(|x| x.format.color).collect();
+        assert!(colors.contains(&SEARCH_HIT), "start marker not highlighted");
+        assert!(colors.contains(&SEARCH_HIT2), "end marker not highlighted");
+        assert!(colors.contains(&DIR_SENSOR), "payload lost its direction colour");
     }
 }
 

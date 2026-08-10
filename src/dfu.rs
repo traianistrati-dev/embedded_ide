@@ -370,7 +370,7 @@ pub fn start_flash(
         let t_obj = std::time::Instant::now();
         let obj = objcopy(&elf, &bin, &dfu_log, &ctx);
         act.rec().cmd_phase(
-            "objcopy (ELF → firmware.bin)",
+            "objcopy (ELF -> firmware.bin)",
             "objcopy -O binary <elf> firmware.bin",
             t_obj.elapsed(),
             if obj.is_ok() { Some(0) } else { Some(1) },

@@ -2111,7 +2111,7 @@ fn f() {}
         assert_eq!(
             fs::metadata(&f).unwrap().modified().unwrap(),
             mtime_before,
-            "no rewrite → mtime stable"
+            "no rewrite -> mtime stable"
         );
         // A real edit is written back CRLF (only the change, no EOL flip).
         write_if_changed(&f, b"a\nc\n").unwrap();

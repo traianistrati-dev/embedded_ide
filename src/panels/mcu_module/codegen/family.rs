@@ -771,7 +771,7 @@ mod tests {
         );
         assert!(
             !body.contains("embedded_io"),
-            "native forced → no embedded-io:\n{body}"
+            "native forced -> no embedded-io:\n{body}"
         );
         // …and main.rs uses the split `(Tx, Rx)` tuple binding.
         let code = mcu.fresh_main_rs();

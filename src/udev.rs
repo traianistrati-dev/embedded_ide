@@ -87,7 +87,7 @@ pub fn rules_text() -> String {
             continue;
         };
         if kind != last_kind {
-            out.push_str(&format!("# ── {kind} ──\n"));
+            out.push_str(&format!("# -- {kind} --\n"));
             last_kind = kind;
         }
         out.push_str(&format!(
