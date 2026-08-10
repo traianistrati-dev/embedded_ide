@@ -435,6 +435,17 @@ impl AppIde {
         ranges
     }
 
+    /// The unused-generic ranges for `display_code`, or empty when the cached
+    /// scan is for different text. Same data the fade uses — handed to the
+    /// pulsing overlay so the two can never disagree about what is unused.
+    pub(super) fn generic_pulse_ranges(&self, display_code: &str) -> &[(usize, usize)] {
+        if self.usages.generics_for_text == display_code {
+            &self.usages.generic_ranges
+        } else {
+            &[]
+        }
+    }
+
     /// Paint the "N refs" indicator on every used item's signature line and
     /// handle its click (open/close a floating popup listing call sites, itself
     /// clickable to navigate there). A no-op unless the usages analysis is

@@ -24,6 +24,23 @@
 //! *not* fading: a name collision (a module-level `T` used in the body) merely
 //! loses us one fade, it never dims live code.
 
+/// Pulse rate of the highlight behind an unused parameter. Slower than the
+/// pin-jump band's 1.5 Hz ([`PIN_PULSE_HZ`](crate::app)): that one runs for
+/// 2.5 s and stops, this one keeps going while the code is on screen, and a
+/// fast permanent blink is exhausting to work next to.
+const PULSE_HZ: f64 = 0.8;
+
+/// Peak alpha of that highlight. Same constraint as the pin band: it is painted
+/// OVER the text, and the text under it is already faded to gray — an opaque
+/// white would bury the very identifier it points at. 55/255 (≈22 %) makes the
+/// parameter the brightest thing on its line while staying readable.
+const PULSE_ALPHA: f32 = 55.0;
+
+/// Animation frame budget: ~30 fps is plenty for a slow breathing highlight,
+/// and asking for repaints at this rate (instead of every frame) keeps a file
+/// with unused parameters from pinning the render loop at full speed.
+const PULSE_FRAME_MS: u64 = 33;
+
 /// Char-index `[start, end)` ranges of generic parameters (and their `where`
 /// predicates) that are declared but never used, ready to append to the
 /// editor's dead-range list.
@@ -533,6 +550,94 @@ fn find_word<'a>(
     })
 }
 
+// ── Pulsing highlight ─────────────────────────────────────────────────────────
+
+/// Highlight alpha at `seconds`: a cosine so it breathes in and out rather than
+/// switching on and off, starting (and returning) at fully transparent.
+fn pulse_alpha(seconds: f64) -> u8 {
+    let phase = (seconds * std::f64::consts::TAU * PULSE_HZ).cos();
+    (((0.5 - 0.5 * phase) as f32) * PULSE_ALPHA).round() as u8
+}
+
+/// Split `[start, end)` into one span per screen row, i.e. cut it at newlines —
+/// a parameter list broken over several lines would otherwise be painted as one
+/// rectangle running off the right edge.
+fn row_spans(display_code: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut seg = start;
+    for (i, c) in display_code
+        .chars()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+    {
+        if c == '\n' {
+            if i > seg {
+                out.push((seg, i));
+            }
+            seg = i + 1;
+        }
+    }
+    if end > seg {
+        out.push((seg, end));
+    }
+    out
+}
+
+/// Paint the pulsing highlight behind every unused generic parameter in view,
+/// on top of the fade the highlighter already applied.
+///
+/// Deliberately limited to generic parameters: the same dead-range list also
+/// fades whole unused fns and structs, and pulsing a 20-line block would be
+/// unbearable. A parameter is one short identifier — exactly the size where a
+/// blink helps instead of shouting.
+pub(super) fn show_unused_generics_overlay(
+    ui: &egui::Ui,
+    galley_pos: egui::Pos2,
+    clip: egui::Rect,
+    galley: &egui::text::Galley,
+    display_code: &str,
+    ranges: &[(usize, usize)],
+) {
+    if ranges.is_empty() {
+        return;
+    }
+    let total_chars = display_code.chars().count();
+    let alpha = pulse_alpha(ui.input(|i| i.time));
+    let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+    let painter = ui.painter().with_clip_rect(clip);
+    let mut painted = false;
+
+    for &(start, end) in ranges {
+        for (s, e) in row_spans(display_code, start.min(total_chars), end.min(total_chars)) {
+            let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(s));
+            let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(e));
+            let y_top = galley_pos.y + loc_s.min.y;
+            let y_bot = galley_pos.y + loc_s.max.y;
+            if y_bot < clip.top() || y_top > clip.bottom() {
+                continue; // scrolled out of view — and not worth animating for
+            }
+            let x0 = galley_pos.x + loc_s.min.x;
+            let x1 = galley_pos.x + loc_e.min.x;
+            if x1 <= x0 {
+                continue;
+            }
+            painted = true;
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x0 - 1.0, y_top), egui::pos2(x1 + 1.0, y_bot)),
+                2.0,
+                color,
+            );
+        }
+    }
+
+    // Keep frames coming only while something is actually pulsing on screen.
+    if painted {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(PULSE_FRAME_MS));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +791,43 @@ mod tests {
     fn multiple_items_report_each() {
         let src = "fn a<T>(x: u8) {}\nfn b<U>(u: U) {}\nfn c<V>(x: u8) {}";
         assert_eq!(unused(src), ["T", "V"]);
+    }
+
+    // ── Pulse ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pulse_starts_transparent_and_peaks_mid_period() {
+        assert_eq!(pulse_alpha(0.0), 0);
+        assert_eq!(pulse_alpha(1.0 / (2.0 * PULSE_HZ)), PULSE_ALPHA as u8);
+        // …and comes back to transparent one full period later.
+        assert_eq!(pulse_alpha(1.0 / PULSE_HZ), 0);
+    }
+
+    #[test]
+    fn pulse_never_exceeds_the_cap() {
+        for step in 0..500 {
+            let a = pulse_alpha(step as f64 * 0.01);
+            assert!(a <= PULSE_ALPHA as u8, "alpha {a} over cap at step {step}");
+        }
+    }
+
+    #[test]
+    fn row_spans_cuts_at_newlines() {
+        let src = "fn f<\n    T,\n>() {}";
+        // The whole `<…>` list, spanning three rows.
+        let start = src.find('<').unwrap() + 1;
+        let end = src.find('>').unwrap();
+        let spans = row_spans(src, start, end);
+        let got: Vec<String> = spans
+            .iter()
+            .map(|&(s, e)| src.chars().skip(s).take(e - s).collect())
+            .collect();
+        assert_eq!(got, ["    T,"]);
+    }
+
+    #[test]
+    fn row_spans_leaves_a_single_line_alone() {
+        assert_eq!(row_spans("fn f<T>() {}", 5, 6), [(5, 6)]);
     }
 
     #[test]

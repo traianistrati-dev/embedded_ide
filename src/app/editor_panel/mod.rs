@@ -779,6 +779,17 @@ impl AppIde {
                 ui,
                 copy_requested,
             );
+            // Unused generic parameters pulse a translucent white highlight on
+            // top of their fade. Drawn before the "N refs" pills so a pill can
+            // never end up under the wash.
+            generics::show_unused_generics_overlay(
+                ui,
+                editor_resp.galley_pos,
+                editor_clip,
+                &editor_resp.galley,
+                &display_code,
+                self.generic_pulse_ranges(&display_code),
+            );
             // "N refs" indicator + popup on every used item (unused ones were
             // already faded by the highlighter, above, via `dead_ranges`).
             if let Some(rel) = &usages_rel_path {
