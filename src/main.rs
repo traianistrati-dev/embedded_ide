@@ -35,15 +35,20 @@ pub mod required_tools;
 pub mod reveal;
 pub mod rtt;
 pub mod serial;
+pub mod serial_bridge;
 pub mod serial_matrix;
 pub mod serial_plot;
 pub mod size;
 pub mod terminal;
+pub mod udev;
 
 fn main() -> eframe::Result<()> {
     // FIRST, before anything can print: adopt the console we were launched from
     // (if any). A GUI-subsystem binary has no standard handles until this runs.
     build::attach_parent_console();
+    // Then make a crash survivable to diagnose — double-clicked, there is no
+    // stderr for the panic message to reach, so it also goes to a file.
+    build::install_panic_logger();
 
     // Resolve the MSVC toolchain env off-thread so the first build doesn't pay
     // for the one-off `vcvars64.bat` capture (see `msvc`).

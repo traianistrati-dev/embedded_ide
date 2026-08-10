@@ -16,16 +16,26 @@ use std::path::{Path, PathBuf};
 use super::builtins;
 use super::mcu_def::McuDefinition;
 
+/// The app's per-user folder — `%APPDATA%/embedded_ide_0` on Windows,
+/// `$XDG_CONFIG_HOME/embedded_ide_0` or `~/.config/embedded_ide_0` elsewhere.
+///
+/// `None` only if no suitable home/config dir can be resolved (rare). The single
+/// definition of that path: the MCU registry and the crash log both hang off it,
+/// and two copies of this env chain would drift.
+pub fn user_config_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA") // Windows
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)) // Linux
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))); // Unix
+    base.map(|b| b.join("embedded_ide_0"))
+}
+
 /// Per-user folder scanned for imported `.ron` definitions.
 ///
 /// Returns `None` only if no suitable home/config dir can be resolved (rare);
 /// callers then fall back to built-ins only.
 pub fn user_mcus_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA") // Windows
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)) // Linux
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))); // Unix
-    base.map(|b| b.join("embedded_ide_0").join("mcus"))
+    user_config_dir().map(|b| b.join("mcus"))
 }
 
 /// Build the full registry: built-ins first, then user `.ron` imports merged on

@@ -18,6 +18,29 @@ use std::time::{Duration, Instant};
 /// Cap on the retained RX byte buffer (older bytes are dropped).
 const RX_CAP: usize = 64_000;
 
+/// Cap on the retained bridge log, in BYTES across all chunks.
+const LOG_CAP: usize = RX_CAP;
+
+/// Which way a logged burst was travelling in Bridge mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dir {
+    /// The other application → the real device.
+    AppToSensor,
+    /// The real device → the other application.
+    SensorToApp,
+}
+
+/// One contiguous burst of bytes in one direction.
+///
+/// Chunks, not a flat buffer: the whole point of Bridge mode is seeing WHO said
+/// what, and a merged stream loses exactly that. Consecutive bursts in the same
+/// direction are coalesced, so a chatty device doesn't produce a chunk per byte.
+#[derive(Clone, Debug)]
+pub struct LogChunk {
+    pub dir: Dir,
+    pub bytes: Vec<u8>,
+}
+
 /// Shared between the background reader thread and the UI.
 #[derive(Default)]
 pub struct SerialState {
@@ -31,6 +54,29 @@ pub struct SerialState {
     pub connected: bool,
     /// Last open / read / write error, shown in the UI.
     pub error: Option<String>,
+    /// Bridge mode only: the relayed traffic, in order, tagged by direction.
+    pub log: Vec<LogChunk>,
+}
+
+impl SerialState {
+    /// Append a relayed burst, merging it into the previous chunk when it came
+    /// from the same side, and trimming the oldest chunks past [`LOG_CAP`].
+    pub fn push_log(&mut self, dir: Dir, bytes: &[u8]) {
+        match self.log.last_mut() {
+            Some(last) if last.dir == dir => last.bytes.extend_from_slice(bytes),
+            _ => self.log.push(LogChunk {
+                dir,
+                bytes: bytes.to_vec(),
+            }),
+        }
+        // Drop whole chunks from the front rather than splitting one: a
+        // half-chunk would show a frame starting mid-byte, which is worse than
+        // showing less history.
+        let mut total: usize = self.log.iter().map(|c| c.bytes.len()).sum();
+        while total > LOG_CAP && self.log.len() > 1 {
+            total -= self.log.remove(0).bytes.len();
+        }
+    }
 }
 
 /// Serial monitor state owned by `AppIde`: the shared RX buffer, the write
@@ -88,6 +134,18 @@ pub struct SerialMonitor {
     pub plot: crate::serial_plot::PlotState,
     /// The 2D matrix view of framed payloads (see `crate::serial_matrix`).
     pub matrix: crate::serial_matrix::MatrixView,
+
+    // ── Bridge (MITM) mode ───────────────────────────────────────────────────
+    /// Relay the port instead of opening it directly (see
+    /// [`crate::serial_bridge`]). Locked while connected — the wiring can't
+    /// change under a live relay.
+    pub bridge: bool,
+    /// The IDE's end of the virtual pair. On Unix it is filled in by "Create
+    /// pair"; on Windows the user picks one half of their com0com pair.
+    pub bridge_port: String,
+    /// The live pair. Held here so dropping it (disconnect / app exit) tears
+    /// down the `socat` child that owns the PTYs.
+    pub pair: Option<crate::serial_bridge::VirtualPair>,
 }
 
 impl Default for SerialMonitor {
@@ -116,6 +174,9 @@ impl Default for SerialMonitor {
             plot_on: false,
             plot: Default::default(),
             matrix: Default::default(),
+            bridge: false,
+            bridge_port: String::new(),
+            pair: None,
         }
     }
 }
@@ -169,6 +230,103 @@ impl SerialMonitor {
         }
     }
 
+    /// Create the virtual pair (Unix / socat only — a com0com pair already
+    /// exists and is picked from the port list). Fills in `bridge_port`.
+    pub fn create_pair(&mut self) {
+        // Tear the old one down first, or its symlinks make socat fail.
+        self.pair = None;
+        match crate::serial_bridge::create_socat_pair() {
+            Ok(p) => {
+                self.bridge_port = p.ide_side.clone();
+                self.pair = Some(p);
+                self.state.lock().unwrap().error = None;
+            }
+            Err(e) => self.state.lock().unwrap().error = Some(e),
+        }
+    }
+
+    /// Open BOTH ends and relay between them, logging each direction.
+    ///
+    /// `self.port` is the real device; `self.bridge_port` is the IDE's end of
+    /// the virtual pair, whose mate the other application holds. Both are opened
+    /// at the SAME baud: the pair is a byte pipe, but the device is not, and a
+    /// mismatch here corrupts every frame in a way that looks like noise.
+    pub fn connect_bridge(&mut self, ctx: &egui::Context) {
+        if self.is_connected() {
+            return;
+        }
+        if self.port.is_empty() || self.bridge_port.is_empty() {
+            self.state.lock().unwrap().error =
+                Some("Bridge needs both a device port and a virtual-pair port.".into());
+            return;
+        }
+        if let Some(s) = self.stop.take() {
+            s.store(true, Ordering::Relaxed);
+        }
+        {
+            let mut s = self.state.lock().unwrap();
+            s.error = None;
+            s.connected = false;
+            s.log.clear();
+        }
+
+        let open = |name: &str, baud: u32| {
+            serialport::new(name, baud)
+                .timeout(Duration::from_millis(100))
+                .open()
+                .map_err(|e| format!("{name}: {e}"))
+        };
+        // Open the DEVICE first: it is the end that can legitimately be busy
+        // (that is why the user is here), so failing before touching the pair
+        // keeps the error about the thing that actually went wrong.
+        let sensor = match open(&self.port, self.baud) {
+            Ok(p) => p,
+            Err(e) => {
+                self.state.lock().unwrap().error = Some(e);
+                return;
+            }
+        };
+        let app = match open(&self.bridge_port, self.baud) {
+            Ok(p) => p,
+            Err(e) => {
+                self.state.lock().unwrap().error = Some(e);
+                return;
+            }
+        };
+        // Each direction needs a reader on one port and a writer on the other,
+        // so both ports are cloned: four handles, two threads.
+        let (Ok(sensor_w), Ok(app_w)) = (sensor.try_clone(), app.try_clone()) else {
+            self.state.lock().unwrap().error =
+                Some("could not duplicate the port handles for relaying".into());
+            return;
+        };
+
+        self.state.lock().unwrap().connected = true;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.stop = Some(Arc::clone(&stop));
+        // device → app
+        spawn_bridge_reader(
+            sensor,
+            app_w,
+            Dir::SensorToApp,
+            Arc::clone(&self.state),
+            Arc::clone(&stop),
+            ctx.clone(),
+        );
+        // app → device
+        spawn_bridge_reader(
+            app,
+            sensor_w,
+            Dir::AppToSensor,
+            Arc::clone(&self.state),
+            stop,
+            ctx.clone(),
+        );
+        // In bridge mode the IDE is a relay, not a participant: it must not
+        // inject bytes of its own, so there is no writer handle for `send`.
+        self.writer = None;
+    }
+
     /// Stop the reader thread and release the port.
     pub fn disconnect(&mut self) {
         if let Some(s) = self.stop.take() {
@@ -179,6 +337,9 @@ impl SerialMonitor {
         // Drop any not-yet-sent queued lines (the port is gone).
         self.tx_queue.clear();
         self.tx_next_at = None;
+        // Drops the socat child with it (see `VirtualPair`). Deliberate: leaving
+        // PTYs behind after a disconnect would collide with the next Create pair.
+        self.pair = None;
     }
 
     /// Send raw bytes on the open port (no-op when disconnected).
@@ -278,6 +439,109 @@ fn spawn_reader(
             }
         }
     });
+}
+
+/// One direction of the bridge: read `from` to `to`, logging every burst.
+///
+/// Forwarding comes FIRST and the log second — the two applications are talking
+/// to each other in real time, and a stall while the UI mutex is contended would
+/// show up as a protocol timeout on the wire. Logging is the side effect here,
+/// not the job.
+fn spawn_bridge_reader(
+    mut from: Box<dyn serialport::SerialPort>,
+    mut to: Box<dyn serialport::SerialPort>,
+    dir: Dir,
+    state: Arc<Mutex<SerialState>>,
+    stop: Arc<AtomicBool>,
+    ctx: egui::Context,
+) {
+    const REPAINT_EVERY: Duration = Duration::from_millis(33);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        let mut last_repaint = Instant::now() - REPAINT_EVERY;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            match from.read(&mut buf) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(5)),
+                Ok(n) => {
+                    let relayed = to.write_all(&buf[..n]).and_then(|()| to.flush());
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.push_log(dir, &buf[..n]);
+                        if let Err(e) = relayed {
+                            // Report but keep relaying the other way: half a
+                            // bridge still shows what the live side is saying.
+                            s.error = Some(format!("relay write failed: {e}"));
+                        }
+                    }
+                    if last_repaint.elapsed() >= REPAINT_EVERY {
+                        ctx.request_repaint();
+                        last_repaint = Instant::now();
+                    } else {
+                        ctx.request_repaint_after(REPAINT_EVERY);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.error = Some(e.to_string());
+                    s.connected = false;
+                    drop(s);
+                    ctx.request_repaint();
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Colour of traffic heading TO the device (the other app's requests).
+pub const DIR_APP: egui::Color32 = egui::Color32::from_rgb(235, 180, 90);
+/// Colour of traffic coming FROM the device (its replies).
+pub const DIR_SENSOR: egui::Color32 = egui::Color32::from_rgb(110, 200, 225);
+
+/// Render the bridge log: one line per burst, prefixed `>>` for app→device and
+/// `<<` for device→app, in hex or lossy text.
+///
+/// Two colours and two arrows rather than one merged stream — reading a MITM
+/// capture is entirely about attributing each byte to a side. Only the tail is
+/// laid out: a long session's log is far bigger than any screen.
+pub fn bridge_log_job(log: &[LogChunk], hex: bool, font_size: f32) -> egui::text::LayoutJob {
+    const MAX_CHUNKS: usize = 400;
+    let mut job = egui::text::LayoutJob::default();
+    let start = log.len().saturating_sub(MAX_CHUNKS);
+    for chunk in &log[start..] {
+        let (arrow, color) = match chunk.dir {
+            Dir::AppToSensor => (">>", DIR_APP),
+            Dir::SensorToApp => ("<<", DIR_SENSOR),
+        };
+        let body = if hex {
+            chunk
+                .bytes
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            // Trailing newlines would double-space the view: the arrow prefix
+            // already puts each burst on its own line.
+            String::from_utf8_lossy(&chunk.bytes)
+                .trim_end_matches(['\r', '\n'])
+                .to_string()
+        };
+        job.append(
+            &format!("{arrow} {body}\n"),
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(font_size),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    job
 }
 
 /// Decoded-text tail of `rx` (lossy UTF-8). Only the last chunk is returned so
@@ -522,6 +786,81 @@ pub fn text_search_job(
         job.append(line, 0.0, TextFormat::simple(font.clone(), color));
     }
     job
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    fn dirs(s: &SerialState) -> Vec<(Dir, Vec<u8>)> {
+        s.log.iter().map(|c| (c.dir, c.bytes.clone())).collect()
+    }
+
+    /// Bursts from the SAME side merge; a change of direction starts a new
+    /// chunk. Without the merge a chatty device produces one chunk per read,
+    /// and the view becomes an unreadable column of one-byte arrows.
+    #[test]
+    fn same_direction_bursts_coalesce() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::AppToSensor, b"AT");
+        s.push_log(Dir::AppToSensor, b"+RST\r\n");
+        s.push_log(Dir::SensorToApp, b"OK");
+        s.push_log(Dir::AppToSensor, b"X");
+        assert_eq!(
+            dirs(&s),
+            vec![
+                (Dir::AppToSensor, b"AT+RST\r\n".to_vec()),
+                (Dir::SensorToApp, b"OK".to_vec()),
+                (Dir::AppToSensor, b"X".to_vec()),
+            ]
+        );
+    }
+
+    /// Trimming drops WHOLE chunks from the front. Splitting one would leave a
+    /// frame starting mid-byte, which reads as corruption rather than as history
+    /// that scrolled away.
+    #[test]
+    fn the_log_is_capped_by_dropping_whole_chunks() {
+        let mut s = SerialState::default();
+        for i in 0..40 {
+            // Alternate so the bursts stay separate chunks rather than merging.
+            let dir = if i % 2 == 0 {
+                Dir::AppToSensor
+            } else {
+                Dir::SensorToApp
+            };
+            s.push_log(dir, &vec![i as u8; LOG_CAP / 8]);
+        }
+        let total: usize = s.log.iter().map(|c| c.bytes.len()).sum();
+        assert!(total <= LOG_CAP, "log not trimmed: {total}");
+        // Every surviving chunk is intact — none was cut in half.
+        assert!(s.log.iter().all(|c| c.bytes.len() == LOG_CAP / 8));
+        // The NEWEST burst always survives; that is the one being watched.
+        assert_eq!(s.log.last().unwrap().bytes[0], 39);
+    }
+
+    /// A single chunk larger than the cap must not be dropped to nothing —
+    /// otherwise one big frame would clear the view instead of showing.
+    #[test]
+    fn one_oversized_chunk_survives() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::SensorToApp, &vec![7u8; LOG_CAP * 2]);
+        assert_eq!(s.log.len(), 1);
+        assert_eq!(s.log[0].bytes.len(), LOG_CAP * 2);
+    }
+
+    #[test]
+    fn the_log_view_attributes_every_burst_to_a_side() {
+        let mut s = SerialState::default();
+        s.push_log(Dir::AppToSensor, b"ping");
+        s.push_log(Dir::SensorToApp, b"pong");
+        let text = bridge_log_job(&s.log, false, 12.0).text;
+        assert!(text.contains(">> ping"), "{text}");
+        assert!(text.contains("<< pong"), "{text}");
+        // Hex mode shows the same bursts as bytes.
+        let hex = bridge_log_job(&s.log, true, 12.0).text;
+        assert!(hex.contains(">> 70 69 6E 67"), "{hex}");
+    }
 }
 
 #[cfg(test)]

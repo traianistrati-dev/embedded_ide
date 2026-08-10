@@ -5,6 +5,55 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 use std::sync::{Arc, Mutex};
 
+/// Write the generated udev rules next to the IDE's other per-user files and
+/// report the install command in the tools log.
+///
+/// The command goes to the LOG rather than a dialog on purpose: the log is
+/// selectable text that survives the rest of the session, so the user can come
+/// back to it after plugging the probe in. The clipboard gets it too, because
+/// retyping a path is where this goes wrong.
+fn stage_udev_rules(
+    tools_state: &Arc<Mutex<required_tools::ToolsState>>,
+    ctx: &egui::Context,
+) {
+    let mut s = tools_state.lock().unwrap();
+    match crate::udev::write_staged_rules() {
+        Ok(path) => {
+            let cmd = crate::udev::install_command(&path);
+            s.push_log_public(format!("[OK] rules written to {}", path.display()));
+            s.push_log_public("  Install them with (needs root):".to_string());
+            s.push_log_public(format!("  {cmd}"));
+            s.push_log_public(
+                "  Then UNPLUG AND REPLUG the probe — udev applies rules at plug time."
+                    .to_string(),
+            );
+            ctx.copy_text(cmd);
+            s.push_log_public("  (command copied to the clipboard)".to_string());
+        }
+        Err(e) => s.push_log_public(format!("[X] could not write the rules file: {e}")),
+    }
+    ctx.request_repaint();
+}
+
+/// Report the serial-access fix in the tools log + clipboard.
+///
+/// The re-login warning is not decoration: `usermod` changes the database, but a
+/// running session keeps the group set it was started with, so the user runs the
+/// command, sees no change, and concludes it didn't work.
+fn show_serial_access_fix(
+    tools_state: &Arc<Mutex<required_tools::ToolsState>>,
+    ctx: &egui::Context,
+) {
+    let (group, cmd) = required_tools::serial_access_fix();
+    let mut s = tools_state.lock().unwrap();
+    s.push_log_public(format!("> Serial port is owned by group `{group}`."));
+    s.push_log_public(format!("  {cmd}"));
+    s.push_log_public("  Then LOG OUT and back in — a running session keeps its old groups.");
+    ctx.copy_text(cmd);
+    s.push_log_public("  (command copied to the clipboard)".to_string());
+    ctx.request_repaint();
+}
+
 pub fn show_tools_tab(
     ui: &mut egui::Ui,
     tools_state: &Arc<Mutex<required_tools::ToolsState>>,
@@ -262,6 +311,60 @@ pub fn show_tools_tab(
                                         Arc::clone(tools_state),
                                         ctx.clone(),
                                     );
+                                }
+                            }
+
+                            // The udev row can't be "installed" (writing to
+                            // /etc needs root), but the IDE CAN generate the
+                            // rules file from its own programmer catalogue and
+                            // hand over the one command that installs it —
+                            // which beats sending the user to a web page to
+                            // assemble a list of VID:PIDs by hand.
+                            if row.name == required_tools::UDEV_RULES_TOOL {
+                                if ui
+                                    .add_enabled(
+                                        !busy,
+                                        egui::Button::new(
+                                            egui::RichText::new("Generate rules…").size(10.5),
+                                        )
+                                        .small(),
+                                    )
+                                    .on_hover_text(
+                                        "Write a udev rules file covering every probe this IDE \
+                                         knows, then show the sudo command that installs it",
+                                    )
+                                    .clicked()
+                                {
+                                    stage_udev_rules(tools_state, ctx);
+                                }
+                            }
+
+                            // Serial access can't be "installed" either — the fix
+                            // is a group change that needs root. What the IDE can
+                            // do is name the RIGHT group: read off the device
+                            // actually plugged in, so the command is correct on
+                            // Arch (`uucp`) as well as Debian (`dialout`).
+                            if row.name == required_tools::SERIAL_ACCESS_TOOL
+                                && matches!(
+                                    row.status,
+                                    ToolStatus::Missing | ToolStatus::Failed(_)
+                                )
+                            {
+                                if ui
+                                    .add_enabled(
+                                        !busy,
+                                        egui::Button::new(
+                                            egui::RichText::new("Fix access…").size(10.5),
+                                        )
+                                        .small(),
+                                    )
+                                    .on_hover_text(
+                                        "Show (and copy) the command that grants this user \
+                                         access to the serial port",
+                                    )
+                                    .clicked()
+                                {
+                                    show_serial_access_fix(tools_state, ctx);
                                 }
                             }
 

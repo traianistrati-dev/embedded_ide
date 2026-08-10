@@ -66,14 +66,37 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                 serial.disconnect();
             }
         } else {
-            let can = !serial.port.is_empty();
+            let can = !serial.port.is_empty() && (!serial.bridge || !serial.bridge_port.is_empty());
             if ui
                 .add_enabled(can, egui::Button::new(format!("{} Connect", ph::PLUGS_CONNECTED)))
+                .on_disabled_hover_text(if serial.bridge {
+                    "Bridge needs BOTH a device port and a virtual-pair port"
+                } else {
+                    "Pick a port first"
+                })
                 .clicked()
             {
-                serial.connect(ctx);
+                if serial.bridge {
+                    serial.connect_bridge(ctx);
+                } else {
+                    serial.connect(ctx);
+                }
             }
         }
+
+        ui.separator();
+        // Bridge (MITM): relay a port another application already holds, instead
+        // of opening it. Locked while connected — the wiring can't be re-pointed
+        // under a live relay.
+        ui.add_enabled_ui(!connected, |ui| {
+            ui.checkbox(&mut serial.bridge, "Bridge")
+                .on_hover_text(
+                    "Man-in-the-middle a port another application is using.\n\
+                     The app talks to a virtual port, the IDE relays every byte \
+                     to the real device and logs both directions.",
+                )
+                .on_disabled_hover_text("Disconnect first to change the wiring");
+        });
 
         ui.separator();
         // Plot view: parse numeric lines into live curves (Arduino Serial
@@ -205,6 +228,10 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             format!("{} {err}", ph::WARNING),
         );
     }
+    // ── Bridge wiring row (only while Bridge is on) ─────────────────────────
+    if serial.bridge {
+        show_bridge_row(ui, serial, connected);
+    }
     ui.separator();
 
     // ── RX view (fills the space left above the resizable send area) ────────────
@@ -241,6 +268,13 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             frames_total,
             rx_height,
         );
+    } else if serial.bridge {
+        // The bridge log takes the WHOLE section: in relay mode the IDE is not
+        // a participant, so there is nothing to send and no send area to leave
+        // room for. Injecting bytes is a deliberate non-feature — it would
+        // corrupt a conversation the user came here to observe.
+        show_bridge_log(ui, serial, section_h);
+        return;
     } else if serial.plot_on {
         {
             let st = serial.state.lock().unwrap();
@@ -253,6 +287,83 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
 
     // ── Send area (drag handle + TX line) — shared by both views ────────────────
     show_tx_area(ui, serial, ctx, max_tx);
+}
+
+/// The Bridge wiring row: which real device, which end of the virtual pair, and
+/// — the part everyone gets stuck on — what the OTHER application must open.
+fn show_bridge_row(ui: &mut egui::Ui, serial: &mut SerialMonitor, connected: bool) {
+    use crate::serial_bridge::{PairProvider, provider, setup_hint};
+    ui.add_enabled_ui(!connected, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Pair:").strong());
+            match provider() {
+                // Unix: the IDE can make the pair itself, so it does.
+                PairProvider::Socat => {
+                    if ui
+                        .button(format!("{} Create pair", ph::PLUS))
+                        .on_hover_text("Run socat to create two linked PTYs")
+                        .clicked()
+                    {
+                        serial.create_pair();
+                    }
+                    if !serial.bridge_port.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&serial.bridge_port)
+                                .monospace()
+                                .size(11.0),
+                        );
+                    }
+                }
+                // Windows: the pair is a driver resource the user made earlier;
+                // all the IDE can do is ask which half to take.
+                PairProvider::Com0com => {
+                    egui::ComboBox::from_id_salt("bridge_pair_port")
+                        .selected_text(if serial.bridge_port.is_empty() {
+                            "—".to_owned()
+                        } else {
+                            serial.bridge_port.clone()
+                        })
+                        .show_ui(ui, |ui| {
+                            for p in serial.ports.clone() {
+                                ui.selectable_value(&mut serial.bridge_port, p.clone(), p);
+                            }
+                        });
+                }
+            }
+        });
+    });
+    let hint = setup_hint(serial.pair.as_ref());
+    ui.label(
+        egui::RichText::new(hint)
+            .size(10.5)
+            .color(egui::Color32::from_rgb(150, 160, 180)),
+    );
+}
+
+/// The relayed traffic, newest at the bottom: `>>` app→device, `<<` device→app.
+fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
+    use crate::serial::{DIR_APP, DIR_SENSOR, bridge_log_job};
+    ui.horizontal(|ui| {
+        ui.colored_label(DIR_APP, ">> app → device");
+        ui.add_space(10.0);
+        ui.colored_label(DIR_SENSOR, "<< device → app");
+        ui.add_space(10.0);
+        if ui.button("Clear").clicked() {
+            serial.state.lock().unwrap().log.clear();
+        }
+    });
+    let job = {
+        let st = serial.state.lock().unwrap();
+        bridge_log_job(&st.log, serial.hex, 12.0)
+    };
+    egui::ScrollArea::both()
+        .id_salt("bridge_log")
+        .max_height(height - 24.0)
+        .stick_to_bottom(serial.autoscroll)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(job);
+        });
 }
 
 /// The classic RX view: coloured hex (+ unique-sequences legend) or decoded

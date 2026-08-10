@@ -171,6 +171,13 @@ impl ToolsState {
         self.log.push(line.into());
     }
 
+    /// Same, for the Tools TAB — the udev "Generate rules…" action reports
+    /// through the shared log rather than a dialog, so its output stays
+    /// selectable for the rest of the session.
+    pub fn push_log_public(&mut self, line: impl Into<String>) {
+        self.log.push(line.into());
+    }
+
     pub fn any_busy(&self) -> bool {
         self.tools.iter().any(|t| t.status.is_busy())
     }
@@ -270,6 +277,11 @@ impl ToolsState {
 }
 
 // ── Per-platform selection ─────────────────────────────────────────────────────
+
+/// Catalog name of the Linux udev-rules entry. A constant because the Tools tab
+/// matches on it to offer "Generate rules…" — a typo there would silently drop
+/// the only action that entry has.
+pub const UDEV_RULES_TOOL: &str = "USB probe udev rules";
 
 /// Pick the value for the host OS. Everything that is not Windows or macOS is
 /// treated as Linux — the other unixes this could run on use the same package
@@ -577,6 +589,43 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         status: ToolStatus::Unknown,
     });
 
+    // ── Serial-tab Bridge (MITM) prerequisite ────────────────────────────────
+    // A virtual serial pair, which is a completely different kind of thing per
+    // platform: a spawnable CLI on unix, a kernel driver on Windows. Hence one
+    // entry whose name, probe and installer are all per-OS.
+    tools.push(RequiredTool {
+        name: per_os("com0com", "socat", "socat"),
+        description: per_os(
+            "Virtual serial-port pair driver — required by the Serial tab's Bridge (MITM) mode",
+            "Multipurpose relay — the Serial tab's Bridge (MITM) mode uses it to create a PTY pair",
+            "Multipurpose relay — the Serial tab's Bridge (MITM) mode uses it to create a PTY pair",
+        ),
+        toolchain: None,
+        severity: Severity::Optional,
+        impact: per_os(
+            "The Serial tab's Bridge (MITM) mode can't run: there is no way to make a virtual \
+             port pair. Everything else in the Serial tab is unaffected.",
+            "The Serial tab's Bridge (MITM) mode can't create its PTY pair. Everything else in \
+             the Serial tab is unaffected.",
+            "The Serial tab's Bridge (MITM) mode can't create its PTY pair. Everything else in \
+             the Serial tab is unaffected.",
+        ),
+        // com0com is a driver with no CLI on PATH, so it is probed by registry
+        // key rather than by running anything — see `COM0COM_CHECK`.
+        check_cmd: per_os(COM0COM_CHECK, "socat", "socat"),
+        check_args: per_os(&[][..], &["-V"][..], &["-V"][..]),
+        check_pattern: "",
+        min_version: None,
+        install_cmd: per_os(None, Some("brew"), None),
+        install_args: per_os(&[][..], &["install", "socat"][..], &[][..]),
+        manual_url: per_os(
+            "https://com0com.sourceforge.net/",
+            "http://www.dest-unreach.org/socat/",
+            "http://www.dest-unreach.org/socat/",
+        ),
+        status: ToolStatus::Unknown,
+    });
+
     // ── Linux-only: access to the hardware ───────────────────────────────────
     // Neither of these is a program to install — they are PERMISSIONS, and they
     // are the number-one reason flashing "doesn't work" on a Linux box that has
@@ -584,7 +633,7 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
     // Zadig) and macOS needs nothing at all, so both entries are Linux-only.
     if cfg!(target_os = "linux") {
         tools.push(RequiredTool {
-            name: "USB probe udev rules",
+            name: UDEV_RULES_TOOL,
             description:
                 "udev rules granting non-root access to debug probes (ST-Link, J-Link, CMSIS-DAP, DFU)",
             toolchain: Some(ToolchainKind::RustEmbedded),
@@ -604,18 +653,20 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
             status: ToolStatus::Unknown,
         });
         tools.push(RequiredTool {
-            name: "serial port access",
-            description: "Membership of the group that owns /dev/ttyUSB* and /dev/ttyACM*",
+            name: SERIAL_ACCESS_TOOL,
+            description: "Permission to open /dev/ttyUSB* and /dev/ttyACM*",
             toolchain: None,
             severity: Severity::Feature,
             impact: "The Serial tab and espflash can't open the port (\"Permission denied\"). \
-                 Run `sudo usermod -aG dialout $USER` — `uucp` instead of `dialout` on Arch and \
-                 openSUSE — then log out and back in.",
-            check_cmd: "id",
-            check_args: &["-nG"],
-            // Substring, so `uucp` on Arch reads as missing even though it works —
-            // the impact text says so rather than silently passing either name.
-            check_pattern: "dialout",
+                 The owning group differs by distro — `dialout` on Debian/Ubuntu/Fedora, `uucp` \
+                 on Arch and openSUSE — so use the Tools tab's \"Fix access…\", which reads the \
+                 group off the device actually plugged in. The change takes effect at the next \
+                 LOGIN, not immediately.",
+            // Sentinel: not a program, and "am I in a group called dialout?" is
+            // the wrong question anyway — see `SERIAL_ACCESS_CHECK`.
+            check_cmd: SERIAL_ACCESS_CHECK,
+            check_args: &[],
+            check_pattern: "",
             min_version: None,
             install_cmd: None, // needs root, and takes effect only after re-login
             install_args: &[],
@@ -783,6 +834,172 @@ pub const OBJCOPY_CHECK: &str = "@objcopy-any";
 /// Not a program, so there is nothing to run: it is answered by looking for rules
 /// files on disk.
 pub const UDEV_CHECK: &str = "@udev-rules";
+
+/// Sentinel for the com0com virtual-pair driver (Windows). It installs no CLI on
+/// PATH, so "run it and see" is impossible; the driver's service key is the
+/// evidence, the same thing its own docs tell you to look for.
+pub const COM0COM_CHECK: &str = "@com0com";
+
+#[cfg(windows)]
+fn check_com0com() -> ToolStatus {
+    // `reg query` rather than a registry crate: one spawn, no dependency, and
+    // the exit code alone answers the question.
+    let ok = crate::build::no_window(&mut Command::new("reg"))
+        .args([
+            "query",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\com0com",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        ToolStatus::Ok("driver installed".to_string())
+    } else {
+        ToolStatus::Missing
+    }
+}
+
+#[cfg(not(windows))]
+fn check_com0com() -> ToolStatus {
+    ToolStatus::Ok("n/a (not Windows)".to_string())
+}
+
+/// Sentinel for "can this user open a serial port?".
+///
+/// The obvious check — `id -nG | grep dialout` — answers the WRONG question in
+/// two directions: Arch and openSUSE call the group `uucp`, and on a systemd
+/// machine the logged-in user gets an ACL on the device through `uaccess` with no
+/// group membership at all. So when a port is actually present the check asks the
+/// kernel directly (`access(R_OK|W_OK)`, which does NOT open the device — opening
+/// a tty asserts DTR and would reset the attached board), and only falls back to
+/// group membership when there is nothing plugged in to test.
+pub const SERIAL_ACCESS_CHECK: &str = "@serial-access";
+
+/// Catalog name of that entry — the Tools tab matches on it to offer "Fix
+/// access…", same arrangement as [`UDEV_RULES_TOOL`].
+pub const SERIAL_ACCESS_TOOL: &str = "serial port access";
+
+/// Groups that conventionally own serial devices. Only consulted when no device
+/// is plugged in; with one present its REAL group is read off the node.
+const SERIAL_GROUP_CANDIDATES: [&str; 3] = ["dialout", "uucp", "plugdev"];
+
+/// Exact-token membership test over `id -nG` output (space-separated names).
+/// A substring test would pass on a group merely CONTAINING the name.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn groups_contain(id_output: &str, group: &str) -> bool {
+    id_output.split_whitespace().any(|g| g == group)
+}
+
+/// Serial device nodes present right now, sorted. `/dev/ttyUSB*` for USB-serial
+/// bridges (CH340, CP210x, FTDI), `/dev/ttyACM*` for CDC devices (ESP32-S3/C3
+/// native USB, many dev boards).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn serial_device_nodes() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/dev") {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("ttyUSB") || name.starts_with("ttyACM") {
+                out.push(e.path());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The group that owns `path`, by name. `None` when the gid has no entry.
+#[cfg(target_os = "linux")]
+fn owning_group(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let gid = std::fs::metadata(path).ok()?.gid();
+    // SAFETY: getgrgid returns a pointer into a static buffer, valid until the
+    // next call; the name is copied out immediately, before anything else can
+    // call it. Null = no such group.
+    unsafe {
+        let grp = libc::getgrgid(gid);
+        if grp.is_null() {
+            return None;
+        }
+        let name = (*grp).gr_name;
+        if name.is_null() {
+            return None;
+        }
+        Some(std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned())
+    }
+}
+
+/// Can we read AND write `path` right now? Answers the real question, and unlike
+/// opening the device it has no side effects on the attached board.
+#[cfg(target_os = "linux")]
+fn can_use_device(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` is a valid NUL-terminated string for the duration of the call.
+    unsafe { libc::access(c.as_ptr(), libc::R_OK | libc::W_OK) == 0 }
+}
+
+/// The group the user should be added to, and the command that does it — used by
+/// the Tools tab's "Fix access…". Reads the group off a plugged-in device when
+/// there is one, so the suggestion is right on Arch (`uucp`) as well as Debian.
+#[cfg(target_os = "linux")]
+pub fn serial_access_fix() -> (String, String) {
+    let group = serial_device_nodes()
+        .iter()
+        .find_map(|d| owning_group(d))
+        .unwrap_or_else(|| SERIAL_GROUP_CANDIDATES[0].to_string());
+    let cmd = format!("sudo usermod -aG {group} $USER");
+    (group, cmd)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn serial_access_fix() -> (String, String) {
+    let group = SERIAL_GROUP_CANDIDATES[0].to_string();
+    let cmd = format!("sudo usermod -aG {group} $USER");
+    (group, cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn check_serial_access() -> ToolStatus {
+    let devices = serial_device_nodes();
+
+    // A device is plugged in: ask the kernel, which accounts for uaccess ACLs,
+    // group membership and plain permissions all at once.
+    if let Some(usable) = devices.iter().find(|d| can_use_device(d)) {
+        return ToolStatus::Ok(format!("can open {}", usable.display()));
+    }
+    if let Some(blocked) = devices.first() {
+        let group = owning_group(blocked).unwrap_or_else(|| "?".to_string());
+        return ToolStatus::Failed(format!(
+            "{} is present but not writable by you (owned by group `{group}`). \
+             Add yourself with `sudo usermod -aG {group} $USER`, then LOG OUT and back in.",
+            blocked.display()
+        ));
+    }
+
+    // Nothing plugged in — the honest answer is "can't tell", so fall back to
+    // the conventional groups and say which one matched.
+    let Ok(out) = Command::new("id").arg("-nG").output() else {
+        return ToolStatus::Unknown;
+    };
+    let mine = String::from_utf8_lossy(&out.stdout);
+    match SERIAL_GROUP_CANDIDATES
+        .iter()
+        .find(|g| groups_contain(&mine, g))
+    {
+        Some(g) => ToolStatus::Ok(format!("in group `{g}` (no port plugged in to verify)")),
+        None => ToolStatus::Missing,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn check_serial_access() -> ToolStatus {
+    ToolStatus::Ok("n/a (not Linux)".to_string())
+}
 
 /// The three ELF→bin converters, in the order [`crate::dfu::objcopy`] tries them.
 /// Kept next to the sentinel so the two lists can be compared at a glance.
@@ -991,6 +1208,12 @@ fn run_check_blocking(
     if cmd == UDEV_CHECK {
         return check_udev_rules();
     }
+    if cmd == SERIAL_ACCESS_CHECK {
+        return check_serial_access();
+    }
+    if cmd == COM0COM_CHECK {
+        return check_com0com();
+    }
     let mut c = Command::new(cmd);
     c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -1190,6 +1413,31 @@ mod tests {
         let found = scan_udev_dirs(&[&p, "/definitely/not/here"]);
         assert_eq!(found, vec!["60-openocd.rules", "69-probe-rs.rules"]);
         assert!(scan_udev_dirs(&["/definitely/not/here"]).is_empty());
+    }
+
+    /// `id -nG` prints space-separated names. A SUBSTRING test — the obvious
+    /// implementation, and what this entry used to do — passes on any group that
+    /// merely contains the word, and on Arch it fails a working setup outright
+    /// because the group there is `uucp`.
+    #[test]
+    fn group_membership_matches_whole_names_only() {
+        let out = "istrati wheel uucp video\n";
+        assert!(groups_contain(out, "uucp"));
+        assert!(groups_contain(out, "wheel"));
+        assert!(!groups_contain(out, "dialout"));
+        // The substring trap: `dialout-admin` must not read as `dialout`.
+        assert!(!groups_contain("me dialout-admin\n", "dialout"));
+        assert!(!groups_contain("", "dialout"));
+    }
+
+    /// The fix must be a runnable command naming a real group, on any host —
+    /// with no device plugged in it falls back to the conventional one.
+    #[test]
+    fn serial_fix_is_a_runnable_command() {
+        let (group, cmd) = serial_access_fix();
+        assert!(!group.trim().is_empty());
+        assert_eq!(cmd, format!("sudo usermod -aG {group} $USER"));
+        assert!(SERIAL_GROUP_CANDIDATES.contains(&group.as_str()) || cfg!(target_os = "linux"));
     }
 
     #[test]

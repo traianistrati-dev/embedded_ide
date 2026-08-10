@@ -17,6 +17,150 @@ use std::{
     thread,
 };
 
+// ── Where diagnostics go when there is no console ────────────────────────────
+// The app is a GUI-subsystem binary in every profile, so stdout/stderr have
+// nowhere to land unless it was started from a terminal. These two cover both
+// halves: adopt that terminal when it exists, and write crashes to a file for
+// when it doesn't.
+
+/// The crash log's path: `<per-user config dir>/crash.log`, falling back to the
+/// temp dir when no config home resolves — a crash report nobody can find is no
+/// better than none.
+pub fn crash_log_path() -> PathBuf {
+    crate::panels::mcu_module::registry::user_config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("crash.log")
+}
+
+/// `YYYY-MM-DD HH:MM:SS UTC` for a `SystemTime`. Pure — tested below.
+///
+/// Hand-rolled for the same reason as [`crate::activity::fmt_clock`]: the crate
+/// has no `chrono` / `time` dependency. UTC, not local: a crash log is read
+/// later, often on another machine, and an unlabelled local time is a trap.
+/// The date conversion is Howard Hinnant's `civil_from_days`, simplified for
+/// post-epoch input only.
+pub fn fmt_utc(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (days, tod) = (secs / 86_400, secs % 86_400);
+
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March-based
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = era * 400 + yoe + u64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60,
+    )
+}
+
+/// Install a panic hook that appends a full report to [`crash_log_path`], then
+/// chains to whatever hook was already installed.
+///
+/// Without this a panic is INVISIBLE when the app was double-clicked: a
+/// GUI-subsystem process has no stderr, so the window simply vanishes. Chaining
+/// to the previous hook keeps the normal report for the case that does have a
+/// console ([`attach_parent_console`]).
+///
+/// The hook must not panic itself — every write is best-effort and ignored on
+/// failure; a second panic inside the hook aborts the process and loses the
+/// original report, which is the one that mattered.
+pub fn install_panic_logger() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        write_crash_report(info);
+        previous(info);
+    }));
+}
+
+/// Keep the log from growing without bound across many crashes. Small enough to
+/// open in any editor, large enough for a good handful of reports.
+const CRASH_LOG_MAX: u64 = 256 * 1024;
+
+/// Render one report. Pure, so the format is testable without a real panic —
+/// installing the process-wide hook from a test would make the whole (parallel)
+/// suite write crash files.
+fn crash_report(
+    message: &str,
+    location: &str,
+    thread: &str,
+    now: std::time::SystemTime,
+    backtrace: &str,
+) -> String {
+    format!(
+        "\n==== embedded_ide_0 panic ====\n\
+         when:      {}\n\
+         version:   {}\n\
+         thread:    {thread}\n\
+         location:  {location}\n\
+         message:   {message}\n\
+         backtrace:\n{backtrace}\n",
+        fmt_utc(now),
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// Append `report` to `path`, creating the folder and rotating an oversized log.
+fn append_report(path: &Path, report: &str) {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // Start fresh once the file gets large rather than trimming it: the newest
+    // report is the interesting one, and truncating mid-file would corrupt it.
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > CRASH_LOG_MAX {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(report.as_bytes());
+    }
+}
+
+fn write_crash_report(info: &std::panic::PanicHookInfo<'_>) {
+    // A `panic!("...")` payload is `&str` or `String` depending on whether it
+    // was formatted; anything else (a non-string `panic_any`) has no text.
+    let payload = info.payload();
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_owned();
+    // `force_capture` ignores RUST_BACKTRACE: the user who double-clicked the
+    // exe never set it, and they are exactly who this file is for.
+    let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+
+    let report = crash_report(
+        &message,
+        &location,
+        &thread,
+        std::time::SystemTime::now(),
+        &backtrace,
+    );
+    append_report(&crash_log_path(), &report);
+}
+
 /// Adopt the console we were launched FROM, if there is one.
 ///
 /// The counterpart of [`no_window`]: that one keeps children from making a
@@ -719,6 +863,77 @@ fn extract_fixes(msg: &serde_json::Value) -> Vec<SpanEdit> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod crash_log_tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn at(secs: u64) -> String {
+        fmt_utc(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    /// The date maths is the only part of the crash report that can be WRONG
+    /// rather than merely missing — a mis-dated report sends you looking at the
+    /// wrong session.
+    #[test]
+    fn utc_stamp_covers_epoch_leap_years_and_century_rules() {
+        assert_eq!(at(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(at(86_399), "1970-01-01 23:59:59 UTC");
+        assert_eq!(at(86_400), "1970-01-02 00:00:00 UTC");
+        // 2000 is a leap year (divisible by 400) — the rule a naive `% 4` gets
+        // right by accident and a naive `% 100` gets wrong.
+        assert_eq!(at(951_782_400), "2000-02-29 00:00:00 UTC");
+        // 2100 is NOT a leap year (divisible by 100, not 400).
+        assert_eq!(at(4_107_542_400), "2100-03-01 00:00:00 UTC");
+        // A known reference point: 2026-08-07 12:34:56 UTC.
+        assert_eq!(at(1_786_106_096), "2026-08-07 12:34:56 UTC");
+    }
+
+    /// Every field a reader needs must actually be in the file. Tested through
+    /// the pure renderer rather than a real panic: installing the process-wide
+    /// hook from a test would make the whole (parallel) suite write crash files,
+    /// and mutating `APPDATA` to redirect the path would race other tests.
+    #[test]
+    fn a_report_carries_everything_needed_to_diagnose() {
+        let r = crash_report(
+            "index out of bounds: the len is 3 but the index is 7",
+            "src/app/mcu_panel.rs:412:9",
+            "main",
+            UNIX_EPOCH + Duration::from_secs(1_786_106_096),
+            "   0: embedded_ide_0::app::foo\n   1: core::panicking",
+        );
+        assert!(r.contains("2026-08-07 12:34:56 UTC"), "{r}");
+        assert!(r.contains(env!("CARGO_PKG_VERSION")), "{r}");
+        assert!(r.contains("thread:    main"), "{r}");
+        assert!(r.contains("src/app/mcu_panel.rs:412:9"), "{r}");
+        assert!(r.contains("the len is 3 but the index is 7"), "{r}");
+        assert!(r.contains("embedded_ide_0::app::foo"), "{r}");
+        // Leading blank line + banner, so consecutive reports stay separable.
+        assert!(r.starts_with("\n==== embedded_ide_0 panic ===="), "{r}");
+    }
+
+    #[test]
+    fn reports_append_and_the_log_rotates_when_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("nested").join("crash.log");
+
+        append_report(&log, "FIRST\n");
+        append_report(&log, "SECOND\n");
+        let both = std::fs::read_to_string(&log).unwrap();
+        assert!(both.contains("FIRST") && both.contains("SECOND"), "{both}");
+        // The parent folder is created on demand — the config dir may not exist
+        // yet on a first run that crashes early.
+        assert!(log.parent().unwrap().is_dir());
+
+        // Past the cap the file starts over, so the newest report is never lost
+        // to a half-trimmed predecessor.
+        std::fs::write(&log, "x".repeat(CRASH_LOG_MAX as usize + 1)).unwrap();
+        append_report(&log, "AFTER ROTATION\n");
+        let rotated = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(rotated, "AFTER ROTATION\n");
+    }
 }
 
 #[cfg(test)]

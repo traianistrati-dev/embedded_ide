@@ -623,7 +623,11 @@ impl ProgrammerInfo {
 
 /// Known VID:PID → (display name, programmer kind).
 /// Sorted roughly by prevalence; exact match checked before VID-only fallback.
-const KNOWN_PROGRAMMERS: &[(&str, &str, &str)] = &[
+///
+/// `pub(crate)` for [`crate::udev`], which GENERATES the Linux udev rules from
+/// this table — so the rules can never fall behind the devices the IDE actually
+/// enumerates.
+pub(crate) const KNOWN_PROGRAMMERS: &[(&str, &str, &str)] = &[
     // ── DFU Bootloaders ───────────────────────────────────────────────────────
     ("0483:df11", "STM32 DFU Bootloader", "DFU Bootloader"),
     ("303a:0002", "ESP32-S2 DFU Bootloader", "DFU Bootloader"),
