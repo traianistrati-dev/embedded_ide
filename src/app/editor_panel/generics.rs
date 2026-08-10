@@ -784,15 +784,24 @@ pub(super) fn show_impl_only_tooltips(
             if !clip.intersects(rect) || rect.width() <= 0.0 {
                 continue;
             }
+            // `on_hover_ui` rather than `on_hover_text`: egui wraps a plain
+            // hover text at its own narrow default, which turned this two-line
+            // explanation into a tall ribbon. 40 % of the editor's width reads
+            // as a couple of comfortable lines and still leaves the code behind
+            // it visible.
+            let tip_w = clip.width() * 0.4;
             ui.interact(
                 rect,
                 egui::Id::new("generic_impl_only").with(i).with(s),
                 egui::Sense::hover(),
             )
-            .on_hover_text(format!(
-                "`{name}` is not used by this item itself — only by an `impl` of it.\n\
-                 Underlined instead of dimmed: it is live code, not a leftover."
-            ));
+            .on_hover_ui(|ui| {
+                ui.set_max_width(tip_w);
+                ui.label(format!(
+                    "`{name}` is not used by this item itself — only by an `impl` of it.\n\
+                     Underlined instead of dimmed: it is live code, not a leftover."
+                ));
+            });
         }
     }
 }

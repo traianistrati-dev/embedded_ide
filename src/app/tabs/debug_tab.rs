@@ -15,8 +15,14 @@ use std::collections::{BTreeMap, BTreeSet};
 const BP_FILL: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
 
 /// The breakpoint the target is currently halted on — same amber as the
-/// "stopped" phase badge, as a row tint + a caret marker.
+/// "stopped" phase badge, used for the caret marker on that row.
 const HALT_AMBER: egui::Color32 = egui::Color32::from_rgb(230, 180, 60);
+
+/// Row tint for the halted breakpoint. The editor marks a breakpoint line in
+/// red (the gutter dot and the rule under the row), so the list says the same
+/// thing in the same colour — an amber tint here against red over there made
+/// the two views look like they were about different things.
+const HALT_ROW_RED: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
 
 /// A breakpoint probe-rs refused to arm: warning glyph amber + muted row.
 const UNARMED_AMBER: egui::Color32 = egui::Color32::from_rgb(215, 150, 60);
@@ -899,7 +905,7 @@ fn breakpoint_pane(
                         // so the tint lands under the text, not over it.
                         egui::Frame::new()
                             .fill(if here {
-                                HALT_AMBER.gamma_multiply(0.16)
+                                HALT_ROW_RED.gamma_multiply(0.22)
                             } else {
                                 egui::Color32::TRANSPARENT
                             })
