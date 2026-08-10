@@ -162,7 +162,9 @@ pub fn diag_row_link_hint(
             location.bottom() - 0.5,
             egui::Stroke::new(1.0, color),
         );
-        painter.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        painter
+            .ctx()
+            .set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 }
 

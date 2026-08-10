@@ -19,9 +19,11 @@ const BP_DOT_SHARE: f32 = 0.80;
 /// the line yet.
 const BP_GHOST_RADIUS: f32 = 4.0;
 /// A breakpoint line is underlined instead of tinted: one rule along the bottom
-/// of the row, dark red at 50 % (premultiplied — `from_rgba_unmultiplied` is not
-/// const). An edge leaves the syntax colours alone, which a band never can.
-const BP_EDGE: egui::Color32 = egui::Color32::from_rgba_premultiplied(70, 0, 0, 128);
+/// of the row, in a light red. An edge leaves the syntax colours alone, which a
+/// band never can. Was a dark red at 50 % alpha, which all but vanished against
+/// the editor background — this one is opaque and reads at a glance while still
+/// sitting a step below the dot's saturation, so the dot stays the anchor.
+const BP_EDGE: egui::Color32 = egui::Color32::from_rgb(235, 120, 110);
 const BP_EDGE_W: f32 = 1.5;
 
 /// The workspace-relative path breakpoints are keyed by — only Rust sources

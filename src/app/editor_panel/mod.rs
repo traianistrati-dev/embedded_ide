@@ -797,6 +797,15 @@ impl AppIde {
                 &display_code,
                 self.generic_pulse_ranges(&display_code),
             );
+            // …and the underlined ones explain themselves on hover.
+            generics::show_impl_only_tooltips(
+                ui,
+                editor_resp.galley_pos,
+                editor_clip,
+                &editor_resp.galley,
+                &display_code,
+                &underline_ranges,
+            );
             // "N refs" indicator + popup on every used item (unused ones were
             // already faded by the highlighter, above, via `dead_ranges`).
             if let Some(rel) = &usages_rel_path {

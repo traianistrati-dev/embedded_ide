@@ -750,6 +750,53 @@ pub(super) fn show_unused_generics_overlay(
     }
 }
 
+/// Explain, on hover, why an underlined generic parameter is underlined.
+///
+/// The underline itself is drawn by the highlighter (it is part of the layout),
+/// so there is no widget to hang a tooltip on — this adds a hover-only
+/// interaction rectangle over each marked name. Hover-only on purpose: a
+/// click-sensing rect over the text would fight the editor for the caret.
+pub(super) fn show_impl_only_tooltips(
+    ui: &egui::Ui,
+    galley_pos: egui::Pos2,
+    clip: egui::Rect,
+    galley: &egui::text::Galley,
+    display_code: &str,
+    ranges: &[(usize, usize)],
+) {
+    if ranges.is_empty() {
+        return;
+    }
+    let chars: Vec<char> = display_code.chars().collect();
+    for (i, &(start, end)) in ranges.iter().enumerate() {
+        let (start, end) = (start.min(chars.len()), end.min(chars.len()));
+        if start >= end {
+            continue;
+        }
+        let name: String = chars[start..end].iter().collect();
+        for (s, e) in row_spans(display_code, start, end) {
+            let loc_s = galley.pos_from_cursor(egui::text::CCursor::new(s));
+            let loc_e = galley.pos_from_cursor(egui::text::CCursor::new(e));
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(galley_pos.x + loc_s.min.x, galley_pos.y + loc_s.min.y),
+                egui::pos2(galley_pos.x + loc_e.min.x, galley_pos.y + loc_s.max.y),
+            );
+            if !clip.intersects(rect) || rect.width() <= 0.0 {
+                continue;
+            }
+            ui.interact(
+                rect,
+                egui::Id::new("generic_impl_only").with(i).with(s),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(format!(
+                "`{name}` is not used by this item itself — only by an `impl` of it.\n\
+                 Underlined instead of dimmed: it is live code, not a leftover."
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
