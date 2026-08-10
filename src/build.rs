@@ -17,6 +17,82 @@ use std::{
     thread,
 };
 
+/// Adopt the console we were launched FROM, if there is one.
+///
+/// The counterpart of [`no_window`]: that one keeps children from making a
+/// console, this one keeps *us* from needing our own. The binary is built with
+/// `windows_subsystem = "windows"` in every profile, so Windows never allocates
+/// a console for it — no black window at startup, in debug or release. The cost
+/// is that `println!` / `eprintln!` / panic messages go nowhere. Attaching to
+/// the parent's console buys them back for the case that wants them: started
+/// from a terminal.
+///
+/// Started from Explorer / a shortcut there IS no parent console, `AttachConsole`
+/// fails, and we stay silent — which is the whole point.
+///
+/// **Call this first thing in `main`, before anything prints.** A GUI-subsystem
+/// process starts with no standard handles at all, so the console has to be
+/// attached AND `CONOUT$` installed as stdout/stderr before Rust's `Stdout`
+/// resolves a handle for the first time.
+///
+/// Known quirk, not a bug: `cmd.exe` does not wait for a GUI-subsystem program,
+/// so it prints its next prompt immediately and our output lands underneath it.
+/// Nothing in the process can prevent that.
+pub fn attach_parent_console() {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        use std::ptr::null_mut;
+
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX; // (DWORD)-1
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const OPEN_EXISTING: u32 = 3;
+
+        unsafe extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+            fn CreateFileA(
+                lpFileName: *const u8,
+                dwDesiredAccess: u32,
+                dwShareMode: u32,
+                lpSecurityAttributes: *mut c_void,
+                dwCreationDisposition: u32,
+                dwFlagsAndAttributes: u32,
+                hTemplateFile: *mut c_void,
+            ) -> *mut c_void;
+            fn SetStdHandle(nStdHandle: u32, hHandle: *mut c_void) -> i32;
+        }
+
+        unsafe {
+            // No parent console (Explorer, a shortcut, the debugger) → nothing
+            // to adopt. Deliberately silent: this is the common case.
+            if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+                return;
+            }
+            // Attaching alone is not enough — the process still has no std
+            // handles. Open the console's own output device and install it.
+            let conout = CreateFileA(
+                c"CONOUT$".as_ptr() as *const u8,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null_mut(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            );
+            let invalid = usize::MAX as *mut c_void; // INVALID_HANDLE_VALUE
+            if !conout.is_null() && conout != invalid {
+                SetStdHandle(STD_OUTPUT_HANDLE, conout);
+                SetStdHandle(STD_ERROR_HANDLE, conout);
+            }
+        }
+    }
+}
+
 /// Apply `CREATE_NO_WINDOW` (Windows) to a command so spawning it does NOT flash
 /// a console window. On a GUI/`windows_subsystem = "windows"` build every child
 /// console process (cargo, rustup, rust-analyzer, …) otherwise pops a console

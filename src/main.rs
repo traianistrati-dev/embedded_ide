@@ -1,9 +1,14 @@
-// Release builds are a GUI app: no attached console window. (Debug keeps the
-// console so `println!` logging stays visible.) Every child process we spawn
-// is given CREATE_NO_WINDOW (see `build::no_window`) so none of them flash a
-// console either — without both halves, spawning cargo / rust-analyzer / rustup
-// popped ghost windows that stole focus and made the app appear to flicker.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// A GUI app in EVERY profile: Windows never allocates a console for it, so no
+// black window pops up at startup — debug included. Debug used to keep the
+// console just to see `println!`; `build::attach_parent_console()` (called first
+// thing in `main`) buys that back without the window, by adopting the console we
+// were launched from when there is one.
+//
+// The other half: every child process we spawn is given CREATE_NO_WINDOW (see
+// `build::no_window`) so none of them flash a console either. Both halves are
+// needed — the subsystem alone makes children flash WORSE, since they no longer
+// have a parent console to inherit.
+#![windows_subsystem = "windows"]
 
 use eframe::egui;
 pub mod activity;
@@ -36,6 +41,10 @@ pub mod size;
 pub mod terminal;
 
 fn main() -> eframe::Result<()> {
+    // FIRST, before anything can print: adopt the console we were launched from
+    // (if any). A GUI-subsystem binary has no standard handles until this runs.
+    build::attach_parent_console();
+
     // Resolve the MSVC toolchain env off-thread so the first build doesn't pay
     // for the one-off `vcvars64.bat` capture (see `msvc`).
     msvc::warm_up();

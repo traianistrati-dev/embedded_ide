@@ -223,7 +223,9 @@ pub fn detect_dfu(
 }
 
 fn run_detect() -> DfuState {
-    let output = match Command::new("dfu-util")
+    let mut cmd = Command::new("dfu-util");
+    crate::build::no_window(&mut cmd);
+    let output = match cmd
         .arg("-l")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -390,7 +392,9 @@ pub fn start_flash(
         );
 
         let t_flash = std::time::Instant::now();
-        let child = Command::new("dfu-util")
+        let mut flash_cmd = Command::new("dfu-util");
+        crate::build::no_window(&mut flash_cmd);
+        let child = flash_cmd
             .args([
                 "-a",
                 "0",
@@ -538,8 +542,13 @@ fn objcopy(
 }
 
 /// Run a command silently; returns true if exit code is 0.
+///
+/// "Silently" includes the WINDOW: this is the objcopy fallback chain, so a
+/// single DFU flash runs it up to three times — without `no_window` that is
+/// three console windows flashing past on a release build.
 fn try_cmd(program: &str, args: &[&str], cwd: Option<&Path>) -> bool {
     let mut cmd = Command::new(program);
+    crate::build::no_window(&mut cmd);
     cmd.args(args).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
