@@ -322,13 +322,7 @@ pub fn show_debug_tab(
             (
                 "No probe detected",
                 egui::Color32::from_rgb(150, 175, 205),
-                "When the probe list is empty the tab says so under the toolbar. \
-                 Scan re-runs `probe-rs list`; if the probe still doesn't show \
-                 up, unplug it and plug it back in — a probe left mid-session \
-                 (a killed debugger, a target that hung) keeps answering \
-                 nothing until the USB stack re-enumerates it. Check too that \
-                 nothing else holds it: another IDE, STM32CubeProgrammer, \
-                 OpenOCD, or an RTT session in this one.",
+                super::NO_PROBE_HINT,
             ),
             (
                 "Debug-friendly build",
@@ -414,27 +408,8 @@ pub fn show_debug_tab(
         }
     }
 
-    // ── No probe on the list ──────────────────────────────────────────────────
-    // Worth saying out loud rather than leaving an empty ComboBox: a probe that
-    // was unplugged mid-session, or one wedged by a previous run, simply stops
-    // enumerating — and replugging it is the fix people reach for last.
-    if probes.is_empty() {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(format!(
-                    "{} No debug probe detected. Press Scan; if it still doesn't appear, \
-                     unplug the probe and plug it back in — one that was interrupted keeps \
-                     answering nothing until it is re-enumerated. Also check no other tool \
-                     holds it (a second IDE, STM32CubeProgrammer, OpenOCD).",
-                    ph::INFO
-                ))
-                .size(10.5)
-                .color(egui::Color32::from_rgb(150, 175, 205)),
-            )
-            .wrap(),
-        );
-        ui.add_space(4.0);
-    }
+    // A missing probe is reported by the picker itself (`probe_selector_ui`), so
+    // every tab that drives one says the same thing in the same place.
 
     // Where the target sits right now, so the Breakpoints pane can mark that
     // row: the innermost frame WITH source, the same one the halt navigation

@@ -49,6 +49,16 @@ use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
+/// What to do when `probe-rs list` comes back empty. One wording, shown by the
+/// probe picker itself (so every tab that drives a probe says it) and quoted in
+/// the Debug tab's help.
+pub(crate) const NO_PROBE_HINT: &str = "No debug probe detected.\n\n\
+     Press Scan to re-run `probe-rs list`. If it still doesn't appear, unplug the probe and \
+     plug it back in — one left mid-session (a killed debugger, a target that hung) keeps \
+     answering nothing until the USB stack re-enumerates it.\n\
+     Check too that nothing else holds it: another IDE, STM32CubeProgrammer, OpenOCD, or a \
+     Debug/RTT session in this one.";
+
 /// Whether a probe of `kind` (as `probe-rs list` reports it — "ST-LINK",
 /// "EspJtag", "JLink", "CMSIS-DAP", …) can drive the project chip's toolchain,
 /// the same gate the Flash tab applies to programmers. ARM chips use SWD probes
@@ -207,6 +217,18 @@ pub(crate) fn probe_selector_ui_with(
             "{current}\n\nWhich debug probe to use when several are attached. Auto lets \
              probe-rs pick the only one — ambiguous with more than one."
         ));
+
+    // Nothing on the list: say what to do, compactly. The full advice is on the
+    // hover — this sits in three different toolbars, one of which is a
+    // fixed-width row, so it cannot be a paragraph.
+    if probes.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("{} no probe — Scan, or replug it", ph::INFO))
+                .size(10.5)
+                .color(egui::Color32::from_rgb(150, 175, 205)),
+        )
+        .on_hover_text(NO_PROBE_HINT);
+    }
 
     // Whatever the caller wants after the list (the Flash tab's Flash button).
     trailing(ui);
