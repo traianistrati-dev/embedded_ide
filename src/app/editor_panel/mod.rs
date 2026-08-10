@@ -892,7 +892,7 @@ impl AppIde {
             self.paint_breakpoint_gutter(ui, &editor_resp, editor_clip, &display_code);
             // Hover-to-evaluate: value tooltip for the identifier under the
             // pointer while a debug session is halted.
-            self.paint_debug_hover(ui, &editor_resp, &display_code);
+            self.paint_debug_hover(ui, &editor_resp, editor_clip, &display_code);
 
             // ── Ctrl+Enter code actions (RA assists / quick-fixes) ────────
             if ctrl_enter_pressed {

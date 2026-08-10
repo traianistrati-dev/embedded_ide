@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 // ── Module structure ──────────────────────────────────────────────────────────
-mod tabs;
+pub(crate) mod tabs;
 
 pub(crate) mod helpers;
 use helpers::apply_dark_theme;

@@ -17,6 +17,8 @@ impl AppIde {
         &self,
         ui: &egui::Ui,
         editor_resp: &egui::text_edit::TextEditOutput,
+        // The editor's visible region — the tooltip is sized and kept inside it.
+        clip: egui::Rect,
         display_code: &str,
     ) {
         // Only while halted on a frame.
@@ -59,11 +61,25 @@ impl AppIde {
         };
 
         // Floating tooltip just below-right of the pointer.
+        //
+        // Width is pinned to a share of the editor, not left to egui: a debug
+        // value is one long unbroken run (`<unsupported memory implementation>`),
+        // and near the right edge of a narrow editor egui had only a few pixels
+        // of room left, wrapping it one CHARACTER per line into a tall ribbon.
+        // The x is pulled back so the whole width fits inside the editor
+        // instead of hanging off it.
+        const TIP_SHARE: f32 = 0.4;
+        let tip_w = (clip.width() * TIP_SHARE).max(160.0);
+        let x = pos.x.min(clip.right() - tip_w - 8.0).max(clip.left());
         egui::Area::new(egui::Id::new("debug_hover_eval_tip"))
             .order(egui::Order::Tooltip)
-            .fixed_pos(pos + egui::vec2(12.0, 18.0))
+            .fixed_pos(egui::pos2(x + 12.0, pos.y + 18.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    // Min AND max: the min stops the one-char-per-line wrap, the
+                    // max keeps a huge struct dump from covering the whole file.
+                    ui.set_min_width(tip_w);
+                    ui.set_max_width(tip_w);
                     ui.label(
                         egui::RichText::new(format!("{expr} = {value}"))
                             .monospace()

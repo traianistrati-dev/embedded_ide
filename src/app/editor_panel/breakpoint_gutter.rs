@@ -8,6 +8,7 @@
 
 use crate::app::{AppIde, ProjectFileId};
 use eframe::egui;
+use egui_phosphor::regular as ph;
 
 /// Breakpoint dot colour (the classic red).
 const BP_FILL: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
@@ -96,6 +97,20 @@ impl AppIde {
 
         let painter = ui.painter().with_clip_rect(clip);
 
+        // probe-rs's verdict per line for THIS file — what the Debug tab's
+        // Breakpoints pane shows. Empty outside a session: nothing has been
+        // asked yet, which is not the same as "it won't work".
+        let bp_status = self
+            .debugger
+            .state
+            .lock()
+            .unwrap()
+            .bp_status
+            .get(&rel)
+            .cloned()
+            .unwrap_or_default();
+        let mut warn_spots: Vec<(u32, egui::Rect)> = Vec::new();
+
         // ── Existing breakpoints ──────────────────────────────────────────────
         // A line-height dot in the gutter, and the line underlined rather than
         // tinted — so the code keeps its own colours.
@@ -117,7 +132,44 @@ impl AppIde {
                     egui::Stroke::new(BP_EDGE_W, BP_EDGE),
                 );
                 painter.circle_filled(egui::pos2(dot_x, cy), r, BP_FILL);
+
+                // A breakpoint the target REFUSED to arm gets the same warning
+                // triangle as the Debug tab's list. It goes just right of the
+                // dot — which means the line's first character cell, because
+                // the dot already fills the gutter (its right edge lands on
+                // `gp.x`). Breakpoint lines are inside a function and therefore
+                // indented, so in practice it sits on blank space.
+                if bp_status.get(&line).is_some_and(|s| !s.verified) {
+                    let size = (bot - top) * 0.62;
+                    let glyph = painter.text(
+                        egui::pos2(gp.x + 1.0, cy),
+                        egui::Align2::LEFT_CENTER,
+                        ph::WARNING,
+                        egui::FontId::proportional(size),
+                        crate::app::tabs::debug_tab::UNARMED_AMBER,
+                    );
+                    warn_spots.push((line, glyph));
+                }
             }
+        }
+
+        // A warning sign nobody can explain is worse than none: the same text
+        // the Breakpoints pane shows, on hover. Hover-only — a click-sensing
+        // rect out here would fight the editor for the caret.
+        for (line, rect) in warn_spots {
+            ui.interact(
+                rect,
+                egui::Id::new("bp_unarmed").with(&rel).with(line),
+                egui::Sense::hover(),
+            )
+            .on_hover_ui(|ui| {
+                ui.set_max_width(clip.width() * 0.4);
+                ui.label(crate::app::tabs::debug_tab::bp_hover(
+                    &format!("{rel}:{line}"),
+                    false,
+                    bp_status.get(&line),
+                ));
+            });
         }
 
         // ── Hover ghost + click toggle (one interact for the whole strip) ────

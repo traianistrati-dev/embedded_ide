@@ -24,8 +24,10 @@ const HALT_AMBER: egui::Color32 = egui::Color32::from_rgb(230, 180, 60);
 /// the two views look like they were about different things.
 const HALT_ROW_RED: egui::Color32 = egui::Color32::from_rgb(220, 70, 60);
 
-/// A breakpoint probe-rs refused to arm: warning glyph amber + muted row.
-const UNARMED_AMBER: egui::Color32 = egui::Color32::from_rgb(215, 150, 60);
+/// A breakpoint probe-rs refused to arm: warning glyph amber + muted row. Also
+/// used by the editor gutter, so the warning triangle there and the one in this
+/// list are visibly the same statement about the same breakpoint.
+pub(crate) const UNARMED_AMBER: egui::Color32 = egui::Color32::from_rgb(215, 150, 60);
 const UNARMED_GREY: egui::Color32 = egui::Color32::from_gray(120);
 
 /// Memory key of this tab's help panel.
@@ -966,7 +968,12 @@ fn breakpoint_pane(
                                         .size(10.5)
                                         .monospace();
                                     if unarmed {
-                                        text = text.color(UNARMED_GREY).strikethrough();
+                                        // Greyed, but NOT struck through: the
+                                        // breakpoint still exists and is still
+                                        // clickable, and a strikethrough reads
+                                        // as "deleted" rather than "not armed".
+                                        // The warning triangle carries that.
+                                        text = text.color(UNARMED_GREY);
                                     } else if here {
                                         text = text.color(egui::Color32::WHITE).strong();
                                     }
@@ -986,7 +993,7 @@ fn breakpoint_pane(
 /// The row tooltip: where it is, plus what probe-rs did with it. The reason an
 /// unarmed breakpoint gives is the point of the whole verdict plumbing — a red
 /// dot that never hits is otherwise indistinguishable from one that works.
-fn bp_hover(loc: &str, here: bool, status: Option<&BpStatus>) -> String {
+pub(crate) fn bp_hover(loc: &str, here: bool, status: Option<&BpStatus>) -> String {
     let mut s = loc.to_owned();
     match status {
         Some(st) if !st.verified => {
