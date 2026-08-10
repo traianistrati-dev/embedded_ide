@@ -798,9 +798,17 @@ pub struct AppIde {
     /// has been stable for `LSP_SETTLE`, we restart it ONCE so the status reflects
     /// the fully-resolved workspace. Reset to `false` on every project load.
     lsp_settle_recheck_done: bool,
+    /// Stage of that one-shot: `false` = the cheap forced re-verify hasn't run
+    /// yet, `true` = it did and diagnostics survived it, so the next settle
+    /// escalates to a full restart. Reset with `lsp_settle_recheck_done`.
+    lsp_settle_reverified: bool,
     /// When the RA workspace content last changed (codegen regen / project load) —
     /// the debounce baseline for the settle restart above.
     last_workspace_change: Option<std::time::Instant>,
+    /// When the current RA session entered `Indexing`. Only used by the fallback
+    /// that opens `src/main.rs` anyway if RA never reports indexing as finished
+    /// (see the `Indexing` arm of the LSP lifecycle).
+    lsp_indexing_since: Option<std::time::Instant>,
     // ── Rename symbol (Ctrl+R → textDocument/rename) ─────────────────────────
     /// While `true`, the rename input popup is shown.
     rename_active: bool,
@@ -1271,7 +1279,9 @@ impl AppIde {
             lsp_state: Arc::new(Mutex::new(lsp::LspState::default())),
             lsp_flush_requested: false,
             lsp_settle_recheck_done: true,
+            lsp_settle_reverified: false,
             last_workspace_change: None,
+            lsp_indexing_since: None,
             lsp_flush_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rename_active: false,
             rename_input: String::new(),
@@ -2003,6 +2013,7 @@ impl AppIde {
                         )
                         .is_ok()
                         {
+                            self.lsp_indexing_since = None; // fresh session
                             lsp::start(
                                 &build_dir,
                                 Arc::clone(&self.lsp_state),
@@ -2013,12 +2024,25 @@ impl AppIde {
                 }
             }
             LspStatus::Indexing => {
-                let mut lsp = self.lsp_state.lock().unwrap();
-                if !lsp.is_file_open("src/main.rs") {
-                    lsp.did_open("src/main.rs", &self.generated_code.clone());
-                }
+                // Deliberately NOT opening the document here. `Indexing` is set
+                // the moment the `initialize` handshake completes — long before
+                // RA has fetched metadata and built the crate graph — and RA
+                // answers a `didOpen` immediately, analysing the file as a
+                // DETACHED one: no sysroot, so no `core`. Without `core` the
+                // `Unsize` lang item is missing, `&mut [u8; 32]` no longer
+                // coerces to `&mut [u8]`, and the length const can't be
+                // evaluated — the exact "expected &mut [u8], found &mut [u8; _]"
+                // false error that used to greet every startup. It then stuck,
+                // because RA re-verifies only on Save. `Ready` means the
+                // workspace finished loading (indexing `$/progress` end), so the
+                // document is opened in the arm below instead.
+                self.open_main_rs_when_indexed();
             }
             LspStatus::Ready => {
+                // Same gate as during Indexing: `Ready` alone is not proof the
+                // crate graph is built (it flips on the first `$/progress end`
+                // of any rust-prefixed token, e.g. "Fetching metadata").
+                self.open_main_rs_when_indexed();
                 // RA re-verifies ONLY on an explicit Project Save (Ctrl+S / Save
                 // button / project reload) — never while typing, so editing stays
                 // light. The Save re-syncs every file to RA and re-runs its checks
@@ -2039,31 +2063,42 @@ impl AppIde {
                     self.spawn_lsp_flush();
                 }
 
-                // One-shot post-load restart: RA's first analysis of a just-opened
-                // project can be stale (the freshly-reset Cargo.lock is still
-                // re-resolving; late config files weren't indexed) and it sticks
-                // because RA only re-checks on Save. Once RA is Ready, the
-                // workspace has been stable for `LSP_SETTLE`, and there ARE
-                // diagnostics (so there's something possibly-stale to clear),
-                // restart RA exactly once so its status reflects the settled,
-                // fully-resolved workspace — what a manual Restart does today.
+                // Post-load clean-up of a possibly-stale first analysis (the
+                // freshly-reset Cargo.lock is still re-resolving; late config
+                // files weren't indexed). It sticks because RA only re-checks on
+                // Save, so once RA is Ready, the workspace has been stable for
+                // `LSP_SETTLE` and there ARE diagnostics, force a re-analysis.
+                //
+                // Two stages, cheapest first: a forced re-verify of the open
+                // documents (a version-bumped no-op `didChange` — what your own
+                // "type a line and save" does by hand) and, only if diagnostics
+                // survive that, the full restart. Restarting first was the old
+                // behaviour and could RE-CREATE the very errors it was meant to
+                // clear: the relaunched RA went through the same too-early open.
                 const LSP_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
                 if !self.lsp_settle_recheck_done && self.has_project() {
                     let settled = self
                         .last_workspace_change
                         .is_some_and(|t| t.elapsed() > LSP_SETTLE);
                     // Wait for any in-flight check too: RA's first `cargo check`
-                    // re-resolves the reset Cargo.lock — restarting before it
-                    // finishes would just make the relaunched RA re-resolve again.
+                    // re-resolves the reset Cargo.lock — acting before it
+                    // finishes would just make RA re-resolve again.
                     let (has_diags, checking) = {
                         let lsp = self.lsp_state.lock().unwrap();
                         (!lsp.diagnostics.is_empty(), lsp.checking)
                     };
                     if settled && !checking {
-                        self.lsp_settle_recheck_done = true;
-                        // Only restart when there ARE diagnostics — a clean load
-                        // needs no re-index.
-                        if has_diags {
+                        // A clean load needs nothing.
+                        if !has_diags {
+                            self.lsp_settle_recheck_done = true;
+                        } else if !self.lsp_settle_reverified {
+                            self.lsp_settle_reverified = true;
+                            self.reverify_open_documents();
+                            // Give RA a fresh settle window to re-publish before
+                            // the stage above is judged.
+                            self.last_workspace_change = Some(std::time::Instant::now());
+                        } else {
+                            self.lsp_settle_recheck_done = true;
                             self.restart_lsp();
                         }
                     }
@@ -2314,6 +2349,70 @@ impl AppIde {
             cache.insert(rel.to_string(), hash);
         }
         true
+    }
+
+    /// Hand `src/main.rs` to rust-analyzer — but only once RA has reported its
+    /// indexing pass finished, i.e. the crate graph and sysroot are loaded.
+    ///
+    /// Opening earlier is what produced the "expected `&mut [u8]`, found
+    /// `&mut [u8; _]`" errors that greeted every startup: RA answers a `didOpen`
+    /// immediately, and with no sysroot loaded the file is analysed detached —
+    /// without `core` there is no `Unsize` lang item, so `&mut [u8; 32]` no
+    /// longer coerces to `&mut [u8]` and the length const can't be evaluated
+    /// (hence the `_`). Those false errors then stuck, because RA re-verifies
+    /// only on Save.
+    ///
+    /// The timeout is a safety valve for an RA that never reports indexing as
+    /// finished: without it the document would never be opened at all. A
+    /// possibly-early analysis beats none, and the settle re-verify cleans up.
+    fn open_main_rs_when_indexed(&mut self) {
+        const OPEN_FALLBACK: std::time::Duration = std::time::Duration::from_secs(20);
+        let since = *self
+            .lsp_indexing_since
+            .get_or_insert_with(std::time::Instant::now);
+        let mut lsp = self.lsp_state.lock().unwrap();
+        if lsp.is_file_open("src/main.rs") {
+            return;
+        }
+        if lsp.indexed || since.elapsed() > OPEN_FALLBACK {
+            lsp.did_open("src/main.rs", &self.generated_code.clone());
+        }
+    }
+
+    /// Make rust-analyzer re-run its analysis of the documents it already has
+    /// open, with no edit: a version-bumped `didChange` carrying the identical
+    /// text (`force`), plus one `didSave` so the flycheck re-runs too.
+    ///
+    /// This is the programmatic form of what clears a stale first analysis by
+    /// hand — type a character and save. Note the normal Save flush deliberately
+    /// uses `force = false` (it must not re-analyse the whole project on every
+    /// save), which is exactly why it can NOT clear a diagnostic computed from
+    /// unchanged text; hence this separate, targeted path. Only already-open
+    /// documents are touched — `did_change` would otherwise auto-open every user
+    /// file and flood RA.
+    fn reverify_open_documents(&mut self) {
+        let mut docs: Vec<(String, String)> = vec![(
+            crate::project_tree::logic::src_path("main.rs"),
+            self.generated_code.clone(),
+        )];
+        docs.extend(
+            self.project_tree
+                .user_src_files
+                .iter()
+                .map(|(rel, content)| (rel.clone(), content.clone())),
+        );
+        let mut lsp = self.lsp_state.lock().unwrap();
+        let mut resent = false;
+        for (rel, text) in &docs {
+            if lsp.is_file_open(rel) {
+                lsp.did_change(rel, text, true);
+                resent = true;
+            }
+        }
+        // One save is enough — the flycheck it triggers covers the workspace.
+        if resent {
+            lsp.did_save(&crate::project_tree::logic::src_path("main.rs"));
+        }
     }
 
     fn spawn_lsp_flush(&mut self) {

@@ -305,6 +305,15 @@ pub struct LspState {
     /// True while RA is running a background `cargo check` pass.
     /// Set to `true` on `$/progress begin` for check tokens; cleared on `end`.
     pub checking: bool,
+    /// True once RA reported its INDEXING pass finished (`$/progress end` for a
+    /// token naming "index"). That is the point where the crate graph and the
+    /// sysroot are loaded — before it, a `didOpen`ed document gets analysed as a
+    /// detached file (no `core`, so no unsized coercions and no const-eval),
+    /// which produces false type errors that then stick. The app waits for this
+    /// before handing RA the first document. `status == Ready` is NOT a
+    /// substitute: it flips on the first `$/progress end` of ANY rust-prefixed
+    /// token, which can be an early phase such as "Fetching metadata".
+    pub indexed: bool,
     /// When the last `didSave` went out — starts the flycheck queue-latency clock.
     last_did_save_at: Option<std::time::Instant>,
     /// When RA reported the current cargo-check began (`$/progress` "begin").
@@ -412,6 +421,7 @@ impl Default for LspState {
             fresh_check_gen: 0,
             root_uri: String::new(),
             checking: false,
+            indexed: false,
             last_did_save_at: None,
             check_started_at: None,
             check_queued: std::time::Duration::ZERO,
@@ -1124,6 +1134,7 @@ impl LspState {
         self.fresh_check_gen = 0;
         self.root_uri = String::new();
         self.checking = false;
+        self.indexed = false;
         self.last_did_save_at = None;
         self.check_started_at = None;
         self.check_queued = std::time::Duration::ZERO;
@@ -1780,6 +1791,13 @@ fn handle_incoming(
                 }
             }
 
+            // The indexing pass proper finishing = crate graph + sysroot are
+            // loaded. Matched case-insensitively: RA's token is
+            // "rustAnalyzer/Indexing".
+            if kind == "end" && token.to_ascii_lowercase().contains("index") {
+                s.indexed = true;
+                ctx.request_repaint();
+            }
             if is_indexing && kind == "end" && s.status == LspStatus::Indexing {
                 s.status = LspStatus::Ready;
                 ctx.request_repaint();

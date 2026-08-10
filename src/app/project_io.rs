@@ -27,6 +27,7 @@ impl AppIde {
         // project can be stale (Cargo.lock re-resolving, config files not yet
         // indexed), so once it settles we restart it once for a correct status.
         self.lsp_settle_recheck_done = false;
+        self.lsp_settle_reverified = false;
         self.last_workspace_change = Some(std::time::Instant::now());
 
         self.selected_file = ProjectFileId::MainRs;
@@ -595,6 +596,10 @@ impl AppIde {
     pub(super) fn restart_lsp(&mut self) {
         self.lsp_state.lock().unwrap().reset();
         self.lsp_selected_diagnostic = None;
+        // The relaunched session goes through Starting → Indexing again, and the
+        // "open the document only once indexing is done" fallback clock is
+        // per-session.
+        self.lsp_indexing_since = None;
     }
 
     /// Start a background `cargo metadata` HEALTH CHECK of the project exactly as
