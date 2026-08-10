@@ -81,16 +81,34 @@ fn fade(color: egui::Color32) -> egui::Color32 {
     )
 }
 
+/// Char-index `[start, end)` spans the analyses want emphasised, on top of the
+/// plain syntax colouring. A token belongs to a span when its START index falls
+/// inside it (tokens never straddle a boundary in practice).
+#[derive(Default, Clone, Copy)]
+pub struct Marks<'a> {
+    /// De-emphasised (faded toward gray): never-referenced fn/struct/enum/const
+    /// from the usages analysis, unused locals, unused generic parameters.
+    pub dead: &'a [(usize, usize)],
+    /// Underlined in their own colour, NOT faded: generic parameters an item
+    /// declares without using, which an `impl` of it does use. They are live
+    /// code — the underline links the declaration to the `impl` that needs it.
+    pub underline: &'a [(usize, usize)],
+}
+
+/// How one token is marked, resolved from its start index.
+#[derive(Default, Clone, Copy)]
+struct TokenMark {
+    dead: bool,
+    underline: bool,
+}
+
 /// Build a syntax-highlighted `LayoutJob` for Rust source. Mirrors the colours of
 /// `egui_code_editor`'s built-in highlighter (keyword / type / special sets come
 /// from the same `Syntax`, colours from the same `ColorTheme`) but is lifetime-
 /// aware: a `'a` / `'static` lifetime is its own blue span instead of a runaway
 /// char-literal string. Char literals (`'x'`, `'\n'`) keep the string colour.
 ///
-/// `dead_ranges` are char-index `[start, end)` spans (e.g. a never-referenced
-/// fn/struct/enum/const, from `AppIde`'s usages analysis) whose tokens are
-/// rendered in a de-emphasised (faded toward gray) colour instead of their
-/// normal syntax colour.
+/// `marks` carries the analysis overlays — see [`Marks`].
 ///
 /// The job text equals the source exactly (every char appended in order), which
 /// egui requires for correct cursor / selection mapping.
@@ -99,23 +117,31 @@ pub(crate) fn rust_layout_job(
     theme: &ColorTheme,
     fontsize: f32,
     syntax: &Syntax,
-    dead_ranges: &[(usize, usize)],
+    marks: Marks<'_>,
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let font = egui::FontId::monospace(fontsize);
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
 
-    // A token starting at char index `at` is "dead" when it falls inside any of
-    // `dead_ranges` — checked once per token (using its start index) since a
-    // token never straddles a dead-range boundary in practice (fn/struct/etc.
-    // spans start/end at statement boundaries).
-    let in_dead = |at: usize| dead_ranges.iter().any(|&(s, e)| at >= s && at < e);
+    // A token is classified by its START index — it never straddles a mark
+    // boundary in practice (fn/struct/etc. spans start and end at statement
+    // boundaries, and a generic parameter's mark is exactly its identifier).
+    let in_dead = |at: usize| TokenMark {
+        dead: marks.dead.iter().any(|&(s, e)| at >= s && at < e),
+        underline: marks.underline.iter().any(|&(s, e)| at >= s && at < e),
+    };
 
-    let push = |job: &mut egui::text::LayoutJob, s: &str, color: egui::Color32, dead: bool| {
+    let push = |job: &mut egui::text::LayoutJob, s: &str, color: egui::Color32, mark: TokenMark| {
         if !s.is_empty() {
-            let color = if dead { fade(color) } else { color };
-            job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
+            let color = if mark.dead { fade(color) } else { color };
+            let mut fmt = egui::TextFormat::simple(font.clone(), color);
+            if mark.underline {
+                // Drawn in the token's OWN colour, so it reads as a property of
+                // the identifier rather than a foreign marker pasted over it.
+                fmt.underline = egui::Stroke::new(1.0, color);
+            }
+            job.append(s, 0.0, fmt);
         }
     };
     let col = |ty: TokenType| theme.type_color(ty);
@@ -344,13 +370,14 @@ fn cached_rust_layout_job(
     theme: &ColorTheme,
     fontsize: f32,
     syntax: &Syntax,
-    dead_ranges: &[(usize, usize)],
+    marks: Marks<'_>,
 ) -> egui::text::LayoutJob {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
     fontsize.to_bits().hash(&mut h);
-    dead_ranges.hash(&mut h);
+    marks.dead.hash(&mut h);
+    marks.underline.hash(&mut h);
     theme.name.hash(&mut h);
     let key = h.finish().max(1); // 0 is the "nothing memoized yet" sentinel
 
@@ -364,7 +391,7 @@ fn cached_rust_layout_job(
             }
             return m[0].1.clone();
         }
-        let job = rust_layout_job(text, theme, fontsize, syntax, dead_ranges);
+        let job = rust_layout_job(text, theme, fontsize, syntax, marks);
         m.insert(0, (key, job.clone()));
         m.truncate(LAYOUT_MEMO_SLOTS);
         job
@@ -436,7 +463,7 @@ fn show_rust_editor(
     rows: usize,
     syntax: &Syntax,
     id: &str,
-    dead_ranges: &[(usize, usize)],
+    marks: Marks<'_>,
 ) -> TextEditOutput {
     let mut out: Option<TextEditOutput> = None;
     let code_editor = |ui: &mut egui::Ui| {
@@ -454,7 +481,7 @@ fn show_rust_editor(
                                     theme,
                                     fontsize,
                                     syntax,
-                                    dead_ranges,
+                                    marks,
                                 );
                                 ui.fonts_mut(|f| f.layout_job(job))
                             };
@@ -510,7 +537,7 @@ pub fn show_rust_editor_plain(
         rows,
         &Syntax::rust(),
         id,
-        &[],
+        Marks::default(),
     )
 }
 
@@ -524,12 +551,12 @@ pub fn show_rust_with_completer(
     id: &str,
     completer: &mut Completer,
     suppress_keyword_completer: bool,
-    dead_ranges: &[(usize, usize)],
+    marks: Marks<'_>,
 ) -> TextEditOutput {
     if !suppress_keyword_completer {
         completer.handle_input(ui.ctx());
     }
-    let mut out = show_rust_editor(ui, text, theme, fontsize, rows, syntax, id, dead_ranges);
+    let mut out = show_rust_editor(ui, text, theme, fontsize, rows, syntax, id, marks);
     completer.text_edit_id = Some(out.response.id);
     if !suppress_keyword_completer {
         completer.show(syntax, theme, fontsize, &mut out);
@@ -550,18 +577,27 @@ mod tests {
         let syn = Syntax::rust();
         let src = "fn main() { let x = 1; }";
 
-        let direct = rust_layout_job(src, &theme, 13.0, &syn, &[]);
-        let cached = cached_rust_layout_job(src, &theme, 13.0, &syn, &[]);
-        let repeat = cached_rust_layout_job(src, &theme, 13.0, &syn, &[]); // memo hit
+        let direct = rust_layout_job(src, &theme, 13.0, &syn, Marks::default());
+        let cached = cached_rust_layout_job(src, &theme, 13.0, &syn, Marks::default());
+        let repeat = cached_rust_layout_job(src, &theme, 13.0, &syn, Marks::default()); // memo hit
         assert_eq!(direct, cached);
         assert_eq!(cached, repeat);
 
         // Changed inputs must not return the stale memo.
-        let faded = cached_rust_layout_job(src, &theme, 13.0, &syn, &[(0, 5)]);
+        let faded = cached_rust_layout_job(
+            src,
+            &theme,
+            13.0,
+            &syn,
+            Marks {
+                dead: &[(0, 5)],
+                ..Default::default()
+            },
+        );
         assert_ne!(faded, cached, "dead range must change the job");
-        let zoomed = cached_rust_layout_job(src, &theme, 15.0, &syn, &[]);
+        let zoomed = cached_rust_layout_job(src, &theme, 15.0, &syn, Marks::default());
         assert_ne!(zoomed, cached, "font size must change the job");
-        let edited = cached_rust_layout_job("fn main() {}", &theme, 13.0, &syn, &[]);
+        let edited = cached_rust_layout_job("fn main() {}", &theme, 13.0, &syn, Marks::default());
         assert_ne!(edited, cached, "text must change the job");
     }
 
@@ -578,11 +614,17 @@ mod tests {
         let b = "fn b() { let y = 2; }";
 
         // Prime both, then alternate the way two visible editors would.
-        let ja = cached_rust_layout_job(a, &theme, 13.0, &syn, &[]);
-        let jb = cached_rust_layout_job(b, &theme, 13.0, &syn, &[]);
+        let ja = cached_rust_layout_job(a, &theme, 13.0, &syn, Marks::default());
+        let jb = cached_rust_layout_job(b, &theme, 13.0, &syn, Marks::default());
         for _ in 0..4 {
-            assert_eq!(cached_rust_layout_job(a, &theme, 13.0, &syn, &[]), ja);
-            assert_eq!(cached_rust_layout_job(b, &theme, 13.0, &syn, &[]), jb);
+            assert_eq!(
+                cached_rust_layout_job(a, &theme, 13.0, &syn, Marks::default()),
+                ja
+            );
+            assert_eq!(
+                cached_rust_layout_job(b, &theme, 13.0, &syn, Marks::default()),
+                jb
+            );
         }
         // Both must be resident simultaneously — not one evicting the other.
         let resident = LAYOUT_MEMO.with(|m| m.borrow().len());
@@ -592,7 +634,13 @@ mod tests {
     /// Collect (segment_text, is_lifetime_blue) from a highlighted job so tests
     /// can assert which spans were coloured as lifetimes without a real UI.
     fn spans(src: &str) -> Vec<(String, bool)> {
-        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[]);
+        let job = rust_layout_job(
+            src,
+            &ColorTheme::GRUVBOX,
+            13.0,
+            &Syntax::rust(),
+            Marks::default(),
+        );
         job.sections
             .iter()
             .map(|s| {
@@ -604,7 +652,13 @@ mod tests {
 
     /// The job text must reproduce the source exactly (egui relies on it).
     fn assert_roundtrip(src: &str) {
-        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[]);
+        let job = rust_layout_job(
+            src,
+            &ColorTheme::GRUVBOX,
+            13.0,
+            &Syntax::rust(),
+            Marks::default(),
+        );
         assert_eq!(job.text, src, "layout job text must equal source");
     }
 
@@ -612,7 +666,16 @@ mod tests {
     #[test]
     fn dead_range_fades_color_without_changing_text() {
         let src = "fn dead() {}\nfn used() {}";
-        let job = rust_layout_job(src, &ColorTheme::GRUVBOX, 13.0, &Syntax::rust(), &[(0, 12)]);
+        let job = rust_layout_job(
+            src,
+            &ColorTheme::GRUVBOX,
+            13.0,
+            &Syntax::rust(),
+            Marks {
+                dead: &[(0, 12)],
+                ..Default::default()
+            },
+        );
         assert_eq!(
             job.text, src,
             "dead ranges must not change the rendered text"

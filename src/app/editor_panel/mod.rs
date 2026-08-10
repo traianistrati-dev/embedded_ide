@@ -686,6 +686,10 @@ impl AppIde {
                 }
                 _ => Vec::new(),
             };
+            // Generic parameters the item declares without using, that an `impl`
+            // of it does use: underlined instead of faded (they are live code).
+            let underline_ranges: Vec<(usize, usize)> =
+                self.generic_underline_ranges(&display_code).to_vec();
 
             // Snapshot right before the editor mutates `display_code`, so
             // the multi-cursor replay below can diff exactly what the
@@ -705,7 +709,10 @@ impl AppIde {
                     &editor_id,
                     &mut self.completer,
                     suppress_keyword_completer,
-                    &dead_ranges,
+                    crate::editor::gui::code_editor::Marks {
+                        dead: &dead_ranges,
+                        underline: &underline_ranges,
+                    },
                 )
             } else {
                 // Config files (Cargo.toml, .cargo/config.toml, .gitignore)

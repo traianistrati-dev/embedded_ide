@@ -41,34 +41,71 @@ const PULSE_ALPHA: f32 = 55.0;
 /// with unused parameters from pinning the render loop at full speed.
 const PULSE_FRAME_MS: u64 = 33;
 
-/// Char-index `[start, end)` ranges of generic parameters (and their `where`
-/// predicates) that are declared but never used, ready to append to the
-/// editor's dead-range list.
-pub fn unused_generic_ranges(text: &str) -> Vec<(usize, usize)> {
+/// What the editor should mark, by treatment.
+#[derive(Default, Debug, PartialEq)]
+pub(super) struct GenericMarks {
+    /// Declared and used nowhere: faded, with the pulsing highlight.
+    pub unused: Vec<(usize, usize)>,
+    /// Unused inside the item itself, but used by an `impl` OF that item —
+    /// underlined in their own colour instead, at the declaration and in the
+    /// `impl` header. These are not dead code: fading a `const EXPECTED_CMD_ID`
+    /// that every `impl` block reads would be actively misleading.
+    pub underline: Vec<(usize, usize)>,
+}
+
+/// One resolved item that declares generic parameters.
+struct Item {
+    /// The item's name (`Parser`), or `None` for an `impl` block.
+    name: Option<(usize, usize)>,
+    /// `<` … `>` of the parameter list.
+    open: usize,
+    close: usize,
+    /// The `{` or `;` that ends the header, and one past the item's last char.
+    body_start: usize,
+    end: usize,
+    params: Vec<Param>,
+    predicates: Vec<Predicate>,
+}
+
+/// Analyse `text` (one `.rs` file) for generic parameters that are declared but
+/// not used by their own item, and split them by treatment — see
+/// [`GenericMarks`].
+pub(super) fn analyze(text: &str) -> GenericMarks {
     let chars: Vec<char> = text.chars().collect();
     let mask = code_mask(&chars);
-    let mut out = Vec::new();
+    let mut marks = GenericMarks::default();
 
-    for open in item_generic_lists(&chars, &mask) {
-        let Some(close) = match_angle(&chars, &mask, open) else {
-            continue; // unbalanced / not really a generic list
-        };
-        let (where_start, body_start, item_end) = item_layout(&chars, &mask, close + 1);
-        let params = split_params(&chars, &mask, open + 1, close);
-        if params.is_empty() {
-            continue;
-        }
-        let predicates = where_start
-            .map(|w| where_predicates(&chars, &mask, w + "where".len(), body_start))
-            .unwrap_or_default();
+    let items: Vec<Item> = item_generic_lists(&chars, &mask)
+        .into_iter()
+        .filter_map(|head| {
+            let close = match_angle(&chars, &mask, head.open)?;
+            let (where_start, body_start, end) = item_layout(&chars, &mask, close + 1);
+            let params = split_params(&chars, &mask, head.open + 1, close);
+            if params.is_empty() {
+                return None;
+            }
+            Some(Item {
+                name: head.name,
+                open: head.open,
+                close,
+                body_start,
+                end,
+                params,
+                predicates: where_start
+                    .map(|w| where_predicates(&chars, &mask, w + "where".len(), body_start))
+                    .unwrap_or_default(),
+            })
+        })
+        .collect();
 
-        for p in &params {
+    for item in &items {
+        for p in &item.params {
             let name: String = chars[p.name.0..p.name.1].iter().collect();
             // Declaration-side occurrences: the parameter's own name in `<…>`
             // and the subject of each of its `where` predicates.
             let mut skip: Vec<(usize, usize)> = vec![p.name];
             let mut own_preds: Vec<(usize, usize)> = Vec::new();
-            for pred in &predicates {
+            for pred in &item.predicates {
                 if chars[pred.subject.0..pred.subject.1]
                     .iter()
                     .collect::<String>()
@@ -78,16 +115,76 @@ pub fn unused_generic_ranges(text: &str) -> Vec<(usize, usize)> {
                     own_preds.push(pred.span);
                 }
             }
-            let used = find_word(&chars, &mask, &name, open, item_end)
+            let used = find_word(&chars, &mask, &name, item.open, item.end)
                 .any(|at| !skip.iter().any(|&(s, _)| s == at));
-            if !used {
-                out.push(p.span);
-                out.extend(own_preds);
+            if used {
+                continue;
+            }
+
+            // Not used by the item — but an `impl` of it may well read it.
+            let rescued = impl_uses(&chars, &mask, &items, item, &name);
+            if rescued.is_empty() {
+                marks.unused.push(p.span);
+                marks.unused.extend(own_preds);
+            } else {
+                marks.underline.push(p.name);
+                marks.underline.extend(rescued);
             }
         }
     }
 
-    out.sort_unstable();
+    marks.unused.sort_unstable();
+    marks.underline.sort_unstable();
+    marks.underline.dedup();
+    marks
+}
+
+/// Occurrences to underline in the `impl` blocks that rescue `param` — empty
+/// when no `impl` of `item` uses it.
+///
+/// An `impl` counts as "of this item" when the item's name appears in its
+/// header AFTER its own parameter list, i.e. in `… Trait for Parser<…>` — the
+/// self type and the implemented trait, not the `impl`'s own `<…>` (where a
+/// same-named parameter would match everything). Only same-file `impl`s are
+/// seen; one in another module leaves the parameter faded, as before.
+///
+/// The returned spans are limited to each `impl`'s HEADER — its parameter list
+/// and the type arguments. Underlining every use in a large `impl` body would
+/// turn the file into a wall of lines.
+fn impl_uses(
+    chars: &[char],
+    mask: &[bool],
+    items: &[Item],
+    item: &Item,
+    param: &str,
+) -> Vec<(usize, usize)> {
+    let Some(name_span) = item.name else {
+        return Vec::new(); // an `impl`'s own unused parameter is just unused
+    };
+    let item_name: String = chars[name_span.0..name_span.1].iter().collect();
+    let len = param.chars().count();
+    let mut out = Vec::new();
+
+    for other in items {
+        if other.name.is_some() || std::ptr::eq(other, item) {
+            continue; // only `impl` blocks
+        }
+        if find_word(chars, mask, &item_name, other.close + 1, other.body_start)
+            .next()
+            .is_none()
+        {
+            continue; // an `impl` of some other type
+        }
+        if find_word(chars, mask, param, other.open, other.end)
+            .next()
+            .is_none()
+        {
+            continue; // this `impl` doesn't mention the parameter
+        }
+        out.extend(
+            find_word(chars, mask, param, other.open, other.body_start).map(|at| (at, at + len)),
+        );
+    }
     out
 }
 
@@ -262,10 +359,18 @@ fn skip_trivia(chars: &[char], mask: &[bool], mut i: usize) -> usize {
 /// follows the keyword directly, with no name in between.
 const ITEM_KEYWORDS: [&str; 6] = ["fn", "struct", "enum", "union", "trait", "type"];
 
-/// Indices of every `<` that opens an *item's* generic parameter list. Anything
-/// else that looks like `<` (comparisons, turbofish, type arguments) is skipped
-/// because it isn't preceded by an item keyword + name.
-fn item_generic_lists(chars: &[char], mask: &[bool]) -> Vec<usize> {
+/// The head of an item that declares generic parameters.
+struct ItemHead {
+    /// Span of the item's name, or `None` for an `impl` block.
+    name: Option<(usize, usize)>,
+    /// Index of the `<` opening the parameter list.
+    open: usize,
+}
+
+/// Every `<` that opens an *item's* generic parameter list, with the item's
+/// name. Anything else that looks like `<` (comparisons, turbofish, type
+/// arguments) is skipped because it isn't preceded by an item keyword + name.
+fn item_generic_lists(chars: &[char], mask: &[bool]) -> Vec<ItemHead> {
     let n = chars.len();
     let mut out = Vec::new();
     let mut i = 0;
@@ -278,22 +383,29 @@ fn item_generic_lists(chars: &[char], mask: &[bool]) -> Vec<usize> {
         let word: String = chars[i..end].iter().collect();
         i = end;
 
-        let open = if word == "impl" {
+        let head = if word == "impl" {
             let j = skip_trivia(chars, mask, end);
-            (chars.get(j) == Some(&'<')).then_some(j)
+            (chars.get(j) == Some(&'<')).then_some(ItemHead {
+                name: None,
+                open: j,
+            })
         } else if ITEM_KEYWORDS.contains(&word.as_str()) {
             let name = skip_trivia(chars, mask, end);
             if name < n && is_ident_start(chars[name]) {
-                let j = skip_trivia(chars, mask, ident_end(chars, name));
-                (chars.get(j) == Some(&'<')).then_some(j)
+                let name_end = ident_end(chars, name);
+                let j = skip_trivia(chars, mask, name_end);
+                (chars.get(j) == Some(&'<')).then_some(ItemHead {
+                    name: Some((name, name_end)),
+                    open: j,
+                })
             } else {
                 None
             }
         } else {
             None
         };
-        if let Some(o) = open {
-            out.push(o);
+        if let Some(h) = head {
+            out.push(h);
         }
     }
     out
@@ -642,13 +754,22 @@ pub(super) fn show_unused_generics_overlay(
 mod tests {
     use super::*;
 
-    /// The source slices reported as unused, in order.
-    fn unused(src: &str) -> Vec<String> {
+    fn slices(src: &str, ranges: Vec<(usize, usize)>) -> Vec<String> {
         let chars: Vec<char> = src.chars().collect();
-        unused_generic_ranges(src)
+        ranges
             .into_iter()
             .map(|(s, e)| chars[s..e].iter().collect())
             .collect()
+    }
+
+    /// The source slices faded as unused, in order.
+    fn unused(src: &str) -> Vec<String> {
+        slices(src, analyze(src).unused)
+    }
+
+    /// The source slices underlined as "used only by an `impl`", in order.
+    fn underlined(src: &str) -> Vec<String> {
+        slices(src, analyze(src).underline)
     }
 
     #[test]
@@ -791,6 +912,108 @@ mod tests {
     fn multiple_items_report_each() {
         let src = "fn a<T>(x: u8) {}\nfn b<U>(u: U) {}\nfn c<V>(x: u8) {}";
         assert_eq!(unused(src), ["T", "V"]);
+    }
+
+    // ── Used only by an `impl` ───────────────────────────────────────────────
+
+    /// The shape from the report: two const parameters that no field mentions,
+    /// but every `impl` block reads.
+    const PARSER: &str = "\
+pub struct Parser<'a, DECODER, const PAYLOAD_LEN: usize, const EXPECTED_CMD_ID: u16>
+where DECODER: PayloadDecoder
+{
+    pub payload: [u8; PAYLOAD_LEN],
+    result_decoder: Option<DECODER>,
+    marker: &'a u8,
+}
+
+impl<'a, DECODER, const PAYLOAD_LEN: usize, const EXPECTED_CMD_ID: u16>
+Parser<'a, DECODER, PAYLOAD_LEN, EXPECTED_CMD_ID>
+where DECODER: PayloadDecoder
+{
+    fn check(&self) -> bool {
+        self.cmd_id == EXPECTED_CMD_ID
+    }
+}";
+
+    #[test]
+    fn param_used_only_by_an_impl_is_underlined_not_faded() {
+        assert!(
+            unused(PARSER).is_empty(),
+            "nothing may fade: the impl uses it"
+        );
+        // The declaration in the struct, plus the two header occurrences in the
+        // impl (its own parameter list and the `Parser<…>` type arguments).
+        assert_eq!(
+            underlined(PARSER),
+            ["EXPECTED_CMD_ID", "EXPECTED_CMD_ID", "EXPECTED_CMD_ID"]
+        );
+    }
+
+    #[test]
+    fn underline_covers_only_the_name_not_the_bounds() {
+        // `const EXPECTED_CMD_ID: u16` — the type must stay out of the range.
+        for s in underlined(PARSER) {
+            assert_eq!(s, "EXPECTED_CMD_ID");
+        }
+    }
+
+    #[test]
+    fn impl_body_uses_are_not_underlined() {
+        // `EXPECTED_CMD_ID` is also read inside `fn check`; only the header
+        // occurrences are marked, so exactly 3 (1 struct + 2 impl header).
+        assert_eq!(underlined(PARSER).len(), 3);
+    }
+
+    #[test]
+    fn no_impl_at_all_still_fades() {
+        let src = "pub struct S<const N: usize> { x: u8 }";
+        assert_eq!(unused(src), ["const N: usize"]);
+        assert!(underlined(src).is_empty());
+    }
+
+    #[test]
+    fn impl_of_another_type_does_not_rescue() {
+        // `Other`'s impl declares a same-named parameter — `S`'s must still fade.
+        let src = "struct S<const N: usize> { x: u8 }\n\
+                   struct Other<const N: usize> { y: [u8; N] }\n\
+                   impl<const N: usize> Other<N> { fn n(&self) -> usize { N } }";
+        assert_eq!(unused(src), ["const N: usize"]);
+    }
+
+    #[test]
+    fn impl_that_never_mentions_the_param_does_not_rescue() {
+        let src = "struct S<const N: usize> { x: u8 }\n\
+                   impl<'a> S<'a> { fn f(&self) {} }";
+        assert_eq!(unused(src), ["const N: usize"]);
+        assert!(underlined(src).is_empty());
+    }
+
+    #[test]
+    fn trait_impl_rescues_too() {
+        let src = "struct S<const N: usize> { x: u8 }\n\
+                   impl<const N: usize> Default for S<N> {\n\
+                   fn default() -> Self { Self { x: N as u8 } }\n\
+                   }";
+        assert!(unused(src).is_empty());
+        assert_eq!(underlined(src), ["N", "N", "N"]);
+    }
+
+    #[test]
+    fn an_impls_own_unused_param_is_still_faded() {
+        // Nothing rescues an `impl`'s own parameter — there is no "impl of an
+        // impl". `U` is used nowhere in the block.
+        let src = "struct S;\nimpl<U> S { fn f(&self) {} }";
+        assert_eq!(unused(src), ["U"]);
+        assert!(underlined(src).is_empty());
+    }
+
+    #[test]
+    fn lifetimes_are_rescued_the_same_way() {
+        let src = "struct S<'a> { x: u8 }\n\
+                   impl<'a> S<'a> { fn f(&self, v: &'a u8) {} }";
+        assert!(unused(src).is_empty());
+        assert_eq!(underlined(src), ["'a", "'a", "'a"]);
     }
 
     // ── Pulse ────────────────────────────────────────────────────────────────

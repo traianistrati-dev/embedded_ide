@@ -107,7 +107,7 @@ pub struct UsagesState {
     /// syntactic, so unlike the RA-driven items above it needs no debounce and
     /// can never be stale: it is recomputed the moment the text differs from
     /// `generics_for_text`, and only ever used for that exact text.
-    generic_ranges: Vec<(usize, usize)>,
+    generic_marks: super::generics::GenericMarks,
     generics_for_text: String,
 }
 
@@ -244,10 +244,10 @@ impl AppIde {
         // it is one scan per keystroke, not one per frame). `.rs` only — a
         // library's Cargo.toml also arrives here as a `UserFile`.
         if self.usages.generics_for_text != text {
-            self.usages.generic_ranges = if rel_path.ends_with(".rs") {
-                super::generics::unused_generic_ranges(text)
+            self.usages.generic_marks = if rel_path.ends_with(".rs") {
+                super::generics::analyze(text)
             } else {
-                Vec::new()
+                Default::default()
             };
             self.usages.generics_for_text = text.to_owned();
         }
@@ -389,7 +389,9 @@ impl AppIde {
         // `tick_usages`, so no freshness guard is needed (or wanted: it is the
         // one part of the fade that stays live while you type).
         if self.usages.generics_for_text == display_code {
-            ranges.extend_from_slice(&self.usages.generic_ranges);
+            // Only the fully-unused ones. The `impl`-only parameters are
+            // underlined instead — fading them would be plain wrong.
+            ranges.extend_from_slice(&self.usages.generic_marks.unused);
         }
 
         if self.usages.rel_path == rel_path && self.usages.computed_for_text == display_code {
@@ -440,7 +442,17 @@ impl AppIde {
     /// pulsing overlay so the two can never disagree about what is unused.
     pub(super) fn generic_pulse_ranges(&self, display_code: &str) -> &[(usize, usize)] {
         if self.usages.generics_for_text == display_code {
-            &self.usages.generic_ranges
+            &self.usages.generic_marks.unused
+        } else {
+            &[]
+        }
+    }
+
+    /// Ranges to underline: generic parameters the item itself doesn't use but
+    /// an `impl` of it does. Empty when the cached scan is for different text.
+    pub(super) fn generic_underline_ranges(&self, display_code: &str) -> &[(usize, usize)] {
+        if self.usages.generics_for_text == display_code {
+            &self.usages.generic_marks.underline
         } else {
             &[]
         }
