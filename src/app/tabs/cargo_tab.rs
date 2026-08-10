@@ -304,7 +304,7 @@ pub(super) fn render_size_row(ui: &mut egui::Ui, state: &SizeState) {
                 ui.add_space(12.0);
                 usage_bar(
                     ui,
-                    "RAM ",
+                    "RAM  ",
                     u.ram_used,
                     u.limits.ram.map(|r| r.length),
                     u,

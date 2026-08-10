@@ -542,10 +542,11 @@ impl AppIde {
                 if resp.clicked() {
                     clicked = Some(i);
                 }
-                resp.on_hover_text(format!(
-                    "`{}` — {label}, click to see call sites",
-                    item.name
-                ));
+                resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(format!(
+                        "`{}` — {label}, click to see call sites",
+                        item.name
+                    ));
             }
         }
 
@@ -598,10 +599,12 @@ impl AppIde {
                             for r in &refs {
                                 let short = crate::app::short_path(&r.path);
                                 let label = format!("{short}:{}", r.line + 1);
-                                let resp = ui.add(
-                                    egui::Label::new(egui::RichText::new(label).size(11.0))
-                                        .sense(egui::Sense::click()),
-                                );
+                                // A real `Link`, not a click-sensing `Label`:
+                                // each row navigates, so it has to LOOK like one
+                                // — link colour, underline on hover and the
+                                // pointing-hand cursor, all of which `Link`
+                                // gives for free (and themed).
+                                let resp = ui.link(egui::RichText::new(label).size(11.0));
                                 if resp.clicked() {
                                     nav_to = Some((r.path.clone(), r.line));
                                     close = true;

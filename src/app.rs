@@ -133,6 +133,39 @@ pub fn diag_highlight_color(sev: lsp::DiagSeverity) -> egui::Color32 {
     }
 }
 
+/// Background of a diagnostic row in the bottom panel. Every one of those rows
+/// navigates to the code it names, so hovering has to say so: the row lights up,
+/// its `file:line` is underlined, and the cursor becomes a pointing hand (see
+/// [`diag_row_link_hint`]). Without that the list reads as static text and the
+/// click goes undiscovered.
+pub fn diag_row_bg(selected: bool, hovered: bool) -> egui::Color32 {
+    if selected {
+        egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
+    } else if hovered {
+        egui::Color32::from_rgba_premultiplied(60, 80, 110, 70)
+    } else {
+        egui::Color32::TRANSPARENT
+    }
+}
+
+/// The hover half of [`diag_row_bg`]: underline the `file:line` text (whose rect
+/// `painter.text` just returned) and switch the cursor to the pointing hand.
+pub fn diag_row_link_hint(
+    painter: &egui::Painter,
+    resp: &egui::Response,
+    location: egui::Rect,
+    color: egui::Color32,
+) {
+    if resp.hovered() && location.width() > 0.0 {
+        painter.hline(
+            location.x_range(),
+            location.bottom() - 0.5,
+            egui::Stroke::new(1.0, color),
+        );
+        painter.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+}
+
 /// The lines lit up by a jump from the Pins canvas: one for a pin click, one per
 /// wired pin for a module click. All in the same file — the editor shows one, and
 /// a band nobody can see is worse than a missing line.

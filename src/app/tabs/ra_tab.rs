@@ -230,16 +230,11 @@ pub fn show_ra_tab(
 
                 let location = format!("{}:{}", path, diag.line);
 
-                let row_bg = if is_sel {
-                    egui::Color32::from_rgba_premultiplied(60, 80, 110, 180)
-                } else {
-                    egui::Color32::TRANSPARENT
-                };
-
                 let (rect, resp) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 18.0),
                     egui::Sense::click(),
                 );
+                let row_bg = crate::app::diag_row_bg(is_sel, resp.hovered());
 
                 if ui.is_rect_visible(rect) {
                     let painter = ui.painter();
@@ -258,14 +253,16 @@ pub fn show_ra_tab(
                     );
                     x = r.right() + 4.0;
 
-                    // file:line
+                    // file:line — the link part of the row.
+                    const LOC_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 160, 200);
                     let r = painter.text(
                         egui::pos2(x, cy),
                         egui::Align2::LEFT_CENTER,
                         &location,
                         egui::FontId::monospace(10.5),
-                        egui::Color32::from_rgb(120, 160, 200),
+                        LOC_COLOR,
                     );
+                    crate::app::diag_row_link_hint(painter, &resp, r, LOC_COLOR);
                     x = r.right() + 6.0;
 
                     // Error code [E0308]
