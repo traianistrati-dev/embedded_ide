@@ -1,5 +1,6 @@
 //! MCU data model — struct definition and rendering constants.
 
+use crate::panels::mcu_module::clock::graph::ClockGraph;
 use crate::panels::mcu_module::clock::{ClockConfig, ClockLimits, ClockPreset};
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
@@ -134,6 +135,12 @@ pub struct Mcu {
     /// Chip-specific clock presets from the definition; empty → the family's
     /// built-in presets are shown in the Clock tab.
     pub clock_presets: Vec<ClockPreset>,
+    /// Pristine clock-graph node states, exactly as the chip definition ships
+    /// them — the target of the Clock tab's "Reset" button. Captured when the
+    /// MCU is built, BEFORE any saved `@clock` state is adopted, so a reset
+    /// really returns to the factory tree and not to whatever the project was
+    /// opened with. `None` for chips with no modelled clock tree.
+    pub clock_defaults: Option<ClockGraph>,
     /// Virtual electronic modules (e.g. _USART) wired to the chip's pins and
     /// drawn beside it on the Pins canvas.
     pub modules: Vec<crate::panels::mcu_module::modules::VirtualModule>,

@@ -14,14 +14,20 @@ impl Mcu {
             clock,
             clock_limits,
             clock_presets,
+            clock_defaults,
             family,
             name,
             ..
         } = self;
         match clock {
-            ClockConfig::Graph(gc) => {
-                clock_gui::draw_graph_clock(ui, gc, clock_limits, clock_presets, family)
-            }
+            ClockConfig::Graph(gc) => clock_gui::draw_graph_clock(
+                ui,
+                gc,
+                clock_limits,
+                clock_presets,
+                clock_defaults.as_ref(),
+                family,
+            ),
             ClockConfig::None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(

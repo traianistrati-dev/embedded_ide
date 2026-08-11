@@ -200,6 +200,9 @@ impl McuDefinition {
         );
         mcu.id = self.id.clone();
         mcu.clock = self.clock.to_config(&self.clock_limits);
+        // The definition's tree is this chip's factory clock — snapshot it for
+        // the Clock tab's "Reset" button before any saved state is applied.
+        mcu.capture_clock_defaults();
         mcu.clock_limits = self.clock_limits;
         mcu.clock_presets = self
             .clock_presets
@@ -396,6 +399,63 @@ mod tests {
         assert_eq!(
             def, back,
             "definition with embedded graph + layout must round-trip"
+        );
+    }
+
+    /// The Clock tab's "Reset" button: an edited tree returns to exactly the
+    /// definition's factory states, and resetting twice is a no-op.
+    #[test]
+    fn reset_clock_restores_the_definition_default() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::NodeState;
+
+        let mut mcu = stm_def().build_mcu();
+        assert!(mcu.clock_defaults.is_some(), "defaults captured at build");
+        assert!(mcu.clock_is_default(), "a freshly built chip is pristine");
+        assert!(!mcu.reset_clock(), "nothing to reset yet");
+
+        // Edit the PLL multiplier the way the diagram widget does.
+        let pristine = mcu.clock.clone();
+        let ClockConfig::Graph(gc) = &mut mcu.clock else {
+            panic!("stm32f103 has a graph clock");
+        };
+        let pll = gc.graph.node_mut("pllmul").expect("pllmul node");
+        pll.state = NodeState::Value(4);
+
+        assert!(!mcu.clock_is_default(), "edit is detected");
+        assert!(mcu.reset_clock(), "reset reports the change");
+        assert_eq!(mcu.clock, pristine, "tree is back to the factory config");
+        assert!(!mcu.reset_clock(), "second reset is a no-op");
+    }
+
+    /// A saved project's clock is adopted AFTER the snapshot, so Reset targets
+    /// the chip default — not whatever the project was opened with.
+    #[test]
+    fn defaults_survive_a_restored_project_clock() {
+        use crate::panels::mcu_module::clock::graph::{NodeState, stm32f1_graph};
+
+        let mut mcu = stm_def().build_mcu();
+        let pristine = mcu.clock.clone();
+        mcu.apply_saved_clock(Stm32f1Clock {
+            pll_mul: 4,
+            ..Stm32f1Clock::default()
+        });
+        assert!(
+            !mcu.clock_is_default(),
+            "restored config differs from factory"
+        );
+
+        assert!(mcu.reset_clock());
+        assert_eq!(mcu.clock, pristine);
+
+        // Sanity: the snapshot really is the definition's tree, not a clone of
+        // the saved one.
+        let def_graph = stm32f1_graph(&Stm32f1Clock::default());
+        let saved = mcu.clock_defaults.as_ref().unwrap();
+        assert!(saved.states_match(&def_graph));
+        assert_ne!(
+            saved.node("pllmul").map(|n| n.state.clone()),
+            Some(NodeState::Value(4))
         );
     }
 }

@@ -67,6 +67,12 @@ impl Mcu {
             }),
             _ => ClockConfig::None,
         };
+        // The tree as built here IS the default — `build_mcu` re-captures after
+        // overriding `clock` from the definition.
+        let clock_defaults = match &clock {
+            ClockConfig::Graph(gc) => Some(gc.graph.clone()),
+            ClockConfig::None => None,
+        };
         Self {
             id: String::new(),
             name,
@@ -82,6 +88,7 @@ impl Mcu {
             clock,
             clock_limits: ClockLimits::default(),
             clock_presets: Vec::new(),
+            clock_defaults,
             modules: Vec::new(),
             runtime: crate::panels::mcu_module::mcu::model::Runtime::default(),
             gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
@@ -635,6 +642,46 @@ impl Mcu {
         if let ClockConfig::Graph(gc) = &mut self.clock {
             gc.graph.adopt_states(&stm32f1_graph(&clock));
         }
+    }
+
+    /// Snapshots the current clock tree as the "factory" configuration for
+    /// [`reset_clock`](Self::reset_clock). Call right after installing the
+    /// definition's clock and BEFORE any saved `@clock` state is adopted.
+    pub fn capture_clock_defaults(&mut self) {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        self.clock_defaults = match &self.clock {
+            ClockConfig::Graph(gc) => Some(gc.graph.clone()),
+            ClockConfig::None => None,
+        };
+    }
+
+    /// Is the clock tree still exactly as the chip definition shipped it?
+    /// `true` when there is nothing to reset (including chips with no clock).
+    pub fn clock_is_default(&self) -> bool {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        match (&self.clock, &self.clock_defaults) {
+            (ClockConfig::Graph(gc), Some(def)) => gc.graph.states_match(def),
+            _ => true,
+        }
+    }
+
+    /// Restores the chip's default clock configuration (node states only — the
+    /// diagram layout is cosmetic and stays put). Returns `true` if anything
+    /// actually changed, so the caller can regenerate `main.rs`.
+    pub fn reset_clock(&mut self) -> bool {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        if self.clock_is_default() {
+            return false;
+        }
+        // Cloned so the defaults stay borrowable independently of `self.clock`.
+        let Some(defaults) = self.clock_defaults.clone() else {
+            return false;
+        };
+        let ClockConfig::Graph(gc) = &mut self.clock else {
+            return false;
+        };
+        gc.graph.adopt_states(&defaults);
+        true
     }
 
     /// Resets all non-reserved pins to Unset and clears selection/info state.

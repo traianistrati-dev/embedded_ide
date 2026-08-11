@@ -128,4 +128,18 @@ impl ClockGraph {
             }
         }
     }
+
+    /// Do this graph's node states already match `other`'s, id by id? Ids
+    /// missing on either side are ignored — the same lenient matching
+    /// [`adopt_states`](Self::adopt_states) uses, so this answers exactly
+    /// "would adopting `other` change anything?".
+    pub fn states_match(&self, other: &ClockGraph) -> bool {
+        self.nodes.iter().all(|node| {
+            other
+                .nodes
+                .iter()
+                .find(|n| n.id == node.id)
+                .is_none_or(|src| src.state == node.state)
+        })
+    }
 }

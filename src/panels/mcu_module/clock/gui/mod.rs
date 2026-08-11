@@ -16,7 +16,8 @@ use super::compute::frequencies;
 use super::graph::layout::ValueSrc;
 use super::graph::validate::ceiling_for;
 use super::graph::{
-    GraphClock, evaluate, graph_to_stm32f1, over_limits, stm32f1_graph, value_from_graph,
+    ClockGraph, GraphClock, evaluate, graph_to_stm32f1, over_limits, stm32f1_graph,
+    value_from_graph,
 };
 use super::model::ClockLimits;
 use super::presets::{ClockPreset, stm32f1_presets};
@@ -27,13 +28,15 @@ use super::validate::{Severity, warnings};
 ///
 /// `limits` are the chip's datasheet ceilings; `presets` the chip-specific
 /// one-click configs (empty + `family == "stm32f1"` → built-in F103 presets);
-/// `family` gates the family-specific extras (presets fallback + footnote
-/// validation via the `graph_to_stm32f1` bridge).
+/// `defaults` the chip's factory node states behind the "Reset" button
+/// (`None` → no Reset button); `family` gates the family-specific extras
+/// (presets fallback + footnote validation via the `graph_to_stm32f1` bridge).
 pub fn draw_graph_clock(
     ui: &mut egui::Ui,
     gc: &mut GraphClock,
     limits: &ClockLimits,
     presets: &[ClockPreset],
+    defaults: Option<&ClockGraph>,
     family: &str,
 ) -> bool {
     let mut changed = false;
@@ -47,7 +50,7 @@ pub fn draw_graph_clock(
         gc.layout = super::graph::auto_layout(&gc.graph);
     }
 
-    // ── Presets (thin top bar) ───────────────────────────────────────────────
+    // ── Reset + presets (thin top bar) ───────────────────────────────────────
     // Presets are typed `Stm32f1Clock` configs; applying one expands it to
     // graph node states and adopts them by id (no-op on non-F103 graphs).
     let family_presets;
@@ -57,13 +60,42 @@ pub fn draw_graph_clock(
     } else {
         presets
     };
-    if !presets.is_empty() {
+    if defaults.is_some() || !presets.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Presets:").strong());
-            for p in presets {
-                if ui.button(&p.name).on_hover_text(&p.description).clicked() {
-                    gc.graph.adopt_states(&stm32f1_graph(&p.config));
+            // Reset — back to the chip definition's factory tree. Disabled (and
+            // grey) while the config already IS the default, so the button also
+            // reads as a "modified" indicator.
+            if let Some(def) = defaults {
+                let dirty = !gc.graph.states_match(def);
+                let color = if dirty {
+                    egui::Color32::from_rgb(220, 100, 80)
+                } else {
+                    egui::Color32::GRAY
+                };
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!("{} Reset", ph::ARROW_COUNTER_CLOCKWISE))
+                        .color(color),
+                );
+                if ui
+                    .add_enabled(dirty, btn)
+                    .on_hover_text("Restore this chip's default clock configuration")
+                    .on_disabled_hover_text("Clock is already at the chip default")
+                    .clicked()
+                {
+                    gc.graph.adopt_states(def);
                     changed = true;
+                }
+                if !presets.is_empty() {
+                    ui.separator();
+                }
+            }
+            if !presets.is_empty() {
+                ui.label(egui::RichText::new("Presets:").strong());
+                for p in presets {
+                    if ui.button(&p.name).on_hover_text(&p.description).clicked() {
+                        gc.graph.adopt_states(&stm32f1_graph(&p.config));
+                        changed = true;
+                    }
                 }
             }
         });
