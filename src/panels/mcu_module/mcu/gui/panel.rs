@@ -40,7 +40,7 @@ fn selectable_functions(mcu: &Mcu, num: usize) -> Option<(String, Vec<PinFunctio
         .map(|p| p.selected_function.clone())
         .collect();
     let pin = mcu.find_pin(num)?;
-    let funcs: Vec<PinFunction> = pin
+    let mut funcs: Vec<PinFunction> = pin
         .available_functions
         .iter()
         .filter(|f| {
@@ -49,6 +49,13 @@ fn selectable_functions(mcu: &Mcu, num: usize) -> Option<(String, Vec<PinFunctio
         })
         .cloned()
         .collect();
+    // The pin's CURRENT function always heads the list: it is the one the user
+    // came to see (and to click again to clear), and on a long list it would
+    // otherwise sit scrolled out of sight.
+    if let Some(i) = funcs.iter().position(|f| *f == pin.selected_function) {
+        let cur = funcs.remove(i);
+        funcs.insert(0, cur);
+    }
     Some((pin.name.clone(), funcs, pin.selected_function.clone()))
 }
 
