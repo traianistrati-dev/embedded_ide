@@ -281,6 +281,10 @@ impl SerialMonitor {
             let mut s = self.state.lock().unwrap();
             s.error = None;
             s.connected = false;
+            s.log.clear();
+            // Anchor the clock for this session, exactly like the bridge: the
+            // plain console timestamps its blocks off the same epoch.
+            s.epoch = Some((Instant::now(), std::time::SystemTime::now()));
         }
         match serialport::new(&self.port, self.baud)
             .timeout(Duration::from_millis(100))
@@ -416,11 +420,21 @@ impl SerialMonitor {
     }
 
     /// Send raw bytes on the open port (no-op when disconnected).
+    ///
+    /// The write is logged as its own timestamped block, so the console can pair
+    /// a command with the reply that follows and show the gap between them —
+    /// which is the whole reason to look at a serial log during bring-up.
+    /// Timestamped AFTER the write returns: that is the moment the bytes are
+    /// with the driver, and it is the honest end of "when did I send it".
     pub fn send(&mut self, bytes: &[u8]) {
         if let Some(w) = self.writer.as_mut() {
             if let Err(e) = w.write_all(bytes) {
                 self.state.lock().unwrap().error = Some(e.to_string());
+                return;
             }
+            let mut s = self.state.lock().unwrap();
+            let gap = Duration::from_millis(s.block_gap_ms);
+            s.push_log(Dir::AppToSensor, bytes, Instant::now(), gap);
         }
     }
 
@@ -466,7 +480,11 @@ impl SerialMonitor {
     }
 
     pub fn clear_rx(&mut self) {
-        self.state.lock().unwrap().rx.clear();
+        let mut s = self.state.lock().unwrap();
+        s.rx.clear();
+        // The timed view reads the SAME session from `log` — leaving it behind
+        // would make Clear look like it did nothing there.
+        s.log.clear();
     }
 }
 
@@ -501,6 +519,13 @@ fn spawn_reader(
                         let excess = s.rx.len() - RX_CAP;
                         s.rx.drain(..excess);
                     }
+                    // Also as a timestamped block, so the plain console can show
+                    // WHEN each burst arrived — the number that answers "how
+                    // long after my command did it reply?". The raw `rx` stream
+                    // stays untouched for the text view, the hex view and the
+                    // plotter.
+                    let gap = Duration::from_millis(s.block_gap_ms);
+                    s.push_log(Dir::SensorToApp, &buf[..n], Instant::now(), gap);
                     drop(s);
                     // Coalesce repaints: at most one ~every 33 ms while streaming.
                     if last_repaint.elapsed() >= REPAINT_EVERY {
@@ -649,6 +674,14 @@ fn stamp_prefix(
     }
 }
 
+/// `filter`: what a Find field DOES to non-matching blocks.
+///
+/// The Bridge filters them out — you are hunting one frame in a relayed
+/// conversation you don't control. The plain console highlights instead: there
+/// you are reading your OWN exchange, and dropping every block but the hit
+/// throws away the reply you were timing (and shows an empty pane the moment a
+/// pattern matches nothing yet).
+#[allow(clippy::too_many_arguments)]
 pub fn bridge_log_job(
     log: &[LogChunk],
     hex: bool,
@@ -657,9 +690,10 @@ pub fn bridge_log_job(
     find_b: &[u8],
     stamps: bool,
     epoch: Option<(Instant, std::time::SystemTime)>,
+    filter: bool,
 ) -> egui::text::LayoutJob {
     const MAX_CHUNKS: usize = 400;
-    let filtering = !find_a.is_empty() || !find_b.is_empty();
+    let filtering = filter && (!find_a.is_empty() || !find_b.is_empty());
     let font = egui::FontId::monospace(font_size);
     let mut job = egui::text::LayoutJob::default();
 
@@ -1009,9 +1043,34 @@ mod bridge_tests {
         s.log.iter().map(|c| (c.dir, c.bytes.clone())).collect()
     }
 
+    /// Find in the PLAIN console highlights but never hides: dropping the
+    /// non-matching blocks would take away the reply whose latency is being
+    /// read, and would blank the pane while a pattern matches nothing yet.
+    #[test]
+    fn plain_console_find_highlights_without_filtering() {
+        let c = Clock::new();
+        let mut s = SerialState::default();
+        push(&mut s, &c, Dir::AppToSensor, b"cmd", 0);
+        push(&mut s, &c, Dir::SensorToApp, b"reply", 30);
+
+        // filter = false: everything stays, whether the pattern hits or misses.
+        let hit = bridge_log_job(&s.log, false, 12.0, b"reply", b"", false, None, false).text;
+        assert!(hit.contains("cmd") && hit.contains("reply"), "{hit}");
+        let miss = bridge_log_job(&s.log, false, 12.0, b"zzz", b"", false, None, false).text;
+        assert!(miss.contains("cmd") && miss.contains("reply"), "{miss}");
+        // …and the match is still coloured.
+        let job = bridge_log_job(&s.log, false, 12.0, b"reply", b"", false, None, false);
+        let colors: Vec<egui::Color32> = job.sections.iter().map(|x| x.format.color).collect();
+        assert!(colors.contains(&SEARCH_HIT), "match not highlighted");
+
+        // filter = true (Bridge) keeps its behaviour: a miss hides the block.
+        let bridged = bridge_log_job(&s.log, false, 12.0, b"zzz", b"", false, None, true).text;
+        assert!(!bridged.contains("cmd"), "{bridged}");
+    }
+
     /// Rendered text with no timestamps — for the tests that are about content.
     fn text_of(s: &SerialState, hex: bool, a: &[u8], b: &[u8]) -> String {
-        bridge_log_job(&s.log, hex, 12.0, a, b, false, None).text
+        bridge_log_job(&s.log, hex, 12.0, a, b, false, None, true).text
     }
 
     /// Bursts from the same side, arriving CLOSE TOGETHER, merge; a change of
@@ -1176,7 +1235,7 @@ mod bridge_tests {
         let c = Clock::new();
         let mut s = SerialState::default();
         push(&mut s, &c, Dir::SensorToApp, &[0xAA, 0x01, 0x02, 0x55], 0);
-        let job = bridge_log_job(&s.log, true, 12.0, &[0xAA], &[0x55], false, None);
+        let job = bridge_log_job(&s.log, true, 12.0, &[0xAA], &[0x55], false, None, true);
         let colors: Vec<egui::Color32> = job.sections.iter().map(|x| x.format.color).collect();
         assert!(colors.contains(&SEARCH_HIT), "start marker not highlighted");
         assert!(colors.contains(&SEARCH_HIT2), "end marker not highlighted");
@@ -1190,7 +1249,7 @@ mod bridge_tests {
         let mut s = SerialState::default();
         push(&mut s, &c, Dir::AppToSensor, b"cmd", 0);
         push(&mut s, &c, Dir::SensorToApp, b"reply", 120);
-        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, None).text;
+        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, None, true).text;
         assert!(t.contains("(+120 ms)"), "{t}");
         // The first block has nothing to measure against, so no delta at all.
         assert_eq!(t.matches("(+").count(), 1, "{t}");
@@ -1205,7 +1264,7 @@ mod bridge_tests {
         push(&mut s, &c, Dir::AppToSensor, b"KEEP one", 0);
         push(&mut s, &c, Dir::SensorToApp, b"hidden", 30);
         push(&mut s, &c, Dir::AppToSensor, b"KEEP two", 100);
-        let t = bridge_log_job(&s.log, false, 12.0, b"KEEP", b"", true, None).text;
+        let t = bridge_log_job(&s.log, false, 12.0, b"KEEP", b"", true, None, true).text;
         assert!(t.contains("(+100 ms)"), "delta should span the hidden block:\n{t}");
     }
 
@@ -1217,7 +1276,7 @@ mod bridge_tests {
         let mut s = SerialState::default();
         push(&mut s, &c, Dir::AppToSensor, b"a", 0);
         push(&mut s, &c, Dir::SensorToApp, b"b", 7);
-        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, None).text;
+        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, None, true).text;
         assert!(t.contains("--:--:--.---"), "{t}");
         assert!(t.contains("(+7 ms)"), "{t}");
     }
@@ -1230,7 +1289,7 @@ mod bridge_tests {
         let mut s = SerialState::default();
         push(&mut s, &c, Dir::AppToSensor, b"a", 0);
         let epoch = (c.at(0), std::time::UNIX_EPOCH + Duration::from_secs(3661));
-        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, Some(epoch)).text;
+        let t = bridge_log_job(&s.log, false, 12.0, b"", b"", true, Some(epoch), true).text;
         assert!(t.contains("01:01:01.000"), "{t}");
     }
 

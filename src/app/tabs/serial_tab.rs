@@ -132,6 +132,18 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             serial.plot_on = false;
         }
         ui.checkbox(&mut serial.hex, "Hex");
+        // Timestamped view: both directions as blocks, with the gap between
+        // them — the only way to read a send→receive latency here.
+        ui.checkbox(&mut serial.stamps, "Time")
+            .on_hover_text(
+                "Show what was SENT and what was RECEIVED as timestamped blocks:\n\
+                 >> what this console sent   ·   << what the device answered\n\
+                 The `(+N ms)` on a reply is the time since the previous block — the \
+                 send→receive latency.\n\n\
+                 The clock is when the IDE wrote/read the bytes, not when they hit the \
+                 wire: good to milliseconds, not better. Blocks are split by the idle \
+                 gap set in Bridge mode.",
+            );
         // Number of bytes per repeating sequence to colour (hex mode).
         ui.add_enabled_ui(serial.hex, |ui| {
             ui.label("Seq:");
@@ -458,7 +470,9 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
     };
     let job = {
         let st = serial.state.lock().unwrap();
-        bridge_log_job(&st.log, serial.hex, 12.0, &a, &b, serial.stamps, st.epoch)
+        // Bridge: Find FILTERS — the point there is to pull one frame out of
+        // someone else's conversation.
+        bridge_log_job(&st.log, serial.hex, 12.0, &a, &b, serial.stamps, st.epoch, true)
     };
     egui::ScrollArea::both()
         .id_salt("bridge_log")
@@ -474,6 +488,41 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
 /// text, with the Find highlights. Extracted unchanged so the Plot toggle can
 /// swap it for the live plotter.
 fn show_rx_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
+    // ── Timed view ────────────────────────────────────────────────────────────
+    // With "Time" on, the console shows the same block log the Bridge does —
+    // BOTH directions, each stamped, with the gap since the previous block. That
+    // gap on a `<<` line right after a `>>` line IS the send→receive latency,
+    // which the raw byte stream cannot express: it has no notion of when
+    // anything arrived, or of who said it.
+    if serial.stamps {
+        let job = {
+            let st = serial.state.lock().unwrap();
+            crate::serial::bridge_log_job(
+                &st.log,
+                serial.hex,
+                12.0,
+                &parse_hex_search(&serial.search),
+                &parse_hex_search(&serial.search2),
+                true,
+                st.epoch,
+                // Find HIGHLIGHTS here, it does not filter — same as the plain
+                // hex view. Keeping only matching blocks would hide the reply
+                // whose latency you are reading, and would blank the pane
+                // entirely while a pattern matches nothing yet.
+                false,
+            )
+        };
+        egui::ScrollArea::both()
+            .id_salt("serial_timed_log")
+            .stick_to_bottom(serial.autoscroll)
+            .auto_shrink([false, false])
+            .max_height(rx_height)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(job).selectable(true));
+            });
+        return;
+    }
+
     // Build the display under one lock. Search mode → yellow/grey highlight (no
     // legend); hex mode → per-sequence colours + unique-sequences legend; text
     // mode → plain decoded text.
