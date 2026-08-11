@@ -183,6 +183,9 @@ impl AppIde {
                         .password(!di.show_key)
                         .desired_width(240.0),
                 );
+                // Whitespace only, never case — see the same call in the pin
+                // importer's key field for why lowercasing a key is a trap.
+                di.api_key.retain(|c| !c.is_whitespace());
                 ui.checkbox(&mut di.show_key, "show");
                 if ui.button("Save key").clicked() {
                     do_save_key = true;
@@ -197,6 +200,9 @@ impl AppIde {
                 ui.label("Model:");
                 ui.add(egui::TextEdit::singleline(&mut di.model).desired_width(200.0))
                     .on_hover_text(di.provider.model_hint());
+                // Lowercased as typed — see the same call in the pin importer's
+                // model field for why in-place ASCII folding is the safe form.
+                di.model.make_ascii_lowercase();
             });
 
             // ── Prompt (base read-only + supplementary) ──────────────

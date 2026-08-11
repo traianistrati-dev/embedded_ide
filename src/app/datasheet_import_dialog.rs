@@ -29,6 +29,96 @@ struct PdfPick {
     bytes: Vec<u8>,
 }
 
+/// Severity of one [`LogLine`] — drives its icon and colour only.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogKind {
+    /// Something started, or a plain fact worth recording.
+    Step,
+    /// A step completed successfully.
+    Ok,
+    /// Completed, but with something the user must look at.
+    Warn,
+    /// Did not complete.
+    Err,
+}
+
+impl LogKind {
+    fn icon(self) -> &'static str {
+        match self {
+            LogKind::Step => ph::DOT,
+            LogKind::Ok => ph::CHECK_CIRCLE,
+            LogKind::Warn => ph::WARNING,
+            LogKind::Err => ph::X_CIRCLE,
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            LogKind::Step => egui::Color32::from_gray(150),
+            LogKind::Ok => egui::Color32::from_rgb(120, 200, 120),
+            LogKind::Warn => egui::Color32::from_rgb(220, 170, 70),
+            LogKind::Err => egui::Color32::from_rgb(230, 110, 90),
+        }
+    }
+}
+
+/// One line of the extraction trace.
+///
+/// An extraction is three requests on two background threads with an on-disk
+/// cache in front of them; when it goes wrong the user previously saw one red
+/// sentence and no way to tell WHICH stage produced it, whether the API was
+/// even called, or how long it ran. Each line records a single observable
+/// transition so the whole run reads top to bottom.
+struct LogLine {
+    /// Seconds since this run began. Elapsed time is the useful clock here —
+    /// "the pin request took 94 s" is actionable, "it happened at 14:03" is not.
+    at: f32,
+    kind: LogKind,
+    text: String,
+}
+
+/// A frameless caret toggle that heads a collapsible section, with an optional
+/// dimmed summary so collapsing never hides the state itself — e.g. the
+/// provider group stays readable as "Anthropic (Claude) · key set" while shut.
+fn section_header(
+    ui: &mut egui::Ui,
+    open: &mut bool,
+    label: &str,
+    summary: &str,
+    hover: &str,
+) -> bool {
+    let caret = if *open {
+        ph::CARET_DOWN
+    } else {
+        ph::CARET_RIGHT
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(format!("{caret} {label}"))
+                        .size(11.0)
+                        .color(egui::Color32::from_gray(180)),
+                )
+                .frame(false),
+            )
+            .on_hover_text(hover)
+            .clicked()
+        {
+            *open = !*open;
+        }
+        if !summary.is_empty() {
+            ui.label(
+                egui::RichText::new(summary)
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(135)),
+            );
+        }
+    });
+    *open
+}
+
 /// Apply maximize / restore to a dialog window.
 ///
 /// Maximized → the window is pinned to (almost) the whole screen via
@@ -273,6 +363,45 @@ pub(crate) struct DatasheetImport {
     /// `package`, so the user picks the exact name instead of typing it.
     detected_packages: Vec<String>,
     pkg_error: Option<String>,
+    /// Step-by-step trace of the run(s) so far, oldest first. Kept for the whole
+    /// dialog session — comparing a failed attempt with the retry that fixed it
+    /// is most of its value, so a new Extract appends rather than clears.
+    log: Vec<LogLine>,
+    log_open: bool,
+    /// Start of the current run; every [`LogLine::at`] is measured from it.
+    run_started: Option<std::time::Instant>,
+    /// Provider + key + where-to-get-one. Collapsed by default: it is configured
+    /// once and then never touched, unlike everything below it.
+    setup_open: bool,
+    /// The paste area. Collapsed by default because the PDF picker is the normal
+    /// path — a 159-page datasheet is a file, not something anyone pastes.
+    text_open: bool,
+}
+
+impl DatasheetImport {
+    /// Append one line to the trace, stamped with the elapsed time of the
+    /// current run.
+    fn log(&mut self, kind: LogKind, text: impl Into<String>) {
+        let at = self
+            .run_started
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
+        self.log.push(LogLine {
+            at,
+            kind,
+            text: text.into(),
+        });
+    }
+
+    /// The whole trace as plain text, for the Copy button. Pasting a run into a
+    /// bug report (or to an assistant) beats describing it.
+    fn log_as_text(&self) -> String {
+        self.log
+            .iter()
+            .map(|l| format!("[{:>6.1}s] {}", l.at, l.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl DatasheetImport {
@@ -309,6 +438,11 @@ impl DatasheetImport {
             pkg_job: None,
             detected_packages: Vec::new(),
             pkg_error: None,
+            log: Vec::new(),
+            log_open: true,
+            run_started: None,
+            setup_open: false,
+            text_open: false,
         }
     }
 }
@@ -346,7 +480,79 @@ impl AppIde {
                         // applying, so the pin-count cross-check uses it.
                         form.package = di.package.trim().to_string();
                         di.last_from_cache = ex.from_cache;
-                        di.report = Some(ds::apply_to_form(&ex.chip, form));
+                        // Applied into a local first: logging reads both the
+                        // report and the raw chip, and `di.report` would hold a
+                        // borrow of `di` across the `di.log` calls.
+                        let rep = ds::apply_to_form(&ex.chip, form);
+
+                        di.log(
+                            LogKind::Ok,
+                            format!(
+                                "Pins: reply received{} — {} pin(s) applied to the form.",
+                                if ex.from_cache {
+                                    " from cache (no API call, not billed)"
+                                } else {
+                                    ""
+                                },
+                                rep.pins_added
+                            ),
+                        );
+                        if rep.pins_added == 0 {
+                            di.log(
+                                LogKind::Err,
+                                "Pins: the model returned an EMPTY pin list. Usually the package \
+                                 name does not match the datasheet character-for-character — use \
+                                 \"Detect from datasheet\" and pick from the chips.",
+                            );
+                        }
+                        if !rep.patched.is_empty() {
+                            di.log(
+                                LogKind::Step,
+                                format!("Identity filled: {}", rep.patched.join(" · ")),
+                            );
+                        }
+                        // The other half of the answer: what the datasheet did
+                        // NOT yield. `apply_to_form` leaves a form field alone
+                        // when the extraction is empty, so silence here would
+                        // otherwise be indistinguishable from "unchanged".
+                        let missing: Vec<&str> = [
+                            ("display name", &ex.chip.display_name),
+                            ("family", &ex.chip.family),
+                            ("CPU", &ex.chip.cpu),
+                            ("flash origin", &ex.chip.flash_origin),
+                            ("flash size", &ex.chip.flash_size),
+                            ("RAM origin", &ex.chip.ram_origin),
+                            ("RAM size", &ex.chip.ram_size),
+                            ("probe-rs chip", &ex.chip.probe_chip),
+                        ]
+                        .into_iter()
+                        .filter(|(_, v)| v.trim().is_empty())
+                        .map(|(k, _)| k)
+                        .collect();
+                        if !missing.is_empty() {
+                            di.log(
+                                LogKind::Warn,
+                                format!(
+                                    "Not found in the datasheet, left as-is in the form: {}.",
+                                    missing.join(", ")
+                                ),
+                            );
+                        }
+                        for w in &rep.warnings {
+                            di.log(LogKind::Warn, format!("Cross-check: {w}"));
+                        }
+                        if !rep.raw_notes.is_empty() {
+                            di.log(
+                                LogKind::Warn,
+                                format!(
+                                    "{} alternate function(s) read but not mapped to a token — \
+                                     place them by hand (listed in the report below).",
+                                    rep.raw_notes.len()
+                                ),
+                            );
+                        }
+
+                        di.report = Some(rep);
                         di.error = None;
                         // A fresh extraction just wrote a new cache entry.
                         di.cache_stats = ds::cache_stats();
@@ -354,6 +560,7 @@ impl AppIde {
                         di.cache_note = None;
                     }
                     Some(Err(e)) => {
+                        di.log(LogKind::Err, format!("Pins FAILED: {e}"));
                         di.error = Some(e);
                         di.report = None;
                     }
@@ -386,8 +593,19 @@ impl AppIde {
                             if ex.from_cache { " · from cache" } else { "" }
                         ));
                         di.clock_error = None;
+                        di.log(
+                            LogKind::Ok,
+                            format!(
+                                "Clock tree: imported, {} MHz SYSCLK{} — review it in the Clock tab.",
+                                sysclk / 1_000_000,
+                                if ex.from_cache { " (from cache)" } else { "" }
+                            ),
+                        );
                     }
                     Some(Err(e)) => {
+                        // Amber, not red: the clock is a bonus pass, and the
+                        // pins of the same click may well have applied fine.
+                        di.log(LogKind::Warn, format!("Clock tree NOT imported: {e}"));
                         di.clock_error = Some(e);
                         di.clock_note = None;
                     }
@@ -407,15 +625,29 @@ impl AppIde {
                 di.pkg_job = None;
                 match result {
                     Some(Ok(list)) => {
+                        di.log(
+                            LogKind::Ok,
+                            if list.is_empty() {
+                                "Packages: the model found no package names in this document."
+                                    .to_string()
+                            } else {
+                                format!("Packages found ({}): {}", list.len(), list.join(" · "))
+                            },
+                        );
                         // A single-package datasheet needs no choice — fill it,
                         // unless the user already typed something.
                         if list.len() == 1 && di.package.trim().is_empty() {
                             di.package = list[0].clone();
+                            di.log(
+                                LogKind::Step,
+                                format!("Only one package — selected \"{}\".", di.package),
+                            );
                         }
                         di.detected_packages = list;
                         di.pkg_error = None;
                     }
                     Some(Err(e)) => {
+                        di.log(LogKind::Err, format!("Package detection FAILED: {e}"));
                         di.pkg_error = Some(e);
                         di.detected_packages.clear();
                     }
@@ -433,6 +665,7 @@ impl AppIde {
         let mut dismiss_report = false;
         let mut do_clear_cache = false;
         let mut do_detect = false;
+        let mut clear_log = false;
 
         let force_default = !di.shown_once || (di.prev_maximized && !di.maximized);
         di.prev_maximized = di.maximized;
@@ -459,93 +692,122 @@ impl AppIde {
             );
             ui.add_space(6.0);
 
-            // ── Provider ─────────────────────────────────────────────────
-            // Switching providers swaps in that provider's own key and
-            // default model — carrying either across would just produce an
-            // auth failure with a confusing message.
-            ui.horizontal(|ui| {
-                ui.label("AI provider:");
-                let before = di.provider;
-                egui::ComboBox::from_id_salt("ds_provider")
-                    .selected_text(di.provider.label())
-                    .width(180.0)
-                    .show_ui(ui, |ui| {
-                        for p in ds::Provider::ALL {
-                            ui.selectable_value(&mut di.provider, p, p.label());
-                        }
-                    });
-                if di.provider != before {
-                    di.api_key = ds::load_api_key(di.provider);
-                    di.model = di.provider.default_model().to_string();
-                    di.key_note = None;
-                    ds::save_last_provider(di.provider);
+            // ── Provider + key (collapsed: set once, then never touched) ──
+            // The summary keeps the state legible while shut, so a disabled
+            // Extract button is never a mystery hidden behind a caret.
+            let setup_summary = format!(
+                "{} · {}",
+                di.provider.label(),
+                if di.api_key.trim().is_empty() {
+                    "no key"
+                } else {
+                    "key set"
                 }
-                ui.label(
-                    egui::RichText::new("all three read the PDF natively")
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(140))
-                        .italics(),
-                )
-                .on_hover_text(
-                    "Only providers that accept a PDF directly are offered. A pin \
+            );
+            let setup_open = section_header(
+                ui,
+                &mut di.setup_open,
+                "AI provider & API key",
+                &setup_summary,
+                "Provider, API key and where to get one. Collapsed by default — \
+                 these are configured once.",
+            );
+            if setup_open {
+                // Switching providers swaps in that provider's own key and
+                // default model — carrying either across would just produce an
+                // auth failure with a confusing message.
+                ui.horizontal(|ui| {
+                    ui.label("AI provider:");
+                    let before = di.provider;
+                    egui::ComboBox::from_id_salt("ds_provider")
+                        .selected_text(di.provider.label())
+                        .width(180.0)
+                        .show_ui(ui, |ui| {
+                            for p in ds::Provider::ALL {
+                                ui.selectable_value(&mut di.provider, p, p.label());
+                            }
+                        });
+                    if di.provider != before {
+                        di.api_key = ds::load_api_key(di.provider);
+                        di.model = di.provider.default_model().to_string();
+                        di.key_note = None;
+                        ds::save_last_provider(di.provider);
+                    }
+                    ui.label(
+                        egui::RichText::new("all three read the PDF natively")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140))
+                            .italics(),
+                    )
+                    .on_hover_text(
+                        "Only providers that accept a PDF directly are offered. A pin \
                          table is a 2D layout — backends that can only be fed text \
                          extracted locally scramble the columns and return confident, \
                          wrong pinouts.",
-                );
-            });
+                    );
+                });
 
-            // ── API key ──────────────────────────────────────────────────
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(format!("{} API key:", di.provider.label()));
-                ui.add(
-                    egui::TextEdit::singleline(&mut di.api_key)
-                        .password(!di.show_key)
-                        .desired_width(260.0),
-                );
-                ui.checkbox(&mut di.show_key, "show");
-                if ui
-                    .button("Save key")
-                    .on_hover_text("Store in the user config folder (never in the project)")
-                    .clicked()
-                {
-                    do_save_key = true;
-                }
-            });
-            ui.label(
-                egui::RichText::new(format!(
-                    "Stored per provider in your user config folder; the {} \
+                // ── API key ──────────────────────────────────────────────────
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} API key:", di.provider.label()));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut di.api_key)
+                            .password(!di.show_key)
+                            .desired_width(260.0),
+                    );
+                    // Strip whitespace, never case: an API key is case-sensitive, so
+                    // folding letters here would invalidate it — and `save_api_key`
+                    // would persist the broken one. Whitespace is the actual paste
+                    // hazard: copying a key out of a provider console picks up a
+                    // trailing newline, and a web page can hand over a NO-BREAK
+                    // SPACE, which `is_whitespace` catches and `is_ascii_whitespace`
+                    // would not. With `password(true)` the user cannot see any of it.
+                    di.api_key.retain(|c| !c.is_whitespace());
+                    ui.checkbox(&mut di.show_key, "show");
+                    if ui
+                        .button("Save key")
+                        .on_hover_text("Store in the user config folder (never in the project)")
+                        .clicked()
+                    {
+                        do_save_key = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Stored per provider in your user config folder; the {} \
                          environment variable overrides it. Never written to the project.",
-                    di.provider.env_var()
-                ))
-                .size(10.0)
-                .color(egui::Color32::from_gray(140))
-                .italics(),
-            );
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                ui.label(
-                    egui::RichText::new(format!("{} No key? Create one at", ph::KEY))
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(140)),
+                        di.provider.env_var()
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140))
+                    .italics(),
                 );
-                ui.hyperlink_to(
-                    egui::RichText::new(di.provider.console_url()).size(10.0),
-                    di.provider.console_url(),
-                )
-                .on_hover_text(
-                    "Opens the provider's console. Sign in, create a key, copy it \
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.label(
+                        egui::RichText::new(format!("{} No key? Create one at", ph::KEY))
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.hyperlink_to(
+                        egui::RichText::new(di.provider.console_url()).size(10.0),
+                        di.provider.console_url(),
+                    )
+                    .on_hover_text(
+                        "Opens the provider's console. Sign in, create a key, copy it \
                          (usually shown once) and paste it above.",
-                );
-                ui.label(
-                    egui::RichText::new("(needs billing set up on the account).")
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(140)),
-                );
-            });
-            if let Some(note) = &di.key_note {
-                ui.label(egui::RichText::new(note).size(10.5));
-            }
+                    );
+                    ui.label(
+                        egui::RichText::new("(needs billing set up on the account).")
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                });
+                if let Some(note) = &di.key_note {
+                    ui.label(egui::RichText::new(note).size(10.5));
+                }
+            } // end of the collapsible provider/key group
 
             // ── Model ────────────────────────────────────────────────────
             ui.add_space(4.0);
@@ -553,6 +815,12 @@ impl AppIde {
                 ui.label("Model:");
                 ui.add(egui::TextEdit::singleline(&mut di.model).desired_width(200.0))
                     .on_hover_text(di.provider.model_hint());
+                // Model ids are lowercase at every provider, and a stray capital
+                // is a 404 the user has to diagnose from an API error. Fold it
+                // away as they type. `make_ascii_lowercase` and not
+                // `to_lowercase`: it rewrites in place and never changes the
+                // byte length, so the text cursor cannot jump mid-word.
+                di.model.make_ascii_lowercase();
                 if !di.family_hint.trim().is_empty() {
                     ui.label(
                         egui::RichText::new(format!("family: {}", di.family_hint.trim()))
@@ -784,23 +1052,40 @@ impl AppIde {
                 }
             });
 
-            // ── Paste area ───────────────────────────────────────────────
+            // ── Paste area (collapsed: the PDF picker is the normal path) ─
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("Datasheet text:").size(11.0));
             let paste_enabled = di.pdf.is_none();
-            egui::ScrollArea::vertical()
-                .id_salt("ds_paste")
-                .max_height(160.0)
-                .show(ui, |ui| {
-                    ui.add_enabled(
-                        paste_enabled,
-                        egui::TextEdit::multiline(&mut di.text)
-                            .desired_rows(8)
-                            .desired_width(f32::INFINITY)
-                            .font(egui::TextStyle::Monospace)
-                            .hint_text("Paste the pin table / alternate-function list here…"),
-                    );
-                });
+            // Summary so a collapsed field never hides content the user pasted
+            // — and states plainly when a PDF has made it irrelevant.
+            let text_summary = if !paste_enabled {
+                "ignored — a PDF is selected".to_string()
+            } else if di.text.trim().is_empty() {
+                "empty".to_string()
+            } else {
+                format!("{} chars pasted", di.text.trim().len())
+            };
+            if section_header(
+                ui,
+                &mut di.text_open,
+                "Datasheet text",
+                &text_summary,
+                "Paste a pin table here instead of picking a PDF. Collapsed by default \
+                 — most datasheets are sent as a PDF.",
+            ) {
+                egui::ScrollArea::vertical()
+                    .id_salt("ds_paste")
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        ui.add_enabled(
+                            paste_enabled,
+                            egui::TextEdit::multiline(&mut di.text)
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("Paste the pin table / alternate-function list here…"),
+                        );
+                    });
+            }
 
             // ── Actions ──────────────────────────────────────────────────
             ui.add_space(6.0);
@@ -856,6 +1141,79 @@ impl AppIde {
                     keep_open = false;
                 }
             });
+
+            // ── Log ──────────────────────────────────────────────────────
+            // An extraction is up to three requests across two threads with a
+            // cache in front; a single red sentence at the end could not say
+            // which stage produced it, whether the API was reached, or how long
+            // it ran. This is that missing narration — and its Copy button is
+            // what makes a failed run reportable.
+            if !di.log.is_empty() {
+                ui.add_space(6.0);
+                let log_summary = if running {
+                    "running…".to_string()
+                } else {
+                    format!("{} step(s)", di.log.len())
+                };
+                if section_header(
+                    ui,
+                    &mut di.log_open,
+                    "Log",
+                    &log_summary,
+                    "Step-by-step trace of this extraction: what was sent, what came \
+                     back, what could not be extracted.",
+                ) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("Copy").size(10.0)).small())
+                            .on_hover_text("Copy the whole log as plain text")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(di.log_as_text());
+                        }
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new("Clear").size(10.0)).small())
+                            .on_hover_text("Discard the trace so far")
+                            .clicked()
+                        {
+                            clear_log = true;
+                        }
+                        if running {
+                            ui.spinner();
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .id_salt("ds_log")
+                        .max_height(170.0)
+                        .auto_shrink([false, true])
+                        // Pinned to the bottom so a running extraction keeps the
+                        // newest line in view without the user scrolling.
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &di.log {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    ui.label(
+                                        egui::RichText::new(format!("{:>5.1}s", line.at))
+                                            .size(9.5)
+                                            .monospace()
+                                            .color(egui::Color32::from_gray(110)),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} {}",
+                                            line.kind.icon(),
+                                            line.text
+                                        ))
+                                        .size(10.5)
+                                        .color(line.kind.color()),
+                                    );
+                                });
+                            }
+                        });
+                }
+            }
 
             if let Some(err) = &di.error {
                 ui.add_space(4.0);
@@ -959,6 +1317,10 @@ impl AppIde {
         if dismiss_report {
             di.report = None;
         }
+        if clear_log {
+            di.log.clear();
+            di.run_started = None;
+        }
         if do_clear_cache {
             di.cache_note = Some(match ds::clear_cache() {
                 Ok(n) => format!("{} cleared {n}", ph::CHECK_CIRCLE),
@@ -972,6 +1334,15 @@ impl AppIde {
                 Arc::new(Mutex::new(None));
             di.pkg_job = Some(shared.clone());
             di.pkg_error = None;
+            // The pre-pass can also be the FIRST thing a user clicks, so it
+            // starts the clock when no extraction has run yet.
+            if di.run_started.is_none() {
+                di.run_started = Some(std::time::Instant::now());
+            }
+            di.log(
+                LogKind::Step,
+                "Detecting the packages this datasheet describes…",
+            );
             let (provider, key, model) = (di.provider, di.api_key.clone(), di.model.clone());
             let source = match &di.pdf {
                 Some(pdf) => Source::Pdf(pdf.bytes.clone()),
@@ -996,6 +1367,54 @@ impl AppIde {
             di.report = None;
             di.clock_note = None;
             di.clock_error = None;
+
+            // Restart the clock BEFORE the first line, so the run reads from 0s.
+            di.run_started = Some(std::time::Instant::now());
+            if !di.log.is_empty() {
+                di.log.push(LogLine {
+                    at: 0.0,
+                    kind: LogKind::Step,
+                    text: "─────────────────────────────".into(),
+                });
+            }
+            // Record exactly WHAT was sent. When a run misbehaves the first
+            // question is always which document, which package and whether the
+            // API was even reached — none of which was recoverable afterwards.
+            let src_desc = match &di.pdf {
+                Some(pdf) => format!(
+                    "PDF \"{}\" ({:.1} MB)",
+                    pdf.name,
+                    pdf.bytes.len() as f64 / (1024.0 * 1024.0)
+                ),
+                None => format!("pasted text ({} chars)", di.text.trim().len()),
+            };
+            let (provider, model, package) = (
+                di.provider.label(),
+                di.model.clone(),
+                di.package.trim().to_string(),
+            );
+            di.log(
+                LogKind::Step,
+                format!("Extract started · {provider} · {model} · package \"{package}\""),
+            );
+            di.log(LogKind::Step, format!("Source: {src_desc}"));
+            if di.force_reextract {
+                di.log(
+                    LogKind::Step,
+                    "Cache bypassed (re-extract on) — this call is billed.",
+                );
+            } else {
+                di.log(
+                    LogKind::Step,
+                    "Cache enabled — an identical document + package + model replies instantly.",
+                );
+            }
+            if di.also_clock {
+                di.log(
+                    LogKind::Step,
+                    "Clock tree requested too — a second, independent request.",
+                );
+            }
             // Persist the supplementary prompt so it survives across sessions.
             ds::save_extra_prompt(ds::PromptSlot::Pins, &di.extra_prompt);
             let (provider, key, model, family, package, extra) = (

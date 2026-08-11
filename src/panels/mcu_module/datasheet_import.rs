@@ -22,10 +22,24 @@ use std::path::PathBuf;
 use super::mcu_form::{McuForm, PinRow};
 use super::stm32_pin_data;
 
-/// Generation cap. A large pinout (176-pin package with full AF lists) fits
-/// comfortably under this; higher avoids a truncated — and therefore
-/// unparseable — JSON object. Output is billed per token actually generated.
-const MAX_TOKENS: u32 = 16000;
+/// Generation cap — a CEILING, not a target: output is billed per token
+/// actually generated, so a generous value costs nothing on a small pinout and
+/// prevents a truncated (therefore unparseable) JSON object on a large one.
+///
+/// 16000 was too tight in practice: a 100+ pin package with full AF lists can
+/// exceed it on its own, and on Anthropic the cap covers THINKING TOKENS TOO
+/// (see [`anthropic_body`]), so the reasoning could eat the budget before the
+/// JSON started. 64000 is under every current provider's ceiling.
+///
+/// A cap that IS hit is now reported as such rather than as a parse failure —
+/// see [`truncation_error`].
+const MAX_TOKENS: u32 = 64000;
+
+/// How long one extraction may take. Generous because a full pin table with
+/// adaptive thinking legitimately runs minutes, and the request is NOT streamed
+/// — the whole answer arrives in one response, so the clock covers generation
+/// end to end.
+const REQUEST_TIMEOUT_SECS: u64 = 600;
 
 // ── Providers ───────────────────────────────────────────────────────────────
 
@@ -77,7 +91,7 @@ impl Provider {
     /// only a default: model ids move, and the dialog's field is editable.
     pub fn default_model(self) -> &'static str {
         match self {
-            Provider::Anthropic => "claude-opus-4-8",
+            Provider::Anthropic => "claude-opus-5",
             Provider::Gemini => "gemini-3.5-flash",
             Provider::OpenAi => "gpt-5.6",
         }
@@ -104,7 +118,7 @@ impl Provider {
     /// Example model id for the field's tooltip.
     pub fn model_hint(self) -> &'static str {
         match self {
-            Provider::Anthropic => "Anthropic model id — e.g. claude-opus-4-8",
+            Provider::Anthropic => "Anthropic model id — e.g. claude-opus-5",
             Provider::Gemini => "Gemini model id — e.g. gemini-3.5-flash",
             Provider::OpenAi => "OpenAI model id — e.g. gpt-5.6",
         }
@@ -371,6 +385,32 @@ impl ExtractKind {
             ExtractKind::Packages => PACKAGES_PDF_INSTRUCTION,
         }
     }
+
+    /// How hard the model should work — deliberately NOT uniform, because the
+    /// three extractions are different shapes of problem.
+    ///
+    /// `Pins` is the one that bit us: at `high`, a 159-page datasheet (the
+    /// STM32WBA5xxx, whose pin table alone spans six pages and five package
+    /// columns) produced ~60k tokens of reasoning and then ran out of budget
+    /// before writing any JSON — the answer it owed was only ~4k tokens. Since
+    /// [`MAX_TOKENS`] caps thinking and answer TOGETHER, deep deliberation
+    /// starves the very output it was meant to improve. Transcribing a table is
+    /// careful-reading work, not reasoning-hard work, so `medium` fits the task
+    /// AND leaves the budget for the answer.
+    ///
+    /// `Clock` stays at `high`: inferring a clock-tree topology IS the
+    /// reasoning-hard case, its output is small, and it demonstrably completes.
+    /// `Packages` only enumerates column headers.
+    ///
+    /// These are starting points chosen from one failure, not measurements —
+    /// the eval harness is what should eventually set them.
+    fn effort(self) -> &'static str {
+        match self {
+            ExtractKind::Pins => "medium",
+            ExtractKind::Clock => "high",
+            ExtractKind::Packages => "low",
+        }
+    }
 }
 
 /// Build the provider's request body (pure — no network).
@@ -395,6 +435,26 @@ pub fn build_request_body(
 
 /// Anthropic Messages API: `system` is top-level, the PDF is a `document`
 /// content block, and `output_config.format` constrains the decoder.
+///
+/// THINKING IS REQUESTED EXPLICITLY. Reading a pin table means holding several
+/// package columns apart while walking ~100 rows — exactly the work that
+/// benefits from reasoning before answering. It has to be explicit because the
+/// meaning of an ABSENT `thinking` field depends on the model (on Opus 4.8 it
+/// means no thinking at all; on Opus 5 it means adaptive), and the model id is a
+/// free-text field the user can set to anything. Stating it makes the request
+/// behave the same whatever they type.
+///
+/// `effort` sits INSIDE `output_config`, alongside `format` — not top-level.
+/// It is uniform across [`ExtractKind`]s for now; the cheap package pre-pass
+/// could likely run lower, but that is a guess until there is an eval to
+/// measure it against.
+///
+/// Both are Anthropic-only. Gemini and OpenAI expose their own reasoning
+/// controls with different shapes; leaving their bodies untouched keeps this
+/// change to one provider that can be reasoned about.
+///
+/// Note `max_tokens` bounds thinking + answer TOGETHER, which is the other half
+/// of why [`MAX_TOKENS`] was raised.
 fn anthropic_body(model: &str, system: &str, source: &Source, kind: ExtractKind) -> String {
     let content = match source {
         Source::Text(t) => serde_json::json!(t),
@@ -414,7 +474,9 @@ fn anthropic_body(model: &str, system: &str, source: &Source, kind: ExtractKind)
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": system,
+        "thinking": { "type": "adaptive" },
         "output_config": {
+            "effort": kind.effort(),
             "format": { "type": "json_schema", "schema": kind.schema(true) },
         },
         "messages": [ { "role": "user", "content": content } ],
@@ -618,23 +680,94 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 
 // ── Response parsing ────────────────────────────────────────────────────────
 
-/// Pull the model's reply text out of the provider's response envelope, or
-/// surface the API error message. All three report failures under a top-level
-/// `error.message`, so only the success path differs.
-pub fn parse_api_envelope(provider: Provider, resp_json: &str) -> Result<String, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(resp_json).map_err(|e| format!("response was not JSON: {e}"))?;
-    if let Some(err) = v.get("error") {
-        // Gemini nests it; Anthropic/OpenAI use a plain string message.
-        let msg = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .or_else(|| err.as_str())
-            .unwrap_or("unknown API error");
-        return Err(format!("API error: {msg}"));
+/// A response that came back HTTP 200 but is unusable — and WHY, in words the
+/// user can act on.
+///
+/// The important case is a hit generation cap. The provider reports it in the
+/// envelope and still returns the partial answer, so without this check the
+/// half-written JSON flows into [`extract_json_object`] / serde and surfaces as
+/// "unbalanced" or "could not parse" — a message that points at the model's
+/// formatting when the real cause is the budget. Each provider names it
+/// differently, hence one arm each.
+///
+/// Also catches a refusal: a safety decline returns 200 with empty content,
+/// which would otherwise read as the generic "no text content".
+fn truncation_error(provider: Provider, v: &serde_json::Value) -> Option<String> {
+    let truncated = match provider {
+        // { "stop_reason": "max_tokens" | "refusal", … }
+        Provider::Anthropic => match v.get("stop_reason").and_then(|s| s.as_str()) {
+            Some("max_tokens") => true,
+            Some("refusal") => {
+                return Some(
+                    "the model declined this request (stop_reason: refusal). If the PDF is a \
+                     normal datasheet this is a false positive — retry, or try another provider."
+                        .to_string(),
+                )
+            }
+            _ => false,
+        },
+
+        // { "candidates": [ { "finishReason": "MAX_TOKENS", … } ] }
+        Provider::Gemini => {
+            v.pointer("/candidates/0/finishReason").and_then(|r| r.as_str()) == Some("MAX_TOKENS")
+        }
+
+        // { "status": "incomplete",
+        //   "incomplete_details": { "reason": "max_output_tokens" } }
+        Provider::OpenAi => {
+            v.get("status").and_then(|s| s.as_str()) == Some("incomplete")
+                && v.pointer("/incomplete_details/reason").and_then(|r| r.as_str())
+                    == Some("max_output_tokens")
+        }
+    };
+
+    if !truncated {
+        return None;
     }
 
-    let text = match provider {
+    // WHICH HALF of the budget ran out decides what the user should change, and
+    // the two fixes are opposite. `max_tokens` covers reasoning AND answer, so:
+    //
+    //   answer barely started → the model reasoned until the budget was gone.
+    //                           Reduce effort; a bigger cap just buys more
+    //                           reasoning and truncates in the same place.
+    //   answer well underway  → the pin list genuinely does not fit. Reduce the
+    //                           scope of the request instead.
+    //
+    // Diagnosing this by hand meant counting pins out of the PDF, so the message
+    // does it here.
+    let partial = envelope_text(provider, v).unwrap_or_default();
+    let generated = v
+        .pointer("/usage/output_tokens")
+        .or_else(|| v.pointer("/usageMetadata/candidatesTokenCount"))
+        .and_then(|t| t.as_u64());
+
+    let spent = match generated {
+        Some(n) => format!("{n} tokens generated of the {MAX_TOKENS} allowed"),
+        None => format!("the {MAX_TOKENS}-token generation cap"),
+    };
+    // A complete pin table is thousands of characters; a few hundred means the
+    // JSON had scarcely begun when the budget ended.
+    let cause = if partial.len() < 512 {
+        "almost none of it was the answer — the model spent the budget reasoning and never got \
+         to the JSON. Lowering the extraction effort helps here; a larger cap would not."
+    } else {
+        "the answer was well underway when it stopped, so this pinout genuinely does not fit in \
+         one request. Extract a smaller package, or send only the pin-table pages rather than \
+         the whole datasheet."
+    };
+    Some(format!(
+        "the reply was cut off mid-JSON ({spent}), so nothing could be imported: {cause}"
+    ))
+}
+
+/// Pull the assistant's text out of a (successful) provider envelope.
+///
+/// Split out of [`parse_api_envelope`] so [`truncation_error`] can measure how
+/// much of the answer arrived before the budget ran out without duplicating
+/// three response shapes.
+fn envelope_text(provider: Provider, v: &serde_json::Value) -> Option<String> {
+    match provider {
         // { "content": [ { "type": "text", "text": … } ] }
         Provider::Anthropic => v
             .get("content")
@@ -691,9 +824,32 @@ pub fn parse_api_envelope(provider: Provider, resp_json: &str) -> Result<String,
                 })
             })
             .map(str::to_string),
-    };
+    }
+}
 
-    text.ok_or_else(|| format!("no text content in the {} API response", provider.label()))
+/// Pull the model's reply text out of the provider's response envelope, or
+/// surface the API error message. All three report failures under a top-level
+/// `error.message`, so only the success path differs.
+pub fn parse_api_envelope(provider: Provider, resp_json: &str) -> Result<String, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(resp_json).map_err(|e| format!("response was not JSON: {e}"))?;
+    if let Some(err) = v.get("error") {
+        // Gemini nests it; Anthropic/OpenAI use a plain string message.
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .or_else(|| err.as_str())
+            .unwrap_or("unknown API error");
+        return Err(format!("API error: {msg}"));
+    }
+    // Before reading the text: a 200 whose generation was cut short carries a
+    // PARTIAL answer, which parses into a confusing downstream error.
+    if let Some(msg) = truncation_error(provider, &v) {
+        return Err(msg);
+    }
+
+    envelope_text(provider, &v)
+        .ok_or_else(|| format!("no text content in the {} API response", provider.label()))
 }
 
 /// Extract the first balanced `{ … }` JSON object from arbitrary model text
@@ -1403,9 +1559,9 @@ pub struct Extraction {
 /// POST a prepared request body to `provider` and return the model's reply
 /// text (the assistant message, unwrapped from the provider envelope).
 ///
-/// The transport — auth header per provider, 180 s timeout, HTTP-error message
-/// extraction, `parse_api_envelope` — is identical for the pin and clock
-/// extractions, so both share this.
+/// The transport — auth header per provider, [`REQUEST_TIMEOUT_SECS`],
+/// HTTP-error message extraction, `parse_api_envelope` — is identical for the
+/// pin and clock extractions, so both share this.
 fn post_and_parse(
     provider: Provider,
     api_key: &str,
@@ -1414,7 +1570,7 @@ fn post_and_parse(
 ) -> Result<String, String> {
     let req = ureq::post(&provider.endpoint(model))
         .set("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(180));
+        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
     let req = match provider {
         Provider::Anthropic => req
             .set("x-api-key", api_key.trim())
@@ -1962,6 +2118,122 @@ mod tests {
         let schema = &v["output_config"]["format"]["schema"];
         assert_eq!(schema["additionalProperties"], false);
         assert!(schema["properties"]["pins"].is_object());
+    }
+
+    /// Thinking must be REQUESTED, not left to the model's default: omitting it
+    /// means "no thinking" on some Claude models and "adaptive" on others, and
+    /// the model id is user-editable text.
+    #[test]
+    fn anthropic_request_asks_for_thinking_and_a_per_kind_effort() {
+        for kind in [ExtractKind::Pins, ExtractKind::Clock, ExtractKind::Packages] {
+            let body = build_request_body(
+                Provider::Anthropic,
+                "claude-opus-5",
+                "SYS",
+                &Source::Text("PASTE".into()),
+                kind,
+            );
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["thinking"]["type"], "adaptive", "{kind:?}");
+            // effort is nested in output_config beside format, never top-level.
+            assert_eq!(v["output_config"]["effort"], kind.effort(), "{kind:?}");
+            assert!(v["effort"].is_null(), "{kind:?}");
+            // The cap covers thinking + answer together, so it must be roomy.
+            assert!(v["max_tokens"].as_u64().unwrap() >= 64000, "{kind:?}");
+        }
+    }
+
+    /// Pin extraction must NOT run at high effort: `max_tokens` covers thinking
+    /// and answer together, and on a large datasheet high spent the whole budget
+    /// reasoning, leaving nothing for the ~4k tokens of JSON it owed.
+    #[test]
+    fn pin_extraction_does_not_out_think_its_own_output_budget() {
+        assert_ne!(ExtractKind::Pins.effort(), "high");
+        assert_ne!(ExtractKind::Pins.effort(), "xhigh");
+        assert_ne!(ExtractKind::Pins.effort(), "max");
+        // The cheap enumeration pre-pass should be cheaper still than the pins.
+        assert_eq!(ExtractKind::Packages.effort(), "low");
+    }
+
+    /// A hit generation cap comes back HTTP 200 with a PARTIAL answer. Each
+    /// provider signals it differently; all three must be named as truncation
+    /// rather than falling through to a JSON parse error.
+    #[test]
+    fn a_hit_generation_cap_is_reported_as_truncation() {
+        let cases = [
+            (
+                Provider::Anthropic,
+                r#"{"stop_reason":"max_tokens","content":[{"type":"text","text":"{\"pins\":["}]}"#,
+            ),
+            (
+                Provider::Gemini,
+                r#"{"candidates":[{"finishReason":"MAX_TOKENS",
+                    "content":{"parts":[{"text":"{\"pins\":["}]}}]}"#,
+            ),
+            (
+                Provider::OpenAi,
+                r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+                    "output":[{"content":[{"type":"output_text","text":"{\"pins\":["}]}]}"#,
+            ),
+        ];
+        for (provider, resp) in cases {
+            let err = parse_api_envelope(provider, resp).unwrap_err();
+            assert!(err.contains("cut off"), "{provider:?}: {err}");
+            // The partial text must NOT be handed downstream as if it were whole.
+            assert!(!err.contains("could not parse"), "{provider:?}: {err}");
+        }
+    }
+
+    /// The two ways a budget runs out need OPPOSITE fixes, so the message has to
+    /// tell them apart: reasoning that never reached the JSON (lower the effort)
+    /// versus an answer that genuinely does not fit (shrink the request).
+    #[test]
+    fn truncation_says_whether_reasoning_or_the_answer_ran_out() {
+        // Budget spent thinking: the text block had barely started.
+        let starved = r#"{"stop_reason":"max_tokens","usage":{"output_tokens":64000},
+            "content":[{"type":"text","text":"{\"display_name\":\"STM32WBA55\",\"pins\":["}]}"#;
+        let err = parse_api_envelope(Provider::Anthropic, starved).unwrap_err();
+        assert!(err.contains("effort"), "{err}");
+        assert!(err.contains("64000"), "{err}");
+
+        // Budget spent answering: a long partial pin list came back.
+        let pins: String = (1..200)
+            .map(|n| format!(r#"{{\"number\":\"{n}\",\"name\":\"PA{n}\"}},"#))
+            .collect();
+        let overflowed = format!(
+            r#"{{"stop_reason":"max_tokens","usage":{{"output_tokens":64000}},
+                "content":[{{"type":"text","text":"{{\"pins\":[{pins}"}}]}}"#
+        );
+        let err = parse_api_envelope(Provider::Anthropic, &overflowed).unwrap_err();
+        assert!(err.contains("smaller package"), "{err}");
+        assert!(!err.contains("effort"), "{err}");
+    }
+
+    /// A complete reply carrying an unrelated stop reason is untouched — the
+    /// truncation check must not swallow the normal path.
+    #[test]
+    fn a_complete_reply_passes_the_truncation_check() {
+        let ok = r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"hello"}]}"#;
+        assert_eq!(
+            parse_api_envelope(Provider::Anthropic, ok).unwrap(),
+            "hello"
+        );
+        // Gemini's normal finish reason, and an OpenAI response that completed.
+        let g = r#"{"candidates":[{"finishReason":"STOP",
+            "content":{"parts":[{"text":"hi"}]}}]}"#;
+        assert_eq!(parse_api_envelope(Provider::Gemini, g).unwrap(), "hi");
+        let o = r#"{"status":"completed",
+            "output":[{"content":[{"type":"output_text","text":"hi"}]}]}"#;
+        assert_eq!(parse_api_envelope(Provider::OpenAi, o).unwrap(), "hi");
+    }
+
+    /// A safety decline returns 200 with empty content; say so instead of the
+    /// generic "no text content".
+    #[test]
+    fn a_refusal_is_named_rather_than_read_as_empty_content() {
+        let resp = r#"{"stop_reason":"refusal","content":[]}"#;
+        let err = parse_api_envelope(Provider::Anthropic, resp).unwrap_err();
+        assert!(err.contains("refusal"), "{err}");
     }
 
     #[test]
