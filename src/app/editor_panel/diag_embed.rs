@@ -152,6 +152,8 @@ impl AppIde {
         let mut rtt_go: Option<crate::rtt::RttMode> = None;
         // Debug-tab Start button.
         let mut debug_go = false;
+        // Debug-tab "Reset target" button.
+        let mut reset_go = false;
         // Debug-tab breakpoint-list row click: `(rel path, 1-based line)`.
         let mut bp_jump: Option<(String, u32)> = None;
         // Same list's ✕ (one row) and "Remove all" buttons.
@@ -276,6 +278,7 @@ impl AppIde {
                     &rtt_chip,
                     &mut self.debugger,
                     &mut debug_go,
+                    &mut reset_go,
                     &self.breakpoints,
                     &mut bp_jump,
                     &mut bp_remove,
@@ -404,6 +407,18 @@ impl AppIde {
         // Debug-tab Start button.
         if debug_go {
             self.start_debug();
+        }
+        // Debug-tab "Reset target": restart the chip through the probe, no
+        // reflash. The result lands in the Debug console.
+        if reset_go {
+            if let Some((project, _)) = self.selected_build_cfg() {
+                crate::probe::start_reset(
+                    project.probe_chip.clone(),
+                    self.selected_probe.clone(),
+                    std::sync::Arc::clone(&self.debugger.console),
+                    self.egui_ctx.clone(),
+                );
+            }
         }
         // ── Debugger keys (the set every debugger uses) ──────────────────────
         // F5 continue · F10 over · F11 in · Shift+F11 out · Shift+F5 stop.

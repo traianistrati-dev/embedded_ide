@@ -9,7 +9,9 @@
 //! probe-rs expects — no reconstruction from our own USB scan.
 
 use crate::build::no_window;
+use crate::terminal::{LineKind, TerminalState};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 /// One probe as reported by `probe-rs list`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +62,72 @@ pub fn list_probes() -> Result<Vec<ProbeInfo>, String> {
         return Err(crate::failure_hint::probe_open_message(&detail));
     }
     Ok(parse_list(&text))
+}
+
+/// Reset the target through the probe (`probe-rs reset`), streaming the result
+/// into `console`. Runs on its own thread — it opens the probe, which takes a
+/// moment and must not stall the UI.
+///
+/// This is the way out of a firmware that sits somewhere it shouldn't: it
+/// restarts the chip WITHOUT reflashing it and without a USB replug. Only
+/// meaningful while nothing else holds the probe — a live Debug/RTT session
+/// owns it exclusively, which is why the button is disabled there.
+pub fn start_reset(
+    chip: String,
+    probe: Option<String>,
+    console: Arc<Mutex<TerminalState>>,
+    ctx: eframe::egui::Context,
+) {
+    std::thread::spawn(move || {
+        let mut args: Vec<String> = vec!["reset".into(), "--chip".into(), chip];
+        if let Some(p) = probe.filter(|s| !s.is_empty()) {
+            args.push("--probe".into());
+            args.push(p);
+        }
+        console
+            .lock()
+            .unwrap()
+            .push_plain(LineKind::Input, format!("> probe-rs {}", args.join(" ")));
+        ctx.request_repaint();
+
+        let out = no_window(&mut Command::new("probe-rs")).args(&args).output();
+        let mut c = console.lock().unwrap();
+        match out {
+            Ok(o) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                for line in crate::terminal::strip_ansi(&text).lines() {
+                    if !line.trim().is_empty() {
+                        c.push_plain(LineKind::Stdout, line);
+                    }
+                }
+                c.push_plain(
+                    if o.status.success() {
+                        LineKind::Notice
+                    } else {
+                        LineKind::Stderr
+                    },
+                    if o.status.success() {
+                        "[target reset — the firmware is running from its entry point]"
+                    } else {
+                        "[reset failed — see above]"
+                    },
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                c.push_plain(
+                    LineKind::Stderr,
+                    "probe-rs not found in PATH (cargo install probe-rs-tools)",
+                );
+            }
+            Err(e) => c.push_plain(LineKind::Stderr, format!("could not run probe-rs: {e}")),
+        }
+        drop(c);
+        ctx.request_repaint();
+    });
 }
 
 /// Parse `probe-rs list` output. Recognised line shape (probe-rs 0.2x–0.31):

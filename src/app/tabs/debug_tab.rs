@@ -51,6 +51,8 @@ pub fn show_debug_tab(
     // Set when Start is clicked; the caller writes the project and calls
     // `start_debug` (the `build_go` signal pattern).
     debug_go: &mut bool,
+    // "Reset target": set on click; the caller runs `probe::start_reset`.
+    reset_go: &mut bool,
     // Every breakpoint in the project (rel path → 1-based lines), listed under
     // the toolbar as clickable rows; a click sets `bp_jump` and the caller
     // opens that file at that line. The row's ✕ sets `bp_remove` and "Remove
@@ -179,6 +181,39 @@ pub fn show_debug_tab(
                 dbg.step_out();
             }
         });
+
+        // Reset the chip without reflashing it — the way out of a firmware that
+        // sits where it shouldn't. Needs the probe to itself, so it is off while
+        // a session owns it.
+        if ui
+            .add_enabled(
+                !busy && can_run,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Reset target", ph::ARROW_CLOCKWISE))
+                        .size(10.5)
+                        .color(if !busy && can_run {
+                            egui::Color32::from_rgb(160, 190, 230)
+                        } else {
+                            egui::Color32::GRAY
+                        }),
+                ),
+            )
+            .on_hover_text(
+                "Restart the chip through the probe (`probe-rs reset`) — no reflash, no \
+                 USB replug.\nUse it when the firmware is stuck somewhere and you want it \
+                 to start over.",
+            )
+            .on_disabled_hover_text(if no_probe_rs {
+                super::needs_tool_hint("probe-rs")
+            } else if busy {
+                "A session owns the probe — stop it first.".to_owned()
+            } else {
+                "No chip config exists yet.".to_owned()
+            })
+            .clicked()
+        {
+            *reset_go = true;
+        }
 
         if ui
             .button(egui::RichText::new(format!("{} Clear", ph::BROOM)).size(10.5))
@@ -384,6 +419,15 @@ pub fn show_debug_tab(
                  refuses. The firmware stays on the chip and keeps running. The \
                  tab stays busy until the probe is actually free — flashing \
                  before that would fail to open it.",
+            ),
+            (
+                "Reset target",
+                egui::Color32::from_rgb(160, 190, 230),
+                "Restarts the chip through the probe (`probe-rs reset`) without \
+                 reflashing it and without unplugging anything — the firmware \
+                 begins again at its entry point. Use it when the firmware is \
+                 stuck somewhere. Needs the probe to itself, so stop a Debug or \
+                 RTT session first.",
             ),
             (
                 "Clear",

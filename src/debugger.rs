@@ -403,6 +403,37 @@ impl Debugger {
     /// left the ST-Link in debug mode — "The debug probe could not be opened"
     /// until the user physically replugged it.
     pub fn stop(&mut self, ctx: &egui::Context) {
+        // ── Leave the CHIP the way we found it ───────────────────────────────
+        // probe-rs's `disconnect` does neither of these (0.29
+        // `adapter.rs::disconnect` only halts, and only when the client asks to
+        // terminate/suspend). Whatever we leave behind outlives the session:
+        // breakpoints live in the core's FPB comparators, and a core halted at
+        // one stays halted with nobody to resume it. The next flash then boots
+        // into a firmware that freezes on the first armed line — which is
+        // exactly what it looks like from the outside.
+        if let Some(cfg) = self.cfg.lock().unwrap().clone() {
+            let files: std::collections::BTreeSet<String> = {
+                let st = self.state.lock().unwrap();
+                cfg.breakpoints
+                    .keys()
+                    .chain(st.bp_status.keys())
+                    .cloned()
+                    .collect()
+            };
+            for rel in files {
+                send_breakpoints(&self.wire, &cfg.project_dir, &rel, &[]);
+            }
+        }
+        // Resume a halted target, so the firmware runs on after we let go. Sent
+        // raw rather than through `continue_run` — the phase is about to become
+        // `Stopping`, not `Running`.
+        if matches!(self.phase(), DebugPhase::Stopped(_)) {
+            self.wire.request(
+                "continue",
+                json!({"threadId": self.thread_id()}),
+                Pending::Other,
+            );
+        }
         // The reader must stay alive to carry the disconnect handshake; only
         // the shutdown thread flips the flag, once the server is really gone.
         self.wire.request(

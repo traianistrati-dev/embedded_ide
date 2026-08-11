@@ -121,6 +121,8 @@ pub(super) fn show_diag_panel(
     // Debug tab: session + Start signal (caller runs `start_debug`).
     debugger: &mut crate::debugger::Debugger,
     debug_go: &mut bool,
+    // Debug tab's "Reset target" button (caller runs `probe::start_reset`).
+    reset_go: &mut bool,
     // Debug tab's breakpoint list: every breakpoint (rel path → 1-based lines)
     // and the row the user clicked — the caller opens it in the editor. The
     // row's ✕ raises `bp_remove`, "Remove all" raises `bp_clear`; the caller
@@ -703,6 +705,7 @@ pub(super) fn show_diag_panel(
                 ui,
                 debugger,
                 debug_go,
+                reset_go,
                 breakpoints,
                 bp_jump,
                 bp_remove,
