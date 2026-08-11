@@ -41,6 +41,7 @@ pub mod serial_plot;
 pub mod size;
 pub mod terminal;
 pub mod udev;
+pub mod workspace;
 
 /// Guard against the tofu-square bug coming back.
 ///
@@ -139,13 +140,34 @@ fn main() -> eframe::Result<()> {
     // stderr for the panic message to reach, so it also goes to a file.
     build::install_panic_logger();
 
+    // Claim this instance's scratch workspace BEFORE anything can look it up —
+    // `msvc::warm_up` below already spawns a thread, and every later reader
+    // (build, LSP, watcher) must see the same answer. A second IDE window gets
+    // its own slot instead of fighting over one directory (see `workspace`).
+    workspace::init();
+
     // Resolve the MSVC toolchain env off-thread so the first build doesn't pay
     // for the one-off `vcvars64.bat` capture (see `msvc`).
     msvc::warm_up();
 
+    // Everything eframe keys off the app NAME — including where it persists the
+    // app state. Sharing that file between windows meant the last one to exit
+    // decided which project both would reopen, so instances past the first get
+    // their own. Slot 1 keeps the original name, and with it the state every
+    // existing install already has.
+    let app_name = format!("Embedded IDE{}", workspace::suffix());
+    // The title is set explicitly so the storage name above doesn't leak into
+    // it verbatim — a second window says "#2", which is what you want on a
+    // taskbar, not "Embedded IDE_2".
+    let title = match workspace::slot() {
+        1 => "Embedded IDE".to_owned(),
+        s => format!("Embedded IDE #{s}"),
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_maximized(true)
+            .with_title(&title)
             // Window + taskbar icon while the app runs. The PNG is baked into
             // the exe at compile time — replace assets/icon.png (any size,
             // 256×256 recommended) and rebuild to change it.
@@ -157,7 +179,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Embedded IDE",
+        &app_name,
         options,
         Box::new(|cc| Ok(Box::new(AppIde::new(cc)))),
     )

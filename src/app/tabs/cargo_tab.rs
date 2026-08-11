@@ -27,7 +27,7 @@ pub fn show_cargo_tab(
 ) {
     let state = build_state.lock().unwrap().clone();
     let size_snapshot = size_state.lock().unwrap().clone();
-    let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+    let workspace = crate::workspace::dir();
 
     // ── Status bar ────────────────────────────────────────────────────────────
     ui.horizontal(|ui| {

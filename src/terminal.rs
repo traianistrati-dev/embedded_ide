@@ -96,7 +96,7 @@ impl Default for TerminalConsole {
     fn default() -> Self {
         Self {
             input: String::new(),
-            cwd: std::env::temp_dir().join("embedded_ide_0_check"),
+            cwd: crate::workspace::dir(),
             history: Vec::new(),
             history_pos: None,
             state: Arc::new(Mutex::new(TerminalState::default())),

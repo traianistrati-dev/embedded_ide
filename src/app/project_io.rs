@@ -47,6 +47,8 @@ impl AppIde {
         self.new_file_in_folder = None;
         self.project_name = root.file_name().and_then(|n| n.to_str()).map(String::from);
         self.project_dir = Some(root.to_path_buf());
+        // Take this folder for this window (or find out another one has it).
+        self.claim_open_project();
 
         // ── Detect which chip this project targets ───────────────────────────
         // Switching the MCU type BEFORE restoring pin state ensures the correct
@@ -216,6 +218,67 @@ impl AppIde {
         self.recheck_workspace_health();
     }
 
+    // ── Project-folder claim ──────────────────────────────────────────────────
+
+    /// Claim the open project's folder for this window, replacing any previous
+    /// claim. Sets `project_lock_conflict` when another live instance holds it.
+    ///
+    /// A busy folder does NOT stop the project from opening: refusing would be
+    /// the more damaging failure (a crashed sibling, a folder open in a window
+    /// the user forgot about, and the project becomes unopenable), and the
+    /// banner states the actual risk plainly enough to act on.
+    pub(super) fn claim_open_project(&mut self) {
+        // Release first — re-claiming the SAME folder would otherwise find our
+        // own lock and report the project busy against itself.
+        self.project_lock = None;
+        self.project_lock_conflict = None;
+        self.project_lock_retry = None;
+        let Some(dir) = self.project_dir.clone() else {
+            return; // an unsaved project has no folder to claim yet
+        };
+        match crate::workspace::claim_project(&dir) {
+            crate::workspace::ProjectClaim::Acquired(lock) => self.project_lock = Some(lock),
+            crate::workspace::ProjectClaim::Busy => {
+                self.project_lock_conflict = Some(
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string()),
+                );
+                self.project_lock_retry = Some(std::time::Instant::now());
+            }
+            // No lock file possible here — never warn on a guess.
+            crate::workspace::ProjectClaim::Unavailable => {}
+        }
+    }
+
+    /// While the project is claimed elsewhere, retry every couple of seconds so
+    /// the banner disappears on its own when the other window closes. Cheap: one
+    /// file open, and only while a conflict is actually up.
+    pub(super) fn retry_project_claim(&mut self) {
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.project_lock_conflict.is_none() {
+            return;
+        }
+        if !self
+            .project_lock_retry
+            .is_some_and(|t| t.elapsed() >= RETRY)
+        {
+            return;
+        }
+        self.project_lock_retry = Some(std::time::Instant::now());
+        let Some(dir) = self.project_dir.clone() else {
+            self.project_lock_conflict = None;
+            return;
+        };
+        if let crate::workspace::ProjectClaim::Acquired(lock) =
+            crate::workspace::claim_project(&dir)
+        {
+            self.project_lock = Some(lock);
+            self.project_lock_conflict = None;
+            self.project_lock_retry = None;
+        }
+    }
+
     // ── Project rename ────────────────────────────────────────────────────────
 
     /// Rename the saved project's FOLDER (leaf only — always the same drive)
@@ -236,6 +299,9 @@ impl AppIde {
             .unwrap_or_else(|| new_name.trim().to_owned());
         self.project_dir = Some(new_dir);
         self.project_name = Some(name);
+        // The claim is keyed by path — the old one now points at a folder that
+        // no longer exists, so re-take it under the new name.
+        self.claim_open_project();
         Ok(())
     }
 
@@ -258,7 +324,7 @@ impl AppIde {
         // project-root-relative). The WATCH itself still covers only `src/`:
         // watching the root would pull in `target/`, which churns constantly
         // during a build and would flood the channel.
-        let workspace_root = std::env::temp_dir().join("embedded_ide_0_check");
+        let workspace_root = crate::workspace::dir();
         let workspace_src = workspace_root.join("src");
 
         // If the watcher hasn't started watching yet (dir didn't exist on

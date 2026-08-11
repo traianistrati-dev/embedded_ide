@@ -110,9 +110,12 @@ impl Drop for VirtualPair {
 #[cfg_attr(not(unix), allow(dead_code))]
 fn link_paths() -> (PathBuf, PathBuf) {
     let base = std::env::temp_dir();
+    // Slot-suffixed: two IDE windows each running a bridge would otherwise
+    // fight over the same two device nodes.
+    let sfx = crate::workspace::suffix();
     (
-        base.join("embedded_ide_bridge_app"),
-        base.join("embedded_ide_bridge_ide"),
+        base.join(format!("embedded_ide_bridge_app{sfx}")),
+        base.join(format!("embedded_ide_bridge_ide{sfx}")),
     )
 }
 

@@ -1661,12 +1661,16 @@ pub fn debug_log(line: &str) {
 }
 
 /// Append a line to the LSP debug log in the system temp dir.
-/// File: <TEMP>/embedded_ide_lsp.log
+/// File: `<TEMP>/embedded_ide_lsp.log` — plus this instance's slot suffix, so
+/// two IDE windows don't interleave their handshakes into one unreadable file.
 /// Only active in debug builds; no-op in release.
 #[cfg(debug_assertions)]
 fn lsp_log(line: &str) {
     use std::io::Write;
-    let path = std::env::temp_dir().join("embedded_ide_lsp.log");
+    let path = std::env::temp_dir().join(format!(
+        "embedded_ide_lsp{}.log",
+        crate::workspace::suffix()
+    ));
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

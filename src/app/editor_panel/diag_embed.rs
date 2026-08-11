@@ -668,7 +668,7 @@ impl AppIde {
         let Some((project, _tc)) = self.selected_build_cfg() else {
             return false;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         if crate::panels::mcu_module::project_gen::write_project(
             &build_dir,
             &self.current_project_files(),

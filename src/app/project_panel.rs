@@ -244,7 +244,7 @@ impl AppIde {
                         let workspace_dir = if let Some(project_dir) = &self.project_dir {
                             project_dir.clone()
                         } else {
-                            std::env::temp_dir().join("embedded_ide_0_check")
+                            crate::workspace::dir()
                         };
                         show_project_tree_panel(
                             ui,

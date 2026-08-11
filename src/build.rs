@@ -660,15 +660,18 @@ fn run_cargo(
             || stderr_text.contains("os error 112")  // Windows  ERROR_DISK_FULL
             || stderr_text.contains("os error 28"); // POSIX    ENOSPC
         if is_disk_full {
-            return BuildState::Failed(
+            return BuildState::Failed(format!(
                 "[DISK_FULL] The build target/ directory has run out of disk space.\n\n\
                  ESP32 / RISC-V builds generate several GB of LLVM artefacts the first time.\n\
                  -> Click  \"Clean target/\"  to delete cached build artefacts and free space,\n\
                    then press Build again (crates stay cached in ~/.cargo; only rebuilt files\n\
                    are re-compiled).\n\n\
-                 Path: <TEMP>\\embedded_ide_0_check\\target\\"
-                    .to_string(),
-            );
+                 Path: {}",
+                // The real path of THIS window's workspace — a second instance
+                // builds in its own slot, so a fixed name would send the user
+                // to someone else's target/.
+                crate::workspace::dir().join("target").display()
+            ));
         }
         // Infer from diagnostic content if cargo exited without build-finished
         result.success = result.error_count() == 0;

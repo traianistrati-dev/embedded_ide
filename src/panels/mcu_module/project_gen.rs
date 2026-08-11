@@ -949,8 +949,13 @@ pub fn write_project(
 /// Absolute path of the throw-away workspace every build / check / flash / size
 /// run uses. It is a COPY of the project — the only place where deleting files
 /// that don't belong to the current project is safe.
+///
+/// Per INSTANCE, not per machine: a second IDE window claims its own slot, or
+/// the two would overwrite each other's generated project here (see
+/// [`crate::workspace`]). Everything that needs this path must go through this
+/// function — never rebuild it from `temp_dir()`.
 pub fn build_workspace_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join("embedded_ide_0_check")
+    crate::workspace::dir()
 }
 
 /// Delete top-level directories of `root` that hold a `Cargo.toml` but are not

@@ -69,7 +69,7 @@ impl AppIde {
             .unwrap_or_default();
         let interface_cfg = openocd::interface_cfg_for_kind(&kind).to_string();
         let adapter = openocd::adapter_select_cmd(&kind, &vid_pid);
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         if project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -102,7 +102,7 @@ impl AppIde {
         let Some((project, _tc)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         if project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -131,7 +131,7 @@ impl AppIde {
         let Some((project, _tc)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         if project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -171,7 +171,7 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -258,7 +258,7 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -292,7 +292,7 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -324,7 +324,7 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -358,7 +358,7 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
             &self.current_project_files(),
@@ -391,7 +391,7 @@ impl AppIde {
         let Some((project, _toolchain)) = self.selected_build_cfg() else {
             return;
         };
-        let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+        let build_dir = crate::workspace::dir();
         match project_gen::write_project(
             &build_dir,
             &self.current_project_files(),

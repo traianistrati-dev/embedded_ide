@@ -426,7 +426,7 @@ fn lsp_pos_to_byte(text: &str, line: u32, character: u32) -> usize {
 /// id — so F12 can open it editable in the main editor instead of the read-only
 /// snippet tab. `None` for external files (crates / std), which keep the snippet.
 fn project_file_for_def(abs_path: &str, user_files: &[(String, String)]) -> Option<ProjectFileId> {
-    let ws = std::env::temp_dir().join("embedded_ide_0_check");
+    let ws = crate::workspace::dir();
     let ws_str = ws.to_string_lossy().replace('\\', "/");
     let p = abs_path.replace('\\', "/");
     let prefix = format!("{ws_str}/");
@@ -1116,6 +1116,21 @@ pub struct AppIde {
     /// Kept alive so the watcher thread lives as long as the app.
     _fs_watcher: Option<notify::RecommendedWatcher>,
 
+    // ── Project-folder claim ──────────────────────────────────────────────────
+    /// This instance's claim on the open project's FOLDER, held for as long as
+    /// that project is open (see [`crate::workspace::claim_project`]). Isolating
+    /// the scratch workspace keeps two windows from corrupting each other's
+    /// generated project; this covers the other half — the same project opened
+    /// twice, where both windows save over the user's real files.
+    project_lock: Option<crate::workspace::ProjectLock>,
+    /// `Some(name)` while the open project is claimed by ANOTHER window: the
+    /// project is loaded anyway (refusing would be worse than warning), with a
+    /// banner up. Cleared as soon as a retry succeeds.
+    project_lock_conflict: Option<String>,
+    /// Throttle for the background re-claim — the banner must clear itself when
+    /// the other window closes, without probing the filesystem every frame.
+    project_lock_retry: Option<std::time::Instant>,
+
     // ── Project-switch overlay ────────────────────────────────────────────────
     /// `Some` while the full-window "loading the project" overlay is up (see
     /// [`loading_overlay`]). Armed by every project-change entry point; lifts
@@ -1200,9 +1215,7 @@ impl AppIde {
         // ── Start filesystem watcher on the build workspace src/ dir ─────────
         // The watcher runs on a background thread and sends events through a
         // channel.  We poll the channel each frame (non-blocking).
-        let workspace_src = std::env::temp_dir()
-            .join("embedded_ide_0_check")
-            .join("src");
+        let workspace_src = crate::workspace::dir().join("src");
         let (fs_tx, fs_rx) = std::sync::mpsc::channel();
         let ctx_clone = cc.egui_ctx.clone();
         let mut watcher = notify::recommended_watcher(move |ev| {
@@ -1452,6 +1465,9 @@ impl AppIde {
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
+            project_lock: None,
+            project_lock_conflict: None,
+            project_lock_retry: None,
             project_loading: None,
         };
 
@@ -1768,6 +1784,10 @@ impl AppIde {
         // ── Poll filesystem watcher events ────────────────────────────────────
         self.poll_fs_events();
 
+        // ── Re-take a project folder another window was holding ───────────────
+        // No-op unless a conflict is up, and throttled to one probe every 2 s.
+        self.retry_project_claim();
+
         // ── MRU file history (Ctrl+Tab switching) ─────────────────────────────
         // One central change detector: whatever switched `selected_file` (tree
         // click, F12, diagnostics nav, …), promote the new file to the front of
@@ -2057,7 +2077,7 @@ impl AppIde {
         match lsp_status {
             LspStatus::Stopped => {
                 if self.has_project() {
-                    let build_dir = std::env::temp_dir().join("embedded_ide_0_check");
+                    let build_dir = crate::workspace::dir();
                     if self.selected_build_cfg().is_some() {
                         if project_gen::write_project(
                             &build_dir,
@@ -2358,7 +2378,7 @@ impl AppIde {
     /// project is opened (the deps differ then); saves keep the lock so checks
     /// stay fast. The user's own project `Cargo.lock` is left untouched.
     fn reset_workspace_lock(&self) {
-        let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+        let workspace = crate::workspace::dir();
         let _ = std::fs::remove_file(workspace.join("Cargo.lock"));
     }
 
@@ -2510,7 +2530,7 @@ impl AppIde {
             // included. Declared first so it outlives everything below.
             let _flag = crate::activity::FlagGuard::set(in_flight);
             let mut rec = crate::activity::Recorder::new("Save (LSP flush)").in_session(session);
-            let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+            let workspace = crate::workspace::dir();
 
             // ── Disk writes (hash-cached) ─────────────────────────────────
             // Diagnostic: count how many files actually hit disk vs were
@@ -2820,6 +2840,43 @@ impl eframe::App for AppIde {
             }
         }
 
+        // ── Project-open-elsewhere banner ─────────────────────────────────────
+        // The project's folder is claimed by another IDE window. Both windows
+        // write the WHOLE project on save, so whoever saves last wins — silently,
+        // and against the user's real files rather than a scratch copy. Nothing
+        // is blocked (see `claim_open_project`); the risk is simply stated, and
+        // the banner clears itself the moment the other window lets go.
+        if let Some(name) = self.project_lock_conflict.clone() {
+            egui::Panel::top("project_open_elsewhere_banner").show_inside(ui, |ui| {
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(58, 40, 20))
+                    .inner_margin(7.0)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  \"{name}\" is already open in another Embedded IDE \
+                                     window.",
+                                    egui_phosphor::regular::WARNING
+                                ))
+                                .size(11.5)
+                                .strong()
+                                .color(egui::Color32::from_rgb(245, 200, 130)),
+                            );
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "Both windows save the whole project into the same folder, so \
+                                 the last save overwrites the other's work. Close it in one of \
+                                 them — this notice clears by itself.",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(225, 195, 155)),
+                        );
+                    });
+            });
+        }
+
         // ── Workspace-load-failure banner (Part 3 safety net) ─────────────────
         // When `cargo metadata` fails, rust-analyzer never loads: no inline
         // errors, no Structure edges, a stuck "Checking…". Surface that plainly
@@ -3126,7 +3183,14 @@ impl eframe::App for AppIde {
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
                     self.project_name = Some(name);
                     // A new project now has a home — later saves go here.
+                    let had_dir = self.project_dir.clone();
                     self.project_dir = self.save_dest.take();
+                    // First save into a folder → claim it. Re-claiming on every
+                    // save would be wasted work (and would briefly release a
+                    // folder we already hold), so only when it changed.
+                    if self.project_dir != had_dir {
+                        self.claim_open_project();
+                    }
                     // "Save and close": the files are on disk now, so finish
                     // the close the prompt put on hold.
                     if self.close_after_save {
@@ -3189,7 +3253,7 @@ impl eframe::App for AppIde {
         // This ensures Cargo.toml and all other required files are in sync.
         if save_project_needed {
             if self.selected_build_cfg().is_some() {
-                let workspace = std::env::temp_dir().join("embedded_ide_0_check");
+                let workspace = crate::workspace::dir();
                 let _ = project_gen::write_project(
                     &workspace,
                     &self.current_project_files(),
