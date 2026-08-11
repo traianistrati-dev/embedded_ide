@@ -121,7 +121,9 @@ pub struct Mcu {
     pub selected_pin: Option<usize>,
     /// Function whose ⓘ info window is open (None = closed)
     pub show_info: Option<PinFunction>,
-    /// Vertical scroll offset (pixels) for the function-list panel inside the chip.
+    /// Vertical scroll offset (pixels) of the function list inside the chip.
+    /// Fed by the wheel in `mcu_panel.rs` (which owns the canvas' wheel), clamped
+    /// while the list is drawn.
     pub fn_scroll_offset: f32,
     /// Clock-tree configuration shown/edited in the "Clock" tab.
     /// `ClockConfig::None` for MCUs without a modelled clock tree yet.

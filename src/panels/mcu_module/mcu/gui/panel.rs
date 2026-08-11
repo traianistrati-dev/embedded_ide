@@ -1,89 +1,142 @@
-//! Function selection panel — scrollable list of pin functions with buttons.
+//! The selected pin's function list — painted INSIDE the chip body.
+//!
+//! It lives in the chip (over the body, under the pin stubs) and is driven by
+//! `Mcu::fn_scroll_offset`: a hand-painted list rather than an egui `ScrollArea`,
+//! because it is drawn inside the [`egui::Scene`] of the Pins canvas and must
+//! scale with it.
+//!
+//! Two things the caller must do for it, both because of that Scene:
+//! * the pin NUMBERS around the body are hidden while it is open (they are
+//!   painted at the same place and would show through the rows) — see
+//!   [`super::chip`];
+//! * the wheel over it must scroll it instead of zooming the canvas. It cannot
+//!   do that itself: `mcu_panel.rs` intercepts the wheel BEFORE this runs, so it
+//!   is the one that feeds `fn_scroll_offset`. This function hands back its rect
+//!   in SCREEN coordinates for exactly that test.
 
+use super::info;
+use crate::panels::mcu_module::mcu::model::Mcu;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 
-/// State returned from panel rendering.
-pub struct PanelState {
-    pub new_function: Option<(usize, PinFunction)>,
-    pub toggle_info: Option<PinFunction>,
+/// Width of the trailing ⓘ button.
+const INFO_BTN_W: f32 = 22.0;
+/// Gap between a function button and its ⓘ.
+const GAP: f32 = 4.0;
+/// Height of one function button, and the pitch between two rows.
+const BTN_H: f32 = 28.0;
+const ITEM_H: f32 = BTN_H + 6.0;
+/// Scrollbar width + its gap from the buttons.
+const SB_W: f32 = 4.0;
+const SB_GAP: f32 = 3.0;
+
+/// The functions offered for `num`: everything the pin can do, minus what is
+/// already taken by another pin (GPIO In/Out are always offered — any pin can be
+/// one).
+fn selectable_functions(mcu: &Mcu, num: usize) -> Option<(String, Vec<PinFunction>, PinFunction)> {
+    let used_elsewhere: Vec<PinFunction> = mcu
+        .iter_all_pins()
+        .filter(|p| p.number != num && p.selected_function != PinFunction::Unset)
+        .map(|p| p.selected_function.clone())
+        .collect();
+    let pin = mcu.find_pin(num)?;
+    let funcs: Vec<PinFunction> = pin
+        .available_functions
+        .iter()
+        .filter(|f| {
+            matches!(f, PinFunction::GpioInput | PinFunction::GpioOutput)
+                || !used_elsewhere.contains(f)
+        })
+        .cloned()
+        .collect();
+    Some((pin.name.clone(), funcs, pin.selected_function.clone()))
 }
 
-/// Render the header (pin name/number) and separator.
-pub fn draw_header(
+/// Draw the selected pin's header + function list inside `content_rect` (the
+/// upright area of the chip body, scene coords).
+///
+/// Returns the `(number, name, function)` change when the user picks one, plus
+/// the list's rect in SCREEN coordinates — [`egui::Rect::NOTHING`] when no pin is
+/// selected, i.e. when nothing was drawn.
+pub fn draw_pin_functions(
+    mcu: &mut Mcu,
     painter: &egui::Painter,
-    chip_rect: egui::Rect,
-    sep_y: &mut f32,
-    num: usize,
-    pin_name: &str,
-) {
-    let header_pos = chip_rect.center_top() + egui::vec2(0.0, 14.0);
+    ui: &mut egui::Ui,
+    content_rect: egui::Rect,
+) -> (Option<(usize, String, PinFunction)>, egui::Rect) {
+    let Some(num) = mcu.selected_pin else {
+        return (None, egui::Rect::NOTHING);
+    };
+    let Some((pin_name, funcs, selected_func)) = selectable_functions(mcu, num) else {
+        return (None, egui::Rect::NOTHING);
+    };
+
+    // ── Header ───────────────────────────────────────────────────────────────
+    let header_pos = content_rect.center_top() + egui::vec2(0.0, 14.0);
     painter.text(
         header_pos,
         egui::Align2::CENTER_CENTER,
-        format!("Pin {}  ·  {}", num, pin_name),
+        format!("Pin {num}  ·  {pin_name}"),
         egui::FontId::proportional(13.0),
         egui::Color32::WHITE,
     );
-
-    *sep_y = header_pos.y + 14.0;
+    let sep_y = header_pos.y + 14.0;
     painter.line_segment(
         [
-            egui::pos2(chip_rect.left() + 8.0, *sep_y),
-            egui::pos2(chip_rect.right() - 8.0, *sep_y),
+            egui::pos2(content_rect.left() + 8.0, sep_y),
+            egui::pos2(content_rect.right() - 8.0, sep_y),
         ],
         egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 120)),
     );
-}
 
-/// Render the function button list with scrolling and interaction detection.
-pub fn render_function_buttons(
-    painter: &egui::Painter,
-    list_painter: &egui::Painter,
-    chip_rect: egui::Rect,
-    funcs: &[PinFunction],
-    selected_func: &PinFunction,
-    pin_num: usize,
-    fn_scroll_offset: f32,
-    show_info: &Option<PinFunction>,
-    ui: &mut egui::Ui,
-) -> PanelState {
-    let info_btn_w = 22.0;
-    let gap = 4.0;
-    let btn_h = 28.0;
-    let item_h = btn_h + 6.0;
-    let btn_x = chip_rect.left() + 12.0;
-    let sep_y = chip_rect.top() + 50.0; // approx header height
+    // ── Geometry ─────────────────────────────────────────────────────────────
+    let btn_x = content_rect.left() + 12.0;
     let content_top = sep_y + 12.0;
-    let content_bottom = chip_rect.bottom() - 8.0;
-    let sb_w = 4.0;
-    let sb_gap = 3.0;
-    let btn_w = chip_rect.width() - 24.0 - info_btn_w - gap - sb_w - sb_gap;
+    let content_bottom = content_rect.bottom() - 8.0;
+    let available_h = (content_bottom - content_top).max(0.0);
+    let total_h = funcs.len() as f32 * ITEM_H;
+    let max_scroll = (total_h - available_h).max(0.0);
+    mcu.fn_scroll_offset = mcu.fn_scroll_offset.clamp(0.0, max_scroll);
+    let btn_w = content_rect.width() - 24.0 - INFO_BTN_W - GAP - SB_W - SB_GAP;
 
-    let mut state = PanelState {
-        new_function: None,
-        toggle_info: None,
-    };
+    let list_rect = egui::Rect::from_min_max(
+        egui::pos2(btn_x - 4.0, content_top),
+        egui::pos2(content_rect.right() - SB_W - SB_GAP - 1.0, content_bottom),
+    );
 
-    let mut btn_y = content_top - fn_scroll_offset;
+    // ── Scrollbar thumb ──────────────────────────────────────────────────────
+    if max_scroll > 0.0 {
+        let sb_x = content_rect.right() - SB_W - 2.0;
+        let thumb_h = ((available_h / total_h) * available_h).max(16.0);
+        let thumb_top = content_top + (mcu.fn_scroll_offset / max_scroll) * (available_h - thumb_h);
+        painter.rect_filled(
+            egui::Rect::from_min_size(egui::pos2(sb_x, thumb_top), egui::vec2(SB_W, thumb_h)),
+            SB_W / 2.0,
+            egui::Color32::from_rgba_premultiplied(180, 180, 210, 140),
+        );
+    }
+
+    // ── Rows ─────────────────────────────────────────────────────────────────
+    let list_painter = painter.with_clip_rect(list_rect);
+    let mut btn_y = content_top - mcu.fn_scroll_offset;
+    let mut new_function: Option<(usize, PinFunction)> = None;
+    let mut toggle_info: Option<PinFunction> = None;
+    let show_info = mcu.show_info.clone();
 
     for (i, func) in funcs.iter().enumerate() {
-        let btn_rect =
-            egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, btn_h));
+        let btn_rect = egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, BTN_H));
         let info_rect = egui::Rect::from_min_size(
-            egui::pos2(btn_x + btn_w + gap, btn_y),
-            egui::vec2(info_btn_w, btn_h),
+            egui::pos2(btn_x + btn_w + GAP, btn_y),
+            egui::vec2(INFO_BTN_W, BTN_H),
         );
+        let visible = btn_rect.bottom() > content_top && btn_rect.top() < content_bottom;
 
-        let visible: bool = btn_rect.bottom() > content_top && btn_rect.top() < content_bottom;
-
-        let is_sel: bool = func == selected_func;
-        let bg: egui::Color32 = if is_sel {
+        let is_sel = func == &selected_func;
+        let bg = if is_sel {
             func.color()
         } else {
             egui::Color32::from_rgb(65, 65, 80)
         };
-
         list_painter.rect_filled(btn_rect, 5.0, bg);
         list_painter.text(
             btn_rect.center(),
@@ -93,28 +146,27 @@ pub fn render_function_buttons(
             egui::Color32::WHITE,
         );
 
-        // ⓘ button
-        let info_open = show_info.as_ref() == Some(func);
-        let info_bg: egui::Color32 = if info_open {
+        // ⓘ button — hand-drawn so it matches the painted list.
+        let info_bg = if show_info.as_ref() == Some(func) {
             egui::Color32::from_rgb(80, 120, 200)
         } else {
             egui::Color32::from_rgb(55, 55, 75)
         };
         list_painter.rect_filled(info_rect, 5.0, info_bg);
         let ic = info_rect.center();
-        let ir = 7.5_f32;
-        list_painter.circle_stroke(ic, ir, egui::Stroke::new(1.5, egui::Color32::WHITE));
+        list_painter.circle_stroke(ic, 7.5, egui::Stroke::new(1.5, egui::Color32::WHITE));
         list_painter.circle_filled(egui::pos2(ic.x, ic.y - 2.5), 1.3, egui::Color32::WHITE);
         list_painter.line_segment(
             [egui::pos2(ic.x, ic.y - 0.5), egui::pos2(ic.x, ic.y + 4.0)],
             egui::Stroke::new(1.8, egui::Color32::WHITE),
         );
 
-        // Hover / click
+        // Only rows actually on screen take clicks — a scrolled-away button must
+        // not keep a hit area over the chip.
         if visible {
             let btn_response = ui.interact(
                 btn_rect,
-                ui.id().with(("fn_btn", pin_num, i)),
+                ui.id().with(("fn_btn", num, i)),
                 egui::Sense::click(),
             );
             if btn_response.hovered() {
@@ -126,17 +178,18 @@ pub fn render_function_buttons(
                 );
             }
             if btn_response.clicked() {
-                let next = if func == selected_func {
+                // Clicking the ACTIVE function clears the pin — it is a toggle.
+                let next = if is_sel {
                     PinFunction::Unset
                 } else {
                     func.clone()
                 };
-                state.new_function = Some((pin_num, next));
+                new_function = Some((num, next));
             }
 
             let info_response = ui.interact(
                 info_rect,
-                ui.id().with(("info_btn", pin_num, i)),
+                ui.id().with(("info_btn", num, i)),
                 egui::Sense::click(),
             );
             if info_response.hovered() {
@@ -148,36 +201,39 @@ pub fn render_function_buttons(
                 );
             }
             if info_response.clicked() {
-                state.toggle_info = Some(func.clone());
+                toggle_info = Some(func.clone());
             }
         }
 
-        btn_y += item_h;
+        btn_y += ITEM_H;
     }
 
-    state
-}
-
-/// Render the scrollbar track and thumb.
-pub fn draw_scrollbar(
-    painter: &egui::Painter,
-    chip_rect: egui::Rect,
-    max_scroll: f32,
-    fn_scroll_offset: f32,
-    content_top: f32,
-    available_h: f32,
-    total_h: f32,
-) {
-    if max_scroll > 0.0 {
-        let sb_w = 4.0;
-        let sb_x = chip_rect.right() - sb_w - 2.0;
-        let track_h = available_h;
-        let thumb_h = ((available_h / total_h) * track_h).max(16.0);
-        let thumb_top = content_top + (fn_scroll_offset / max_scroll) * (track_h - thumb_h);
-        painter.rect_filled(
-            egui::Rect::from_min_size(egui::pos2(sb_x, thumb_top), egui::vec2(sb_w, thumb_h)),
-            sb_w / 2.0,
-            egui::Color32::from_rgba_premultiplied(180, 180, 210, 140),
-        );
+    // ── Apply ────────────────────────────────────────────────────────────────
+    // Applying also clears `show_info`, so it runs before the toggle below.
+    let changed = new_function.and_then(|(n, f)| mcu.apply_pin_function(n, f));
+    if let Some(func) = toggle_info {
+        mcu.show_info = if mcu.show_info.as_ref() == Some(&func) {
+            None
+        } else {
+            Some(func)
+        };
     }
+
+    // This all lives inside the canvas' Scene, so scene coords ≠ screen coords as
+    // soon as the user zooms or pans. Map the list rect out to screen space for
+    // the caller's wheel test — and anchor the ⓘ window there too, instead of on
+    // the scene-space chip rect (which would place it wherever the diagram is).
+    let to_global = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .unwrap_or_default();
+    let list_screen = to_global * list_rect;
+
+    if let Some(func) = mcu.show_info.clone()
+        && !info::draw_info_popup(&func, list_screen, ui)
+    {
+        mcu.show_info = None;
+    }
+
+    (changed, list_screen)
 }

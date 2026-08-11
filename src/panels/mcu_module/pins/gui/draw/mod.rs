@@ -63,6 +63,9 @@ impl Pin {
             layout::text_position_horizontal(rect),
             text_color,
             font_size,
+            // The label runs along the stub from `left + 2`, so that is the room
+            // it has before it spills past the pin.
+            rect.width() - 4.0,
         );
 
         if is_selected {
@@ -97,6 +100,9 @@ impl Pin {
             layout::text_position_horizontal(rect),
             text_color,
             font_size,
+            // The label runs along the stub from `left + 2`, so that is the room
+            // it has before it spills past the pin.
+            rect.width() - 4.0,
         );
 
         if is_selected {
@@ -131,6 +137,8 @@ impl Pin {
             layout::text_position_vertical(rect),
             text_color,
             font_size,
+            // Rotated −90°, the label runs UP the stub from `bottom - 4`.
+            rect.height() - 6.0,
         );
 
         if is_selected {
@@ -165,6 +173,8 @@ impl Pin {
             layout::text_position_vertical(rect),
             text_color,
             font_size,
+            // Rotated −90°, the label runs UP the stub from `bottom - 4`.
+            rect.height() - 6.0,
         );
 
         if is_selected {

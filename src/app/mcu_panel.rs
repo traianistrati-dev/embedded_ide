@@ -694,9 +694,23 @@ impl AppIde {
                             let ptr = ui.input(|i| i.pointer.hover_pos());
                             let (scroll_y, ctrl) =
                                 ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
+                            // Over the pin-function list inside the chip the wheel
+                            // means SCROLL THE LIST, not zoom. That list is painted
+                            // inside the Scene and can't take the wheel itself (we
+                            // intercept it here, before the Scene), so this is where
+                            // it is fed — and consumed, so neither the zoom below
+                            // nor the Scene's own pan sees it. The rect is last
+                            // frame's, in screen coords, which is exact unless the
+                            // view moved in between.
+                            let on_fn_list = ptr.is_some_and(|p| self.mcu_fn_list_rect.contains(p));
+                            if on_fn_list && scroll_y != 0.0 && !ctrl {
+                                mcu.fn_scroll_offset -= scroll_y;
+                                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                            }
                             if let Some(ptr) = ptr
                                 && scroll_y != 0.0
                                 && !ctrl
+                                && !on_fn_list
                                 && outer.contains(ptr)
                                 && scene_rect.is_finite()
                                 && scene_rect.size() != egui::Vec2::ZERO
@@ -730,7 +744,10 @@ impl AppIde {
                                     content_bounds = ui.min_rect();
                                     r
                                 });
-                            let inner = scene.inner;
+                            let (inner, fn_rect) = scene.inner;
+                            // Screen rect of the function list — next frame's wheel
+                            // uses it to tell "scroll the list" from "zoom".
+                            self.mcu_fn_list_rect = fn_rect;
 
                             // Scene marks its response changed on the pan/zoom it
                             // still owns (drag-pan + Ctrl+scroll zoom) and writes
@@ -808,6 +825,7 @@ impl AppIde {
                                     content_bounds
                                 };
                             }
+
                             inner
                         }
                         None => {

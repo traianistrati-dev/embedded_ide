@@ -600,6 +600,12 @@ pub struct AppIde {
     /// Ctrl+scroll, Ctrl+±): the view is then PERSISTED in `mcu_scene_bounds`
     /// instead of auto-fitting. Ctrl+0 (or a chip change) clears it → re-fit.
     mcu_view_adjusted: bool,
+    /// Screen rect of the selected pin's function list inside the chip
+    /// (`Rect::NOTHING` when no pin is selected). The list is painted inside the
+    /// canvas' `Scene`, which cannot receive the wheel (we intercept it first),
+    /// so the wheel handler uses this to scroll the list instead of zooming.
+    /// Written each frame from `Mcu::draw`; transient.
+    mcu_fn_list_rect: egui::Rect,
     /// Cached module graph for the Structure tab: `(content hash, graph,
     /// layout)`. Rebuilt only when a file's content or the file list changes.
     structure_cache: Option<(
@@ -1238,6 +1244,7 @@ impl AppIde {
             renaming_project_focus: false,
             mcu_scene_bounds: egui::Rect::NOTHING,
             mcu_view_adjusted: false,
+            mcu_fn_list_rect: egui::Rect::NOTHING,
             structure_cache: None,
             structure_view: Default::default(),
             structure_calls: None,

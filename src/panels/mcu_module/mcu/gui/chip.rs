@@ -19,6 +19,29 @@ fn num_font() -> egui::FontId {
     egui::FontId::monospace(11.0)
 }
 
+/// The pin number, painted just inside the chip edge.
+///
+/// `show` is false while a pin is SELECTED: the body then carries that pin's
+/// function list, and the numbers — painted at the very same place, inside the
+/// perimeter — would show through its rows.
+fn draw_number(
+    painter: &egui::Painter,
+    show: bool,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    pin: &Pin,
+) {
+    if !show {
+        return;
+    }
+    let color = if pin.has_bus_function() {
+        NUM_COLOR_BUS
+    } else {
+        NUM_COLOR
+    };
+    painter.text(pos, align, pin.number, num_font(), color);
+}
+
 /// Draw the chip body (gray rectangle).
 pub fn draw_chip_body(painter: &egui::Painter, chip_rect: egui::Rect) {
     painter.rect_filled(chip_rect, 4.0, egui::Color32::from_rgb(45, 45, 55));
@@ -158,17 +181,12 @@ fn render_quarter(
                     .1
             }
         };
-        let col = if lp.pin.has_bus_function() {
-            NUM_COLOR_BUS
-        } else {
-            NUM_COLOR
-        };
-        painter.text(
+        draw_number(
+            painter,
+            selected.is_none(),
             rot.apply(lp.num_pos),
             egui::Align2::CENTER_CENTER,
-            lp.pin.number,
-            num_font(),
-            col,
+            lp.pin,
         );
         if hit {
             clicked = Some(lp.pin.number);
@@ -233,8 +251,16 @@ fn render_diamond(
         } else {
             (lp.pin.get_text_color(), PIN_FONT_SIZE)
         };
-        let galley =
-            painter.layout_no_wrap(lp.pin.name.clone(), egui::FontId::monospace(tsize), tcol);
+        // Cut a name too long for the stub, same as the un-rotated sides. The
+        // label runs along the stub, whose length is `PIN_HEIGHT` either way.
+        let font = egui::FontId::monospace(tsize);
+        let label = crate::panels::mcu_module::pins::gui::draw::text::fit(
+            painter,
+            &lp.pin.name,
+            font.clone(),
+            PIN_HEIGHT - 6.0,
+        );
+        let galley = painter.layout_no_wrap(label, font, tcol);
         let (pos_local, base) = if lp.outward.y == 0.0 {
             // left/right → default horizontal label (LEFT_CENTER at mid-height)
             (
@@ -265,17 +291,12 @@ fn render_diamond(
         });
         // Pin number, upright, nudged further inside the body (−outward) so the
         // rotated stub doesn't sit on top of it.
-        let ncol = if lp.pin.has_bus_function() {
-            NUM_COLOR_BUS
-        } else {
-            NUM_COLOR
-        };
-        painter.text(
+        draw_number(
+            painter,
+            selected.is_none(),
             rot.apply(lp.num_pos - lp.outward * 7.0),
             egui::Align2::CENTER_CENTER,
-            lp.pin.number,
-            num_font(),
-            ncol,
+            lp.pin,
         );
         if clicked_now && hovered {
             clicked = Some(lp.pin.number);
@@ -309,17 +330,12 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, right-aligned just inside the right edge.
-        let num_color = if pin.has_bus_function() {
-            NUM_COLOR_BUS
-        } else {
-            NUM_COLOR
-        };
-        painter.text(
+        draw_number(
+            painter,
+            selected.is_none(),
             egui::pos2(chip_rect.right() - NUM_MARGIN, y + PIN_WIDTH / 2.0),
             egui::Align2::RIGHT_CENTER,
-            pin.number,
-            num_font(),
-            num_color,
+            pin,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -340,17 +356,12 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, left-aligned just inside the left edge.
-        let num_color = if pin.has_bus_function() {
-            NUM_COLOR_BUS
-        } else {
-            NUM_COLOR
-        };
-        painter.text(
+        draw_number(
+            painter,
+            selected.is_none(),
             egui::pos2(chip_rect.left() + NUM_MARGIN, y + PIN_WIDTH / 2.0),
             egui::Align2::LEFT_CENTER,
-            pin.number,
-            num_font(),
-            num_color,
+            pin,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -371,17 +382,12 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, just below the top edge.
-        let num_color = if pin.has_bus_function() {
-            NUM_COLOR_BUS
-        } else {
-            NUM_COLOR
-        };
-        painter.text(
+        draw_number(
+            painter,
+            selected.is_none(),
             egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.top() + NUM_MARGIN),
             egui::Align2::CENTER_TOP,
-            pin.number,
-            num_font(),
-            num_color,
+            pin,
         );
         if hit {
             clicked_pin = Some(pin.number);
@@ -402,17 +408,12 @@ pub fn render_pins_and_detect_clicks(
             selected == Some(pin.number),
         );
         // Pin number inside the chip, just above the bottom edge.
-        let num_color = if pin.has_bus_function() {
-            NUM_COLOR_BUS
-        } else {
-            NUM_COLOR
-        };
-        painter.text(
+        draw_number(
+            painter,
+            selected.is_none(),
             egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.bottom() - NUM_MARGIN),
             egui::Align2::CENTER_BOTTOM,
-            pin.number,
-            num_font(),
-            num_color,
+            pin,
         );
         if hit {
             clicked_pin = Some(pin.number);
