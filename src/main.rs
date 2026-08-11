@@ -36,6 +36,7 @@ pub mod reveal;
 pub mod rtt;
 pub mod serial;
 pub mod serial_bridge;
+pub mod serial_frames;
 pub mod serial_matrix;
 pub mod serial_plot;
 pub mod size;

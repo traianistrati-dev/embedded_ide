@@ -132,6 +132,16 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             serial.plot_on = false;
         }
         ui.checkbox(&mut serial.hex, "Hex");
+        // One row per protocol frame — the view that answers "what did each
+        // message look like", which a byte stream never can.
+        ui.checkbox(&mut serial.frames_on, "Frames").on_hover_text(
+            "List one row per protocol FRAME instead of the raw stream.\n\
+             Delimited by the Find start / Find end patterns, or by a length field \
+             inside the frame (pick the mode above the list).\n\
+             Bytes no frame claimed stay visible as grey `raw` rows, and a frame that \
+             broke is marked BAD — a decoder that drops what it can't parse looks \
+             exactly like a quiet link.",
+        );
         // Timestamped view: both directions as blocks, with the gap between
         // them — the only way to read a send→receive latency here.
         ui.checkbox(&mut serial.stamps, "Time")
@@ -484,6 +494,109 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
         });
 }
 
+/// One row per protocol frame, with the framing rules above the list.
+///
+/// The Find fields double as the marker patterns — they already hold the header
+/// and tail the user typed to measure the payload, so asking for them twice
+/// would be asking the same question twice.
+fn show_frames_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
+    use crate::serial_frames::{FrameMode, frames_from_log, frames_log_job, frames_summary};
+
+    // Framing controls.
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Framing:");
+        ui.selectable_value(&mut serial.frame_spec.mode, FrameMode::Markers, "Markers")
+            .on_hover_text(
+                "A frame runs from the Find start pattern to the Find end pattern.\n\
+                 Simple and exact when the protocol has a unique tail.",
+            );
+        ui.selectable_value(&mut serial.frame_spec.mode, FrameMode::Length, "Length")
+            .on_hover_text(
+                "A frame starts at the Find start pattern and ends where its own length \
+                 field says.\nThe only option without a unique tail — and the only one \
+                 that can tell a TRUNCATED frame from a short one.",
+            );
+        ui.separator();
+        if serial.frame_spec.mode == FrameMode::Length {
+            ui.label("len@");
+            ui.add(
+                egui::DragValue::new(&mut serial.frame_spec.len_offset)
+                    .range(0..=64)
+                    .speed(0.1),
+            )
+            .on_hover_text("Byte offset of the length field, counted from the header's FIRST byte.");
+            ui.label("width");
+            ui.add(
+                egui::DragValue::new(&mut serial.frame_spec.len_width)
+                    .range(1..=4)
+                    .speed(0.05),
+            )
+            .on_hover_text("Length field width in bytes.");
+            ui.checkbox(&mut serial.frame_spec.len_le, "LE")
+                .on_hover_text("Little-endian length field (off = big-endian).");
+            ui.label("tail");
+            ui.add(
+                egui::DragValue::new(&mut serial.frame_spec.tail_len)
+                    .range(0..=64)
+                    .speed(0.1),
+            )
+            .on_hover_text(
+                "Bytes AFTER the counted length — a trailer or checksum the length \
+                 field doesn't include.",
+            );
+            ui.checkbox(&mut serial.frame_spec.len_covers_header, "len covers header")
+                .on_hover_text(
+                    "On: the length counts from the header's first byte. Off: it counts \
+                     only what follows the field. Datasheets use both — the wrong one \
+                     shifts every frame.",
+                );
+        }
+    });
+
+    // The Find fields ARE the markers.
+    serial.frame_spec.start = parse_hex_search(&serial.search);
+    serial.frame_spec.end = parse_hex_search(&serial.search2);
+
+    let (job, summary) = {
+        let st = serial.state.lock().unwrap();
+        let frames = frames_from_log(&st.log, &serial.frame_spec);
+        let summary = frames_summary(&frames);
+        (
+            frames_log_job(
+                &frames,
+                serial.hex,
+                12.0,
+                &serial.frame_spec.start,
+                &serial.frame_spec.end,
+                st.epoch,
+            ),
+            summary,
+        )
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(summary)
+                .size(10.5)
+                .color(egui::Color32::from_gray(150)),
+        );
+        if serial.frame_spec.start.is_empty() {
+            ui.label(
+                egui::RichText::new("— set Find start to the frame header")
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(210, 170, 90)),
+            );
+        }
+    });
+    egui::ScrollArea::both()
+        .id_salt("serial_frames_view")
+        .stick_to_bottom(serial.autoscroll)
+        .auto_shrink([false, false])
+        .max_height(rx_height - 22.0)
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(job).selectable(true));
+        });
+}
+
 /// The classic RX view: coloured hex (+ unique-sequences legend) or decoded
 /// text, with the Find highlights. Extracted unchanged so the Plot toggle can
 /// swap it for the live plotter.
@@ -494,6 +607,14 @@ fn show_rx_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
     // gap on a `<<` line right after a `>>` line IS the send→receive latency,
     // which the raw byte stream cannot express: it has no notion of when
     // anything arrived, or of who said it.
+    // ── Frames view ───────────────────────────────────────────────────────────
+    // One row per protocol frame. Checked before the timed view: framing is a
+    // stronger statement about the stream than "split it where it went quiet".
+    if serial.frames_on {
+        show_frames_view(ui, serial, rx_height);
+        return;
+    }
+
     if serial.stamps {
         let job = {
             let st = serial.state.lock().unwrap();

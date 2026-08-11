@@ -184,6 +184,11 @@ pub struct SerialMonitor {
     pub plot: crate::serial_plot::PlotState,
     /// The 2D matrix view of framed payloads (see `crate::serial_matrix`).
     pub matrix: crate::serial_matrix::MatrixView,
+    /// `true` → the RX area lists one row per protocol FRAME instead of the
+    /// byte stream (see `crate::serial_frames`).
+    pub frames_on: bool,
+    /// How frames are delimited for that view.
+    pub frame_spec: crate::serial_frames::FrameSpec,
 
     // ── Bridge (MITM) mode ───────────────────────────────────────────────────
     /// Relay the port instead of opening it directly (see
@@ -238,6 +243,8 @@ impl Default for SerialMonitor {
             plot_on: false,
             plot: Default::default(),
             matrix: Default::default(),
+            frames_on: false,
+            frame_spec: Default::default(),
             bridge: false,
             bridge_port: String::new(),
             pair: None,
@@ -617,7 +624,7 @@ pub const DIR_SENSOR: egui::Color32 = egui::Color32::from_rgb(110, 200, 225);
 
 /// Every start index at which `pat` occurs in `hay`. Empty pattern → no hits,
 /// so an empty Find field never "matches everything".
-fn match_positions(hay: &[u8], pat: &[u8]) -> Vec<usize> {
+pub(crate) fn match_positions(hay: &[u8], pat: &[u8]) -> Vec<usize> {
     if pat.is_empty() || pat.len() > hay.len() {
         return Vec::new();
     }
