@@ -42,6 +42,55 @@ pub fn rcc_recipe(family: &str) -> Option<(ReadSpec, RccDescriptor)> {
     }
 }
 
+/// The graph node ids this family's code generation READS, by id.
+///
+/// The clock editor needs this: nodes are addressed by id everywhere, so
+/// renaming or deleting one of these silently changes (or defaults) what lands
+/// in `main.rs` — a failure with no error message anywhere. The editor marks
+/// them and reports the ones that have gone missing.
+///
+/// Kept next to the readers that consume them, so a new family's ids arrive with
+/// its [`ReadSpec`] instead of drifting in a list elsewhere.
+pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
+    match family {
+        // Its own HAL: `graph_to_stm32f1` reads the whole F103 tree.
+        "stm32f1" => vec![
+            "hse",
+            "pllsrc",
+            "pllxtpre",
+            "pll_input",
+            "pllmul",
+            "sw",
+            "ahb",
+            "apb1",
+            "apb2",
+            "adc",
+            "usb",
+            "systick",
+            "rtc",
+            "mco",
+        ],
+        // esp-hal exposes only the CPU clock.
+        "esp32c3" => vec!["cpu"],
+        _ => match rcc_recipe(family) {
+            Some((spec, _)) => {
+                let mut ids = vec![
+                    "hse",
+                    "sw",
+                    "pllsrc",
+                    "pllm",
+                    "plln",
+                    "ahb",
+                    spec.pll_out_node,
+                ];
+                ids.extend(spec.apb.iter().map(|(_, node)| *node));
+                ids
+            }
+            None => Vec::new(),
+        },
+    }
+}
+
 /// Emit the RCC clock block for an embassy STM32 `family` from its Clock-tab
 /// graph. Families with no recipe — or a non-graph / reset-equivalent clock —
 /// get embassy's reset default. Replaces the per-family `f4::clock_block` /
@@ -724,6 +773,34 @@ mod tests {
         }
         let spec = ReadSpec::f4();
         assert_eq!(read_rcc_values(&g, &spec), spec.reset);
+    }
+
+    /// The editor asks which node ids code generation reads, so it can mark them
+    /// and report the ones that went missing. They must match what the readers
+    /// actually look up.
+    #[test]
+    fn codegen_node_ids_match_what_the_readers_look_up() {
+        let f4 = codegen_node_ids("stm32f4");
+        for id in [
+            "hse", "sw", "pllsrc", "pllm", "plln", "ahb", "pllp", "apb1", "apb2",
+        ] {
+            assert!(f4.contains(&id), "F4 reads `{id}`: {f4:?}");
+        }
+        assert!(!f4.contains(&"pllr"), "that is the WBA/G4 output leg");
+
+        // WBA's PLL output is R, and it has the extra APB7 bus.
+        let wba = codegen_node_ids("stm32wba");
+        assert!(wba.contains(&"pllr") && wba.contains(&"apb7"), "{wba:?}");
+
+        // G0 has a single APB bus — the list follows the ReadSpec, not a guess.
+        let g0 = codegen_node_ids("stm32g0");
+        assert!(g0.contains(&"apb1") && !g0.contains(&"apb2"), "{g0:?}");
+
+        // The families on their own generators.
+        assert!(codegen_node_ids("stm32f1").contains(&"pllmul"));
+        assert_eq!(codegen_node_ids("esp32c3"), vec!["cpu"]);
+        // No recipe, nothing to protect.
+        assert!(codegen_node_ids("stm8").is_empty());
     }
 
     #[test]

@@ -7,18 +7,15 @@
 //!   input is obvious — like CubeMX.
 //! - Frequency tags/boxes turn red past their datasheet limit.
 //!
-//! The figure lives in a fixed virtual space and scales to the panel width.
+//! The figure is drawn at its natural size ([`ClockLayout::bounds`]); the caller
+//! wraps it in an [`egui::Scene`], which owns zoom and pan.
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Shape, Stroke, UiBuilder, Vec2};
 
-use super::super::graph::layout::{ClockLayout, ValueSrc, Widget};
+use super::super::graph::layout::{ClockLayout, NodeBox, ValueSrc, Widget};
 use super::super::graph::model::{ClockGraph, NodeState};
 use super::super::graph::validate::ceiling_for;
 use super::super::model::ClockLimits;
-
-// ── Virtual canvas ────────────────────────────────────────────────────────────
-const VW: f32 = 1000.0;
-const VH: f32 = 790.0;
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 const BG: Color32 = Color32::from_rgb(26, 28, 34);
@@ -32,48 +29,45 @@ const MUX_FILL: Color32 = Color32::from_rgb(50, 56, 70);
 const MUX_STROKE: Color32 = Color32::from_rgb(95, 140, 215);
 const FREQ_OK: Color32 = Color32::from_rgb(120, 205, 140);
 const FREQ_BAD: Color32 = Color32::from_rgb(235, 95, 85);
+/// Outline of a draggable box in edit mode — amber, so "this is a layout edit"
+/// reads differently from the blue mux selection.
+const EDIT_STROKE: Color32 = Color32::from_rgb(225, 175, 75);
+/// The selected node, and the wire being drawn — brighter than the rest so the
+/// current subject of the properties panel is unmistakable.
+const SELECT_STROKE: Color32 = Color32::from_rgb(255, 232, 150);
 
+/// Places the layout's virtual coordinates at the allocated canvas origin.
+///
+/// A pure translation: zoom belongs to the enclosing [`egui::Scene`], which
+/// transforms the whole layer, so the diagram is painted 1:1 and font sizes are
+/// plain point values again.
 #[derive(Clone, Copy)]
 pub(crate) struct Tf {
     origin: Pos2,
-    scale: f32,
 }
 impl Tf {
     fn p(&self, x: f32, y: f32) -> Pos2 {
-        self.origin + Vec2::new(x, y) * self.scale
+        self.origin + Vec2::new(x, y)
     }
     fn r(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
-        Rect::from_min_size(self.p(x, y), Vec2::new(w, h) * self.scale)
-    }
-    fn fs(&self, pt: f32) -> f32 {
-        (pt * self.scale).max(6.0)
+        Rect::from_min_size(self.p(x, y), Vec2::new(w, h))
     }
 }
 
-/// Shared static-diagram renderer. Scales `lay` to the viewport, paints the
-/// background + wires + blocks/outputs/tags/labels/mux-titles, and returns the
-/// canvas `Rect` + transform. `resolve` supplies each box/tag's frequency —
+/// Shared static-diagram renderer. Allocates the layout's natural size, paints
+/// the background + wires + blocks/outputs/tags/labels/mux-titles, and returns
+/// the canvas `Rect` + transform. `resolve` supplies each box/tag's frequency —
 /// `value_of` for the F103 typed path, `value_from_graph` for imported graph
 /// clocks. No interactivity (callers add their own).
 pub(crate) fn draw_static_diagram<R: Fn(&ValueSrc) -> u32>(
     ui: &mut egui::Ui,
     lay: &ClockLayout,
     l: &ClockLimits,
-    avail_w: f32,
-    avail_h: f32,
-    zoom: f32,
     resolve: R,
 ) -> (Rect, Tf) {
-    // Fit the whole diagram into the viewport (both dimensions), then apply zoom.
-    let fit = (avail_w / VW).min(avail_h / VH);
-    let scale = (fit * zoom).max(0.12);
-    let size = Vec2::new(VW * scale, VH * scale);
-
-    let (rect, _resp) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let tf = Tf {
-        origin: rect.min,
-        scale,
-    };
+    let (w, h) = lay.bounds();
+    let (rect, _resp) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
+    let tf = Tf { origin: rect.min };
 
     let clip = rect.intersect(ui.clip_rect());
     let painter = ui.painter().with_clip_rect(clip);
@@ -136,10 +130,147 @@ fn draw_static<R: Fn(&ValueSrc) -> u32>(
             tf.p(mt.x, mt.y),
             Align2::CENTER_BOTTOM,
             &mt.text,
-            FontId::proportional(tf.fs(9.0)),
+            FontId::proportional(9.0),
             DIM_C,
         );
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Edit mode — drag the node boxes
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// What the edit overlay saw this frame. Everything is reported back rather
+/// than acted on here, because the actual edits are graph operations
+/// ([`super::super::graph::edit`]) that the caller owns.
+#[derive(Default)]
+pub(crate) struct EditHits {
+    /// A box is being dragged right now.
+    pub dragged: bool,
+    /// A box was clicked — the new selection.
+    pub select: Option<String>,
+    /// The output port (right edge) was clicked: start wiring from here.
+    pub out_port: Option<String>,
+    /// The input port (left edge) was clicked: finish wiring into here.
+    pub in_port: Option<String>,
+}
+
+/// Edit-mode overlay: draw each [`NodeBox`] as a draggable plate with an input
+/// and an output port, move it with the pointer, and report clicks.
+///
+/// This REPLACES [`interactive_graph`] rather than sitting next to it — the
+/// value controls occupy exactly these rectangles, so a drag would otherwise
+/// fight the dropdown underneath it. Values stay readable: the name labels above
+/// and the frequency tags below are painted by the static layer either way.
+///
+/// `drag_delta` is already divided by the enclosing [`egui::Scene`]'s zoom, so a
+/// box follows the cursor exactly at any zoom level.
+pub(crate) fn edit_nodes(
+    ui: &mut egui::Ui,
+    tf: &Tf,
+    nodes: &mut [NodeBox],
+    selected: Option<&str>,
+    linking: Option<&str>,
+) -> EditHits {
+    let mut hits = EditHits::default();
+
+    for nb in nodes.iter_mut() {
+        let rect = tf.r(nb.x, nb.y, nb.w, nb.h);
+        let resp = ui.interact(
+            rect,
+            egui::Id::new(("clock_node_drag", &nb.node)),
+            egui::Sense::click_and_drag(),
+        );
+        let is_sel = selected == Some(nb.node.as_str());
+        let active = resp.dragged() || resp.hovered() || is_sel;
+        let p = ui.painter();
+        p.rect(
+            rect,
+            3.0,
+            if resp.dragged() { MUX_FILL } else { BOX_FILL },
+            Stroke::new(
+                if is_sel {
+                    2.4
+                } else if active {
+                    1.8
+                } else {
+                    1.0
+                },
+                if is_sel { SELECT_STROKE } else { EDIT_STROKE },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            &nb.node,
+            FontId::proportional(9.0),
+            LABEL_C,
+        );
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            // Keep the diagram in positive space — `ClockLayout::bounds` measures
+            // the far edge, so anything dragged past the origin would be clipped.
+            nb.x = (nb.x + d.x).max(0.0);
+            nb.y = (nb.y + d.y).max(0.0);
+            hits.dragged = true;
+        }
+        if resp.clicked() {
+            hits.select = Some(nb.node.clone());
+        }
+
+        // Ports last, so they sit on top of the plate and win the click.
+        let wiring_from = linking == Some(nb.node.as_str());
+        if port(
+            ui,
+            tf.p(nb.x + nb.w, nb.y + nb.h / 2.0),
+            &nb.node,
+            "out",
+            wiring_from,
+        ) {
+            hits.out_port = Some(nb.node.clone());
+        }
+        if port(
+            ui,
+            tf.p(nb.x, nb.y + nb.h / 2.0),
+            &nb.node,
+            "in",
+            linking.is_some() && !wiring_from,
+        ) {
+            hits.in_port = Some(nb.node.clone());
+        }
+    }
+
+    // The wire being drawn, from its source port to the cursor.
+    if let Some(from) = linking
+        && let Some(nb) = nodes.iter().find(|n| n.node == from)
+        && let Some(cursor) = ui.ctx().pointer_latest_pos()
+    {
+        ui.painter().line_segment(
+            [tf.p(nb.x + nb.w, nb.y + nb.h / 2.0), cursor],
+            Stroke::new(1.5, SELECT_STROKE),
+        );
+    }
+
+    hits
+}
+
+/// One connection port. `armed` highlights it as a valid next click.
+fn port(ui: &mut egui::Ui, center: Pos2, node: &str, side: &'static str, armed: bool) -> bool {
+    let rect = Rect::from_center_size(center, Vec2::splat(11.0));
+    let resp = ui.interact(
+        rect,
+        egui::Id::new(("clock_port", node, side)),
+        egui::Sense::click(),
+    );
+    let hot = armed || resp.hovered();
+    ui.painter().circle(
+        center,
+        if hot { 5.0 } else { 3.5 },
+        if hot { SELECT_STROKE } else { MUX_FILL },
+        Stroke::new(1.2, if hot { SELECT_STROKE } else { STROKE_C }),
+    );
+    resp.clicked()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -267,7 +398,7 @@ fn graph_combo(
     let mut picked = None;
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
         egui::ComboBox::from_id_salt(("graph_combo", id))
-            .selected_text(egui::RichText::new(cur_label).size(tf.fs(9.0)))
+            .selected_text(egui::RichText::new(cur_label).size(9.0))
             .width(rect.width())
             .show_ui(ui, |ui| {
                 for (label, state) in options {
@@ -346,12 +477,12 @@ fn mux_radios(
             tf.p(lbl_x, cy),
             lbl_align,
             *label,
-            FontId::proportional(tf.fs(8.0)),
+            FontId::proportional(8.0),
             DIM_C,
         );
 
         let center = tf.p(radio_cx, cy);
-        let rsz = 12.0 * tf.scale;
+        let rsz = 12.0;
         let rrect = Rect::from_center_size(center, Vec2::splat(rsz));
         let is_sel = selected == Some(i);
         if ui.put(rrect, egui::RadioButton::new(is_sel, "")).clicked() {
@@ -379,7 +510,7 @@ fn block(p: &egui::Painter, tf: &Tf, x: f32, y: f32, w: f32, h: f32, title: &str
         r.center(),
         Align2::CENTER_CENTER,
         title,
-        FontId::proportional(tf.fs(9.0)),
+        FontId::proportional(9.0),
         LABEL_C,
     );
 }
@@ -410,14 +541,14 @@ fn out_box(
         tf.p(x + 6.0, y + h / 2.0),
         Align2::LEFT_CENTER,
         mhz(hz),
-        FontId::monospace(tf.fs(9.5)),
+        FontId::monospace(9.5),
         col,
     );
     p.text(
         tf.p(x + w - 6.0, y + h / 2.0),
         Align2::RIGHT_CENTER,
         label,
-        FontId::proportional(tf.fs(8.5)),
+        FontId::proportional(8.5),
         DIM_C,
     );
 }
@@ -427,7 +558,7 @@ fn label_above(p: &egui::Painter, tf: &Tf, x: f32, y: f32, text: &str) {
         tf.p(x, y),
         Align2::LEFT_BOTTOM,
         text,
-        FontId::proportional(tf.fs(8.5)),
+        FontId::proportional(8.5),
         DIM_C,
     );
 }
@@ -452,7 +583,7 @@ fn arrowhead(p: &egui::Painter, tf: &Tf, from: (f32, f32), to: (f32, f32)) {
         return;
     }
     let n = Vec2::new(-dir.y, dir.x);
-    let s = 5.0 * tf.scale.max(0.5);
+    let s = 5.0;
     let p1 = b - dir * s + n * (s * 0.5);
     let p2 = b - dir * s - n * (s * 0.5);
     p.add(Shape::convex_polygon(vec![b, p1, p2], WIRE_C, Stroke::NONE));
@@ -464,7 +595,7 @@ fn tag(p: &egui::Painter, tf: &Tf, x: f32, y: f32, value: &str, bad: bool, name:
         tf.p(x, y),
         Align2::LEFT_CENTER,
         format!("{name} {value}"),
-        FontId::monospace(tf.fs(9.0)),
+        FontId::monospace(9.0),
         color,
     );
 }

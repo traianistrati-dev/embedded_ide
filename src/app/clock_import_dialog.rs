@@ -6,18 +6,46 @@
 //! + numeric self-check live in `clock::graph::extract`, so a reply that
 //! doesn't compute the datasheet's SYSCLK is rejected before it reaches the
 //! form. On success it attaches the graph via `McuForm::set_imported_clock`.
+//!
+//! **Two passes** (Phase 6): "Extract spine" is the original call; "Extract
+//! branches" then asks for everything the spine contract cannot express (the
+//! low-speed paths, MCO, the peripheral kernel selectors) and MERGES it onto the
+//! tree already in the form — see `clock::graph::extract_tree`. Splitting it
+//! keeps the working spine banked instead of putting it behind one
+//! all-or-nothing reply, and each pass carries its own numeric self-check.
 
 use std::sync::{Arc, Mutex};
 
 use super::AppIde;
-use crate::panels::mcu_module::datasheet_import::{self as ds, ClockExtraction, Source};
+use crate::panels::mcu_module::clock::graph::GraphClock;
+use crate::panels::mcu_module::clock::graph::extract_tree::MergeReport;
+use crate::panels::mcu_module::datasheet_import::{self as ds, Source};
 use crate::panels::mcu_module::mcu_form::McuForm;
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
+/// What either pass produced. The two calls answer with different shapes; the
+/// dialog only cares about the resulting tree, whether it was cached, and — for
+/// the second pass — what the merge did.
+struct Outcome {
+    clock: GraphClock,
+    from_cache: bool,
+    /// `Some` for the branch pass: nodes added / kept / wired / skipped.
+    report: Option<MergeReport>,
+}
+
 enum ClockJob {
     Running,
-    Done(Result<ClockExtraction, String>),
+    Done(Result<Outcome, String>),
+}
+
+/// Which extraction the worker is running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// The clock spine, with its own contract and SYSCLK self-check.
+    Spine,
+    /// Everything else, merged onto the spine already in the form.
+    Branches,
 }
 
 struct PdfPick {
@@ -105,13 +133,34 @@ impl AppIde {
                                 .get("sysclk")
                                 .copied()
                                 .unwrap_or(0);
+                        let cached = if ex.from_cache { " · from cache" } else { "" };
+                        di.note = Some(match &ex.report {
+                            // Second pass: what matters is what the merge did.
+                            Some(r) => format!(
+                                "{} Branches merged: {}{}. Review them in the Clock tab.",
+                                ph::CHECK_CIRCLE,
+                                r.summary(),
+                                cached
+                            ),
+                            None => format!(
+                                "{} Clock imported ({} MHz SYSCLK){}. Review it in the Clock tab.",
+                                ph::CHECK_CIRCLE,
+                                sysclk / 1_000_000,
+                                cached
+                            ),
+                        });
+                        // Wires the datasheet asked for but the merge refused —
+                        // worth showing, they are where a re-run should look.
+                        if let Some(r) = &ex.report
+                            && !r.skipped.is_empty()
+                        {
+                            di.note.get_or_insert_default().push_str(&format!(
+                                "
+Skipped: {}",
+                                r.skipped.join("; ")
+                            ));
+                        }
                         form.set_imported_clock(ex.clock);
-                        di.note = Some(format!(
-                            "{} Clock imported ({} MHz SYSCLK){}. Review it in the Clock tab.",
-                            ph::CHECK_CIRCLE,
-                            sysclk / 1_000_000,
-                            if ex.from_cache { " · from cache" } else { "" }
-                        ));
                         di.error = None;
                     }
                     Some(Err(e)) => {
@@ -127,8 +176,20 @@ impl AppIde {
         }
         let running = di.job.is_some();
 
-        let mut do_extract = false;
+        let mut do_extract: Option<Pass> = None;
         let mut do_save_key = false;
+
+        // The tree the second pass would merge onto — whatever the form holds
+        // right now (an AI spine, a `.ron` import, or a family template; the
+        // compact family forms are upgraded to a graph the same way loading a
+        // chip does).
+        let base_clock: Option<GraphClock> = {
+            use crate::panels::mcu_module::clock::{ClockConfig, ClockLimits};
+            match form.effective_clock().to_config(&ClockLimits::default()) {
+                ClockConfig::Graph(g) => Some(g),
+                ClockConfig::None => None,
+            }
+        };
 
         let force_default = !di.shown_once || (di.prev_maximized && !di.maximized);
         di.prev_maximized = di.maximized;
@@ -146,9 +207,10 @@ impl AppIde {
             super::datasheet_import_dialog::maximize_button(ui, &mut di.maximized);
             ui.label(
                 egui::RichText::new(
-                    "Extracts the clock SPINE (sources -> PLL -> SYSCLK -> AHB -> APB) as a \
-                         graph and attaches it to this chip. The result is verified against the \
-                         datasheet's own default SYSCLK before it is accepted.",
+                    "Two passes. SPINE (sources -> PLL -> SYSCLK -> AHB -> APB) builds the tree; \
+                         BRANCHES then adds the low-speed paths, MCO and the peripheral kernel \
+                         clocks on top of it. Each pass is verified against frequencies the \
+                         datasheet itself states before it is accepted.",
                 )
                 .size(11.0)
                 .color(egui::Color32::from_gray(160)),
@@ -277,11 +339,27 @@ impl AppIde {
                 let has_source = di.pdf.is_some() || !di.text.trim().is_empty();
                 let can = !running && !di.api_key.trim().is_empty() && has_source;
                 if ui
-                    .add_enabled(can, egui::Button::new(format!("{} Extract", ph::SPARKLE)))
+                    .add_enabled(can, egui::Button::new(format!("{} Extract spine", ph::SPARKLE)))
+                    .on_hover_text("Pass 1: sources -> PLL -> SYSCLK -> AHB -> APB")
                     .on_disabled_hover_text("needs an API key and a PDF or pasted text")
                     .clicked()
                 {
-                    do_extract = true;
+                    do_extract = Some(Pass::Spine);
+                }
+                // Pass 2 needs something to merge ONTO, so it only lights up
+                // once a tree exists.
+                if ui
+                    .add_enabled(
+                        can && base_clock.is_some(),
+                        egui::Button::new(format!("{} Extract branches", ph::SPARKLE)),
+                    )
+                    .on_hover_text(
+                        "Pass 2: the low-speed paths, MCO and the peripheral kernel clocks,                          merged onto the tree you already have",
+                    )
+                    .on_disabled_hover_text("extract (or import) the spine first")
+                    .clicked()
+                {
+                    do_extract = Some(Pass::Branches);
                 }
                 if running {
                     crate::app::helpers::spinner::throttled_spinner(ui, 12.0);
@@ -325,7 +403,9 @@ impl AppIde {
                 Err(e) => format!("{} {e}", ph::X_CIRCLE),
             });
         }
-        if do_extract && di.job.is_none() {
+        if let Some(pass) = do_extract
+            && di.job.is_none()
+        {
             let shared = Arc::new(Mutex::new(ClockJob::Running));
             di.job = Some(shared.clone());
             di.error = None;
@@ -343,8 +423,30 @@ impl AppIde {
             };
             let use_cache = !di.force_reextract;
             let ctx = ui.ctx().clone();
+            let base = base_clock.clone();
             std::thread::spawn(move || {
-                let res = ds::call_ai_clock(provider, &key, &model, &extra, &source, use_cache);
+                let res = match pass {
+                    Pass::Spine => ds::call_ai_clock(
+                        provider, &key, &model, &extra, &source, use_cache,
+                    )
+                    .map(|ex| Outcome {
+                        clock: ex.clock,
+                        from_cache: ex.from_cache,
+                        report: None,
+                    }),
+                    // `base` is Some — the button is disabled otherwise.
+                    Pass::Branches => match base {
+                        Some(base) => ds::call_ai_clock_branches(
+                            provider, &key, &model, &extra, &source, &base, use_cache,
+                        )
+                        .map(|ex| Outcome {
+                            clock: ex.clock,
+                            from_cache: ex.from_cache,
+                            report: Some(ex.report),
+                        }),
+                        None => Err("No clock tree to merge into.".to_string()),
+                    },
+                };
                 *shared.lock().unwrap() = ClockJob::Done(res);
                 ctx.request_repaint();
             });

@@ -36,6 +36,8 @@ pub fn ceiling_for(key: LimitKey, l: &ClockLimits) -> Option<u32> {
         LimitKey::Pclk2Max => Some(l.pclk2_max),
         LimitKey::AdcclkMax => Some(l.adcclk_max),
         LimitKey::UsbclkHz => None,
+        // A node-carried ceiling needs no lookup.
+        LimitKey::Hz(hz) => Some(hz),
     }
 }
 
@@ -116,6 +118,57 @@ mod tests {
         for id in ["sysclk", "pllclk", "hclk", "pclk2"] {
             assert!(flagged.contains(&id.to_string()), "expected {id} flagged");
         }
+    }
+
+    /// A node-carried ceiling needs no `ClockLimits` field — this is how clocks
+    /// the fixed struct doesn't name (PCLK7, ADC4, SAI…) get validated.
+    #[test]
+    fn a_node_carried_hz_ceiling_is_checked() {
+        use super::super::eval::evaluate;
+        use super::super::model::{Edge, Node, NodeKind, NodeState};
+
+        let graph = |limit_hz: u32| ClockGraph {
+            nodes: vec![
+                Node {
+                    id: "src".into(),
+                    kind: NodeKind::Source {
+                        min_hz: 100_000_000,
+                        max_hz: 100_000_000,
+                        gated: false,
+                    },
+                    state: NodeState::Source {
+                        enabled: true,
+                        hz: 100_000_000,
+                    },
+                    limit: None,
+                },
+                Node {
+                    id: "pclk7".into(),
+                    kind: NodeKind::Output,
+                    state: NodeState::Fixed,
+                    limit: Some(LimitKey::Hz(limit_hz)),
+                },
+            ],
+            edges: vec![Edge {
+                from: "src".into(),
+                to: "pclk7".into(),
+                input: 0,
+            }],
+        };
+
+        let flagged = |limit_hz: u32| {
+            let g = graph(limit_hz);
+            let f = evaluate(&g);
+            over_limits(&g, &ClockLimits::default(), &f)
+        };
+        assert!(
+            flagged(100_000_000).is_empty(),
+            "exactly at the ceiling is OK"
+        );
+        let over = flagged(36_000_000);
+        assert_eq!(over.len(), 1);
+        assert_eq!(over[0].node, "pclk7");
+        assert_eq!(over[0].limit, 36_000_000);
     }
 
     #[test]

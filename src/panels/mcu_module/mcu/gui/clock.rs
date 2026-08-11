@@ -5,9 +5,20 @@ use crate::panels::mcu_module::mcu::model::Mcu;
 use eframe::egui;
 
 impl Mcu {
-    /// Render the "Clock" tab. Returns `true` if the configuration changed
-    /// (the app regenerates `main.rs` from MCU state every frame in `init_frame`).
-    pub fn draw_clock_tab(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Render the "Clock" tab. The returned [`ClockTabOut`] says whether the
+    /// configuration changed (the app regenerates `main.rs` from MCU state every
+    /// frame in `init_frame`) and whether the user asked to write the edited tree
+    /// back into the chip definition.
+    ///
+    /// `positions` are the project's dragged node positions (edit mode reads and
+    /// writes them); they persist in `project_structure.config`, not in the
+    /// clock config, so moving a box never regenerates code.
+    pub fn draw_clock_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        positions: &mut crate::panels::mcu_module::structure_config::ClockPositions,
+        note: &mut String,
+    ) -> clock_gui::ClockTabOut {
         // Destructure so the config borrows mutably while the chip's limits,
         // presets and family stay readable alongside it.
         let Mcu {
@@ -27,6 +38,8 @@ impl Mcu {
                 clock_presets,
                 clock_defaults.as_ref(),
                 family,
+                positions,
+                note,
             ),
             ClockConfig::None => {
                 ui.centered_and_justified(|ui| {
@@ -38,7 +51,7 @@ impl Mcu {
                         .color(egui::Color32::GRAY),
                     );
                 });
-                false
+                clock_gui::ClockTabOut::default()
             }
         }
     }

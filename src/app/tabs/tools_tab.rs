@@ -12,10 +12,7 @@ use std::sync::{Arc, Mutex};
 /// selectable text that survives the rest of the session, so the user can come
 /// back to it after plugging the probe in. The clipboard gets it too, because
 /// retyping a path is where this goes wrong.
-fn stage_udev_rules(
-    tools_state: &Arc<Mutex<required_tools::ToolsState>>,
-    ctx: &egui::Context,
-) {
+fn stage_udev_rules(tools_state: &Arc<Mutex<required_tools::ToolsState>>, ctx: &egui::Context) {
     let mut s = tools_state.lock().unwrap();
     match crate::udev::write_staged_rules() {
         Ok(path) => {
@@ -24,8 +21,7 @@ fn stage_udev_rules(
             s.push_log_public("  Install them with (needs root):".to_string());
             s.push_log_public(format!("  {cmd}"));
             s.push_log_public(
-                "  Then UNPLUG AND REPLUG the probe — udev applies rules at plug time."
-                    .to_string(),
+                "  Then UNPLUG AND REPLUG the probe — udev applies rules at plug time.".to_string(),
             );
             ctx.copy_text(cmd);
             s.push_log_public("  (command copied to the clipboard)".to_string());
@@ -345,10 +341,7 @@ pub fn show_tools_tab(
                             // actually plugged in, so the command is correct on
                             // Arch (`uucp`) as well as Debian (`dialout`).
                             if row.name == required_tools::SERIAL_ACCESS_TOOL
-                                && matches!(
-                                    row.status,
-                                    ToolStatus::Missing | ToolStatus::Failed(_)
-                                )
+                                && matches!(row.status, ToolStatus::Missing | ToolStatus::Failed(_))
                             {
                                 if ui
                                     .add_enabled(

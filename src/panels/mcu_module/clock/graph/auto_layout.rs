@@ -12,35 +12,53 @@
 //!   every wire flows left→right at least one column);
 //! - **y** = ordered within each column by a few barycenter sweeps, so edges
 //!   cross as little as the heuristic manages;
-//! - positions are fitted into the diagram's fixed 1000×790 virtual canvas.
+//! - positions use a FIXED pitch, so the diagram grows with the graph. It used
+//!   to be squeezed into a 1000×790 canvas, which only shrank a large tree until
+//!   its labels were unreadable; the Clock tab's `Scene` pans and zooms instead.
 //!
-//! Each node emits: a name label above, a control (dropdown for mux / divider /
-//! choice / multiplier, drag-MHz for a source, else a static box) and a live
-//! frequency tag below; each edge emits an orthogonal 3-segment wire.
+//! Two steps, so an editor can re-run only the second one:
+//! - [`place`] → one [`NodeBox`] per node (WHERE things go);
+//! - [`derive`] → the drawable primitives from those boxes: per node a name
+//!   label above, a control (dropdown for mux / divider / choice / multiplier /
+//!   gate, drag-MHz for a source, else a static box) and a live frequency tag
+//!   below; per edge an orthogonal wire routed through a per-edge lane.
+//!
+//! The boxes are the SOURCE OF TRUTH and are kept in [`ClockLayout::nodes`]:
+//! move one, call `derive` again, and the whole node moves with it.
 
 use std::collections::{HashMap, VecDeque};
 
-use super::layout::{BlockDef, ClockLayout, LabelDef, TagDef, ValueSrc, Widget};
-use super::model::{ClockGraph, NodeKind, NodeState};
+use super::layout::{BlockDef, ClockLayout, LabelDef, NodeBox, TagDef, ValueSrc, Widget};
+use super::model::{ClockGraph, Edge, NodeKind, NodeState};
 
-// The renderer's fixed virtual canvas (see `gui/diagram.rs`). Everything must
-// fit inside it — content beyond is clipped, so positions are fitted, not free.
-const VW: f32 = 1000.0;
-const VH: f32 = 790.0;
 const MARGIN: f32 = 46.0;
 const NODE_W: f32 = 96.0;
 const NODE_H: f32 = 26.0;
-/// Caps so a small graph isn't stretched across the whole canvas.
-const COL_CAP: f32 = 190.0;
-const ROW_CAP: f32 = 74.0;
+/// Distance between adjacent columns / rows. A fixed pitch, so the diagram grows
+/// with the graph instead of being compressed into a fixed canvas — the Scene in
+/// `gui/mod.rs` supplies zoom and pan.
+const COL_PITCH: f32 = 190.0;
+const ROW_PITCH: f32 = 74.0;
+/// Where a wire turns down before entering its target, and how far apart the
+/// lanes of several wires into the SAME node are kept.
+const LANE_GAP: f32 = 16.0;
+const LANE_STEP: f32 = 9.0;
 
 /// Compute a full [`ClockLayout`] from a graph's topology. Deterministic and
 /// pure — the same graph always lays out identically.
+///
+/// Two steps, separated so an editor can re-run only the second one: [`place`]
+/// decides WHERE the nodes go, [`derive`] turns positions into drawable
+/// primitives. After dragging a node you keep its box and call `derive` again.
 pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
-    let mut lay = ClockLayout::default();
+    derive(graph, place(graph))
+}
+
+/// Lay the graph out: one [`NodeBox`] per node, in `graph.nodes` order.
+pub fn place(graph: &ClockGraph) -> Vec<NodeBox> {
     let n = graph.nodes.len();
     if n == 0 {
-        return lay;
+        return Vec::new();
     }
 
     let idx_of: HashMap<&str, usize> = graph
@@ -111,37 +129,95 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
         }
     }
 
-    // ── Fit coordinates into the virtual canvas ──────────────────────────────
-    let usable_w = (VW - 2.0 * MARGIN - NODE_W).max(0.0);
-    let col_step = if num_layers > 1 {
-        (usable_w / (num_layers - 1) as f32).min(COL_CAP)
-    } else {
-        0.0
-    };
-    let used_w = col_step * num_layers.saturating_sub(1) as f32 + NODE_W;
-    let x0 = ((VW - used_w) / 2.0).max(MARGIN);
-
+    // ── Place at a fixed pitch ───────────────────────────────────────────────
+    // Coordinates are absolute, NOT squeezed into a fixed canvas: the renderer
+    // allocates whatever the layout measures and the pan/zoom Scene handles the
+    // viewport. Compressing a large tree into 1000×790 only made every node
+    // smaller and its labels unreadable.
     let max_rows = by_layer.iter().map(|c| c.len()).max().unwrap_or(1);
-    let usable_h = (VH - 2.0 * MARGIN - NODE_H).max(0.0);
-    let row_step = if max_rows > 1 {
-        (usable_h / (max_rows - 1) as f32).min(ROW_CAP)
-    } else {
-        0.0
-    };
+    let full_h = ROW_PITCH * max_rows.saturating_sub(1) as f32 + NODE_H;
 
-    let mut pos = vec![(0f32, 0f32); n];
+    let mut boxes: Vec<NodeBox> = graph
+        .nodes
+        .iter()
+        .map(|nd| NodeBox {
+            node: nd.id.clone(),
+            x: 0.0,
+            y: 0.0,
+            w: NODE_W,
+            h: NODE_H,
+        })
+        .collect();
     for (l, col) in by_layer.iter().enumerate() {
-        let x = x0 + col_step * l as f32;
-        let col_h = row_step * col.len().saturating_sub(1) as f32;
-        let y0 = ((VH - col_h - NODE_H) / 2.0).max(MARGIN);
+        let x = MARGIN + COL_PITCH * l as f32;
+        // Centre each column against the tallest one, so the tree reads as a
+        // spine rather than a top-aligned staircase.
+        let col_h = ROW_PITCH * col.len().saturating_sub(1) as f32;
+        let y0 = MARGIN + (full_h - col_h - NODE_H).max(0.0) / 2.0;
         for (r, &i) in col.iter().enumerate() {
-            pos[i] = (x, y0 + row_step * r as f32);
+            boxes[i].x = x;
+            boxes[i].y = y0 + ROW_PITCH * r as f32;
         }
     }
+    boxes
+}
+
+/// Keep the boxes a layout already has and place the nodes that lack one.
+///
+/// The case this exists for: a second AI pass (or the palette) adds nodes to a
+/// tree the user has already arranged. Re-running [`place`] would throw that
+/// arrangement away; this only fills the gaps, stacking newcomers below the
+/// current extent where they are visible and easy to drag into place.
+/// Boxes naming nodes the graph no longer has are dropped.
+pub fn place_missing(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
+    let mut kept: Vec<NodeBox> = boxes
+        .into_iter()
+        .filter(|b| graph.nodes.iter().any(|n| n.id == b.node))
+        .collect();
+    let bottom = kept
+        .iter()
+        .map(|b| b.y + b.h)
+        .fold(0.0_f32, f32::max)
+        .max(MARGIN);
+
+    let missing: Vec<&str> = graph
+        .nodes
+        .iter()
+        .map(|n| n.id.as_str())
+        .filter(|id| !kept.iter().any(|b| b.node == *id))
+        .collect();
+    // Lay them out in rows under the diagram, so a big second pass doesn't end
+    // up as one unreachable column.
+    const PER_ROW: usize = 6;
+    for (i, id) in missing.iter().enumerate() {
+        kept.push(NodeBox {
+            node: (*id).to_owned(),
+            x: MARGIN + COL_PITCH * (i % PER_ROW) as f32,
+            y: bottom + ROW_PITCH * (1 + i / PER_ROW) as f32,
+            w: NODE_W,
+            h: NODE_H,
+        });
+    }
+    kept
+}
+
+/// Turn node positions into a drawable [`ClockLayout`]: per node a name label, a
+/// control and a live frequency tag; per edge an orthogonal wire. `boxes` is
+/// kept in [`ClockLayout::nodes`] as the layout's source of truth.
+///
+/// Nodes without a box are skipped (nothing to draw them at); boxes naming a
+/// node the graph doesn't have are ignored. So a stale saved layout degrades
+/// instead of panicking.
+pub fn derive(graph: &ClockGraph, boxes: Vec<NodeBox>) -> ClockLayout {
+    let mut lay = ClockLayout::default();
+    let box_of: HashMap<&str, &NodeBox> = boxes.iter().map(|b| (b.node.as_str(), b)).collect();
 
     // ── Emit one control + label + freq tag per node ─────────────────────────
-    for (i, node) in graph.nodes.iter().enumerate() {
-        let (x, y) = pos[i];
+    for node in &graph.nodes {
+        let Some(nb) = box_of.get(node.id.as_str()) else {
+            continue;
+        };
+        let (x, y, w, h) = (nb.x, nb.y, nb.w, nb.h);
         lay.labels_above.push(LabelDef {
             x,
             y: y - 3.0,
@@ -149,7 +225,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
         });
         lay.tags.push(TagDef {
             x,
-            y: y + NODE_H + 12.0,
+            y: y + h + 12.0,
             name: String::new(), // the value alone; the id is the label above
             src: ValueSrc::Node(node.id.clone()),
             limit: node.limit,
@@ -162,7 +238,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                     node: node.id.clone(),
                     x,
                     y,
-                    w: NODE_W,
+                    w,
                     min_mhz: lo.max(0.0),
                     max_mhz: (*max_hz as f32 / 1e6).max(lo),
                 });
@@ -184,7 +260,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                     node: node.id.clone(),
                     x,
                     y,
-                    w: NODE_W,
+                    w,
                     options,
                 });
             }
@@ -198,7 +274,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                     node: node.id.clone(),
                     x,
                     y,
-                    w: NODE_W,
+                    w,
                     options: opts,
                 });
             }
@@ -219,7 +295,7 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                     node: node.id.clone(),
                     x,
                     y,
-                    w: NODE_W,
+                    w,
                     options: opts,
                 });
             }
@@ -231,47 +307,87 @@ pub fn auto_layout(graph: &ClockGraph) -> ClockLayout {
                     node: node.id.clone(),
                     x,
                     y,
-                    w: NODE_W,
+                    w,
                     options: opts,
+                });
+            }
+            // An EN box is a two-state pick, so it reuses the same dropdown.
+            NodeKind::Gate => {
+                lay.widgets.push(Widget::Combo {
+                    node: node.id.clone(),
+                    x,
+                    y,
+                    w,
+                    options: vec![
+                        ("EN on".to_owned(), NodeState::Fixed),
+                        ("EN off".to_owned(), NodeState::Unset),
+                    ],
                 });
             }
             // Non-editable nodes render as a static labelled box.
             NodeKind::FixedDiv { by } => {
-                lay.blocks.push(box_at(x, y, format!("/{by}")));
+                lay.blocks.push(box_at(nb, format!("/{by}")));
             }
             NodeKind::TimerMul { .. } => {
-                lay.blocks.push(box_at(x, y, "×tim".to_string()));
+                lay.blocks.push(box_at(nb, "×tim".to_string()));
             }
             NodeKind::Tap | NodeKind::Output => {
-                lay.blocks.push(box_at(x, y, node.id.clone()));
+                lay.blocks.push(box_at(nb, node.id.clone()));
             }
         }
     }
 
-    // ── Orthogonal 3-segment wires along the edges ───────────────────────────
+    // ── Orthogonal wires along the edges ─────────────────────────────────────
+    // Each wire leaves the source's right edge, runs down a vertical lane just
+    // before the target, and enters the target's left edge. Wires into the same
+    // node get their own lane and their own entry height, so a multi-input mux
+    // shows its inputs separately instead of one wire hiding the others.
     for e in &graph.edges {
-        if let (Some(&u), Some(&v)) = (idx_of.get(e.from.as_str()), idx_of.get(e.to.as_str())) {
-            let (xu, yu) = pos[u];
-            let (xv, yv) = pos[v];
-            let sx = xu + NODE_W;
-            let sy = yu + NODE_H / 2.0;
-            let tx = xv;
-            let ty = yv + NODE_H / 2.0;
-            let midx = (sx + tx) / 2.0;
-            lay.wires
-                .push(vec![(sx, sy), (midx, sy), (midx, ty), (tx, ty)]);
+        let (Some(from), Some(to)) = (
+            box_of.get(e.from.as_str()).copied(),
+            box_of.get(e.to.as_str()).copied(),
+        ) else {
+            continue;
+        };
+        let mut incoming: Vec<&Edge> = graph.edges.iter().filter(|o| o.to == e.to).collect();
+        incoming.sort_by(|a, b| (a.input, &a.from).cmp(&(b.input, &b.from)));
+        let rank = incoming
+            .iter()
+            .position(|o| o.from == e.from && o.input == e.input)
+            .unwrap_or(0);
+        let fan = incoming.len().max(1);
+
+        let sx = from.x + from.w;
+        let sy = from.y + from.h / 2.0;
+        // Spread the entry points down the target's left edge.
+        let ty = to.y + to.h * (rank + 1) as f32 / (fan + 1) as f32;
+
+        if (sy - ty).abs() < 0.5 {
+            lay.wires.push(vec![(sx, sy), (to.x, ty)]); // straight run, no bend
+            continue;
         }
+        // One lane per incoming wire, walking left from the target.
+        let lane = to.x - LANE_GAP - LANE_STEP * rank as f32;
+        // No room for lanes (target level with, or behind, the source).
+        let lane = if lane > sx + 4.0 {
+            lane
+        } else {
+            (sx + to.x) / 2.0
+        };
+        lay.wires
+            .push(vec![(sx, sy), (lane, sy), (lane, ty), (to.x, ty)]);
     }
 
+    lay.nodes = boxes;
     lay
 }
 
-fn box_at(x: f32, y: f32, label: String) -> BlockDef {
+fn box_at(nb: &NodeBox, label: String) -> BlockDef {
     BlockDef {
-        x,
-        y,
-        w: NODE_W,
-        h: NODE_H,
+        x: nb.x,
+        y: nb.y,
+        w: nb.w,
+        h: nb.h,
         label,
     }
 }
@@ -357,12 +473,294 @@ mod tests {
         assert!(x("hsi") < x("ahb"), "source must be left of divider");
         assert!(x("ahb") < x("hclk"), "divider must be left of output");
 
-        // Everything stays inside the virtual canvas.
+        // Everything stays inside the measured extent (which is now the canvas).
+        let (w, h) = lay.bounds();
         for l in &lay.labels_above {
             assert!(
-                l.x >= 0.0 && l.x <= VW && l.y >= 0.0 && l.y <= VH,
-                "{l:?} off canvas"
+                l.x >= 0.0 && l.x <= w && l.y >= 0.0 && l.y <= h,
+                "{l:?} outside the measured bounds {w}×{h}"
             );
         }
+    }
+
+    /// A big graph GROWS instead of being squeezed: with the old fixed canvas
+    /// the columns were compressed to fit 1000×790, which shrank every node.
+    #[test]
+    fn a_large_graph_outgrows_the_old_fixed_canvas() {
+        // A 12-deep chain (12 columns) with a 20-wide fan-out at the end.
+        let mut nodes = vec![node(
+            "src",
+            NodeKind::Source {
+                min_hz: 8_000_000,
+                max_hz: 8_000_000,
+                gated: false,
+            },
+            NodeState::Source {
+                enabled: true,
+                hz: 8_000_000,
+            },
+        )];
+        let mut edges = Vec::new();
+        let mut prev = "src".to_string();
+        for i in 0..11 {
+            let id = format!("tap{i}");
+            nodes.push(node(&id, NodeKind::Tap, NodeState::Fixed));
+            edges.push(edge(&prev, &id));
+            prev = id;
+        }
+        for i in 0..20 {
+            let id = format!("out{i}");
+            nodes.push(node(&id, NodeKind::Output, NodeState::Fixed));
+            edges.push(edge(&prev, &id));
+        }
+
+        let lay = auto_layout(&ClockGraph { nodes, edges });
+        let (w, h) = lay.bounds();
+        assert!(
+            w > 1000.0,
+            "13 columns must exceed the old 1000 wide, got {w}"
+        );
+        assert!(h > 790.0, "20 rows must exceed the old 790 tall, got {h}");
+
+        // The pitch is fixed, so adjacent columns stay a readable distance apart
+        // however many there are.
+        let x = |id: &str| lay.labels_above.iter().find(|l| l.text == id).unwrap().x;
+        assert_eq!(x("tap1") - x("tap0"), COL_PITCH);
+    }
+
+    /// A three-node chain used by the box/derive tests.
+    fn chain() -> ClockGraph {
+        ClockGraph {
+            nodes: vec![
+                node(
+                    "hsi",
+                    NodeKind::Source {
+                        min_hz: 16_000_000,
+                        max_hz: 16_000_000,
+                        gated: true,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 16_000_000,
+                    },
+                ),
+                node(
+                    "ahb",
+                    NodeKind::Divider {
+                        options: vec![1, 2, 4],
+                    },
+                    NodeState::Index(0),
+                ),
+                node("hclk", NodeKind::Output, NodeState::Fixed),
+            ],
+            edges: vec![edge("hsi", "ahb"), edge("ahb", "hclk")],
+        }
+    }
+
+    /// The layout now carries a box per node — the handle an editor drags.
+    #[test]
+    fn every_node_gets_a_box() {
+        let g = chain();
+        let lay = auto_layout(&g);
+        let ids: Vec<&str> = lay.nodes.iter().map(|b| b.node.as_str()).collect();
+        assert_eq!(ids, ["hsi", "ahb", "hclk"], "one box per node, in order");
+        assert!(lay.nodes.iter().all(|b| b.w > 0.0 && b.h > 0.0));
+    }
+
+    /// Moving a box and re-deriving moves the node's label, control and tag with
+    /// it — that is what makes the boxes the source of truth (Phase 3's drag).
+    #[test]
+    fn moving_a_box_moves_the_whole_node() {
+        let g = chain();
+        let mut boxes = place(&g);
+        let before = derive(&g, boxes.clone());
+
+        let ahb = boxes.iter_mut().find(|b| b.node == "ahb").unwrap();
+        let (ox, oy) = (ahb.x, ahb.y);
+        ahb.x += 40.0;
+        ahb.y += 25.0;
+        let after = derive(&g, boxes);
+
+        let label = |l: &ClockLayout| {
+            let e = l
+                .labels_above
+                .iter()
+                .find(|e| e.text == "ahb")
+                .expect("label");
+            (e.x, e.y)
+        };
+        let control = |l: &ClockLayout| match l.widgets.iter().find(|w| w.node_id() == "ahb") {
+            Some(Widget::Combo { x, y, .. }) => (*x, *y),
+            other => panic!("expected the divider's dropdown, got {other:?}"),
+        };
+        assert_eq!(control(&before), (ox, oy));
+        assert_eq!(control(&after), (ox + 40.0, oy + 25.0));
+        assert_eq!(label(&after).0 - label(&before).0, 40.0);
+        assert_eq!(label(&after).1 - label(&before).1, 25.0);
+        // The frequency tag rides along too.
+        let tag_y = |l: &ClockLayout| {
+            l.tags
+                .iter()
+                .find(|t| t.src == ValueSrc::Node("ahb".into()))
+                .unwrap()
+                .y
+        };
+        assert_eq!(tag_y(&after) - tag_y(&before), 25.0);
+    }
+
+    /// Wires are derived from the edges and meet the boxes they connect.
+    #[test]
+    fn wires_run_between_the_box_edges() {
+        let g = chain();
+        let lay = auto_layout(&g);
+        let bx = |id: &str| lay.nodes.iter().find(|b| b.node == id).unwrap().clone();
+        let (hsi, ahb) = (bx("hsi"), bx("ahb"));
+
+        let w = lay
+            .wires
+            .iter()
+            .find(|w| (w[0].0 - (hsi.x + hsi.w)).abs() < 0.01)
+            .expect("a wire leaving hsi's right edge");
+        let end = *w.last().unwrap();
+        assert!(
+            (end.0 - ahb.x).abs() < 0.01,
+            "wire must end on ahb's left edge, got {end:?}"
+        );
+        assert!(
+            end.1 >= ahb.y && end.1 <= ahb.y + ahb.h,
+            "entry point must be within ahb's height"
+        );
+    }
+
+    /// Several inputs into one mux each get their own entry height, so they stay
+    /// distinguishable instead of overlapping into a single line.
+    #[test]
+    fn wires_into_one_mux_do_not_overlap() {
+        let src = |id: &str, hz: u32| {
+            node(
+                id,
+                NodeKind::Source {
+                    min_hz: hz,
+                    max_hz: hz,
+                    gated: false,
+                },
+                NodeState::Source { enabled: true, hz },
+            )
+        };
+        let g = ClockGraph {
+            nodes: vec![
+                src("a", 8_000_000),
+                src("b", 16_000_000),
+                src("c", 32_000_000),
+                node("sw", NodeKind::Mux { inputs: 3 }, NodeState::Index(0)),
+            ],
+            edges: vec![
+                Edge {
+                    from: "a".into(),
+                    to: "sw".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "b".into(),
+                    to: "sw".into(),
+                    input: 1,
+                },
+                Edge {
+                    from: "c".into(),
+                    to: "sw".into(),
+                    input: 2,
+                },
+            ],
+        };
+        let lay = auto_layout(&g);
+        let sw = lay.nodes.iter().find(|b| b.node == "sw").unwrap();
+        let mut entries: Vec<f32> = lay
+            .wires
+            .iter()
+            .map(|w| w.last().unwrap().1)
+            .filter(|y| *y >= sw.y && *y <= sw.y + sw.h)
+            .collect();
+        entries.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(entries.len(), 3);
+        for pair in entries.windows(2) {
+            assert!(
+                pair[1] - pair[0] > 1.0,
+                "entry points must be distinct, got {entries:?}"
+            );
+        }
+    }
+
+    /// A second AI pass (or the palette) adds nodes to a tree the user has
+    /// already arranged: the arrangement survives, the newcomers get a spot.
+    #[test]
+    fn place_missing_keeps_the_arrangement_and_fills_the_gaps() {
+        let g = chain();
+        let mut boxes = place(&g);
+        // The user dragged one somewhere deliberate.
+        let ahb = boxes.iter_mut().find(|b| b.node == "ahb").unwrap();
+        ahb.x = 700.0;
+        ahb.y = 40.0;
+        let arranged = boxes.clone();
+
+        // A branch arrives with two new nodes; one old box is now stale.
+        let mut grown = g.clone();
+        for id in ["lse", "rtc"] {
+            grown.nodes.push(node(id, NodeKind::Tap, NodeState::Fixed));
+        }
+        boxes.push(NodeBox {
+            node: "gone".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 96.0,
+            h: 26.0,
+        });
+
+        let out = place_missing(&grown, boxes);
+        assert_eq!(out.len(), 5, "3 kept + 2 placed, the stale one dropped");
+        for old in &arranged {
+            let same = out.iter().find(|b| b.node == old.node).unwrap();
+            assert_eq!((same.x, same.y), (old.x, old.y), "{} moved", old.node);
+        }
+        let below = arranged.iter().map(|b| b.y + b.h).fold(0.0, f32::max);
+        for id in ["lse", "rtc"] {
+            let b = out.iter().find(|b| b.node == id).unwrap();
+            assert!(b.y > below, "`{id}` must land below the existing diagram");
+        }
+        assert!(!out.iter().any(|b| b.node == "gone"));
+    }
+
+    /// An `EN` gate gets the same dropdown treatment as a mux (on / off).
+    #[test]
+    fn a_gate_gets_an_on_off_dropdown() {
+        let g = ClockGraph {
+            nodes: vec![
+                node(
+                    "lse",
+                    NodeKind::Source {
+                        min_hz: 32_768,
+                        max_hz: 32_768,
+                        gated: true,
+                    },
+                    NodeState::Source {
+                        enabled: true,
+                        hz: 32_768,
+                    },
+                ),
+                node("en", NodeKind::Gate, NodeState::Fixed),
+            ],
+            edges: vec![edge("lse", "en")],
+        };
+        let lay = auto_layout(&g);
+        let w = lay
+            .widgets
+            .iter()
+            .find(|w| w.node_id() == "en")
+            .expect("gate control");
+        let Widget::Combo { options, .. } = w else {
+            panic!("a gate is a two-option dropdown, got {w:?}");
+        };
+        assert_eq!(options.len(), 2);
+        assert!(options.iter().any(|(_, s)| *s == NodeState::Fixed));
+        assert!(options.iter().any(|(_, s)| *s == NodeState::Unset));
     }
 }

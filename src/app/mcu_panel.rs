@@ -870,7 +870,14 @@ impl AppIde {
                         // scrollable diagram), so no outer ScrollArea here.
                         // Mutating mcu.clock is enough — `init_frame`
                         // regenerates main.rs from MCU state each frame.
-                        let _changed = mcu.draw_clock_tab(ui);
+                        // `clock_overrides` is a disjoint field, so it can be
+                        // borrowed alongside `self.mcu`; edit mode writes the
+                        // dragged positions straight into it.
+                        let out =
+                            mcu.draw_clock_tab(ui, &mut self.clock_overrides, &mut self.clock_note);
+                        if out.save_to_definition {
+                            self.save_clock_to_definition();
+                        }
                     }
                     None => {
                         ui.centered_and_justified(|ui| {

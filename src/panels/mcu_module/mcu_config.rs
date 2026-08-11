@@ -467,6 +467,7 @@ mod tests {
         text.push_str(&structure_config::serialize(
             &pos,
             &(true, Some(2), 0, false),
+            &Default::default(),
         ));
 
         let (m, c) = parse(&text);

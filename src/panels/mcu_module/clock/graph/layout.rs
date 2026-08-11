@@ -7,10 +7,12 @@
 //! CubeMX-style primitives), so a chip can ship a different layout to get a
 //! different diagram — the answer to "import the clock diagram per MCU".
 //!
-//! Coordinates are in the diagram's 1000×790 virtual space. Values shown in
-//! boxes/tags are *not* stored — each carries a [`ValueSrc`] resolved live from
-//! the graph-evaluated frequencies, so the diagram stays correct as the user
-//! edits nodes.
+//! Coordinates are in a virtual space whose extent is whatever the content
+//! measures ([`ClockLayout::bounds`]) — the hand-authored figures were drawn
+//! against 1000×790, but a layout may be any size. Values shown in boxes/tags
+//! are *not* stored — each carries a [`ValueSrc`] resolved live from the
+//! graph-evaluated frequencies, so the diagram stays correct as the user edits
+//! nodes.
 
 use serde::{Deserialize, Serialize};
 
@@ -136,9 +138,32 @@ impl Widget {
     }
 }
 
+/// Where one graph node sits on the canvas.
+///
+/// This is the **source of truth for a derived layout**: the label, the control
+/// and the frequency tag are all generated from it
+/// ([`super::auto_layout::derive`]), so moving a box moves the whole node — the
+/// primitives below are a cache, not something to edit by hand. The
+/// hand-authored figures (F1/F4/WBA/ESP) place their primitives directly and
+/// carry no boxes at all.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeBox {
+    /// The [`super::model::Node`] id this box belongs to.
+    pub node: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 /// The complete static diagram description.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClockLayout {
+    /// Node positions, for layouts that are DERIVED from the graph (auto-laid-out
+    /// or drawn in the editor). Empty for the hand-authored figures — and then
+    /// omitted from the `.ron` entirely, so those files don't change at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<NodeBox>,
     pub blocks: Vec<BlockDef>,
     pub outputs: Vec<OutputDef>,
     pub tags: Vec<TagDef>,
@@ -158,13 +183,90 @@ impl ClockLayout {
     /// to auto-generate one from the graph topology (see
     /// [`super::auto_layout::auto_layout`]). An AI-imported clock lands here.
     pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
+        self.nodes.is_empty()
+            && self.blocks.is_empty()
             && self.outputs.is_empty()
             && self.tags.is_empty()
             && self.labels_above.is_empty()
             && self.mux_titles.is_empty()
             && self.wires.is_empty()
             && self.widgets.is_empty()
+    }
+
+    /// The drawn extent `(w, h)` in virtual coordinates — every primitive plus a
+    /// margin.
+    ///
+    /// This replaced the renderer's fixed 1000×790 canvas. That constant was not
+    /// a *size* but the denominator of a fit-to-viewport scale, so a diagram
+    /// bigger than the STM32F103 figure did not get more room — it got drawn
+    /// smaller. Now a layout is as large as it needs to be and the pan/zoom
+    /// [`Scene`](eframe::egui::Scene) owns the view. The hand-authored F1/F4/WBA
+    /// layouts measure back at ≈1000×790, so they are unchanged.
+    ///
+    /// Text widths are estimated (≈0.55 em at the sizes `gui::diagram` uses) —
+    /// this sizes a canvas, it does not need to be exact.
+    pub fn bounds(&self) -> (f32, f32) {
+        /// Right-hand allowance for a label drawn from `x`.
+        fn text_w(s: &str, pt: f32) -> f32 {
+            s.chars().count() as f32 * pt * 0.55
+        }
+        let mut w: f32 = 0.0;
+        let mut h: f32 = 0.0;
+        let mut fit = |x: f32, y: f32| {
+            w = w.max(x);
+            h = h.max(y);
+        };
+
+        for nb in &self.nodes {
+            fit(nb.x + nb.w, nb.y + nb.h);
+        }
+        for b in &self.blocks {
+            fit(b.x + b.w, b.y + b.h);
+        }
+        for o in &self.outputs {
+            fit(o.x + o.w, o.y + o.h);
+        }
+        for t in &self.tags {
+            // "NAME 72 MHz" — the name plus a value of its own.
+            fit(t.x + text_w(&t.name, 9.0) + 60.0, t.y + 14.0);
+        }
+        for l in self.labels_above.iter().chain(&self.mux_titles) {
+            fit(l.x + text_w(&l.text, 9.0), l.y + 12.0);
+        }
+        for poly in &self.wires {
+            for &(x, y) in poly {
+                fit(x, y);
+            }
+        }
+        for wg in &self.widgets {
+            match wg {
+                Widget::Combo { x, y, w: cw, .. } => fit(x + cw, y + 26.0),
+                Widget::DragMhz { x, y, w: dw, .. } => fit(x + dw, y + 22.0),
+                Widget::MuxRadios {
+                    x,
+                    y,
+                    w: mw,
+                    h: mh,
+                    flip,
+                    inputs,
+                    ..
+                } => {
+                    // A flipped mux carries its input stubs + labels on the RIGHT.
+                    let stubs = if *flip {
+                        26.0 + inputs
+                            .iter()
+                            .map(|(l, _, _)| text_w(l, 8.0))
+                            .fold(0.0, f32::max)
+                    } else {
+                        0.0
+                    };
+                    fit(x + mw + stubs, y + mh);
+                }
+            }
+        }
+
+        const PAD: f32 = 24.0;
+        (w + PAD, h + PAD)
     }
 }
 
@@ -233,6 +335,9 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
     let s = |label: &str, state: NodeState| (label.to_owned(), state);
 
     ClockLayout {
+        // Hand-authored: the primitives below ARE the layout, so there are
+        // no node boxes to derive them from.
+        nodes: Vec::new(),
         blocks: vec![
             blk(28.0, 78.0, 92.0, 34.0, "LSE OSC\n32.768 kHz"),
             blk(170.0, 84.0, 46.0, 22.0, "/128"),
@@ -540,5 +645,58 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
                 vec![s("/ 8", NodeState::Index(0)), s("/ 1", NodeState::Index(1))],
             ),
         ],
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hand-authored STM32F103 figure measures back at roughly the 1000×790
+    /// canvas it was drawn against — so replacing that constant with a measured
+    /// extent did not move it.
+    #[test]
+    fn f1_layout_measures_its_original_canvas() {
+        let (w, h) = stm32f1_layout(&ClockLimits::default()).bounds();
+        assert!(
+            (900.0..=1120.0).contains(&w),
+            "F1 layout should still be ~1000 wide, got {w}"
+        );
+        assert!(
+            (700.0..=880.0).contains(&h),
+            "F1 layout should still be ~790 tall, got {h}"
+        );
+    }
+
+    /// An empty layout has no extent to speak of — the caller (`is_empty`) fills
+    /// it from the graph instead.
+    #[test]
+    fn an_empty_layout_measures_almost_nothing() {
+        let (w, h) = ClockLayout::default().bounds();
+        assert!(w < 50.0 && h < 50.0, "expected just padding, got {w}×{h}");
+    }
+
+    /// Bounds cover every primitive, not just the boxes.
+    #[test]
+    fn bounds_cover_the_furthest_primitive() {
+        let mut lay = ClockLayout {
+            blocks: vec![BlockDef {
+                x: 10.0,
+                y: 10.0,
+                w: 100.0,
+                h: 20.0,
+                label: "HSI".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let (w0, _) = lay.bounds();
+        lay.wires.push(vec![(0.0, 0.0), (600.0, 40.0)]);
+        let (w1, h1) = lay.bounds();
+        assert!(w1 > w0, "a wire reaching further must widen the extent");
+        assert!(w1 >= 600.0 && h1 >= 40.0);
     }
 }

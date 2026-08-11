@@ -339,6 +339,9 @@ const CLOCK_PDF_INSTRUCTION: &str = "This is a microcontroller datasheet (PDF). 
      system instructions and the required JSON schema. Do not model the \
      peripheral kernel clocks.";
 
+/// PDF instruction for the SECOND clock pass — the branches the spine leaves out.
+const CLOCK_BRANCH_PDF_INSTRUCTION: &str = "This is a microcontroller datasheet (PDF). The clock SPINE is already modelled;      extract the REST of the clock tree (low-speed branches, RTC/IWDG/MCO and the      peripheral kernel-clock selectors) following the system instructions and the      required JSON schema.";
+
 const PDF_INSTRUCTION: &str = "This is a microcontroller datasheet (PDF). Extract the chip identity, \
      memory map, and full pin / alternate-function table following the system \
      instructions and the required JSON schema.";
@@ -357,6 +360,9 @@ pub enum ExtractKind {
     Pins,
     /// The clock tree spine (`clock::graph::extract::ExtractedClock`).
     Clock,
+    /// The rest of the clock tree, as generic nodes + edges, to be MERGED onto
+    /// the spine (`clock::graph::extract_tree::ExtractedTree`).
+    ClockBranches,
     /// Just the list of package names, for the pick-a-package pre-pass
     /// (`ExtractedPackages`).
     Packages,
@@ -373,6 +379,11 @@ impl ExtractKind {
                     additional_properties,
                 )
             }
+            ExtractKind::ClockBranches => {
+                crate::panels::mcu_module::clock::graph::extract_tree::tree_extraction_schema(
+                    additional_properties,
+                )
+            }
             ExtractKind::Packages => packages_schema(additional_properties),
         }
     }
@@ -382,6 +393,7 @@ impl ExtractKind {
         match self {
             ExtractKind::Pins => PDF_INSTRUCTION,
             ExtractKind::Clock => CLOCK_PDF_INSTRUCTION,
+            ExtractKind::ClockBranches => CLOCK_BRANCH_PDF_INSTRUCTION,
             ExtractKind::Packages => PACKAGES_PDF_INSTRUCTION,
         }
     }
@@ -408,6 +420,8 @@ impl ExtractKind {
         match self {
             ExtractKind::Pins => "medium",
             ExtractKind::Clock => "high",
+            // Same reasoning-hard shape as the spine, over more of the figure.
+            ExtractKind::ClockBranches => "high",
             ExtractKind::Packages => "low",
         }
     }
@@ -702,21 +716,24 @@ fn truncation_error(provider: Provider, v: &serde_json::Value) -> Option<String>
                     "the model declined this request (stop_reason: refusal). If the PDF is a \
                      normal datasheet this is a false positive — retry, or try another provider."
                         .to_string(),
-                )
+                );
             }
             _ => false,
         },
 
         // { "candidates": [ { "finishReason": "MAX_TOKENS", … } ] }
         Provider::Gemini => {
-            v.pointer("/candidates/0/finishReason").and_then(|r| r.as_str()) == Some("MAX_TOKENS")
+            v.pointer("/candidates/0/finishReason")
+                .and_then(|r| r.as_str())
+                == Some("MAX_TOKENS")
         }
 
         // { "status": "incomplete",
         //   "incomplete_details": { "reason": "max_output_tokens" } }
         Provider::OpenAi => {
             v.get("status").and_then(|s| s.as_str()) == Some("incomplete")
-                && v.pointer("/incomplete_details/reason").and_then(|r| r.as_str())
+                && v.pointer("/incomplete_details/reason")
+                    .and_then(|r| r.as_str())
                     == Some("max_output_tokens")
         }
     };
@@ -1681,6 +1698,110 @@ pub fn call_ai_clock(
         clock: gc,
         from_cache: false,
     })
+}
+
+/// The result of the SECOND clock pass: the merged tree and what the merge did.
+pub struct ClockBranchExtraction {
+    pub clock: crate::panels::mcu_module::clock::graph::GraphClock,
+    pub report: crate::panels::mcu_module::clock::graph::extract_tree::MergeReport,
+    pub from_cache: bool,
+}
+
+/// Extract the clock-tree BRANCHES the spine pass leaves out and merge them onto
+/// `base` — the low-speed paths, MCO, and the peripheral kernel selectors.
+///
+/// Why a second call instead of one bigger prompt: the spine has its own
+/// contract and its own SYSCLK self-check, both of which work; asking for
+/// everything at once would put that behind an all-or-nothing reply. Here the
+/// spine is already banked, the model is TOLD which nodes exist so it attaches
+/// to them by name, and the merge is rejected whole if its numbers disagree with
+/// the datasheet — so a bad second pass costs nothing.
+///
+/// The cache is keyed with a `"clock-branches"` tag plus the base's node ids, so
+/// a re-run against a different spine is a different question.
+///
+/// Blocking — the dialog runs it on a worker thread.
+pub fn call_ai_clock_branches(
+    provider: Provider,
+    api_key: &str,
+    model: &str,
+    extra_prompt: &str,
+    source: &Source,
+    base: &crate::panels::mcu_module::clock::graph::GraphClock,
+    use_cache: bool,
+) -> Result<ClockBranchExtraction, String> {
+    use crate::panels::mcu_module::clock::graph::{auto_layout, extract_tree as et};
+
+    if api_key.trim().is_empty() {
+        return Err(format!(
+            "No API key set — enter your {} API key first.",
+            provider.label()
+        ));
+    }
+    if model.trim().is_empty() {
+        return Err("No model set — enter a model id first.".to_string());
+    }
+    match source {
+        Source::Text(t) if t.trim().is_empty() => {
+            return Err("Nothing to extract — paste the clock-tree text first.".to_string());
+        }
+        Source::Pdf(b) if b.is_empty() => return Err("The selected PDF is empty.".to_string()),
+        Source::Pdf(b) if b.len() > MAX_PDF_BYTES => {
+            return Err(format!(
+                "PDF is {:.1} MB — over the {} MB limit. Paste the relevant pages instead.",
+                b.len() as f64 / (1024.0 * 1024.0),
+                MAX_PDF_BYTES / (1024 * 1024)
+            ));
+        }
+        _ => {}
+    }
+
+    let existing: Vec<String> = base.graph.nodes.iter().map(|n| n.id.clone()).collect();
+    let build_from = |model_text: &str| -> Result<ClockBranchExtraction, String> {
+        let ex = et::parse_tree_reply(model_text)?;
+        let (graph, report) = et::merge_tree(&base.graph, &ex)?;
+        // New nodes need somewhere to sit; the arrangement of the existing ones
+        // is preserved.
+        let boxes = auto_layout::place_missing(&graph, base.layout.nodes.clone());
+        let layout = auto_layout::derive(&graph, boxes);
+        Ok(ClockBranchExtraction {
+            clock: crate::panels::mcu_module::clock::graph::GraphClock { graph, layout },
+            report,
+            from_cache: false,
+        })
+    };
+
+    let key = cache_key(
+        provider,
+        model,
+        &format!("clock-branches:{}", existing.join(",")),
+        extra_prompt,
+        source,
+    );
+    if use_cache
+        && let Some(cached) = load_cached(&key)
+        && let Ok(mut out) = build_from(&cached)
+    {
+        out.from_cache = true;
+        return Ok(out);
+    }
+
+    let system = with_extra_prompt(&et::build_tree_prompt(&existing), extra_prompt);
+    let body = build_request_body(provider, model, &system, source, ExtractKind::ClockBranches);
+    let model_text = post_and_parse(provider, api_key, model, &body)?;
+    // Merge + verify before caching, so only a usable reply is stored.
+    let out = build_from(&model_text)?;
+    let label = format!(
+        "clock branches · {}/{} · {}",
+        provider.label(),
+        model.trim(),
+        match source {
+            Source::Text(_) => "text".to_string(),
+            Source::Pdf(b) => format!("PDF {}", human_bytes(b.len() as u64)),
+        }
+    );
+    save_cached(&key, &model_text, &label);
+    Ok(out)
 }
 
 /// A package-list pre-pass result plus whether it came from the cache.

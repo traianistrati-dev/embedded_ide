@@ -628,6 +628,16 @@ pub struct AppIde {
     /// file. Applied over every automatic layout; persisted in the project's
     /// `project_structure.config` on Project Save.
     structure_overrides: crate::panels::mcu_module::structure_config::StructurePositions,
+    /// Manually dragged Clock-diagram node positions, keyed by graph node id.
+    /// Same deal as `structure_overrides` — applied over the generated layout,
+    /// persisted in `project_structure.config`, and deliberately NOT part of
+    /// `mcu.config`: moving a box is cosmetic, it must not show up in Git or
+    /// regenerate `main.rs`.
+    clock_overrides: crate::panels::mcu_module::structure_config::ClockPositions,
+    /// One-line result of the last Clock-tab edit action (wired / refused /
+    /// exported / saved to the chip). Shown in the tab's palette row, so the
+    /// answer appears where the button was; session-only.
+    clock_note: String,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -1272,6 +1282,8 @@ impl AppIde {
             structure_calls: None,
             structure_layout_calls: 0,
             structure_overrides: Default::default(),
+            clock_overrides: Default::default(),
+            clock_note: String::new(),
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
             inline_errors_enabled: true,
@@ -1492,6 +1504,50 @@ impl AppIde {
         registry.iter().find(|d| d.id == id).map(|d| d.build_mcu())
     }
 
+    /// Write the Clock tab's edited tree back into the chip's `.ron` definition.
+    ///
+    /// This is what makes a STRUCTURAL clock edit (a node added, deleted, rewired)
+    /// outlive the session: node states round-trip through `mcu.config`, but the
+    /// TOPOLOGY lives in the definition, so it has to be saved there.
+    /// [`registry::save_definition`] writes `<user mcus>/<id>.ron`, which the
+    /// loader merges over the built-in of the same id — so editing a bundled
+    /// chip's clock creates a personal override rather than needing a writable
+    /// install.
+    ///
+    /// The result goes to `clock_note`, which the Clock tab shows next frame —
+    /// the answer appears where the button was.
+    fn save_clock_to_definition(&mut self) {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::mcu_def::ClockDef;
+
+        let Some(mcu) = &self.mcu else { return };
+        let ClockConfig::Graph(gc) = &mcu.clock else {
+            return;
+        };
+        let Some(def) = self.selected_def() else {
+            self.clock_note = "No chip selected.".to_owned();
+            return;
+        };
+        let mut def = def.clone();
+        def.clock = ClockDef::Graph(gc.clone());
+
+        self.clock_note = match registry::save_definition(&def) {
+            Ok(path) => {
+                // Keep the live registry in step, so reopening the project (or
+                // the chip picker) sees the edited tree without a restart.
+                registry::merge_def(&mut self.mcu_registry, def);
+                // What was just saved IS the chip's factory clock now, so the
+                // Reset button must aim at it — otherwise Reset would revert to
+                // the tree this one replaced.
+                if let Some(mcu) = &mut self.mcu {
+                    mcu.capture_clock_defaults();
+                }
+                format!("Clock tree saved to {}", path.display())
+            }
+            Err(e) => format!("Could not save the chip definition: {e}"),
+        };
+    }
+
     /// The currently-selected MCU definition (key = `selected_mcu_id`).
     fn selected_def(&self) -> Option<&McuDefinition> {
         self.mcu_registry
@@ -1635,6 +1691,7 @@ impl AppIde {
                 v.path_style.to_u8(),
                 v.show_externals,
             ),
+            &self.clock_overrides,
         )
     }
 

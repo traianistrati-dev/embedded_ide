@@ -1,11 +1,17 @@
 //! Clock-tab GUI — the data-driven graph is the only clock model.
 //!
 //! [`draw_graph_clock`] renders an imported/built-in [`GraphClock`]:
-//! a presets bar, a fixed footer (Frequencies | Info with validation), a zoom
-//! toolbar, and the interactive diagram (shared static renderer + widget
-//! overlay editing graph node states). The old typed `Stm32f1Clock` UI
+//! a Reset + presets bar, a fixed footer (Frequencies | Info with validation), a
+//! zoom toolbar, and the interactive diagram (shared static renderer + widget
+//! overlay editing graph node states) inside an [`egui::Scene`] that pans and
+//! zooms it like the Pins canvas. The old typed `Stm32f1Clock` UI
 //! (`draw_clock_tree`, `interactive_nodes`) was retired — its visuals live on
 //! as data in `stm32f1_layout`.
+//!
+//! **Edit mode** turns the same canvas into the tree CONSTRUCTOR: a palette adds
+//! nodes, boxes are dragged and wired through their ports, and a properties
+//! panel edits the selected node. The rules live in
+//! [`edit`](super::graph::edit); this module is the mouse and the layout.
 
 pub mod diagram;
 
@@ -16,21 +22,32 @@ use super::compute::frequencies;
 use super::graph::layout::ValueSrc;
 use super::graph::validate::ceiling_for;
 use super::graph::{
-    ClockGraph, GraphClock, evaluate, graph_to_stm32f1, over_limits, stm32f1_graph,
+    ClockGraph, GraphClock, edit, evaluate, graph_to_stm32f1, over_limits, stm32f1_graph,
     value_from_graph,
 };
 use super::model::ClockLimits;
 use super::presets::{ClockPreset, stm32f1_presets};
 use super::validate::{Severity, warnings};
+use crate::panels::mcu_module::structure_config::ClockPositions;
 
-/// Render the Clock tab for a graph clock. Returns `true` if anything changed
-/// (the caller relies on `init_frame` to regenerate `main.rs`).
+/// What the Clock tab wants the app to do after this frame.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ClockTabOut {
+    /// The clock configuration changed — regenerate `main.rs`.
+    pub changed: bool,
+    /// The user asked to write the edited tree into the chip's `.ron`
+    /// definition. Only the app can do it: it owns the registry.
+    pub save_to_definition: bool,
+}
+
+/// Render the Clock tab for a graph clock.
 ///
 /// `limits` are the chip's datasheet ceilings; `presets` the chip-specific
 /// one-click configs (empty + `family == "stm32f1"` → built-in F103 presets);
 /// `defaults` the chip's factory node states behind the "Reset" button
 /// (`None` → no Reset button); `family` gates the family-specific extras
-/// (presets fallback + footnote validation via the `graph_to_stm32f1` bridge).
+/// (presets fallback + footnote validation via the `graph_to_stm32f1` bridge)
+/// and names the ids code generation reads.
 pub fn draw_graph_clock(
     ui: &mut egui::Ui,
     gc: &mut GraphClock,
@@ -38,14 +55,17 @@ pub fn draw_graph_clock(
     presets: &[ClockPreset],
     defaults: Option<&ClockGraph>,
     family: &str,
-) -> bool {
+    positions: &mut ClockPositions,
+    note: &mut String,
+) -> ClockTabOut {
+    let mut out = ClockTabOut::default();
     let mut changed = false;
     let is_stm32f1 = family == "stm32f1";
 
     // A graph without a hand-authored diagram (AI-imported clock, or any future
     // family) gets one computed from its topology — filled ONCE and kept on the
-    // live model, so it isn't recomputed per frame and a later drag-refine can
-    // persist. Does NOT set `changed`: the layout is cosmetic, codegen ignores it.
+    // live model, so it isn't recomputed per frame. Does NOT set `changed`: the
+    // layout is cosmetic, codegen ignores it.
     if gc.layout.is_empty() {
         gc.layout = super::graph::auto_layout(&gc.graph);
     }
@@ -142,51 +162,905 @@ pub fn draw_graph_clock(
             });
         });
 
+    // ── View state (session-only, never persisted) ───────────────────────────
+    // Deliberately in `ui.data` temp, like the zoom it replaces: zoom/pan is a
+    // view preference, so it must not reach `mcu.config`, `project_structure.
+    // config` or the Git snapshot. `sig` re-fits the view whenever the graph
+    // itself changes (Reset, preset, chip switch, AI import) — one check that
+    // covers every call site, instead of clearing a latch at each of them.
+    let view_id = egui::Id::new("graph_clock_view");
+    let mut view: ClockView = ui.data(|d| d.get_temp(view_id)).unwrap_or_default();
+    let sig = graph_signature(&gc.graph);
+    if view.sig != sig {
+        view.sig = sig;
+        view.adjusted = false;
+    }
+
+    // Saved node positions (from `project_structure.config`) are applied over the
+    // generated layout — once, whenever either side changes, since re-deriving
+    // per frame would rebuild every dropdown's option list.
+    let pos_sig = positions_signature(positions);
+    let editable = !gc.layout.nodes.is_empty();
+    if editable && (view.pos_sig != pos_sig || view.layout_sig != sig) {
+        view.pos_sig = pos_sig;
+        view.layout_sig = sig;
+        apply_positions(gc, positions);
+    }
+
     // ── Zoom toolbar ─────────────────────────────────────────────────────────
-    let zoom_id = egui::Id::new("graph_clock_zoom");
-    let mut zoom = ui.data(|d| d.get_temp::<f32>(zoom_id).unwrap_or(1.0));
+    // The buttons drive the Scene (same effect as Ctrl+± / Ctrl+0) and the
+    // percentage is the Scene's real scale, so it tells the truth after a wheel
+    // zoom or a drag too. The clicks are only RECORDED here — applying them
+    // needs the viewport rect, which is known once this row has been laid out.
+    let mut zoom_click: Option<f32> = None;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Diagram").strong());
         ui.separator();
         ui.label("Zoom:");
-        if ui.small_button("−").clicked() {
-            zoom = (zoom / 1.15).max(0.4);
+        if ui.small_button("−").on_hover_text("Ctrl+−").clicked() {
+            zoom_click = Some(1.2);
         }
         if ui
-            .small_button(format!("{:.0}%", zoom * 100.0))
-            .on_hover_text("Reset to 100%")
+            .small_button(format!("{:.0}%", view.last_scale * 100.0))
+            .on_hover_text("Fit the whole diagram (Ctrl+0)")
             .clicked()
         {
-            zoom = 1.0;
+            view.adjusted = false;
         }
-        if ui.small_button("+").clicked() {
-            zoom = (zoom * 1.15).min(3.0);
+        if ui.small_button("+").on_hover_text("Ctrl++").clicked() {
+            zoom_click = Some(1.0 / 1.2);
         }
-    });
-    ui.data_mut(|d| d.insert_temp(zoom_id, zoom));
+        ui.separator();
 
-    // ── Diagram + interactive widgets (graph-backed values) ──────────────────
-    let avail_w = ui.available_width();
-    let avail_h = ui.available_height();
-    egui::ScrollArea::both()
-        .id_salt("graph_clock_diagram")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+        // Edit mode — move the node boxes around. Only for GENERATED layouts:
+        // the hand-drawn figures (F1/F4/WBA/ESP) place their primitives directly
+        // and carry no boxes to drag.
+        let edit_btn = egui::Button::new(
+            egui::RichText::new(format!("{} Edit", ph::ARROWS_OUT_CARDINAL)).color(if view.edit {
+                egui::Color32::from_rgb(225, 175, 75)
+            } else {
+                ui.visuals().text_color()
+            }),
+        )
+        .selected(view.edit);
+        if ui
+            .add_enabled(editable, edit_btn)
+            .on_hover_text("Build the tree: drag boxes, add / delete nodes, wire them up")
+            .on_disabled_hover_text("This chip ships a hand-drawn figure — nothing to drag")
+            .clicked()
+        {
+            view.edit = !view.edit;
+            view.selected = None;
+            view.linking = None;
+        }
+        if view.edit
+            && !positions.is_empty()
+            && ui
+                .small_button("Auto-arrange")
+                .on_hover_text(
+                    "Drop the saved positions and lay the diagram out from the graph again",
+                )
+                .clicked()
+        {
+            positions.clear();
+            gc.layout = super::graph::auto_layout(&gc.graph);
+            view.pos_sig = positions_signature(positions);
+            view.adjusted = false;
+        }
+
+        ui.label(
+            egui::RichText::new(if view.edit {
+                "· click a box to select · drag it to move · ports (○) wire nodes up"
+            } else {
+                "· wheel = zoom · drag = pan"
+            })
+            .size(10.0)
+            .color(egui::Color32::from_rgb(150, 158, 172)),
+        );
+    });
+
+    // ── Palette row (edit mode) ──────────────────────────────────────────────
+    if view.edit {
+        let mut structural = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.menu_button(format!("{} Add node", ph::PLUS), |ui| {
+                for kind in edit::PaletteKind::ALL {
+                    if ui.button(kind.label()).clicked() {
+                        // Below the diagram's current extent, so a new node is
+                        // never dropped on top of an existing one. The graph
+                        // signature changes, which re-fits the view onto it.
+                        let (_, h) = gc.layout.bounds();
+                        let mut boxes = std::mem::take(&mut gc.layout.nodes);
+                        let id =
+                            edit::add_node(&mut gc.graph, &mut boxes, kind, 46.0, h, 96.0, 26.0);
+                        gc.layout = super::graph::derive(&gc.graph, boxes);
+                        view.selected = Some(id);
+                        structural = true;
+                        ui.close();
+                    }
+                }
+            });
+
+            let has_sel = view.selected.is_some();
+            if ui
+                .add_enabled(has_sel, egui::Button::new(format!("{} Delete", ph::TRASH)))
+                .on_hover_text("Remove the selected node and its wires")
+                .clicked()
+                && let Some(id) = view.selected.take()
+            {
+                let mut boxes = std::mem::take(&mut gc.layout.nodes);
+                edit::remove_node(&mut gc.graph, &mut boxes, &id);
+                gc.layout = super::graph::derive(&gc.graph, boxes);
+                positions.remove(&id);
+                structural = true;
+            }
+
+            if !positions.is_empty()
+                && ui
+                    .button("Auto-arrange")
+                    .on_hover_text(
+                        "Drop the saved positions and lay the diagram out from the graph again",
+                    )
+                    .clicked()
+            {
+                positions.clear();
+                gc.layout = super::graph::auto_layout(&gc.graph);
+                view.pos_sig = positions_signature(positions);
+                view.adjusted = false;
+            }
+
+            // THE persistence path for structural edits: the graph lives in the
+            // chip's definition, so that is where it must be written back.
+            if ui
+                .button(format!("{} Save to chip", ph::FLOPPY_DISK))
+                .on_hover_text(
+                    "Write this clock tree into the chip's .ron definition, so every future \
+                     project with this chip gets it",
+                )
+                .clicked()
+            {
+                out.save_to_definition = true;
+            }
+
+            if ui
+                .button("Export .ron…")
+                .on_hover_text("Save the tree (graph + diagram) to a file of your choosing")
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("clock.ron")
+                    .add_filter("RON", &["ron"])
+                    .save_file()
+            {
+                (*note) = match std::fs::write(&path, super::graph::export_clock_ron(gc)) {
+                    Ok(()) => format!("Saved to {}", path.display()),
+                    Err(e) => format!("Could not save: {e}"),
+                };
+            }
+
+            if let Some(from) = view.linking.clone() {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Wiring from `{from}` — click an input port (Esc to cancel)"
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(255, 232, 150)),
+                );
+            }
+        });
+        if structural {
+            changed = true;
+            view.pos_sig = positions_signature(positions);
+            view.adjusted = false;
+        }
+        if !(*note).is_empty() {
+            ui.label(
+                egui::RichText::new(&(*note))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 200, 160)),
+            );
+        }
+    }
+
+    // ── Properties panel (edit mode) ─────────────────────────────────────────
+    if view.edit {
+        let mut edited = false;
+        egui::SidePanel::right("clock_edit_props")
+            .resizable(true)
+            .default_width(260.0)
+            .show_inside(ui, |ui| {
+                edited = properties_panel(ui, gc, &mut view, positions, family, note);
+            });
+        if edited {
+            changed = true;
+        }
+    }
+
+    // The rect the Scene will fill — the cursor-anchored zoom below replicates
+    // the Scene's own scene→screen fit from it, so it must be exactly that rect
+    // (measured AFTER the toolbar and the properties panel, not before).
+    let outer = ui.available_rect_before_wrap();
+    let avail = ui.available_size_before_wrap();
+    if let Some(f) = zoom_click {
+        zoom_by(&mut view, f, avail);
+    }
+
+    // ── Diagram + interactive widgets, inside a pan/zoom Scene ───────────────
+    // The layout is painted at its natural size (`ClockLayout::bounds`) and the
+    // Scene owns the view, so a full datasheet clock tree is navigated instead
+    // of being shrunk to fit — see the Pins canvas for the same pattern.
+    let mut scene_rect = view.scene;
+    let mut content_bounds = egui::Rect::NOTHING;
+    let mut hits = diagram::EditHits::default();
+
+    // egui's Scene PANS on a plain wheel; turn that into a cursor-anchored zoom
+    // (Ctrl+wheel stays the Scene's own zoom) by replicating its scene→screen
+    // fit, zooming about the pointer, then consuming the scroll.
+    let fit_tf = |scene: egui::Rect| -> egui::emath::TSTransform {
+        let scale = (outer.size() / scene.size())
+            .min_elem()
+            .clamp(ZOOM_MIN, ZOOM_MAX);
+        egui::emath::TSTransform::from_translation(
+            outer.center().to_vec2() - scale * scene.center().to_vec2(),
+        ) * egui::emath::TSTransform::from_scaling(scale)
+    };
+    let ptr = ui.input(|i| i.pointer.hover_pos());
+    let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
+    if let Some(ptr) = ptr
+        && scroll_y != 0.0
+        && !ctrl
+        && outer.contains(ptr)
+        && scene_rect.is_finite()
+        && scene_rect.size() != egui::Vec2::ZERO
+    {
+        let to_global = fit_tf(scene_rect);
+        let cur = to_global.scaling;
+        let z = ((scroll_y * 0.002).exp() * cur).clamp(ZOOM_MIN, ZOOM_MAX) / cur;
+        let p = to_global.inverse() * ptr;
+        let new = to_global
+            * egui::emath::TSTransform::from_translation(p.to_vec2())
+            * egui::emath::TSTransform::from_scaling(z)
+            * egui::emath::TSTransform::from_translation(-p.to_vec2());
+        let new_rect = new.inverse() * outer;
+        if new_rect.is_finite() && new_rect.size() != egui::Vec2::ZERO {
+            scene_rect = new_rect;
+            view.scene = new_rect;
+            view.adjusted = true;
+        }
+        ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+    }
+
+    let scene = egui::Scene::new()
+        .zoom_range(ZOOM_MIN..=ZOOM_MAX)
+        .drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE)
+        .show(ui, &mut scene_rect, |ui| {
             let (rect, tf) = {
                 let resolve = |src: &ValueSrc| value_from_graph(src, &freqs);
-                diagram::draw_static_diagram(
-                    ui, &gc.layout, limits, avail_w, avail_h, zoom, resolve,
-                )
+                diagram::draw_static_diagram(ui, &gc.layout, limits, resolve)
             };
+            content_bounds = ui.min_rect();
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                ui.set_clip_rect(rect.intersect(ui.clip_rect()));
-                if diagram::interactive_graph(ui, &tf, &mut gc.graph, &gc.layout.widgets) {
+                if view.edit {
+                    // Edit mode REPLACES the value controls — they sit on exactly
+                    // these rectangles, so both at once would fight for the drag.
+                    hits = diagram::edit_nodes(
+                        ui,
+                        &tf,
+                        &mut gc.layout.nodes,
+                        view.selected.as_deref(),
+                        view.linking.as_deref(),
+                    );
+                } else if diagram::interactive_graph(ui, &tf, &mut gc.graph, &gc.layout.widgets) {
                     changed = true;
                 }
             });
         });
 
+    // A drag moved boxes: rebuild the primitives from them and record the
+    // positions for `project_structure.config`. NOT `changed` — the layout is
+    // cosmetic and must not regenerate `main.rs` on every mouse move.
+    if hits.dragged {
+        let boxes = std::mem::take(&mut gc.layout.nodes);
+        gc.layout = super::graph::derive(&gc.graph, boxes);
+        *positions = moved_positions(gc);
+        view.pos_sig = positions_signature(positions);
+    }
+    if let Some(id) = hits.select {
+        view.selected = Some(id);
+    }
+    // Wiring: an output port arms the link, an input port completes it.
+    if let Some(id) = hits.out_port {
+        view.linking = Some(id);
+        (*note).clear();
+    }
+    if let Some(to) = hits.in_port
+        && let Some(from) = view.linking.take()
+    {
+        match edit::connect(&mut gc.graph, &from, &to) {
+            Ok(input) => {
+                let boxes = std::mem::take(&mut gc.layout.nodes);
+                gc.layout = super::graph::derive(&gc.graph, boxes);
+                (*note) = format!("Wired `{from}` -> `{to}` (input {input}).");
+                changed = true;
+            }
+            Err(e) => (*note) = e,
+        }
+    }
+    if view.edit && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        view.linking = None;
+    }
+
+    // The Scene writes back the view it owns (drag-pan + Ctrl+wheel) — latch it.
+    if scene.response.changed() {
+        view.scene = scene_rect;
+        view.adjusted = true;
+    }
+
+    // Ctrl+± / Ctrl+0, consumed only over the canvas so the editor keeps its own.
+    if scene.response.contains_pointer() {
+        let (reset, factor) = ui.input_mut(|i| {
+            let cmd = egui::Modifiers::COMMAND;
+            if i.consume_key(cmd, egui::Key::Num0) {
+                (true, None)
+            } else if i.consume_key(cmd, egui::Key::Plus) || i.consume_key(cmd, egui::Key::Equals) {
+                (false, Some(1.0 / 1.2)) // smaller rect = zoom IN
+            } else if i.consume_key(cmd, egui::Key::Minus) {
+                (false, Some(1.2))
+            } else {
+                (false, None)
+            }
+        });
+        if reset {
+            view.adjusted = false;
+        } else if let Some(f) = factor {
+            // `scene_rect` post-show is the live view — zoom relative to it.
+            view.scene = scene_rect;
+            zoom_by(&mut view, f, avail);
+        }
+    }
+
+    // What the toolbar percentage shows next frame — the scale the Scene ended
+    // up at, whoever changed it (button, wheel, drag, Ctrl+key, auto-fit).
+    view.last_scale = scale_of(scene_rect, outer);
+
+    // Auto-fit until the user takes over. Padded to at least the panel size so a
+    // diagram smaller than the panel sits at 100% instead of being blown up.
+    if !view.adjusted {
+        view.scene = if content_bounds.is_finite() {
+            egui::Rect::from_center_size(
+                content_bounds.center(),
+                egui::vec2(
+                    content_bounds.width().max(avail.x),
+                    content_bounds.height().max(avail.y),
+                ),
+            )
+        } else {
+            content_bounds
+        };
+    }
+    ui.data_mut(|d| d.insert_temp(view_id, view));
+
+    out.changed = changed;
+    out
+}
+
+// ── Pan / zoom view ───────────────────────────────────────────────────────────
+
+const ZOOM_MIN: f32 = 0.05;
+const ZOOM_MAX: f32 = 4.0;
+
+/// Session-only diagram view: the Scene rect, whether the user has taken it over
+/// (else it auto-fits), and a signature of the graph it belongs to.
+#[derive(Clone)]
+struct ClockView {
+    scene: egui::Rect,
+    adjusted: bool,
+    sig: u64,
+    /// Last frame's effective scale — what the toolbar shows as a percentage.
+    /// Measured after the Scene ran, so it is the real one and not an estimate.
+    last_scale: f32,
+    /// Edit mode: build the tree instead of setting its values.
+    edit: bool,
+    /// Which saved positions, and which graph, the current layout was built
+    /// from — so applying them (and re-deriving) happens on change, not per
+    /// frame.
+    pos_sig: u64,
+    layout_sig: u64,
+    /// The node the properties panel is showing.
+    selected: Option<String>,
+    /// Wiring in progress: the node whose output port was clicked.
+    linking: Option<String>,
+    /// Text buffers for the fields that must not be reparsed mid-typing (the id
+    /// and the list-valued parameters), plus which node they belong to.
+    buf_for: String,
+    id_buf: String,
+    param_buf: String,
+}
+
+impl Default for ClockView {
+    fn default() -> Self {
+        Self {
+            scene: egui::Rect::NOTHING,
+            adjusted: false,
+            sig: 0,
+            last_scale: 1.0,
+            edit: false,
+            pos_sig: 0,
+            layout_sig: 0,
+            selected: None,
+            linking: None,
+            buf_for: String::new(),
+            id_buf: String::new(),
+            param_buf: String::new(),
+        }
+    }
+}
+
+// ── Properties panel ──────────────────────────────────────────────────────────
+
+/// The edit-mode side panel: identity and parameters of the selected node, its
+/// incoming wires, and the graph's structural problems. Returns `true` when the
+/// GRAPH changed (so the caller regenerates code) — moving a box does not come
+/// through here.
+fn properties_panel(
+    ui: &mut egui::Ui,
+    gc: &mut GraphClock,
+    view: &mut ClockView,
+    positions: &mut ClockPositions,
+    family: &str,
+    note: &mut String,
+) -> bool {
+    use super::graph::model::{LimitKey, NodeKind};
+    let mut changed = false;
+
+    ui.strong("Node");
+    ui.separator();
+
+    let Some(id) = view.selected.clone() else {
+        ui.label(
+            egui::RichText::new("Select a node in the diagram to edit it.")
+                .size(11.0)
+                .color(egui::Color32::GRAY),
+        );
+        ui.add_space(10.0);
+        issue_list(ui, gc, family);
+        return false;
+    };
+    if gc.graph.node(&id).is_none() {
+        view.selected = None;
+        return false;
+    }
+
+    // Refill the text buffers when the subject changes, so typing isn't
+    // reformatted under the cursor.
+    if view.buf_for != id {
+        view.buf_for = id.clone();
+        view.id_buf = id.clone();
+        view.param_buf = param_text(gc.graph.node(&id).unwrap());
+    }
+
+    // ── Identity ─────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.label("id");
+        ui.add(egui::TextEdit::singleline(&mut view.id_buf).desired_width(120.0));
+        if ui.small_button("Rename").clicked() {
+            let mut boxes = std::mem::take(&mut gc.layout.nodes);
+            match edit::rename_node(&mut gc.graph, &mut boxes, &id, &view.id_buf.clone()) {
+                Ok(()) => {
+                    let new = view.id_buf.trim().to_owned();
+                    if let Some((x, y)) = positions.remove(&id) {
+                        positions.insert(new.clone(), (x, y));
+                    }
+                    view.selected = Some(new.clone());
+                    view.buf_for = new;
+                    (*note).clear();
+                    changed = true;
+                }
+                Err(e) => (*note) = e,
+            }
+            gc.layout = super::graph::derive(&gc.graph, boxes);
+        }
+    });
+    if codegen_ids(family).contains(&id.as_str()) {
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  Read by code generation — renaming or deleting it changes main.rs.",
+                ph::WARNING
+            ))
+            .size(10.0)
+            .color(egui::Color32::from_rgb(225, 185, 60)),
+        );
+    }
+
+    // ── Kind parameters ──────────────────────────────────────────────────────
+    ui.add_space(6.0);
+    let node = gc.graph.node_mut(&id).unwrap();
+    ui.label(egui::RichText::new(kind_name(&node.kind)).strong());
+    let mut params_edited = false;
+    match &mut node.kind {
+        NodeKind::Source {
+            min_hz,
+            max_hz,
+            gated,
+        } => {
+            let mut lo = *min_hz as f64 / 1e6;
+            let mut hi = *max_hz as f64 / 1e6;
+            ui.horizontal(|ui| {
+                ui.label("min");
+                params_edited |= ui
+                    .add(egui::DragValue::new(&mut lo).speed(0.1).suffix(" MHz"))
+                    .changed();
+                ui.label("max");
+                params_edited |= ui
+                    .add(egui::DragValue::new(&mut hi).speed(0.1).suffix(" MHz"))
+                    .changed();
+            });
+            params_edited |= ui.checkbox(gated, "can be switched off").changed();
+            *min_hz = (lo * 1e6).max(0.0) as u32;
+            *max_hz = (hi * 1e6).max(0.0) as u32;
+        }
+        NodeKind::Mux { inputs } => {
+            ui.horizontal(|ui| {
+                ui.label("inputs");
+                params_edited |= ui.add(egui::DragValue::new(inputs).range(1..=12)).changed();
+            });
+        }
+        NodeKind::FixedDiv { by } => {
+            ui.horizontal(|ui| {
+                ui.label("divide by");
+                params_edited |= ui.add(egui::DragValue::new(by).range(1..=4096)).changed();
+            });
+        }
+        NodeKind::Multiplier { min, max } => {
+            ui.horizontal(|ui| {
+                ui.label("×");
+                params_edited |= ui.add(egui::DragValue::new(min).range(1..=1024)).changed();
+                ui.label("…");
+                params_edited |= ui.add(egui::DragValue::new(max).range(1..=1024)).changed();
+            });
+        }
+        NodeKind::Divider { .. } | NodeKind::Choice { .. } => {
+            let hint = match &node.kind {
+                NodeKind::Divider { .. } => "divisors, comma separated (1, 2, 4, 8)",
+                _ => "ratios n/d, comma separated (1/1, 2/3)",
+            };
+            ui.label(
+                egui::RichText::new(hint)
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+            );
+            if ui
+                .add(egui::TextEdit::singleline(&mut view.param_buf).desired_width(f32::INFINITY))
+                .lost_focus()
+            {
+                params_edited = apply_param_text(node, &view.param_buf);
+                view.param_buf = param_text(node);
+            }
+        }
+        NodeKind::TimerMul { prescaler } => {
+            // Which prescaler it follows is a reference to another node, so the
+            // picker needs the whole graph — it is drawn just below, outside
+            // this borrow. Here we only show the current value.
+            let current = prescaler.clone();
+            ui.horizontal(|ui| {
+                ui.label("follows");
+                ui.label(
+                    egui::RichText::new(if current.is_empty() { "—" } else { &current })
+                        .color(egui::Color32::from_rgb(150, 200, 160)),
+                );
+            });
+        }
+        NodeKind::Gate | NodeKind::Tap | NodeKind::Output => {
+            ui.label(
+                egui::RichText::new("No parameters.")
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+            );
+        }
+    }
+    if params_edited {
+        edit::clamp_state(node);
+        changed = true;
+    }
+
+    // The timer rule's prescaler is a reference to another node, so it needs the
+    // id list — picked here, outside the borrow above.
+    if matches!(
+        gc.graph.node(&id).map(|n| &n.kind),
+        Some(NodeKind::TimerMul { .. })
+    ) {
+        let ids: Vec<String> = gc.graph.nodes.iter().map(|n| n.id.clone()).collect();
+        let mut pick: Option<String> = None;
+        egui::ComboBox::from_id_salt("clock_timer_presc")
+            .selected_text("choose prescaler")
+            .show_ui(ui, |ui| {
+                for other in ids.iter().filter(|o| **o != id) {
+                    if ui.selectable_label(false, other).clicked() {
+                        pick = Some(other.clone());
+                    }
+                }
+            });
+        if let Some(p) = pick
+            && let Some(n) = gc.graph.node_mut(&id)
+        {
+            n.kind = NodeKind::TimerMul { prescaler: p };
+            changed = true;
+        }
+    }
+
+    // ── Datasheet ceiling ────────────────────────────────────────────────────
+    ui.add_space(6.0);
+    let node = gc.graph.node_mut(&id).unwrap();
+    let mut mhz = match node.limit {
+        Some(LimitKey::Hz(hz)) => hz as f64 / 1e6,
+        _ => 0.0,
+    };
+    let named = !matches!(node.limit, Some(LimitKey::Hz(_)) | None);
+    ui.horizontal(|ui| {
+        ui.label("limit");
+        if named {
+            ui.label(
+                egui::RichText::new(format!("{:?} (from the chip)", node.limit.unwrap()))
+                    .size(10.0)
+                    .color(egui::Color32::GRAY),
+            );
+        } else if ui
+            .add(egui::DragValue::new(&mut mhz).speed(1.0).suffix(" MHz"))
+            .changed()
+        {
+            node.limit = if mhz > 0.0 {
+                Some(LimitKey::Hz((mhz * 1e6) as u32))
+            } else {
+                None
+            };
+            changed = true;
+        }
+    });
+
+    // ── Incoming wires ───────────────────────────────────────────────────────
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Inputs").strong());
+    let incoming: Vec<(String, usize)> = gc
+        .graph
+        .edges
+        .iter()
+        .filter(|e| e.to == id)
+        .map(|e| (e.from.clone(), e.input))
+        .collect();
+    if incoming.is_empty() {
+        ui.label(
+            egui::RichText::new("nothing connected")
+                .size(10.0)
+                .color(egui::Color32::GRAY),
+        );
+    }
+    for (from, input) in incoming {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{input}: {from}")).size(11.0));
+            if ui.small_button(ph::X).on_hover_text("Disconnect").clicked() {
+                edit::disconnect(&mut gc.graph, &from, &id, input);
+                let boxes = std::mem::take(&mut gc.layout.nodes);
+                gc.layout = super::graph::derive(&gc.graph, boxes);
+                changed = true;
+            }
+        });
+    }
+
+    ui.add_space(10.0);
+    issue_list(ui, gc, family);
     changed
+}
+
+/// The node ids this chip's code generation reads — marked in the panel and
+/// checked for existence, since they are addressed by name.
+fn codegen_ids(family: &str) -> Vec<&'static str> {
+    crate::panels::mcu_module::codegen::rcc::codegen_node_ids(family)
+}
+
+/// Structural problems, worst first — the editor's own validation, separate
+/// from the datasheet-ceiling checks in the footer.
+fn issue_list(ui: &mut egui::Ui, gc: &GraphClock, family: &str) {
+    let mut found = edit::issues(&gc.graph);
+    // Family-aware check the pure validator cannot make: an id the code
+    // generator looks up has gone missing, so that value silently falls back to
+    // a default in `main.rs`.
+    for id in codegen_ids(family) {
+        if !gc.graph.nodes.iter().any(|n| n.id == id) {
+            found.insert(
+                0,
+                edit::Issue {
+                    node: None,
+                    msg: format!(
+                        "`{id}` is missing — code generation reads it, so main.rs will fall back \
+                         to a default."
+                    ),
+                    severity: Severity::Error,
+                },
+            );
+        }
+    }
+    ui.label(egui::RichText::new("Checks").strong());
+    if found.is_empty() {
+        ui.colored_label(
+            egui::Color32::from_rgb(90, 200, 110),
+            format!("{}  The tree is well-formed.", ph::CHECK_CIRCLE),
+        );
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("clock_issue_scroll")
+        .max_height(180.0)
+        .show(ui, |ui| {
+            for i in found {
+                let (color, icon) = match i.severity {
+                    Severity::Error => (egui::Color32::from_rgb(230, 90, 80), ph::X_CIRCLE),
+                    Severity::Warning => (egui::Color32::from_rgb(225, 185, 60), ph::WARNING),
+                };
+                let where_ = i.node.map(|n| format!("{n}: ")).unwrap_or_default();
+                ui.colored_label(color, format!("{icon}  {where_}{}", i.msg));
+            }
+        });
+}
+
+fn kind_name(kind: &super::graph::model::NodeKind) -> &'static str {
+    use super::graph::model::NodeKind as K;
+    match kind {
+        K::Source { .. } => "Oscillator / source",
+        K::Mux { .. } => "Mux (selector)",
+        K::Divider { .. } => "Divider",
+        K::FixedDiv { .. } => "Fixed divider",
+        K::Choice { .. } => "Ratio choice",
+        K::Multiplier { .. } => "Multiplier",
+        K::Gate => "Enable gate",
+        K::TimerMul { .. } => "Timer ×1/×2 rule",
+        K::Tap => "Tap",
+        K::Output => "Output",
+    }
+}
+
+/// The list-valued parameter of a node as editable text.
+fn param_text(node: &super::graph::model::Node) -> String {
+    use super::graph::model::NodeKind as K;
+    match &node.kind {
+        K::Divider { options } => options
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        K::Choice { ratios } => ratios
+            .iter()
+            .map(|(n, d)| format!("{n}/{d}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    }
+}
+
+/// Parse an edited parameter list back into the node. Unparseable entries are
+/// dropped; an empty result is refused, so a typo can't erase the node's options.
+fn apply_param_text(node: &mut super::graph::model::Node, text: &str) -> bool {
+    use super::graph::model::NodeKind as K;
+    match &mut node.kind {
+        K::Divider { options } => {
+            let parsed: Vec<u32> = text
+                .split(',')
+                .filter_map(|t| t.trim().parse::<u32>().ok())
+                .filter(|v| *v > 0)
+                .collect();
+            if parsed.is_empty() || parsed == *options {
+                return false;
+            }
+            *options = parsed;
+            true
+        }
+        K::Choice { ratios } => {
+            let parsed: Vec<(u32, u32)> = text
+                .split(',')
+                .filter_map(|t| {
+                    let (n, d) = t.trim().split_once('/')?;
+                    Some((n.trim().parse().ok()?, d.trim().parse::<u32>().ok()?))
+                })
+                .filter(|(_, d)| *d > 0)
+                .collect();
+            if parsed.is_empty() || parsed == *ratios {
+                return false;
+            }
+            *ratios = parsed;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Overwrite the layout's node positions with the saved ones and rebuild the
+/// drawable primitives. Ids the graph doesn't have are ignored, so a layout
+/// saved for another chip degrades to "no overrides" instead of corrupting.
+fn apply_positions(gc: &mut GraphClock, positions: &ClockPositions) {
+    let mut boxes = std::mem::take(&mut gc.layout.nodes);
+    for b in &mut boxes {
+        if let Some(&(x, y)) = positions.get(&b.node) {
+            b.x = x;
+            b.y = y;
+        }
+    }
+    gc.layout = super::graph::derive(&gc.graph, boxes);
+}
+
+/// The positions worth saving: only nodes the user MOVED away from where the
+/// automatic layout puts them. Keeping the rest implicit means a later
+/// `auto_layout` improvement still reaches every untouched node, and a project
+/// nobody dragged in writes no `@clock_layout` section at all.
+fn moved_positions(gc: &GraphClock) -> ClockPositions {
+    let base = super::graph::place(&gc.graph);
+    gc.layout
+        .nodes
+        .iter()
+        .filter(|b| {
+            base.iter()
+                .find(|p| p.node == b.node)
+                .is_none_or(|p| (p.x - b.x).abs() > 0.5 || (p.y - b.y).abs() > 0.5)
+        })
+        .map(|b| (b.node.clone(), (b.x, b.y)))
+        .collect()
+}
+
+/// Identity of a saved-position set, so the layout is re-derived on a change
+/// rather than every frame.
+fn positions_signature(p: &ClockPositions) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.len().hash(&mut h);
+    for (id, (x, y)) in p {
+        id.hash(&mut h);
+        x.to_bits().hash(&mut h);
+        y.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Cheap identity of a graph's SHAPE (ids + wiring, not the selected states):
+/// changes exactly when the diagram needs re-fitting, and stays stable while the
+/// user is only picking dividers and muxes.
+fn graph_signature(g: &super::graph::ClockGraph) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    g.nodes.len().hash(&mut h);
+    for n in &g.nodes {
+        n.id.hash(&mut h);
+    }
+    g.edges.len().hash(&mut h);
+    for e in &g.edges {
+        e.from.hash(&mut h);
+        e.to.hash(&mut h);
+        e.input.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The Scene's effective scale — how `scene` maps onto the viewport `outer`.
+/// This is what the toolbar shows as a percentage.
+fn scale_of(scene: egui::Rect, outer: egui::Rect) -> f32 {
+    if !scene.is_finite() || scene.size() == egui::Vec2::ZERO {
+        return 1.0;
+    }
+    (outer.size() / scene.size())
+        .min_elem()
+        .clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+/// Scale the view rect about its centre — `f < 1` zooms IN (smaller rect shows
+/// less of the scene). Bounded relative to the viewport so repeated presses
+/// can't push the diagram out of reach.
+fn zoom_by(view: &mut ClockView, f: f32, avail: egui::Vec2) {
+    let base = view.scene;
+    if !base.is_finite() || base.size() == egui::Vec2::ZERO || avail.x <= 0.0 || avail.y <= 0.0 {
+        return;
+    }
+    let (min, max) = (avail * 0.2, avail * 5.0);
+    let s = base.size() * f;
+    let s = egui::vec2(s.x.clamp(min.x, max.x), s.y.clamp(min.y, max.y));
+    view.scene = egui::Rect::from_center_size(base.center(), s);
+    view.adjusted = true;
 }
 
 // ── Footer zones ──────────────────────────────────────────────────────────────
@@ -341,5 +1215,200 @@ fn mhz_num(hz: u32) -> String {
         format!("{}", mhz as u32)
     } else {
         format!("{mhz:.1}")
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests — the pure half of edit mode (the drag itself needs a live egui pass)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panels::mcu_module::clock::graph::{
+        ClockGraph, Edge, Node, NodeKind, NodeState, auto_layout,
+    };
+
+    fn sample() -> GraphClock {
+        let graph = ClockGraph {
+            nodes: vec![
+                Node {
+                    id: "hsi".into(),
+                    kind: NodeKind::Source {
+                        min_hz: 16_000_000,
+                        max_hz: 16_000_000,
+                        gated: false,
+                    },
+                    state: NodeState::Source {
+                        enabled: true,
+                        hz: 16_000_000,
+                    },
+                    limit: None,
+                },
+                Node {
+                    id: "ahb".into(),
+                    kind: NodeKind::Divider {
+                        options: vec![1, 2, 4],
+                    },
+                    state: NodeState::Index(0),
+                    limit: None,
+                },
+                Node {
+                    id: "hclk".into(),
+                    kind: NodeKind::Output,
+                    state: NodeState::Fixed,
+                    limit: None,
+                },
+            ],
+            edges: vec![
+                Edge {
+                    from: "hsi".into(),
+                    to: "ahb".into(),
+                    input: 0,
+                },
+                Edge {
+                    from: "ahb".into(),
+                    to: "hclk".into(),
+                    input: 0,
+                },
+            ],
+        };
+        let layout = auto_layout(&graph);
+        GraphClock { graph, layout }
+    }
+
+    fn box_of(gc: &GraphClock, id: &str) -> (f32, f32) {
+        let b = gc.layout.nodes.iter().find(|b| b.node == id).unwrap();
+        (b.x, b.y)
+    }
+
+    /// An untouched diagram records nothing — so a project nobody dragged in
+    /// never grows a `@clock_layout` section, and a better `auto_layout` still
+    /// reaches it later.
+    #[test]
+    fn an_untouched_layout_saves_no_positions() {
+        assert!(moved_positions(&sample()).is_empty());
+    }
+
+    /// Only the node the user actually moved is recorded.
+    #[test]
+    fn only_moved_nodes_are_recorded() {
+        let mut gc = sample();
+        let b = gc
+            .layout
+            .nodes
+            .iter_mut()
+            .find(|b| b.node == "ahb")
+            .unwrap();
+        b.x += 60.0;
+        b.y -= 12.0;
+        let moved = moved_positions(&gc);
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved.get("ahb"), Some(&box_of(&gc, "ahb")));
+    }
+
+    /// Saved positions survive a reload: applying them to a fresh automatic
+    /// layout puts the box back AND moves its label with it.
+    #[test]
+    fn saved_positions_are_reapplied_to_a_fresh_layout() {
+        let mut edited = sample();
+        {
+            let b = edited
+                .layout
+                .nodes
+                .iter_mut()
+                .find(|b| b.node == "ahb")
+                .unwrap();
+            b.x = 500.0;
+            b.y = 300.0;
+        }
+        let saved = moved_positions(&edited);
+
+        // A fresh session: the layout is generated from scratch, then the saved
+        // positions land on top of it.
+        let mut reopened = sample();
+        apply_positions(&mut reopened, &saved);
+        assert_eq!(box_of(&reopened, "ahb"), (500.0, 300.0));
+        assert_eq!(
+            box_of(&reopened, "hsi"),
+            box_of(&sample(), "hsi"),
+            "untouched nodes keep the automatic position"
+        );
+        let label = reopened
+            .layout
+            .labels_above
+            .iter()
+            .find(|l| l.text == "ahb")
+            .unwrap();
+        assert_eq!(label.x, 500.0, "the derived primitives followed the box");
+    }
+
+    /// A layout saved for a different chip must not corrupt this one.
+    #[test]
+    fn positions_for_unknown_nodes_are_ignored() {
+        let mut gc = sample();
+        let before = gc.layout.nodes.clone();
+        let mut alien = ClockPositions::new();
+        alien.insert("some_other_chips_node".into(), (900.0, 900.0));
+        apply_positions(&mut gc, &alien);
+        assert_eq!(gc.layout.nodes, before);
+    }
+
+    /// The properties panel edits divisor / ratio lists as text; the round trip
+    /// must be lossless and a typo must not wipe the node's options.
+    #[test]
+    fn parameter_lists_round_trip_through_their_text_field() {
+        use crate::panels::mcu_module::clock::graph::{Node, NodeKind, NodeState};
+
+        let mut div = Node {
+            id: "ahb".into(),
+            kind: NodeKind::Divider {
+                options: vec![1, 2, 4, 8],
+            },
+            state: NodeState::Index(0),
+            limit: None,
+        };
+        assert_eq!(param_text(&div), "1, 2, 4, 8");
+        assert!(apply_param_text(&mut div, "1, 2, 4, 8, 16"));
+        assert_eq!(param_text(&div), "1, 2, 4, 8, 16");
+        assert!(
+            !apply_param_text(&mut div, "1, 2, 4, 8, 16"),
+            "an unchanged list is not an edit"
+        );
+        assert!(
+            !apply_param_text(&mut div, "oops"),
+            "an unparseable list is refused"
+        );
+        assert_eq!(param_text(&div), "1, 2, 4, 8, 16", "options survived");
+        assert!(!apply_param_text(&mut div, "0, 0"), "zero divisors dropped");
+
+        let mut choice = Node {
+            id: "usb".into(),
+            kind: NodeKind::Choice {
+                ratios: vec![(1, 1), (2, 3)],
+            },
+            state: NodeState::Index(0),
+            limit: None,
+        };
+        assert_eq!(param_text(&choice), "1/1, 2/3");
+        assert!(apply_param_text(&mut choice, "1/1, 2/3, 1/2"));
+        assert_eq!(param_text(&choice), "1/1, 2/3, 1/2");
+        assert!(
+            !apply_param_text(&mut choice, "3/0"),
+            "a zero denominator is dropped, leaving nothing to apply"
+        );
+    }
+
+    /// The signature changes when a position does — that is what triggers the
+    /// re-derive instead of doing it every frame.
+    #[test]
+    fn the_position_signature_tracks_changes() {
+        let mut p = ClockPositions::new();
+        let empty = positions_signature(&p);
+        p.insert("ahb".into(), (10.0, 20.0));
+        let one = positions_signature(&p);
+        assert_ne!(empty, one);
+        p.insert("ahb".into(), (10.0, 21.0));
+        assert_ne!(one, positions_signature(&p), "a moved node must register");
     }
 }

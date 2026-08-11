@@ -277,6 +277,23 @@ impl AppIde {
                                 });
                             }
                         }
+                        // The deterministic path for an ST part: CubeMX ships the
+                        // clock tree ST draws, coordinates included, so this
+                        // imports the real figure instead of inferring one.
+                        if ui
+                            .button(format!("{} CubeMX clock XML…", ph::FILE_CODE))
+                            .on_hover_text(
+                                "Import a clock tree from an STM32CubeMX installation: pick \
+                                 db/plugins/clock/STM32<FAMILY>.xml — the matching RCC parameter \
+                                 file is found next to it.",
+                            )
+                            .clicked()
+                            && let Some(path) = rfd::FileDialog::new()
+                                .add_filter("CubeMX clock XML", &["xml"])
+                                .pick_file()
+                        {
+                            clock_note = Some(import_cubemx_clock(&path, &mut form));
+                        }
                         if ui
                             .button(format!("{} Extract from datasheet (AI)…", ph::SPARKLE))
                             .on_hover_text(
@@ -641,4 +658,36 @@ fn pin_side_editor(
                 }
             });
         });
+}
+
+/// Import a clock tree from a CubeMX `db/plugins/clock/STM32<FAM>.xml` the user
+/// picked, and attach it to `form`.
+///
+/// The path locates everything: its stem is the family, and its grandparent's
+/// parent is the `db` directory holding the RCC parameter file. So the user
+/// picks ONE file, not two — and picking the wrong one says so instead of
+/// importing a half tree.
+///
+/// Variant tokens (`STM32WBAx5`, `SAI1_Exist`, …) are what CubeMX uses to fit
+/// one family file to several parts. We do not know them from a bare file pick,
+/// so nothing is assumed: conditional branches stay out, and the user adds what
+/// their part has in the clock editor.
+fn import_cubemx_clock(path: &std::path::Path, form: &mut McuForm) -> Result<String, String> {
+    use crate::panels::mcu_module::clock::graph::{GraphClock, cubemx, derive};
+
+    let family = cubemx::family_of(path).ok_or("that file has no name to take a family from")?;
+    // …/db/plugins/clock/STM32WBA.xml -> …/db
+    let db = path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or("expected the file to sit in <CubeMX>/db/plugins/clock/")?;
+
+    let (graph, boxes) = cubemx::import_from_db(db, &family, &cubemx::Variant::default())?;
+    let nodes = graph.nodes.len();
+    let layout = derive(&graph, boxes);
+    form.set_imported_clock(GraphClock { graph, layout });
+    Ok(format!(
+        "Imported {family} from CubeMX: {nodes} nodes, with ST's own diagram layout."
+    ))
 }

@@ -58,7 +58,11 @@ pub fn show_bridge_info(
             format!("{label} {port}")
         }
     };
-    let pair_title = if unix { "socat PTY pair" } else { "com0com pair" };
+    let pair_title = if unix {
+        "socat PTY pair"
+    } else {
+        "com0com pair"
+    };
     let boxes = [
         Box {
             x: 10.0,
@@ -146,8 +150,22 @@ pub fn show_bridge_info(
 
     // The two ends of the virtual pair, inside the pair box.
     let ends = [
-        (30.0, if app_side.is_empty() { "app side" } else { app_side }),
-        (170.0, if ide_side.is_empty() { "IDE side" } else { ide_side }),
+        (
+            30.0,
+            if app_side.is_empty() {
+                "app side"
+            } else {
+                app_side
+            },
+        ),
+        (
+            170.0,
+            if ide_side.is_empty() {
+                "IDE side"
+            } else {
+                ide_side
+            },
+        ),
     ];
     for (x, label) in ends {
         let r = egui::Rect::from_min_max(p(x, 140.0), p(x + 100.0, 190.0));
@@ -192,13 +210,7 @@ pub fn show_bridge_info(
             2.0 * scale,
             col,
         );
-        painter.text(
-            p(416.0, y),
-            egui::Align2::LEFT_CENTER,
-            label,
-            f(11.0),
-            col,
-        );
+        painter.text(p(416.0, y), egui::Align2::LEFT_CENTER, label, f(11.0), col);
     }
 }
 

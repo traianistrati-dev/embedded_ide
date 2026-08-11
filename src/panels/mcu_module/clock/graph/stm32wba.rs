@@ -285,6 +285,9 @@ pub fn stm32wba_layout() -> ClockLayout {
     let plln = [10u32, 12, 15, 16, 20, 24, 25, 30, 32, 36, 40, 48, 50, 60];
 
     ClockLayout {
+        // Hand-authored: the primitives below ARE the layout, so there are
+        // no node boxes to derive them from.
+        nodes: Vec::new(),
         blocks: vec![
             BlockDef {
                 x: 40.0,

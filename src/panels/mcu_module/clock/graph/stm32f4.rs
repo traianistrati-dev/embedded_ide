@@ -270,6 +270,9 @@ pub fn stm32f4_layout() -> ClockLayout {
     ];
 
     ClockLayout {
+        // Hand-authored: the primitives below ARE the layout, so there are
+        // no node boxes to derive them from.
+        nodes: Vec::new(),
         blocks: vec![
             BlockDef {
                 x: 40.0,

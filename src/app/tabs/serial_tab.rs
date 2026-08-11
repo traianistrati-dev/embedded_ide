@@ -359,12 +359,11 @@ fn show_bridge_row(ui: &mut egui::Ui, serial: &mut SerialMonitor, connected: boo
                                 // arbitrary but STABLE split; Swap flips it.
                                 if ui.selectable_label(false, format!("{a} <-> {b}")).clicked() {
                                     serial.bridge_port = b.clone();
-                                    serial.pair = Some(
-                                        crate::serial_bridge::VirtualPair::existing(
+                                    serial.pair =
+                                        Some(crate::serial_bridge::VirtualPair::existing(
                                             b.clone(),
                                             a.clone(),
-                                        ),
-                                    );
+                                        ));
                                 }
                             }
                         });

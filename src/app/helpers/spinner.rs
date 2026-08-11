@@ -46,6 +46,8 @@ pub(crate) fn throttled_spinner_stroked(ui: &mut egui::Ui, size: f32, thickness:
             rect.center() + radius * egui::vec2(cos as f32, sin as f32)
         })
         .collect();
-    ui.painter()
-        .add(egui::Shape::line(points, egui::Stroke::new(thickness, color)));
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(thickness, color),
+    ));
 }

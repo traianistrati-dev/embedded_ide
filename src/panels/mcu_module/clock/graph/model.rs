@@ -26,6 +26,12 @@ pub enum LimitKey {
     Pclk2Max,
     AdcclkMax,
     UsbclkHz,
+    /// An explicit ceiling in Hz, carried by the node itself. `ClockLimits` has
+    /// fixed STM32F103-shaped fields, so clocks it doesn't name (PCLK7, ADC4,
+    /// SAI, RNG…) had to borrow an unrelated key — see the PCLK7 comment in
+    /// [`super::stm32wba`]. With this a hand-drawn or imported graph carries its
+    /// own limits and stays self-contained.
+    Hz(u32),
 }
 
 /// The behaviour of a node — how it turns its input frequency(ies) into an
@@ -55,6 +61,12 @@ pub enum NodeKind {
     Tap,
     /// Timer-clock rule: ×1 when the referenced prescaler's divisor is 1, else ×2.
     TimerMul { prescaler: NodeId },
+    /// Enable gate — the `EN` boxes a datasheet clock tree puts on a branch
+    /// (LSE→lsesys, the radio kernel clock, RNG). Passes its input through when
+    /// on, outputs 0 when off. State: [`NodeState::Fixed`] = on,
+    /// [`NodeState::Unset`] = off — no new `NodeState` variant, so every
+    /// existing `.ron` keeps parsing.
+    Gate,
     /// Leaf sink — a delivered clock (HCLK, PCLK1, …). Whether it has a ceiling
     /// is a `Node`-level concern ([`Node::limit`]), not the kind's.
     Output,

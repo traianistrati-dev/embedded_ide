@@ -107,7 +107,11 @@ impl ClockDef {
     /// compact family forms are upgraded to a full graph here (topology +
     /// diagram from the family's `*_graph` / `*_layout`; `limits` only feeds the
     /// STM32F1 HSE-range label).
-    fn to_config(&self, limits: &ClockLimits) -> ClockConfig {
+    ///
+    /// Public because the AI clock importer needs the same upgrade: its second
+    /// pass merges onto whatever tree the form currently holds, family template
+    /// included.
+    pub fn to_config(&self, limits: &ClockLimits) -> ClockConfig {
         use super::clock::graph::{
             GraphClock, esp32c3_graph, esp32c3_layout, layout::stm32f1_layout, stm32f1_graph,
         };
@@ -426,6 +430,60 @@ mod tests {
         assert!(mcu.reset_clock(), "reset reports the change");
         assert_eq!(mcu.clock, pristine, "tree is back to the factory config");
         assert!(!mcu.reset_clock(), "second reset is a no-op");
+    }
+
+    /// "Save to chip" writes the edited TOPOLOGY into the definition — the part
+    /// `mcu.config` cannot carry (it round-trips node states, not the graph). A
+    /// definition carrying an edited tree must survive the `.ron` round trip and
+    /// rebuild into exactly that tree.
+    #[test]
+    fn an_edited_clock_tree_survives_the_definition_round_trip() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::clock::graph::edit::{PaletteKind, add_node, connect};
+        use crate::panels::mcu_module::clock::graph::{GraphClock, auto_layout};
+
+        // Start from the chip's own tree and add a node, as the editor does.
+        let mut mcu = stm_def().build_mcu();
+        let ClockConfig::Graph(gc) = &mut mcu.clock else {
+            panic!("graph clock");
+        };
+        let mut boxes = auto_layout(&gc.graph).nodes;
+        let added = add_node(
+            &mut gc.graph,
+            &mut boxes,
+            PaletteKind::Output,
+            10.0,
+            10.0,
+            96.0,
+            26.0,
+        );
+        connect(&mut gc.graph, "hclk", &added).expect("wire the new output");
+        let edited = GraphClock {
+            graph: gc.graph.clone(),
+            layout: gc.layout.clone(),
+        };
+
+        let mut def = stm_def();
+        def.clock = ClockDef::Graph(edited.clone());
+        let text = ron::ser::to_string_pretty(&def, ron::ser::PrettyConfig::default())
+            .expect("serialize the edited definition");
+        let back: McuDefinition = ron::from_str(&text).expect("parse it back");
+        assert_eq!(back, def, "the edited tree round-trips");
+
+        let rebuilt = back.build_mcu();
+        let ClockConfig::Graph(out) = &rebuilt.clock else {
+            panic!("graph clock");
+        };
+        assert!(
+            out.graph.node(&added).is_some(),
+            "the node added in the editor is in the rebuilt chip"
+        );
+        assert!(
+            out.graph.edges.iter().any(|e| e.to == added),
+            "and so is its wire"
+        );
+        // The saved tree is the chip's factory config now, so Reset aims at it.
+        assert!(rebuilt.clock_is_default());
     }
 
     /// A saved project's clock is adopted AFTER the snapshot, so Reset targets

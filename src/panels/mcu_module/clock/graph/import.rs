@@ -101,6 +101,95 @@ mod tests {
         );
     }
 
+    /// `NodeKind::Gate` and `LimitKey::Hz` are new variants — a `.ron` using
+    /// them round-trips, and every shipped file (which uses neither) still
+    /// parses unchanged.
+    #[test]
+    fn gate_and_inline_hz_limit_round_trip() {
+        use super::super::model::{Edge, LimitKey, Node, NodeKind, NodeState};
+        let gc = GraphClock {
+            graph: ClockGraph {
+                nodes: vec![
+                    Node {
+                        id: "lse".into(),
+                        kind: NodeKind::Source {
+                            min_hz: 32_768,
+                            max_hz: 32_768,
+                            gated: true,
+                        },
+                        state: NodeState::Source {
+                            enabled: true,
+                            hz: 32_768,
+                        },
+                        limit: None,
+                    },
+                    Node {
+                        id: "en".into(),
+                        kind: NodeKind::Gate,
+                        state: NodeState::Fixed,
+                        limit: None,
+                    },
+                    Node {
+                        id: "lsesys".into(),
+                        kind: NodeKind::Output,
+                        state: NodeState::Fixed,
+                        limit: Some(LimitKey::Hz(32_768)),
+                    },
+                ],
+                edges: vec![
+                    Edge {
+                        from: "lse".into(),
+                        to: "en".into(),
+                        input: 0,
+                    },
+                    Edge {
+                        from: "en".into(),
+                        to: "lsesys".into(),
+                        input: 0,
+                    },
+                ],
+            },
+            layout: Default::default(),
+        };
+        let back = parse_clock_ron(&export_clock_ron(&gc)).expect("re-import");
+        assert_eq!(gc.graph, back.graph);
+
+        // The shipped chips predate both variants — still fine.
+        let old = sample();
+        assert_eq!(
+            parse_clock_ron(&export_clock_ron(&old)).expect("existing style"),
+            old
+        );
+    }
+
+    /// `ClockLayout.nodes` is new: a derived layout round-trips with its boxes,
+    /// and a `.ron` written before the field existed still parses (the shipped
+    /// chips are exactly that case — hand-authored, no boxes).
+    #[test]
+    fn node_boxes_round_trip_and_stay_optional() {
+        use super::super::auto_layout::auto_layout;
+
+        let derived = GraphClock {
+            graph: sample().graph,
+            layout: auto_layout(&sample().graph),
+        };
+        assert!(!derived.layout.nodes.is_empty(), "auto layout places boxes");
+        let back = parse_clock_ron(&export_clock_ron(&derived)).expect("re-import");
+        assert_eq!(derived.layout.nodes, back.layout.nodes);
+
+        // A layout serialized without the field at all.
+        let no_field = r#"(
+            graph: (
+                nodes: [(id: "hsi", kind: Source(min_hz: 8000000, max_hz: 8000000, gated: false),
+                         state: Source(enabled: true, hz: 8000000), limit: None)],
+                edges: [],
+            ),
+            layout: (blocks: [], outputs: [], tags: [], labels_above: [], mux_titles: [], wires: []),
+        )"#;
+        let gc = parse_clock_ron(no_field).expect("a layout without `nodes` must parse");
+        assert!(gc.layout.nodes.is_empty());
+    }
+
     #[test]
     fn garbage_is_rejected_with_a_readable_error() {
         let err = parse_clock_ron("this is not ron at all {{{").unwrap_err();

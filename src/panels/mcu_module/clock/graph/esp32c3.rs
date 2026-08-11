@@ -168,6 +168,9 @@ pub fn esp32c3_layout() -> ClockLayout {
     let mi = |label: &str, dy: f32, i: usize| (label.to_owned(), dy, NodeState::Index(i));
 
     ClockLayout {
+        // Hand-authored: the primitives below ARE the layout, so there are
+        // no node boxes to derive them from.
+        nodes: Vec::new(),
         blocks: vec![
             blk(28.0, 92.0, 120.0, 36.0, "XTAL\n40 MHz"),
             blk(28.0, 300.0, 120.0, 36.0, "RC_FAST\n17.5 MHz"),

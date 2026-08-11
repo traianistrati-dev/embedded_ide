@@ -100,6 +100,8 @@ fn eval_node(
 
         (NodeKind::Tap, _) => primary,
         (NodeKind::Output, _) => primary,
+        // An `EN` box: off is `Unset`, caught by the first arm above.
+        (NodeKind::Gate, _) => primary,
 
         (NodeKind::TimerMul { prescaler }, _) => {
             let presc = by_id
@@ -146,6 +148,36 @@ mod tests {
             to: to.into(),
             input,
         }
+    }
+
+    /// An `EN` gate passes its input when on (`Fixed`) and stops it when off
+    /// (`Unset`) — the datasheet's EN boxes, with no new `NodeState` variant.
+    #[test]
+    fn a_gate_passes_or_stops_its_input() {
+        let gated = |state: NodeState| {
+            let g = ClockGraph {
+                nodes: vec![
+                    n(
+                        "lse",
+                        NodeKind::Source {
+                            min_hz: 32_768,
+                            max_hz: 32_768,
+                            gated: true,
+                        },
+                        NodeState::Source {
+                            enabled: true,
+                            hz: 32_768,
+                        },
+                    ),
+                    n("en", NodeKind::Gate, state),
+                    n("lsesys", NodeKind::Output, NodeState::Fixed),
+                ],
+                edges: vec![e("lse", "en", 0), e("en", "lsesys", 0)],
+            };
+            evaluate(&g)["lsesys"]
+        };
+        assert_eq!(gated(NodeState::Fixed), 32_768, "gate on passes through");
+        assert_eq!(gated(NodeState::Unset), 0, "gate off delivers no clock");
     }
 
     /// A tiny graph: src 8 MHz → ×9 → /2 → output, plus a parallel mux pick.
