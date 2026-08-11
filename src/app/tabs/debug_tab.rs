@@ -33,6 +33,16 @@ const UNARMED_GREY: egui::Color32 = egui::Color32::from_gray(120);
 /// Memory key of this tab's help panel.
 const HELP_ID: &str = "debug";
 
+/// The Watch pane's "Live" checkbox — shown on its hover.
+const LIVE_HELP: &str = "Read watch rows straight out of memory ~2x a second, WHILE THE TARGET \
+     RUNS (DAP readMemory — it doesn't need a halt).\n\n\
+     Only rows whose expression is an ADDRESS (0x20000004) can be read this way: \
+     resolving a NAME needs a stack frame, and a running target has none. Get the \
+     address of a static from the map file or from a halt.\n\n\
+     What it is for: point a row at a counter your main loop increments. While the \
+     loop turns, the value moves; the moment it stops, the row shows how long it has \
+     been steady — a hang detector that never stops the target.";
+
 /// What probe-rs can evaluate for a watch/hover — shown on the Watch pane's ⓘ.
 /// Its evaluator resolves a SINGLE in-scope name; compound expressions and
 /// out-of-scope / optimized-out names come back unresolved.
@@ -685,6 +695,9 @@ pub fn show_debug_tab(
                     .color(egui::Color32::from_gray(130)),
             )
             .on_hover_text(WATCH_HELP);
+            // Live: read ADDRESS rows out of memory while the target runs.
+            ui.checkbox(&mut dbg.watch_live, egui::RichText::new("Live").size(10.0))
+                .on_hover_text(LIVE_HELP);
             let r = ui.add(
                 egui::TextEdit::singleline(&mut dbg.watch_draft)
                     .hint_text("expression…")
@@ -743,6 +756,31 @@ pub fn show_debug_tab(
                         if let Some(ty) = &w.ty {
                             resp.on_hover_text(ty);
                         }
+                        // How long this live value has been standing still —
+                        // the actual hang signal. Green while it moves, amber
+                        // once it has been steady long enough to be suspicious.
+                        if let Some(since) = w.changed_at {
+                            let secs = since.elapsed().as_secs_f32();
+                            ui.label(
+                                egui::RichText::new(if secs < 1.0 {
+                                    "· moving".to_owned()
+                                } else {
+                                    format!("· steady {secs:.0}s")
+                                })
+                                .size(10.0)
+                                .color(if secs < 1.0 {
+                                    egui::Color32::from_rgb(80, 200, 100)
+                                } else if secs < 5.0 {
+                                    egui::Color32::from_gray(150)
+                                } else {
+                                    HALT_AMBER
+                                }),
+                            )
+                            .on_hover_text(
+                                "Time since this value last CHANGED. A counter your main \
+                                 loop bumps stops moving the moment the loop does.",
+                            );
+                        }
                     });
                 }
             });
@@ -797,6 +835,15 @@ pub fn show_debug_tab(
     }
     if let Some(f) = select {
         dbg.select_frame(&f);
+    }
+
+    // Live watch: rate-limited inside, so calling it every frame is fine. The
+    // repaint keeps the poll going while the user isn't touching anything —
+    // without it the values would only refresh on mouse movement.
+    dbg.poll_live_watches();
+    if dbg.watch_live && dbg.is_busy() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(400));
     }
 }
 

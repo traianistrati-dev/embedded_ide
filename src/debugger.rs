@@ -83,6 +83,26 @@ pub struct WatchRow {
     pub value: String,
     pub ty: Option<String>,
     pub error: bool,
+    /// The last value read LIVE (see [`Debugger::poll_live_watches`]) and when
+    /// it last changed. A counter the firmware bumps in its main loop stops
+    /// moving the moment that loop is stuck — that "steady for Ns" is the whole
+    /// point of watching while the target RUNS.
+    pub raw: Option<u64>,
+    pub changed_at: Option<std::time::Instant>,
+}
+
+impl WatchRow {
+    /// A fresh row for `expr`, with no value yet.
+    fn new(expr: String) -> Self {
+        Self {
+            expr,
+            value: String::new(),
+            ty: None,
+            error: false,
+            raw: None,
+            changed_at: None,
+        }
+    }
 }
 
 /// The current hover-to-evaluate request: the identifier under the pointer and
@@ -163,6 +183,10 @@ enum Pending {
     /// `evaluate` for a hover tooltip; the `u64` is the hover generation so a
     /// stale reply (pointer already moved on) is dropped.
     Hover(u64),
+    /// `readMemory` for live watch row `i` — the one request that answers while
+    /// the target is RUNNING (probe-rs reads over the AHB-AP; it only halts
+    /// when the core is asleep).
+    MemRead(usize),
     /// `setBreakpoints` for one file: `(rel path, the lines we asked for, in
     /// request order)`. The response's array is positional against that list.
     Breakpoints(String, Vec<u32>),
@@ -267,6 +291,11 @@ pub struct Debugger {
     pub pane_splits: [f32; 4],
     /// The Watch pane's "add expression" input text. UI-only.
     pub watch_draft: String,
+    /// Watch pane "Live": poll ADDRESS rows out of memory while the target runs
+    /// (see [`Debugger::poll_live_watches`]). UI-only, session-persistent.
+    pub watch_live: bool,
+    /// Rate limit for the poll above.
+    last_live_poll: std::time::Instant,
     /// Monotonic generation for hover-evaluate requests (drops stale replies).
     hover_gen: AtomicU64,
 }
@@ -288,6 +317,8 @@ impl Default for Debugger {
             // Console widest; breakpoints / stack / variables / watch share it.
             pane_splits: [0.28, 0.45, 0.62, 0.81],
             watch_draft: String::new(),
+            watch_live: false,
+            last_live_poll: std::time::Instant::now(),
             hover_gen: AtomicU64::new(0),
         }
     }
@@ -339,12 +370,7 @@ impl Debugger {
             let watches = st
                 .watches
                 .iter()
-                .map(|w| WatchRow {
-                    expr: w.expr.clone(),
-                    value: String::new(),
-                    ty: None,
-                    error: false,
-                })
+                .map(|w| WatchRow::new(w.expr.clone()))
                 .collect();
             *st = DebugState {
                 phase: DebugPhase::Building,
@@ -592,12 +618,7 @@ impl Debugger {
             if st.watches.iter().any(|w| w.expr == expr) {
                 return; // already watching it
             }
-            st.watches.push(WatchRow {
-                expr: expr.clone(),
-                value: String::new(),
-                ty: None,
-                error: false,
-            });
+            st.watches.push(WatchRow::new(expr.clone()));
             (st.watches.len() - 1, st.sel_frame)
         };
         // Evaluate now if a session is halted on a frame; otherwise it fills in
@@ -610,6 +631,40 @@ impl Debugger {
                     Pending::Watch(idx),
                 );
             }
+        }
+    }
+
+    /// Re-read every ADDRESS watch straight from memory, whether the target is
+    /// halted or running. Call once per frame; it rate-limits itself.
+    ///
+    /// This is the only way to see a value MOVE: `evaluate` needs a stack frame,
+    /// so the ordinary watch path is dead while the firmware runs — which is
+    /// exactly when you want to know whether the main loop is still turning.
+    /// Point a row at a counter's address and its "steady for Ns" badge is a
+    /// hang detector that costs the target nothing but a few bus cycles.
+    pub fn poll_live_watches(&mut self) {
+        const EVERY: Duration = Duration::from_millis(400);
+        if !self.watch_live || self.wire.writer.lock().unwrap().is_none() {
+            return;
+        }
+        if self.last_live_poll.elapsed() < EVERY {
+            return;
+        }
+        self.last_live_poll = std::time::Instant::now();
+        let addrs: Vec<(usize, u64)> = {
+            let st = self.state.lock().unwrap();
+            st.watches
+                .iter()
+                .enumerate()
+                .filter_map(|(i, w)| parse_addr(&w.expr).map(|a| (i, a)))
+                .collect()
+        };
+        for (i, addr) in addrs {
+            self.wire.request(
+                "readMemory",
+                json!({"memoryReference": format!("0x{addr:X}"), "count": 4}),
+                Pending::MemRead(i),
+            );
         }
     }
 
@@ -1278,6 +1333,28 @@ fn handle_response(
                 }
             }
         }
+        Pending::MemRead(i) => {
+            // DAP ships memory base64-encoded, little-endian on our targets.
+            let Some(bytes) = msg["body"]["data"].as_str().and_then(base64_decode) else {
+                return;
+            };
+            let mut raw: u64 = 0;
+            for (k, b) in bytes.iter().take(8).enumerate() {
+                raw |= (*b as u64) << (8 * k);
+            }
+            let mut st = state.lock().unwrap();
+            if let Some(row) = st.watches.get_mut(i) {
+                // The CHANGE is the signal, so only a different value restarts
+                // the clock — a steady counter means a stopped loop.
+                if row.raw != Some(raw) {
+                    row.changed_at = Some(std::time::Instant::now());
+                }
+                row.raw = Some(raw);
+                row.value = format!("0x{raw:08X}  ({raw})");
+                row.ty = Some(format!("{} bytes @ live read", bytes.len()));
+                row.error = false;
+            }
+        }
         Pending::Breakpoints(rel, asked) => {
             let answers = msg["body"]["breakpoints"]
                 .as_array()
@@ -1442,6 +1519,46 @@ fn handle_event(
     }
 }
 
+/// A watch expression that is a plain ADDRESS (`0x2000_0004`) — the only kind
+/// that can be read while the target runs, since there is no frame to resolve a
+/// name against. Underscores are allowed, the way they are written in code.
+fn parse_addr(expr: &str) -> Option<u64> {
+    let t = expr.trim().replace('_', "");
+    let hex = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X"))?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
+/// Decode standard base64 (the encoding DAP uses for `readMemory` data).
+/// `None` on any character outside the alphabet — a malformed body must not
+/// silently produce a plausible-looking value.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a') as u32 + 26,
+            b'0'..=b'9' => (c - b'0') as u32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    };
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for c in s.bytes().filter(|c| !c.is_ascii_whitespace()) {
+        if c == b'=' {
+            break; // padding: whatever is buffered is incomplete, drop it
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 /// `"Erasing sectors · 42%"` from a DAP `progressUpdate` body — `None` when it
 /// carries neither a message nor a percentage (nothing to show, keep the last).
 fn progress_text(msg: &Value) -> Option<String> {
@@ -1471,6 +1588,32 @@ fn rel_of(path: &str, project_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live watch reads memory over DAP, which ships it base64-encoded, and
+    /// only ADDRESS rows can be read while the target runs.
+    #[test]
+    fn live_watch_parses_addresses_and_decodes_memory() {
+        assert_eq!(parse_addr("0x20000004"), Some(0x2000_0004));
+        assert_eq!(parse_addr("  0x2000_0004 "), Some(0x2000_0004));
+        assert_eq!(parse_addr("0X1FFFF7E8"), Some(0x1FFF_F7E8));
+        // A NAME has no address — it needs a frame, so live can't read it.
+        assert_eq!(parse_addr("TICK"), None);
+        assert_eq!(parse_addr("0xZZ"), None);
+
+        // "AQAAAA==" = 01 00 00 00 → 1 little-endian.
+        let bytes = base64_decode("AQAAAA==").expect("valid base64");
+        assert_eq!(bytes, vec![1, 0, 0, 0]);
+        let mut raw: u64 = 0;
+        for (k, b) in bytes.iter().enumerate() {
+            raw |= (*b as u64) << (8 * k);
+        }
+        assert_eq!(raw, 1);
+        // Every 6-bit group maps back to its byte, padding and all.
+        assert_eq!(base64_decode("/w==").unwrap(), vec![0xFF]);
+        assert_eq!(base64_decode("ESIz").unwrap(), vec![0x11, 0x22, 0x33]);
+        // Garbage is rejected rather than turned into a plausible number.
+        assert!(base64_decode("!!!!").is_none());
+    }
 
     /// The badge text while flashing: a message, a percentage, or both — and
     /// nothing at all when the event carries neither, so the last useful line
