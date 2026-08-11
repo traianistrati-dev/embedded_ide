@@ -439,7 +439,7 @@ pub(super) fn show_diag_panel(
                     format!(" {}", ph::PLAY),
                     egui::Color32::from_rgb(80, 200, 100),
                 ),
-                DebugPhase::Building | DebugPhase::Launching => {
+                DebugPhase::Building | DebugPhase::Launching | DebugPhase::Stopping => {
                     (" …".to_owned(), egui::Color32::GRAY)
                 }
                 DebugPhase::Error(_) => (

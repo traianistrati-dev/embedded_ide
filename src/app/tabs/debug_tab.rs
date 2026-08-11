@@ -128,7 +128,7 @@ pub fn show_debug_tab(
                 )
                 .clicked()
             {
-                dbg.stop();
+                dbg.stop(ui.ctx());
             }
         });
 
@@ -275,6 +275,12 @@ pub fn show_debug_tab(
                 DebugPhase::Stopped(r) => (
                     format!("{} stopped: {r}", ph::PAUSE),
                     egui::Color32::from_rgb(230, 180, 60),
+                ),
+                // Said out loud because it gates the Flash buttons: the probe
+                // isn't free until the server has actually let go of it.
+                DebugPhase::Stopping => (
+                    "disconnecting — releasing the probe…".to_owned(),
+                    egui::Color32::from_rgb(200, 180, 120),
                 ),
                 DebugPhase::Error(e) => (
                     // Without `strip` the badge would lead with the raw `[TAG]`.

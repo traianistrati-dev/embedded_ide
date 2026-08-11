@@ -47,6 +47,10 @@ pub enum DebugPhase {
     Running,
     /// Halted — the inner string is the DAP stop reason ("breakpoint", "step").
     Stopped(String),
+    /// Disconnecting: the server is finishing and letting go of the probe.
+    /// A phase of its own because `is_busy` must stay TRUE through it — the
+    /// probe is not free yet, and a Flash started here fails to open it.
+    Stopping,
     Error(String),
 }
 
@@ -389,11 +393,18 @@ impl Debugger {
         });
     }
 
-    /// End the session: polite `disconnect`, then kill the server.
-    pub fn stop(&mut self) {
-        if let Some(stop) = &self.stop {
-            stop.store(true, Ordering::Relaxed);
-        }
+    /// End the session: polite `disconnect`, then wait for the server to let go
+    /// of the probe — and only kill it if it won't.
+    ///
+    /// The phase stays [`DebugPhase::Stopping`] (so `is_busy` is true, so every
+    /// flasher stays blocked) until the server process is GONE. It used to flip
+    /// to `Idle` immediately while a kill was scheduled 400 ms later: a Flash
+    /// clicked in that window found the probe still held, and the kill itself
+    /// left the ST-Link in debug mode — "The debug probe could not be opened"
+    /// until the user physically replugged it.
+    pub fn stop(&mut self, ctx: &egui::Context) {
+        // The reader must stay alive to carry the disconnect handshake; only
+        // the shutdown thread flips the flag, once the server is really gone.
         self.wire.request(
             "disconnect",
             json!({"terminateDebuggee": false}),
@@ -402,17 +413,10 @@ impl Debugger {
         if let Some(child) = self.build_child.lock().unwrap().as_mut() {
             let _ = child.kill();
         }
-        // Give the server a moment to honour the disconnect, then kill it.
-        let server = Arc::clone(&self.server);
-        let writer = Arc::clone(&self.wire.writer);
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(400));
-            kill_server(&server);
-            *writer.lock().unwrap() = None;
-        });
         {
             let mut st = self.state.lock().unwrap();
-            st.phase = DebugPhase::Idle;
+            st.phase = DebugPhase::Stopping;
+            st.progress = None;
             st.stack.clear();
             st.locals.clear();
             st.registers.clear();
@@ -420,7 +424,39 @@ impl Debugger {
         self.console
             .lock()
             .unwrap()
-            .push_plain(LineKind::Notice, "[debug session ended]");
+            .push_plain(LineKind::Notice, "[disconnecting — releasing the probe…]");
+
+        let server = Arc::clone(&self.server);
+        let writer = Arc::clone(&self.wire.writer);
+        let state = Arc::clone(&self.state);
+        let console = Arc::clone(&self.console);
+        let stop = self.stop.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let clean = shutdown_server(&server, Duration::from_secs(3));
+            // Some ST-Links need a breath after the handle closes before they
+            // answer an open again.
+            thread::sleep(Duration::from_millis(150));
+            if let Some(s) = stop {
+                s.store(true, Ordering::Relaxed);
+            }
+            *writer.lock().unwrap() = None;
+            {
+                let mut st = state.lock().unwrap();
+                st.phase = DebugPhase::Idle;
+                st.bp_status.clear();
+            }
+            console.lock().unwrap().push_plain(
+                LineKind::Notice,
+                if clean {
+                    "[debug session ended — probe released]"
+                } else {
+                    "[debug session ended — server killed; if the next Flash can't open \
+                     the probe, unplug it and plug it back in]"
+                },
+            );
+            ctx.request_repaint();
+        });
     }
 
     /// Synchronous teardown for app exit — an orphaned dap-server would keep
@@ -669,6 +705,28 @@ fn send_breakpoints(wire: &Wire, project_dir: &Path, rel_path: &str, lines: &[u3
     );
 }
 
+/// Wait for the dap-server to exit on its own (it does, after a `disconnect`,
+/// because we start it with `--single-session`), killing it only if it outstays
+/// `grace`. Returns true when it left by itself — the case where probe-rs ran
+/// its own shutdown and DETACHED the probe. A kill skips all of that, which is
+/// what used to leave the ST-Link wedged until a replug.
+fn shutdown_server(server: &Arc<Mutex<Option<Child>>>, grace: Duration) -> bool {
+    let Some(mut child) = server.lock().unwrap().take() else {
+        return true; // nothing running
+    };
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => thread::sleep(Duration::from_millis(40)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
+}
+
 fn kill_server(server: &Arc<Mutex<Option<Child>>>) {
     if let Some(mut child) = server.lock().unwrap().take() {
         let _ = child.kill();
@@ -711,7 +769,17 @@ fn run_session(
     ctx.request_repaint();
     let mut server = no_window(&mut Command::new("probe-rs"))
         .current_dir(project_dir)
-        .args(["dap-server", "--port", &port.to_string()])
+        // `--single-session` (the flag its VS Code extension uses): the server
+        // finishes after OUR session and exits, instead of going back to
+        // listening. That exit is what releases the probe cleanly — with the
+        // server still alive we had to kill it, and a killed probe-rs never
+        // detaches, leaving the ST-Link in debug mode until it is replugged.
+        .args([
+            "dap-server",
+            "--single-session",
+            "--port",
+            &port.to_string(),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -933,7 +1001,15 @@ fn spawn_dap_reader(
             // after a wall of `<unknown>` frames or a WinUSB complaint.
             let crash = crate::rtt::probe_rs_failure(&console.lock().unwrap());
             let mut st = state.lock().unwrap();
-            if !matches!(st.phase, DebugPhase::Error(_) | DebugPhase::Idle) {
+            // `Stopping` is excluded: the socket closing is EXPECTED there (the
+            // single-session server exits after our disconnect), and `stop`'s
+            // own thread owns the ending — it must not be declared over until
+            // that thread has seen the process go, or the Flash buttons unblock
+            // while the probe is still held.
+            if !matches!(
+                st.phase,
+                DebugPhase::Error(_) | DebugPhase::Idle | DebugPhase::Stopping
+            ) {
                 match crash {
                     Some(msg) => {
                         st.phase = DebugPhase::Error(msg);
