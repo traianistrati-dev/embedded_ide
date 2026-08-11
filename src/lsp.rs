@@ -1723,7 +1723,10 @@ fn lsp_log(line: &str) {
     };
     // Rotate BEFORE writing, so the cap is a real ceiling. Dropping the handle
     // first keeps the rename working on Windows.
-    if slot.as_ref().is_some_and(|(_, written)| *written >= LOG_CAP) {
+    if slot
+        .as_ref()
+        .is_some_and(|(_, written)| *written >= LOG_CAP)
+    {
         *slot = None;
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
@@ -2900,7 +2903,10 @@ mod log_preview_tests {
             out.len()
         );
         // serde_json::Value keeps object keys sorted, so "kind" comes first.
-        assert!(out.starts_with(r#"[{"kind":12,"name":"symbol_0""#), "keeps the head");
+        assert!(
+            out.starts_with(r#"[{"kind":12,"name":"symbol_0""#),
+            "keeps the head"
+        );
     }
 
     /// A payload that fits is logged whole, with no truncation marker.

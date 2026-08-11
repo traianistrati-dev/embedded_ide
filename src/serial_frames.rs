@@ -205,12 +205,10 @@ fn length_end(bytes: &[u8], at: usize, spec: &FrameSpec) -> Option<usize> {
     }
     // Where the counted region starts: after the length field, unless the field
     // counts the header too.
-    let counted_from = if spec.len_covers_header {
-        at
-    } else {
-        lo + w
-    };
-    let end = counted_from.checked_add(v as usize)?.checked_add(spec.tail_len)?;
+    let counted_from = if spec.len_covers_header { at } else { lo + w };
+    let end = counted_from
+        .checked_add(v as usize)?
+        .checked_add(spec.tail_len)?;
     (end <= bytes.len() && end > at).then_some(end)
 }
 
@@ -316,9 +314,7 @@ pub fn frames_log_job(
             FrameKind::Bad => " BAD ",
         };
         let clock = match epoch {
-            Some((i0, t0)) => {
-                crate::activity::fmt_clock(t0 + f.at.saturating_duration_since(i0))
-            }
+            Some((i0, t0)) => crate::activity::fmt_clock(t0 + f.at.saturating_duration_since(i0)),
             None => "--:--:--.---".to_string(),
         };
         let delta = match prev {
@@ -327,10 +323,7 @@ pub fn frames_log_job(
         };
         prev = Some(f.at);
         job.append(
-            &format!(
-                "#{n:<4}{tag}len={:<5} [{clock}] {delta:<11}",
-                f.bytes.len()
-            ),
+            &format!("#{n:<4}{tag}len={:<5} [{clock}] {delta:<11}", f.bytes.len()),
             0.0,
             egui::TextFormat::simple(font.clone(), META),
         );
@@ -368,10 +361,18 @@ pub fn frames_log_job(
                     .trim_end_matches(['\r', '\n'])
                     .to_string()
             };
-            job.append(&text, 0.0, egui::TextFormat::simple(font.clone(), colors[i]));
+            job.append(
+                &text,
+                0.0,
+                egui::TextFormat::simple(font.clone(), colors[i]),
+            );
             i = j;
         }
-        job.append("\n", 0.0, egui::TextFormat::simple(font.clone(), body_color));
+        job.append(
+            "\n",
+            0.0,
+            egui::TextFormat::simple(font.clone(), body_color),
+        );
     }
     job
 }

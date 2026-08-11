@@ -166,7 +166,8 @@ fn project_lock_path(project_dir: &Path) -> Option<PathBuf> {
     // Canonicalize so `.`, `..` and a trailing separator can't disguise the
     // same folder as a different one. A path that can't be canonicalized (it
     // was just deleted) falls back to its literal form.
-    let canonical = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let canonical =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
     let mut key = canonical.to_string_lossy().replace('\\', "/");
     if cfg!(windows) {
         key = key.to_lowercase();
@@ -297,10 +298,7 @@ mod tests {
             }
         }
         let mut bad = Vec::new();
-        scan(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &mut bad,
-        );
+        scan(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
         assert!(
             bad.is_empty(),
             "the scratch workspace is PER INSTANCE - call \
@@ -320,7 +318,10 @@ mod tests {
 
         let direct = project_lock_path(&proj);
         let indirect = project_lock_path(&base.join("Proj").join("."));
-        assert!(direct.is_some(), "a config dir resolves in this environment");
+        assert!(
+            direct.is_some(),
+            "a config dir resolves in this environment"
+        );
         assert_eq!(direct, indirect, "`.` must not look like another project");
 
         // A different folder must NOT collide.

@@ -58,7 +58,9 @@ pub mod workspace;
 mod glyph_guard {
     /// Arrow-class characters absent from the bundled font. Em dash, ellipsis
     /// and `×` are deliberately NOT here — those do render.
-    const BANNED: [char; 7] = ['\u{2192}', '\u{2190}', '\u{2194}', '\u{21c4}', '\u{21c6}', '\u{21d2}', '\u{21bb}'];
+    const BANNED: [char; 7] = [
+        '\u{2192}', '\u{2190}', '\u{2194}', '\u{21c4}', '\u{21c6}', '\u{21d2}', '\u{21bb}',
+    ];
 
     /// Does this line carry a banned glyph INSIDE a double-quoted literal?
     ///

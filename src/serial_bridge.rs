@@ -148,7 +148,10 @@ pub fn create_socat_pair() -> Result<VirtualPair, String> {
     let _ = std::fs::remove_file(&app);
     let _ = std::fs::remove_file(&ide);
 
-    let (app_s, ide_s) = (app.to_string_lossy().to_string(), ide.to_string_lossy().to_string());
+    let (app_s, ide_s) = (
+        app.to_string_lossy().to_string(),
+        ide.to_string_lossy().to_string(),
+    );
     let mut child = Command::new("socat")
         .args(socat_args(&app_s, &ide_s))
         .stdin(Stdio::null())
@@ -189,9 +192,11 @@ pub fn create_socat_pair() -> Result<VirtualPair, String> {
 
 #[cfg(not(unix))]
 pub fn create_socat_pair() -> Result<VirtualPair, String> {
-    Err("socat pairs are a Unix feature; on Windows create a com0com pair \
+    Err(
+        "socat pairs are a Unix feature; on Windows create a com0com pair \
          and pick its ports."
-        .to_string())
+            .to_string(),
+    )
 }
 
 // ── com0com pair discovery (Windows) ─────────────────────────────────────────
@@ -216,7 +221,10 @@ fn side_id(key_line: &str) -> Option<(char, u32)> {
     if ab != 'A' && ab != 'B' {
         return None;
     }
-    let digits: String = rest[1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = rest[1..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok().map(|n| (ab, n))
 }
 
@@ -423,15 +431,16 @@ HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\com0com\\port\\CNCB0\\Devic
         // One end unplugged → the pair is unusable, not half-usable.
         assert!(usable_pairs(&names, &["COM10".to_string()]).is_empty());
         // Matching is case-insensitive: Windows is inconsistent about "com10".
-        assert_eq!(usable_pairs(&names, &["com10".into(), "com11".into()]).len(), 1);
+        assert_eq!(
+            usable_pairs(&names, &["com10".into(), "com11".into()]).len(),
+            1
+        );
     }
 
     #[test]
     fn a_half_configured_pair_is_ignored() {
         // Only the A side exists — nothing to bridge to.
-        let names = parse_port_names(
-            "HKLM\\...\\CNCA2\n    PortName    REG_SZ    COM20\n",
-        );
+        let names = parse_port_names("HKLM\\...\\CNCA2\n    PortName    REG_SZ    COM20\n");
         assert!(usable_pairs(&names, &["COM20".to_string()]).is_empty());
     }
 

@@ -131,7 +131,8 @@ pub fn draw_pin_functions(
     let show_info = mcu.show_info.clone();
 
     for (i, func) in funcs.iter().enumerate() {
-        let btn_rect = egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, BTN_H));
+        let btn_rect =
+            egui::Rect::from_min_size(egui::pos2(btn_x, btn_y), egui::vec2(btn_w, BTN_H));
         let info_rect = egui::Rect::from_min_size(
             egui::pos2(btn_x + btn_w + GAP, btn_y),
             egui::vec2(INFO_BTN_W, BTN_H),

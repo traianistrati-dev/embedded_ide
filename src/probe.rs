@@ -90,7 +90,9 @@ pub fn start_reset(
             .push_plain(LineKind::Input, format!("> probe-rs {}", args.join(" ")));
         ctx.request_repaint();
 
-        let out = no_window(&mut Command::new("probe-rs")).args(&args).output();
+        let out = no_window(&mut Command::new("probe-rs"))
+            .args(&args)
+            .output();
         let mut c = console.lock().unwrap();
         match out {
             Ok(o) => {

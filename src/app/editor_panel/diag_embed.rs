@@ -432,9 +432,8 @@ impl AppIde {
                 crate::debugger::DebugPhase::Stopped(_)
             );
             let busy = self.debugger.is_busy();
-            let key = |m: egui::Modifiers, k: egui::Key| {
-                ui.ctx().input_mut(|i| i.consume_key(m, k))
-            };
+            let key =
+                |m: egui::Modifiers, k: egui::Key| ui.ctx().input_mut(|i| i.consume_key(m, k));
             // Shift variants first, so a plain-key branch can't shadow one.
             if busy && key(egui::Modifiers::SHIFT, egui::Key::F5) {
                 self.debugger.stop(ui.ctx());

@@ -1246,7 +1246,10 @@ mod bridge_tests {
         let colors: Vec<egui::Color32> = job.sections.iter().map(|x| x.format.color).collect();
         assert!(colors.contains(&SEARCH_HIT), "start marker not highlighted");
         assert!(colors.contains(&SEARCH_HIT2), "end marker not highlighted");
-        assert!(colors.contains(&DIR_SENSOR), "payload lost its direction colour");
+        assert!(
+            colors.contains(&DIR_SENSOR),
+            "payload lost its direction colour"
+        );
     }
 
     /// The delta is the number you actually read when timing a protocol.
@@ -1272,7 +1275,10 @@ mod bridge_tests {
         push(&mut s, &c, Dir::SensorToApp, b"hidden", 30);
         push(&mut s, &c, Dir::AppToSensor, b"KEEP two", 100);
         let t = bridge_log_job(&s.log, false, 12.0, b"KEEP", b"", true, None, true).text;
-        assert!(t.contains("(+100 ms)"), "delta should span the hidden block:\n{t}");
+        assert!(
+            t.contains("(+100 ms)"),
+            "delta should span the hidden block:\n{t}"
+        );
     }
 
     /// Without an epoch only the delta is knowable; the clock column says so

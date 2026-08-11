@@ -482,7 +482,16 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
         let st = serial.state.lock().unwrap();
         // Bridge: Find FILTERS — the point there is to pull one frame out of
         // someone else's conversation.
-        bridge_log_job(&st.log, serial.hex, 12.0, &a, &b, serial.stamps, st.epoch, true)
+        bridge_log_job(
+            &st.log,
+            serial.hex,
+            12.0,
+            &a,
+            &b,
+            serial.stamps,
+            st.epoch,
+            true,
+        )
     };
     egui::ScrollArea::both()
         .id_salt("bridge_log")
@@ -524,7 +533,9 @@ fn show_frames_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f3
                     .range(0..=64)
                     .speed(0.1),
             )
-            .on_hover_text("Byte offset of the length field, counted from the header's FIRST byte.");
+            .on_hover_text(
+                "Byte offset of the length field, counted from the header's FIRST byte.",
+            );
             ui.label("width");
             ui.add(
                 egui::DragValue::new(&mut serial.frame_spec.len_width)
@@ -544,12 +555,15 @@ fn show_frames_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f3
                 "Bytes AFTER the counted length — a trailer or checksum the length \
                  field doesn't include.",
             );
-            ui.checkbox(&mut serial.frame_spec.len_covers_header, "len covers header")
-                .on_hover_text(
-                    "On: the length counts from the header's first byte. Off: it counts \
+            ui.checkbox(
+                &mut serial.frame_spec.len_covers_header,
+                "len covers header",
+            )
+            .on_hover_text(
+                "On: the length counts from the header's first byte. Off: it counts \
                      only what follows the field. Datasheets use both — the wrong one \
                      shifts every frame.",
-                );
+            );
         }
     });
 

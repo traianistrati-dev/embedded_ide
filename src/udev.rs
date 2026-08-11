@@ -146,8 +146,7 @@ mod tests {
         let text = rules_text();
         for &(key, name, _) in crate::dfu::KNOWN_PROGRAMMERS {
             let (vid, pid) = split_vid_pid(key).unwrap_or_else(|| panic!("bad key {key} ({name})"));
-            let expected =
-                format!("ATTR{{idVendor}}==\"{vid}\", ATTR{{idProduct}}==\"{pid}\"");
+            let expected = format!("ATTR{{idVendor}}==\"{vid}\", ATTR{{idProduct}}==\"{pid}\"");
             assert!(text.contains(&expected), "no usb rule for {name} ({key})");
         }
     }
@@ -185,11 +184,18 @@ mod tests {
     fn serial_adapters_also_get_a_tty_rule() {
         let text = rules_text();
         // CH340 — the classic ESP32 / Arduino clone adapter.
-        assert!(text.contains("SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"7523\""));
+        assert!(
+            text.contains(
+                "SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"1a86\", ATTRS{idProduct}==\"7523\""
+            )
+        );
         // An ST-Link is raw USB only; a tty rule for it would be noise.
         let stlink_tty =
             "SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"0483\", ATTRS{idProduct}==\"3748\"";
-        assert!(!text.contains(stlink_tty), "ST-Link should have no tty rule");
+        assert!(
+            !text.contains(stlink_tty),
+            "ST-Link should have no tty rule"
+        );
     }
 
     /// The header has to carry the install steps: the file outlives this UI, and

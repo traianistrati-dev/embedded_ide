@@ -52,7 +52,8 @@ pub fn draw_vertical_text_colored(
     max_len: f32,
 ) {
     let font = egui::FontId::monospace(font_size);
-    let galley = painter.layout_no_wrap(fit(painter, &pin.name, font.clone(), max_len), font, color);
+    let galley =
+        painter.layout_no_wrap(fit(painter, &pin.name, font.clone(), max_len), font, color);
 
     let text_shape = egui::epaint::TextShape {
         pos,

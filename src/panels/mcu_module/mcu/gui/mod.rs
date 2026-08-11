@@ -28,7 +28,10 @@ impl Mcu {
     /// changes, plus the function list's rect in SCREEN coordinates — the caller
     /// needs it to route the mouse wheel to the list instead of the canvas zoom
     /// (see [`panel::draw_pin_functions`]).
-    pub fn draw(&mut self, ui: &mut egui::Ui) -> (Option<(usize, String, PinFunction)>, egui::Rect) {
+    pub fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+    ) -> (Option<(usize, String, PinFunction)>, egui::Rect) {
         let top_count = self.top_pins.len();
         let left_count = self.left_pins.len();
 

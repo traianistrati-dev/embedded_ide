@@ -946,7 +946,11 @@ fn owning_group(path: &std::path::Path) -> Option<String> {
         if name.is_null() {
             return None;
         }
-        Some(std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned())
+        Some(
+            std::ffi::CStr::from_ptr(name)
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 }
 
