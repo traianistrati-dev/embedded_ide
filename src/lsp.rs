@@ -1660,27 +1660,133 @@ pub fn debug_log(line: &str) {
     lsp_log(line);
 }
 
+// ── LSP debug log ────────────────────────────────────────────────────────────
+// OFF by default, even in debug builds. It used to be on for every debug run,
+// which is how it reached 108 MB in a single session: one `open + append +
+// close` per protocol message on an ever-growing file, and the traffic peaks
+// exactly at Save (didChange per file, didSave, publishDiagnostics, symbol and
+// inlay-hint bursts). Two more guards below: the file is now kept OPEN, and it
+// is capped, so a long session can't make the next Save slower than the last.
+//
+// Turn it on with EIDE_LSP_LOG=1 (accepts 1 / true / on / yes).
+
+/// Bytes after which the log rotates to `<name>.1`. Two files, bounded disk,
+/// and the recent history — the part worth reading — always survives.
+#[cfg(debug_assertions)]
+const LOG_CAP: u64 = 16 * 1024 * 1024;
+
+/// Is the LSP debug log turned on for this run? Read once — an env lookup per
+/// protocol message is exactly the kind of cost this whole change is about.
+///
+/// Public so hot call sites can skip BUILDING their message: `debug_log(&format!(…))`
+/// formats the string whether or not anything consumes it.
+pub fn log_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("EIDE_LSP_LOG").is_ok_and(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+        })
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+/// The open log file plus the byte count that drives rotation. Keeping the
+/// handle open is the point: reopening per line is what made this expensive.
+#[cfg(debug_assertions)]
+static LOG_FILE: Mutex<Option<(std::fs::File, u64)>> = Mutex::new(None);
+
 /// Append a line to the LSP debug log in the system temp dir.
+///
 /// File: `<TEMP>/embedded_ide_lsp.log` — plus this instance's slot suffix, so
 /// two IDE windows don't interleave their handshakes into one unreadable file.
-/// Only active in debug builds; no-op in release.
+/// No-op in release, and in debug unless `EIDE_LSP_LOG` is set.
 #[cfg(debug_assertions)]
 fn lsp_log(line: &str) {
-    use std::io::Write;
+    if !log_enabled() {
+        return;
+    }
     let path = std::env::temp_dir().join(format!(
         "embedded_ide_lsp{}.log",
         crate::workspace::suffix()
     ));
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{}", line);
+    let Ok(mut slot) = LOG_FILE.lock() else {
+        return;
+    };
+    // Rotate BEFORE writing, so the cap is a real ceiling. Dropping the handle
+    // first keeps the rename working on Windows.
+    if slot.as_ref().is_some_and(|(_, written)| *written >= LOG_CAP) {
+        *slot = None;
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    if slot.is_none() {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path);
+        let Ok(file) = file else {
+            return;
+        };
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        *slot = Some((file, written));
+    }
+    if let Some((file, written)) = slot.as_mut() {
+        if writeln!(file, "{line}").is_ok() {
+            *written += line.len() as u64 + 1;
+        }
     }
 }
 #[cfg(not(debug_assertions))]
 fn lsp_log(_: &str) {}
+
+/// Serialize `value` to JSON, stopping after `limit` bytes.
+///
+/// The reason this exists: the old preview did `value.to_string()` and then
+/// kept the first 200 characters, so every `documentSymbol` answer — the whole
+/// symbol tree of a file — was serialized in full to be thrown away. Writing
+/// into a sink that refuses more than `limit` bytes stops serde at the limit
+/// instead. `from_utf8_lossy` closes the other half of that bug: the old byte
+/// slice `&r[..200]` panics when byte 200 lands inside a multi-byte character.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+fn truncated_json(value: &serde_json::Value, limit: usize) -> String {
+    struct LimitWriter {
+        buf: Vec<u8>,
+        limit: usize,
+    }
+    impl std::io::Write for LimitWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let room = self.limit.saturating_sub(self.buf.len());
+            if room == 0 {
+                // Any error stops `to_writer` — that IS the early exit.
+                return Err(std::io::Error::other("limit reached"));
+            }
+            let take = room.min(data.len());
+            self.buf.extend_from_slice(&data[..take]);
+            Ok(take)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut w = LimitWriter {
+        buf: Vec::with_capacity(limit.min(256)),
+        limit,
+    };
+    let complete = serde_json::to_writer(&mut w, value).is_ok();
+    let mut out = String::from_utf8_lossy(&w.buf).into_owned();
+    if !complete {
+        out.push_str("…(truncated)");
+    }
+    out
+}
 
 fn handle_incoming(
     msg: serde_json::Value,
@@ -1697,19 +1803,17 @@ fn handle_incoming(
 
     let method = msg["method"].as_str().unwrap_or("");
 
-    // Log all response messages (no "method") for debugging.
+    // Log all response messages (no "method") for debugging. The `log_enabled`
+    // gate comes FIRST: everything below — serializing the payload, formatting
+    // the line — is pure cost when nothing will read it, and this runs on every
+    // single response RA sends.
     #[cfg(debug_assertions)]
-    if method.is_empty() {
+    if method.is_empty() && log_enabled() {
         let id = &msg["id"];
-        let has_result = msg.get("result").is_some();
-        let has_error = msg.get("error").is_some();
-        let preview = if has_result {
-            let r = msg["result"].to_string();
-            format!("result={}", &r[..r.len().min(200)])
-        } else if has_error {
-            format!("error={}", msg["error"].to_string())
-        } else {
-            "?".to_owned()
+        let preview = match (msg.get("result"), msg.get("error")) {
+            (Some(r), _) => format!("result={}", truncated_json(r, 200)),
+            (_, Some(e)) => format!("error={}", truncated_json(e, 500)),
+            _ => "?".to_owned(),
         };
         lsp_log(&format!("RESPONSE id={id} {preview}"));
     }
@@ -2771,5 +2875,58 @@ mod completion_item_tests {
         let bare = serde_json::json!({ "label": "baz", "kind": 6 });
         let item = parse_completion_item(&bare).expect("parses");
         assert_eq!(item.insert_text, "baz");
+    }
+}
+
+#[cfg(test)]
+mod log_preview_tests {
+    use super::truncated_json;
+
+    /// The whole point: serialization STOPS at the limit instead of building
+    /// the full payload and slicing it. A `documentSymbol` answer for a big
+    /// file used to be serialized in its entirety to show 200 characters.
+    #[test]
+    fn stops_at_the_limit_and_says_so() {
+        let big = serde_json::json!(
+            (0..5_000)
+                .map(|i| serde_json::json!({ "name": format!("symbol_{i}"), "kind": 12 }))
+                .collect::<Vec<_>>()
+        );
+        let out = truncated_json(&big, 200);
+        assert!(out.ends_with("…(truncated)"), "truncation must be visible");
+        assert!(
+            out.len() < 260,
+            "cut near the limit, got {} bytes",
+            out.len()
+        );
+        // serde_json::Value keeps object keys sorted, so "kind" comes first.
+        assert!(out.starts_with(r#"[{"kind":12,"name":"symbol_0""#), "keeps the head");
+    }
+
+    /// A payload that fits is logged whole, with no truncation marker.
+    #[test]
+    fn short_values_pass_through_intact() {
+        let v = serde_json::json!({ "ok": true });
+        assert_eq!(truncated_json(&v, 200), r#"{"ok":true}"#);
+        assert_eq!(truncated_json(&serde_json::Value::Null, 200), "null");
+    }
+
+    /// The old `&r[..200]` panicked when byte 200 split a character. Cutting
+    /// mid-character must produce a lossy string, never a panic.
+    #[test]
+    fn a_cut_inside_a_multibyte_character_does_not_panic() {
+        // 'ă' is two bytes, so some limit lands between them whatever the
+        // padding — walk a range to be sure one of them does.
+        let v = serde_json::json!("ăăăăăăăăăă");
+        for limit in 1..24 {
+            let out = truncated_json(&v, limit);
+            // A cut character becomes one U+FFFD, so the result can exceed the
+            // limit slightly — bounded, which is all the caller needs.
+            assert!(
+                out.len() <= limit + "…(truncated)".len() + 3,
+                "limit {limit} produced {} bytes",
+                out.len()
+            );
+        }
     }
 }

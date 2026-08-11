@@ -332,7 +332,11 @@ impl AppIde {
             // empty diagram with silent status made failures undiagnosable.
             "no cross-module calls found".to_owned()
         };
-        pass.log_once(format!("CALLS_STATE {status}"));
+        // Runs on EVERY frame the Structure tab is open, so don't build the
+        // line (or the String it needs) unless something will read it.
+        if crate::lsp::log_enabled() {
+            pass.log_once(format!("CALLS_STATE {status}"));
+        }
         status
     }
 }
