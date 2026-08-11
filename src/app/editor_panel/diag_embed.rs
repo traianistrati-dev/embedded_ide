@@ -405,6 +405,34 @@ impl AppIde {
         if debug_go {
             self.start_debug();
         }
+        // ── Debugger keys (the set every debugger uses) ──────────────────────
+        // F5 continue · F10 over · F11 in · Shift+F11 out · Shift+F5 stop.
+        // Handled on the CONTEXT, not inside the Debug tab: the halted line is
+        // in the editor, which is where the user is looking (and where the
+        // focus is) when they reach for these. The stepping keys only fire
+        // while halted, so they can never be sent into a running target.
+        {
+            let halted = matches!(
+                self.debugger.phase(),
+                crate::debugger::DebugPhase::Stopped(_)
+            );
+            let busy = self.debugger.is_busy();
+            let key = |m: egui::Modifiers, k: egui::Key| {
+                ui.ctx().input_mut(|i| i.consume_key(m, k))
+            };
+            // Shift variants first, so a plain-key branch can't shadow one.
+            if busy && key(egui::Modifiers::SHIFT, egui::Key::F5) {
+                self.debugger.stop(ui.ctx());
+            } else if halted && key(egui::Modifiers::SHIFT, egui::Key::F11) {
+                self.debugger.step_out();
+            } else if halted && key(egui::Modifiers::NONE, egui::Key::F5) {
+                self.debugger.continue_run();
+            } else if halted && key(egui::Modifiers::NONE, egui::Key::F10) {
+                self.debugger.step_over();
+            } else if halted && key(egui::Modifiers::NONE, egui::Key::F11) {
+                self.debugger.step_in();
+            }
+        }
         // Shared RTT/Debug probe-selector Scan button.
         if probe_scan {
             self.scan_probes();

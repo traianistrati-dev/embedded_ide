@@ -126,6 +126,7 @@ pub fn show_debug_tab(
                         .size(10.5)
                         .color(egui::Color32::from_rgb(230, 120, 110)),
                 )
+                .on_hover_text("End the session and release the probe (Shift+F5)")
                 .clicked()
             {
                 dbg.stop(ui.ctx());
@@ -138,7 +139,7 @@ pub fn show_debug_tab(
         if stopped {
             if ui
                 .button(egui::RichText::new(format!("{} Continue", ph::PLAY)).size(10.5))
-                .on_hover_text("Resume execution (F5-style)")
+                .on_hover_text("Resume execution — or press F5 anywhere in the IDE")
                 .clicked()
             {
                 dbg.continue_run();
@@ -158,21 +159,21 @@ pub fn show_debug_tab(
                 .button(
                     egui::RichText::new(format!("{} Over", ph::ARROW_BEND_DOWN_RIGHT)).size(10.5),
                 )
-                .on_hover_text("Step over — next line, calls run through")
+                .on_hover_text("Step over — next line, calls run through (F10)")
                 .clicked()
             {
                 dbg.step_over();
             }
             if ui
                 .button(egui::RichText::new(format!("{} In", ph::ARROW_LINE_DOWN)).size(10.5))
-                .on_hover_text("Step into the call on this line")
+                .on_hover_text("Step into the call on this line (F11)")
                 .clicked()
             {
                 dbg.step_in();
             }
             if ui
                 .button(egui::RichText::new(format!("{} Out", ph::ARROW_LINE_UP)).size(10.5))
-                .on_hover_text("Run until the current function returns")
+                .on_hover_text("Run until the current function returns (Shift+F11)")
                 .clicked()
             {
                 dbg.step_out();
@@ -358,7 +359,8 @@ pub fn show_debug_tab(
                 egui::Color32::from_rgb(200, 210, 230),
                 "Resumes a halted target until it hits the next breakpoint. \
                  Shown while the target is stopped; while it runs, the same slot \
-                 offers Pause.",
+                 offers Pause. F5 does the same from anywhere in the IDE — the \
+                 editor included, which is where the halted line is.",
             ),
             (
                 "Pause",
@@ -371,15 +373,17 @@ pub fn show_debug_tab(
                 egui::Color32::from_rgb(200, 210, 230),
                 "Only while halted. Over = run the next line, executing any call \
                  on it fully. In = enter the call on the line. Out = run until \
-                 the current function returns to its caller.",
+                 the current function returns to its caller. Keys: F10 / F11 / \
+                 Shift+F11, from anywhere in the IDE.",
             ),
             (
                 "Stop",
                 egui::Color32::from_rgb(230, 120, 110),
-                "Ends the session, kills the DAP server and releases the probe. \
-                 The firmware stays on the chip and keeps running. Stop the \
-                 session before using the RTT tab — one process at a time may \
-                 hold the probe.",
+                "Ends the session (Shift+F5): disconnects, waits for the DAP \
+                 server to exit and release the probe, and only kills it if it \
+                 refuses. The firmware stays on the chip and keeps running. The \
+                 tab stays busy until the probe is actually free — flashing \
+                 before that would fail to open it.",
             ),
             (
                 "Clear",
