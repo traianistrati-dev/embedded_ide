@@ -1100,6 +1100,12 @@ impl AppIde {
                         // so the next check re-resolves (saves otherwise keep it).
                         self.reset_workspace_lock();
                         *save_project_needed = true;
+                        // Nothing is read from disk here, but everything after
+                        // still runs (workspace rewrite, RA restart on a chip
+                        // change, re-index, check) — same wait, same overlay.
+                        self.begin_project_loading(
+                            super::loading_overlay::LoadKind::New,
+                        );
                     }
                     ui.add_space(8.0);
                     if ui.button("Cancel").clicked() {

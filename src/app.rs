@@ -42,6 +42,8 @@ mod editor_panel;
 
 mod project_io;
 
+mod loading_overlay;
+
 // ── Project file selector ─────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
@@ -1113,6 +1115,13 @@ pub struct AppIde {
     fs_rx: Option<std::sync::mpsc::Receiver<notify::Result<notify::Event>>>,
     /// Kept alive so the watcher thread lives as long as the app.
     _fs_watcher: Option<notify::RecommendedWatcher>,
+
+    // ── Project-switch overlay ────────────────────────────────────────────────
+    /// `Some` while the full-window "loading the project" overlay is up (see
+    /// [`loading_overlay`]). Armed by every project-change entry point; lifts
+    /// itself once the load chain (workspace write → RA index → check) goes
+    /// quiet.
+    project_loading: Option<loading_overlay::ProjectLoading>,
 }
 
 impl AppIde {
@@ -1443,6 +1452,7 @@ impl AppIde {
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
+            project_loading: None,
         };
 
         // ── Restore previously opened project on startup ──────────────────────
@@ -1452,6 +1462,9 @@ impl AppIde {
         if let Some(dir) = &saved_project_dir {
             if dir.exists() {
                 app.load_project_from_dir(dir);
+                // Same overlay, restated for what this actually is — the load
+                // above armed it as an "Open".
+                app.begin_project_loading(loading_overlay::LoadKind::Restore);
             }
         }
 
@@ -3205,6 +3218,12 @@ impl eframe::App for AppIde {
         } else {
             self.show_mcu_panel(ui);
         }
+
+        // ── Project-switch overlay ───────────────────────────────────────────
+        // Dead last: it covers the WHOLE window (panels, banners and dialogs
+        // alike) while a project change is still loading, and its lift decision
+        // needs this frame's final busy state.
+        self.show_project_loading_overlay(ui);
     }
 }
 

@@ -17,6 +17,13 @@ impl AppIde {
     /// (it is regenerated from MCU pin state).
     /// Any previous user files are replaced.
     pub(super) fn load_project_from_dir(&mut self, root: &std::path::Path) {
+        // Cover the whole switch with the loading overlay — this call is the
+        // single choke point for every project change (Open, clone, git branch
+        // switch / discard-all, the startup restore), and what follows it
+        // (workspace write, RA re-index, flycheck) takes far longer than the
+        // read below while leaving a half-loaded project on screen.
+        self.begin_project_loading(super::loading_overlay::LoadKind::Open);
+
         // Load files and folders via ProjectTreeState
         self.project_tree = ProjectTreeState::load_from_dir(root);
 

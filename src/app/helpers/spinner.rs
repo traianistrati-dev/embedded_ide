@@ -16,6 +16,12 @@ const STEP: std::time::Duration = std::time::Duration::from_millis(100);
 /// Draw a spinner of `size` px that repaints at ~10 FPS instead of every
 /// frame. Drop-in replacement for `ui.add(egui::Spinner::new().size(size))`.
 pub(crate) fn throttled_spinner(ui: &mut egui::Ui, size: f32) {
+    throttled_spinner_stroked(ui, size, 3.0);
+}
+
+/// Same spinner with an explicit arc thickness — a 3 px stroke looks like a
+/// hairline on the big project-loading spinner.
+pub(crate) fn throttled_spinner_stroked(ui: &mut egui::Ui, size: f32, thickness: f32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
     if !ui.is_rect_visible(rect) {
         return;
@@ -41,5 +47,5 @@ pub(crate) fn throttled_spinner(ui: &mut egui::Ui, size: f32) {
         })
         .collect();
     ui.painter()
-        .add(egui::Shape::line(points, egui::Stroke::new(3.0, color)));
+        .add(egui::Shape::line(points, egui::Stroke::new(thickness, color)));
 }
