@@ -1806,6 +1806,9 @@ impl AppIde {
             // The interrupt edge is CODE, not a view preference: arming a pin
             // adds a whole #[task] on the RTIC runtime, so it must regenerate.
             pin.irq.hash(&mut hasher);
+            // Same reasoning for the GPIO drive/pull mode: it selects the
+            // `into_*` / `Pull::*` the binding is generated with.
+            pin.io_mode.hash(&mut hasher);
         }
 
         // Hash clock config

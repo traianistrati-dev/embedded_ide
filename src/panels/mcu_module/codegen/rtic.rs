@@ -864,8 +864,10 @@ mod tests {
             true,
             "",
         );
-        // The pin binding is identical text in both, modulo indentation.
-        let binding = "let pc13_out_led =";
+        // The pin binding is identical text in both, modulo indentation and the
+        // `mut`: blocking writes through the pin (`let mut`), RTIC moves it into
+        // a `Local` (`let`). Everything to the right of the name is the same.
+        let binding = "pc13_out_led = gpioc.pc13.into_push_pull_output";
         assert!(blocking.contains(binding), "{blocking}");
         assert!(rtic.contains(binding), "{rtic}");
         assert!(rtic.contains("#[init]"), "{rtic}");

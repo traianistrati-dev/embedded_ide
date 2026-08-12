@@ -1053,7 +1053,7 @@ mod tests {
         // `&mut` + var-name shape so the round-trip parsers still work.
         assert_contains_substring(
             &code,
-            "let pa0_out = &mut pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
+            "let mut pa0_out = pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
         );
         // The bare-field form must NOT be used for the binding name.
         assert_not_contains_substring(&code, "let pa0 = &mut gpioa.pa0");
@@ -1602,12 +1602,91 @@ mod tests {
         // Native GPIO → raw HAL pin, NO io.rs, NO DigitalOut.
         mcu.gpio_api = ApiStyle::Native;
         let code = mcu.fresh_main_rs();
-        assert_contains_substring(&code, "let pa0_out = &mut gpioa.pa0.into_push_pull_output");
+        assert_contains_substring(&code, "let mut pa0_out = gpioa.pa0.into_push_pull_output");
         assert_not_contains_substring(&code, "DigitalOut");
         assert!(
             !mcu.config_files().iter().any(|(n, _)| n == "io.rs"),
             "no io.rs on Native GPIO"
         );
+    }
+
+    /// The per-pin GPIO mode picks which `into_*` the binding is generated with,
+    /// on both the Portable and the Native path — and `None` keeps the historic
+    /// default, so an untouched project's code does not move.
+    #[test]
+    fn gpio_mode_selects_the_into_method() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        mcu.apply_pin_function(11, PinFunction::GpioInput); // PA1
+
+        // Defaults, unchanged from before the mode existed.
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "gpioa.pa0.into_push_pull_output");
+        assert_contains_substring(&code, "gpioa.pa1.into_floating_input");
+
+        mcu.find_pin_mut(10).unwrap().io_mode = Some(GpioMode::OpenDrain);
+        mcu.find_pin_mut(11).unwrap().io_mode = Some(GpioMode::PullUp);
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "gpioa.pa0.into_open_drain_output");
+        assert_contains_substring(&code, "gpioa.pa1.into_pull_up_input");
+        assert_not_contains_substring(&code, "into_floating_input");
+    }
+
+    /// A GPIO pin is bound BY VALUE — no `&mut` of a temporary — so it can be
+    /// moved into a driver. `mut` appears exactly where the pin is written
+    /// through: an output always, an input only on the Portable path (where
+    /// `embedded-hal` 1.0 reads through `&mut self`).
+    #[test]
+    fn gpio_bindings_are_owned_and_mut_only_where_written() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::ApiStyle;
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        mcu.apply_pin_function(11, PinFunction::GpioInput); // PA1
+
+        let code = mcu.fresh_main_rs();
+        assert_not_contains_substring(&code, "= &mut pins::configs::io::");
+        assert_contains_substring(&code, "let mut pa0_out = pins::configs::io::DigitalOut(");
+        // Portable input: eh-1.0 `is_high(&mut self)` → needs `mut`.
+        assert_contains_substring(&code, "let mut pa1_in = pins::configs::io::DigitalIn(");
+
+        // Native input: the raw HAL reads through `&self`, so no `mut` (it would
+        // only earn an unused-mut warning).
+        mcu.gpio_api = ApiStyle::Native;
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "let mut pa0_out = gpioa.pa0.into_push_pull_output");
+        assert_contains_substring(&code, "let pa1_in = gpioa.pa1.into_floating_input");
+    }
+
+    /// A pin MOVED into a Custom module is not written through, so its binding
+    /// must not be `let mut` — that would be an unused-mut warning on a line the
+    /// user cannot edit.
+    #[test]
+    fn a_pin_moved_into_a_custom_module_is_not_mut() {
+        use super::super::mock_mcu;
+        use crate::panels::mcu_module::modules::{ModuleConfig, ModuleKind};
+
+        let mut mcu = mock_mcu::create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput); // PA0
+        assert!(mcu.add_module(ModuleKind::Custom));
+        let m = mcu
+            .modules
+            .iter_mut()
+            .find(|m| m.kind == ModuleKind::Custom)
+            .unwrap();
+        *m.config.custom_label_mut() = "panel".to_owned();
+        if let ModuleConfig::Custom(c) = &mut m.config {
+            c.pins = vec![10];
+            c.applied_pins = vec![10]; // Update pressed
+        }
+        let code = mcu.fresh_main_rs();
+        assert_contains_substring(&code, "Panel::new(pa0_out)");
+        assert_contains_substring(&code, "let pa0_out = pins::configs::io::DigitalOut(");
+        assert_not_contains_substring(&code, "let mut pa0_out");
     }
 
     /// Staged style choices don't affect codegen until `apply_pending_style`:
@@ -1725,7 +1804,7 @@ mod tests {
 
         assert_contains_substring(
             &code,
-            "let pa0_out_status_led = &mut pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
+            "let mut pa0_out_status_led = pins::configs::io::DigitalOut(gpioa.pa0.into_push_pull_output",
         );
 
         // The label round-trips back into the pin's custom_label on reopen.

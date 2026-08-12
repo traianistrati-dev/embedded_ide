@@ -18,7 +18,8 @@ use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
     self, ApiStyle, I2cModuleConfig, SpiModuleConfig, UsartModuleConfig,
 };
-use crate::panels::mcu_module::pins::logic::pin::Pin;
+use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use std::collections::BTreeMap;
 
 /// The USART/SPI/I2C configs for `mcu`'s blocking codegen, with `api_style`
@@ -74,6 +75,30 @@ pub trait FamilyBackend {
     fn config_files(&self, _mcu: &Mcu) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    /// The drive / pull modes this backend can generate for `func` — what the
+    /// mode list under the selected function offers. The FIRST entry is the
+    /// default, i.e. what a pin with `io_mode: None` generates.
+    ///
+    /// The default implementation is the full set, which the `into_*` HALs
+    /// (stm32f1xx-hal & friends) all provide. A backend whose HAL spells one of
+    /// them differently — embassy's open-drain output is a different TYPE, not
+    /// an argument — overrides this to offer only what it actually emits, so the
+    /// list can never promise code the generator can't write.
+    fn gpio_modes(&self, func: &PinFunction) -> &'static [GpioMode] {
+        match func {
+            PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+            PinFunction::GpioOutput => &[GpioMode::PushPull, GpioMode::OpenDrain],
+            _ => &[],
+        }
+    }
+}
+
+/// The modes offered for `pin` on `mcu`'s current backend — empty when the pin
+/// is not a GPIO In/Out, or the family has no backend. The single entry point
+/// the UI uses, so it can't drift from what codegen supports.
+pub fn gpio_modes_for(mcu: &Mcu, func: &PinFunction) -> &'static [GpioMode] {
+    backend_for_runtime(&mcu.family, mcu.runtime).map_or(&[], |b| b.gpio_modes(func))
 }
 
 /// All four sides of the chip, in the canonical order codegen expects
@@ -163,6 +188,13 @@ impl FamilyBackend for Esp32Backend {
         "esp32c3"
     }
 
+    /// esp-hal configures pulls through `InputConfig`/`OutputConfig` builders,
+    /// which this backend does not emit yet — so it offers no choice rather than
+    /// listing modes it would silently ignore.
+    fn gpio_modes(&self, _func: &PinFunction) -> &'static [GpioMode] {
+        &[]
+    }
+
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let usart = modules::usart_configs(&mcu.modules);
         let spi = modules::spi_configs(&mcu.modules);
@@ -203,6 +235,17 @@ impl FamilyBackend for WbaBackend {
         "stm32wba"
     }
 
+    /// embassy takes the pull as an argument (`Input::new(p.PB5, Pull::Up)`) but
+    /// spells an open-drain output as a different TYPE (`OutputOpenDrain`), which
+    /// this backend does not emit — so outputs offer push-pull only.
+    fn gpio_modes(&self, func: &PinFunction) -> &'static [GpioMode] {
+        match func {
+            PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+            PinFunction::GpioOutput => &[GpioMode::PushPull],
+            _ => &[],
+        }
+    }
+
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
         let all = pins_of(mcu);
         format!(
@@ -239,6 +282,17 @@ struct StmEmbassyBackend;
 impl FamilyBackend for StmEmbassyBackend {
     fn family_id(&self) -> &'static str {
         "stm32" // label only — `handles` does the real matching
+    }
+
+    /// embassy takes the pull as an argument (`Input::new(p.PB5, Pull::Up)`) but
+    /// spells an open-drain output as a different TYPE (`OutputOpenDrain`), which
+    /// this backend does not emit — so outputs offer push-pull only.
+    fn gpio_modes(&self, func: &PinFunction) -> &'static [GpioMode] {
+        match func {
+            PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+            PinFunction::GpioOutput => &[GpioMode::PushPull],
+            _ => &[],
+        }
     }
 
     fn handles(&self, family: &str) -> bool {
@@ -289,6 +343,17 @@ struct AsyncEmbassyBackend;
 impl FamilyBackend for AsyncEmbassyBackend {
     fn family_id(&self) -> &'static str {
         "stm32-async" // label only — dispatch is via `backend_for_runtime`
+    }
+
+    /// embassy takes the pull as an argument (`Input::new(p.PB5, Pull::Up)`) but
+    /// spells an open-drain output as a different TYPE (`OutputOpenDrain`), which
+    /// this backend does not emit — so outputs offer push-pull only.
+    fn gpio_modes(&self, func: &PinFunction) -> &'static [GpioMode] {
+        match func {
+            PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
+            PinFunction::GpioOutput => &[GpioMode::PushPull],
+            _ => &[],
+        }
     }
 
     fn handles(&self, family: &str) -> bool {

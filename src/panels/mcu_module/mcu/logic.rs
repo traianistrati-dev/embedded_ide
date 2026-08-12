@@ -456,6 +456,19 @@ impl Mcu {
             }
             s.push_str(&irq);
         }
+        // GPIO drive/pull modes (`@iomode`) — also CODE, not a view preference:
+        // it picks which `into_*` / `Pull::*` the binding is generated with.
+        let modes: std::collections::BTreeMap<usize, _> = self
+            .iter_all_pins()
+            .filter_map(|p| p.io_mode.map(|m| (p.number, m)))
+            .collect();
+        let iomode = mcu_config::iomode_section(&modes);
+        if !iomode.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&iomode);
+        }
         s
     }
 
@@ -489,8 +502,13 @@ impl Mcu {
         // Interrupt edges (`@irq`) — a missing section means every input is
         // polled, which is the pre-RTIC behaviour of every existing project.
         let irqs = mcu_config::parse_irq(text);
+        // GPIO modes (`@iomode`) — a missing section means every pin is on the
+        // backend default (floating in / push-pull out), i.e. what every project
+        // generated before the mode was selectable.
+        let modes = mcu_config::parse_iomode(text);
         for pin in self.iter_all_pins_mut() {
             pin.irq = irqs.get(&pin.number).copied();
+            pin.io_mode = modes.get(&pin.number).copied();
         }
         // A freshly loaded project has NO staged edits: pending == applied.
         self.sync_pending_style();
@@ -908,6 +926,48 @@ impl Mcu {
     /// Finds a pin by number (mutable)
     pub fn find_pin_mut(&mut self, number: usize) -> Option<&mut Pin> {
         self.iter_all_pins_mut().find(|p| p.number == number)
+    }
+}
+
+#[cfg(test)]
+mod iomode_persist_tests {
+    use crate::panels::mcu_module::create_stm32f103c8tx;
+    use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    /// A chosen GPIO mode survives save → load through `mcu.config` `@iomode`.
+    #[test]
+    fn gpio_modes_round_trip_through_mcu_config() {
+        let mut mcu = create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        mcu.apply_pin_function(11, PinFunction::GpioInput);
+        mcu.find_pin_mut(10).unwrap().io_mode = Some(GpioMode::OpenDrain);
+        mcu.find_pin_mut(11).unwrap().io_mode = Some(GpioMode::PullDown);
+
+        let text = mcu.mcu_config_text();
+        assert!(text.contains("@iomode"), "{text}");
+
+        let mut reloaded = create_stm32f103c8tx();
+        reloaded.apply_pin_function(10, PinFunction::GpioOutput);
+        reloaded.apply_pin_function(11, PinFunction::GpioInput);
+        reloaded.apply_mcu_config(&text);
+        assert_eq!(
+            reloaded.find_pin(10).unwrap().io_mode,
+            Some(GpioMode::OpenDrain)
+        );
+        assert_eq!(
+            reloaded.find_pin(11).unwrap().io_mode,
+            Some(GpioMode::PullDown)
+        );
+    }
+
+    /// A project that never touched a mode writes NO section at all, so its
+    /// `mcu.config` is byte-identical to what older versions produced.
+    #[test]
+    fn untouched_modes_write_no_section() {
+        let mut mcu = create_stm32f103c8tx();
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        assert!(!mcu.mcu_config_text().contains("@iomode"));
     }
 }
 

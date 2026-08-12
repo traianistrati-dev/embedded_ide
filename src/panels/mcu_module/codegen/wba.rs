@@ -59,6 +59,7 @@ mod tests {
             selected_function: func,
             custom_label: String::new(),
             irq: None,
+            io_mode: None,
         }
     }
 
@@ -91,6 +92,22 @@ mod tests {
         assert!(parsed.contains(&("PB5".into(), PinFunction::GpioOutput)));
         assert!(parsed.contains(&("PC13".into(), PinFunction::GpioInput)));
         assert!(parsed.contains(&("PA9".into(), PinFunction::UsartTx(1))));
+    }
+
+    /// embassy takes the pull as an ARGUMENT, so the same per-pin mode choice
+    /// that picks `into_pull_up_input` on the blocking HAL comes out as
+    /// `Pull::Up` here — the point of keeping the mode a neutral key.
+    #[test]
+    fn gpio_mode_maps_to_the_embassy_pull_argument() {
+        use crate::panels::mcu_module::pins::logic::pin::GpioMode;
+        let mut pc13 = pin("PC13", PinFunction::GpioInput);
+        pc13.io_mode = Some(GpioMode::PullUp);
+        let refs: Vec<&Pin> = vec![&pc13];
+        let section = make_generated_section("STM32WBA55CG", &refs, &ClockConfig::None, "");
+        assert!(
+            section.contains("let pc13_in = Input::new(p.PC13, Pull::Up); // GPIO Input"),
+            "{section}"
+        );
     }
 
     /// No configured pins → no gpio import, a placeholder comment, still valid.

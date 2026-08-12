@@ -6,7 +6,7 @@ use super::super::modules::{
     ApiStyle, CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits,
     UsartModuleConfig, UsbModuleConfig,
 };
-use super::super::pins::logic::pin::Pin;
+use super::super::pins::logic::pin::{GpioMode, Pin};
 use super::super::pins::logic::pin_function::PinFunction;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding, sanitize_label};
 use std::collections::{BTreeMap, BTreeSet};
@@ -308,7 +308,12 @@ pub(super) fn gen_parts(
     // ── Pin declaration lines ────────────────────────────────────────────────
     let mut port_groups: BTreeMap<char, Vec<String>> = BTreeMap::new();
     for (pin, meta) in &configured {
-        let expr = into_expr(&pin.selected_function, &meta.port_var, meta.crx);
+        let expr = into_expr(
+            &pin.selected_function,
+            pin.io_mode,
+            &meta.port_var,
+            meta.crx,
+        );
         let comment = pin.selected_function.label();
         let line = if is_comment_expr(&expr) {
             format!(
@@ -322,25 +327,35 @@ pub(super) fn gen_parts(
             //  · Portable (default) → wrap in the `pins::configs::io` bridge so
             //    the binding is a STANDARD `embedded-hal` 1.0 pin — portable to
             //    any HAL. The wrapper is transparent (`.0` gives the raw HAL pin
-            //    back) and the `&mut` + var-name + comment shape is unchanged, so
-            //    `parse_main_rs` / `parse_pin_labels` still round-trip.
+            //    back).
             //  · Native → bind the raw HAL pin (no io.rs, no embedded-hal dep).
+            //
+            // A GPIO pin is bound BY VALUE (no `&mut` on the right-hand side):
+            // owning it is what lets the user move it into a driver or a struct,
+            // which a `&mut` to a temporary never allowed. Peripheral pins keep
+            // the old shape — they are consumed by an `init_*` call.
+            let binding = binding_of(pin, meta);
             let (prefix, open, close) = match pin.selected_function {
                 // RTIC: the pin is moved into a `Local`, so it must be owned.
                 _ if binding_style == Binding::Owned => ("", "", ""),
                 PinFunction::GpioOutput if !gpio_native => {
-                    ("&mut ", "pins::configs::io::DigitalOut(", ")")
+                    ("", "pins::configs::io::DigitalOut(", ")")
                 }
                 PinFunction::GpioInput if !gpio_native => {
-                    ("&mut ", "pins::configs::io::DigitalIn(", ")")
+                    ("", "pins::configs::io::DigitalIn(", ")")
                 }
-                PinFunction::GpioOutput | PinFunction::GpioInput => ("&mut ", "", ""),
+                PinFunction::GpioOutput | PinFunction::GpioInput => ("", "", ""),
                 ref f if needs_mut_ref(f) => ("&mut ", "", ""),
                 _ => ("", "", ""),
             };
             format!(
-                "    let {binding} = {prefix}{open}{pv}.{field}.{expr}{close}; // {comment}",
-                binding = binding_of(pin, meta),
+                "    let {mut_}{binding} = {prefix}{open}{pv}.{field}.{expr}{close}; // {comment}",
+                mut_ = if needs_mut_binding(pin, gpio_native, binding_style, &binding, custom_inits)
+                {
+                    "mut "
+                } else {
+                    ""
+                },
                 field = meta.var,
                 pv = meta.port_var,
             )
@@ -1460,10 +1475,20 @@ fn parse_pin(name: &str) -> Option<PinMeta> {
     })
 }
 
-fn into_expr(func: &PinFunction, pv: &str, crx: &str) -> String {
+/// The `.into_*(…)` call for a pin. `mode` is the user's GPIO drive/pull choice
+/// (`None` = this backend's default: floating in, push-pull out) and only
+/// applies to GPIO In/Out — a peripheral pin's mode is dictated by the
+/// peripheral, not by the user.
+fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) -> String {
     match func {
-        PinFunction::GpioInput => format!("into_floating_input(&mut {pv}.{crx})"),
-        PinFunction::GpioOutput => format!("into_push_pull_output(&mut {pv}.{crx})"),
+        PinFunction::GpioInput => {
+            let m = mode.unwrap_or(GpioMode::Floating).into_method();
+            format!("{m}(&mut {pv}.{crx})")
+        }
+        PinFunction::GpioOutput => {
+            let m = mode.unwrap_or(GpioMode::PushPull).into_method();
+            format!("{m}(&mut {pv}.{crx})")
+        }
         PinFunction::AdcChannel { .. } => format!("into_analog(&mut {pv}.{crx})"),
         PinFunction::TimerPwm { .. } => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
         // LPUART / SPI-RDY don't exist on STM32F1; they're grouped with their
@@ -1513,6 +1538,43 @@ fn is_comment_expr(expr: &str) -> bool {
 /// Returns `true` for pins that are driven (output / alternate-output).
 /// These get a `&mut` prefix so the binding is immediately usable as a
 /// mutable reference without a later `&mut var` at each call site.
+/// Whether an OWNED GPIO binding has to be `let mut`.
+///
+/// Owning the pin (instead of taking `&mut` of a temporary) means the `mut` now
+/// has to be spelled out wherever the pin is written through:
+/// * an **output** always — `set_high` takes `&mut self` in both `embedded-hal`
+///   0.2 and 1.0;
+/// * an **input** only on the Portable path — `embedded-hal` 1.0's `InputPin`
+///   reads through `&mut self`, while the raw `stm32f1xx-hal` (0.2) input reads
+///   through `&self`, where a `mut` would just earn an unused-mut warning;
+/// * never when the pin is **moved into a Custom module** below, since the
+///   binding is then consumed, never written through.
+///
+/// The "moved" test reads the already-rendered `custom_inits` text rather than
+/// re-deriving which modules get built: that text is what actually passes the
+/// binding, so the two can't disagree.
+fn needs_mut_binding(
+    pin: &Pin,
+    gpio_native: bool,
+    binding_style: Binding,
+    binding: &str,
+    custom_inits: &str,
+) -> bool {
+    if binding_style == Binding::Owned {
+        return false; // RTIC moves it into a `Local`
+    }
+    let write_through = match pin.selected_function {
+        PinFunction::GpioOutput => true,
+        PinFunction::GpioInput => !gpio_native,
+        _ => false,
+    };
+    if !write_through {
+        return false;
+    }
+    let moved = custom_inits.contains(&format!("{binding},")) || custom_inits.contains(&format!("{binding})"));
+    !moved
+}
+
 fn needs_mut_ref(func: &PinFunction) -> bool {
     matches!(
         func,

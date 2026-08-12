@@ -12,7 +12,7 @@
 //! restores on reopen.
 
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding};
-use crate::panels::mcu_module::pins::logic::pin::Pin;
+use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 
 /// Invariant file header (above `GEN_BEGIN`, survives every re-splice).
@@ -145,7 +145,14 @@ fn pin_binding_line(p: &Pin) -> String {
             "    let mut {var} = Output::new(p.{singleton}, Level::Low, Speed::Low); // {label}"
         ),
         PinFunction::GpioInput => {
-            format!("    let {var} = Input::new(p.{singleton}, Pull::None); // {label}")
+            // embassy takes the pull as an argument, so the user's mode choice is
+            // just this variant (default = no pull, what it always generated).
+            let pull = match p.io_mode {
+                Some(GpioMode::PullUp) => "Pull::Up",
+                Some(GpioMode::PullDown) => "Pull::Down",
+                _ => "Pull::None",
+            };
+            format!("    let {var} = Input::new(p.{singleton}, {pull}); // {label}")
         }
         // Bus / analog / debug: bind the raw peripheral, ready for its driver.
         _ => format!("    let {var} = p.{singleton}; // {label}"),

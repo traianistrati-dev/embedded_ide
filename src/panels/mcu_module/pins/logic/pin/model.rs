@@ -54,6 +54,77 @@ impl Edge {
     }
 }
 
+/// How a GPIO pin is driven / terminated — the part of the binding the user can
+/// change (`into_floating_input` ⇄ `into_pull_up_input`, …).
+///
+/// It is a NEUTRAL key, not a HAL method name, because the same choice has to
+/// survive a Runtime switch: `PullUp` is `into_pull_up_input(&mut gpiob.crl)` on
+/// the blocking `stm32f1xx-hal` and `Input::new(p.PB5, Pull::Up)` on embassy.
+/// Each backend renders it in its own syntax and says which of these it offers
+/// ([`FamilyBackend::gpio_modes`]).
+///
+/// `None` on a pin means "the backend's default" — floating for an input,
+/// push-pull for an output — which is what every project generated before this
+/// existed, so a missing `@iomode` section round-trips unchanged.
+///
+/// [`FamilyBackend::gpio_modes`]: crate::panels::mcu_module::codegen::family::FamilyBackend::gpio_modes
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum GpioMode {
+    // Inputs
+    Floating,
+    PullUp,
+    PullDown,
+    // Outputs
+    PushPull,
+    OpenDrain,
+}
+
+impl GpioMode {
+    /// Token persisted in `mcu.config` `@iomode`.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Floating => "Floating",
+            Self::PullUp => "PullUp",
+            Self::PullDown => "PullDown",
+            Self::PushPull => "PushPull",
+            Self::OpenDrain => "OpenDrain",
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Floating" => Some(Self::Floating),
+            "PullUp" => Some(Self::PullUp),
+            "PullDown" => Some(Self::PullDown),
+            "PushPull" => Some(Self::PushPull),
+            "OpenDrain" => Some(Self::OpenDrain),
+            _ => None,
+        }
+    }
+
+    /// Row text in the mode list under the selected function.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Floating => "Floating",
+            Self::PullUp => "Pull-up",
+            Self::PullDown => "Pull-down",
+            Self::PushPull => "Push-pull",
+            Self::OpenDrain => "Open-drain",
+        }
+    }
+
+    /// The `stm32f1xx-hal` (and generally `into_*`) method this mode maps to.
+    pub fn into_method(self) -> &'static str {
+        match self {
+            Self::Floating => "into_floating_input",
+            Self::PullUp => "into_pull_up_input",
+            Self::PullDown => "into_pull_down_input",
+            Self::PushPull => "into_push_pull_output",
+            Self::OpenDrain => "into_open_drain_output",
+        }
+    }
+}
+
 /// Represents a physical pin on a microcontroller.
 ///
 /// Each pin has:
@@ -81,6 +152,11 @@ pub struct Pin {
     /// RTIC backend; ignored by the other runtimes, which do not wire the NVIC.
     /// Persisted in `mcu.config` (`@irq`).
     pub irq: Option<Edge>,
+    /// Drive / pull mode of a GPIO In/Out pin — `None` = the backend's default
+    /// (floating input, push-pull output). Chosen from the mode list under the
+    /// function in the chip, persisted in `mcu.config` (`@iomode`), and rendered
+    /// by each backend in its own syntax. See [`GpioMode`].
+    pub io_mode: Option<GpioMode>,
 }
 
 impl Pin {

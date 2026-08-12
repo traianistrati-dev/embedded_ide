@@ -16,6 +16,7 @@
 
 use super::info;
 use crate::panels::mcu_module::mcu::model::Mcu;
+use crate::panels::mcu_module::pins::logic::pin::GpioMode;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 
@@ -29,6 +30,8 @@ const ITEM_H: f32 = BTN_H + 6.0;
 /// Scrollbar width + its gap from the buttons.
 const SB_W: f32 = 4.0;
 const SB_GAP: f32 = 3.0;
+/// Height of a GPIO-mode chip (the row under the active function).
+const MODE_H: f32 = 19.0;
 
 /// The functions offered for `num`: everything the pin can do, minus what is
 /// already taken by another pin (GPIO In/Out are always offered — any pin can be
@@ -96,12 +99,23 @@ pub fn draw_pin_functions(
         egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 120)),
     );
 
+    // The drive / pull modes this backend can generate for the pin's CURRENT
+    // function — the row of chips under it. Empty for a peripheral pin (its mode
+    // is dictated by the peripheral) or a backend that offers no choice.
+    let modes: &[GpioMode] =
+        crate::panels::mcu_module::codegen::family::gpio_modes_for(mcu, &selected_func);
+    let current_mode = mcu
+        .find_pin(num)
+        .and_then(|p| p.io_mode)
+        .or_else(|| modes.first().copied());
+    let mode_row_h = if modes.is_empty() { 0.0 } else { MODE_H + 6.0 };
+
     // ── Geometry ─────────────────────────────────────────────────────────────
     let btn_x = content_rect.left() + 12.0;
     let content_top = sep_y + 12.0;
     let content_bottom = content_rect.bottom() - 8.0;
     let available_h = (content_bottom - content_top).max(0.0);
-    let total_h = funcs.len() as f32 * ITEM_H;
+    let total_h = funcs.len() as f32 * ITEM_H + mode_row_h;
     let max_scroll = (total_h - available_h).max(0.0);
     mcu.fn_scroll_offset = mcu.fn_scroll_offset.clamp(0.0, max_scroll);
     let btn_w = content_rect.width() - 24.0 - INFO_BTN_W - GAP - SB_W - SB_GAP;
@@ -127,6 +141,7 @@ pub fn draw_pin_functions(
     let list_painter = painter.with_clip_rect(list_rect);
     let mut btn_y = content_top - mcu.fn_scroll_offset;
     let mut new_function: Option<(usize, PinFunction)> = None;
+    let mut new_mode: Option<GpioMode> = None;
     let mut toggle_info: Option<PinFunction> = None;
     let show_info = mcu.show_info.clone();
 
@@ -214,11 +229,74 @@ pub fn draw_pin_functions(
         }
 
         btn_y += ITEM_H;
+
+        // ── Mode chips, directly under the ACTIVE function ───────────────────
+        // The active function is always the first row (see `selectable_functions`),
+        // so this row sits at the top of the list where it is reachable without
+        // scrolling. One chip per mode the backend can actually generate.
+        if is_sel && !modes.is_empty() {
+            let chip_w = (btn_w - GAP * (modes.len() as f32 - 1.0)) / modes.len() as f32;
+            for (j, m) in modes.iter().enumerate() {
+                let r = egui::Rect::from_min_size(
+                    egui::pos2(btn_x + j as f32 * (chip_w + GAP), btn_y),
+                    egui::vec2(chip_w, MODE_H),
+                );
+                let on = current_mode == Some(*m);
+                list_painter.rect_filled(
+                    r,
+                    4.0,
+                    if on {
+                        egui::Color32::from_rgb(70, 100, 150)
+                    } else {
+                        egui::Color32::from_rgb(52, 52, 64)
+                    },
+                );
+                list_painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    m.label(),
+                    egui::FontId::proportional(10.0),
+                    if on {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_rgb(185, 190, 205)
+                    },
+                );
+                if r.bottom() > content_top && r.top() < content_bottom {
+                    let resp = ui.interact(
+                        r,
+                        ui.id().with(("fn_mode", num, j)),
+                        egui::Sense::click(),
+                    );
+                    if resp.hovered() {
+                        list_painter.rect_stroke(
+                            r,
+                            4.0,
+                            egui::Stroke::new(1.2, egui::Color32::WHITE),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                    if resp.clicked() {
+                        new_mode = Some(*m);
+                    }
+                }
+            }
+            btn_y += mode_row_h;
+        }
     }
 
     // ── Apply ────────────────────────────────────────────────────────────────
     // Applying also clears `show_info`, so it runs before the toggle below.
-    let changed = new_function.and_then(|(n, f)| mcu.apply_pin_function(n, f));
+    let mut changed = new_function.and_then(|(n, f)| mcu.apply_pin_function(n, f));
+    // A mode change rewrites the pin's `let` line (it is in the state hash), so
+    // it is reported as a pin change too — same downstream sync as a function
+    // change. Clicking the ACTIVE mode clears it back to the backend default.
+    if let Some(m) = new_mode
+        && let Some(pin) = mcu.find_pin_mut(num)
+    {
+        pin.io_mode = if pin.io_mode == Some(m) { None } else { Some(m) };
+        changed = Some((pin.number, pin.name.clone(), pin.selected_function.clone()));
+    }
     if let Some(func) = toggle_info {
         mcu.show_info = if mcu.show_info.as_ref() == Some(&func) {
             None

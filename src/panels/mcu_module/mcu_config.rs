@@ -21,7 +21,7 @@ use super::clock::model::Stm32f1Clock;
 use super::clock::persist as clock_persist;
 use super::mcu::{AutoBuild, Runtime};
 use super::modules::{ApiStyle, VirtualModule};
-use crate::panels::mcu_module::pins::logic::pin::Edge;
+use crate::panels::mcu_module::pins::logic::pin::{Edge, GpioMode};
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";
@@ -33,6 +33,7 @@ const DEBUGBUILD_HEADER: &str = "@debugbuild";
 const ROTATION_HEADER: &str = "@rotation";
 const IOPINS_HEADER: &str = "@iopins";
 const IRQ_HEADER: &str = "@irq";
+const IOMODE_HEADER: &str = "@iomode";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -130,6 +131,37 @@ pub fn irq_section(irqs: &std::collections::BTreeMap<usize, Edge>) -> String {
         s.push_str(&format!("{num}={}\n", e.as_token()));
     }
     s
+}
+
+/// The `@iomode` section — one `num=Mode` per GPIO pin whose drive/pull mode the
+/// user changed from the backend default — or "" when every pin is on its
+/// default, so a project that never touched a mode round-trips without it.
+pub fn iomode_section(modes: &std::collections::BTreeMap<usize, GpioMode>) -> String {
+    if modes.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(IOMODE_HEADER);
+    s.push('\n');
+    for (num, m) in modes {
+        s.push_str(&format!("{num}={}\n", m.as_token()));
+    }
+    s
+}
+
+/// Parse `@iomode` back into `pin -> GpioMode`; malformed lines are skipped.
+pub fn parse_iomode(text: &str) -> std::collections::BTreeMap<usize, GpioMode> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(body) = section_body(text, IOMODE_HEADER) else {
+        return map;
+    };
+    for line in body.lines() {
+        if let Some((n, m)) = line.trim().split_once('=') {
+            if let (Ok(num), Some(mode)) = (n.trim().parse::<usize>(), GpioMode::from_token(m)) {
+                map.insert(num, mode);
+            }
+        }
+    }
+    map
 }
 
 /// Parse `@irq` back into `pin -> Edge`; malformed lines are skipped.

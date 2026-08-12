@@ -14,6 +14,7 @@ impl Pin {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            io_mode: None,
         }
     }
 
@@ -31,6 +32,7 @@ impl Pin {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            io_mode: None,
         }
     }
 
@@ -44,6 +46,7 @@ impl Pin {
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
             irq: None,
+            io_mode: None,
         }
     }
 
