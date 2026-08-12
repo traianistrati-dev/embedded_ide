@@ -213,6 +213,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
         &mcu.clock,
+        &mcu.name,
         &mcu.id,
         &usart,
         &spi,
@@ -231,6 +232,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         existing,
         &pins_of(mcu),
         &mcu.clock,
+        &mcu.name,
         &mcu.id,
         &usart,
         &spi,
@@ -817,7 +819,14 @@ mod tests {
             project_gen::gen_config(ConfigFile::CargoConfig, &def.project, &def.toolchain),
         )
         .unwrap();
-        fs::write(out.join("src/main.rs"), mcu.fresh_main_rs()).unwrap();
+        // `ESP_ASYNC_IN=<file>` re-splices an EXISTING main.rs instead of writing
+        // a fresh one — how a real project (older header, user code around the
+        // markers) is put through the generator before compiling it.
+        let main_rs = match std::env::var("ESP_ASYNC_IN") {
+            Ok(src) => mcu.update_main_rs(&fs::read_to_string(src).expect("ESP_ASYNC_IN readable")),
+            Err(_) => mcu.fresh_main_rs(),
+        };
+        fs::write(out.join("src/main.rs"), main_rs).unwrap();
         fs::write(out.join("src/pins/mod.rs"), "").unwrap(); // header declares it
     }
 

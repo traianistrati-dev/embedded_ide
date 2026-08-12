@@ -420,6 +420,19 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool, sources: &[&str]) -> S
     s
 }
 
+/// The `esp-hal` version requirement every generated ESP `Cargo.toml` carries.
+///
+/// Shared with the `main.rs` header (`codegen_esp::hal_line`) so the comment
+/// that names the HAL and the dependency that provides it are the same string —
+/// they used to be written independently, and the header went on claiming
+/// "esp-hal 0.22" long after the template had moved to 1.1.
+pub const ESP_HAL_REQ: &str = "~1.1.0";
+
+/// The `esp-rtos` version requirement for the Async runtime. Same rationale as
+/// [`ESP_HAL_REQ`]. Pinned to 0.3: it is the first release built against
+/// esp-hal 1.1, and it dictates `embassy-executor` 0.10.
+pub const ESP_RTOS_REQ: &str = "0.3";
+
 /// Which HAL the Async runtime sits on. Both paths use `embassy-executor` +
 /// `embassy-time` under the SAME dependency keys but at incompatible versions,
 /// so [`ensure_async_deps`] — the single authority for those two lines — has to
@@ -453,7 +466,7 @@ impl AsyncFlavor<'_> {
             Self::Stm32 => "esp32c3",
             Self::Esp(chip) => chip,
         };
-        format!("esp-rtos = {{ version = \"0.3\", features = [\"{chip}\", \"embassy\"] }}")
+        format!("esp-rtos = {{ version = \"{ESP_RTOS_REQ}\", features = [\"{chip}\", \"embassy\"] }}")
     }
 }
 
@@ -1399,7 +1412,7 @@ fn cargo_toml_esp(c: &ProjectDef) -> String {
          bench = false\n\
          \n\
          [dependencies]\n\
-         esp-hal       = {{ version = \"~1.1.0\", features = [\"{chip}\", \"unstable\"] }}\n\
+         esp-hal       = {{ version = \"{ESP_HAL_REQ}\", features = [\"{chip}\", \"unstable\"] }}\n\
          esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
          esp-bootloader-esp-idf = {{ version = \"0.5.0\", features = [\"{chip}\"] }}\n\
          critical-section = \"1.2.0\"\n\

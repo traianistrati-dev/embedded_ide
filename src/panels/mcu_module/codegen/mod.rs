@@ -1627,6 +1627,7 @@ mod tests {
         let esp = crate::panels::mcu_module::codegen_esp::fresh_esp32c3_main_rs(
             &pins,
             &mcu.clock,
+            "ESP32-C3",
             "esp32c3",
             &Default::default(),
             &Default::default(),
