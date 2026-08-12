@@ -29,8 +29,8 @@ fn connector(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: e
     painter.line_segment([to, to - head * (rot.inverse() * dir)], stroke);
 }
 use crate::panels::mcu_module::codegen::{pin_binding, sanitize_label};
-use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use crate::panels::mcu_module::pins::logic::pin::Edge;
+use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 
 /// Shared with the chip pins and the module boxes — one selection look.
@@ -318,36 +318,31 @@ pub fn draw_io_arrows(
                     ),
                 };
                 ui.push_id(("io_irq", it.num), |ui| {
-                    ui.put(
-                        irq_rect,
-                        |ui: &mut egui::Ui| {
-                            ui.menu_button(
-                                egui::RichText::new(label)
-                                    .size(9.5 * scale)
-                                    .color(col),
-                                |ui| {
-                                    ui.set_min_width(140.0);
-                                    ui.label(
-                                        egui::RichText::new("Interrupt on")
-                                            .size(10.0)
-                                            .color(egui::Color32::GRAY),
-                                    );
-                                    ui.separator();
-                                    let mut pick = |ui: &mut egui::Ui, v: Option<Edge>, t: &str| {
-                                        if ui.selectable_label(pin.irq == v, t).clicked() {
-                                            pin.irq = v;
-                                            ui.close();
-                                        }
-                                    };
-                                    pick(ui, None, "No interrupt (polled)");
-                                    pick(ui, Some(Edge::Rising), "Rising edge");
-                                    pick(ui, Some(Edge::Falling), "Falling edge");
-                                    pick(ui, Some(Edge::Both), "Both edges");
-                                },
-                            )
-                            .response
-                        },
-                    )
+                    ui.put(irq_rect, |ui: &mut egui::Ui| {
+                        ui.menu_button(
+                            egui::RichText::new(label).size(9.5 * scale).color(col),
+                            |ui| {
+                                ui.set_min_width(140.0);
+                                ui.label(
+                                    egui::RichText::new("Interrupt on")
+                                        .size(10.0)
+                                        .color(egui::Color32::GRAY),
+                                );
+                                ui.separator();
+                                let mut pick = |ui: &mut egui::Ui, v: Option<Edge>, t: &str| {
+                                    if ui.selectable_label(pin.irq == v, t).clicked() {
+                                        pin.irq = v;
+                                        ui.close();
+                                    }
+                                };
+                                pick(ui, None, "No interrupt (polled)");
+                                pick(ui, Some(Edge::Rising), "Rising edge");
+                                pick(ui, Some(Edge::Falling), "Falling edge");
+                                pick(ui, Some(Edge::Both), "Both edges");
+                            },
+                        )
+                        .response
+                    })
                     .on_hover_text(
                         "Raise an interrupt on this input. Used by the RTIC runtime, 
                          which turns each armed pin into a #[task(binds = EXTIn)].",

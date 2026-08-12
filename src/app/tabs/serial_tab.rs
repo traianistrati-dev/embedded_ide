@@ -72,7 +72,10 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         } else {
             let can = !serial.port.is_empty() && (!serial.bridge || !serial.bridge_port.is_empty());
             if ui
-                .add_enabled(can, egui::Button::new(format!("{} Connect", ph::PLUGS_CONNECTED)))
+                .add_enabled(
+                    can,
+                    egui::Button::new(format!("{} Connect", ph::PLUGS_CONNECTED)),
+                )
                 .on_disabled_hover_text(if serial.bridge {
                     "Bridge needs BOTH a device port and a virtual-pair port"
                 } else {
@@ -126,7 +129,6 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         // what you read to decide whether you need Bridge at all.
         ui.toggle_value(&mut serial.info_on, format!("{} Info", ph::INFO))
             .on_hover_text("How Bridge (MITM) wiring works, with this session's ports");
-
     });
 
     // ── View row ──────────────────────────────────────────────────────────────

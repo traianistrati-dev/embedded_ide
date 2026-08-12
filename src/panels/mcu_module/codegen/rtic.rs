@@ -237,8 +237,7 @@ pub fn invariant_header(mcu_name: &str, mcu_id: &str) -> String {
     )
 }
 
-pub const RTIC_USER_TAIL: &str =
-    "// Add helpers, `impl`s and `use`s for your tasks here.\n     // Task bodies live inside the `mod app` block above.\n";
+pub const RTIC_USER_TAIL: &str = "// Add helpers, `impl`s and `use`s for your tasks here.\n     // Task bodies live inside the `mod app` block above.\n";
 
 /// Does this trailing text close a block that the GEN section opened?
 ///
@@ -253,7 +252,12 @@ fn tail_closes_a_missing_block(tail: &str) -> bool {
 }
 
 /// Re-splice an RTIC GEN block, replacing an inherited bare-metal tail.
-pub fn splice_rtic_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id: &str) -> String {
+pub fn splice_rtic_section(
+    existing: &str,
+    new_section: &str,
+    mcu_name: &str,
+    mcu_id: &str,
+) -> String {
     let header = invariant_header(mcu_name, mcu_id);
     let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) else {
         return format!("{header}{new_section}\n{RTIC_USER_TAIL}");
@@ -551,9 +555,14 @@ mod tests {
         assert_eq!(code.matches("clear_interrupt_pending_bit()").count(), 2);
         for block in code.split("#[task(").skip(1) {
             let body = block.split_once('{').map(|x| x.1).unwrap_or("");
-            let clear = body.find("clear_interrupt_pending_bit").unwrap_or(usize::MAX);
+            let clear = body
+                .find("clear_interrupt_pending_bit")
+                .unwrap_or(usize::MAX);
             let handler = body.find("handler code here").unwrap_or(0);
-            assert!(clear < handler, "pending bit cleared after the handler:\n{body}");
+            assert!(
+                clear < handler,
+                "pending bit cleared after the handler:\n{body}"
+            );
         }
     }
 
@@ -692,14 +701,23 @@ mod tests {
         // `sync_pin_files` normally writes these two; without them `mod pins;`
         // in the invariant header has nothing to point at.
         let mut user: Vec<(String, String)> = vec![
-            ("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
             (
                 "src/pins/configs/mod.rs".into(),
                 configs
                     .iter()
-                    .map(|(n, _)| format!("pub mod {};
-", n.trim_end_matches(".rs")))
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
                     .collect(),
             ),
         ];
@@ -742,9 +760,15 @@ mod tests {
         // inline and no RTIC anywhere.
         assert!(out.contains("#[entry]"), "{out}");
         assert!(out.contains("fn main() -> ! {"), "{out}");
-        assert!(out.contains("let dp = pac::Peripherals::take().unwrap();"), "{out}");
-        assert!(!out.contains("rtic"), "RTIC leaked into the blocking output:
-{out}");
+        assert!(
+            out.contains("let dp = pac::Peripherals::take().unwrap();"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("rtic"),
+            "RTIC leaked into the blocking output:
+{out}"
+        );
         assert!(!out.contains("#[init]"), "{out}");
         // And the interrupt edge changed nothing here.
         assert!(!out.contains("trigger_on_edge"), "{out}");

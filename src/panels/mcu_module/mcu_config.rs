@@ -17,11 +17,11 @@
 //! …
 //! ```
 
-use crate::panels::mcu_module::pins::logic::pin::Edge;
 use super::clock::model::Stm32f1Clock;
 use super::clock::persist as clock_persist;
 use super::mcu::{AutoBuild, Runtime};
 use super::modules::{ApiStyle, VirtualModule};
+use crate::panels::mcu_module::pins::logic::pin::Edge;
 
 const MODULES_HEADER: &str = "@modules";
 const CLOCK_HEADER: &str = "@clock";

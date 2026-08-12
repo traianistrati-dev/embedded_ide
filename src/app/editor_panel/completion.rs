@@ -440,11 +440,6 @@ impl AppIde {
                                             };
                                             let sel_bg = egui::Color32::from_rgb(40, 90, 160);
                                             let hover_bg = egui::Color32::from_rgb(50, 60, 80);
-                                            let detail_fg = if selected {
-                                                egui::Color32::from_rgb(160, 195, 255)
-                                            } else {
-                                                egui::Color32::from_rgb(110, 130, 155)
-                                            };
 
                                             // Allocate the full row width for hit-testing.
                                             let row_h = 19.0;
@@ -474,29 +469,15 @@ impl AppIde {
                                                 fg,
                                             );
 
-                                            // Detail (type signature) — right-aligned,
-                                            // smaller and dimmer, truncated if needed.
-                                            if !item.detail.is_empty() {
-                                                let det = {
-                                                    let chars: Vec<char> =
-                                                        item.detail.chars().collect();
-                                                    if chars.len() > 38 {
-                                                        format!(
-                                                            "{}…",
-                                                            chars[..35].iter().collect::<String>()
-                                                        )
-                                                    } else {
-                                                        item.detail.clone()
-                                                    }
-                                                };
-                                                painter.text(
-                                                    rect.right_center() - egui::vec2(4.0, 0.0),
-                                                    egui::Align2::RIGHT_CENTER,
-                                                    det,
-                                                    egui::FontId::monospace(10.5),
-                                                    detail_fg,
-                                                );
-                                            }
+                                            // The type signature is deliberately NOT
+                                            // repeated per row. It used to be
+                                            // right-aligned in the same 440 px as the
+                                            // label, so a long name (`into_open_drain_
+                                            // output_with_state`) and its signature
+                                            // ran into each other and both became
+                                            // unreadable. The panel beside the popup
+                                            // already shows the focused item's full
+                                            // signature, untruncated.
 
                                             // Mouse click → deferred insert.
                                             if row_resp.clicked() {

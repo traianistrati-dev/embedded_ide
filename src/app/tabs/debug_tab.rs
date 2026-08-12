@@ -262,12 +262,12 @@ pub fn show_debug_tab(
                         ph::ARROW_CLOCKWISE,
                         if chip.is_empty() { "target" } else { chip }
                     ))
-                        .size(10.5)
-                        .color(if !busy && can_run {
-                            egui::Color32::from_rgb(160, 190, 230)
-                        } else {
-                            egui::Color32::GRAY
-                        }),
+                    .size(10.5)
+                    .color(if !busy && can_run {
+                        egui::Color32::from_rgb(160, 190, 230)
+                    } else {
+                        egui::Color32::GRAY
+                    }),
                 ),
             )
             .on_hover_text(
