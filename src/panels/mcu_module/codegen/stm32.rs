@@ -138,8 +138,48 @@ pub fn clock_setup_chain(clock: &ClockConfig) -> String {
 
 // ── Generated section builder ─────────────────────────────────────────────────
 
-pub fn make_generated_section(
-    mcu_name: &str,
+/// The pieces of an STM32F1 init sequence, before they are arranged into a
+/// program.
+///
+/// Extracted so the RTIC backend can lay the SAME init out inside `#[init]`
+/// instead of `fn main`. Two copies of this logic would drift the first time a
+/// peripheral is added, and only one of them would be the one under test.
+pub(super) struct GenParts {
+    /// Items for the `use stm32f1xx_hal::{ ... };` block, already indented.
+    pub use_block: String,
+    /// Top-level `use`s that cannot live inside the HAL block (USB).
+    pub extra_uses: &'static str,
+    /// `let mut afio = ...;` or empty.
+    pub afio_line: &'static str,
+    /// Right-hand side of `let clocks = ...`.
+    pub clock_chain: String,
+    /// `let mut gpioX = dp.GPIOX.split();` lines.
+    pub port_splits: String,
+    /// Per-pin `let` bindings, grouped by port.
+    pub pin_section: String,
+    /// Peripheral init calls (`pins::configs::usart1::init(...)`, ADC, CAN...).
+    pub fn_calls: String,
+}
+
+/// Build the init pieces. `None` when no pin is configured — the caller decides
+/// what an empty project looks like.
+#[allow(clippy::too_many_arguments)]
+/// How a pin's `let` binding is produced.
+///
+/// The bare-metal path takes `&mut` of the freshly-configured pin because
+/// everything stays inside one `fn main` and nothing outlives it. RTIC cannot:
+/// each pin is MOVED into a `Local` resource that outlives `#[init]`, and a
+/// `&mut` to a temporary would not even compile. Same lines, one prefix apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Binding {
+    /// `let p = &mut gpioa.pa0.into_...();` — the historical form.
+    MutRef,
+    /// `let p = gpioa.pa0.into_...();` — movable into an RTIC resource.
+    Owned,
+}
+
+pub(super) fn gen_parts(
+    binding_style: Binding,
     all_pins: &[&Pin],
     clock: &ClockConfig,
     usart: &BTreeMap<u8, UsartModuleConfig>,
@@ -151,7 +191,7 @@ pub fn make_generated_section(
     // `let x = Foo::new(pa0_out, …);` lines for the Custom modules — appended
     // last, after every binding/init they consume (see `Mcu::custom_module_inits`).
     custom_inits: &str,
-) -> String {
+) -> Option<GenParts> {
     let configured: Vec<(&Pin, PinMeta)> = all_pins
         .iter()
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
@@ -159,7 +199,7 @@ pub fn make_generated_section(
         .collect();
 
     if configured.is_empty() {
-        return make_default_gen_section(mcu_name, clock);
+        return None;
     }
 
     // ── Ports used ───────────────────────────────────────────────────────────
@@ -286,6 +326,8 @@ pub fn make_generated_section(
             //    `parse_main_rs` / `parse_pin_labels` still round-trip.
             //  · Native → bind the raw HAL pin (no io.rs, no embedded-hal dep).
             let (prefix, open, close) = match pin.selected_function {
+                // RTIC: the pin is moved into a `Local`, so it must be owned.
+                _ if binding_style == Binding::Owned => ("", "", ""),
                 PinFunction::GpioOutput if !gpio_native => {
                     ("&mut ", "pins::configs::io::DigitalOut(", ")")
                 }
@@ -553,7 +595,58 @@ pub fn make_generated_section(
     // `src/pins/configs/` (e.g. `pins::configs::usart1`), seeded from the wired
     // Virtual Module — no longer emitted in main.rs.
 
-    // ── Put it all together ──────────────────────────────────────────────────
+    Some(GenParts {
+        use_block,
+        extra_uses,
+        afio_line,
+        clock_chain,
+        port_splits,
+        pin_section,
+        fn_calls,
+    })
+}
+
+/// The classic bare-metal `main.rs` GEN block: `#[entry] fn main() -> !` with
+/// the whole init inlined.
+///
+/// Byte-for-byte what it always produced — the parts moved out, the arrangement
+/// did not (guarded by `blocking_output_is_unchanged`).
+#[allow(clippy::too_many_arguments)]
+pub fn make_generated_section(
+    mcu_name: &str,
+    all_pins: &[&Pin],
+    clock: &ClockConfig,
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi: &BTreeMap<u8, SpiModuleConfig>,
+    i2c: &BTreeMap<u8, I2cModuleConfig>,
+    can: &BTreeMap<u8, CanModuleConfig>,
+    usb: &BTreeMap<u8, UsbModuleConfig>,
+    gpio_native: bool,
+    custom_inits: &str,
+) -> String {
+    let Some(parts) = gen_parts(
+        Binding::MutRef,
+        all_pins,
+        clock,
+        usart,
+        spi,
+        i2c,
+        can,
+        usb,
+        gpio_native,
+        custom_inits,
+    ) else {
+        return make_default_gen_section(mcu_name, clock);
+    };
+    let GenParts {
+        use_block,
+        extra_uses,
+        afio_line,
+        clock_chain,
+        port_splits,
+        pin_section,
+        fn_calls,
+    } = parts;
     // Nothing is appended after `fn main` any more: USART/SPI/I2C init live in
     // `src/pins/configs/` and the ADC is a single line inside the GEN block.
     format!(
@@ -890,13 +983,21 @@ impl<TX, RX: embedded_hal_0_2::serial::Read<u8>> embedded_io::Read for SerialIo<
     }
 }
 
+/// The concrete type [`init`] hands back.
+///
+/// A NAMED type, not `impl Trait`: a struct field has to name its type, and on
+/// the RTIC runtime this handle becomes a `Local` resource. Returning `impl
+/// Trait` made the peripheral unusable there — `#[init]` returned and dropped
+/// it. Still `embedded-io` Read + Write for every caller.
+pub type Handle = SerialIo<serial::Tx<pac::USART{N}>, serial::Rx<pac::USART{N}>>;
+
 /// Initialise USART{N} and expose it as an `embedded-io` Read + Write value.
 pub fn init(
     usart: pac::USART{N},
     pins: impl serial::Pins<pac::USART{N}>,
     afio: &mut afio::Parts,
     clocks: &Clocks,
-) -> impl embedded_io::Read + embedded_io::Write {
+) -> Handle {
     let (tx, rx) = Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split();
     SerialIo(tx, rx)
 }

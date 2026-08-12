@@ -58,6 +58,7 @@ mod tests {
             available_functions: vec![func.clone()],
             selected_function: func,
             custom_label: String::new(),
+            irq: None,
         }
     }
 

@@ -51,6 +51,7 @@ impl PinDef {
             available_functions: self.functions.clone(),
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
+            irq: None,
         }
     }
 }

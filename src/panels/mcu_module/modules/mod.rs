@@ -403,7 +403,7 @@ mod tests {
         // Portable (default) → embedded-io return + the bridge.
         let portable = usart_body(ApiStyle::Portable);
         assert!(
-            portable.contains("impl embedded_io::Read + embedded_io::Write"),
+            portable.contains("pub type Handle = SerialIo<"),
             "{portable}"
         );
         assert!(portable.contains("struct SerialIo"), "{portable}");

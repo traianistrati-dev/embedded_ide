@@ -17,6 +17,7 @@
 //! …
 //! ```
 
+use crate::panels::mcu_module::pins::logic::pin::Edge;
 use super::clock::model::Stm32f1Clock;
 use super::clock::persist as clock_persist;
 use super::mcu::{AutoBuild, Runtime};
@@ -31,6 +32,7 @@ const STRICT_HEADER: &str = "@strict";
 const DEBUGBUILD_HEADER: &str = "@debugbuild";
 const ROTATION_HEADER: &str = "@rotation";
 const IOPINS_HEADER: &str = "@iopins";
+const IRQ_HEADER: &str = "@irq";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -113,6 +115,37 @@ pub fn iopins_section(pos: &std::collections::BTreeMap<usize, (f32, f32)>) -> St
         s.push_str(&format!("{num}={x},{y}\n"));
     }
     s
+}
+
+/// The `@irq` section — one `num=Edge` per interrupt-enabled input pin — or ""
+/// when none are armed, so a project that uses no interrupts round-trips without
+/// the section at all.
+pub fn irq_section(irqs: &std::collections::BTreeMap<usize, Edge>) -> String {
+    if irqs.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(IRQ_HEADER);
+    s.push('\n');
+    for (num, e) in irqs {
+        s.push_str(&format!("{num}={}\n", e.as_token()));
+    }
+    s
+}
+
+/// Parse `@irq` back into `pin -> Edge`; malformed lines are skipped.
+pub fn parse_irq(text: &str) -> std::collections::BTreeMap<usize, Edge> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(body) = section_body(text, IRQ_HEADER) else {
+        return map;
+    };
+    for line in body.lines() {
+        if let Some((n, e)) = line.trim().split_once('=') {
+            if let (Ok(num), Some(edge)) = (n.trim().parse::<usize>(), Edge::from_token(e)) {
+                map.insert(num, edge);
+            }
+        }
+    }
+    map
 }
 
 /// Parse the `@iopins` section back into the `pin → (x,y)` map; malformed lines

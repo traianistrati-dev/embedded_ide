@@ -10,4 +10,4 @@ pub mod colors;
 pub mod model;
 
 // Re-export essentials for backward compatibility and convenience
-pub use model::{PIN_FONT_SIZE, PIN_ROUNDING, Pin};
+pub use model::{Edge, PIN_FONT_SIZE, PIN_ROUNDING, Pin};

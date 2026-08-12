@@ -940,6 +940,7 @@ impl AppIde {
 
             let async_ok = family::async_supported(&mcu.family);
             let native_ok = family::native_supported(&mcu.family);
+            let rtic_ok = family::rtic_supported(&mcu.family);
 
             // The cards edit the STAGED choice (`pending_*`); nothing regenerates
             // until "Apply" commits it (see the Apply bar below).
@@ -1065,8 +1066,36 @@ impl AppIde {
                  _serial1.write_all(b\"hi\").await.ok();",
             );
 
+            let rtic_sel = mcu.pending_runtime == Runtime::Rtic;
+            let rtic_resp = runtime_card(
+                ui,
+                rtic_sel,
+                rtic_ok,
+                "RTIC 2",
+                "#[rtic::app] with Shared / Local / init / idle  ·                   one hardware task per interrupt pin",
+            );
+            if rtic_resp.clicked() && rtic_ok {
+                mcu.pending_runtime = Runtime::Rtic;
+            }
+            runtime_details(
+                ui,
+                "rt_details_rtic",
+                &[
+                    ("On Apply:", "Regenerates main.rs as an #[rtic::app] module. The init sequence is                                    UNCHANGED - same clocks, same pin bindings, same pins/configs/*::init calls -                                    it just moves into #[init]. The config files themselves are untouched."),
+                    ("Entry:", "RTIC owns main. #[init] runs once and returns (Shared, Local); #[idle] is the                                 background loop (wfi)."),
+                    ("Interrupts:", "A GPIO input with an Edge set on the Pins canvas becomes a                                      #[task(binds = EXTIn)]. RTIC enables the vector itself, so the generated                                      code never calls NVIC::unmask."),
+                    ("Shared EXTI vectors:", "STM32 gives lines 5-9 and 10-15 ONE vector each, so pins on them                                               share a single task that branches on check_interrupt(). Two tasks                                               on one vector would not compile."),
+                    ("Cargo.toml:", "Adds rtic (backend feature picked from the chip's Rust target: thumbv6 /                                      thumbv7 / thumbv8) and rtic-monotonics with cortex-m-systick. cortex-m                                      already carries critical-section-single-core. Leaving RTIC removes them."),
+                    ("Applies to:", "STM32F1 only for now - the interrupt tasks are written against                                      stm32f1xx-hal's ExtiPin trait."),
+                ],
+                "#[task(binds = EXTI0, local = [pa0_in_button])]
+                 fn exti0(cx: exti0::Context) {
+                     cx.local.pa0_in_button.clear_interrupt_pending_bit();
+                 }",
+            );
+
             ui.add_space(10.0);
-            if !async_ok && !native_ok {
+            if !async_ok && !native_ok && !rtic_ok {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  {} only supports Blocking here (Native = STM32F1 concrete HAL; \

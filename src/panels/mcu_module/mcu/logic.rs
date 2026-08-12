@@ -443,6 +443,19 @@ impl Mcu {
             }
             s.push_str(&iopins);
         }
+        // Interrupt edges (`@irq`). Unlike the two sections above this is NOT a
+        // view preference: it changes the generated code on the RTIC runtime.
+        let irqs: std::collections::BTreeMap<usize, _> = self
+            .iter_all_pins()
+            .filter_map(|p| p.irq.map(|e| (p.number, e)))
+            .collect();
+        let irq = mcu_config::irq_section(&irqs);
+        if !irq.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&irq);
+        }
         s
     }
 
@@ -473,6 +486,12 @@ impl Mcu {
         self.rotated = mcu_config::parse_rotation(text);
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
         self.io_pin_pos = mcu_config::parse_iopins(text);
+        // Interrupt edges (`@irq`) — a missing section means every input is
+        // polled, which is the pre-RTIC behaviour of every existing project.
+        let irqs = mcu_config::parse_irq(text);
+        for pin in self.iter_all_pins_mut() {
+            pin.irq = irqs.get(&pin.number).copied();
+        }
         // A freshly loaded project has NO staged edits: pending == applied.
         self.sync_pending_style();
     }

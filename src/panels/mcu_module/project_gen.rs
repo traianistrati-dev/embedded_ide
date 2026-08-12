@@ -430,6 +430,57 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool, sources: &[&str]) -> S
 /// newline-preserving (called every frame from `init_frame`). The executor's
 /// `critical-section-single-core` impl is already pulled by `cortex-m` in the
 /// base Cargo.toml.
+/// The `rtic` cargo FEATURE that selects the cortex-m backend for `target`.
+///
+/// RTIC 2 picks its backend by feature, not by code, so this is the whole of
+/// "choose the backend for the architecture". Unknown targets fall back to
+/// thumbv7 — the overwhelmingly common case, and a wrong guess fails loudly at
+/// compile time rather than silently miscompiling.
+pub fn rtic_backend_feature(target: &str) -> &'static str {
+    if target.starts_with("thumbv6m") {
+        "thumbv6-backend"
+    } else if target.starts_with("thumbv8m.base") {
+        "thumbv8base-backend"
+    } else if target.starts_with("thumbv8m.main") {
+        "thumbv8main-backend"
+    } else {
+        "thumbv7-backend"
+    }
+}
+
+/// The `[dependencies]` lines an RTIC project needs, added/removed as the
+/// Runtime is switched.
+///
+/// `cortex-m` with `critical-section-single-core` is deliberately NOT touched
+/// here: the base template already ships it for every RustEmbedded project
+/// (see `cargo_toml_embedded`), and adding a second authority for that line is
+/// how two features start fighting over it.
+pub fn ensure_rtic_deps(
+    cargo_toml: &str,
+    needs_rtic: bool,
+    target: &str,
+    sources: &[&str],
+) -> String {
+    let backend = rtic_backend_feature(target);
+    let s = ensure_dep(
+        cargo_toml,
+        "rtic",
+        needs_rtic,
+        &format!("rtic = {{ version = \"2\", features = [\"{backend}\"] }}"),
+        sources,
+    );
+    // SysTick monotonic: what `Mono::start(...)` in the generated `#[init]`
+    // drives. Kept in step with `rtic` itself — a project with one and not the
+    // other does not build.
+    ensure_dep(
+        &s,
+        "rtic-monotonics",
+        needs_rtic,
+        "rtic-monotonics = { version = \"2\", features = [\"cortex-m-systick\"] }",
+        sources,
+    )
+}
+
 pub fn ensure_async_deps(
     cargo_toml: &str,
     needs_async: bool,

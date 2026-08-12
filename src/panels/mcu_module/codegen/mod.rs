@@ -12,6 +12,7 @@ pub mod embassy_async;
 pub mod embassy_common;
 pub mod family;
 pub mod rcc;
+pub mod rtic;
 pub mod stm32;
 pub mod wba;
 
@@ -63,6 +64,14 @@ impl Mcu {
     /// toggle's effective state (Async selected on `stm32f1`/ESP is inert).
     pub fn is_async(&self) -> bool {
         self.runtime == Runtime::Async && family::async_supported(&self.family)
+    }
+
+    /// Whether code generation for this MCU is on the RTIC path — the project
+    /// Runtime is Rtic AND the family supports it. Drives the RTIC deps and the
+    /// System-tab card's effective state (Rtic selected elsewhere is inert, the
+    /// same way Async is on stm32f1/ESP).
+    pub fn is_rtic(&self) -> bool {
+        self.runtime == Runtime::Rtic && family::rtic_supported(&self.family)
     }
 
     /// Whether code generation is on the Native (concrete-HAL) path — Runtime is

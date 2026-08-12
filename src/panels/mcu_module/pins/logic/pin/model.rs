@@ -5,6 +5,55 @@ use super::super::pin_function::PinFunction;
 pub const PIN_FONT_SIZE: f32 = 10.0;
 pub const PIN_ROUNDING: f32 = 0.0;
 
+/// Which edge of an input pin raises an interrupt.
+///
+/// `None` on a pin (the default) means "read it by polling" — the common case,
+/// and why this is opt-in rather than implied by `GpioInput`. Only meaningful on
+/// the RTIC runtime, where each interrupt-enabled pin becomes a hardware task.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Edge {
+    Rising,
+    Falling,
+    Both,
+}
+
+impl Edge {
+    /// Token persisted in `mcu.config` `@irq`.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Rising => "Rising",
+            Self::Falling => "Falling",
+            Self::Both => "Both",
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s.trim() {
+            "Rising" => Some(Self::Rising),
+            "Falling" => Some(Self::Falling),
+            "Both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    /// The `stm32f1xx-hal` `ExtiPin::trigger_on_edge` argument.
+    pub fn hal_variant(self) -> &'static str {
+        match self {
+            Self::Rising => "Edge::Rising",
+            Self::Falling => "Edge::Falling",
+            Self::Both => "Edge::RisingFalling",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rising => "Rising",
+            Self::Falling => "Falling",
+            Self::Both => "Both edges",
+        }
+    }
+}
+
 /// Represents a physical pin on a microcontroller.
 ///
 /// Each pin has:
@@ -25,6 +74,13 @@ pub struct Pin {
     /// with label "led" generates `let pc13_out_led = …`. Empty by default;
     /// editable via the in/out arrow on the Pins canvas (GPIO In/Out & PWM).
     pub custom_label: String,
+    /// Interrupt trigger for a GPIO input, when the user asked for one.
+    ///
+    /// Opt-in: most inputs are polled, so deriving "interrupt" from
+    /// `GpioInput` alone would generate a task for every button. Consumed by the
+    /// RTIC backend; ignored by the other runtimes, which do not wire the NVIC.
+    /// Persisted in `mcu.config` (`@irq`).
+    pub irq: Option<Edge>,
 }
 
 impl Pin {

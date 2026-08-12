@@ -13,6 +13,7 @@ impl Pin {
             available_functions: vec![PinFunction::GpioInput, PinFunction::GpioOutput],
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
+            irq: None,
         }
     }
 
@@ -29,6 +30,7 @@ impl Pin {
             ],
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
+            irq: None,
         }
     }
 
@@ -41,6 +43,7 @@ impl Pin {
             available_functions: vec![],
             selected_function: PinFunction::Unset,
             custom_label: String::new(),
+            irq: None,
         }
     }
 

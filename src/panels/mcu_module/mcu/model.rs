@@ -32,6 +32,14 @@ pub const PIN_SPACING: f32 = 3.0;
 ///   (`embedded-io-async` / `embedded-hal-async`). Selected in the System tab;
 ///   for STM32 it re-targets code generation to the async embassy backend.
 ///
+/// - [`Runtime::Rtic`]: an RTIC 2.x project — `#[rtic::app]` with `Shared`,
+///   `Local`, `#[init]`, `#[idle]`, and one hardware task per interrupt-enabled
+///   input pin. Still bare-metal and still the concrete HAL, but the scheduler
+///   owns `main`: clock + peripheral init moves into `#[init]`, and an interrupt
+///   is a `#[task(binds = ...)]` rather than an `#[interrupt] fn` the user has
+///   to write. Only where a cortex-m PAC + the `ExtiPin` trait exist
+///   ([`super::super::codegen::family::rtic_supported`] = STM32F1).
+///
 /// Persisted in `mcu.config` (`@runtime`); old projects (no section) load as
 /// `Blocking`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -40,6 +48,7 @@ pub enum Runtime {
     Blocking,
     Native,
     Async,
+    Rtic,
 }
 
 impl Runtime {
@@ -49,6 +58,7 @@ impl Runtime {
             Self::Blocking => "Blocking",
             Self::Native => "Native",
             Self::Async => "Async",
+            Self::Rtic => "Rtic",
         }
     }
 
@@ -58,6 +68,7 @@ impl Runtime {
         match s.trim() {
             "Async" => Self::Async,
             "Native" => Self::Native,
+            "Rtic" => Self::Rtic,
             _ => Self::Blocking,
         }
     }

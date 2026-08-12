@@ -1803,6 +1803,9 @@ impl AppIde {
         for pin in mcu.iter_all_pins() {
             pin.selected_function.hash(&mut hasher);
             pin.custom_label.hash(&mut hasher);
+            // The interrupt edge is CODE, not a view preference: arming a pin
+            // adds a whole #[task] on the RTIC runtime, so it must regenerate.
+            pin.irq.hash(&mut hasher);
         }
 
         // Hash clock config
@@ -2042,6 +2045,16 @@ impl AppIde {
                 needs_eh_async,
                 &sources,
             );
+            // RTIC runtime: the framework + its SysTick monotonic. The backend
+            // feature follows the chip's Rust target, which only `ProjectDef`
+            // knows — hence reading it here rather than in the codegen backend.
+            let is_rtic = self.mcu.as_ref().is_some_and(|m| m.is_rtic());
+            let rtic_target = self
+                .selected_build_cfg()
+                .map(|(p, _)| p.target)
+                .unwrap_or_default();
+            let new_toml =
+                project_gen::ensure_rtic_deps(&new_toml, is_rtic, &rtic_target, &sources);
             // Strict-lints `[lints.clippy]` block (MCU System toggle).
             let strict = self.mcu.as_ref().is_some_and(|m| m.strict_lints);
             let new_toml = project_gen::ensure_strict_lints(&new_toml, strict);

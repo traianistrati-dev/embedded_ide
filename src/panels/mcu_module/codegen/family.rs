@@ -12,7 +12,7 @@
 //! here — they are pure data (a `.ron` definition).
 
 use super::common::USER_TAIL;
-use super::{embassy_async, embassy_common, rcc, stm32, wba};
+use super::{embassy_async, embassy_common, rcc, rtic, stm32, wba};
 use crate::panels::mcu_module::codegen_esp;
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
@@ -360,11 +360,86 @@ const BACKENDS: &[&dyn FamilyBackend] = &[
 /// [`BACKENDS`]; a `static` gives the `&'static` the dispatch returns.
 static ASYNC_EMBASSY_BACKEND: AsyncEmbassyBackend = AsyncEmbassyBackend;
 
+// ── RTIC (STM32F1) ──────────────────────────────────────────────────────────
+/// Same chip, same HAL, same init as the blocking backend — only the program
+/// shape differs (see [`super::rtic`]). It therefore reuses `Stm32f1Backend`'s
+/// `config_files`: the `pins/configs/*.rs` are called from `#[init]` unchanged.
+struct RticBackend;
+
+impl FamilyBackend for RticBackend {
+    fn family_id(&self) -> &'static str {
+        "stm32f1"
+    }
+
+    fn fresh_main_rs(&self, mcu: &Mcu) -> String {
+        let all = pins_of(mcu);
+        let (usart, spi, i2c) = resolve_bus_configs(mcu);
+        let can = modules::can_configs(&mcu.modules);
+        let usb = modules::usb_configs(&mcu.modules);
+        let section = rtic::make_generated_section(
+            &mcu.name,
+            &all,
+            &mcu.clock,
+            &usart,
+            &spi,
+            &i2c,
+            &can,
+            &usb,
+            mcu.gpio_native(),
+            &mcu.custom_module_inits(),
+        );
+        format!(
+            "{}{section}
+{}",
+            rtic::invariant_header(&mcu.name, &mcu.id),
+            rtic::RTIC_USER_TAIL
+        )
+    }
+
+    fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
+        let all = pins_of(mcu);
+        let (usart, spi, i2c) = resolve_bus_configs(mcu);
+        let can = modules::can_configs(&mcu.modules);
+        let usb = modules::usb_configs(&mcu.modules);
+        let section = rtic::make_generated_section(
+            &mcu.name,
+            &all,
+            &mcu.clock,
+            &usart,
+            &spi,
+            &i2c,
+            &can,
+            &usb,
+            mcu.gpio_native(),
+            &mcu.custom_module_inits(),
+        );
+        rtic::splice_rtic_section(existing, &section, &mcu.name, &mcu.id)
+    }
+
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        Stm32f1Backend.config_files(mcu)
+    }
+}
+
+static RTIC_BACKEND: RticBackend = RticBackend;
+
 /// Whether an Async runtime has a backend for `family` — i.e. an embassy-capable
 /// STM32 family. Drives both codegen dispatch and the System-tab toggle's
 /// enabled state.
 pub fn async_supported(family: &str) -> bool {
     ASYNC_EMBASSY_BACKEND.handles(family)
+}
+
+/// Whether an RTIC project can be generated for `family`.
+///
+/// Narrow on purpose. RTIC 2 only has cortex-m backends, which rules out the
+/// RISC-V ESP parts outright; and the generated interrupt tasks are written
+/// against `stm32f1xx-hal`'s `ExtiPin` trait (`make_interrupt_source`,
+/// `trigger_on_edge`, `clear_interrupt_pending_bit`), which the embassy-stm32
+/// families do not expose. Widening this means writing those task bodies for
+/// another HAL, not flipping a flag.
+pub fn rtic_supported(family: &str) -> bool {
+    family == "stm32f1"
 }
 
 /// Whether a Native runtime is meaningful for `family` — i.e. the backend has
@@ -392,6 +467,9 @@ pub fn backend_for(family: &str) -> Option<&'static dyn FamilyBackend> {
 pub fn backend_for_runtime(family: &str, runtime: Runtime) -> Option<&'static dyn FamilyBackend> {
     if runtime == Runtime::Async && async_supported(family) {
         return Some(&ASYNC_EMBASSY_BACKEND);
+    }
+    if runtime == Runtime::Rtic && rtic_supported(family) {
+        return Some(&RTIC_BACKEND);
     }
     backend_for(family)
 }
@@ -757,7 +835,11 @@ mod tests {
         };
 
         // Blocking + Portable module → portable embedded-io init.
-        assert!(usart_body(&mcu).contains("impl embedded_io::Read + embedded_io::Write"));
+        // The Portable USART now returns a NAMED type (see `Handle`), so an RTIC
+        // `Local` field can name it; it is still embedded-io Read + Write.
+        let body = usart_body(&mcu);
+        assert!(body.contains("pub type Handle = SerialIo<"), "{body}");
+        assert!(body.contains(") -> Handle {"), "{body}");
 
         // Native runtime OVERRIDES it → concrete `Serial` split, no embedded-io.
         mcu.runtime = Runtime::Native;
