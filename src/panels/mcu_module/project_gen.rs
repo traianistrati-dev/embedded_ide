@@ -1466,13 +1466,29 @@ mod tests {
         );
         // The async pass runs next and ALSO manages embedded-hal — it must be told
         // the blocking need (combined), or it strips what was just added.
-        let after_async = ensure_async_deps(&with_gpio, false, AsyncFlavor::Stm32, false, true, false, &[]);
+        let after_async = ensure_async_deps(
+            &with_gpio,
+            false,
+            AsyncFlavor::Stm32,
+            false,
+            true,
+            false,
+            &[],
+        );
         assert!(
             after_async.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "async pass keeps embedded-hal when the combined need is true:\n{after_async}"
         );
         // Guard proving the bug shape: the OLD `needs_eh = false` stripped it.
-        let stripped = ensure_async_deps(&with_gpio, false, AsyncFlavor::Stm32, false, false, false, &[]);
+        let stripped = ensure_async_deps(
+            &with_gpio,
+            false,
+            AsyncFlavor::Stm32,
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(
             !stripped.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "needs_eh=false would strip it (the bug this guards):\n{stripped}"
@@ -1900,7 +1916,15 @@ cortex-m = \"0.7\"
             "peripheral sync ate the user's line:
 {after_periph}"
         );
-        let after_async = ensure_async_deps(&after_periph, false, AsyncFlavor::Stm32, false, false, false, &[]);
+        let after_async = ensure_async_deps(
+            &after_periph,
+            false,
+            AsyncFlavor::Stm32,
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(
             after_async.contains("embedded-hal = \"1.0\""),
             "async sync ate the user's line:
@@ -2106,7 +2130,15 @@ fn f() {}
             "must NOT use the hyphen name"
         );
         assert_eq!(
-            ensure_async_deps(&with_usart, true, AsyncFlavor::Stm32, true, false, false, &[]),
+            ensure_async_deps(
+                &with_usart,
+                true,
+                AsyncFlavor::Stm32,
+                true,
+                false,
+                false,
+                &[]
+            ),
             with_usart,
             "usart add idempotent"
         );
@@ -2141,7 +2173,15 @@ fn f() {}
         );
 
         // Dropping just the USART removes only its two crates (executor stays).
-        let no_usart = ensure_async_deps(&with_usart, true, AsyncFlavor::Stm32, false, false, false, &[]);
+        let no_usart = ensure_async_deps(
+            &with_usart,
+            true,
+            AsyncFlavor::Stm32,
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(
             !no_usart.contains("embedded-io-async")
                 && !no_usart.lines().any(|l| is_dep_line(l, "static_cell"))
@@ -2149,7 +2189,15 @@ fn f() {}
         assert!(no_usart.contains("embassy-executor"), "runtime deps stay");
 
         // Removing everything restores the original exactly.
-        let removed = ensure_async_deps(&with_dma, false, AsyncFlavor::Stm32, false, false, false, &[]);
+        let removed = ensure_async_deps(
+            &with_dma,
+            false,
+            AsyncFlavor::Stm32,
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(
             !removed.contains("embassy-executor"),
             "executor removed:\n{removed}"
@@ -2189,9 +2237,19 @@ fn f() {}
     fn esp_async_deps_use_esp_rtos_and_their_own_executor() {
         let base = "[package]\nname = \"x\"\n\n[dependencies]\n\
                     esp-hal       = { version = \"~1.1.0\", features = [\"esp32c3\", \"unstable\"] }\n";
-        let with = ensure_async_deps(base, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]);
+        let with = ensure_async_deps(
+            base,
+            true,
+            AsyncFlavor::Esp("esp32c3"),
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(
-            with.contains("esp-rtos = { version = \"0.3\", features = [\"esp32c3\", \"embassy\"] }"),
+            with.contains(
+                "esp-rtos = { version = \"0.3\", features = [\"esp32c3\", \"embassy\"] }"
+            ),
             "esp-rtos with chip + embassy features:\n{with}"
         );
         assert!(
@@ -2220,12 +2278,28 @@ fn f() {}
 
         // Idempotent, and leaving Async takes exactly what it added back out.
         assert_eq!(
-            ensure_async_deps(&with, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]),
+            ensure_async_deps(
+                &with,
+                true,
+                AsyncFlavor::Esp("esp32c3"),
+                false,
+                false,
+                false,
+                &[]
+            ),
             with,
             "add must be idempotent"
         );
         assert_eq!(
-            ensure_async_deps(&with, false, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]),
+            ensure_async_deps(
+                &with,
+                false,
+                AsyncFlavor::Esp("esp32c3"),
+                false,
+                false,
+                false,
+                &[]
+            ),
             base,
             "removal restores the original"
         );
@@ -2241,24 +2315,52 @@ fn f() {}
         let base = "[package]\nname = \"x\"\n\n[dependencies]\n\
                     esp-hal       = { version = \"~1.1.0\", features = [\"esp32c3\"] }\n\
                     esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }\n";
-        let with = ensure_async_deps(base, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]);
+        let with = ensure_async_deps(
+            base,
+            true,
+            AsyncFlavor::Esp("esp32c3"),
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(
-            with.contains("esp-hal       = { version = \"~1.1.0\", features = [\"unstable\", \"esp32c3\"] }"),
+            with.contains(
+                "esp-hal       = { version = \"~1.1.0\", features = [\"unstable\", \"esp32c3\"] }"
+            ),
             "unstable added to esp-hal:\n{with}"
         );
         // Only the HAL line — a sibling esp-* crate must not be touched.
         assert!(
-            with.contains("esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }"),
+            with.contains(
+                "esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }"
+            ),
             "esp-println untouched:\n{with}"
         );
         assert_eq!(
-            ensure_async_deps(&with, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]),
+            ensure_async_deps(
+                &with,
+                true,
+                AsyncFlavor::Esp("esp32c3"),
+                false,
+                false,
+                false,
+                &[]
+            ),
             with,
             "no duplicate on the second pass"
         );
         // Add-only: leaving Async drops the runtime crates but KEEPS `unstable`,
         // which user code may rely on (and the template ships anyway).
-        let off = ensure_async_deps(&with, false, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]);
+        let off = ensure_async_deps(
+            &with,
+            false,
+            AsyncFlavor::Esp("esp32c3"),
+            false,
+            false,
+            false,
+            &[],
+        );
         assert!(!off.contains("esp-rtos"), "runtime crates removed:\n{off}");
         assert!(off.contains("\"unstable\""), "unstable kept:\n{off}");
     }

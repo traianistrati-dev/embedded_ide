@@ -211,8 +211,11 @@ pub fn pick_pins(
         walk(&lists, 0, &mut Vec::new(), &mut combos, MAX_COMBOS);
 
         for combo in combos {
-            let mut chosen: Vec<(ModuleSignal, usize)> =
-                required.iter().copied().zip(combo.iter().copied()).collect();
+            let mut chosen: Vec<(ModuleSignal, usize)> = required
+                .iter()
+                .copied()
+                .zip(combo.iter().copied())
+                .collect();
             let mut taken: HashSet<usize> = used.clone();
             taken.extend(combo.iter().copied());
             // An optional signal takes whichever of its pins keeps the whole set

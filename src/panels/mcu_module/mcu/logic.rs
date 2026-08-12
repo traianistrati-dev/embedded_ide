@@ -632,8 +632,7 @@ impl Mcu {
         if self.pending_is_async() != self.is_async() {
             // ESP spells both ends differently: esp-rtos drives the executor and
             // the blocking entry is esp-hal's, not cortex-m-rt's.
-            let esp =
-                crate::panels::mcu_module::codegen::family::async_is_esp(&self.family);
+            let esp = crate::panels::mcu_module::codegen::family::async_is_esp(&self.family);
             let entry = match (self.pending_is_async(), esp) {
                 (true, true) => "#[esp_rtos::main] async fn main(Spawner)",
                 (true, false) => "#[embassy_executor::main] async fn main(Spawner)",

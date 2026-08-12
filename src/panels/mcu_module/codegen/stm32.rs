@@ -1860,7 +1860,8 @@ fn needs_mut_binding(
     if !write_through {
         return false;
     }
-    let moved = custom_inits.contains(&format!("{binding},")) || custom_inits.contains(&format!("{binding})"));
+    let moved = custom_inits.contains(&format!("{binding},"))
+        || custom_inits.contains(&format!("{binding})"));
     !moved
 }
 

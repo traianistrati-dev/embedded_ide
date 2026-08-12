@@ -362,8 +362,14 @@ impl McuTab {
     /// Tab-bar group: `false` = the chip-config "MCU" group (Pins /
     /// Peripherals / Clock / System), `true` = the chip-agnostic "Project"
     /// group (Structure / Definition).
+    /// Structure / Definition — the tabs that live UNDER the "Project" group
+    /// button.
+    ///
+    /// `Reference` is deliberately absent: it is its own top-level entry beside
+    /// MCU and Project, because it holds an editor and has to line up with the
+    /// main one. Nested a level deeper it sat below the code it is read against.
     fn is_project_group(self) -> bool {
-        matches!(self, Self::Structure | Self::Definition | Self::Reference)
+        matches!(self, Self::Structure | Self::Definition)
     }
 }
 

@@ -263,11 +263,8 @@ pub fn draw_pin_functions(
                     },
                 );
                 if r.bottom() > content_top && r.top() < content_bottom {
-                    let resp = ui.interact(
-                        r,
-                        ui.id().with(("fn_mode", num, j)),
-                        egui::Sense::click(),
-                    );
+                    let resp =
+                        ui.interact(r, ui.id().with(("fn_mode", num, j)), egui::Sense::click());
                     if resp.hovered() {
                         list_painter.rect_stroke(
                             r,
@@ -294,7 +291,11 @@ pub fn draw_pin_functions(
     if let Some(m) = new_mode
         && let Some(pin) = mcu.find_pin_mut(num)
     {
-        pin.io_mode = if pin.io_mode == Some(m) { None } else { Some(m) };
+        pin.io_mode = if pin.io_mode == Some(m) {
+            None
+        } else {
+            Some(m)
+        };
         changed = Some((pin.number, pin.name.clone(), pin.selected_function.clone()));
     }
     if let Some(func) = toggle_info {

@@ -736,7 +736,10 @@ mod tests {
         assert!(back.contains("#[esp_hal::main]"), "{back}");
         assert!(!back.contains("esp_rtos"), "scheduler gone:\n{back}");
         assert!(!back.contains("Spawner"), "async import gone:\n{back}");
-        assert!(back.contains(MARK), "user tail survives the way back:\n{back}");
+        assert!(
+            back.contains(MARK),
+            "user tail survives the way back:\n{back}"
+        );
         // Round-trip is stable — a switch there and back is not a rewrite.
         assert_eq!(back, blocking, "blocking -> async -> blocking is identity");
     }
@@ -795,7 +798,8 @@ mod tests {
             pin.selected_function = func;
         }
 
-        let cargo_toml = project_gen::gen_config(ConfigFile::CargoToml, &def.project, &def.toolchain);
+        let cargo_toml =
+            project_gen::gen_config(ConfigFile::CargoToml, &def.project, &def.toolchain);
         let cargo_toml = project_gen::ensure_async_deps(
             &cargo_toml,
             async_rt,

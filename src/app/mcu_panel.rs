@@ -38,12 +38,18 @@ impl AppIde {
                 }
             }
             // Track each group's last-used tab so group clicks restore it.
+            // Reference belongs to NEITHER group — recording it would make a
+            // later "MCU" click land on a file instead of the chip.
+            let reference_active = self.active_tab == McuTab::Reference;
             if self.active_tab.is_project_group() {
                 self.project_group_last = self.active_tab;
-            } else {
+            } else if !reference_active {
                 self.mcu_group_last = self.active_tab;
             }
             let project_active = self.active_tab.is_project_group();
+            // The chip-only chrome (Reset pins, the chip label) must not come
+            // back just because Reference left the Project group.
+            let mcu_active = !project_active && !reference_active;
 
             // ── Level 1: group selector ────────────────────────────────────
             ui.horizontal(|ui| {
@@ -71,8 +77,33 @@ impl AppIde {
                         };
                     }
                 }
+                // The open reference file, as a THIRD top-level entry — right
+                // of Project, level with the code editor it is read beside.
+                if let Some(path) = self.reference_file.clone() {
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    let text = egui::RichText::new(name).size(14.0).strong().color(
+                        if reference_active {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(150, 200, 150)
+                        },
+                    );
+                    if ui.selectable_label(reference_active, text).clicked() {
+                        self.active_tab = McuTab::Reference;
+                    }
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
+                        .on_hover_text("Close the reference file")
+                        .clicked()
+                    {
+                        self.reference_file = None;
+                        if reference_active {
+                            self.active_tab = self.project_group_last;
+                        }
+                    }
+                }
                 // Reset pins — a chip operation, shown with the MCU group only.
-                if !project_active {
+                if mcu_active {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let reset_btn = ui
                             .add(egui::Button::new(
@@ -95,7 +126,7 @@ impl AppIde {
 
             // Chip label — MCU group only (read-only; selection happens in the
             // "New Project" popup). The Project group doesn't involve the chip.
-            if !project_active {
+            if mcu_active {
                 ui.horizontal(|ui| {
                     ui.label("Chip:");
                     ui.label(
@@ -114,14 +145,15 @@ impl AppIde {
             ui.separator();
 
             // ── Level 2: the active group's tab row ────────────────────────
+            // Skipped entirely for Reference: it is a top-level entry with no
+            // sub-tabs, and falling through to the `else` below would show the
+            // MCU row (Pins/Clock/…) over a file that has nothing to do with it.
+            if !reference_active {
             ui.horizontal(|ui| {
                 let mut tabs: Vec<McuTab> = if project_active {
                     let mut t = vec![McuTab::Structure];
                     if self.definition_view.is_some() {
                         t.push(McuTab::Definition);
-                    }
-                    if self.reference_file.is_some() {
-                        t.push(McuTab::Reference);
                     }
                     t
                 } else {
@@ -172,19 +204,8 @@ impl AppIde {
                         self.active_tab = self.definition_return_tab;
                     }
                 }
-                // Same for the Reference tab.
-                if project_active
-                    && self.reference_file.is_some()
-                    && self.active_tab == McuTab::Reference
-                    && ui
-                        .add(egui::Button::new(egui::RichText::new(ph::X).size(10.0)).frame(false))
-                        .on_hover_text("Close the reference file")
-                        .clicked()
-                {
-                    self.reference_file = None;
-                    self.active_tab = McuTab::Structure;
-                }
             });
+            }
 
             ui.separator();
 
