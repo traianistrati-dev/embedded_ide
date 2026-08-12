@@ -103,6 +103,48 @@ pub fn show_debug_tab(
     let no_probe_rs = super::tool_missing(missing_tools, "probe-rs");
     let can_run = can_run && !no_probe_rs;
     ui.horizontal_wrapped(|ui| {
+        // ── Debug-friendly release profile ────────────────────────────────────
+        // A toggle BUTTON, not a checkbox: it is a mode the whole session runs
+        // in, and it reads as one — lit while on. Disabled mid-session, because
+        // it rewrites Cargo.toml and the binary on the chip would stop being the
+        // one being debugged.
+        let toggle = ui
+            .add_enabled(
+                !busy,
+                egui::Button::new(
+                    egui::RichText::new(format!("{} Debug-friendly build", ph::WRENCH))
+                        .size(10.5)
+                        .color(if debug_build {
+                            egui::Color32::from_rgb(30, 30, 30)
+                        } else {
+                            egui::Color32::from_gray(170)
+                        }),
+                )
+                .fill(if debug_build {
+                    egui::Color32::from_rgb(220, 180, 60)
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                }),
+            )
+            .on_hover_text(
+                "Relax the project's [profile.release] for stepping: opt-level = 1 \
+                 and debug = true.\nLevel 1 stops the statement folding and loop \
+                 unrolling that leave plain lines without code of their own, so \
+                 breakpoints on them actually arm.\n\nlto stays as you set it: \
+                 turning it off costs several KB and can overflow Flash on a small \
+                 part.\n\nCost: the binary still grows and timing-sensitive code \
+                 behaves differently — this is NOT the firmware to ship. If the link \
+                 fails with \"will not fit in region 'FLASH'\", turn it back off; \
+                 your own profile values are restored exactly.\n\nWrites Cargo.toml; \
+                 Save + rebuild to apply.",
+            )
+            .on_disabled_hover_text("Stop the session first — it rewrites Cargo.toml.");
+        if toggle.clicked() {
+            *debug_build_set = Some(!debug_build);
+        }
+
+        ui.separator();
+
         if ui
             .add_enabled(
                 !busy && can_run,
@@ -131,6 +173,9 @@ pub fn show_debug_tab(
         {
             *debug_go = true;
         }
+
+        ui.separator();
+
         ui.add_enabled_ui(busy, |ui| {
             if ui
                 .button(
@@ -144,8 +189,6 @@ pub fn show_debug_tab(
                 dbg.stop(ui.ctx());
             }
         });
-
-        ui.separator();
 
         // Execution controls — Continue/Pause swap on state; steps need a halt.
         if stopped {
@@ -192,14 +235,33 @@ pub fn show_debug_tab(
             }
         });
 
+        ui.separator();
+
+        // The probe this tab (and Flash, and RTT) will use.
+        super::probe_selector_ui(
+            ui,
+            probes,
+            selected_probe,
+            probe_scan,
+            probe_scan_err,
+            toolchain,
+        );
+
+        ui.separator();
+
         // Reset the chip without reflashing it — the way out of a firmware that
         // sits where it shouldn't. Needs the probe to itself, so it is off while
-        // a session owns it.
+        // a session owns it. Named with the chip, which is why the toolbar no
+        // longer carries a separate "Chip:" label.
         if ui
             .add_enabled(
                 !busy && can_run,
                 egui::Button::new(
-                    egui::RichText::new(format!("{} Reset target", ph::ARROW_CLOCKWISE))
+                    egui::RichText::new(format!(
+                        "{} Reset {}",
+                        ph::ARROW_CLOCKWISE,
+                        if chip.is_empty() { "target" } else { chip }
+                    ))
                         .size(10.5)
                         .color(if !busy && can_run {
                             egui::Color32::from_rgb(160, 190, 230)
@@ -225,75 +287,18 @@ pub fn show_debug_tab(
             *reset_go = true;
         }
 
+        ui.separator();
+
         if ui
             .button(egui::RichText::new(format!("{} Clear", ph::BROOM)).size(10.5))
+            .on_hover_text("Empty the console. Does not touch the target or the session.")
             .clicked()
         {
             dbg.clear_console();
         }
 
         ui.separator();
-
-        // Debug-friendly release profile. Disabled mid-session: the toggle
-        // rewrites Cargo.toml, and the binary on the chip would no longer be
-        // the one being debugged.
-        let mut want = debug_build;
-        let toggle = ui
-            .add_enabled(
-                !busy,
-                egui::Checkbox::new(
-                    &mut want,
-                    egui::RichText::new("Debug-friendly build")
-                        .size(10.5)
-                        .color(if debug_build {
-                            egui::Color32::from_rgb(220, 180, 60)
-                        } else {
-                            egui::Color32::from_gray(170)
-                        }),
-                ),
-            )
-            .on_hover_text(
-                "Relax the project's [profile.release] for stepping: opt-level = 1 \
-                 and debug = true.\nLevel 1 stops the statement folding and loop \
-                 unrolling that leave plain lines without code of their own, so \
-                 breakpoints on them actually arm.\n\nlto stays as you set it: \
-                 turning it off costs several KB and can overflow Flash on a small \
-                 part.\n\nCost: the binary still grows and timing-sensitive code \
-                 behaves differently — this is NOT the firmware to ship. If the link \
-                 fails with \"will not fit in region 'FLASH'\", turn it back off; \
-                 your own profile values are restored exactly.\n\nWrites Cargo.toml; \
-                 Save + rebuild to apply.",
-            )
-            .on_disabled_hover_text("Stop the session first — it rewrites Cargo.toml.");
-        if toggle.changed() {
-            *debug_build_set = Some(want);
-        }
-
-        ui.separator();
         help_panel::toggle_button(ui, HELP_ID);
-
-        ui.separator();
-        ui.label(
-            egui::RichText::new("Chip:")
-                .size(10.5)
-                .color(egui::Color32::GRAY),
-        );
-        ui.label(
-            egui::RichText::new(if chip.is_empty() { "—" } else { chip })
-                .size(10.5)
-                .monospace()
-                .color(egui::Color32::from_rgb(120, 160, 200)),
-        );
-
-        ui.separator();
-        super::probe_selector_ui(
-            ui,
-            probes,
-            selected_probe,
-            probe_scan,
-            probe_scan_err,
-            toolchain,
-        );
 
         // Phase status, right-aligned.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
