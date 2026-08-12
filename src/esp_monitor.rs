@@ -1,5 +1,10 @@
-//! ESP serial console via the `espflash monitor` CLI (bottom-panel "Monitor"
-//! tab) — where `esp_println::println!` output ends up after a flash.
+//! ESP serial console via the `espflash monitor` CLI — where
+//! `esp_println::println!` output ends up after a flash.
+//!
+//! Rendered in the RIGHT half of the Flash tab's output area, beside the
+//! flasher's own log: "flash it and see what it prints" is one action, and the
+//! two streams are two different conversations (with the programmer, and with
+//! the firmware) that must not interleave in one scrollback.
 //!
 //! Why a subprocess and not [`crate::serial::SerialMonitor`], which already
 //! speaks to serial ports:

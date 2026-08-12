@@ -170,9 +170,10 @@ impl AppIde {
     }
 
     /// Attach `espflash monitor` to the ESP board and stream its output into the
-    /// Monitor tab. `after_flash` distinguishes the automatic run (which follows
-    /// the port the flash just used and brings the tab to the front) from the
-    /// tab's own Start button. No-op without an ESP chip config.
+    /// Flash tab's right-hand pane. `after_flash` distinguishes the automatic
+    /// run — which follows the port the flash just used, and must reset a chip
+    /// the flash deliberately left held — from the Monitor button's manual one.
+    /// No-op without an ESP chip config.
     pub(crate) fn start_esp_monitor(&mut self, after_flash: bool) {
         let Some((project, toolchain)) = self.selected_build_cfg() else {
             return;
@@ -191,7 +192,7 @@ impl AppIde {
                     self.serial.port
                 ),
             );
-            self.build_tab = BuildPanelTab::EspMonitor;
+            self.build_tab = BuildPanelTab::Dfu;
             return;
         }
         // After a flash: the port espflash reported (it may have auto-detected
@@ -209,7 +210,7 @@ impl AppIde {
             .join(&project.target)
             .join("release")
             .join(format!("{}-project", project.probe_chip));
-        self.build_tab = BuildPanelTab::EspMonitor;
+        self.build_tab = BuildPanelTab::Dfu;
         self.esp_monitor.start(
             build_dir,
             project.probe_chip.clone(),

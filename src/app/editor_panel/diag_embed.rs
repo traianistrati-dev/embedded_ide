@@ -153,10 +153,6 @@ impl AppIde {
         // Monitor-tab Start button + its "open after flash" checkbox.
         let mut esp_monitor_go = false;
         let mut esp_monitor_auto_set: Option<bool> = None;
-        // The Monitor tab shells out to espflash, so it only exists on ESP.
-        let is_esp = self.selected_build_cfg().is_some_and(|(_, tc)| {
-            tc == crate::panels::mcu_module::mcu_catalog::ToolchainKind::EspRust
-        });
         // Debug-tab Start button.
         let mut debug_go = false;
         // Debug-tab "Reset target" button.
@@ -287,7 +283,6 @@ impl AppIde {
                     &mut esp_monitor_go,
                     self.esp_monitor_auto,
                     &mut esp_monitor_auto_set,
-                    is_esp,
                     &mut self.debugger,
                     &mut debug_go,
                     &mut reset_go,

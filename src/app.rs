@@ -383,8 +383,6 @@ enum BuildPanelTab {
     Dfu,
     /// RTT / defmt live logs through the debug probe (probe-rs).
     Rtt,
-    /// ESP device output (`esp_println`) streamed by `espflash monitor`.
-    EspMonitor,
     /// On-target debugger (probe-rs dap-server): breakpoints, step, variables.
     Debug,
     /// Built-in USART/UART serial console.

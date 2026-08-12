@@ -47,6 +47,18 @@ pub fn show_dfu_tab(
     // any. Only one process can hold it, so every flasher is blocked while one
     // runs — and the button says so instead of failing deep inside the tool.
     probe_holder: Option<&'static str>,
+    // ESP device console (`espflash monitor`) — lives in THIS tab, beside the
+    // flash log, because "flash it and see what it prints" is one action to the
+    // user. `monitor_go` fires a manual Start (the caller runs
+    // `start_esp_monitor`); `monitor_auto` + its setter are the "open it after
+    // every flash" preference.
+    esp_monitor: &mut crate::esp_monitor::EspMonitor,
+    monitor_go: &mut bool,
+    monitor_auto: bool,
+    monitor_auto_set: &mut Option<bool>,
+    // Port the Serial tab holds, if connected — a serial port is exclusive, so
+    // the monitor cannot have it at the same time.
+    serial_port_held: Option<&str>,
     // Tools confirmed missing — buttons needing one are greyed out with a
     // "install it in Tools" hint (see `super::tool_missing`).
     missing_tools: &[&'static str],
@@ -56,6 +68,9 @@ pub fn show_dfu_tab(
     let esp_state = espflash_state.lock().unwrap().clone();
     let log = dfu_log.lock().unwrap().clone();
     let progs = dfu_programmers.lock().unwrap().clone();
+    // Read once here: the ESP phase widgets moved up to the probe row, above
+    // the config row where this used to be computed.
+    let build_done = log.iter().any(|l| l.contains("[OK] Build OK"));
 
     // Sort programmers: compatible with selected toolchain first, then by name
     // progs.sort_by(|a, b| {
@@ -265,6 +280,24 @@ pub fn show_dfu_tab(
                         }
                     },
                 );
+            } else if *toolchain == ToolchainKind::EspRust {
+                // ESP has no probe-rs row, so this line is the natural home for
+                // the espflash pipeline: which tool runs, and how far it got.
+                // (It used to sit on the config row below, which then had no
+                // space for the Read-Chip-Info and Monitor buttons.)
+                ui.label(
+                    egui::RichText::new("Tool: espflash")
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(220, 140, 60)),
+                );
+                ui.separator();
+                esp_phase_widgets(ui, &esp_state, build_done);
+                ui.label(
+                    egui::RichText::new("(probe-rs path is for the ARM toolchain)")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(90))
+                        .italics(),
+                );
             } else {
                 ui.label(
                     egui::RichText::new("probe-rs path is for the ARM toolchain")
@@ -318,7 +351,6 @@ pub fn show_dfu_tab(
         // field all come out the same — text fields need `add_sized`, they
         // measure themselves from the font instead.
         ui.spacing_mut().interact_size.y = ROW_H;
-        let build_done = log.iter().any(|l| l.contains("[OK] Build OK"));
 
         // Helper: render a phase indicator icon + label
         let phase_widget = |ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32| {
@@ -327,43 +359,28 @@ pub fn show_dfu_tab(
         };
 
         if *toolchain == ToolchainKind::EspRust {
-            // ── EspRust config ────────────────────────────────────────────────
-            ui.label(
-                egui::RichText::new("Tool: espflash")
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(220, 140, 60)),
+            // ── EspRust config: connectivity check + the device console ───────
+            // `Tool: espflash` and the Build → Flash phases moved up to the
+            // probe row; what is left here is what you press: read the chip,
+            // then watch what it prints.
+            esp_board_info_button(
+                ui,
+                &esp_state,
+                espflash_state,
+                dfu_log,
+                dfu_sel_programmer,
             );
             ui.separator();
-
-            // Phases: Build → Flash ESP
-            let (b_icon, b_col) = match &esp_state {
-                EspFlashState::Building => {
-                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60))
-                }
-                _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
-                EspFlashState::Error(_) if !build_done && !log.is_empty() => {
-                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-                }
-                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
-            };
-            phase_widget(ui, b_icon, "Build", b_col);
-            ui.label(
-                egui::RichText::new(ph::ARROW_RIGHT)
-                    .size(11.0)
-                    .color(egui::Color32::from_gray(70)),
+            esp_monitor_controls(
+                ui,
+                esp_monitor,
+                monitor_go,
+                monitor_auto,
+                monitor_auto_set,
+                can_flash,
+                serial_port_held,
+                missing_tools,
             );
-
-            let (f_icon, f_col) = match &esp_state {
-                EspFlashState::Flashing => {
-                    (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 140, 60))
-                }
-                EspFlashState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
-                EspFlashState::Error(_) if build_done => {
-                    (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
-                }
-                _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
-            };
-            phase_widget(ui, f_icon, "Flash ESP32", f_col);
         } else if is_swd {
             // ── SWD / OpenOCD config ──────────────────────────────────────────
             ui.label(
@@ -599,60 +616,8 @@ pub fn show_dfu_tab(
             ui.add_space(2.0);
         }
     */
-    // ── ESP32 diagnostic row (read-only chip identification) ─────────────────
-    // Shown only for EspRust; sits between the config row and the log area.
-    if *toolchain == ToolchainKind::EspRust {
-        ui.horizontal(|ui| {
-            let busy = esp_state.is_busy();
-            let reading = matches!(esp_state, EspFlashState::ReadingInfo);
-
-            let btn_color = if reading {
-                egui::Color32::from_rgb(100, 180, 255)
-            } else if busy {
-                egui::Color32::GRAY
-            } else {
-                egui::Color32::from_rgb(100, 180, 255)
-            };
-
-            let btn_label = if reading {
-                format!("{} Reading…", ph::CIRCLE_NOTCH)
-            } else {
-                format!("{} Read Chip Info", ph::INFO)
-            };
-
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new(egui::RichText::new(&btn_label).size(10.5).color(btn_color)),
-                )
-                .on_hover_text(
-                    "Run `espflash board-info` — connects to the chip and reads:\n\
-                     chip type, silicon revision, flash size, MAC address.\n\
-                     \n\
-                     Nothing is written to flash — safe to run at any time.\n\
-                     Use this to verify the USB cable / COM port works before flashing.",
-                )
-                .clicked()
-            {
-                espflash::read_board_info(
-                    Arc::clone(espflash_state),
-                    Arc::clone(dfu_log),
-                    ui.ctx().clone(),
-                    dfu_sel_programmer.clone(),
-                );
-            }
-
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} verify connectivity without flashing",
-                    ph::ARROW_LEFT
-                ))
-                .size(10.0)
-                .color(egui::Color32::from_gray(100))
-                .italics(),
-            );
-        });
-    }
+    // (The ESP32 "Read Chip Info" row was merged into the config row above, so
+    // the ESP toolchain has ONE row of buttons instead of two half-empty ones.)
 
     ui.separator();
 
@@ -759,10 +724,51 @@ pub fn show_dfu_tab(
         ui.separator();
     }
 
-    // ── Scrollable log (shared between DFU and OpenOCD operations) ────────────
+    // ── Output area ──────────────────────────────────────────────────────────
+    // On ESP it is split in two: the flasher's own log on the left, the device
+    // console on the right. They are two different conversations — one with the
+    // programmer, one with the firmware — and interleaving them in one
+    // scrollback made it impossible to tell which side said what.
+    if *toolchain == ToolchainKind::EspRust {
+        let h = ui.available_height();
+        ui.columns(2, |cols| {
+            cols[0].label(
+                egui::RichText::new("Flash log")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(120)),
+            );
+            flash_log_view(&mut cols[0], &log, h - 18.0);
+
+            cols[1].horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Device output")
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(120)),
+                );
+                let port = esp_monitor.port.lock().unwrap().clone();
+                if !port.is_empty() {
+                    ui.label(
+                        egui::RichText::new(port)
+                            .size(10.0)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(120, 160, 200)),
+                    );
+                }
+            });
+            monitor_view(&mut cols[1], esp_monitor, h - 18.0);
+        });
+        return;
+    }
+    flash_log_view(ui, &log, ui.available_height());
+}
+
+/// The flasher's own output (cargo, dfu-util, OpenOCD, espflash) — one line per
+/// entry, coloured by content since the tools' ANSI escapes are stripped.
+fn flash_log_view(ui: &mut egui::Ui, log: &[String], height: f32) {
     egui::ScrollArea::vertical()
         .id_salt("dfu_log_scroll")
         .stick_to_bottom(true)
+        .max_height(height)
         // Full panel width: with the default auto-shrink the area is only as
         // wide as its longest line, which put the scrollbar in the middle of
         // the panel.
@@ -783,7 +789,7 @@ pub fn show_dfu_tab(
                 return;
             }
 
-            for line in &log {
+            for line in log {
                 // A tool that colours its output (cargo through `cargo flash`,
                 // espflash) sends ANSI escapes; this console renders plain
                 // strings, so they would show up as literal `[1m[93m` noise.
@@ -824,6 +830,230 @@ pub fn show_dfu_tab(
                 );
             }
         });
+}
+
+/// The device console's scrollback, or a hint at what would fill it.
+fn monitor_view(ui: &mut egui::Ui, monitor: &crate::esp_monitor::EspMonitor, height: f32) {
+    let empty = monitor.state.lock().unwrap().lines.is_empty();
+    if empty {
+        egui::ScrollArea::vertical()
+            .id_salt("esp_monitor_empty")
+            .max_height(height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Nothing from the device yet.\n\
+                         What `esp_println::println!`, the `log` macros and panics \
+                         print shows up here.\n\
+                         \n\
+                         Flash with Monitor on, or press Monitor to attach to the \
+                         firmware already running.",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::GRAY),
+                );
+            });
+        return;
+    }
+    super::terminal_tab::render_scrollback(ui, &monitor.state, "esp_monitor_scroll", height);
+}
+
+/// `Build -> Flash ESP32` progress, shown on the probe row (ESP has no probe).
+fn esp_phase_widgets(ui: &mut egui::Ui, esp_state: &EspFlashState, build_done: bool) {
+    let phase = |ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32| {
+        ui.label(egui::RichText::new(icon).size(11.5).color(color));
+        ui.label(egui::RichText::new(label).size(11.0).color(color));
+    };
+    let (b_icon, b_col) = match esp_state {
+        EspFlashState::Building => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 180, 60)),
+        _ if build_done => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+        EspFlashState::Error(_) if !build_done => {
+            (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+        }
+        _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+    };
+    phase(ui, b_icon, "Build", b_col);
+    ui.label(
+        egui::RichText::new(ph::ARROW_RIGHT)
+            .size(11.0)
+            .color(egui::Color32::from_gray(70)),
+    );
+    let (f_icon, f_col) = match esp_state {
+        EspFlashState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 140, 60)),
+        EspFlashState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
+        EspFlashState::Error(_) if build_done => (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70)),
+        _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
+    };
+    phase(ui, f_icon, "Flash ESP32", f_col);
+}
+
+/// `espflash board-info` — connect and identify the chip, writing nothing.
+fn esp_board_info_button(
+    ui: &mut egui::Ui,
+    esp_state: &EspFlashState,
+    espflash_state: &Arc<Mutex<EspFlashState>>,
+    dfu_log: &Arc<Mutex<Vec<String>>>,
+    dfu_sel_programmer: &str,
+) {
+    let busy = esp_state.is_busy();
+    let reading = matches!(esp_state, EspFlashState::ReadingInfo);
+    let label = if reading {
+        format!("{} Reading…", ph::CIRCLE_NOTCH)
+    } else {
+        format!("{} Read chip info", ph::INFO)
+    };
+    if ui
+        .add_enabled(
+            !busy,
+            egui::Button::new(
+                egui::RichText::new(&label)
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(100, 180, 255)),
+            ),
+        )
+        .on_hover_text(
+            "Run `espflash board-info` — connects to the chip and reads:\n\
+             chip type, silicon revision, flash size, MAC address.\n\
+             \n\
+             Nothing is written to flash — safe to run at any time.\n\
+             Use this to verify the USB cable / COM port works before flashing.",
+        )
+        .clicked()
+    {
+        espflash::read_board_info(
+            Arc::clone(espflash_state),
+            Arc::clone(dfu_log),
+            ui.ctx().clone(),
+            dfu_sel_programmer.to_owned(),
+        );
+    }
+}
+
+/// Monitor controls: Start / Stop / Clear, the auto-open checkbox and the phase
+/// badge. Sits between Read-chip-info and the right-aligned Size/Info/Clear.
+#[allow(clippy::too_many_arguments)]
+fn esp_monitor_controls(
+    ui: &mut egui::Ui,
+    monitor: &mut crate::esp_monitor::EspMonitor,
+    monitor_go: &mut bool,
+    monitor_auto: bool,
+    monitor_auto_set: &mut Option<bool>,
+    can_flash: bool,
+    serial_port_held: Option<&str>,
+    missing_tools: &[&'static str],
+) {
+    use crate::esp_monitor::MonitorPhase;
+    let phase = monitor.phase();
+    let busy = monitor.is_busy();
+    let no_espflash = super::tool_missing(missing_tools, "espflash");
+    // A serial port is exclusive: while the Serial tab holds one, espflash
+    // cannot open it, and its error ("Access is denied") names nothing useful.
+    let blocked_by_serial = serial_port_held.is_some();
+    let can_start = can_flash && !no_espflash && !blocked_by_serial;
+
+    if ui
+        .add_enabled(
+            !busy && can_start,
+            egui::Button::new(
+                egui::RichText::new(format!("{} Monitor", ph::PLAY))
+                    .size(10.5)
+                    .color(if !busy && can_start {
+                        egui::Color32::from_rgb(100, 220, 100)
+                    } else {
+                        egui::Color32::GRAY
+                    }),
+            ),
+        )
+        .on_hover_text(
+            "`espflash monitor`: attach to the board and stream what the firmware \
+             prints (esp-println / log / panics).\nIt resets the target once \
+             attached, so the output starts at boot.",
+        )
+        .on_disabled_hover_text(if no_espflash {
+            super::needs_tool_hint("espflash")
+        } else if let Some(p) = serial_port_held {
+            format!("The Serial tab is connected on {p} — disconnect it there first.")
+        } else if busy {
+            "The monitor is already attached.".to_owned()
+        } else {
+            "No ESP chip config exists yet.".to_owned()
+        })
+        .clicked()
+    {
+        *monitor_go = true;
+    }
+    ui.add_enabled_ui(busy, |ui| {
+        if ui
+            .button(
+                egui::RichText::new(format!("{} Stop", ph::STOP_CIRCLE))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(230, 120, 110)),
+            )
+            .on_hover_text("Kill espflash and release the serial port.")
+            .clicked()
+        {
+            monitor.stop();
+        }
+    });
+    // Icon-only: the row already ends in a "Clear" (the flash log's), and two
+    // buttons with the same word would be a coin toss.
+    if ui
+        .button(
+            egui::RichText::new(ph::BROOM)
+                .size(11.0)
+                .color(egui::Color32::GRAY),
+        )
+        .on_hover_text("Clear the device output (the right-hand pane)")
+        .clicked()
+    {
+        monitor.clear();
+    }
+    let mut auto = monitor_auto;
+    if ui
+        .checkbox(&mut auto, egui::RichText::new("auto").size(10.5))
+        .on_hover_text(
+            "Open the monitor automatically after a successful flash.\n\
+             The flash then leaves the chip in reset and the monitor resets it \
+             once attached, so the first println! of main is not missed.\n\
+             Off = press Monitor yourself.",
+        )
+        .changed()
+    {
+        *monitor_auto_set = Some(auto);
+    }
+    let (text, color) = match &phase {
+        MonitorPhase::Idle => (String::new(), egui::Color32::GRAY),
+        MonitorPhase::Starting => (
+            "attaching…".to_owned(),
+            egui::Color32::from_rgb(220, 180, 60),
+        ),
+        MonitorPhase::Streaming => (
+            format!("{} live", ph::BROADCAST),
+            egui::Color32::from_rgb(80, 200, 100),
+        ),
+        MonitorPhase::Error(e) => (
+            format!("{} {}", ph::X_CIRCLE, e.lines().next().unwrap_or("error")),
+            egui::Color32::from_rgb(230, 90, 80),
+        ),
+    };
+    if !text.is_empty() {
+        let label = ui.label(egui::RichText::new(text).size(10.5).color(color));
+        if let MonitorPhase::Error(e) = &phase {
+            label.on_hover_text(e);
+        }
+    }
+    if blocked_by_serial {
+        ui.label(
+            egui::RichText::new(ph::WARNING)
+                .size(11.0)
+                .color(egui::Color32::from_rgb(210, 170, 90)),
+        )
+        .on_hover_text(
+            "The Serial tab holds the port. Only one of the two can read it at a time.",
+        );
+    }
 }
 
 /// Memory key of this tab's Info panel.

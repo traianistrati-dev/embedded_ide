@@ -6,7 +6,7 @@
 use super::BuildPanelTab;
 use super::tabs::{
     show_activity_tab, show_cargo_tab, show_clippy_tab, show_debug_tab, show_dfu_tab,
-    show_esp_monitor_tab, show_git_tab, show_profile_tab, show_ra_tab, show_rtt_tab,
+    show_git_tab, show_profile_tab, show_ra_tab, show_rtt_tab,
     show_serial_tab, show_terminal_tab, show_tools_tab,
 };
 use crate::activity::ActivityLog;
@@ -118,14 +118,14 @@ pub(super) fn show_diag_panel(
     rtt: &mut crate::rtt::RttConsole,
     rtt_go: &mut Option<crate::rtt::RttMode>,
     rtt_chip: &str,
-    // Monitor tab (ESP only): device console + Start signal (caller runs
-    // `start_esp_monitor`) + the "open after flash" preference and its toggle.
+    // ESP device console — rendered INSIDE the Flash tab (see `show_dfu_tab`),
+    // beside the flash log. Start signal (caller runs `start_esp_monitor`) plus
+    // the "open after flash" preference and its toggle.
     esp_monitor: &mut crate::esp_monitor::EspMonitor,
     esp_monitor_go: &mut bool,
     esp_monitor_auto: bool,
     esp_monitor_auto_set: &mut Option<bool>,
-    // `true` for an ESP project — the Monitor tab only exists there.
-    is_esp: bool,
+
     // Debug tab: session + Start signal (caller runs `start_debug`).
     debugger: &mut crate::debugger::Debugger,
     debug_go: &mut bool,
@@ -436,40 +436,6 @@ pub(super) fn show_diag_panel(
             }
         }
 
-        // Monitor tab button — ESP only (it shells out to espflash), with a
-        // streaming badge while the device console is live.
-        if is_esp {
-            use crate::esp_monitor::MonitorPhase;
-            let active = *tab == BuildPanelTab::EspMonitor;
-            let (badge, col) = match esp_monitor.phase() {
-                MonitorPhase::Streaming => (
-                    format!(" {}", ph::BROADCAST),
-                    egui::Color32::from_rgb(80, 200, 100),
-                ),
-                MonitorPhase::Starting => (" …".to_owned(), egui::Color32::GRAY),
-                MonitorPhase::Error(_) => (
-                    format!(" {}", ph::X_CIRCLE),
-                    egui::Color32::from_rgb(220, 80, 70),
-                ),
-                MonitorPhase::Idle => (String::new(), egui::Color32::DARK_GRAY),
-            };
-            let label = format!("{} Monitor{badge}", ph::TERMINAL_WINDOW);
-            let btn = ui
-                .add(
-                    egui::Button::new(egui::RichText::new(&label).size(11.0).color(if active {
-                        egui::Color32::WHITE
-                    } else {
-                        col
-                    }))
-                    .frame(active),
-                )
-                .on_hover_text("What the ESP prints (esp_println / panics), via espflash monitor");
-            if btn.clicked() {
-                *tab = BuildPanelTab::EspMonitor;
-                *tab_clicked = true;
-            }
-        }
-
         // Debug tab button (state badge while a session is live).
         {
             let active = *tab == BuildPanelTab::Debug;
@@ -724,6 +690,11 @@ pub(super) fn show_diag_panel(
                 } else {
                     None
                 },
+                esp_monitor,
+                esp_monitor_go,
+                esp_monitor_auto,
+                esp_monitor_auto_set,
+                serial.is_connected().then(|| serial.port.as_str()),
                 missing_tools,
             );
         }
@@ -761,19 +732,6 @@ pub(super) fn show_diag_panel(
                 probe_scan,
                 probe_scan_err,
                 toolchain,
-                missing_tools,
-            );
-        }
-        BuildPanelTab::EspMonitor => {
-            show_esp_monitor_tab(
-                ui,
-                esp_monitor,
-                esp_monitor_go,
-                esp_monitor_auto,
-                esp_monitor_auto_set,
-                can_flash && is_esp,
-                rtt_chip,
-                serial.is_connected().then(|| serial.port.as_str()),
                 missing_tools,
             );
         }
