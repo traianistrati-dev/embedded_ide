@@ -81,6 +81,20 @@ impl Default for MatrixView {
 }
 
 impl MatrixView {
+    /// Show THIS payload and stop following the stream.
+    ///
+    /// For the Frames list, where the user picks a row: the matrix normally
+    /// decodes whatever arrived last, which is precisely not what you want
+    /// after singling out one frame — the next burst would replace it under
+    /// your eyes. Pausing is the same freeze the Pause button does, so the
+    /// button is also the way back out.
+    pub fn show_payload(&mut self, payload: &[u8]) {
+        self.on = true;
+        self.paused = true;
+        self.frozen = Some(payload.to_vec());
+        self.note_frame(payload);
+    }
+
     /// Track serial frames (NOT egui repaints): when a payload with different
     /// bytes arrives, the current one becomes "previous" — the baseline the
     /// `Change %` heat compares against. The byte compare is a few KB.

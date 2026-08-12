@@ -27,9 +27,11 @@ const BP_GHOST_RADIUS: f32 = 4.0;
 const BP_EDGE: egui::Color32 = egui::Color32::from_rgb(235, 120, 110);
 const BP_EDGE_W: f32 = 1.5;
 /// The row under the pointer while it is over the line-number column: black at
-/// 90 % across the full editor width. Black (0,0,0) is its own premultiplied
-/// form, so this stays const (`from_rgba_unmultiplied` is not).
-const HOVER_ROW_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 230);
+/// 10 % across the full editor width. It covers the number column too, so it has
+/// to stay light — at 90 % the band blacked out the very line number the pointer
+/// was aiming at. Black (0,0,0) is its own premultiplied form, so this stays
+/// const (`from_rgba_unmultiplied` is not).
+const HOVER_ROW_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 26);
 
 /// The workspace-relative path breakpoints are keyed by — only Rust sources
 /// can hold one (a breakpoint in Cargo.toml means nothing to the debugger).
@@ -207,16 +209,11 @@ impl AppIde {
                     egui::pos2(clip.left(), top),
                     egui::pos2(clip.right(), bot),
                 );
-                painter.rect_filled(row, 0.0, HOVER_ROW_BG);
                 // The band goes OVER the text (everything here is painted after
-                // the editor), so at 90 % it would black the line out. Re-draw
-                // the galley clipped to this one row and the code comes back on
-                // top of the band — one extra shape, only while hovering.
-                ui.painter().with_clip_rect(row.intersect(clip)).galley(
-                    gp,
-                    galley.clone(),
-                    egui::Color32::WHITE,
-                );
+                // the editor), which is exactly why it stays this light: at 10 %
+                // the code and the line number read straight through it, so
+                // nothing has to be re-drawn on top of it.
+                painter.rect_filled(row, 0.0, HOVER_ROW_BG);
             }
             let already = self
                 .breakpoints

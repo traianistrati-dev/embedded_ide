@@ -278,13 +278,20 @@ const BAD: egui::Color32 = egui::Color32::from_rgb(225, 100, 90);
 /// Colour of the `#n len=… [clock] (+Δ)` prefix.
 const META: egui::Color32 = egui::Color32::from_rgb(130, 140, 160);
 
-/// One row per frame: `#n >> len=8 [14:32:07.436] (+120 ms)  FD FC …`.
+/// How many rows the list renders (the newest ones).
+pub const MAX_ROWS: usize = 400;
+
+/// One row's `LayoutJob`: `#n >> len=8 [14:32:07.436] (+120 ms)  FD FC …`.
 ///
-/// The delta is against the previous row, which for a reply right after a
-/// command is the turnaround time — the number this whole view exists to show.
+/// Per row rather than one job for the list, so each row can be its own
+/// clickable widget — picking a frame is the point of having them separated.
+/// `prev` is the previous row's time; the delta against it is the turnaround
+/// when a reply follows a command.
 #[allow(clippy::too_many_arguments)]
-pub fn frames_log_job(
-    frames: &[TimedFrame],
+pub fn frame_row_job(
+    f: &TimedFrame,
+    n: usize,
+    prev: Option<Instant>,
     hex: bool,
     font_size: f32,
     find_a: &[u8],
@@ -292,13 +299,9 @@ pub fn frames_log_job(
     epoch: Option<(Instant, std::time::SystemTime)>,
 ) -> egui::text::LayoutJob {
     use crate::serial::{DIR_APP, DIR_SENSOR, SEARCH_HIT, SEARCH_HIT2, match_positions};
-    const MAX_ROWS: usize = 400;
     let font = egui::FontId::monospace(font_size);
     let mut job = egui::text::LayoutJob::default();
-    let start = frames.len().saturating_sub(MAX_ROWS);
-    let mut prev: Option<Instant> = None;
-
-    for (n, f) in frames.iter().enumerate().skip(start) {
+    {
         let (arrow, dir_color) = match f.dir {
             Dir::AppToSensor => (">>", DIR_APP),
             Dir::SensorToApp => ("<<", DIR_SENSOR),
@@ -321,7 +324,6 @@ pub fn frames_log_job(
             Some(p) => format!("(+{} ms)", f.at.saturating_duration_since(p).as_millis()),
             None => String::new(),
         };
-        prev = Some(f.at);
         job.append(
             &format!("#{n:<4}{tag}len={:<5} [{clock}] {delta:<11}", f.bytes.len()),
             0.0,
@@ -368,11 +370,8 @@ pub fn frames_log_job(
             );
             i = j;
         }
-        job.append(
-            "\n",
-            0.0,
-            egui::TextFormat::simple(font.clone(), body_color),
-        );
+        // No trailing newline: each row is its own widget now, and egui gives
+        // a Label its own line.
     }
     job
 }

@@ -509,7 +509,7 @@ fn show_bridge_log(ui: &mut egui::Ui, serial: &mut SerialMonitor, height: f32) {
 /// and tail the user typed to measure the payload, so asking for them twice
 /// would be asking the same question twice.
 fn show_frames_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f32) {
-    use crate::serial_frames::{FrameMode, frames_from_log, frames_log_job, frames_summary};
+    use crate::serial_frames::{FrameMode, frames_from_log, frames_summary};
 
     // Framing controls.
     ui.horizontal_wrapped(|ui| {
@@ -571,25 +571,13 @@ fn show_frames_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f3
     serial.frame_spec.start = parse_hex_search(&serial.search);
     serial.frame_spec.end = parse_hex_search(&serial.search2);
 
-    let (job, summary) = {
+    let (frames, epoch) = {
         let st = serial.state.lock().unwrap();
-        let frames = frames_from_log(&st.log, &serial.frame_spec);
-        let summary = frames_summary(&frames);
-        (
-            frames_log_job(
-                &frames,
-                serial.hex,
-                12.0,
-                &serial.frame_spec.start,
-                &serial.frame_spec.end,
-                st.epoch,
-            ),
-            summary,
-        )
+        (frames_from_log(&st.log, &serial.frame_spec), st.epoch)
     };
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(summary)
+            egui::RichText::new(frames_summary(&frames))
                 .size(10.5)
                 .color(egui::Color32::from_gray(150)),
         );
@@ -599,16 +587,72 @@ fn show_frames_view(ui: &mut egui::Ui, serial: &mut SerialMonitor, rx_height: f3
                     .size(10.5)
                     .color(egui::Color32::from_rgb(210, 170, 90)),
             );
+        } else {
+            ui.label(
+                egui::RichText::new("· click a row to open it in the Matrix")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(120)),
+            );
         }
     });
+
+    // One clickable widget per row: clicking sends THAT frame's payload to the
+    // Matrix view, which then holds it (the matrix normally follows the newest
+    // frame — the opposite of what you want after singling one out).
+    let mut open_in_matrix: Option<Vec<u8>> = None;
+    let start = frames.len().saturating_sub(crate::serial_frames::MAX_ROWS);
     egui::ScrollArea::both()
         .id_salt("serial_frames_view")
         .stick_to_bottom(serial.autoscroll)
         .auto_shrink([false, false])
         .max_height(rx_height - 22.0)
         .show(ui, |ui| {
-            ui.add(egui::Label::new(job).selectable(true));
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let mut prev: Option<std::time::Instant> = None;
+            for (n, f) in frames.iter().enumerate().skip(start) {
+                let job = crate::serial_frames::frame_row_job(
+                    f,
+                    n,
+                    prev,
+                    serial.hex,
+                    12.0,
+                    &serial.frame_spec.start,
+                    &serial.frame_spec.end,
+                    epoch,
+                );
+                prev = Some(f.at);
+                let resp = ui.add(
+                    egui::Label::new(job)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                );
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                let resp = resp.on_hover_text(
+                    "Open this frame in the Matrix view (it freezes there — press \
+                     Pause in the Matrix to follow the stream again).",
+                );
+                if resp.clicked() {
+                    // The payload BETWEEN the markers is what the matrix decodes;
+                    // sending the header and tail too would shift every value.
+                    let a = serial.frame_spec.start.len();
+                    let b = serial.frame_spec.end.len();
+                    let body = if f.kind == crate::serial_frames::FrameKind::Complete
+                        && f.bytes.len() >= a + b
+                    {
+                        &f.bytes[a..f.bytes.len() - b]
+                    } else {
+                        &f.bytes[..]
+                    };
+                    open_in_matrix = Some(body.to_vec());
+                }
+            }
         });
+    if let Some(payload) = open_in_matrix {
+        serial.matrix.show_payload(&payload);
+        serial.frames_on = false; // the matrix takes the RX area
+    }
 }
 
 /// The classic RX view: coloured hex (+ unique-sequences legend) or decoded

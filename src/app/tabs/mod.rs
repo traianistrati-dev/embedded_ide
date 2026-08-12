@@ -133,19 +133,6 @@ pub(crate) fn probe_selector_ui_with(
         );
     }
 
-    let mut scan =
-        egui::Button::new(egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5));
-    if scan_w > 0.0 {
-        scan = scan.min_size(egui::vec2(scan_w, ui.spacing().interact_size.y));
-    }
-    if ui
-        .add(scan)
-        .on_hover_text("Enumerate connected debug probes (`probe-rs list`).")
-        .clicked()
-    {
-        *scan_go = true;
-    }
-
     // The label for the currently selected probe (or Auto).
     let current = selected
         .as_ref()
@@ -218,6 +205,22 @@ pub(crate) fn probe_selector_ui_with(
             "{current}\n\nWhich debug probe to use when several are attached. Auto lets \
              probe-rs pick the only one — ambiguous with more than one."
         ));
+
+    // Scan sits AFTER the list, next to whatever the caller puts behind it —
+    // on the Flash tab that is the Flash button, and the two actions you use
+    // together should not be a row apart.
+    let mut scan =
+        egui::Button::new(egui::RichText::new(format!("{} Scan", ph::MAGNIFYING_GLASS)).size(10.5));
+    if scan_w > 0.0 {
+        scan = scan.min_size(egui::vec2(scan_w, ui.spacing().interact_size.y));
+    }
+    if ui
+        .add(scan)
+        .on_hover_text("Enumerate connected debug probes (`probe-rs list`).")
+        .clicked()
+    {
+        *scan_go = true;
+    }
 
     // Nothing on the list: say what to do, compactly. The full advice is on the
     // hover — this sits in three different toolbars, one of which is a

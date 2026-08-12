@@ -155,7 +155,12 @@ pub fn show_dfu_tab(
     split_row(
         ui,
         |ui| {
+            programmer_combo(ui, combo_w, &progs, dfu_sel_programmer, toolchain);
+
             // Scan USB (detect DFU / ST-Link / J-Link / CMSIS-DAP / USB-serial).
+            // Placed between the list and Flash: those two are used together,
+            // and starting the row with Scan meant dragging the pointer across
+            // the whole list to reach Flash.
             if ui
                 .add_enabled(
                     !dfu_busy,
@@ -174,8 +179,6 @@ pub fn show_dfu_tab(
             {
                 *scan_out = true;
             }
-
-            programmer_combo(ui, combo_w, &progs, dfu_sel_programmer, toolchain);
 
             // Toolchain-specific Flash button.
             match toolchain {
