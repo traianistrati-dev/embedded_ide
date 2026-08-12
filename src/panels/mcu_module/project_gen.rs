@@ -2207,15 +2207,15 @@ fn f() {}
             "esp-rtos is the time driver:\n{with}"
         );
         assert!(with.contains("embassy-time = \"0.5\""), "{with}");
-        // esp-rtos requires esp-hal/unstable — without it esp-hal's build script
-        // aborts and RA calls TIMG0 / SW_INTERRUPT private.
-        assert!(
-            with.contains("features = [\"unstable\", \"esp32c3\"]"),
-            "unstable added to the esp-hal line:\n{with}"
-        );
         assert!(
             !with.contains("esp-hal-embassy"),
             "esp-hal-embassy is not resolvable on esp-hal 1.1:\n{with}"
+        );
+        // The template already carries `unstable`, so the esp-hal line is left
+        // exactly as it was (no duplicate, no re-ordering).
+        assert!(
+            with.contains("features = [\"esp32c3\", \"unstable\"] }"),
+            "esp-hal line untouched:\n{with}"
         );
 
         // Idempotent, and leaving Async takes exactly what it added back out.
@@ -2229,6 +2229,38 @@ fn f() {}
             base,
             "removal restores the original"
         );
+    }
+
+    /// An older ESP project whose `esp-hal` line predates the `unstable` feature
+    /// gets it ADDED when Async is switched on — esp-rtos cannot build without
+    /// it. Regression: such a project used to come back with `field TIMG0 of
+    /// Peripherals is private` on the generated `TimerGroup::new(...)` while the
+    /// (stable) GPIO lines resolved fine.
+    #[test]
+    fn esp_async_adds_the_unstable_feature_when_missing() {
+        let base = "[package]\nname = \"x\"\n\n[dependencies]\n\
+                    esp-hal       = { version = \"~1.1.0\", features = [\"esp32c3\"] }\n\
+                    esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }\n";
+        let with = ensure_async_deps(base, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]);
+        assert!(
+            with.contains("esp-hal       = { version = \"~1.1.0\", features = [\"unstable\", \"esp32c3\"] }"),
+            "unstable added to esp-hal:\n{with}"
+        );
+        // Only the HAL line — a sibling esp-* crate must not be touched.
+        assert!(
+            with.contains("esp-println   = { version = \"0.13\", features = [\"esp32c3\", \"log\"] }"),
+            "esp-println untouched:\n{with}"
+        );
+        assert_eq!(
+            ensure_async_deps(&with, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]),
+            with,
+            "no duplicate on the second pass"
+        );
+        // Add-only: leaving Async drops the runtime crates but KEEPS `unstable`,
+        // which user code may rely on (and the template ships anyway).
+        let off = ensure_async_deps(&with, false, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]);
+        assert!(!off.contains("esp-rtos"), "runtime crates removed:\n{off}");
+        assert!(off.contains("\"unstable\""), "unstable kept:\n{off}");
     }
 
     /// A hand-written file with no GEN markers (external project) must be shown
