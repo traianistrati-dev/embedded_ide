@@ -129,6 +129,32 @@ impl SerialState {
     }
 }
 
+/// Which view fills the RX area. They all want the same space, so exactly one
+/// is active — an enum instead of three booleans that could disagree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SerialView {
+    /// The raw stream, as text or coloured hex.
+    #[default]
+    Raw,
+    /// The newest framed payload as a grid of numbers.
+    Matrix,
+    /// One row per protocol frame.
+    Frames,
+    /// Numeric lines as live curves.
+    Plot,
+}
+
+impl SerialView {
+    pub fn label(self) -> &'static str {
+        match self {
+            SerialView::Raw => "Default",
+            SerialView::Matrix => "Matrix",
+            SerialView::Frames => "Frames",
+            SerialView::Plot => "Plot",
+        }
+    }
+}
+
 /// Serial monitor state owned by `AppIde`: the shared RX buffer, the write
 /// handle (while connected), and the UI selections.
 pub struct SerialMonitor {
@@ -273,6 +299,27 @@ impl SerialMonitor {
 
     pub fn is_connected(&self) -> bool {
         self.state.lock().unwrap().connected
+    }
+
+    /// The active view, read off the per-view flags the renderers still use.
+    pub fn view(&self) -> SerialView {
+        if self.plot_on {
+            SerialView::Plot
+        } else if self.matrix.on {
+            SerialView::Matrix
+        } else if self.frames_on {
+            SerialView::Frames
+        } else {
+            SerialView::Raw
+        }
+    }
+
+    /// Switch views. Setting all three flags from one place is what keeps them
+    /// from disagreeing — two "on" at once used to be a click away.
+    pub fn set_view(&mut self, v: SerialView) {
+        self.plot_on = v == SerialView::Plot;
+        self.matrix.on = v == SerialView::Matrix;
+        self.frames_on = v == SerialView::Frames;
     }
 
     /// Open `self.port` at `self.baud` and start the background reader.

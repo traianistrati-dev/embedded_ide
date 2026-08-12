@@ -6,8 +6,9 @@
 //! terminal. See [`crate::serial::SerialMonitor`].
 
 use crate::serial::{
-    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, byte_color, frame_ranges, gap_counts, hex_layout_job,
-    hex_search_job, parse_hex_search, render_rx_text, seq_color, seq_counts, text_search_job,
+    SEARCH_HIT, SEARCH_HIT2, SerialMonitor, SerialView, byte_color, frame_ranges, gap_counts,
+    hex_layout_job, hex_search_job, parse_hex_search, render_rx_text, seq_color, seq_counts,
+    text_search_job,
 };
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -60,7 +61,10 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         ui.add_space(8.0);
         if connected {
             if ui
-                .button(format!("{} Disconnect", ph::PLUGS))
+                .button(
+                    egui::RichText::new(format!("{} Disconnect", ph::PLUGS))
+                        .color(egui::Color32::from_rgb(230, 150, 140)),
+                )
                 .clicked()
             {
                 serial.disconnect();
@@ -84,6 +88,27 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             }
         }
 
+        // The state itself, always on screen: which port at which baud is open,
+        // or that none is. The button alone only says what would happen next.
+        let (dot, text, color) = if connected {
+            (
+                ph::CHECK_CIRCLE,
+                format!("{} @ {}", serial.port, serial.baud),
+                egui::Color32::from_rgb(90, 200, 120),
+            )
+        } else {
+            (
+                ph::CIRCLE,
+                "not connected".to_owned(),
+                egui::Color32::from_gray(130),
+            )
+        };
+        ui.label(
+            egui::RichText::new(format!("{dot} {text}"))
+                .size(10.5)
+                .color(color),
+        );
+
         ui.separator();
         // Bridge (MITM): relay a port another application already holds, instead
         // of opening it. Locked while connected — the wiring can't be re-pointed
@@ -102,50 +127,54 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
         ui.toggle_value(&mut serial.info_on, format!("{} Info", ph::INFO))
             .on_hover_text("How Bridge (MITM) wiring works, with this session's ports");
 
+    });
+
+    // ── View row ──────────────────────────────────────────────────────────────
+    // One `Type` picker instead of three checkboxes that could contradict each
+    // other, and only the options that MEAN something for the chosen view: a
+    // control that does nothing in the current mode is worse than a missing one,
+    // because it invites the click.
+    let view = serial.view();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Type:");
+        let mut chosen = view;
+        egui::ComboBox::from_id_salt("serial_view_type")
+            .selected_text(view.label())
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                for v in [
+                    SerialView::Raw,
+                    SerialView::Matrix,
+                    SerialView::Frames,
+                    SerialView::Plot,
+                ] {
+                    ui.selectable_value(&mut chosen, v, v.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Default — the raw stream, text or coloured hex.\n\
+                 Matrix  — the newest framed payload as a grid of numbers.\n\
+                 Frames  — one row per protocol frame.\n\
+                 Plot    — numeric lines as live curves.",
+            );
+        if chosen != view {
+            serial.set_view(chosen);
+        }
+
+        // Plot brings its own controls; everything here would be dead weight.
+        if view == SerialView::Plot {
+            return;
+        }
+
         ui.separator();
-        // Plot view: parse numeric lines into live curves (Arduino Serial
-        // Plotter style) — replaces the text/hex view while on.
-        if ui
-            .checkbox(&mut serial.plot_on, "Plot")
-            .on_hover_text(
-                "Plot numeric lines as live curves.\n\
-                 Formats:  temp:23.4 hum:56   ·   1.0 2.5 -3\n\
-                 One line = one sample tick; log lines in between are ignored.",
-            )
-            .clicked()
-            && serial.plot_on
-        {
-            serial.matrix.on = false; // one special view at a time
-        }
-        // Matrix view: the newest Find start…Find end payload as a rows×cols
-        // grid of N-byte integers (e.g. 1280 B = 20×16×u32 radar frame).
-        if ui
-            .checkbox(&mut serial.matrix.on, "Matrix")
-            .on_hover_text(
-                "Show the newest payload between `Find start` and `Find end` \
-                 as a 2D matrix of N-byte values.\n\
-                 Example: 1280 B payload = 20 rows × 16 values × 4 bytes (u32).",
-            )
-            .clicked()
-            && serial.matrix.on
-        {
-            serial.plot_on = false;
-        }
-        ui.checkbox(&mut serial.hex, "Hex");
-        // One row per protocol frame — the view that answers "what did each
-        // message look like", which a byte stream never can.
-        ui.checkbox(&mut serial.frames_on, "Frames").on_hover_text(
-            "List one row per protocol FRAME instead of the raw stream.\n\
-             Delimited by the Find start / Find end patterns, or by a length field \
-             inside the frame (pick the mode above the list).\n\
-             Bytes no frame claimed stay visible as grey `raw` rows, and a frame that \
-             broke is marked BAD — a decoder that drops what it can't parse looks \
-             exactly like a quiet link.",
-        );
-        // Timestamped view: both directions as blocks, with the gap between
-        // them — the only way to read a send→receive latency here.
-        ui.checkbox(&mut serial.stamps, "Time")
-            .on_hover_text(
+        ui.checkbox(&mut serial.hex, "Hex")
+            .on_hover_text("Show bytes as hex instead of decoded text.");
+
+        // Time is a RAW-view thing: Matrix and Frames already carry their own
+        // per-frame timing.
+        if view == SerialView::Raw {
+            ui.checkbox(&mut serial.stamps, "Time").on_hover_text(
                 "Show what was SENT and what was RECEIVED as timestamped blocks:\n\
                  >> what this console sent   ·   << what the device answered\n\
                  The `(+N ms)` on a reply is the time since the previous block — the \
@@ -154,23 +183,28 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
                  wire: good to milliseconds, not better. Blocks are split by the idle \
                  gap set in Bridge mode.",
             );
-        // Number of bytes per repeating sequence to colour (hex mode).
-        ui.add_enabled_ui(serial.hex, |ui| {
-            ui.label("Seq:");
-            ui.add(
-                egui::DragValue::new(&mut serial.seq_len)
-                    .range(1..=16)
-                    .speed(0.1),
-            )
-            .on_hover_text("Bytes per repeating sequence: each group of N bytes\nis coloured as a unit (same sequence -> same colour).");
-            ui.label("Row:");
-            ui.add(
-                egui::DragValue::new(&mut serial.row_bytes)
-                    .range(1..=64)
-                    .speed(0.2),
-            )
-            .on_hover_text("Bytes shown per line in the hex view.");
-        });
+            // Seq / Row lay out the flat hex dump — the timed view renders
+            // blocks instead, where neither applies.
+            if !serial.stamps {
+                ui.add_enabled_ui(serial.hex, |ui| {
+                    ui.label("Seq:");
+                    ui.add(
+                        egui::DragValue::new(&mut serial.seq_len)
+                            .range(1..=16)
+                            .speed(0.1),
+                    )
+                    .on_hover_text("Bytes per repeating sequence: each group of N bytes\nis coloured as a unit (same sequence -> same colour).");
+                    ui.label("Row:");
+                    ui.add(
+                        egui::DragValue::new(&mut serial.row_bytes)
+                            .range(1..=64)
+                            .speed(0.2),
+                    )
+                    .on_hover_text("Bytes shown per line in the hex view.");
+                });
+            }
+        }
+
         // Search fields. Field 1 works in BOTH views: hex mode highlights the
         // byte sequence in yellow; text mode tints whole LINES that START with
         // the typed text. Field 2 stays hex-only.
@@ -242,9 +276,18 @@ pub fn show_serial_tab(ui: &mut egui::Ui, serial: &mut SerialMonitor, ctx: &egui
             )
             .on_hover_text("Highlight this hex sequence in blue (rest greyed).");
         });
-        ui.checkbox(&mut serial.autoscroll, "Autoscroll");
-        if ui.button(format!("{} Clear", ph::BROOM)).clicked() {
-            serial.clear_rx();
+        // Autoscroll and Clear belong to a SCROLLING stream. The Matrix shows
+        // one payload and the Frames list keeps its own tail — neither has a
+        // stream to pin or wipe from here.
+        if view == SerialView::Raw {
+            ui.checkbox(&mut serial.autoscroll, "Autoscroll");
+            if ui
+                .button(format!("{} Clear", ph::BROOM))
+                .on_hover_text("Drop the received bytes and the timed blocks.")
+                .clicked()
+            {
+                serial.clear_rx();
+            }
         }
     });
 
