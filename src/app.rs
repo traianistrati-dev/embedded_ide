@@ -383,6 +383,8 @@ enum BuildPanelTab {
     Dfu,
     /// RTT / defmt live logs through the debug probe (probe-rs).
     Rtt,
+    /// ESP device output (`esp_println`) streamed by `espflash monitor`.
+    EspMonitor,
     /// On-target debugger (probe-rs dap-server): breakpoints, step, variables.
     Debug,
     /// Built-in USART/UART serial console.
@@ -593,6 +595,11 @@ struct PersistedState {
     /// = shown, so existing/older state keeps the current look.
     #[serde(default)]
     hide_diff_line_bg: bool,
+    /// User turned OFF "open the ESP Monitor after a successful flash". Stored
+    /// inverted for the same reason as `hide_diff_line_bg`: the serde default
+    /// `false` must mean the ON behaviour, so older state keeps it enabled.
+    #[serde(default)]
+    esp_monitor_no_auto: bool,
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -770,6 +777,16 @@ pub struct AppIde {
     deps_banner_dismissed: bool,
     /// RTT / defmt console (probe-rs pipeline + scrollback) — the RTT tab.
     rtt: crate::rtt::RttConsole,
+    /// ESP device console (`espflash monitor` + scrollback) — the Monitor tab.
+    /// Where `esp_println::println!` output shows up.
+    esp_monitor: crate::esp_monitor::EspMonitor,
+    /// Open the Monitor automatically after a successful ESP flash. Persisted —
+    /// it is a workflow preference, not session state.
+    esp_monitor_auto: bool,
+    /// The port the last `espflash flash` actually used (its own override, or
+    /// the one it auto-detected and logged). Written by the flash thread, read
+    /// when the Monitor session starts so it follows the board just flashed.
+    espflash_used_port: Arc<Mutex<String>>,
     /// On-target debug session (DAP client over probe-rs dap-server).
     debugger: crate::debugger::Debugger,
     /// Debug probes from the last `probe-rs list` scan — the shared selector on
@@ -1355,6 +1372,10 @@ impl AppIde {
             deps_checked: false,
             deps_banner_dismissed: false,
             rtt: crate::rtt::RttConsole::default(),
+            esp_monitor: crate::esp_monitor::EspMonitor::default(),
+            // On by default: an ESP project is flashed to see what it prints.
+            esp_monitor_auto: !persisted.esp_monitor_no_auto,
+            espflash_used_port: Arc::new(Mutex::new(String::new())),
             debugger: crate::debugger::Debugger::default(),
             probe_list: Vec::new(),
             selected_probe: None,
@@ -2762,6 +2783,7 @@ impl eframe::App for AppIde {
                 diag_collapsed: self.diag_collapsed,
                 tree_split_ratio: self.tree_split_ratio,
                 hide_diff_line_bg: !self.diff_line_bg,
+                esp_monitor_no_auto: !self.esp_monitor_auto,
             },
         );
     }
@@ -2792,6 +2814,9 @@ impl eframe::App for AppIde {
         // the next app start — kill them synchronously.
         self.rtt.stop();
         self.debugger.kill_now();
+        // Same for espflash: an orphan keeps the serial port open, and the next
+        // flash then fails to claim it ("Access is denied").
+        self.esp_monitor.stop();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

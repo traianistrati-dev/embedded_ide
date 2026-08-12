@@ -19,6 +19,7 @@ pub mod build;
 pub mod debugger;
 pub mod dfu;
 pub mod editor;
+pub mod esp_monitor;
 pub mod espflash;
 pub mod failure_hint;
 pub mod flamegraph;

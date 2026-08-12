@@ -149,17 +149,77 @@ impl AppIde {
                 .get(&self.dfu_sel_programmer)
                 .map(|p| p.port.clone())
                 .unwrap_or_default();
+            // The Monitor cannot attach while it (or the Serial tab) still holds
+            // the port, and espflash needs it for the flash itself — so end any
+            // live session first. It is restarted below if auto-open is on.
+            self.esp_monitor.stop();
+            let monitor_follows = self.esp_monitor_auto;
             espflash::start_flash(
                 build_dir,
                 project.target.clone(),
                 project.probe_chip.clone(),
                 port,
+                Arc::clone(&self.espflash_used_port),
+                monitor_follows,
                 Arc::clone(&self.espflash_state),
                 Arc::clone(&self.dfu_log),
                 self.egui_ctx.clone(),
                 std::sync::Arc::clone(&self.activity),
             );
         }
+    }
+
+    /// Attach `espflash monitor` to the ESP board and stream its output into the
+    /// Monitor tab. `after_flash` distinguishes the automatic run (which follows
+    /// the port the flash just used and brings the tab to the front) from the
+    /// tab's own Start button. No-op without an ESP chip config.
+    pub(crate) fn start_esp_monitor(&mut self, after_flash: bool) {
+        let Some((project, toolchain)) = self.selected_build_cfg() else {
+            return;
+        };
+        use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+        if toolchain != ToolchainKind::EspRust {
+            return;
+        }
+        // The Serial tab opens ports exclusively; two readers on one port means
+        // whichever loses gets an opaque OS error. Say so instead of racing.
+        if self.serial.is_connected() {
+            self.esp_monitor.state.lock().unwrap().push_plain(
+                crate::terminal::LineKind::Notice,
+                format!(
+                    "[error] the Serial tab is connected on {} — disconnect it there first",
+                    self.serial.port
+                ),
+            );
+            self.build_tab = BuildPanelTab::EspMonitor;
+            return;
+        }
+        // After a flash: the port espflash reported (it may have auto-detected
+        // one the IDE never chose). Standalone: the Flash tab's override, else
+        // empty so espflash detects it again.
+        let port = if after_flash {
+            self.espflash_used_port.lock().unwrap().clone()
+        } else {
+            self.espflash_port.clone()
+        };
+        // Symbols for backtrace decoding — same ELF path the flash used.
+        let build_dir = crate::workspace::dir();
+        let elf = build_dir
+            .join("target")
+            .join(&project.target)
+            .join("release")
+            .join(format!("{}-project", project.probe_chip));
+        self.build_tab = BuildPanelTab::EspMonitor;
+        self.esp_monitor.start(
+            build_dir,
+            project.probe_chip.clone(),
+            port,
+            Some(elf),
+            // Only the post-flash session left the chip in the bootloader, so
+            // only it has something to rescue.
+            after_flash,
+            self.egui_ctx.clone(),
+        );
     }
 
     /// Run `cargo check` on the generated project: write it to the check
@@ -235,6 +295,12 @@ impl AppIde {
         // measuring would just repeat the same cargo error in a second place.
         if finished && (dfu_ok || ocd_ok || esp_ok) {
             self.start_size_measure_quiet();
+        }
+        // ESP only: attach the device console to the board just programmed. The
+        // flash left the chip in reset for exactly this (`monitor_follows`), so
+        // the monitor resets it and catches the output from the first line.
+        if finished && esp_ok && self.esp_monitor_auto {
+            self.start_esp_monitor(true);
         }
     }
 

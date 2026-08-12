@@ -78,12 +78,23 @@ impl EspFlashState {
 ///
 /// `state` is updated at every phase so the UI can show progress.
 /// `log` receives each output line as it arrives.
+#[allow(clippy::too_many_arguments)]
 pub fn start_flash(
     project_dir: PathBuf,
     target: String,
     chip: String,
     // Serial port override (e.g. "COM3").  Pass an empty string for auto-detect.
     port: String,
+    // Where the port espflash actually used is written back — the same string on
+    // an override, the auto-detected one otherwise (read out of espflash's own
+    // log, see `esp_monitor::parse_port_line`). The Monitor session picks it up
+    // so it watches the board that was just flashed, not another one.
+    used_port: Arc<Mutex<String>>,
+    // `true` when the ESP Monitor takes over right after: espflash then leaves
+    // the chip in reset (`--after no-reset`) and the monitor resets it once it
+    // is attached, so the first `println!` of `main` is not missed. `false`
+    // keeps the standalone behaviour of resetting into the new firmware.
+    monitor_follows: bool,
     state: Arc<Mutex<EspFlashState>>,
     log: Arc<Mutex<Vec<String>>>,
     ctx: eframe::egui::Context,
@@ -225,6 +236,10 @@ pub fn start_flash(
             );
         }
 
+        // Seed the write-back with the override; an auto-detected run overwrites
+        // it from espflash's log below.
+        *used_port.lock().unwrap() = port.clone();
+
         let mut esp_cmd = Command::new("espflash");
         esp_cmd
             .current_dir(&project_dir)
@@ -232,8 +247,16 @@ pub fn start_flash(
         if !port.is_empty() {
             esp_cmd.args(["--port", &port]);
         }
+        // One reset, by whoever is going to watch the output (see
+        // `monitor_follows`). Two resets would boot the firmware twice, and the
+        // first boot's output has nobody listening.
+        let after = if monitor_follows {
+            "no-reset"
+        } else {
+            "hard-reset"
+        };
         esp_cmd
-            .args(["--ignore-app-descriptor", "--after", "hard-reset"])
+            .args(["--ignore-app-descriptor", "--after", after])
             .arg(&elf_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -264,10 +287,14 @@ pub fn start_flash(
         // Stream espflash stdout in a helper thread
         let stdout_log = Arc::clone(&log);
         let stdout_ctx = ctx.clone();
+        let stdout_port = Arc::clone(&used_port);
         let stdout_handle = child.stdout.take().map(|stdout| {
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     if let Ok(line) = line {
+                        if let Some(p) = crate::esp_monitor::parse_port_line(&line) {
+                            *stdout_port.lock().unwrap() = p;
+                        }
                         stdout_log.lock().unwrap().push(line);
                         stdout_ctx.request_repaint();
                     }
@@ -279,6 +306,11 @@ pub fn start_flash(
         if let Some(stderr) = child.stderr.take() {
             for line in BufReader::new(stderr).lines() {
                 if let Ok(line) = line {
+                    // espflash logs through `env_logger`, i.e. to STDERR — this
+                    // is where the port line usually shows up.
+                    if let Some(p) = crate::esp_monitor::parse_port_line(&line) {
+                        *used_port.lock().unwrap() = p;
+                    }
                     push_log(&log, &ctx, &line);
                 }
             }

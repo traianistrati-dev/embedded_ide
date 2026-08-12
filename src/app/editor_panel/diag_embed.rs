@@ -150,6 +150,13 @@ impl AppIde {
         let mut tab_clicked = false;
         // RTT-tab Run/Attach buttons.
         let mut rtt_go: Option<crate::rtt::RttMode> = None;
+        // Monitor-tab Start button + its "open after flash" checkbox.
+        let mut esp_monitor_go = false;
+        let mut esp_monitor_auto_set: Option<bool> = None;
+        // The Monitor tab shells out to espflash, so it only exists on ESP.
+        let is_esp = self.selected_build_cfg().is_some_and(|(_, tc)| {
+            tc == crate::panels::mcu_module::mcu_catalog::ToolchainKind::EspRust
+        });
         // Debug-tab Start button.
         let mut debug_go = false;
         // Debug-tab "Reset target" button.
@@ -276,6 +283,11 @@ impl AppIde {
                     &mut self.rtt,
                     &mut rtt_go,
                     &rtt_chip,
+                    &mut self.esp_monitor,
+                    &mut esp_monitor_go,
+                    self.esp_monitor_auto,
+                    &mut esp_monitor_auto_set,
+                    is_esp,
                     &mut self.debugger,
                     &mut debug_go,
                     &mut reset_go,
@@ -403,6 +415,13 @@ impl AppIde {
         // RTT-tab Run/Attach buttons.
         if let Some(mode) = rtt_go {
             self.start_rtt(mode);
+        }
+        // Monitor-tab Start button (standalone — no flash preceding it).
+        if esp_monitor_go {
+            self.start_esp_monitor(false);
+        }
+        if let Some(v) = esp_monitor_auto_set {
+            self.esp_monitor_auto = v;
         }
         // Debug-tab Start button.
         if debug_go {
