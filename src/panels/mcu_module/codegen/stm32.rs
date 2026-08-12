@@ -203,9 +203,33 @@ pub(super) fn gen_parts(
     }
 
     // ── Ports used ───────────────────────────────────────────────────────────
-    let mut ports_used: BTreeSet<char> = BTreeSet::new();
+    // A port whose pins are configured is split `let mut` — every `into_*` takes
+    // `&mut gpioX.crl`. A port pulled in only to free the JTAG pins below is not
+    // written through at all, so it must NOT be `mut`.
+    let mut ports_written: BTreeSet<char> = BTreeSet::new();
     for (_, meta) in &configured {
-        ports_used.insert(meta.port);
+        ports_written.insert(meta.port);
+    }
+    let mut ports_used: BTreeSet<char> = ports_written.clone();
+
+    // ── JTAG pins ────────────────────────────────────────────────────────────
+    // PA15, PB3 and PB4 come out of reset as the JTAG port, typed
+    // `Pin<'B', 3, Debugger>` — a state with no `into_*` methods at all, so a
+    // project using any of them did not compile. `afio.mapr.disable_jtag` is the
+    // way out, and it takes ALL THREE at once (used or not), which is why the
+    // ports of the other two get split here too.
+    let jtag_used = configured
+        .iter()
+        .any(|(p, _)| JTAG_PINS.contains(&p.name.as_str()));
+    // Two of three cannot be handed to the call, so a chip missing one is left
+    // exactly as it was rather than given code that won't build either way.
+    let jtag_pins_exist = JTAG_PINS
+        .iter()
+        .all(|n| all_pins.iter().any(|p| p.name == *n));
+    let free_jtag = jtag_used && jtag_pins_exist;
+    if free_jtag {
+        ports_used.insert('A');
+        ports_used.insert('B');
     }
 
     // ── Feature flags ────────────────────────────────────────────────────────
@@ -239,8 +263,9 @@ pub(super) fn gen_parts(
     let has_usb = configured
         .iter()
         .any(|(p, _)| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp));
-    // CAN's `assign_pins` needs AFIO too (it may remap the pins).
-    let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can;
+    // CAN's `assign_pins` needs AFIO too (it may remap the pins), and so does
+    // `disable_jtag` — it lives on `afio.mapr`.
+    let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can || free_jtag;
     let has_periph_fns = has_serial || has_spi || has_i2c || has_adc || has_can;
 
     // ── SPI instances ────────────────────────────────────────────────────────
@@ -348,16 +373,21 @@ pub(super) fn gen_parts(
                 ref f if needs_mut_ref(f) => ("&mut ", "", ""),
                 _ => ("", "", ""),
             };
+            // A freed JTAG pin is no longer a field of the port: `disable_jtag`
+            // moved it out and handed it back as a plain binding.
+            let src = if free_jtag && JTAG_PINS.contains(&pin.name.as_str()) {
+                meta.var.clone()
+            } else {
+                format!("{}.{}", meta.port_var, meta.var)
+            };
             format!(
-                "    let {mut_}{binding} = {prefix}{open}{pv}.{field}.{expr}{close}; // {comment}",
+                "    let {mut_}{binding} = {prefix}{open}{src}.{expr}{close}; // {comment}",
                 mut_ = if needs_mut_binding(pin, gpio_native, binding_style, &binding, custom_inits)
                 {
                     "mut "
                 } else {
                     ""
                 },
-                field = meta.var,
-                pv = meta.port_var,
             )
         };
         port_groups.entry(meta.port).or_default().push(line);
@@ -440,15 +470,18 @@ pub(super) fn gen_parts(
             continue;
         }
         header!();
+        // A signal the user left unwired gets the HAL's own placeholder — the
+        // same type `SpiPins` in the config module names for it, and a value
+        // that exists (the old `_miso{n}` was a binding nothing ever declared).
         let sck_v = sck
             .map(|(p, m)| binding_of(p, m))
-            .unwrap_or_else(|| format!("_sck{n}"));
+            .unwrap_or_else(|| SPI_NO_SCK.to_string());
         let miso_v = miso
             .map(|(p, m)| binding_of(p, m))
-            .unwrap_or_else(|| format!("_miso{n}"));
+            .unwrap_or_else(|| SPI_NO_MISO.to_string());
         let mosi_v = mosi
             .map(|(p, m)| binding_of(p, m))
-            .unwrap_or_else(|| format!("_mosi{n}"));
+            .unwrap_or_else(|| SPI_NO_MOSI.to_string());
         let sfx = spi
             .get(&n)
             .map(|c| module_label_sfx(&c.custom_label))
@@ -588,14 +621,22 @@ pub(super) fn gen_parts(
     }
 
     // ── Assemble port splits ─────────────────────────────────────────────────
-    let port_splits = ports_used
+    let mut port_splits = ports_used
         .iter()
         .map(|p| {
             let lc = p.to_ascii_lowercase();
-            format!("    let mut gpio{lc} = dp.GPIO{p}.split();")
+            let mut_ = if ports_written.contains(p) {
+                "mut "
+            } else {
+                ""
+            };
+            format!("    let {mut_}gpio{lc} = dp.GPIO{p}.split();")
         })
         .collect::<Vec<_>>()
         .join("\n");
+    if free_jtag {
+        port_splits.push_str(&jtag_release_line(&configured));
+    }
 
     let afio_line = if needs_afio {
         "let mut afio = dp.AFIO.constrain();\n"
@@ -736,12 +777,18 @@ pub fn config_files(
     }
     for n in 1u8..=2 {
         if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
-            out.push((format!("spi{n}.rs"), spi_config_file(n, spi.get(&n))));
+            out.push((
+                format!("spi{n}.rs"),
+                spi_config_file(n, spi.get(&n), &spi_pin_tys(n, all_pins)),
+            ));
         }
     }
     for n in 1u8..=2 {
         if has(PinFunction::I2cScl(n)) && has(PinFunction::I2cSda(n)) {
-            out.push((format!("i2c{n}.rs"), i2c_config_file(n, i2c.get(&n))));
+            out.push((
+                format!("i2c{n}.rs"),
+                i2c_config_file(n, i2c.get(&n), &i2c_pin_tys(n, all_pins)),
+            ));
         }
     }
     // CAN — single instance on STM32F1; the bit-timing register depends on the
@@ -760,6 +807,141 @@ pub fn config_files(
         out.push(("io.rs".to_string(), GPIO_IO_FILE.to_string()));
     }
     out
+}
+
+/// The pins the JTAG port holds at reset. `disable_jtag` frees exactly these
+/// three, together — the order is the one its signature takes.
+const JTAG_PINS: [&str; 3] = ["PA15", "PB3", "PB4"];
+
+/// The `let (…) = afio.mapr.disable_jtag(…)` line, with the pins the project
+/// does not use underscored so they don't read as forgotten bindings.
+fn jtag_release_line(configured: &[(&Pin, PinMeta)]) -> String {
+    let names = JTAG_PINS
+        .iter()
+        .map(|n| {
+            let var = n.to_ascii_lowercase();
+            if configured.iter().any(|(p, _)| p.name == *n) {
+                var
+            } else {
+                format!("_{var}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "\n    // PA15/PB3/PB4 are the JTAG port at reset and have no usable pin\n\
+         \x20   // mode until it is given up. SWD keeps working; JTAG debugging does not.\n\
+         \x20   let ({names}) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);"
+    )
+}
+
+// ── Concrete pin types for the bus config modules ─────────────────────────────
+//
+// SPI and I2C keep their pins IN the handle type (`Spi<SPI1, REMAP, PINS, u8>`,
+// `BlockingI2c<I2C1, PINS>`), so a config module cannot name what `init` returns
+// without naming the pins. USART could get away with `Handle` alone — its
+// `split()` erases them — these two cannot, and a named handle is what an RTIC
+// `Local` resource (or any struct field) needs.
+//
+// The aliases therefore live INSIDE each file's GENERATED block: re-wiring a
+// peripheral must rewrite them, and only that block is re-spliced on save.
+
+/// The HAL placeholders for an unwired SPI signal. main.rs passes the VALUE (by
+/// full path — its `use` block does not import `spi`); the config module's
+/// `SpiPins` names the TYPE through the `hal_spi` alias it imports itself.
+const SPI_NO_SCK: &str = "stm32f1xx_hal::spi::NoSck";
+const SPI_NO_MISO: &str = "stm32f1xx_hal::spi::NoMiso";
+const SPI_NO_MOSI: &str = "stm32f1xx_hal::spi::NoMosi";
+
+/// The pin carrying `want`, or `None` when the user has not wired that signal.
+fn wired<'a>(all_pins: &[&'a Pin], want: PinFunction) -> Option<&'a Pin> {
+    all_pins
+        .iter()
+        .copied()
+        .find(|p| !p.reserved && p.selected_function == want)
+}
+
+/// The `stm32f1xx-hal` type a configured bus pin ends up with — the value
+/// [`into_expr`] builds, named. `hal_gpio` is the alias the GENERATED block of
+/// each config file imports for itself, so the type keeps resolving whatever the
+/// user does to the editable `use` block below it.
+fn hal_pin_ty(pin: &Pin) -> Option<String> {
+    let mode = match pin.selected_function {
+        // `into_alternate_push_pull` → `Alternate<PushPull>`, and `PushPull` is
+        // the alias' default parameter.
+        PinFunction::SpiSck(_) | PinFunction::SpiMosi(_) => "hal_gpio::Alternate",
+        PinFunction::SpiMiso(_) => "hal_gpio::Input<hal_gpio::Floating>",
+        PinFunction::I2cScl(_) | PinFunction::I2cSda(_) => {
+            "hal_gpio::Alternate<hal_gpio::OpenDrain>"
+        }
+        _ => return None,
+    };
+    let m = parse_pin(&pin.name)?;
+    Some(format!("hal_gpio::P{}{}<{mode}>", m.port, m.pin_num))
+}
+
+/// One line per element of a generated tuple type, indented for the alias.
+fn tuple_body(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|t| format!("\n    {t},"))
+        .collect::<String>()
+        + "\n"
+}
+
+/// `(SpiPins tuple body, SpiRemap type)` for SPI`n`, as its config module
+/// spells them.
+fn spi_pin_tys(n: u8, all_pins: &[&Pin]) -> (String, String) {
+    let ty = |f: PinFunction, filler: &str| {
+        wired(all_pins, f)
+            .and_then(hal_pin_ty)
+            // Same placeholder main.rs passes for the missing signal, with the
+            // full path swapped for the file's own `hal_spi` alias.
+            .unwrap_or_else(|| filler.replace("stm32f1xx_hal::spi::", "hal_spi::"))
+    };
+    let pins = tuple_body(&[
+        ty(PinFunction::SpiSck(n), SPI_NO_SCK),
+        ty(PinFunction::SpiMiso(n), SPI_NO_MISO),
+        ty(PinFunction::SpiMosi(n), SPI_NO_MOSI),
+    ]);
+    (pins, spi_remap_ty(n, all_pins))
+}
+
+/// The remap type-state for SPI`n`. Only SPI1 has an alternate pin set on this
+/// family (PB3/PB4/PB5 instead of PA5/PA6/PA7) and the HAL takes the remap
+/// REGISTER BIT from this type, so naming the wrong one drives the wrong pads.
+/// SPI2's own pins are on port B as well — hence the instance check.
+///
+/// The clock pin decides, falling back to MOSI then MISO: the HAL's remap is
+/// all-or-nothing, so a wiring that mixes the two sets has no right answer here
+/// — it is rejected by the `Pins` impls, at the pin that does not belong.
+fn spi_remap_ty(n: u8, all_pins: &[&Pin]) -> String {
+    let remapped = n == 1
+        && [
+            PinFunction::SpiSck(n),
+            PinFunction::SpiMosi(n),
+            PinFunction::SpiMiso(n),
+        ]
+        .into_iter()
+        .find_map(|f| wired(all_pins, f).and_then(|p| parse_pin(&p.name)))
+        .is_some_and(|m| m.port == 'B');
+    if remapped {
+        "hal_spi::Spi1Remap".to_string()
+    } else {
+        format!("hal_spi::Spi{n}NoRemap")
+    }
+}
+
+/// The `I2cPins` tuple body for I2C`n` — (SCL, SDA), the order the HAL's `Pins`
+/// impls and main.rs's call both use. Both signals are required for the file to
+/// be generated at all, so there is no placeholder case.
+fn i2c_pin_tys(n: u8, all_pins: &[&Pin]) -> String {
+    let ty = |f: PinFunction| {
+        wired(all_pins, f)
+            .and_then(hal_pin_ty)
+            .unwrap_or_else(|| "()".to_string())
+    };
+    tuple_body(&[ty(PinFunction::I2cScl(n)), ty(PinFunction::I2cSda(n))])
 }
 
 /// `src/pins/configs/io.rs` — bridges the HAL's embedded-hal 0.2 GPIO + blocking
@@ -880,11 +1062,17 @@ use stm32f1xx_hal::{
     can::Can,
 };
 
+/// The concrete type [`init`] hands back.
+///
+/// CAN already returned a named type; the alias exists so every config module
+/// spells its handle the same way, which is what the RTIC generator looks for.
+pub type Handle = bxcan::Can<Can<pac::CAN1>>;
+
 pub fn init<PINS>(
     can: pac::CAN1,
     pins: PINS,
     afio: &mut afio::Parts,
-) -> bxcan::Can<Can<pac::CAN1>>
+) -> Handle
 where
     PINS: stm32f1xx_hal::can::Pins<Instance = pac::CAN1>,
 {
@@ -1101,6 +1289,23 @@ const SPI_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
 const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
 const CLOCK_KHZ: u32 = {KHZ};
+
+// The wired pins, straight from the MCU Configurator's pin map. They live in
+// this block because re-wiring the peripheral has to update them; the `use` is
+// here too, so the aliases hold whatever you do to the `use` block below.
+use stm32f1xx_hal::{gpio as hal_gpio, spi as hal_spi};
+
+/// The pins SPI{N} is wired to, in HAL order: (SCK, MISO, MOSI). A signal you
+/// left unwired is the HAL's `No…` placeholder.
+///
+/// `allow(dead_code)`: `init` below is yours to edit and may stop naming it.
+#[allow(dead_code)]
+pub type SpiPins = ({PINS});
+
+/// Whether those are the peripheral's default pins or its remapped set — the
+/// HAL takes the remap register bit from this type.
+#[allow(dead_code)]
+pub type SpiRemap = {REMAP};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1109,7 +1314,7 @@ use stm32f1xx_hal::{
     prelude::*,
     afio,
     rcc::Clocks,
-    spi::{self, Mode, Phase, Polarity, Spi, Spi{N}NoRemap},
+    spi::{Mode, Phase, Polarity, Spi},
 };
 
 fn get_mode() -> Mode {
@@ -1175,31 +1380,59 @@ where
     }
 }
 
+/// The concrete type [`init`] hands back.
+///
+/// A NAMED type, not `impl Trait`: a struct field — an RTIC `Local` resource,
+/// say — has to name what it holds, and an opaque type cannot be named. The pins
+/// stay inside the HAL's `Spi<…>`, so `SpiPins`/`SpiRemap` from the GENERATED
+/// block above are part of it; re-wiring SPI{N} updates this alias with them.
+/// It is still an `embedded-hal` 1.0 `SpiBus` for every caller.
+pub type Handle = SpiBusIo<Spi<pac::SPI{N}, SpiRemap, SpiPins, u8>>;
+
 /// Initialise SPI{N} and expose it as an `embedded-hal` 1.0 `SpiBus`.
-pub fn init<PINS>(
+pub fn init(
     spi: pac::SPI{N},
-    pins: PINS,
-    afio: &mut afio::Parts,
+    pins: SpiPins,
+    {AFIO_PARAM}: &mut afio::Parts,
     clocks: &Clocks,
-) -> impl embedded_hal::spi::SpiBus<u8>
-where
-    PINS: spi::Pins<Spi{N}NoRemap>,
-{
-    let bus = Spi::spi{N}(spi, pins, &mut afio.mapr, get_mode(), CLOCK_KHZ.kHz(), *clocks);
+) -> Handle {
+    let bus = Spi::spi{N}(spi, pins, {AFIO_ARG}get_mode(), CLOCK_KHZ.kHz(), *clocks);
     SpiBusIo(bus)
 }
 "#;
 
-fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>) -> String {
+fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, String)) -> String {
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
     let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
         ApiStyle::Portable => SPI_TMPL,
         ApiStyle::Native => SPI_TMPL_NATIVE,
     };
+    let (pins, remap) = pin_tys;
+    // Only SPI1 can be remapped, so only `Spi::spi1` takes the AFIO register.
+    let (afio_param, afio_arg) = afio_subst(n == 1);
     tmpl.replace("{N}", &n.to_string())
         .replace("{MODE}", &mode.to_string())
         .replace("{KHZ}", &khz.to_string())
+        .replace("{PINS}", pins)
+        .replace("{REMAP}", remap)
+        .replace("{AFIO_PARAM}", afio_param)
+        .replace("{AFIO_ARG}", afio_arg)
+}
+
+/// `({AFIO_PARAM}, {AFIO_ARG})` for a config template.
+///
+/// In stm32f1xx-hal 0.10 only the FIRST instance of SPI and I2C takes the AFIO
+/// remap register — `Spi::spi2` / `BlockingI2c::i2c2` have no `mapr` argument,
+/// because those peripherals have no alternate pin set to select. main.rs passes
+/// `&mut afio` to every instance all the same (one call shape for all of them),
+/// so the parameter stays and is underscored where the HAL cannot use it.
+fn afio_subst(takes_mapr: bool) -> (&'static str, &'static str) {
+    if takes_mapr {
+        ("afio", "&mut afio.mapr, ")
+    } else {
+        ("_afio", "")
+    }
 }
 
 /// Native `stm32f1xx-hal` SPI init (no eh-1.0 bridge). Returns `Spi<…>`.
@@ -1207,6 +1440,23 @@ const SPI_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
 const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
 const CLOCK_KHZ: u32 = {KHZ};
+
+// The wired pins, straight from the MCU Configurator's pin map. They live in
+// this block because re-wiring the peripheral has to update them; the `use` is
+// here too, so the aliases hold whatever you do to the `use` block below.
+use stm32f1xx_hal::{gpio as hal_gpio, spi as hal_spi};
+
+/// The pins SPI{N} is wired to, in HAL order: (SCK, MISO, MOSI). A signal you
+/// left unwired is the HAL's `No…` placeholder.
+///
+/// `allow(dead_code)`: `init` below is yours to edit and may stop naming it.
+#[allow(dead_code)]
+pub type SpiPins = ({PINS});
+
+/// Whether those are the peripheral's default pins or its remapped set — the
+/// HAL takes the remap register bit from this type.
+#[allow(dead_code)]
+pub type SpiRemap = {REMAP};
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1217,7 +1467,7 @@ use stm32f1xx_hal::{
     prelude::*,
     afio,
     rcc::Clocks,
-    spi::{self, Mode, Phase, Polarity, Spi, Spi{N}NoRemap},
+    spi::{Mode, Phase, Polarity, Spi},
 };
 
 fn get_mode() -> Mode {
@@ -1229,22 +1479,36 @@ fn get_mode() -> Mode {
     }
 }
 
-pub fn init<PINS>(
+/// The concrete type [`init`] hands back — the HAL's own `Spi`, with the pins
+/// and the remap state it keeps in its type. Named so it can be a struct field
+/// (an RTIC `Local` resource, say); the two aliases come from the GENERATED
+/// block above, so re-wiring SPI{N} updates this one with them.
+pub type Handle = Spi<pac::SPI{N}, SpiRemap, SpiPins, u8>;
+
+pub fn init(
     spi: pac::SPI{N},
-    pins: PINS,
-    afio: &mut afio::Parts,
+    pins: SpiPins,
+    {AFIO_PARAM}: &mut afio::Parts,
     clocks: &Clocks,
-) -> Spi<pac::SPI{N}, Spi{N}NoRemap, PINS, u8>
-where
-    PINS: spi::Pins<Spi{N}NoRemap>,
-{
-    Spi::spi{N}(spi, pins, &mut afio.mapr, get_mode(), CLOCK_KHZ.kHz(), *clocks)
+) -> Handle {
+    Spi::spi{N}(spi, pins, {AFIO_ARG}get_mode(), CLOCK_KHZ.kHz(), *clocks)
 }
 "#;
 
 const I2C_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
 const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
+
+// The wired pins, straight from the MCU Configurator's pin map. They live in
+// this block because re-wiring the peripheral has to update them; the `use` is
+// here too, so the alias holds whatever you do to the `use` block below.
+use stm32f1xx_hal::gpio as hal_gpio;
+
+/// The pins I2C{N} is wired to, in HAL order: (SCL, SDA).
+///
+/// `allow(dead_code)`: `init` below is yours to edit and may stop naming it.
+#[allow(dead_code)]
+pub type I2cPins = ({PINS});
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1319,35 +1583,57 @@ where
     }
 }
 
+/// The concrete type [`init`] hands back.
+///
+/// A NAMED type, not `impl Trait`: a struct field — an RTIC `Local` resource,
+/// say — has to name what it holds, and an opaque type cannot be named. The pins
+/// stay inside the HAL's `BlockingI2c<…>`, so `I2cPins` from the GENERATED block
+/// above is part of it; re-wiring I2C{N} updates this alias with it. It is still
+/// an `embedded-hal` 1.0 `I2c` for every caller.
+pub type Handle = I2cIo<BlockingI2c<pac::I2C{N}, I2cPins>>;
+
 /// Initialise I2C{N} and expose it as an `embedded-hal` 1.0 `I2c`.
-pub fn init<PINS>(
+pub fn init(
     i2c: pac::I2C{N},
-    pins: PINS,
-    afio: &mut afio::Parts,
+    pins: I2cPins,
+    {AFIO_PARAM}: &mut afio::Parts,
     clocks: &Clocks,
-) -> impl embedded_hal::i2c::I2c
-where
-    PINS: i2c::Pins<pac::I2C{N}>,
-{
-    let bus = BlockingI2c::i2c{N}(i2c, pins, &mut afio.mapr, get_mode(), *clocks, 1000, 10, 1000, 1000);
+) -> Handle {
+    let bus = BlockingI2c::i2c{N}(i2c, pins, {AFIO_ARG}get_mode(), *clocks, 1000, 10, 1000, 1000);
     I2cIo(bus)
 }
 "#;
 
-fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
+fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>, pins: &str) -> String {
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(100_000) / 1_000;
     let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
         ApiStyle::Portable => I2C_TMPL,
         ApiStyle::Native => I2C_TMPL_NATIVE,
     };
+    // Only I2C1 can be remapped (PB8/PB9), so only `i2c1` takes the AFIO.
+    let (afio_param, afio_arg) = afio_subst(n == 1);
     tmpl.replace("{N}", &n.to_string())
         .replace("{KHZ}", &khz.to_string())
+        .replace("{PINS}", pins)
+        .replace("{AFIO_PARAM}", afio_param)
+        .replace("{AFIO_ARG}", afio_arg)
 }
 
 /// Native `stm32f1xx-hal` I2C init (no eh-1.0 bridge). Returns `BlockingI2c<…>`.
 const I2C_TMPL_NATIVE: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
 const CLOCK_KHZ: u32 = {KHZ}; // <=100 Standard, >100 Fast
+
+// The wired pins, straight from the MCU Configurator's pin map. They live in
+// this block because re-wiring the peripheral has to update them; the `use` is
+// here too, so the alias holds whatever you do to the `use` block below.
+use stm32f1xx_hal::gpio as hal_gpio;
+
+/// The pins I2C{N} is wired to, in HAL order: (SCL, SDA).
+///
+/// `allow(dead_code)`: `init` below is yours to edit and may stop naming it.
+#[allow(dead_code)]
+pub type I2cPins = ({PINS});
 // <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
@@ -1369,16 +1655,19 @@ fn get_mode() -> I2cMode {
     }
 }
 
-pub fn init<PINS>(
+/// The concrete type [`init`] hands back — the HAL's own `BlockingI2c`, with the
+/// pins it keeps in its type. Named so it can be a struct field (an RTIC `Local`
+/// resource, say); `I2cPins` comes from the GENERATED block above, so re-wiring
+/// I2C{N} updates this one with it.
+pub type Handle = BlockingI2c<pac::I2C{N}, I2cPins>;
+
+pub fn init(
     i2c: pac::I2C{N},
-    pins: PINS,
-    afio: &mut afio::Parts,
+    pins: I2cPins,
+    {AFIO_PARAM}: &mut afio::Parts,
     clocks: &Clocks,
-) -> BlockingI2c<pac::I2C{N}, PINS>
-where
-    PINS: i2c::Pins<pac::I2C{N}>,
-{
-    BlockingI2c::i2c{N}(i2c, pins, &mut afio.mapr, get_mode(), *clocks, 1000, 10, 1000, 1000)
+) -> Handle {
+    BlockingI2c::i2c{N}(i2c, pins, {AFIO_ARG}get_mode(), *clocks, 1000, 10, 1000, 1000)
 }
 "#;
 

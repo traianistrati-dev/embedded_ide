@@ -76,7 +76,20 @@ pub struct BusHandle {
     pub ty: String,
 }
 
-/// Promote the USART handles in `fn_calls` from dropped temporaries to named
+/// The bus bindings the blocking generator emits, mapped to the config module
+/// that names their `Handle`.
+///
+/// `numbered` says whether the binding carries the instance number, which is
+/// also where the module name comes from (`_serial1_gps` → `usart1`). CAN does
+/// not: STM32F1 has exactly one, and its file is always `can1.rs`.
+const BUS_HANDLES: &[(&str, &str, bool)] = &[
+    ("_serial", "usart", true),
+    ("_spi", "spi", true),
+    ("_i2c", "i2c", true),
+    ("_can", "can1", false),
+];
+
+/// Promote the bus handles in `fn_calls` from dropped temporaries to named
 /// bindings, returning the rewritten block and the resources to declare.
 ///
 /// The blocking generator writes `let mut _serial1 = ...`: the underscore says
@@ -85,29 +98,35 @@ pub struct BusHandle {
 /// the peripheral becomes unreachable. Dropping the underscore and handing it to
 /// the framework is the whole fix.
 ///
-/// USART only, for now: `configs/usart{N}.rs` is the one template that exposes a
-/// named `Handle`. SPI / I2C / CAN still return `impl Trait`, which cannot be a
-/// struct field, so their handles stay dropped until they get the same alias.
+/// Every bus is covered now that `configs/{usart,spi,i2c,can1}{N}.rs` all expose
+/// a named `Handle` — SPI and I2C needed concrete pin types in the alias first,
+/// because the HAL keeps the pins inside the handle's own type.
 pub fn promote_bus_handles(fn_calls: &str) -> (String, Vec<BusHandle>) {
     let mut out = String::new();
     let mut found = Vec::new();
     for line in fn_calls.lines() {
         let promoted = (|| {
             let (indent, rest) = line.split_at(line.len() - line.trim_start().len());
-            let rest = rest.strip_prefix("let mut _serial")?;
-            let (tail, _) = rest.split_once(" =")?;
-            // `1` or `1_gps` — the instance number is the leading digits.
-            let n: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if n.is_empty() {
-                return None;
-            }
+            // SPI/I2C bind without `mut` (nothing writes through them here),
+            // USART and CAN with it.
+            let rest = rest.strip_prefix("let ")?;
+            let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+            let (name, module) = BUS_HANDLES.iter().find_map(|(pfx, stem, numbered)| {
+                let (tail, _) = rest.strip_prefix(pfx)?.split_once(" =")?;
+                let n: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if *numbered && n.is_empty() {
+                    return None;
+                }
+                // `_serial1_gps` → binding `serial1_gps`, module `usart1`.
+                Some((format!("{}{tail}", &pfx[1..]), format!("{stem}{n}")))
+            })?;
             found.push(BusHandle {
-                binding: format!("serial{tail}"),
-                ty: format!("pins::configs::usart{n}::Handle"),
+                binding: name.clone(),
+                ty: format!("pins::configs::{module}::Handle"),
             });
             // No `mut`: the value is only moved into the resource here, and
             // RTIC hands tasks a `&mut` to it anyway.
-            Some(format!("{indent}let serial{}", rest))
+            Some(format!("{indent}let {name}{}", &rest[rest.find(" =")?..]))
         })();
         out.push_str(&promoted.unwrap_or_else(|| line.to_string()));
         out.push('\n');
@@ -560,6 +579,54 @@ mod tests {
         assert_eq!(exti_vector(15), "EXTI15_10");
     }
 
+    /// Under RTIC every bus handle has to reach the tasks, and the only way in
+    /// is a `Local` field — which must name its type. `_spi1` / `_i2c1` were the
+    /// last two still dropped at the end of `#[init]`.
+    #[test]
+    fn every_bus_handle_becomes_a_named_local() {
+        let calls = "\
+    // ── Peripheral initialisation ──
+    let mut _serial1_gps = pins::configs::usart1::init(dp.USART1, (pa9_usart1_tx, pa10_usart1_rx), &mut afio, &clocks);
+    let _spi1 = pins::configs::spi1::init(dp.SPI1, (pa5_spi1_sck, pa6_spi1_miso, pa7_spi1_mosi), &mut afio, &clocks);
+    let _i2c2_imu = pins::configs::i2c2::init(dp.I2C2, (pb10_i2c2_scl, pb11_i2c2_sda), &mut afio, &clocks);
+    let mut _can = pins::configs::can1::init(dp.CAN1, (pa12_can_tx, pa11_can_rx), &mut afio);
+    let mut adc1 = adc::Adc::adc1(dp.ADC1, clocks);
+";
+        let (out, buses) = promote_bus_handles(calls);
+
+        let names: Vec<(&str, &str)> = buses
+            .iter()
+            .map(|b| (b.binding.as_str(), b.ty.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("serial1_gps", "pins::configs::usart1::Handle"),
+                ("spi1", "pins::configs::spi1::Handle"),
+                ("i2c2_imu", "pins::configs::i2c2::Handle"),
+                ("can", "pins::configs::can1::Handle"),
+            ],
+            "{out}"
+        );
+        // The underscore is gone and nothing else about the line moved.
+        assert!(
+            out.contains("    let spi1 = pins::configs::spi1::init(dp.SPI1, ("),
+            "{out}"
+        );
+        assert!(
+            out.contains("    let i2c2_imu = pins::configs::i2c2::init("),
+            "{out}"
+        );
+        // No `mut`: the handle is only moved into the resource, and RTIC hands
+        // tasks a `&mut` to it anyway.
+        assert!(!out.contains("let mut serial1_gps"), "{out}");
+        // A non-bus line is passed through untouched.
+        assert!(
+            out.contains("    let mut adc1 = adc::Adc::adc1(dp.ADC1, clocks);"),
+            "{out}"
+        );
+    }
+
     fn input(name: &str, irq: Option<Edge>) -> Pin {
         let mut p = Pin::new(1, name);
         p.selected_function = PinFunction::GpioInput;
@@ -692,6 +759,9 @@ mod tests {
     /// cd /tmp/rtic && cargo check --target thumbv7m-none-eabi
     /// ```
     ///
+    /// `RTIC_RUNTIME=blocking` / `=native` writes the same pin set on the other
+    /// runtimes, which share these config files but not their `init`.
+    ///
     /// Ignored: it writes to the filesystem and only means anything next to a
     /// toolchain. It exists because every assertion in this file checks the
     /// SHAPE of the output — only rustc checks whether it is Rust.
@@ -711,7 +781,14 @@ mod tests {
             .find(|d| d.family == "stm32f1")
             .expect("no stm32f1 definition in the registry");
         let mut mcu = def.build_mcu();
-        mcu.runtime = crate::panels::mcu_module::mcu::Runtime::Rtic;
+        // `RTIC_RUNTIME=blocking|native` writes the same project on another
+        // runtime instead — the config files' `init` differs per runtime, so the
+        // other two want a real `cargo check` of their own.
+        mcu.runtime = match std::env::var("RTIC_RUNTIME").as_deref() {
+            Ok("blocking") => crate::panels::mcu_module::mcu::Runtime::Blocking,
+            Ok("native") => crate::panels::mcu_module::mcu::Runtime::Native,
+            _ => crate::panels::mcu_module::mcu::Runtime::Rtic,
+        };
 
         // A button on its own vector, two more sharing EXTI9_5, and an LED.
         for (name, func, edge, label) in [
@@ -719,10 +796,24 @@ mod tests {
             ("PB6", PinFunction::GpioInput, Some(Edge::Rising), ""),
             ("PB7", PinFunction::GpioInput, Some(Edge::Both), ""),
             ("PC13", PinFunction::GpioOutput, None, "led"),
-            // A bus peripheral too: its init goes through
-            // `pins::configs::usart1::init(...)` inside `#[init]`.
+            // Bus peripherals too: their init goes through
+            // `pins::configs::<periph>::init(...)` inside `#[init]`, and each
+            // handle has to survive as a `Local` — the SPI/I2C ones only can
+            // because their config module names concrete pin types.
             ("PA9", PinFunction::UsartTx(1), None, ""),
             ("PA10", PinFunction::UsartRx(1), None, ""),
+            ("PA5", PinFunction::SpiSck(1), None, ""),
+            ("PA6", PinFunction::SpiMiso(1), None, ""),
+            ("PA7", PinFunction::SpiMosi(1), None, ""),
+            ("PB8", PinFunction::I2cScl(1), None, ""),
+            ("PB9", PinFunction::I2cSda(1), None, ""),
+            // The SECOND instance of each too: those HAL constructors take no
+            // AFIO register, which the config template has to know.
+            ("PB13", PinFunction::SpiSck(2), None, ""),
+            ("PB14", PinFunction::SpiMiso(2), None, ""),
+            ("PB15", PinFunction::SpiMosi(2), None, ""),
+            ("PB10", PinFunction::I2cScl(2), None, ""),
+            ("PB11", PinFunction::I2cSda(2), None, ""),
         ] {
             let num = mcu
                 .iter_all_pins()
@@ -746,12 +837,12 @@ mod tests {
         // crates — app.rs adds these from `has_cfg("io")` on every frame.
         files.cargo_toml = project_gen::ensure_peripheral_deps(
             &files.cargo_toml,
-            false,
-            true,
-            false,
-            false,
-            true,
-            true,
+            false, // CAN
+            true,  // USART
+            true,  // SPI
+            true,  // I2C
+            true,  // GPIO
+            true,  // nb
             &[],
         );
 

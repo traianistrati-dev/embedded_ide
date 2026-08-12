@@ -76,48 +76,52 @@ fn side_map(mcu: &Mcu) -> HashMap<usize, u8> {
     m
 }
 
-/// Every pin that could carry `sig` on `inst`: free (or already set to exactly
-/// this function) and not taken by another module or an earlier signal.
-fn eligible(
-    mcu: &Mcu,
-    taken: &HashSet<usize>,
-    sig: ModuleSignal,
-    inst: u8,
-) -> Vec<usize> {
-    let want = sig.pin_function(inst);
+/// Every pin that could carry `want`: free (or already set to exactly this
+/// function) and not taken by another module or an earlier signal.
+fn eligible_for(mcu: &Mcu, taken: &HashSet<usize>, want: &PinFunction) -> Vec<usize> {
     mcu.iter_all_pins()
         .filter(|p| !p.reserved && !taken.contains(&p.number))
         .filter(|p| {
-            p.available_functions.contains(&want)
-                && (p.selected_function == want || p.selected_function == PinFunction::Unset)
+            p.available_functions.contains(want)
+                && (p.selected_function == *want || p.selected_function == PinFunction::Unset)
         })
         .map(|p| p.number)
         .take(MAX_PER_SIGNAL)
         .collect()
 }
 
+/// [`eligible_for`], addressed the way a module names its signals.
+fn eligible(mcu: &Mcu, taken: &HashSet<usize>, sig: ModuleSignal, inst: u8) -> Vec<usize> {
+    eligible_for(mcu, taken, &sig.pin_function(inst))
+}
+
+/// Rank a candidate set of `(function the pin is wanted for, pin number)`.
+///
+/// It is keyed on the FUNCTION rather than on a module signal so the same
+/// ranking serves both callers: a whole module's wiring, and the partners of a
+/// single pin the user assigned by hand.
 fn score(
     mcu: &Mcu,
     inst: u8,
-    chosen: &[(ModuleSignal, usize)],
+    chosen: &[(PinFunction, usize)],
     sides: &HashMap<usize, u8>,
 ) -> Score {
     let mut unassigned = 0;
     let mut ports: HashSet<&str> = HashSet::new();
     let mut side_set: HashSet<u8> = HashSet::new();
     let (mut lo, mut hi) = (usize::MAX, 0usize);
-    for &(sig, num) in chosen {
-        if let Some(pin) = mcu.find_pin(num) {
-            if pin.selected_function != sig.pin_function(inst) {
+    for (want, num) in chosen {
+        if let Some(pin) = mcu.find_pin(*num) {
+            if pin.selected_function != *want {
                 unassigned += 1;
             }
             ports.insert(port_of(&pin.name));
         }
-        if let Some(&s) = sides.get(&num) {
+        if let Some(&s) = sides.get(num) {
             side_set.insert(s);
         }
-        lo = lo.min(num);
-        hi = hi.max(num);
+        lo = lo.min(*num);
+        hi = hi.max(*num);
     }
     Score {
         unassigned,
@@ -126,6 +130,20 @@ fn score(
         spread: hi.saturating_sub(lo),
         instance: inst,
     }
+}
+
+/// `score` for a set named by module signals.
+fn score_signals(
+    mcu: &Mcu,
+    inst: u8,
+    chosen: &[(ModuleSignal, usize)],
+    sides: &HashMap<usize, u8>,
+) -> Score {
+    let by_fn: Vec<(PinFunction, usize)> = chosen
+        .iter()
+        .map(|&(sig, num)| (sig.pin_function(inst), num))
+        .collect();
+    score(mcu, inst, &by_fn, sides)
 }
 
 /// All distinct-pin combinations of `lists` (one pin per required signal), up to
@@ -206,7 +224,7 @@ pub fn pick_pins(
                     .min_by_key(|&num| {
                         let mut trial = chosen.clone();
                         trial.push((sig, num));
-                        score(mcu, inst, &trial, &sides)
+                        score_signals(mcu, inst, &trial, &sides)
                     });
                 if let Some(num) = pick {
                     taken.insert(num);
@@ -214,7 +232,7 @@ pub fn pick_pins(
                 }
             }
 
-            let sc = score(mcu, inst, &chosen, &sides);
+            let sc = score_signals(mcu, inst, &chosen, &sides);
             let better = match &best {
                 None => true,
                 Some((bs, _, _)) => sc < *bs,
@@ -226,6 +244,72 @@ pub fn pick_pins(
     }
 
     best.map(|(_, inst, chosen)| (inst, chosen))
+}
+
+/// Pins for the partner signals of a pin the user assigned BY HAND — the SPI
+/// MISO/MOSI that go with an SCK, the USART RX that goes with a TX.
+///
+/// Same ranking as [`pick_pins`], with the user's own pin pinned into the set
+/// and counted by it. That is what keeps a peripheral on ONE pad group: on an
+/// STM32F1 SPI1 is either PA5/PA6/PA7 or the remapped PB3/PB4/PB5, never a mix
+/// (one AFIO bit moves all of them), and a mixed set is a `ports` of 2 against
+/// the matching set's 1 — so wiring PA5 draws in PA6/PA7, and wiring PB3 draws
+/// in PB4/PB5. Where both groups sit on one port (I2C1's PB6/PB7 vs PB8/PB9)
+/// `spread` separates them instead.
+///
+/// This is a ranking, not a hardware rule: the pin model has no notion of a
+/// remap group (a definition only lists which functions a pin can carry), so
+/// geometry stands in for it. It agrees with the F1 groups on every peripheral
+/// this IDE generates; a chip whose alternate pads interleave would need real
+/// group data.
+///
+/// The partners are chosen TOGETHER (see [`walk`]) rather than one after the
+/// other, so the first one cannot take the only pin the second could have used.
+pub fn pick_partners(
+    mcu: &Mcu,
+    source_pin: usize,
+    func: &PinFunction,
+) -> Vec<(PinFunction, usize)> {
+    let partners = crate::panels::mcu_module::mcu::logic::partner_functions(func);
+    if partners.is_empty() {
+        return Vec::new();
+    }
+    let sides = side_map(mcu);
+    let mut taken: HashSet<usize> = HashSet::new();
+    taken.insert(source_pin);
+
+    let lists: Vec<Vec<usize>> = partners
+        .iter()
+        .map(|want| eligible_for(mcu, &taken, want))
+        .collect();
+    // A partner with nowhere to go is dropped, not a reason to wire nothing:
+    // the old first-fit assigned what it could, and so does this.
+    let present: Vec<usize> = (0..lists.len()).filter(|&i| !lists[i].is_empty()).collect();
+    if present.is_empty() {
+        return Vec::new();
+    }
+    let lists: Vec<Vec<usize>> = present.iter().map(|&i| lists[i].clone()).collect();
+
+    let mut combos: Vec<Vec<usize>> = Vec::new();
+    walk(&lists, 0, &mut Vec::new(), &mut combos, MAX_COMBOS);
+
+    combos
+        .into_iter()
+        .map(|combo| {
+            present
+                .iter()
+                .map(|&i| partners[i].clone())
+                .zip(combo)
+                .collect::<Vec<(PinFunction, usize)>>()
+        })
+        .min_by_key(|chosen| {
+            let mut with_source = chosen.clone();
+            with_source.push((func.clone(), source_pin));
+            // The instance tie-break is meaningless here (the instance is the
+            // user's, already fixed by `func`), so any constant will do.
+            score(mcu, 0, &with_source, &sides)
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -285,6 +369,124 @@ mod tests {
         assert_eq!(mcu.modules[0].instance(), 1);
         assert_eq!(mcu.modules[1].instance(), 2);
         assert_eq!(wired(&mcu, 1), vec![25, 26, 27, 28]);
+    }
+
+    /// Assign `func` to the pin NAMED `name`, the way a click on the Pins tab
+    /// does — partners included.
+    fn assign(mcu: &mut Mcu, name: &str, func: PinFunction) {
+        let num = mcu
+            .iter_all_pins()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no pin {name} on the mock chip"))
+            .number;
+        mcu.apply_pin_function(num, func);
+    }
+
+    /// The names carrying each of `funcs`, in that order. `None` for a function
+    /// nothing holds, so a missing partner fails the assertion visibly.
+    fn holders(mcu: &Mcu, funcs: &[PinFunction]) -> Vec<Option<String>> {
+        funcs
+            .iter()
+            .map(|f| {
+                mcu.iter_all_pins()
+                    .find(|p| p.selected_function == *f)
+                    .map(|p| p.name.clone())
+            })
+            .collect()
+    }
+
+    fn spi1(mcu: &Mcu) -> Vec<Option<String>> {
+        holders(
+            mcu,
+            &[
+                PinFunction::SpiSck(1),
+                PinFunction::SpiMiso(1),
+                PinFunction::SpiMosi(1),
+            ],
+        )
+    }
+
+    fn names(v: &[Option<String>]) -> Vec<&str> {
+        v.iter().map(|o| o.as_deref().unwrap_or("<none>")).collect()
+    }
+
+    /// The reported bug: assigning ONE SPI1 signal by hand answered PA5 (the
+    /// default SCK) with PB4/PB5 (the REMAP MISO/MOSI). One AFIO bit moves all
+    /// of SPI1's pins together, so that set does not exist in hardware, no
+    /// `spi::Pins` impl accepts it, and the generated project did not compile.
+    /// Whichever group the user's own pin is in, the partners must follow it.
+    #[test]
+    fn a_hand_assigned_signal_keeps_its_partners_in_one_pad_group() {
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PA5", PinFunction::SpiSck(1));
+        assert_eq!(
+            names(&spi1(&mcu)),
+            ["PA5", "PA6", "PA7"],
+            "the DEFAULT set must stay whole"
+        );
+
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PB3", PinFunction::SpiSck(1));
+        assert_eq!(
+            names(&spi1(&mcu)),
+            ["PB3", "PB4", "PB5"],
+            "the REMAP set must stay whole"
+        );
+
+        // Reached from a partner signal rather than the clock, it holds too.
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PA7", PinFunction::SpiMosi(1));
+        assert_eq!(names(&spi1(&mcu)), ["PA5", "PA6", "PA7"]);
+    }
+
+    /// I2C1's two groups (PB6/PB7 and the PB8/PB9 remap) share a port, so the
+    /// `ports` criterion cannot separate them — `spread` does.
+    #[test]
+    fn i2c1_partners_follow_the_group_the_user_picked() {
+        let scl_sda = [PinFunction::I2cScl(1), PinFunction::I2cSda(1)];
+
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PB6", PinFunction::I2cScl(1));
+        assert_eq!(names(&holders(&mcu, &scl_sda)), ["PB6", "PB7"]);
+
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PB8", PinFunction::I2cScl(1));
+        assert_eq!(names(&holders(&mcu, &scl_sda)), ["PB8", "PB9"]);
+    }
+
+    /// USART1 is modelled with ONE pin set on this chip (PA9/PA10 — the remap to
+    /// PB6/PB7 is not in the definition), so there is no group to get wrong;
+    /// this pins down that the partner is still found.
+    #[test]
+    fn usart1_still_pairs_tx_with_rx() {
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PA9", PinFunction::UsartTx(1));
+        assert_eq!(
+            names(&holders(
+                &mcu,
+                &[PinFunction::UsartTx(1), PinFunction::UsartRx(1)]
+            )),
+            ["PA9", "PA10"]
+        );
+    }
+
+    /// A partner already on the pin the user wants is REUSED, not duplicated.
+    /// First-fit skipped any non-Unset pin, so it would hand the same function
+    /// to a second pin — two SPI1 MISOs, and a `pins::configs` call naming only
+    /// one of them.
+    #[test]
+    fn an_already_assigned_partner_is_not_duplicated() {
+        let mut mcu = create_stm32f103c8tx();
+        assign(&mut mcu, "PA6", PinFunction::SpiMiso(1));
+        assign(&mut mcu, "PA5", PinFunction::SpiSck(1));
+        assert_eq!(names(&spi1(&mcu)), ["PA5", "PA6", "PA7"]);
+        assert_eq!(
+            mcu.iter_all_pins()
+                .filter(|p| p.selected_function == PinFunction::SpiMiso(1))
+                .count(),
+            1,
+            "MISO must sit on exactly one pin"
+        );
     }
 
     /// Pins the user already assigned to the exact function outrank everything

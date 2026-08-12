@@ -826,6 +826,291 @@ mod tests {
         assert_eq!(i2c1.matches("pub fn init").count(), 1);
     }
 
+    /// Pins wired straight to the generator, bypassing `apply_pin_function`.
+    ///
+    /// Not to dodge the auto-wiring (that picks one pad group correctly now —
+    /// see `spi1_config_follows_the_pin_the_user_assigned`), but to reach states
+    /// it will never produce: instance 2, and a bus with a signal left unwired.
+    fn bus_configs(wiring: &[(&str, PinFunction)]) -> Vec<(String, String)> {
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use std::collections::BTreeMap;
+
+        let pins: Vec<Pin> = wiring
+            .iter()
+            .map(|(name, f)| {
+                let mut p = Pin::new(1, name);
+                p.selected_function = f.clone();
+                p
+            })
+            .collect();
+        let refs: Vec<&Pin> = pins.iter().collect();
+        super::stm32::config_files(
+            &refs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &crate::panels::mcu_module::clock::ClockConfig::None,
+            true,
+        )
+    }
+
+    /// SPI and I2C keep their pins inside the handle's own HAL type, so naming
+    /// what `init` returns means naming the pins. The aliases that do it live in
+    /// the GENERATED block — only that block is re-spliced when the user rewires
+    /// a peripheral, and a stale pin type is a type error, not a stale comment.
+    #[test]
+    fn spi_and_i2c_name_their_handle_with_concrete_pin_types() {
+        // SPI1 on its default pins + I2C1 on PB6/PB7.
+        let cfgs = bus_configs(&[
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+        ]);
+        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
+        let i2c1 = &cfgs.iter().find(|(n, _)| n == "i2c1.rs").unwrap().1;
+
+        // The pin types are the ones the `into_*` calls in main.rs produce.
+        assert_contains_substring(spi1, "hal_gpio::PA5<hal_gpio::Alternate>,");
+        assert_contains_substring(spi1, "hal_gpio::PA6<hal_gpio::Input<hal_gpio::Floating>>,");
+        assert_contains_substring(spi1, "hal_gpio::PA7<hal_gpio::Alternate>,");
+        assert_contains_substring(spi1, "pub type SpiRemap = hal_spi::Spi1NoRemap;");
+        assert_contains_substring(
+            spi1,
+            "pub type Handle = SpiBusIo<Spi<pac::SPI1, SpiRemap, SpiPins, u8>>;",
+        );
+        assert_contains_substring(spi1, ") -> Handle {");
+        // No `impl Trait` left: an RTIC resource cannot name one.
+        assert_not_contains_substring(spi1, "-> impl embedded_hal::spi::SpiBus");
+
+        assert_contains_substring(
+            i2c1,
+            "hal_gpio::PB6<hal_gpio::Alternate<hal_gpio::OpenDrain>>,",
+        );
+        assert_contains_substring(
+            i2c1,
+            "hal_gpio::PB7<hal_gpio::Alternate<hal_gpio::OpenDrain>>,",
+        );
+        assert_contains_substring(
+            i2c1,
+            "pub type Handle = I2cIo<BlockingI2c<pac::I2C1, I2cPins>>;",
+        );
+        assert_not_contains_substring(i2c1, "-> impl embedded_hal::i2c::I2c");
+
+        // Both aliases sit INSIDE the auto-updated block.
+        for (body, alias) in [(spi1, "pub type SpiPins"), (i2c1, "pub type I2cPins")] {
+            let gen_end = body.find(GEN_END).expect("marker");
+            assert!(
+                body.find(alias).expect("alias") < gen_end,
+                "{alias} must be regenerated with the pin map:\n{body}"
+            );
+        }
+    }
+
+    /// PA15/PB3/PB4 come out of reset as the JTAG port — typed
+    /// `Pin<'B', 3, Debugger>`, a state with NO `into_*` method — so a project
+    /// touching any of them did not compile at all. `disable_jtag` is the way
+    /// out; it takes all three at once and hands them back as plain pins.
+    #[test]
+    fn jtag_pins_are_released_before_they_are_configured() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use std::collections::BTreeMap;
+
+        let section = |pins: &[(&str, PinFunction)]| {
+            let owned: Vec<Pin> = pins
+                .iter()
+                .map(|(name, f)| {
+                    let mut p = Pin::new(1, name);
+                    p.selected_function = f.clone();
+                    p
+                })
+                .collect();
+            let refs: Vec<&Pin> = owned.iter().collect();
+            super::stm32::make_generated_section(
+                "STM32F103",
+                &refs,
+                &ClockConfig::None,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                true,
+                "",
+            )
+        };
+
+        // One JTAG pin in use pulls the whole call in, and the pins the project
+        // does not use are underscored rather than left looking forgotten.
+        // PA15/PB4 are listed as Unset because the call needs all three to EXIST
+        // on the chip — a definition missing one gets no `disable_jtag` at all.
+        let code = section(&[
+            ("PB3", PinFunction::GpioOutput),
+            ("PA15", PinFunction::Unset),
+            ("PB4", PinFunction::Unset),
+        ]);
+        assert_contains_substring(
+            &code,
+            "let (_pa15, pb3, _pb4) = afio.mapr.disable_jtag(gpioa.pa15, gpiob.pb3, gpiob.pb4);",
+        );
+        // The pin now binds from that value, not from the port it left.
+        assert_contains_substring(
+            &code,
+            "let mut pb3_out = pb3.into_push_pull_output(&mut gpiob.crl);",
+        );
+        assert_not_contains_substring(&code, "gpiob.pb3.into_");
+        // Port A is split only to hand PA15 over — nothing writes through it.
+        assert_contains_substring(&code, "let gpioa = dp.GPIOA.split();");
+        assert_contains_substring(&code, "let mut gpiob = dp.GPIOB.split();");
+        // `disable_jtag` lives on the AFIO, so a project that needed no AFIO
+        // before needs one now.
+        assert_contains_substring(&code, "let mut afio = dp.AFIO.constrain();");
+
+        // A project clear of those three pins is untouched by any of it.
+        let code = section(&[
+            ("PC13", PinFunction::GpioOutput),
+            ("PA15", PinFunction::Unset),
+            ("PB3", PinFunction::Unset),
+            ("PB4", PinFunction::Unset),
+        ]);
+        assert_not_contains_substring(&code, "disable_jtag");
+        assert_not_contains_substring(&code, "dp.GPIOA.split()");
+    }
+
+    /// End to end, through the click path the user actually takes: assigning one
+    /// SPI1 signal auto-wires the partners, and the config module's pin types
+    /// must be the group that pin belongs to. This used to come out as (PA5,
+    /// PB4, PB5) — a set the hardware cannot form and rustc rejects.
+    #[test]
+    fn spi1_config_follows_the_pin_the_user_assigned() {
+        use super::super::mock_mcu;
+
+        for (pin, group) in [
+            (15, ["PA5", "PA6", "PA7"]), // the default set
+            (39, ["PB3", "PB4", "PB5"]), // the remap set
+        ] {
+            let mut mcu = mock_mcu::create_stm32f103c8tx();
+            mcu.apply_pin_function(pin, PinFunction::SpiSck(1));
+            let cfgs = mcu.config_files();
+            let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
+            for name in group {
+                assert_contains_substring(spi1, &format!("hal_gpio::{name}<"));
+            }
+        }
+    }
+
+    /// SPI1 on PB3/PB4/PB5 is the SAME peripheral through different pads, and
+    /// the HAL takes the remap register bit from the type. Naming NoRemap there
+    /// would configure the pins the project does not use.
+    #[test]
+    fn spi1_on_its_alternate_pins_names_the_remap_type() {
+        let cfgs = bus_configs(&[
+            ("PB3", PinFunction::SpiSck(1)),
+            ("PB4", PinFunction::SpiMiso(1)),
+            ("PB5", PinFunction::SpiMosi(1)),
+        ]);
+        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
+        assert_contains_substring(spi1, "pub type SpiRemap = hal_spi::Spi1Remap;");
+        assert_contains_substring(spi1, "hal_gpio::PB3<hal_gpio::Alternate>,");
+
+        // SPI2's own pins are on port B too — that is not a remap.
+        let cfgs = bus_configs(&[
+            ("PB13", PinFunction::SpiSck(2)),
+            ("PB14", PinFunction::SpiMiso(2)),
+            ("PB15", PinFunction::SpiMosi(2)),
+        ]);
+        let spi2 = &cfgs.iter().find(|(n, _)| n == "spi2.rs").unwrap().1;
+        assert_contains_substring(spi2, "pub type SpiRemap = hal_spi::Spi2NoRemap;");
+    }
+
+    /// In stm32f1xx-hal 0.10 only the FIRST SPI/I2C takes the AFIO remap
+    /// register: `Spi::spi2` / `BlockingI2c::i2c2` have no `mapr` parameter, so
+    /// passing one is an arity error and NO project on instance 2 ever built.
+    /// main.rs's call shape is the same for every instance, so the `init`
+    /// parameter stays — underscored where the HAL cannot take it.
+    #[test]
+    fn only_the_first_spi_and_i2c_pass_the_afio_register() {
+        let one = bus_configs(&[
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+        ]);
+        let two = bus_configs(&[
+            ("PB13", PinFunction::SpiSck(2)),
+            ("PB14", PinFunction::SpiMiso(2)),
+            ("PB15", PinFunction::SpiMosi(2)),
+            ("PB10", PinFunction::I2cScl(2)),
+            ("PB11", PinFunction::I2cSda(2)),
+        ]);
+        let body = |files: &[(String, String)], name: &str| {
+            files
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .1
+                .clone()
+        };
+
+        let spi1 = body(&one, "spi1.rs");
+        assert_contains_substring(&spi1, "Spi::spi1(spi, pins, &mut afio.mapr, get_mode()");
+        assert_contains_substring(&spi1, "    afio: &mut afio::Parts,");
+        let i2c1 = body(&one, "i2c1.rs");
+        assert_contains_substring(
+            &i2c1,
+            "BlockingI2c::i2c1(i2c, pins, &mut afio.mapr, get_mode()",
+        );
+
+        let spi2 = body(&two, "spi2.rs");
+        assert_contains_substring(&spi2, "Spi::spi2(spi, pins, get_mode()");
+        // The parameter is still there — main.rs passes it — but unused.
+        assert_contains_substring(&spi2, "    _afio: &mut afio::Parts,");
+        assert_not_contains_substring(&spi2, "afio.mapr");
+        let i2c2 = body(&two, "i2c2.rs");
+        assert_contains_substring(&i2c2, "BlockingI2c::i2c2(i2c, pins, get_mode()");
+        assert_contains_substring(&i2c2, "    _afio: &mut afio::Parts,");
+        assert_not_contains_substring(&i2c2, "afio.mapr");
+    }
+
+    /// A signal the user never wired gets the HAL's own placeholder — in the
+    /// alias AND in main.rs's call, which used to pass a binding (`_miso1`) that
+    /// nothing declared.
+    #[test]
+    fn an_unwired_spi_signal_becomes_the_hal_placeholder() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use std::collections::BTreeMap;
+
+        // SCK alone — no MISO, no MOSI.
+        let mut sck = Pin::new(1, "PA5");
+        sck.selected_function = PinFunction::SpiSck(1);
+        let pins: Vec<&Pin> = vec![&sck];
+
+        let code = super::stm32::make_generated_section(
+            "STM32F103",
+            &pins,
+            &ClockConfig::None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            true,
+            "",
+        );
+        assert_contains_substring(&code, "stm32f1xx_hal::spi::NoMiso");
+        assert_not_contains_substring(&code, "_miso1");
+
+        let cfgs = bus_configs(&[("PA5", PinFunction::SpiSck(1))]);
+        let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;
+        assert_contains_substring(spi1, "hal_spi::NoMiso,");
+        assert_contains_substring(spi1, "hal_spi::NoMosi,");
+    }
+
     #[test]
     fn test_can_emits_config_file_and_call() {
         use super::super::mock_mcu;

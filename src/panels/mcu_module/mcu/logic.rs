@@ -1,6 +1,7 @@
 //! MCU business logic — partner assignment, state management, pin lookups.
 
 use super::model::Mcu;
+use crate::panels::mcu_module::modules::autowire;
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 
@@ -750,26 +751,21 @@ impl Mcu {
             .chain(self.right_pins.iter_mut())
     }
 
-    /// Auto-assigns partner functions when `source_pin` receives `func`.
-    /// For each partner function defined by `partner_functions()`, finds the
-    /// first Unset pin (other than `source_pin`) that lists it as available
-    /// and assigns it automatically.
+    /// Auto-assigns partner functions when `source_pin` receives `func`: the
+    /// MISO/MOSI that go with an SCK, the RX that goes with a TX.
+    ///
+    /// The pins come from the same scoring a whole module's wiring goes through
+    /// ([`autowire::pick_partners`]) — which is what keeps the peripheral on ONE
+    /// pad group. Picking the first available pin instead (what this did until
+    /// 2026-08-12) answered PA5 SCK with PB4/PB5, mixing the F1 SPI1 default set
+    /// with its remap set: a combination one AFIO bit cannot express, that no
+    /// `stm32f1xx_hal::spi::Pins` impl accepts, and that therefore generated a
+    /// project which could not compile.
     pub fn auto_assign_partners(&mut self, source_pin: usize, func: &PinFunction) {
-        for partner in partner_functions(func) {
-            // Resolve the target pin number before any mutable borrow
-            let target = self
-                .iter_all_pins()
-                .find(|p| {
-                    p.number != source_pin
-                        && p.selected_function == PinFunction::Unset
-                        && p.available_functions.contains(&partner)
-                })
-                .map(|p| p.number);
-
-            if let Some(num) = target {
-                if let Some(pin) = self.find_pin_mut(num) {
-                    pin.selected_function = partner;
-                }
+        let picks = autowire::pick_partners(self, source_pin, func);
+        for (partner, num) in picks {
+            if let Some(pin) = self.find_pin_mut(num) {
+                pin.selected_function = partner;
             }
         }
     }
