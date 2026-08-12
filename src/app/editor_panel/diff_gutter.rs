@@ -9,7 +9,7 @@
 //! the bars sit under the breakpoint dot, so clicking to set a breakpoint
 //! reverted the hunk; revert now lives in the Git tab's diff view (+ Ctrl+Z).
 
-use crate::app::{AppIde, ProjectFileId};
+use crate::app::AppIde;
 use crate::git::{BaselineFetch, DiffHunk, compute_hunks, fetch_baseline};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
@@ -47,20 +47,6 @@ impl Default for DiffGutter {
             computed_hash: 0,
         }
     }
-}
-
-/// The repo-relative git path of an editor file, `None` for files that don't
-/// live in the project directory.
-fn git_path_of(id: ProjectFileId, user_files: &[(String, String)]) -> Option<String> {
-    Some(match id {
-        ProjectFileId::MainRs => "src/main.rs".to_owned(),
-        ProjectFileId::UserFile(i) => user_files.get(i)?.0.clone(),
-        ProjectFileId::CargoToml => "Cargo.toml".to_owned(),
-        ProjectFileId::CargoConfig => ".cargo/config.toml".to_owned(),
-        ProjectFileId::MemoryX => "memory.x".to_owned(),
-        ProjectFileId::BuildRs => "build.rs".to_owned(),
-        ProjectFileId::GitIgnore => ".gitignore".to_owned(),
-    })
 }
 
 /// Char index of every line start (line 0 included).
@@ -110,7 +96,8 @@ impl AppIde {
     pub(super) fn tick_diff_gutter(&mut self, display_code: &str) {
         let (Some(root), Some(path)) = (
             self.project_dir.clone(),
-            git_path_of(self.selected_file, &self.project_tree.user_src_files),
+            self.selected_file
+                .rel_path(&self.project_tree.user_src_files),
         ) else {
             self.diff_gutter.hunks.clear();
             self.diff_gutter.computed_hash = 0;

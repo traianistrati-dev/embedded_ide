@@ -32,8 +32,13 @@ pub(super) struct ProjectPanelSignals {
     pub add_to_workspace: Option<String>,
     /// A member library the user asked to remove from the workspace (keep files).
     pub detach_from_workspace: Option<String>,
-    /// `user_src_files` index to show READ-ONLY in the Reference tab.
-    pub open_reference: Option<usize>,
+    /// Project-root-relative path of the file to show in the Reference tab.
+    ///
+    /// A PATH, not a `user_src_files` index: fixed project files (Cargo.toml,
+    /// memory.x, …) have no index at all, and an index would go stale the
+    /// moment a file above it is deleted. `AppIde::reference_file` stores a
+    /// path for the same reason.
+    pub open_reference: Option<String>,
 }
 
 impl AppIde {
@@ -134,7 +139,7 @@ impl AppIde {
         let mut library_action: Option<(String, bool)> = None;
         let mut add_to_workspace: Option<String> = None;
         let mut detach_from_workspace: Option<String> = None;
-        let mut open_reference: Option<usize> = None;
+        let mut open_reference: Option<String> = None;
 
         egui::Panel::right("project_tree")
             .resizable(true)

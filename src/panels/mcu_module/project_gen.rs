@@ -587,6 +587,38 @@ pub fn ensure_async_deps(
         sources,
     );
 
+    // esp-rtos hard-requires `esp-hal/unstable`: it pulls esp-hal with
+    // `requires-unstable`, and esp-hal's build script then ABORTS unless the
+    // top-level crate enables `unstable` too ("The `unstable` feature is
+    // required by a dependent crate but is not enabled"). Before that abort,
+    // rust-analyzer already reports the unstable-gated peripherals as private —
+    // `field TIMG0 of Peripherals is private` — while stable GPIO resolves fine,
+    // which is what a project missing this feature looks like in the editor.
+    //
+    // Add-only, unlike the STM32 toggle below: the ESP template ships `unstable`
+    // anyway, and user code may reach for other unstable esp-hal APIs, so
+    // leaving Async must not strip it back out.
+    if is_esp
+        && needs_async
+        && !s
+            .lines()
+            .any(|l| is_dep_line(l, "esp-hal") && l.contains("\"unstable\""))
+    {
+        let mut out: Vec<String> = Vec::new();
+        for line in s.lines() {
+            if is_dep_line(line, "esp-hal") && line.contains("features = [") {
+                out.push(toggle_hal_feature(line, "unstable", true));
+            } else {
+                out.push(line.to_string());
+            }
+        }
+        let mut joined = out.join("\n");
+        if s.ends_with('\n') {
+            joined.push('\n');
+        }
+        s = joined;
+    }
+
     // Toggle the `time-driver-any` HAL feature inside the `embassy-stm32`
     // `features = [ … ]` array. Skipped on ESP, where esp-rtos IS the time
     // driver and no `embassy-stm32` line exists.
@@ -2175,6 +2207,16 @@ fn f() {}
             "esp-rtos is the time driver:\n{with}"
         );
         assert!(with.contains("embassy-time = \"0.5\""), "{with}");
+        // esp-rtos requires esp-hal/unstable — without it esp-hal's build script
+        // aborts and RA calls TIMG0 / SW_INTERRUPT private.
+        assert!(
+            with.contains("features = [\"unstable\", \"esp32c3\"]"),
+            "unstable added to the esp-hal line:\n{with}"
+        );
+        assert!(
+            !with.contains("esp-hal-embassy"),
+            "esp-hal-embassy is not resolvable on esp-hal 1.1:\n{with}"
+        );
 
         // Idempotent, and leaving Async takes exactly what it added back out.
         assert_eq!(

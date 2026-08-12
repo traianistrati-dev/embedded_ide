@@ -713,7 +713,7 @@ pub fn show_project_tree(
     // Set to a member lib's dir when its "Detach" button is clicked.
     detach_from_workspace: &mut Option<String>,
     // `user_src_files` index of a file to open READ-ONLY in the Reference tab.
-    open_reference: &mut Option<usize>,
+    open_reference: &mut Option<String>,
 ) {
     // Diagnostic status of the user files (cargo + rust-analyzer), so
     // `user_file_row` can flag them: `true` = has ERRORS (red icon), `false` =
@@ -840,6 +840,8 @@ pub fn show_project_tree(
                     "config.toml",
                     ProjectFileId::CargoConfig,
                     selected,
+                    open_reference,
+                    project_dir,
                     build_result,
                     lsp_state,
                 );
@@ -861,6 +863,8 @@ pub fn show_project_tree(
                     "main.rs",
                     ProjectFileId::MainRs,
                     selected,
+                    open_reference,
+                    project_dir,
                     build_result,
                     lsp_state,
                 );
@@ -998,6 +1002,8 @@ pub fn show_project_tree(
                 ".gitignore",
                 ProjectFileId::GitIgnore,
                 selected,
+                open_reference,
+                project_dir,
                 build_result,
                 lsp_state,
             );
@@ -1008,6 +1014,8 @@ pub fn show_project_tree(
                     "build.rs",
                     ProjectFileId::BuildRs,
                     selected,
+                    open_reference,
+                    project_dir,
                     build_result,
                     lsp_state,
                 );
@@ -1018,6 +1026,8 @@ pub fn show_project_tree(
                 "Cargo.toml",
                 ProjectFileId::CargoToml,
                 selected,
+                open_reference,
+                project_dir,
                 build_result,
                 lsp_state,
             );
@@ -1028,6 +1038,8 @@ pub fn show_project_tree(
                     "memory.x",
                     ProjectFileId::MemoryX,
                     selected,
+                    open_reference,
+                    project_dir,
                     build_result,
                     lsp_state,
                 );
@@ -1580,7 +1592,7 @@ fn render_tree_node(
     cancel_rename_file: &mut bool,
     to_delete: &mut Option<usize>,
     to_duplicate: &mut Option<usize>,
-    open_reference: &mut Option<usize>,
+    open_reference: &mut Option<String>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     project_dir: Option<&std::path::Path>,
@@ -1965,6 +1977,9 @@ fn file_row(
     name: &str,
     id: ProjectFileId,
     selected: &mut ProjectFileId,
+    open_reference: &mut Option<String>,
+    // The saved project folder, for the Show-in-Explorer / Copy-path entries.
+    project_dir: Option<&std::path::Path>,
     build_result: Option<&build::BuildResult>,
     lsp_state: Option<&lsp::LspState>,
 ) {
@@ -1993,6 +2008,28 @@ fn file_row(
         );
         if resp.clicked() {
             *selected = id;
+        }
+        // The fixed files have no Rename/Delete (codegen owns them), but they
+        // are just as worth consulting side-by-side — or opening in a file
+        // manager — as a user file: reading memory.x or Cargo.toml while
+        // editing main.rs is the common case. `file_row` only ever renders
+        // fixed ids, so the path always resolves.
+        if let Some(rel) = id.fixed_rel_path() {
+            resp.context_menu(|ui| {
+                if ui
+                    .button(menu_label(ph::COLUMNS, "Open beside editor", ICON_VIEW))
+                    .on_hover_text(
+                        "Show this file READ-ONLY in the Reference tab, so you can consult it \
+                         while editing another one",
+                    )
+                    .clicked()
+                {
+                    *open_reference = Some(rel.to_owned());
+                    ui.close();
+                }
+                ui.separator();
+                reveal_menu_items(ui, project_dir, rel);
+            });
         }
         if let Some(cargo_path) = id.cargo_path() {
             let err = build_result.is_some_and(|r| r.has_errors_in(cargo_path))
@@ -2037,7 +2074,7 @@ fn user_file_row(
     // file list). Offered only for files that are safe to rename/delete — a
     // copy inside `pins/` would be pruned by the next pin sync.
     to_duplicate: &mut Option<usize>,
-    open_reference: &mut Option<usize>,
+    open_reference: &mut Option<String>,
     can_duplicate: bool,
     // Project-root-relative path of this file + the saved project folder, for
     // the Show-in-Explorer / Copy-path entries.
@@ -2156,7 +2193,7 @@ fn user_file_row(
                 )
                 .clicked()
             {
-                *open_reference = Some(idx);
+                *open_reference = Some(rel_path.to_owned());
                 ui.close();
             }
             ui.separator();

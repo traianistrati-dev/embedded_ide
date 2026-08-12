@@ -120,6 +120,33 @@ impl ProjectFileId {
             _ => None,
         }
     }
+
+    /// Project-root-relative path of a FIXED project file. `None` for
+    /// `UserFile`, whose path is not knowable from the id alone — it lives in
+    /// `user_src_files` (see [`Self::rel_path`]).
+    ///
+    /// Unlike [`Self::cargo_path`] this covers EVERY fixed file, not just the
+    /// three rustc reports diagnostics for.
+    pub fn fixed_rel_path(self) -> Option<&'static str> {
+        Some(match self {
+            Self::MainRs => "src/main.rs",
+            Self::CargoToml => "Cargo.toml",
+            Self::CargoConfig => ".cargo/config.toml",
+            Self::MemoryX => "memory.x",
+            Self::BuildRs => "build.rs",
+            Self::GitIgnore => ".gitignore",
+            Self::UserFile(_) => return None,
+        })
+    }
+
+    /// Project-root-relative path of ANY editor file. `None` only for a
+    /// `UserFile` index that no longer exists (deleted since it was captured).
+    pub fn rel_path(self, user_files: &[(String, String)]) -> Option<String> {
+        match self {
+            Self::UserFile(i) => user_files.get(i).map(|(p, _)| p.clone()),
+            _ => self.fixed_rel_path().map(str::to_owned),
+        }
+    }
 }
 
 /// Translucent band colour for a clicked diagnostic's line in the editor, keyed
@@ -3122,12 +3149,8 @@ impl eframe::App for AppIde {
         self.poll_workspace_health();
         // "Open beside editor" → show the file READ-ONLY in the Reference tab.
         // The editor keeps whatever it had open, which is the whole point.
-        if let Some(idx) = signals.open_reference {
-            self.reference_file = self
-                .project_tree
-                .user_src_files
-                .get(idx)
-                .map(|(p, _)| p.clone());
+        if let Some(path) = signals.open_reference {
+            self.reference_file = Some(path);
             self.active_tab = McuTab::Reference;
             // The tab lives in the middle zone — reopen it if it was collapsed
             // away, or the file would silently go nowhere.
