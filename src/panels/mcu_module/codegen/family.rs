@@ -13,7 +13,7 @@
 
 use super::common::USER_TAIL;
 use super::{embassy_async, embassy_common, rcc, rtic, stm32, wba};
-use crate::panels::mcu_module::codegen_esp;
+use crate::panels::mcu_module::codegen_esp::{self, EspRuntime};
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
     self, ApiStyle, I2cModuleConfig, SpiModuleConfig, UsartModuleConfig,
@@ -196,36 +196,88 @@ impl FamilyBackend for Esp32Backend {
     }
 
     fn fresh_main_rs(&self, mcu: &Mcu) -> String {
-        let usart = modules::usart_configs(&mcu.modules);
-        let spi = modules::spi_configs(&mcu.modules);
-        let i2c = modules::i2c_configs(&mcu.modules);
-        codegen_esp::fresh_esp32c3_main_rs(
-            &pins_of(mcu),
-            &mcu.clock,
-            &mcu.id,
-            &usart,
-            &spi,
-            &i2c,
-            &mcu.custom_module_inits(),
-        )
+        esp_fresh_main_rs(mcu, EspRuntime::Blocking)
     }
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
-        let usart = modules::usart_configs(&mcu.modules);
-        let spi = modules::spi_configs(&mcu.modules);
-        let i2c = modules::i2c_configs(&mcu.modules);
-        codegen_esp::update_esp32c3_main_rs(
-            existing,
-            &pins_of(mcu),
-            &mcu.clock,
-            &mcu.id,
-            &usart,
-            &spi,
-            &i2c,
-            &mcu.custom_module_inits(),
-        )
+        esp_update_main_rs(mcu, existing, EspRuntime::Blocking)
     }
 }
+
+/// A fresh ESP `main.rs` on `runtime` — shared by the blocking and async ESP
+/// backends, which differ only in that argument.
+fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
+    let usart = modules::usart_configs(&mcu.modules);
+    let spi = modules::spi_configs(&mcu.modules);
+    let i2c = modules::i2c_configs(&mcu.modules);
+    codegen_esp::fresh_esp32c3_main_rs(
+        &pins_of(mcu),
+        &mcu.clock,
+        &mcu.id,
+        &usart,
+        &spi,
+        &i2c,
+        &mcu.custom_module_inits(),
+        runtime,
+    )
+}
+
+/// Re-splice an existing ESP `main.rs` on `runtime` (see [`esp_fresh_main_rs`]).
+fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String {
+    let usart = modules::usart_configs(&mcu.modules);
+    let spi = modules::spi_configs(&mcu.modules);
+    let i2c = modules::i2c_configs(&mcu.modules);
+    codegen_esp::update_esp32c3_main_rs(
+        existing,
+        &pins_of(mcu),
+        &mcu.clock,
+        &mcu.id,
+        &usart,
+        &spi,
+        &i2c,
+        &mcu.custom_module_inits(),
+        runtime,
+    )
+}
+
+// ── Async ESP32-C3 (esp-rtos + embassy-executor) ────────────────────────────
+// The [`Runtime::Async`] counterpart of [`Esp32Backend`]: the SAME esp-hal
+// bindings, entered through `#[esp_rtos::main] async fn main(Spawner)` with the
+// esp-rtos scheduler driving the executor. Like [`AsyncEmbassyBackend`] it is
+// selected by [`backend_for_runtime`], never listed in [`BACKENDS`].
+//
+// `esp-rtos`, not `esp-hal-embassy`: the latter needs esp-hal's private
+// `__esp_hal_embassy` feature, which esp-hal 1.1 (the version the project
+// template pins) dropped — cargo fails to resolve before compiling anything.
+struct AsyncEspBackend;
+
+impl FamilyBackend for AsyncEspBackend {
+    fn family_id(&self) -> &'static str {
+        "esp32c3-async" // label only — dispatch is via `backend_for_runtime`
+    }
+
+    /// Same reason as [`Esp32Backend`]: the `InputConfig`/`OutputConfig`
+    /// builders that carry the pulls are not emitted yet.
+    fn gpio_modes(&self, _func: &PinFunction) -> &'static [GpioMode] {
+        &[]
+    }
+
+    fn handles(&self, family: &str) -> bool {
+        family == "esp32c3"
+    }
+
+    fn fresh_main_rs(&self, mcu: &Mcu) -> String {
+        esp_fresh_main_rs(mcu, EspRuntime::Async)
+    }
+
+    fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
+        esp_update_main_rs(mcu, existing, EspRuntime::Async)
+    }
+}
+
+/// Chosen by runtime rather than family, so — like [`ASYNC_EMBASSY_BACKEND`] —
+/// it lives outside [`BACKENDS`].
+static ASYNC_ESP_BACKEND: AsyncEspBackend = AsyncEspBackend;
 
 // ── STM32WBA (embassy-stm32, blocking) ──────────────────────────────────────
 struct WbaBackend;
@@ -488,11 +540,19 @@ impl FamilyBackend for RticBackend {
 
 static RTIC_BACKEND: RticBackend = RticBackend;
 
-/// Whether an Async runtime has a backend for `family` — i.e. an embassy-capable
-/// STM32 family. Drives both codegen dispatch and the System-tab toggle's
-/// enabled state.
+/// Whether an Async runtime has a backend for `family` — an embassy-capable
+/// STM32 family (embassy-stm32) or the ESP32-C3 (esp-rtos). Drives both codegen
+/// dispatch and the System-tab toggle's enabled state.
 pub fn async_supported(family: &str) -> bool {
-    ASYNC_EMBASSY_BACKEND.handles(family)
+    ASYNC_EMBASSY_BACKEND.handles(family) || ASYNC_ESP_BACKEND.handles(family)
+}
+
+/// Whether `family`'s async path is the ESP one (esp-rtos + embassy-executor)
+/// rather than embassy-stm32. The two need DIFFERENT `[dependencies]` — same
+/// crate names, different versions and features — so the Cargo.toml sync has to
+/// tell them apart (see `project_gen::AsyncFlavor`).
+pub fn async_is_esp(family: &str) -> bool {
+    ASYNC_ESP_BACKEND.handles(family)
 }
 
 /// Whether an RTIC project can be generated for `family`.
@@ -525,11 +585,15 @@ pub fn backend_for(family: &str) -> Option<&'static dyn FamilyBackend> {
 }
 
 /// Look up the backend honouring the project [`Runtime`]. Async re-targets every
-/// embassy-capable STM32 family to the async backend; everything else — and all
-/// of Blocking — falls through to [`backend_for`].
+/// embassy-capable STM32 family to the async embassy backend and the ESP32-C3 to
+/// the esp-rtos one; everything else — and all of Blocking — falls through to
+/// [`backend_for`].
 ///
 /// [`Runtime`]: crate::panels::mcu_module::mcu::Runtime
 pub fn backend_for_runtime(family: &str, runtime: Runtime) -> Option<&'static dyn FamilyBackend> {
+    if runtime == Runtime::Async && ASYNC_ESP_BACKEND.handles(family) {
+        return Some(&ASYNC_ESP_BACKEND);
+    }
     if runtime == Runtime::Async && async_supported(family) {
         return Some(&ASYNC_EMBASSY_BACKEND);
     }
@@ -598,7 +662,9 @@ mod tests {
         assert!(async_supported("stm32g0"));
         assert!(async_supported("stm32wba"));
         assert!(!async_supported("stm32f1"));
-        assert!(!async_supported("esp32c3"));
+        assert!(async_supported("esp32c3")); // esp-rtos
+        assert!(!async_is_esp("stm32f4"));
+        assert!(async_is_esp("esp32c3"));
         assert!(!async_supported("rp2040"));
 
         // Blocking always uses the family default.
@@ -622,6 +688,164 @@ mod tests {
                 .family_id(),
             "stm32f1"
         );
+        // ESP32-C3 async is a DIFFERENT backend (esp-rtos), not the embassy one.
+        assert_eq!(
+            backend_for_runtime("esp32c3", Runtime::Async)
+                .unwrap()
+                .family_id(),
+            "esp32c3-async"
+        );
+        assert_eq!(
+            backend_for_runtime("esp32c3", Runtime::Blocking)
+                .unwrap()
+                .family_id(),
+            "esp32c3"
+        );
+        // Native / RTIC are still not offered on ESP — they fall back to blocking.
+        for rt in [Runtime::Native, Runtime::Rtic] {
+            assert_eq!(
+                backend_for_runtime("esp32c3", rt).unwrap().family_id(),
+                "esp32c3"
+            );
+        }
+    }
+
+    /// Switching the ESP runtime re-splices ONLY the generated block, both ways,
+    /// leaving the user's loop body untouched — the whole entry-point difference
+    /// lives inside the markers, so the invariant header never moves.
+    #[test]
+    fn esp_runtime_switch_reslices_and_keeps_user_tail() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        const MARK: &str = "        my_own_call(); // USER";
+        let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+
+        let blocking = mcu.fresh_main_rs().replace(
+            "        // Your main loop code here.",
+            &format!("        // Your main loop code here.\n{MARK}"),
+        );
+        assert!(blocking.contains(MARK), "test fixture wrote the user line");
+
+        mcu.runtime = Runtime::Async;
+        let to_async = mcu.update_main_rs(&blocking);
+        assert!(to_async.contains("#[esp_rtos::main]"), "{to_async}");
+        assert!(!to_async.contains("#[esp_hal::main]"), "{to_async}");
+        assert!(to_async.contains(MARK), "user tail survives:\n{to_async}");
+
+        mcu.runtime = Runtime::Blocking;
+        let back = mcu.update_main_rs(&to_async);
+        assert!(back.contains("#[esp_hal::main]"), "{back}");
+        assert!(!back.contains("esp_rtos"), "scheduler gone:\n{back}");
+        assert!(!back.contains("Spawner"), "async import gone:\n{back}");
+        assert!(back.contains(MARK), "user tail survives the way back:\n{back}");
+        // Round-trip is stable — a switch there and back is not a rewrite.
+        assert_eq!(back, blocking, "blocking -> async -> blocking is identity");
+    }
+
+    /// Writes the EXACT files an Async ESP32-C3 project generates (main.rs,
+    /// Cargo.toml with the async deps, .cargo/config.toml) into
+    /// `%ESP_ASYNC_OUT%`, so the generated code can be compiled for real against
+    /// the riscv target — what "verified" means for a codegen change here:
+    ///
+    /// ```text
+    /// ESP_ASYNC_OUT=/some/dir cargo test write_esp_async_project -- --ignored
+    /// cd /some/dir && cargo check --target riscv32imc-unknown-none-elf
+    /// ```
+    #[test]
+    #[ignore]
+    fn write_esp_async_project() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        use crate::panels::mcu_module::project_gen::{self, AsyncFlavor, ConfigFile};
+        use std::fs;
+        use std::path::PathBuf;
+
+        let out = PathBuf::from(
+            std::env::var("ESP_ASYNC_OUT").expect("set ESP_ASYNC_OUT to the target folder"),
+        );
+        let def = crate::panels::mcu_module::builtins::builtin_for("esp32c3").expect("esp32c3 def");
+
+        // GPIO in + out and one of every bus — the whole surface the ESP backend
+        // emits, so a compile of this project covers the generator, not just the
+        // entry point.
+        let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+        // `ESP_ASYNC_RUNTIME=blocking` writes the blocking project instead — the
+        // A/B that tells a codegen error apart from one the async path added.
+        let async_rt = std::env::var("ESP_ASYNC_RUNTIME").as_deref() != Ok("blocking");
+        mcu.runtime = if async_rt {
+            Runtime::Async
+        } else {
+            Runtime::Blocking
+        };
+        for (name, func) in [
+            ("GPIO2", PinFunction::GpioOutput),
+            ("GPIO3", PinFunction::GpioInput),
+            ("GPIO21", PinFunction::UsartTx(0)),
+            ("GPIO20", PinFunction::UsartRx(0)),
+            ("GPIO4", PinFunction::SpiSck(2)),
+            ("GPIO5", PinFunction::SpiMosi(2)),
+            ("GPIO6", PinFunction::SpiMiso(2)),
+            ("GPIO7", PinFunction::SpiNss(2)),
+            ("GPIO8", PinFunction::I2cScl(0)),
+            ("GPIO9", PinFunction::I2cSda(0)),
+        ] {
+            let pin = mcu
+                .iter_all_pins_mut()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("{name} exists"));
+            pin.selected_function = func;
+        }
+
+        let cargo_toml = project_gen::gen_config(ConfigFile::CargoToml, &def.project, &def.toolchain);
+        let cargo_toml = project_gen::ensure_async_deps(
+            &cargo_toml,
+            async_rt,
+            AsyncFlavor::Esp(&def.project.probe_chip),
+            false,
+            false,
+            false,
+            &[],
+        );
+        fs::create_dir_all(out.join("src/pins")).unwrap();
+        fs::create_dir_all(out.join(".cargo")).unwrap();
+        fs::write(out.join("Cargo.toml"), cargo_toml).unwrap();
+        fs::write(
+            out.join(".cargo/config.toml"),
+            project_gen::gen_config(ConfigFile::CargoConfig, &def.project, &def.toolchain),
+        )
+        .unwrap();
+        fs::write(out.join("src/main.rs"), mcu.fresh_main_rs()).unwrap();
+        fs::write(out.join("src/pins/mod.rs"), "").unwrap(); // header declares it
+    }
+
+    /// The ESP async backend swaps the entry point for `#[esp_rtos::main]` and
+    /// starts the scheduler, while the pin bindings stay the same esp-hal calls.
+    #[test]
+    fn esp_async_backend_emits_esp_rtos_main() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+
+        // Blocking — the esp-hal entry, no scheduler.
+        let blocking = mcu.fresh_main_rs();
+        assert!(blocking.contains("#[esp_hal::main]"), "{blocking}");
+        assert!(!blocking.contains("esp_rtos"), "{blocking}");
+
+        mcu.runtime = Runtime::Async;
+        let code = mcu.fresh_main_rs();
+        assert!(code.contains("#[esp_rtos::main]"), "{code}");
+        assert!(code.contains("async fn main(_spawner: Spawner)"), "{code}");
+        assert!(code.contains("use embassy_executor::Spawner;"), "{code}");
+        assert!(
+            code.contains("esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);"),
+            "{code}"
+        );
+        // The scheduler must start BEFORE anything that could await.
+        let init = code.find("esp_hal::init").expect("init");
+        let start = code.find("esp_rtos::start").expect("start");
+        assert!(init < start, "start comes after esp_hal::init:\n{code}");
+        // ...and the whole runtime difference stays inside the generated block,
+        // so a runtime switch never rewrites the user's tail.
+        let end = code.find(super::super::GEN_END).expect("end");
+        assert!(start < end, "scheduler start inside GEN:\n{code}");
     }
 
     /// The async backend emits an `#[embassy_executor::main] async fn main`

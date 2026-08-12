@@ -364,7 +364,18 @@ impl AppIde {
                             let collapse_all = std::mem::take(&mut mcu.collapse_modules);
                             // The module selectors follow the STAGED runtime (what
                             // the user is about to Apply), not the applied one.
-                            let is_async = mcu.pending_is_async();
+                            //
+                            // ESP is excluded on purpose: the embassy Blocking |
+                            // Async-DMA row belongs to the embassy bus drivers in
+                            // src/pins/configs/*.rs, which the esp-rtos backend
+                            // does not emit — its USART/SPI/I2C stay the blocking
+                            // esp-hal ones inline in main.rs, same as ESP
+                            // blocking. Offering the row there would promise a
+                            // driver the generator never writes.
+                            let is_async = mcu.pending_is_async()
+                                && !crate::panels::mcu_module::codegen::family::async_is_esp(
+                                    &mcu.family,
+                                );
                             let is_native = mcu.pending_is_native();
 
                             if !mcu.modules.is_empty() {
@@ -1027,22 +1038,55 @@ impl AppIde {
             ui.add_space(6.0);
 
             // ── Async (embassy) ──────────────────────────────────────────────
+            // Two different async stacks behind one card: embassy-stm32 on ARM,
+            // esp-rtos (same embassy executor, ESP scheduler) on the ESP32-C3.
+            let esp_async = family::async_is_esp(&mcu.family);
             let async_sel = mcu.pending_runtime == Runtime::Async;
             let async_resp = runtime_card(
                 ui,
                 async_sel,
                 async_ok,
-                "Async (embassy)",
-                "#[embassy_executor::main] async fn main(Spawner)  ·  \
-                 .await-able drivers on embassy-stm32",
+                if esp_async {
+                    "Async (embassy on esp-rtos)"
+                } else {
+                    "Async (embassy)"
+                },
+                if esp_async {
+                    "#[esp_rtos::main] async fn main(Spawner)  ·  \
+                     embassy executor scheduled by esp-rtos"
+                } else {
+                    "#[embassy_executor::main] async fn main(Spawner)  ·  \
+                     .await-able drivers on embassy-stm32"
+                },
             );
             if async_resp.clicked() && async_ok {
                 mcu.pending_runtime = Runtime::Async;
             }
+            let esp_async_details: &[(&str, &str)] = &[
+                ("On Apply:", "Regenerates main.rs with the esp-rtos entry + Spawner and adds the async \
+                               Cargo.toml deps — then builds. The pin bindings themselves do NOT change: \
+                               esp-hal's Output/Input/Uart/Spi/I2c are the same types in both runtimes."),
+                ("Entry:", "#[esp_rtos::main] async fn main(_spawner: Spawner) — esp_rtos::start(...) hands \
+                            TIMG0 + software interrupt 0 to the scheduler, then embassy_time::Timer and \
+                            .await work in the loop."),
+                ("TIMG0:", "The scheduler takes peripherals.TIMG0, so your own code cannot also claim it. \
+                            That is the cost of having embassy-time on this chip."),
+                ("Why esp-rtos:", "NOT esp-hal-embassy: that crate needs esp-hal's private __esp_hal_embassy \
+                                   feature, dropped in esp-hal 1.1 (the version this template pins), so cargo \
+                                   cannot even resolve it. esp-rtos is its replacement, same maintainers."),
+                ("Cargo.toml:", "Adds esp-rtos (chip + embassy features), embassy-executor 0.10 and \
+                                 embassy-time 0.5. Leaving Async removes them again."),
+                ("Not yet:", "USART/SPI/I2C stay the blocking esp-hal drivers written inline in main.rs — \
+                              ESP has no src/pins/configs/*.rs, so there is no async bus driver to select."),
+                ("Applies to:", "ESP32-C3 (riscv32imc). The STM32 async path is embassy-stm32 instead."),
+            ];
             runtime_details(
                 ui,
                 "rt_details_async",
-                &[
+                if esp_async {
+                    esp_async_details
+                } else {
+                    &[
                     ("On Apply:", "Regenerates main.rs with the embassy entry + Spawner, rewrites every \
                                    src/pins/configs/*.rs to the async init, toggles the embassy Cargo.toml deps — \
                                    then builds."),
@@ -1059,11 +1103,18 @@ impl AppIde {
                                      on embassy-stm32. Async USART adds embedded-io-async + static_cell; SPI/I2C \
                                      add embedded-hal (blocking) / embedded-hal-async (async-DMA). Leaving Async \
                                      removes these again."),
-                    ("Applies to:", "STM32F4/G0/G4/L4/H7/WBA/… (embassy families). NOT STM32F1 (on stm32f1xx-hal) \
-                                     or ESP yet."),
-                ],
-                "let mut _serial1 = pins::configs::usart1::init(p.USART1, p.PA10, p.PA9);\n\
-                 _serial1.write_all(b\"hi\").await.ok();",
+                    ("Applies to:", "STM32F4/G0/G4/L4/H7/WBA/… (embassy families). NOT STM32F1 (on stm32f1xx-hal). \
+                                     ESP32-C3 has its own async path (esp-rtos)."),
+                    ]
+                },
+                if esp_async {
+                    "let timg0 = TimerGroup::new(peripherals.TIMG0);\n\
+                     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);\n\
+                     // then: embassy_time::Timer::after_millis(500).await;"
+                } else {
+                    "let mut _serial1 = pins::configs::usart1::init(p.USART1, p.PA10, p.PA9);\n\
+                     _serial1.write_all(b\"hi\").await.ok();"
+                },
             );
 
             let rtic_sel = mcu.pending_runtime == Runtime::Rtic;
@@ -1099,7 +1150,7 @@ impl AppIde {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  {} only supports Blocking here (Native = STM32F1 concrete HAL; \
-                         Async = embassy on STM32F4/G0/G4/L4/H7/…).",
+                         Async = embassy on STM32F4/G0/G4/L4/H7/… and esp-rtos on ESP32-C3).",
                         ph::WARNING,
                         mcu.family,
                     ))

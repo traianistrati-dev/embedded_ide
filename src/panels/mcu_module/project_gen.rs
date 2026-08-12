@@ -420,8 +420,46 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool, sources: &[&str]) -> S
     s
 }
 
-/// Add or remove the embassy async-runtime deps, driven by whether the project
-/// Runtime is Async (on an embassy-capable STM32). Manages `embassy-executor`
+/// Which HAL the Async runtime sits on. Both paths use `embassy-executor` +
+/// `embassy-time` under the SAME dependency keys but at incompatible versions,
+/// so [`ensure_async_deps`] — the single authority for those two lines — has to
+/// know which one it is writing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AsyncFlavor<'a> {
+    /// `embassy-stm32` + the cortex-m executor arch.
+    Stm32,
+    /// `esp-rtos` on the given chip feature (`"esp32c3"`), RISC-V — the executor
+    /// arch comes from esp-rtos itself, so no `arch-*` feature is listed here.
+    Esp(&'a str),
+}
+
+impl AsyncFlavor<'_> {
+    /// The `embassy-executor` dependency line for this flavor. The versions are
+    /// NOT interchangeable: esp-rtos 0.3 requires embassy-executor 0.10, while
+    /// the embassy-stm32 stack in this template is on 0.9.
+    fn executor_line(self) -> &'static str {
+        match self {
+            Self::Stm32 => {
+                "embassy-executor = { version = \"0.9\", features = [\"arch-cortex-m\", \"executor-thread\"] }"
+            }
+            Self::Esp(_) => "embassy-executor = \"0.10\"",
+        }
+    }
+
+    /// The `esp-rtos` dependency line (ESP only — the caller gates it on the
+    /// flavor, so the value is unused on STM32).
+    fn esp_rtos_line(self) -> String {
+        let chip = match self {
+            Self::Stm32 => "esp32c3",
+            Self::Esp(chip) => chip,
+        };
+        format!("esp-rtos = {{ version = \"0.3\", features = [\"{chip}\", \"embassy\"] }}")
+    }
+}
+
+/// Add or remove the async-runtime deps, driven by whether the project Runtime
+/// is Async (on an embassy-capable STM32, or the ESP32-C3 via `esp-rtos` — see
+/// [`AsyncFlavor`]). Manages `embassy-executor`
 /// (the `#[embassy_executor::main]` entry) + `embassy-time`, toggles the
 /// `time-driver-any` feature on the `embassy-stm32` line (embassy-time needs a
 /// time driver, which the HAL supplies), and — when an async USART config file
@@ -484,16 +522,18 @@ pub fn ensure_rtic_deps(
 pub fn ensure_async_deps(
     cargo_toml: &str,
     needs_async: bool,
+    flavor: AsyncFlavor<'_>,
     needs_async_usart: bool,
     needs_eh: bool,
     needs_eh_async: bool,
     sources: &[&str],
 ) -> String {
+    let is_esp = matches!(flavor, AsyncFlavor::Esp(_));
     let mut s = ensure_dep(
         cargo_toml,
         "embassy-executor",
         needs_async,
-        "embassy-executor = { version = \"0.9\", features = [\"arch-cortex-m\", \"executor-thread\"] }",
+        flavor.executor_line(),
         sources,
     );
     s = ensure_dep(
@@ -501,6 +541,16 @@ pub fn ensure_async_deps(
         "embassy-time",
         needs_async,
         "embassy-time = \"0.5\"",
+        sources,
+    );
+    // esp-rtos: the ESP scheduler that drives the executor and supplies the
+    // embassy time driver (what `time-driver-any` does on the STM32 side). Its
+    // `embassy` feature is what exports `#[esp_rtos::main]`.
+    s = ensure_dep(
+        &s,
+        "esp-rtos",
+        needs_async && is_esp,
+        &flavor.esp_rtos_line(),
         sources,
     );
     // Async USART (`BufferedUart` → embedded-io-async). NB the crate is published
@@ -538,13 +588,13 @@ pub fn ensure_async_deps(
     );
 
     // Toggle the `time-driver-any` HAL feature inside the `embassy-stm32`
-    // `features = [ … ]` array. A no-op for non-embassy projects — async is only
-    // offered where an `embassy-stm32` line exists.
+    // `features = [ … ]` array. Skipped on ESP, where esp-rtos IS the time
+    // driver and no `embassy-stm32` line exists.
     let is_embassy = |line: &str| line.trim_start().starts_with("embassy-stm32");
     let has_driver = s
         .lines()
         .any(|l| is_embassy(l) && l.contains("\"time-driver-any\""));
-    if needs_async != has_driver {
+    if !is_esp && needs_async != has_driver {
         let mut out: Vec<String> = Vec::new();
         for line in s.lines() {
             if is_embassy(line) && line.contains("features = [") {
@@ -1384,13 +1434,13 @@ mod tests {
         );
         // The async pass runs next and ALSO manages embedded-hal — it must be told
         // the blocking need (combined), or it strips what was just added.
-        let after_async = ensure_async_deps(&with_gpio, false, false, true, false, &[]);
+        let after_async = ensure_async_deps(&with_gpio, false, AsyncFlavor::Stm32, false, true, false, &[]);
         assert!(
             after_async.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "async pass keeps embedded-hal when the combined need is true:\n{after_async}"
         );
         // Guard proving the bug shape: the OLD `needs_eh = false` stripped it.
-        let stripped = ensure_async_deps(&with_gpio, false, false, false, false, &[]);
+        let stripped = ensure_async_deps(&with_gpio, false, AsyncFlavor::Stm32, false, false, false, &[]);
         assert!(
             !stripped.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "needs_eh=false would strip it (the bug this guards):\n{stripped}"
@@ -1818,7 +1868,7 @@ cortex-m = \"0.7\"
             "peripheral sync ate the user's line:
 {after_periph}"
         );
-        let after_async = ensure_async_deps(&after_periph, false, false, false, false, &[]);
+        let after_async = ensure_async_deps(&after_periph, false, AsyncFlavor::Stm32, false, false, false, &[]);
         assert!(
             after_async.contains("embedded-hal = \"1.0\""),
             "async sync ate the user's line:
@@ -1961,7 +2011,7 @@ fn f() {}
 
         // Async runtime, no bus peripherals yet → executor + time + driver, but
         // none of the peripheral trait crates.
-        let with = ensure_async_deps(base, true, false, false, false, &[]);
+        let with = ensure_async_deps(base, true, AsyncFlavor::Stm32, false, false, false, &[]);
         assert!(
             with.contains("embassy-executor = { version = \"0.9\""),
             "executor added:\n{with}"
@@ -1993,7 +2043,7 @@ fn f() {}
         );
         // Idempotent — no duplicate deps/features.
         assert_eq!(
-            ensure_async_deps(&with, true, false, false, false, &[]),
+            ensure_async_deps(&with, true, AsyncFlavor::Stm32, false, false, false, &[]),
             with,
             "add must be idempotent"
         );
@@ -2010,7 +2060,7 @@ fn f() {}
         );
 
         // Add an async USART → embedded-io-async + static_cell appear too.
-        let with_usart = ensure_async_deps(base, true, true, false, false, &[]);
+        let with_usart = ensure_async_deps(base, true, AsyncFlavor::Stm32, true, false, false, &[]);
         assert!(
             with_usart.contains("embedded-io-async = \"0.6\""),
             "async serial trait crate:\n{with_usart}"
@@ -2024,13 +2074,13 @@ fn f() {}
             "must NOT use the hyphen name"
         );
         assert_eq!(
-            ensure_async_deps(&with_usart, true, true, false, false, &[]),
+            ensure_async_deps(&with_usart, true, AsyncFlavor::Stm32, true, false, false, &[]),
             with_usart,
             "usart add idempotent"
         );
 
         // Blocking SPI/I2C on async → embedded-hal 1.0, NOT embedded-hal-async.
-        let with_bus = ensure_async_deps(base, true, false, true, false, &[]);
+        let with_bus = ensure_async_deps(base, true, AsyncFlavor::Stm32, false, true, false, &[]);
         assert!(
             with_bus.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "embedded-hal added:\n{with_bus}"
@@ -2043,7 +2093,7 @@ fn f() {}
         );
 
         // Async-DMA SPI/I2C → both embedded-hal + embedded-hal-async.
-        let with_dma = ensure_async_deps(base, true, false, true, true, &[]);
+        let with_dma = ensure_async_deps(base, true, AsyncFlavor::Stm32, false, true, true, &[]);
         assert!(
             with_dma.lines().any(|l| is_dep_line(l, "embedded-hal")),
             "embedded-hal present"
@@ -2053,13 +2103,13 @@ fn f() {}
             "async trait crate added:\n{with_dma}"
         );
         assert_eq!(
-            ensure_async_deps(&with_dma, true, false, true, true, &[]),
+            ensure_async_deps(&with_dma, true, AsyncFlavor::Stm32, false, true, true, &[]),
             with_dma,
             "dma add idempotent"
         );
 
         // Dropping just the USART removes only its two crates (executor stays).
-        let no_usart = ensure_async_deps(&with_usart, true, false, false, false, &[]);
+        let no_usart = ensure_async_deps(&with_usart, true, AsyncFlavor::Stm32, false, false, false, &[]);
         assert!(
             !no_usart.contains("embedded-io-async")
                 && !no_usart.lines().any(|l| is_dep_line(l, "static_cell"))
@@ -2067,7 +2117,7 @@ fn f() {}
         assert!(no_usart.contains("embassy-executor"), "runtime deps stay");
 
         // Removing everything restores the original exactly.
-        let removed = ensure_async_deps(&with_dma, false, false, false, false, &[]);
+        let removed = ensure_async_deps(&with_dma, false, AsyncFlavor::Stm32, false, false, false, &[]);
         assert!(
             !removed.contains("embassy-executor"),
             "executor removed:\n{removed}"
@@ -2090,10 +2140,52 @@ fn f() {}
             "async trait crate removed"
         );
         assert_eq!(removed, base, "removal restores the original");
+        // The STM32 flavor never writes the ESP scheduler.
+        assert!(!with.contains("esp-rtos"), "no esp-rtos on STM32:\n{with}");
         assert_eq!(
-            ensure_async_deps(base, false, false, false, false, &[]),
+            ensure_async_deps(base, false, AsyncFlavor::Stm32, false, false, false, &[]),
             base,
             "no-op when nothing to remove"
+        );
+    }
+
+    /// The ESP async flavor writes a DIFFERENT dependency set under the same
+    /// keys: esp-rtos (chip + embassy features) and embassy-executor 0.10, which
+    /// esp-rtos 0.3 requires — the STM32 line (0.9 + arch-cortex-m) does not
+    /// resolve against it. No `time-driver-any` toggle: esp-rtos IS the driver.
+    #[test]
+    fn esp_async_deps_use_esp_rtos_and_their_own_executor() {
+        let base = "[package]\nname = \"x\"\n\n[dependencies]\n\
+                    esp-hal       = { version = \"~1.1.0\", features = [\"esp32c3\", \"unstable\"] }\n";
+        let with = ensure_async_deps(base, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]);
+        assert!(
+            with.contains("esp-rtos = { version = \"0.3\", features = [\"esp32c3\", \"embassy\"] }"),
+            "esp-rtos with chip + embassy features:\n{with}"
+        );
+        assert!(
+            with.contains("embassy-executor = \"0.10\""),
+            "executor 0.10 (what esp-rtos 0.3 needs):\n{with}"
+        );
+        assert!(
+            !with.contains("arch-cortex-m"),
+            "no cortex-m arch on RISC-V:\n{with}"
+        );
+        assert!(
+            !with.contains("time-driver-any"),
+            "esp-rtos is the time driver:\n{with}"
+        );
+        assert!(with.contains("embassy-time = \"0.5\""), "{with}");
+
+        // Idempotent, and leaving Async takes exactly what it added back out.
+        assert_eq!(
+            ensure_async_deps(&with, true, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]),
+            with,
+            "add must be idempotent"
+        );
+        assert_eq!(
+            ensure_async_deps(&with, false, AsyncFlavor::Esp("esp32c3"), false, false, false, &[]),
+            base,
+            "removal restores the original"
         );
     }
 

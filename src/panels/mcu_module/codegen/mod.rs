@@ -1632,6 +1632,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             line,
+            crate::panels::mcu_module::codegen_esp::EspRuntime::Blocking,
         );
         assert!(
             esp.contains(line),

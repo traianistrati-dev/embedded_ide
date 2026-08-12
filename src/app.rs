@@ -2040,9 +2040,28 @@ impl AppIde {
             // that `ensure_peripheral_deps` just added would be stripped right back
             // out here (and a user's manual `embedded-hal` line with it).
             let needs_eh_total = needs_eh || needs_spi || needs_i2c || needs_gpio;
+            // Which async stack: embassy-stm32, or esp-rtos on the ESP32-C3.
+            // Same crate names, different versions — see `AsyncFlavor`. The chip
+            // feature (`esp32c3`) comes from the same `ProjectDef` the base
+            // Cargo.toml template uses.
+            let esp_chip = self
+                .selected_build_cfg()
+                .map(|(p, _)| p.probe_chip)
+                .unwrap_or_default();
+            use crate::panels::mcu_module::codegen::family;
+            let async_flavor = if self
+                .mcu
+                .as_ref()
+                .is_some_and(|m| family::async_is_esp(&m.family))
+            {
+                project_gen::AsyncFlavor::Esp(&esp_chip)
+            } else {
+                project_gen::AsyncFlavor::Stm32
+            };
             let new_toml = project_gen::ensure_async_deps(
                 &new_toml,
                 is_async,
+                async_flavor,
                 is_async && has_cfg("usart"),
                 needs_eh_total,
                 needs_eh_async,

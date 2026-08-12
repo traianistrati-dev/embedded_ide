@@ -26,6 +26,12 @@
 //!     }
 //! }
 //! ```
+//!
+//! The [`Runtime::Async`] path emits the same body from the same builder — only
+//! the entry point differs (`#[esp_rtos::main] async fn main(Spawner)` plus the
+//! `esp_rtos::start(...)` scheduler hand-off). See [`EspRuntime`].
+//!
+//! [`Runtime::Async`]: crate::panels::mcu_module::mcu::Runtime
 
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
@@ -38,6 +44,77 @@ use std::collections::{BTreeMap, BTreeSet};
 // ── User tail — closes fn main() ─────────────────────────────────────────────
 
 const USER_TAIL: &str = "    loop {\n        // Your main loop code here.\n    }\n}\n";
+
+/// First link of every esp-hal bus builder chain: `Uart::new` / `Spi::new` /
+/// `I2c::new` all return `Result<Self, ConfigError>` on esp-hal 1.1, so the
+/// `.with_xxx(...)` links below them do not exist until it is unwrapped.
+///
+/// A bad config here is a programming error the IDE wrote (the values come from
+/// the Virtual Module UI, which range-limits them), not a runtime condition the
+/// firmware could handle — the same reason the STM32 backend emits
+/// `pac::Peripherals::take().unwrap()`.
+const UNWRAP_CFG: &str = "\n        .unwrap()";
+
+// ── Runtime (entry point) ────────────────────────────────────────────────────
+
+/// Which entry point the generated `main` opens — the only structural difference
+/// between the two ESP paths. Everything below the entry (clock, GPIO, UART,
+/// SPI, I2C bindings) is byte-for-byte identical: they are the same esp-hal
+/// drivers, so one builder serves both.
+///
+/// Async is `esp-rtos`, NOT `esp-hal-embassy`. The latter is pinned to esp-hal
+/// 1.0 by the private `__esp_hal_embassy` feature, which esp-hal 1.1 (what the
+/// project template pins) no longer has — the dependency resolution fails before
+/// anything compiles. `esp-rtos` is the same maintainers' replacement and drives
+/// the very same `embassy-executor` / `embassy-time`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EspRuntime {
+    /// `#[esp_hal::main] fn main() -> !`
+    Blocking,
+    /// `#[esp_rtos::main] async fn main(_spawner: Spawner)`, with the scheduler
+    /// started from TIMG0 + software interrupt 0.
+    Async,
+}
+
+impl EspRuntime {
+    /// The attribute + `fn` signature line(s) that open `main`, ending in `{\n`.
+    fn entry(self) -> &'static str {
+        match self {
+            Self::Blocking => "#[esp_hal::main]\nfn main() -> ! {\n",
+            Self::Async => "#[esp_rtos::main]\nasync fn main(_spawner: Spawner) {\n",
+        }
+    }
+
+    /// The lines that hand the timer to the scheduler, emitted right after
+    /// `esp_hal::init` — empty on the blocking path.
+    ///
+    /// TIMG0 is the timer the esp-rtos docs (and `esp-generate`) use; taking it
+    /// here means user code cannot also claim `peripherals.TIMG0`, which is the
+    /// normal trade for having `embassy_time::Timer` work at all.
+    fn start_block(self) -> &'static str {
+        match self {
+            Self::Blocking => "",
+            Self::Async => {
+                "\n    // ── Async runtime (esp-rtos drives the embassy executor) ──\n\
+                 \x20   let timg0 = TimerGroup::new(peripherals.TIMG0);\n\
+                 \x20   let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);\n\
+                 \x20   esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);\n"
+            }
+        }
+    }
+
+    /// The extra `use` items the async entry + scheduler start need.
+    fn use_lines(self) -> &'static [&'static str] {
+        match self {
+            Self::Blocking => &[],
+            Self::Async => &[
+                "use embassy_executor::Spawner;",
+                "use esp_hal::interrupt::software::SoftwareInterruptControl;",
+                "use esp_hal::timer::timg::TimerGroup;",
+            ],
+        }
+    }
+}
 
 // ── Clock config → esp-hal `CpuClock` ─────────────────────────────────────────
 
@@ -74,8 +151,9 @@ pub fn fresh_esp32c3_main_rs(
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     custom_inits: &str,
+    runtime: EspRuntime,
 ) -> String {
-    let section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits);
+    let section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits, runtime);
     format!("{}{section}\n{USER_TAIL}", invariant_header(id))
 }
 
@@ -90,8 +168,9 @@ pub fn update_esp32c3_main_rs(
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     custom_inits: &str,
+    runtime: EspRuntime,
 ) -> String {
-    let new_section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits);
+    let new_section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits, runtime);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
@@ -136,6 +215,7 @@ fn make_gen_section(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
     custom_inits: &str,
+    runtime: EspRuntime,
 ) -> String {
     let configured: Vec<&Pin> = pins
         .iter()
@@ -144,7 +224,7 @@ fn make_gen_section(
         .collect();
 
     if configured.is_empty() {
-        return make_default_gen_section(clock);
+        return make_default_gen_section(clock, runtime);
     }
 
     // ── Feature flags ────────────────────────────────────────────────────────
@@ -186,7 +266,9 @@ fn make_gen_section(
         .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp));
 
     // ── use block ─────────────────────────────────────────────────────────────
-    let use_block = build_use_block(has_output, has_input, has_adc, has_uart, has_spi, has_i2c);
+    let use_block = build_use_block(
+        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, runtime,
+    );
 
     // ── fn main() body ────────────────────────────────────────────────────────
     let mut body = String::new();
@@ -194,6 +276,8 @@ fn make_gen_section(
         "    let peripherals = {};\n",
         esp_init_line(clock)
     ));
+    // Async: start the scheduler before anything awaits (or spawns).
+    body.push_str(runtime.start_block());
 
     // ── GPIO Output / Input ───────────────────────────────────────────────────
     let outputs: Vec<&Pin> = configured
@@ -280,26 +364,8 @@ fn make_gen_section(
         for n in instances {
             body.push('\n');
             body.push_str(&format!("    // ── UART{n} ──\n"));
-            let rx_part = uart_rx
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_rx(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
-            let tx_part = uart_tx
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_tx(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
+            let rx_part = with_pin("with_rx", uart_rx.get(&n));
+            let tx_part = with_pin("with_tx", uart_tx.get(&n));
             // A wired _USART module sets the baud rate; else esp-hal's default.
             let cfg = match usart.get(&n) {
                 Some(c) => format!("UartConfig::default().with_baudrate({})", c.baud_rate),
@@ -310,7 +376,8 @@ fn make_gen_section(
                 .map(|c| module_label_sfx(&c.custom_label))
                 .unwrap_or_default();
             body.push_str(&format!(
-                "    let mut _uart{n}{sfx} = Uart::new(peripherals.UART{n}, {cfg}){rx_part}{tx_part};\n"
+                "    let mut _uart{n}{sfx} = Uart::new(peripherals.UART{n}, {cfg})\
+                 {UNWRAP_CFG}{rx_part}{tx_part};\n"
             ));
         }
     }
@@ -348,53 +415,17 @@ fn make_gen_section(
         for n in instances {
             body.push('\n');
             body.push_str(&format!("    // ── SPI{n} ──\n"));
-            let sck_part = spi_sck
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_sck(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
-            let mosi_part = spi_mosi
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_mosi(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
-            let miso_part = spi_miso
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_miso(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
-            let nss_part = spi_nss
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_cs(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
+            let sck_part = with_pin("with_sck", spi_sck.get(&n));
+            let mosi_part = with_pin("with_mosi", spi_mosi.get(&n));
+            let miso_part = with_pin("with_miso", spi_miso.get(&n));
+            let nss_part = with_pin("with_cs", spi_nss.get(&n));
             let sfx = spi
                 .get(&n)
                 .map(|c| module_label_sfx(&c.custom_label))
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _spi{n}{sfx} = Spi::new(peripherals.SPI{n}, SpiConfig::default())\
-                 {sck_part}{mosi_part}{miso_part}{nss_part};\n"
+                 {UNWRAP_CFG}{sck_part}{mosi_part}{miso_part}{nss_part};\n"
             ));
         }
     }
@@ -418,33 +449,15 @@ fn make_gen_section(
         for n in instances {
             body.push('\n');
             body.push_str(&format!("    // ── I2C{n} ──\n"));
-            let scl_part = i2c_scl
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_scl(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
-            let sda_part = i2c_sda
-                .get(&n)
-                .map(|p| {
-                    format!(
-                        "\n        .with_sda(peripherals.{}) // {}",
-                        p.name,
-                        p.selected_function.label()
-                    )
-                })
-                .unwrap_or_default();
+            let scl_part = with_pin("with_scl", i2c_scl.get(&n));
+            let sda_part = with_pin("with_sda", i2c_sda.get(&n));
             let sfx = i2c
                 .get(&n)
                 .map(|c| module_label_sfx(&c.custom_label))
                 .unwrap_or_default();
             body.push_str(&format!(
                 "    let mut _i2c{n}{sfx} = I2c::new(peripherals.I2C{n}, I2cConfig::default())\
-                 {scl_part}{sda_part};\n"
+                 {UNWRAP_CFG}{scl_part}{sda_part};\n"
             ));
         }
     }
@@ -486,24 +499,28 @@ fn make_gen_section(
     format!(
         "{GEN_BEGIN}\n\
          {use_block}\
-         #[esp_hal::main]\n\
-         fn main() -> ! {{\n\
+         {entry}\
          {body}\
-         {GEN_END}\n"
+         {GEN_END}\n",
+        entry = runtime.entry(),
     )
 }
 
 // ── Default generated section (no pins configured yet) ────────────────────────
 
-fn make_default_gen_section(clock: &ClockConfig) -> String {
+fn make_default_gen_section(clock: &ClockConfig, runtime: EspRuntime) -> String {
     format!(
         "{GEN_BEGIN}\n\
-         #[esp_hal::main]\n\
-         fn main() -> ! {{\n\
-             let peripherals = {init};\n\n\
+         {use_block}\
+         {entry}\
+             let peripherals = {init};\n\
+         {start}\n\
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n",
+        use_block = build_use_block(false, false, false, false, false, false, runtime),
+        entry = runtime.entry(),
         init = esp_init_line(clock),
+        start = runtime.start_block(),
     )
 }
 
@@ -516,8 +533,13 @@ fn build_use_block(
     has_uart: bool,
     has_spi: bool,
     has_i2c: bool,
+    runtime: EspRuntime,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
+
+    // Entry-point imports first (`Spawner`, the timer + software interrupt the
+    // scheduler start consumes) — none on the blocking path.
+    lines.extend(runtime.use_lines().iter().map(|s| (*s).to_owned()));
 
     // gpio — collect needed types alphabetically via BTreeSet
     let mut gpio_types: BTreeSet<&str> = BTreeSet::new();
@@ -540,7 +562,9 @@ fn build_use_block(
         lines.push("use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};".into());
     }
     if has_uart {
-        lines.push("use esp_hal::uart::{Uart, config::Config as UartConfig};".into());
+        // esp-hal 1.1 exposes `uart::Config` directly — the old `uart::config`
+        // submodule is gone (SPI/I2C keep theirs under `master`).
+        lines.push("use esp_hal::uart::{Config as UartConfig, Uart};".into());
     }
     if has_spi {
         lines.push("use esp_hal::spi::master::{Config as SpiConfig, Spi};".into());
@@ -548,12 +572,11 @@ fn build_use_block(
     if has_i2c {
         lines.push("use esp_hal::i2c::master::{Config as I2cConfig, I2c};".into());
     }
-    /*
-        if lines.is_empty() {
-            // Fallback — should only happen if only USB / TWAI are selected
-            return "use esp_hal::prelude::*;\n\n".into();
-        }
-    */
+    // No imports at all (blocking, and only USB/TWAI — which are comments —
+    // selected): emit nothing rather than two stray blank lines above `fn main`.
+    if lines.is_empty() {
+        return String::new();
+    }
     let mut block = lines.join("\n");
     block.push_str("\n\n");
     block
@@ -575,6 +598,24 @@ fn pin_var(pin_name: &str) -> String {
 /// ESP analogue of the STM32 `<pin>_<type>` format.
 fn esp_binding(p: &Pin) -> String {
     pin_binding(&pin_var(&p.name), &p.selected_function, &p.custom_label)
+}
+
+/// One `.with_xxx(peripherals.GPIOn)` link of an esp-hal builder chain, with the
+/// pin's function named in a comment on its OWN line above the call. Empty when
+/// the peripheral has no pin for that role.
+///
+/// The comment must NOT trail the call: the chain's terminating `;` is appended
+/// after the LAST link, so a trailing `// …` swallows it and the generated file
+/// stops parsing (`expected ';', found keyword 'loop'`).
+fn with_pin(method: &str, pin: Option<&&Pin>) -> String {
+    pin.map(|p| {
+        format!(
+            "\n        // {label}\n        .{method}(peripherals.{name})",
+            label = p.selected_function.label(),
+            name = p.name,
+        )
+    })
+    .unwrap_or_default()
 }
 
 /// `_<sanitized label>` suffix for a module's generated handle (`_uart1_imu`),
@@ -626,6 +667,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert!(
             code.contains("CpuClock::_160MHz"),
@@ -645,6 +687,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert!(
             code.contains("CpuClock::_80MHz"),
@@ -664,6 +707,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert!(code.contains("CpuClock::max()"), "{code}");
     }
@@ -680,6 +724,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert_eq!(parse_mcu_id(&fresh).as_deref(), Some("esp32c3-graph"));
         let updated = update_esp32c3_main_rs(
@@ -691,8 +736,73 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert_eq!(parse_mcu_id(&updated).as_deref(), Some("esp32c3-graph"));
+    }
+
+    /// Every bus builder chain must end in a bare `.with_xxx(...)` so its `;` is
+    /// real code. The pin labels used to TRAIL the call — the terminating `;`
+    /// landed inside that comment and the file stopped parsing
+    /// ("expected `;`, found keyword `loop`"), on both runtimes.
+    #[test]
+    fn bus_chains_close_outside_the_pin_comments() {
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        let pin = |num: usize, name: &str, f: PinFunction| {
+            let mut p = Pin::new(num, name).with_functions(vec![f.clone()]);
+            p.selected_function = f;
+            p
+        };
+        let pins = [
+            pin(28, "GPIO21", PinFunction::UsartTx(0)),
+            pin(27, "GPIO20", PinFunction::UsartRx(0)),
+            pin(9, "GPIO4", PinFunction::SpiSck(2)),
+            pin(10, "GPIO5", PinFunction::SpiMosi(2)),
+            pin(12, "GPIO6", PinFunction::SpiMiso(2)),
+            pin(13, "GPIO7", PinFunction::SpiNss(2)),
+            pin(14, "GPIO8", PinFunction::I2cScl(0)),
+            pin(15, "GPIO9", PinFunction::I2cSda(0)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+
+        for runtime in [EspRuntime::Blocking, EspRuntime::Async] {
+            let code = fresh_esp32c3_main_rs(
+                &refs,
+                &ClockConfig::None,
+                "esp32c3",
+                &no_usart(),
+                &no_spi(),
+                &no_i2c(),
+                "",
+                runtime,
+            );
+            for (i, line) in code.lines().enumerate() {
+                if let Some((_, comment)) = line.split_once("//") {
+                    assert!(
+                        !comment.contains(';'),
+                        "{runtime:?} line {}: `;` swallowed by a comment:\n{line}",
+                        i + 1
+                    );
+                }
+            }
+            // Each bus is one statement, so one `;` per builder.
+            for head in ["Uart::new", "Spi::new", "I2c::new"] {
+                assert!(code.contains(head), "{runtime:?} emits {head}:\n{code}");
+            }
+            // esp-hal 1.1: the three constructors return Result, so the
+            // `.with_xxx` links below them need the value unwrapped first.
+            assert_eq!(
+                code.matches(".unwrap()").count(),
+                3,
+                "{runtime:?} one unwrap per bus:\n{code}"
+            );
+            // esp-hal 1.1 moved UART's Config out of a `config` submodule.
+            assert!(
+                code.contains("use esp_hal::uart::{Config as UartConfig, Uart};"),
+                "{runtime:?} uart import:\n{code}"
+            );
+            assert!(!code.contains("uart::config"), "{runtime:?}:\n{code}");
+        }
     }
 
     /// A wired _USART module sets the baud rate on the generated `Uart::new`.
@@ -717,6 +827,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert!(
             code.contains("with_baudrate(9600)"),
@@ -732,6 +843,7 @@ mod tests {
             &no_spi(),
             &no_i2c(),
             "",
+            EspRuntime::Blocking,
         );
         assert!(
             plain.contains("UartConfig::default())"),

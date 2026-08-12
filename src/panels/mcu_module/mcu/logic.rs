@@ -630,10 +630,15 @@ impl Mcu {
         // 2. Entry-point change (only when async-ness flips; Blocking↔Native
         //    share `#[entry] fn main() -> !`).
         if self.pending_is_async() != self.is_async() {
-            let entry = if self.pending_is_async() {
-                "#[embassy_executor::main] async fn main(Spawner)"
-            } else {
-                "#[entry] fn main() -> !"
+            // ESP spells both ends differently: esp-rtos drives the executor and
+            // the blocking entry is esp-hal's, not cortex-m-rt's.
+            let esp =
+                crate::panels::mcu_module::codegen::family::async_is_esp(&self.family);
+            let entry = match (self.pending_is_async(), esp) {
+                (true, true) => "#[esp_rtos::main] async fn main(Spawner)",
+                (true, false) => "#[embassy_executor::main] async fn main(Spawner)",
+                (false, true) => "#[esp_hal::main] fn main() -> !",
+                (false, false) => "#[entry] fn main() -> !",
             };
             out.push(format!("main.rs entry -> {entry}"));
         } else {
