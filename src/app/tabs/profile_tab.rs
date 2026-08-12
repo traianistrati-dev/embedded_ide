@@ -249,10 +249,12 @@ fn bloat_row(ui: &mut egui::Ui, r: &BloatRow, max: u64) {
     } else {
         format!("{}   {}::{}", r.size_label, r.crate_name, r.name)
     };
-    painter.text(
-        rect.left_center() + egui::vec2(6.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
+    // Same fitting as the flamegraph: a Rust symbol is long enough to run past
+    // any row it is given.
+    draw_fitted_text(
+        painter,
+        rect,
+        &label,
         egui::FontId::monospace(11.0),
         egui::Color32::from_gray(235),
     );
@@ -284,7 +286,18 @@ fn runtime_view(
     let st = flame_state.lock().unwrap().clone();
     let busy = st.is_busy();
 
+    // One row: the probe it will use, then the action, then what it targets.
     ui.horizontal_wrapped(|ui| {
+        // Shared probe picker — the SAME probe as the Debug / RTT / Flash tabs.
+        super::probe_selector_ui(
+            ui,
+            probe_list,
+            selected_probe,
+            probe_scan,
+            probe_scan_err,
+            toolchain,
+        );
+        ui.separator();
         if ui
             .add_enabled(
                 !busy && can_run,
@@ -363,17 +376,6 @@ fn runtime_view(
                 }
                 FlameState::Idle => {}
             },
-        );
-    });
-    // Shared probe row — pick the SAME probe as the Debug / RTT / Flash tabs.
-    ui.horizontal_wrapped(|ui| {
-        super::probe_selector_ui(
-            ui,
-            probe_list,
-            selected_probe,
-            probe_scan,
-            probe_scan_err,
-            toolchain,
         );
     });
     ui.separator();
@@ -631,10 +633,10 @@ fn draw_node(
     );
     painter.rect_filled(rect, 1.0, node_color(&node.name));
     if w > 26.0 {
-        painter.text(
-            rect.left_center() + egui::vec2(3.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            elide(&node.name, w),
+        draw_fitted_text(
+            painter,
+            rect,
+            &node.name,
             egui::FontId::monospace(10.5),
             egui::Color32::from_rgb(25, 20, 15),
         );
@@ -667,13 +669,47 @@ fn node_color(name: &str) -> egui::Color32 {
     )
 }
 
-/// Truncate a symbol to roughly fit `w` px of monospace (≈6 px/char at 10.5).
-fn elide(name: &str, w: f32) -> String {
-    let max = ((w - 6.0) / 6.0).floor().max(1.0) as usize;
-    if name.chars().count() <= max {
-        name.to_owned()
-    } else {
-        let keep = max.saturating_sub(1);
-        format!("{}…", name.chars().take(keep).collect::<String>())
+/// Draw `text` inside `rect`, truncated to what actually fits and clipped to the
+/// box either way.
+///
+/// Both halves matter. The truncation is MEASURED, not estimated: the old
+/// `≈6 px/char` guess was optimistic for this font, so long Rust symbols
+/// (`…gpio::Alternate<stm32f1xx_hal::gpio::OpenDrain>>, …`) kept a few characters
+/// too many and ran into the neighbouring segment. And the painter is clipped
+/// regardless, so no future rounding error can spill again — a label that leaves
+/// its box doesn't just look wrong, it reads as belonging to the box it lands in.
+fn draw_fitted_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) {
+    const PAD: f32 = 3.0;
+    let avail = rect.width() - 2.0 * PAD;
+    if avail <= 0.0 || text.is_empty() {
+        return;
     }
+    let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
+    let shown = if galley.size().x <= avail {
+        text.to_owned()
+    } else {
+        // Monospace: one measurement gives the exact per-character width.
+        let chars = text.chars().count().max(1);
+        let cw = galley.size().x / chars as f32;
+        let keep = ((avail / cw).floor() as usize).saturating_sub(1);
+        if keep == 0 {
+            return; // narrower than a single glyph — the colour is the label
+        }
+        format!("{}…", text.chars().take(keep).collect::<String>())
+    };
+    painter
+        .with_clip_rect(rect.intersect(painter.clip_rect()))
+        .text(
+            rect.left_center() + egui::vec2(PAD, 0.0),
+            egui::Align2::LEFT_CENTER,
+            shown,
+            font,
+            color,
+        );
 }

@@ -265,18 +265,29 @@ pub fn show_matrix(
             {
                 m.full = !m.full;
             }
-            let (text, color) = match (m.paused, live) {
+            let (icon, text, color) = match (m.paused, live) {
                 (true, _) => (
-                    format!("{} frozen", ph::SNOWFLAKE),
+                    Some(ph::PAUSE),
+                    "frozen".to_owned(),
                     egui::Color32::from_rgb(120, 180, 240),
                 ),
                 (false, Some(p)) => (
+                    None,
                     format!("frame #{frames_total} · {} B", p.len()),
                     egui::Color32::from_rgb(120, 210, 140),
                 ),
-                (false, None) => ("—".to_owned(), egui::Color32::GRAY),
+                (false, None) => (None, "—".to_owned(), egui::Color32::GRAY),
             };
+            // Icon and text are SEPARATE labels: phosphor is registered only in
+            // the Proportional family (`add_to_fonts` in app.rs), so a glyph
+            // inside a `.monospace()` RichText draws as a tofu square — which is
+            // what showed up before "frozen". The numbers keep monospace; the
+            // icon gets the proportional font. Right-to-left layout, so the text
+            // goes in FIRST to end up on the right of the icon.
             ui.label(egui::RichText::new(text).size(10.5).monospace().color(color));
+            if let Some(i) = icon {
+                ui.label(egui::RichText::new(i).size(10.5).color(color));
+            }
         });
     });
 

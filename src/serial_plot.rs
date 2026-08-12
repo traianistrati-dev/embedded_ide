@@ -137,6 +137,14 @@ impl PlotState {
     /// Parse one complete line and append its samples (no-op when it holds no
     /// numeric values — log lines between samples are fine).
     fn apply_line(&mut self, line: &str) {
+        // A BINARY stream has no lines: `0x0A` occurs inside payloads by chance,
+        // so the assembled "line" is a slice of frame bytes. Parsing it invents
+        // channels out of noise — that is where the legend's unreadable names
+        // came from. The plotter is for TEXT protocols; anything else is not a
+        // sample line and is dropped whole.
+        if !is_text_line(line) {
+            return;
+        }
         let samples = parse_line(line);
         if samples.is_empty() {
             return;
@@ -185,6 +193,28 @@ impl PlotState {
 
 /// The value tokens of one line: `(label, value)` per token; `label` is `None`
 /// for bare numbers. See the module docs for the accepted formats.
+/// Is this a plausible line of a TEXT protocol? Printable ASCII plus spacing,
+/// nothing else. The one check that keeps a binary stream out of the plotter:
+/// its bytes contain `0x0A` at random, so without it every frame boundary looks
+/// like a sample line.
+fn is_text_line(line: &str) -> bool {
+    !line.trim().is_empty()
+        && line
+            .chars()
+            .all(|c| c == ' ' || c == '\t' || c.is_ascii_graphic())
+}
+
+/// Is this a plausible CHANNEL NAME? A label comes from a human writing
+/// `temp:23.4`, so it looks like an identifier — a run of bytes that merely
+/// contains a `:` does not become one.
+fn is_label(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 24
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '[' | ']'))
+}
+
 fn parse_line(line: &str) -> Vec<(Option<String>, f32)> {
     let mut out = Vec::new();
     for tok in line.split([' ', '\t', ',', ';']) {
@@ -194,7 +224,7 @@ fn parse_line(line: &str) -> Vec<(Option<String>, f32)> {
         }
         if let Some((name, val)) = tok.split_once([':', '=']) {
             let name = name.trim();
-            if let (false, Ok(v)) = (name.is_empty(), val.trim().parse::<f32>()) {
+            if let (true, Ok(v)) = (is_label(name), val.trim().parse::<f32>()) {
                 if v.is_finite() {
                     out.push((Some(name.to_string()), v));
                 }
@@ -503,6 +533,32 @@ mod tests {
         assert!(parse_line("").is_empty());
         // NaN / inf are rejected.
         assert!(parse_line("NaN inf x:nan").is_empty());
+        // A "label" that is really binary noise is not a channel name — this is
+        // what filled the legend with unreadable buttons on a binary stream.
+        assert!(parse_line("\u{0}\u{f8}\u{d7}\u{a4}:10").is_empty());
+        assert!(parse_line("way_too_long_a_name_to_be_real_here:1").is_empty());
+    }
+
+    /// A binary stream contains `0x0A` by chance, so the assembled "lines" are
+    /// frame fragments. They must not reach the parser at all: the plotter is
+    /// for text protocols, and inventing channels from noise is worse than
+    /// plotting nothing.
+    #[test]
+    fn binary_noise_never_becomes_a_channel() {
+        assert!(!is_text_line("\u{0}\u{f8}\u{d7}#\u{a4}"));
+        assert!(!is_text_line("temp:23\u{7}")); // one control byte is enough
+        assert!(!is_text_line("   "));
+        assert!(is_text_line("temp:23.4, hum=56"));
+        assert!(is_text_line("1.0 2.5 -3"));
+
+        let mut p = PlotState::default();
+        let junk = b"\x00\xf8\xd7\x23\x3a\x31\x30\n\xaa\xbb\n";
+        p.feed(junk, junk.len() as u64);
+        assert!(
+            p.channels.is_empty(),
+            "binary noise created channels: {:?}",
+            p.channels.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
     }
 
     /// Feeding across arbitrary chunk boundaries assembles the same lines.
