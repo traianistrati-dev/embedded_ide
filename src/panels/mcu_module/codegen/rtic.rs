@@ -67,6 +67,54 @@ pub fn local_pins(all_pins: &[&Pin]) -> Vec<LocalPin> {
         .collect()
 }
 
+/// A bus peripheral handle promoted to an RTIC `Local` resource.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BusHandle {
+    /// Binding without the leading underscore, e.g. `serial1_gps`.
+    pub binding: String,
+    /// The named type its config module exposes.
+    pub ty: String,
+}
+
+/// Promote the USART handles in `fn_calls` from dropped temporaries to named
+/// bindings, returning the rewritten block and the resources to declare.
+///
+/// The blocking generator writes `let mut _serial1 = ...`: the underscore says
+/// "configured, never used again", which is right when `fn main` continues into
+/// the user's loop. Under RTIC `#[init]` RETURNS, so that value is dropped and
+/// the peripheral becomes unreachable. Dropping the underscore and handing it to
+/// the framework is the whole fix.
+///
+/// USART only, for now: `configs/usart{N}.rs` is the one template that exposes a
+/// named `Handle`. SPI / I2C / CAN still return `impl Trait`, which cannot be a
+/// struct field, so their handles stay dropped until they get the same alias.
+pub fn promote_bus_handles(fn_calls: &str) -> (String, Vec<BusHandle>) {
+    let mut out = String::new();
+    let mut found = Vec::new();
+    for line in fn_calls.lines() {
+        let promoted = (|| {
+            let (indent, rest) = line.split_at(line.len() - line.trim_start().len());
+            let rest = rest.strip_prefix("let mut _serial")?;
+            let (tail, _) = rest.split_once(" =")?;
+            // `1` or `1_gps` — the instance number is the leading digits.
+            let n: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if n.is_empty() {
+                return None;
+            }
+            found.push(BusHandle {
+                binding: format!("serial{tail}"),
+                ty: format!("pins::configs::usart{n}::Handle"),
+            });
+            // No `mut`: the value is only moved into the resource here, and
+            // RTIC hands tasks a `&mut` to it anyway.
+            Some(format!("{indent}let serial{}", rest))
+        })();
+        out.push_str(&promoted.unwrap_or_else(|| line.to_string()));
+        out.push('\n');
+    }
+    (out, found)
+}
+
 /// One interrupt-enabled input pin, resolved to what the generator needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IrqPin {
@@ -309,6 +357,7 @@ pub fn make_generated_section(
 
     let irqs = irq_pins(all_pins);
     let locals_all = local_pins(all_pins);
+    let (fn_calls, buses) = promote_bus_handles(&fn_calls);
     // `make_interrupt_source(&mut self)` needs a mutable binding. Rewriting only
     // the armed pins keeps `unused_mut` off the polled ones.
     let pin_section = irqs.iter().fold(pin_section, |acc, p| {
@@ -322,7 +371,9 @@ pub fn make_generated_section(
     let arming: String = irqs.iter().map(arm_lines).collect();
     let locals = locals_all
         .iter()
-        .map(|p| format!("            {},\n", p.binding))
+        .map(|p| p.binding.clone())
+        .chain(buses.iter().map(|b| b.binding.clone()))
+        .map(|b| format!("            {b},\n"))
         .collect::<String>();
     let task_fns = tasks(&irqs);
 
@@ -381,8 +432,15 @@ pub fn make_generated_section(
          }}\n\
          {GEN_END}\n",
         clock_chain_i = clock_chain.replace('\n', "\n        "),
-        local_fields = locals_decl(&locals_all),
-        local_init = if locals_all.is_empty() {
+        local_fields = format!(
+            "{}{}",
+            locals_decl(&locals_all),
+            buses
+                .iter()
+                .map(|b| format!("        {}: {},\n", b.binding, b.ty))
+                .collect::<String>()
+        ),
+        local_init = if locals_all.is_empty() && buses.is_empty() {
             String::new()
         } else {
             format!("\n{locals}        ")
