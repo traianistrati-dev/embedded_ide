@@ -79,7 +79,9 @@ impl AppIde {
                 };
                 set_tree_notice(
                     ctx,
-                    format!("Copied `{base}` ({count} file(s){skipped}) — paste it here or in another IDE window."),
+                    format!(
+                        "Copied `{base}` ({count} file(s){skipped}) — paste it here or in another IDE window."
+                    ),
                 );
             }
             Err(e) => set_tree_notice(ctx, format!("Copy failed: {e}")),
@@ -132,7 +134,12 @@ impl AppIde {
             .user_src_files
             .iter()
             .map(|(p, _)| p.as_str())
-            .chain(self.project_tree.user_src_folders.iter().map(|f| f.as_str()))
+            .chain(
+                self.project_tree
+                    .user_src_folders
+                    .iter()
+                    .map(|f| f.as_str()),
+            )
             .collect();
         let new_files = clipboard::paste_paths(&payload, &req.target_dir, |p| taken.contains(p));
         if new_files.is_empty() {
@@ -180,7 +187,10 @@ impl AppIde {
         };
         set_tree_notice(
             ctx,
-            format!("Pasted `{}` — {count} file(s){hint}.", payload.manifest.name),
+            format!(
+                "Pasted `{}` — {count} file(s){hint}.",
+                payload.manifest.name
+            ),
         );
         *save_needed = true;
     }
@@ -191,8 +201,27 @@ impl AppIde {
 /// `.rs` is worth copying, an empty `.png` never is.
 fn is_texty(path: &str) -> bool {
     const TEXT_EXT: &[&str] = &[
-        "rs", "toml", "md", "txt", "x", "json", "ron", "cfg", "yml", "yaml", "lock", "gitignore",
-        "c", "h", "cpp", "hpp", "ld", "s", "asm", "sh", "py",
+        "rs",
+        "toml",
+        "md",
+        "txt",
+        "x",
+        "json",
+        "ron",
+        "cfg",
+        "yml",
+        "yaml",
+        "lock",
+        "gitignore",
+        "c",
+        "h",
+        "cpp",
+        "hpp",
+        "ld",
+        "s",
+        "asm",
+        "sh",
+        "py",
     ];
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rsplit_once('.') {

@@ -330,7 +330,8 @@ fn new_id() -> String {
 }
 
 fn write_pointer(root: &Path, id: &str) -> Result<(), String> {
-    let text = ron::ser::to_string(&ClipPointer { id: id.to_owned() }).map_err(|e| format!("{e}"))?;
+    let text =
+        ron::ser::to_string(&ClipPointer { id: id.to_owned() }).map_err(|e| format!("{e}"))?;
     // Write-then-rename: another window polling `latest.ron` must never read a
     // half-written file.
     let tmp = root.join("latest.ron.tmp");
@@ -429,7 +430,10 @@ mod tests {
     fn a_file_clash_keeps_the_extension() {
         let p = payload("bus.rs", ClipKind::File, &[("bus.rs", "x")]);
         let out = paste_paths(&p, "src/drivers", |path| path == "src/drivers/bus.rs");
-        assert_eq!(out, vec![("src/drivers/bus_1.rs".to_owned(), "x".to_owned())]);
+        assert_eq!(
+            out,
+            vec![("src/drivers/bus_1.rs".to_owned(), "x".to_owned())]
+        );
     }
 
     /// A library pastes at the PROJECT ROOT, next to src/ — that is where a
@@ -439,7 +443,10 @@ mod tests {
         let p = payload(
             "mw_radar",
             ClipKind::Library,
-            &[("mw_radar/Cargo.toml", "[package]"), ("mw_radar/src/lib.rs", "")],
+            &[
+                ("mw_radar/Cargo.toml", "[package]"),
+                ("mw_radar/src/lib.rs", ""),
+            ],
         );
         let out = paste_paths(&p, "", |_| false);
         assert_eq!(
@@ -503,7 +510,10 @@ mod tests {
 
         assert!(!base.join("0000000000001-1").exists(), "oldest pruned");
         assert!(base.join("0000000000003-1").exists(), "newest kept");
-        assert!(base.join("latest.ron").exists(), "the pointer is not a payload");
+        assert!(
+            base.join("latest.ron").exists(),
+            "the pointer is not a payload"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

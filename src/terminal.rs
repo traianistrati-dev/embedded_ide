@@ -49,10 +49,35 @@ pub struct TerminalState {
     pub lines: Vec<TermLine>,
     /// `true` while a command's child process is still running.
     pub running: bool,
+    /// When set, every pushed line is prefixed with the time ELAPSED since this
+    /// instant — the ESP monitor sets it when a session attaches, so device
+    /// output reads like `[  1.234] tick`.
+    ///
+    /// Elapsed, not wall-clock: the crate carries no `chrono`/`time`, and the
+    /// hand-rolled [`crate::activity::fmt_clock`] is UTC-based (it says so) —
+    /// stamping firmware output with an hour that is off by the timezone would
+    /// be worse than no stamp. Time SINCE THE BOARD STARTED TALKING is also the
+    /// number you actually want when watching a loop.
+    pub stamp_from: Option<Instant>,
 }
+
+/// Colour of the `[  1.234]` prefix — dim enough to read past, present enough
+/// to scan down.
+const STAMP_COLOR: egui::Color32 = egui::Color32::from_rgb(110, 120, 135);
 
 impl TerminalState {
     pub(crate) fn push(&mut self, kind: LineKind, spans: Vec<(String, Option<egui::Color32>)>) {
+        let mut spans = spans;
+        if let Some(t0) = self.stamp_from {
+            // Width 7 keeps the column steady from `  0.000` to `9999.999`.
+            spans.insert(
+                0,
+                (
+                    format!("[{:>7.3}] ", t0.elapsed().as_secs_f64()),
+                    Some(STAMP_COLOR),
+                ),
+            );
+        }
         self.lines.push(TermLine { kind, spans });
         if self.lines.len() > MAX_LINES {
             let excess = self.lines.len() - MAX_LINES;
@@ -536,6 +561,40 @@ fn sgr_color(params: &str, prev: Option<egui::Color32>) -> Option<egui::Color32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `stamp_from` prefixes each line with the time since the session attached,
+    /// as its OWN span — so the stamp keeps its dim colour while the line below
+    /// it keeps whatever colour its content earned, and the text is untouched.
+    #[test]
+    fn stamped_lines_get_a_separate_time_span() {
+        let mut st = TerminalState::default();
+
+        // Off by default: nothing else in the app wants stamps.
+        st.push_plain(LineKind::Stdout, "plain");
+        assert_eq!(st.lines[0].spans.len(), 1);
+        assert_eq!(st.lines[0].spans[0].0, "plain");
+
+        st.stamp_from = Some(Instant::now());
+        st.push_plain(LineKind::Stdout, "tick");
+        let spans = &st.lines[1].spans;
+        assert_eq!(spans.len(), 2, "stamp is its own span: {spans:?}");
+        assert_eq!(spans[1].0, "tick", "the line itself is unchanged");
+        assert!(spans[0].1.is_some(), "the stamp carries its own colour");
+        let stamp = &spans[0].0;
+        assert!(
+            stamp.starts_with('[') && stamp.ends_with("] "),
+            "bracketed: {stamp:?}"
+        );
+        // Fixed width keeps the column steady as seconds grow.
+        assert_eq!(stamp.len(), "[  0.000] ".len(), "{stamp:?}");
+        let secs: f64 = stamp
+            .trim_start_matches('[')
+            .trim_end_matches("] ")
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("{stamp:?} is not a number: {e}"));
+        assert!((0.0..1.0).contains(&secs), "just attached: {secs}");
+    }
 
     #[test]
     fn parse_cd_variants() {

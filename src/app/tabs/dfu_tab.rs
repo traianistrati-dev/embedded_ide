@@ -379,17 +379,6 @@ pub fn show_dfu_tab(
                 *openocd_state.lock().unwrap() = OpenOcdState::Idle;
                 *espflash_state.lock().unwrap() = EspFlashState::Idle;
             }
-            ui.separator();
-            esp_monitor_controls(
-                ui,
-                esp_monitor,
-                monitor_go,
-                monitor_auto,
-                monitor_auto_set,
-                can_flash,
-                serial_port_held,
-                missing_tools,
-            );
         } else if is_swd {
             // ── SWD / OpenOCD config ──────────────────────────────────────────
             ui.label(
@@ -567,6 +556,21 @@ pub fn show_dfu_tab(
                 if size_button(ui, size_busy, !size_busy && !any_busy && can_flash) {
                     *size_out = true;
                 }
+                ui.separator();
+                // The monitor group sits just left of Size/Info — it belongs to
+                // the right-hand pane, so it reads next to it rather than tucked
+                // against the flash-log buttons on the far left.
+                esp_monitor_controls(
+                    ui,
+                    esp_monitor,
+                    monitor_go,
+                    monitor_auto,
+                    monitor_auto_set,
+                    can_flash,
+                    serial_port_held,
+                    missing_tools,
+                    true, // this block is laid out right to left
+                );
             });
             return;
         }
@@ -798,7 +802,11 @@ fn flash_log_view(ui: &mut egui::Ui, log: &[String], height: f32, toolchain: &To
                      • Flash SWD    — ST-Link / J-Link via OpenOCD\n\
                      • Flash (probe-rs) — the shared debug probe"
                 };
-                ui.label(egui::RichText::new(hint).size(11.0).color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new(hint)
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                );
                 return;
             }
 
@@ -958,6 +966,10 @@ fn esp_monitor_controls(
     can_flash: bool,
     serial_port_held: Option<&str>,
     missing_tools: &[&'static str],
+    // The group lives inside the row's RIGHT-ALIGNED block, which lays widgets
+    // out right to left — so to READ as `Monitor Stop 🧹 auto ⦿port` they have to
+    // be ADDED in the opposite order. Set `false` for a normal left-to-right row.
+    right_to_left: bool,
 ) {
     use crate::esp_monitor::MonitorPhase;
     let phase = monitor.phase();
@@ -968,98 +980,130 @@ fn esp_monitor_controls(
     let blocked_by_serial = serial_port_held.is_some();
     let can_start = can_flash && !no_espflash && !blocked_by_serial;
 
-    if ui
-        .add_enabled(
-            !busy && can_start,
-            egui::Button::new(
-                egui::RichText::new(format!("{} Monitor", ph::PLAY))
-                    .size(10.5)
-                    .color(if !busy && can_start {
-                        egui::Color32::from_rgb(100, 220, 100)
-                    } else {
-                        egui::Color32::GRAY
-                    }),
-            ),
-        )
-        .on_hover_text(
-            "`espflash monitor`: attach to the board and stream what the firmware \
-             prints (esp-println / log / panics).\nIt resets the target once \
-             attached, so the output starts at boot.",
-        )
-        .on_disabled_hover_text(if no_espflash {
-            super::needs_tool_hint("espflash")
-        } else if let Some(p) = serial_port_held {
-            format!("The Serial tab is connected on {p} — disconnect it there first.")
-        } else if busy {
-            "The monitor is already attached.".to_owned()
-        } else {
-            "No ESP chip config exists yet.".to_owned()
-        })
-        .clicked()
-    {
-        *monitor_go = true;
+    // Which widget, in READING order. The row's right-aligned block lays out
+    // right to left, so there the same list is walked backwards — one order,
+    // declared once, instead of two copies of the buttons.
+    #[derive(Clone, Copy)]
+    enum W {
+        Start,
+        Stop,
+        Clear,
+        Auto,
+        Status,
     }
-    ui.add_enabled_ui(busy, |ui| {
-        if ui
-            .button(
-                egui::RichText::new(format!("{} Stop", ph::STOP_CIRCLE))
-                    .size(10.5)
-                    .color(egui::Color32::from_rgb(230, 120, 110)),
-            )
-            .on_hover_text("Kill espflash and release the serial port.")
-            .clicked()
-        {
-            monitor.stop();
-        }
-    });
-    // Icon-only: the row already ends in a "Clear" (the flash log's), and two
-    // buttons with the same word would be a coin toss.
-    if ui
-        .button(
-            egui::RichText::new(ph::BROOM)
-                .size(11.0)
-                .color(egui::Color32::GRAY),
-        )
-        .on_hover_text("Clear the device output (the right-hand pane)")
-        .clicked()
-    {
-        monitor.clear();
-    }
-    let mut auto = monitor_auto;
-    if ui
-        .checkbox(&mut auto, egui::RichText::new("auto").size(10.5))
-        .on_hover_text(
-            "Open the monitor automatically after a successful flash.\n\
-             The flash then leaves the chip in reset and the monitor resets it \
-             once attached, so the first println! of main is not missed.\n\
-             Off = press Monitor yourself.",
-        )
-        .changed()
-    {
-        *monitor_auto_set = Some(auto);
-    }
-    // The port rides along with the status: which board is being watched matters
-    // most exactly while one IS being watched, and it costs no extra widget.
-    let port = monitor.port.lock().unwrap().clone();
-    let (text, color) = match &phase {
-        MonitorPhase::Idle => (String::new(), egui::Color32::GRAY),
-        MonitorPhase::Starting => (
-            format!("attaching {port}…"),
-            egui::Color32::from_rgb(220, 180, 60),
-        ),
-        MonitorPhase::Streaming => (
-            format!("{} {port}", ph::BROADCAST),
-            egui::Color32::from_rgb(80, 200, 100),
-        ),
-        MonitorPhase::Error(e) => (
-            format!("{} {}", ph::X_CIRCLE, e.lines().next().unwrap_or("error")),
-            egui::Color32::from_rgb(230, 90, 80),
-        ),
+    const ORDER: [W; 5] = [W::Start, W::Stop, W::Clear, W::Auto, W::Status];
+    let walk: Box<dyn Iterator<Item = &W>> = if right_to_left {
+        Box::new(ORDER.iter().rev())
+    } else {
+        Box::new(ORDER.iter())
     };
-    if !text.is_empty() {
-        let label = ui.label(egui::RichText::new(text).size(10.5).color(color));
-        if let MonitorPhase::Error(e) = &phase {
-            label.on_hover_text(e);
+
+    for w in walk {
+        match w {
+            W::Start => {
+                if ui
+                    .add_enabled(
+                        !busy && can_start,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Monitor", ph::PLAY))
+                                .size(10.5)
+                                .color(if !busy && can_start {
+                                    egui::Color32::from_rgb(100, 220, 100)
+                                } else {
+                                    egui::Color32::GRAY
+                                }),
+                        ),
+                    )
+                    .on_hover_text(
+                        "`espflash monitor`: attach to the board and stream what the firmware \
+                     prints (esp-println / log / panics).\nIt resets the target once \
+                     attached, so the output starts at boot.",
+                    )
+                    .on_disabled_hover_text(if no_espflash {
+                        super::needs_tool_hint("espflash")
+                    } else if let Some(p) = serial_port_held {
+                        format!("The Serial tab is connected on {p} — disconnect it there first.")
+                    } else if busy {
+                        "The monitor is already attached.".to_owned()
+                    } else {
+                        "No ESP chip config exists yet.".to_owned()
+                    })
+                    .clicked()
+                {
+                    *monitor_go = true;
+                }
+            }
+            W::Stop => {
+                ui.add_enabled_ui(busy, |ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new(format!("{} Stop", ph::STOP_CIRCLE))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(230, 120, 110)),
+                        )
+                        .on_hover_text("Kill espflash and release the serial port.")
+                        .clicked()
+                    {
+                        monitor.stop();
+                    }
+                });
+            }
+            W::Clear => {
+                // Icon-only: the row already ends in a "Clear" (the flash log's), and two
+                // buttons with the same word would be a coin toss.
+                if ui
+                    .button(
+                        egui::RichText::new(ph::BROOM)
+                            .size(11.0)
+                            .color(egui::Color32::GRAY),
+                    )
+                    .on_hover_text("Clear the device output (the right-hand pane)")
+                    .clicked()
+                {
+                    monitor.clear();
+                }
+            }
+            W::Auto => {
+                let mut auto = monitor_auto;
+                if ui
+                    .checkbox(&mut auto, egui::RichText::new("auto").size(10.5))
+                    .on_hover_text(
+                        "Open the monitor automatically after a successful flash.\n\
+                     The flash then leaves the chip in reset and the monitor resets it \
+                     once attached, so the first println! of main is not missed.\n\
+                     Off = press Monitor yourself.",
+                    )
+                    .changed()
+                {
+                    *monitor_auto_set = Some(auto);
+                }
+            }
+            W::Status => {
+                // The port rides along with the status: which board is being watched matters
+                // most exactly while one IS being watched, and it costs no extra widget.
+                let port = monitor.port.lock().unwrap().clone();
+                let (text, color) = match &phase {
+                    MonitorPhase::Idle => (String::new(), egui::Color32::GRAY),
+                    MonitorPhase::Starting => (
+                        format!("attaching {port}…"),
+                        egui::Color32::from_rgb(220, 180, 60),
+                    ),
+                    MonitorPhase::Streaming => (
+                        format!("{} {port}", ph::BROADCAST),
+                        egui::Color32::from_rgb(80, 200, 100),
+                    ),
+                    MonitorPhase::Error(e) => (
+                        format!("{} {}", ph::X_CIRCLE, e.lines().next().unwrap_or("error")),
+                        egui::Color32::from_rgb(230, 90, 80),
+                    ),
+                };
+                if !text.is_empty() {
+                    let label = ui.label(egui::RichText::new(text).size(10.5).color(color));
+                    if let MonitorPhase::Error(e) = &phase {
+                        label.on_hover_text(e);
+                    }
+                }
+            }
         }
     }
     if blocked_by_serial {
@@ -1555,7 +1599,10 @@ fn esp_selected_programmer_note(ui: &mut egui::Ui, selected: Option<&dfu::Progra
 /// only one flashing path here, so this describes IT rather than comparing two
 /// SWD tools the board has no pins for.
 const ESP_INFO: &[(&str, &str)] = &[
-    ("Tool", "espflash — over the serial port, no debug probe involved"),
+    (
+        "Tool",
+        "espflash — over the serial port, no debug probe involved",
+    ),
     (
         "Flash command",
         "espflash flash --chip <chip> --port <port> --ignore-app-descriptor <elf>",
@@ -1569,7 +1616,10 @@ const ESP_INFO: &[(&str, &str)] = &[
         "Chip identity comes from",
         "the project's chip name (e.g. esp32c3), passed as --chip",
     ),
-    ("Needs installed", "espflash in PATH  (cargo install espflash)"),
+    (
+        "Needs installed",
+        "espflash in PATH  (cargo install espflash)",
+    ),
     (
         "Download mode",
         "Boards with an auto-reset circuit enter it themselves. If flashing fails to \

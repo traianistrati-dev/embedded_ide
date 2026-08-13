@@ -162,6 +162,10 @@ impl EspMonitor {
         self.stop = Some(Arc::clone(&stop));
         *self.phase.lock().unwrap() = MonitorPhase::Starting;
         *self.port.lock().unwrap() = port.clone();
+        // Restart the clock: every line from here on is stamped with the time
+        // since THIS attach, so `[  0.000]` is the reset and the numbers read as
+        // "how long after boot did the firmware say this".
+        self.state.lock().unwrap().stamp_from = Some(std::time::Instant::now());
 
         let state = Arc::clone(&self.state);
         let phase = Arc::clone(&self.phase);

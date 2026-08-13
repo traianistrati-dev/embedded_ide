@@ -2099,12 +2099,7 @@ fn render_tree_node(
                             return;
                         }
                         ui.separator();
-                        copy_menu_item(
-                            ui,
-                            clipboard::ClipKind::Folder,
-                            &folder_path,
-                            clip_copy,
-                        );
+                        copy_menu_item(ui, clipboard::ClipKind::Folder, &folder_path, clip_copy);
                         paste_menu_item(ui, &folder_path, false, clip_paste);
                         ui.separator();
                         // Turn this folder into a sibling crate you can publish.
@@ -2445,8 +2440,12 @@ mod tests {
             FLOOR
         );
         // …and nothing more: an empty section must not eat into the tree.
-        let project_h = 600.0 - SPLIT_HANDLE_H - libs_section_h(600.0, FLOOR, DEFAULT_SPLIT_RATIO, false);
-        assert!(project_h > 550.0, "the tree keeps the rest, got {project_h}");
+        let project_h =
+            600.0 - SPLIT_HANDLE_H - libs_section_h(600.0, FLOOR, DEFAULT_SPLIT_RATIO, false);
+        assert!(
+            project_h > 550.0,
+            "the tree keeps the rest, got {project_h}"
+        );
     }
 
     /// Dragging the handle works with no libraries too — that is how you make
