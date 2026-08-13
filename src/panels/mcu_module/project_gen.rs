@@ -466,7 +466,9 @@ impl AsyncFlavor<'_> {
             Self::Stm32 => "esp32c3",
             Self::Esp(chip) => chip,
         };
-        format!("esp-rtos = {{ version = \"{ESP_RTOS_REQ}\", features = [\"{chip}\", \"embassy\"] }}")
+        format!(
+            "esp-rtos = {{ version = \"{ESP_RTOS_REQ}\", features = [\"{chip}\", \"embassy\"] }}"
+        )
     }
 }
 

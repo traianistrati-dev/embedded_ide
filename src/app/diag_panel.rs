@@ -5,9 +5,9 @@
 
 use super::BuildPanelTab;
 use super::tabs::{
-    show_activity_tab, show_cargo_tab, show_clippy_tab, show_debug_tab, show_dfu_tab,
-    show_git_tab, show_profile_tab, show_ra_tab, show_rtt_tab,
-    show_serial_tab, show_terminal_tab, show_tools_tab,
+    show_activity_tab, show_cargo_tab, show_clippy_tab, show_debug_tab, show_dfu_tab, show_git_tab,
+    show_profile_tab, show_ra_tab, show_rtt_tab, show_serial_tab, show_terminal_tab,
+    show_tools_tab,
 };
 use crate::activity::ActivityLog;
 use crate::build::BuildState;

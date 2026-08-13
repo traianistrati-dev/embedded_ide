@@ -574,9 +574,19 @@ struct PersistedState {
     #[serde(default)]
     project_name: Option<String>,
     /// Full filesystem path of the last opened project root (UTF-8 string).
-    /// On startup the IDE reopens this folder automatically if it still exists.
+    /// On startup the IDE reopens this folder automatically. Written only when
+    /// the folder EXISTS, and it is what licenses the two lists above — see
+    /// [`AppIde::save`].
     #[serde(default)]
     project_dir: Option<String>,
+    /// Chip the session ended on. Unlike everything else about the MCU (pins,
+    /// clock, modules — all read back from `mcu.config`), this survives a
+    /// project that was never saved: reopening on the chip you were working
+    /// with costs nothing, and it is the half of a lost session worth keeping.
+    /// `None` (older state) or an id whose definition has since been deleted
+    /// falls back to the built-in default.
+    #[serde(default)]
+    selected_mcu_id: Option<String>,
     /// Editor-only layout (MCU + Project panels collapsed away).
     #[serde(default)]
     side_panels_collapsed: bool,
@@ -598,6 +608,89 @@ struct PersistedState {
     /// `false` must mean the ON behaviour, so older state keeps it enabled.
     #[serde(default)]
     esp_monitor_no_auto: bool,
+}
+
+impl PersistedState {
+    /// Enforce the rule that the persisted project is a POINTER, not a copy:
+    /// the source buffers are kept only alongside the folder they came from.
+    /// Returns that folder, or `None` after clearing everything that needs one.
+    ///
+    /// Everything that MAKES a project — the chip's pin configuration, main.rs,
+    /// Cargo.toml — is read back by [`AppIde::load_project_from_dir`], which
+    /// only runs for a folder that exists. The buffers alone are half a project:
+    /// restored without their folder they landed on top of whatever chip started
+    /// next, giving sources from one project and a chip from another — a
+    /// combination that never existed. A project moved or deleted since the last
+    /// save is the same case as one never saved at all.
+    ///
+    /// `selected_mcu_id` is deliberately outside the rule: it is one id, it
+    /// cannot contradict anything, and reopening on the chip you were working
+    /// with is the one part of an unsaved session worth keeping.
+    ///
+    /// BOTH ends call this — `save` before writing, `AppIde::new` after reading.
+    /// The read side is not redundant: state written by an older build already
+    /// carries the ghost, and cleaning it only on the way out would still let
+    /// one bad restore through first.
+    fn drop_homeless_files(&mut self) -> Option<std::path::PathBuf> {
+        let home = self
+            .project_dir
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists());
+        if home.is_none() {
+            self.project_dir = None;
+            self.project_name = None;
+            self.user_src_files.clear();
+            self.user_src_folders.clear();
+        }
+        home
+    }
+}
+
+#[cfg(test)]
+mod persisted_state_tests {
+    use super::PersistedState;
+
+    fn with_files(dir: Option<&str>) -> PersistedState {
+        PersistedState {
+            user_src_files: vec![("src/app.rs".to_owned(), "fn main() {}".to_owned())],
+            user_src_folders: vec!["src/pins".to_owned()],
+            project_name: Some("blinky".to_owned()),
+            project_dir: dir.map(String::from),
+            selected_mcu_id: Some("esp32c3".to_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_project_with_no_folder_keeps_only_the_chip() {
+        let mut s = with_files(None);
+        assert_eq!(s.drop_homeless_files(), None);
+        assert!(s.user_src_files.is_empty());
+        assert!(s.user_src_folders.is_empty());
+        assert_eq!(s.project_name, None);
+        // The chip survives — that is the whole point of keeping it separate.
+        assert_eq!(s.selected_mcu_id.as_deref(), Some("esp32c3"));
+    }
+
+    #[test]
+    fn a_folder_deleted_since_the_last_save_counts_as_none() {
+        let mut s = with_files(Some("Z:/no/such/project/26-08-13"));
+        assert_eq!(s.drop_homeless_files(), None);
+        assert!(s.user_src_files.is_empty());
+        // Cleared too, so the next start doesn't retry a path that is gone.
+        assert_eq!(s.project_dir, None);
+    }
+
+    #[test]
+    fn a_folder_that_still_exists_keeps_its_files() {
+        let here = env!("CARGO_MANIFEST_DIR");
+        let mut s = with_files(Some(here));
+        assert_eq!(s.drop_homeless_files().as_deref(), Some(here.as_ref()));
+        assert_eq!(s.user_src_files.len(), 1);
+        assert_eq!(s.user_src_folders.len(), 1);
+        assert_eq!(s.project_name.as_deref(), Some("blinky"));
+    }
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -1245,12 +1338,25 @@ impl AppIde {
                 .retain(|(p, _)| !folders.contains(p));
         }
 
+        // Drop source buffers that have no project folder to belong to (see
+        // `drop_homeless_files`) — including state an older build wrote before
+        // the rule existed. What's left is the folder to reopen, if any.
+        let saved_project_dir = persisted.drop_homeless_files();
+
         // Load the MCU registry: bundled built-ins + any user `.ron` imports
         // from the per-user `mcus/` folder (Phase 5 — runtime import).
         let mcu_registry = registry::load_registry();
-        let selected_mcu_id = "stm32f103c8t6".to_owned();
+        // The chip DOES outlive an unsaved session (see the field's doc). A
+        // definition that has since been deleted — a user `.ron` — would make
+        // the `expect` below fire, so the id is checked against the registry
+        // rather than trusted.
+        let selected_mcu_id = persisted
+            .selected_mcu_id
+            .take()
+            .filter(|id| mcu_registry.iter().any(|d| &d.id == id))
+            .unwrap_or_else(|| "stm32f103c8t6".to_owned());
         let mcu = Self::build_mcu_for(&mcu_registry, &selected_mcu_id)
-            .expect("built-in STM32F103 definition must load");
+            .expect("the chip id was just validated against the registry");
         let generated_code = mcu.fresh_main_rs();
 
         // Seed the editable project config files from the default chip — each
@@ -1262,13 +1368,6 @@ impl AppIde {
                 .expect("selected definition exists");
             project_gen::build_project_files(&d.project, &d.toolchain, &generated_code)
         };
-
-        // Pre-compute the saved project dir so we can use it both in the
-        // Self initialiser and in the post-construction load call below.
-        let saved_project_dir: Option<std::path::PathBuf> = persisted
-            .project_dir
-            .as_deref()
-            .map(std::path::PathBuf::from);
 
         // ── Start filesystem watcher on the build workspace src/ dir ─────────
         // The watcher runs on a background thread and sends events through a
@@ -1536,16 +1635,16 @@ impl AppIde {
         };
 
         // ── Restore previously opened project on startup ──────────────────────
-        // If the last project directory still exists on disk, reload it:
-        // user source files, pin configuration, and generated code are all
-        // recovered exactly as they were when the app was last closed.
+        // User source files, pin configuration and generated code are all
+        // recovered from the folder, exactly as they were when the app was last
+        // closed. `saved_project_dir` is already filtered to a folder that
+        // exists — when it is `None` the state above was cleared to match, so
+        // there is a clean empty project here rather than a half-restored one.
         if let Some(dir) = &saved_project_dir {
-            if dir.exists() {
-                app.load_project_from_dir(dir);
-                // Same overlay, restated for what this actually is — the load
-                // above armed it as an "Open".
-                app.begin_project_loading(loading_overlay::LoadKind::Restore);
-            }
+            app.load_project_from_dir(dir);
+            // Same overlay, restated for what this actually is — the load
+            // above armed it as an "Open".
+            app.begin_project_loading(loading_overlay::LoadKind::Restore);
         }
 
         app
@@ -2764,26 +2863,30 @@ impl AppIde {
 impl eframe::App for AppIde {
     // ── Persistence: called by eframe on app exit (and periodically) ──────────
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(
-            storage,
-            STORAGE_KEY,
-            &PersistedState {
-                user_src_files: self.project_tree.user_src_files.clone(),
-                user_src_folders: self.project_tree.user_src_folders.clone(),
-                paths_root_relative: true,
-                project_name: self.project_name.clone(),
-                project_dir: self
-                    .project_dir
-                    .as_ref()
-                    .and_then(|p| p.to_str())
-                    .map(String::from),
-                side_panels_collapsed: self.side_panels_collapsed,
-                diag_collapsed: self.diag_collapsed,
-                tree_split_ratio: self.tree_split_ratio,
-                hide_diff_line_bg: !self.diff_line_bg,
-                esp_monitor_no_auto: !self.esp_monitor_auto,
-            },
-        );
+        let mut state = PersistedState {
+            user_src_files: self.project_tree.user_src_files.clone(),
+            user_src_folders: self.project_tree.user_src_folders.clone(),
+            paths_root_relative: true,
+            project_name: self.project_name.clone(),
+            project_dir: self
+                .project_dir
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(String::from),
+            selected_mcu_id: Some(self.selected_mcu_id.clone()),
+            side_panels_collapsed: self.side_panels_collapsed,
+            diag_collapsed: self.diag_collapsed,
+            tree_split_ratio: self.tree_split_ratio,
+            hide_diff_line_bg: !self.diff_line_bg,
+            esp_monitor_no_auto: !self.esp_monitor_auto,
+        };
+        // Never write buffers that have no folder to be restored onto (see
+        // `drop_homeless_files`). This is also what makes "Close without saving"
+        // true: eframe calls `save` on the way out — and every 30s — so the
+        // files the user chose to discard used to be written anyway, leaving no
+        // way to be rid of them.
+        state.drop_homeless_files();
+        eframe::set_value(storage, STORAGE_KEY, &state);
     }
 
     // ── App exit: terminate rust-analyzer ─────────────────────────────────────

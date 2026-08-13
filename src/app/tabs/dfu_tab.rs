@@ -363,13 +363,7 @@ pub fn show_dfu_tab(
             // `Tool: espflash` and the Build → Flash phases moved up to the
             // probe row; what is left here is what you press: read the chip,
             // then watch what it prints.
-            esp_board_info_button(
-                ui,
-                &esp_state,
-                espflash_state,
-                dfu_log,
-                dfu_sel_programmer,
-            );
+            esp_board_info_button(ui, &esp_state, espflash_state, dfu_log, dfu_sel_programmer);
             ui.separator();
             esp_monitor_controls(
                 ui,
@@ -883,7 +877,9 @@ fn esp_phase_widgets(ui: &mut egui::Ui, esp_state: &EspFlashState, build_done: b
     let (f_icon, f_col) = match esp_state {
         EspFlashState::Flashing => (ph::CIRCLE_NOTCH, egui::Color32::from_rgb(220, 140, 60)),
         EspFlashState::Success => (ph::CHECK_CIRCLE, egui::Color32::from_rgb(80, 200, 100)),
-        EspFlashState::Error(_) if build_done => (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70)),
+        EspFlashState::Error(_) if build_done => {
+            (ph::X_CIRCLE, egui::Color32::from_rgb(220, 80, 70))
+        }
         _ => (ph::CIRCLE_NOTCH, egui::Color32::from_gray(70)),
     };
     phase(ui, f_icon, "Flash ESP32", f_col);
@@ -1050,9 +1046,7 @@ fn esp_monitor_controls(
                 .size(11.0)
                 .color(egui::Color32::from_rgb(210, 170, 90)),
         )
-        .on_hover_text(
-            "The Serial tab holds the port. Only one of the two can read it at a time.",
-        );
+        .on_hover_text("The Serial tab holds the port. Only one of the two can read it at a time.");
     }
 }
 
