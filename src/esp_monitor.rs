@@ -348,11 +348,13 @@ fn run_session(
             Ok(())
         }
         Some(Ok(st)) => Err(format!(
-            "espflash monitor exited with {} — is the board still connected, \
-             and is the port free? (the Serial tab holds it exclusively)",
+            "espflash monitor exited with {} on {} — see the lines above. Usually: \
+             the board was unplugged, or something else holds the port (the Serial \
+             tab opens it exclusively).",
             st.code()
                 .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into())
+                .unwrap_or_else(|| "signal".into()),
+            if port.is_empty() { "auto" } else { port },
         )),
         _ => Err("espflash monitor could not be reaped".into()),
     }

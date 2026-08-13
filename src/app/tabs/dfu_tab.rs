@@ -359,11 +359,26 @@ pub fn show_dfu_tab(
         };
 
         if *toolchain == ToolchainKind::EspRust {
-            // ── EspRust config: connectivity check + the device console ───────
-            // `Tool: espflash` and the Build → Flash phases moved up to the
-            // probe row; what is left here is what you press: read the chip,
-            // then watch what it prints.
+            // ── EspRust: one row for everything ──────────────────────────────
+            // Reading order matches the panes below it: what acts on the flash
+            // log first (left), then the device console (right), with Size/Info
+            // pushed to the far edge. `Tool: espflash` and the Build -> Flash
+            // phases live on the probe row above.
             esp_board_info_button(ui, &esp_state, espflash_state, dfu_log, dfu_sel_programmer);
+            if ui
+                .button(
+                    egui::RichText::new(ph::BROOM)
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                )
+                .on_hover_text("Clear the flash log (left pane) and reset the phase icons")
+                .clicked()
+            {
+                dfu_log.lock().unwrap().clear();
+                *dfu_state.lock().unwrap() = DfuState::Idle;
+                *openocd_state.lock().unwrap() = OpenOcdState::Idle;
+                *espflash_state.lock().unwrap() = EspFlashState::Idle;
+            }
             ui.separator();
             esp_monitor_controls(
                 ui,
@@ -538,6 +553,23 @@ pub fn show_dfu_tab(
         // Right-aligned tail of the config row: Size · Info · Clear. Laid out
         // right to left, so Clear stays on the edge and the other two sit just
         // before it — away from the usage bars they used to overlap.
+        //
+        // On ESP the text "Clear" is gone — the two broom icons (one per pane)
+        // replace it, and a third Clear here would be a coin toss.
+        if *toolchain == ToolchainKind::EspRust {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::app::helpers::help_panel::toggle_button_with(
+                    ui,
+                    INFO_ID,
+                    "Info",
+                    "How flashing an ESP32 works, and what the selected programmer can do",
+                );
+                if size_button(ui, size_busy, !size_busy && !any_busy && can_flash) {
+                    *size_out = true;
+                }
+            });
+            return;
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add(egui::Button::new(
@@ -565,7 +597,7 @@ pub fn show_dfu_tab(
     });
 
     // ── Info panel — right under the button that opens it ────────────────────
-    flash_info_panel(ui, progs.get(dfu_sel_programmer));
+    flash_info_panel(ui, progs.get(dfu_sel_programmer), toolchain);
     /*
         // ── ESP32 port selector ───────────────────────────────────────────────────
         // Shown only for EspRust.  Lets the user type a COM port (e.g. "COM3") so
@@ -724,41 +756,23 @@ pub fn show_dfu_tab(
     // programmer, one with the firmware — and interleaving them in one
     // scrollback made it impossible to tell which side said what.
     if *toolchain == ToolchainKind::EspRust {
+        // No per-pane toolbars: every button lives on the single row above (see
+        // the config row), so both panes are pure output. Each takes the full
+        // height of its column; which is which is stated by the empty-state text
+        // and by the ordering — flasher left, device right, same as the buttons.
         let h = ui.available_height();
         ui.columns(2, |cols| {
-            cols[0].label(
-                egui::RichText::new("Flash log")
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(120)),
-            );
-            flash_log_view(&mut cols[0], &log, h - 18.0);
-
-            cols[1].horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Device output")
-                        .size(10.0)
-                        .color(egui::Color32::from_gray(120)),
-                );
-                let port = esp_monitor.port.lock().unwrap().clone();
-                if !port.is_empty() {
-                    ui.label(
-                        egui::RichText::new(port)
-                            .size(10.0)
-                            .monospace()
-                            .color(egui::Color32::from_rgb(120, 160, 200)),
-                    );
-                }
-            });
-            monitor_view(&mut cols[1], esp_monitor, h - 18.0);
+            flash_log_view(&mut cols[0], &log, h, toolchain);
+            monitor_view(&mut cols[1], esp_monitor, h);
         });
         return;
     }
-    flash_log_view(ui, &log, ui.available_height());
+    flash_log_view(ui, &log, ui.available_height(), toolchain);
 }
 
 /// The flasher's own output (cargo, dfu-util, OpenOCD, espflash) — one line per
 /// entry, coloured by content since the tools' ANSI escapes are stripped.
-fn flash_log_view(ui: &mut egui::Ui, log: &[String], height: f32) {
+fn flash_log_view(ui: &mut egui::Ui, log: &[String], height: f32, toolchain: &ToolchainKind) {
     egui::ScrollArea::vertical()
         .id_salt("dfu_log_scroll")
         .stick_to_bottom(true)
@@ -770,16 +784,21 @@ fn flash_log_view(ui: &mut egui::Ui, log: &[String], height: f32) {
         .show(ui, |ui| {
             if log.is_empty() {
                 ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(
-                        "No output yet.\n\
-                         • Flash USB    — DFU mode (STM32 with BOOT0 = 1)\n\
-                         • Flash SWD    — ST-Link / J-Link via OpenOCD\n\
-                         • Flash ESP32  — espflash (ESP32-C3 via USB-Serial)",
-                    )
-                    .size(11.0)
-                    .color(egui::Color32::GRAY),
-                );
+                // Only the paths this chip HAS: listing DFU and SWD on an ESP
+                // board describes hardware it does not have (same reason the
+                // Info panel is split per toolchain).
+                let hint = if *toolchain == ToolchainKind::EspRust {
+                    "No output yet.\n\
+                     Flash ESP32 builds --release, then programs the board with \
+                     espflash over the serial port.\n\
+                     Read chip info connects without writing anything."
+                } else {
+                    "No output yet.\n\
+                     • Flash USB    — DFU mode (STM32 with BOOT0 = 1)\n\
+                     • Flash SWD    — ST-Link / J-Link via OpenOCD\n\
+                     • Flash (probe-rs) — the shared debug probe"
+                };
+                ui.label(egui::RichText::new(hint).size(11.0).color(egui::Color32::GRAY));
                 return;
             }
 
@@ -1019,14 +1038,17 @@ fn esp_monitor_controls(
     {
         *monitor_auto_set = Some(auto);
     }
+    // The port rides along with the status: which board is being watched matters
+    // most exactly while one IS being watched, and it costs no extra widget.
+    let port = monitor.port.lock().unwrap().clone();
     let (text, color) = match &phase {
         MonitorPhase::Idle => (String::new(), egui::Color32::GRAY),
         MonitorPhase::Starting => (
-            "attaching…".to_owned(),
+            format!("attaching {port}…"),
             egui::Color32::from_rgb(220, 180, 60),
         ),
         MonitorPhase::Streaming => (
-            format!("{} live", ph::BROADCAST),
+            format!("{} {port}", ph::BROADCAST),
             egui::Color32::from_rgb(80, 200, 100),
         ),
         MonitorPhase::Error(e) => (
@@ -1382,7 +1404,11 @@ fn programmer_combo(
 /// SELECTED programmer kind can actually do (the old per-programmer guidance
 /// line, which used to sit under the row claiming SWD needed an external
 /// OpenOCD — this tab has had a button for it for a while).
-fn flash_info_panel(ui: &mut egui::Ui, selected: Option<&dfu::ProgrammerInfo>) {
+fn flash_info_panel(
+    ui: &mut egui::Ui,
+    selected: Option<&dfu::ProgrammerInfo>,
+    toolchain: &ToolchainKind,
+) {
     crate::app::helpers::help_panel::custom_panel(ui, INFO_ID, |ui| {
         // Explicit column widths. An `egui::Grid` sizes its columns from the
         // content, and a WRAPPED label reports a tiny minimum — which is what
@@ -1406,6 +1432,42 @@ fn flash_info_panel(ui: &mut egui::Ui, selected: Option<&dfu::ProgrammerInfo>) {
         let head = |t: egui::RichText| t.strong().color(egui::Color32::from_rgb(200, 210, 230));
         let body = |t: egui::RichText| t.color(egui::Color32::from_gray(195));
         let aspect = |t: egui::RichText| t.color(egui::Color32::from_gray(150));
+
+        // The ESP toolchain has exactly ONE flashing path, so the SWD vs
+        // probe-rs comparison is noise there — it describes hardware the board
+        // does not have. Show what espflash actually does instead.
+        if *toolchain == ToolchainKind::EspRust {
+            let w_val = (total - w_aspect - 20.0).max(120.0);
+            for (i, (asp, val)) in ESP_INFO.iter().enumerate() {
+                let bg = if i % 2 == 0 {
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                egui::Frame::new()
+                    .fill(bg)
+                    .inner_margin(egui::Margin::symmetric(0, 2))
+                    .show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            cell(ui, w_aspect, asp, aspect);
+                            cell(ui, w_val, val, body);
+                        });
+                    });
+            }
+            ui.add_space(6.0);
+            for note in ESP_NOTES {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{} {note}", ph::DOT))
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
+                    )
+                    .wrap(),
+                );
+            }
+            esp_selected_programmer_note(ui, selected);
+            return;
+        }
 
         ui.horizontal_top(|ui| {
             cell(ui, w_aspect, "", head);
@@ -1464,6 +1526,74 @@ fn flash_info_panel(ui: &mut egui::Ui, selected: Option<&dfu::ProgrammerInfo>) {
         }
     });
 }
+
+/// The "Selected programmer — …" footer, shared by both Info variants.
+fn esp_selected_programmer_note(ui: &mut egui::Ui, selected: Option<&dfu::ProgrammerInfo>) {
+    let Some(p) = selected else { return };
+    let guidance = p.guidance();
+    if guidance.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(format!("Selected programmer — {} ({})", p.name, p.kind))
+            .size(11.0)
+            .strong()
+            .color(egui::Color32::from_rgb(200, 210, 230)),
+    );
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(guidance)
+                .size(10.5)
+                .color(egui::Color32::from_gray(180)),
+        )
+        .wrap(),
+    );
+}
+
+/// `(aspect, what it means)` — the Info panel on the ESP toolchain. There is
+/// only one flashing path here, so this describes IT rather than comparing two
+/// SWD tools the board has no pins for.
+const ESP_INFO: &[(&str, &str)] = &[
+    ("Tool", "espflash — over the serial port, no debug probe involved"),
+    (
+        "Flash command",
+        "espflash flash --chip <chip> --port <port> --ignore-app-descriptor <elf>",
+    ),
+    (
+        "Port comes from",
+        "the Programmer row above — pick the board there after a Scan. The monitor \
+         reuses whatever port the flash actually used.",
+    ),
+    (
+        "Chip identity comes from",
+        "the project's chip name (e.g. esp32c3), passed as --chip",
+    ),
+    ("Needs installed", "espflash in PATH  (cargo install espflash)"),
+    (
+        "Download mode",
+        "Boards with an auto-reset circuit enter it themselves. If flashing fails to \
+         connect: hold BOOT -> press RESET -> release BOOT, then flash again.",
+    ),
+    (
+        "Monitor",
+        "espflash monitor on the same port — it attaches FIRST and resets the chip \
+         itself, so the output starts at boot. With `auto` on it opens after every \
+         successful flash.",
+    ),
+];
+
+/// Notes under the ESP table.
+const ESP_NOTES: &[&str] = &[
+    "Flash builds `cargo build --release` first, and refreshes the Flash/RAM \
+     measurement on the right afterwards.",
+    "One process at a time owns the serial port: the monitor refuses to start while \
+     the Serial tab is connected, and stops itself before a flash.",
+    "esp-println picks its output at RUNTIME on the C3/C6/S3: USB Serial/JTAG when a \
+     USB host is attached, otherwise UART0. On a board reached through a UART bridge, \
+     giving UART0's pins another function on the Pins canvas silences the prints.",
+    "SWD / OpenOCD / DFU do not apply here — those are the ARM toolchain's paths.",
+];
 
 /// `(aspect, Flash SWD, Flash (probe-rs))` — the comparison table in the Info
 /// panel. Both write over the same SWD wires; what differs is the tool driving

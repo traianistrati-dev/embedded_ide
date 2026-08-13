@@ -195,14 +195,40 @@ impl AppIde {
             self.build_tab = BuildPanelTab::Dfu;
             return;
         }
-        // After a flash: the port espflash reported (it may have auto-detected
-        // one the IDE never chose). Standalone: the Flash tab's override, else
-        // empty so espflash detects it again.
-        let port = if after_flash {
-            self.espflash_used_port.lock().unwrap().clone()
-        } else {
-            self.espflash_port.clone()
+        // A port MUST be resolved here. `--non-interactive` (which the monitor
+        // needs, or espflash stops on a prompt nobody can see) refuses to
+        // auto-detect: "No serial port was provided … when using the
+        // `--non-interactive` flag". So try, in order:
+        //   1. the port the last flash actually used (auto-detected or not),
+        //   2. the Flash tab's explicit override,
+        //   3. the port of the programmer selected in the row above — the same
+        //      source `flash_esp` uses, and what the user actually picked.
+        let port = {
+            let from_flash = self.espflash_used_port.lock().unwrap().clone();
+            if after_flash && !from_flash.is_empty() {
+                from_flash
+            } else if !self.espflash_port.is_empty() {
+                self.espflash_port.clone()
+            } else if !from_flash.is_empty() {
+                from_flash
+            } else {
+                self.dfu_programmers
+                    .lock()
+                    .unwrap()
+                    .get(&self.dfu_sel_programmer)
+                    .map(|p| p.port.clone())
+                    .unwrap_or_default()
+            }
         };
+        if port.is_empty() {
+            self.esp_monitor.state.lock().unwrap().push_plain(
+                crate::terminal::LineKind::Notice,
+                "[error] no serial port known — press Scan and pick the board in the \
+                 programmer list above, then try again",
+            );
+            self.build_tab = BuildPanelTab::Dfu;
+            return;
+        }
         // Symbols for backtrace decoding — same ELF path the flash used.
         let build_dir = crate::workspace::dir();
         let elf = build_dir
