@@ -34,6 +34,8 @@ mod diag_panel;
 
 mod project_panel;
 
+mod tree_clipboard;
+
 mod mcu_panel;
 
 mod structure_tab;
@@ -1603,7 +1605,7 @@ impl AppIde {
             // 0.0 = absent from an older build's state; clamp keeps a corrupt
             // value from collapsing one half to nothing.
             tree_split_ratio: if persisted.tree_split_ratio <= 0.0 {
-                0.6
+                crate::project_tree::gui::DEFAULT_SPLIT_RATIO
             } else {
                 persisted.tree_split_ratio.clamp(0.15, 0.85)
             },
@@ -3237,6 +3239,14 @@ impl eframe::App for AppIde {
         let open_project_clicked = signals.open_clicked;
         let new_project_clicked = signals.new_clicked;
         let save_project_clicked = signals.save_clicked;
+        // Cross-instance tree clipboard. Copy stages the item and puts a token
+        // on the system clipboard; paste reads a staged payload back.
+        if let Some(req) = signals.clip_copy {
+            self.apply_clip_copy(&ui.ctx().clone(), req);
+        }
+        if let Some(req) = signals.clip_paste {
+            self.apply_clip_paste(&ui.ctx().clone(), req, &mut save_project_needed);
+        }
         // "Extract to library crate…" on a tree folder → open the dialog.
         if let Some(folder) = signals.extract_folder {
             self.extract_crate = Some(extract_crate_dialog::ExtractCrateDialog::extract(folder));

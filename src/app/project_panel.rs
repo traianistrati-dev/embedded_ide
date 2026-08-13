@@ -39,6 +39,10 @@ pub(super) struct ProjectPanelSignals {
     /// moment a file above it is deleted. `AppIde::reference_file` stores a
     /// path for the same reason.
     pub open_reference: Option<String>,
+    /// Tree item to stage on the cross-instance clipboard.
+    pub clip_copy: Option<crate::project_tree::clipboard::CopyRequest>,
+    /// Where to paste a staged payload.
+    pub clip_paste: Option<crate::project_tree::clipboard::PasteRequest>,
 }
 
 impl AppIde {
@@ -140,6 +144,8 @@ impl AppIde {
         let mut add_to_workspace: Option<String> = None;
         let mut detach_from_workspace: Option<String> = None;
         let mut open_reference: Option<String> = None;
+        let mut clip_copy: Option<crate::project_tree::clipboard::CopyRequest> = None;
+        let mut clip_paste: Option<crate::project_tree::clipboard::PasteRequest> = None;
 
         egui::Panel::right("project_tree")
             .resizable(true)
@@ -282,6 +288,8 @@ impl AppIde {
                             &mut add_to_workspace,
                             &mut detach_from_workspace,
                             &mut open_reference,
+                            &mut clip_copy,
+                            &mut clip_paste,
                         );
                     }
                     _ => {
@@ -309,6 +317,8 @@ impl AppIde {
             add_to_workspace,
             detach_from_workspace,
             open_reference,
+            clip_copy,
+            clip_paste,
         }
     }
 }

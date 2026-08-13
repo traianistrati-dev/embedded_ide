@@ -2,6 +2,7 @@
 
 use crate::app::ProjectFileId;
 use crate::panels::mcu_module::mcu_catalog::ToolchainKind;
+use crate::project_tree::clipboard;
 use crate::project_tree::logic::SRC_ROOT;
 use crate::{build, lsp};
 use eframe::egui;
@@ -118,7 +119,7 @@ const TREE_NOTICE_ID: &str = "__tree_move_notice__";
 /// seconds — used to explain why a drag-drop move was refused. Stored in egui
 /// temp memory (with an expiry time) so it survives across frames without a
 /// dedicated state field.
-fn set_tree_notice(ctx: &egui::Context, msg: String) {
+pub(crate) fn set_tree_notice(ctx: &egui::Context, msg: String) {
     let expiry = ctx.input(|i| i.time) + 6.0;
     ctx.memory_mut(|m| {
         m.data
@@ -362,6 +363,37 @@ const ICON_DANGER_LIBRARY: egui::Color32 = egui::Color32::from_rgb(230, 130, 115
 /// Text size shared by every context-menu entry.
 const MENU_TEXT_SIZE: f32 = 11.5;
 
+/// Share of the tree's height given to the project half when the user has never
+/// dragged the splitter. Also the value [`AppIde`](crate::app::AppIde) falls
+/// back to when no ratio was persisted — kept here, next to the layout that
+/// compares against it, so the two can't drift apart.
+pub const DEFAULT_SPLIT_RATIO: f32 = 0.6;
+
+/// Gap above the LIBRARIES separator, and the height egui gives a horizontal
+/// `Separator`. Both feed the section's minimum height, so they are constants
+/// rather than literals at the call site — a change in one must move the other.
+const LIBS_HEADER_PAD: f32 = 4.0;
+const SEPARATOR_H: f32 = 6.0;
+
+/// Height of the drag handle between the project half and LIBRARIES.
+const SPLIT_HANDLE_H: f32 = 6.0;
+
+/// Height to give the LIBRARIES section. `min_h` is its floor — the separator
+/// plus the header row carrying the "+" / git-clone buttons, which must never
+/// be clipped.
+///
+/// With no libraries and an untouched splitter the section sits exactly on that
+/// floor: there is nothing to reveal, and reserving 40% of the panel for an
+/// empty section would only shrink the tree. Once the user drags the handle,
+/// their ratio governs in both states.
+fn libs_section_h(total_h: f32, min_h: f32, split_ratio: f32, has_libs: bool) -> f32 {
+    if has_libs || split_ratio != DEFAULT_SPLIT_RATIO {
+        ((total_h - SPLIT_HANDLE_H) * (1.0 - split_ratio)).max(min_h)
+    } else {
+        min_h
+    }
+}
+
 /// Label for a context-menu entry: `icon` painted in `icon_color`, the text
 /// left at [`egui::Color32::PLACEHOLDER`] — egui substitutes the button's own
 /// colour there when it paints the galley, so the label keeps reacting to
@@ -406,6 +438,92 @@ fn menu_label_with_text_color(
         },
     );
     job
+}
+
+/// The "Copy" entry, shared by the file / folder / library context menus.
+///
+/// It stages the item for [`clipboard`] — a copy that survives into ANOTHER
+/// IDE window — which is why it is worded plainly as "Copy" while the entry
+/// that puts a path on the system clipboard stays "Copy path".
+fn copy_menu_item(
+    ui: &mut egui::Ui,
+    kind: clipboard::ClipKind,
+    rel_path: &str,
+    clip_copy: &mut Option<clipboard::CopyRequest>,
+) {
+    let label = match kind {
+        clipboard::ClipKind::Library => "Copy library",
+        _ => "Copy",
+    };
+    if ui
+        .button(menu_label(ph::CLIPBOARD_TEXT, label, ICON_UTIL))
+        .on_hover_text(format!(
+            "Copy this {} so it can be pasted here or in ANOTHER IDE window \
+             (text files only)",
+            kind.noun()
+        ))
+        .clicked()
+    {
+        *clip_copy = Some(clipboard::CopyRequest {
+            kind,
+            path: rel_path.to_owned(),
+        });
+        ui.close();
+    }
+}
+
+/// The "Paste" entry for a folder / the `src` root / the LIBRARIES header.
+///
+/// It names what it will paste — "Paste drivers (folder)" — because a menu
+/// cannot read the system clipboard and so has to offer the LAST staged
+/// payload rather than whatever the user copied most recently anywhere. Seeing
+/// the name is what makes that honest. Disabled, with the reason, when nothing
+/// is staged or the payload doesn't belong here.
+///
+/// `libraries_only` is the LIBRARIES header: a crate directory is the only
+/// thing that can be pasted at the project root.
+fn paste_menu_item(
+    ui: &mut egui::Ui,
+    target_dir: &str,
+    libraries_only: bool,
+    clip_paste: &mut Option<clipboard::PasteRequest>,
+) {
+    // Manifest only — this runs every frame the menu is open, and reading the
+    // payload's files just to write a label would re-read a whole library
+    // crate at frame rate.
+    let id = clipboard::latest_id();
+    let manifest = id.as_deref().and_then(clipboard::load_manifest);
+    let is_lib = manifest
+        .as_ref()
+        .is_some_and(|m| m.kind == clipboard::ClipKind::Library);
+    // A library is a crate directory: it belongs next to src/, never inside it.
+    // Anything else belongs inside the tree, never loose at the root.
+    let fits = is_lib == libraries_only;
+
+    let label = match &manifest {
+        Some(m) => format!("Paste {} ({})", m.name, m.kind.noun()),
+        None => "Paste".to_owned(),
+    };
+    let resp = ui
+        .add_enabled(
+            manifest.is_some() && fits,
+            egui::Button::new(menu_label(ph::CLIPBOARD, &label, ICON_UTIL)),
+        )
+        .on_disabled_hover_text(match (&manifest, libraries_only) {
+            (None, _) => "Nothing copied yet — use Copy on a file, folder or library".to_owned(),
+            (Some(m), true) => format!("{} is a {}, not a library crate", m.name, m.kind.noun()),
+            (Some(m), false) => format!(
+                "{} is a library crate — paste it on the LIBRARIES header instead",
+                m.name
+            ),
+        });
+    if resp.clicked() {
+        *clip_paste = Some(clipboard::PasteRequest {
+            target_dir: target_dir.to_owned(),
+            id,
+        });
+        ui.close();
+    }
 }
 
 /// The "Show in Explorer" + "Copy path" pair, shared by the file and folder
@@ -712,8 +830,13 @@ pub fn show_project_tree(
     add_to_workspace: &mut Option<String>,
     // Set to a member lib's dir when its "Detach" button is clicked.
     detach_from_workspace: &mut Option<String>,
-    // `user_src_files` index of a file to open READ-ONLY in the Reference tab.
+    // Project-root-relative path of a file to open READ-ONLY in the Reference tab.
     open_reference: &mut Option<String>,
+    // Cross-instance copy/paste (see `project_tree::clipboard`). Raised here,
+    // applied by the app — only it can read and mutate `user_src_files` as a
+    // whole.
+    clip_copy: &mut Option<clipboard::CopyRequest>,
+    clip_paste: &mut Option<clipboard::PasteRequest>,
 ) {
     // Diagnostic status of the user files (cargo + rust-analyzer), so
     // `user_file_row` can flag them: `true` = has ERRORS (red icon), `false` =
@@ -770,25 +893,27 @@ pub fn show_project_tree(
     ui.add_space(2.0);
 
     // ── Split: project above, LIBRARIES below ────────────────────────────────
-    // Only when there IS a library. Otherwise the project keeps the whole
-    // height — reserving 40% for an empty section would just shrink the tree.
     let has_libs = !detached_libs.is_empty()
         || lib_crates.iter().any(|c| {
             user_src_files
                 .iter()
                 .any(|(p, _)| p.starts_with(&format!("{c}/")))
         });
-    const SPLIT_HANDLE_H: f32 = 6.0;
     let total_h = ui.available_height();
-    // The LIBRARIES header always renders — it carries the "+" button, which is
-    // how the FIRST library gets created — so its row must be left visible even
-    // when the section below it is empty.
-    let libs_header_h = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 3.0;
-    let project_h = if has_libs {
-        (total_h - SPLIT_HANDLE_H) * *split_ratio
-    } else {
-        (total_h - libs_header_h).max(0.0)
+
+    // Floor for the LIBRARIES section: its separator and header row must ALWAYS
+    // be fully visible, because that row carries the "+" and git-clone buttons
+    // — the only way to get a FIRST library. Derived from the real spacing
+    // instead of a guessed multiple of it: the previous
+    // `interact_size.y + 3 * item_spacing.y` left out the separator's own
+    // height, so with no libraries the header rendered clipped against the
+    // bottom edge of the panel.
+    let libs_min_h = {
+        let sp = ui.spacing();
+        LIBS_HEADER_PAD + SEPARATOR_H + sp.item_spacing.y * 2.0 + sp.interact_size.y
     };
+    let libs_h = libs_section_h(total_h, libs_min_h, *split_ratio, has_libs);
+    let project_h = (total_h - SPLIT_HANDLE_H - libs_h).max(0.0);
     // `ScrollSource::drag` is ON by default and would swallow the tree's own
     // hold-to-drag file move — the two gestures are the same input.
     let no_drag_scroll = egui::scroll_area::ScrollSource {
@@ -916,6 +1041,8 @@ pub fn show_project_tree(
                     &mut to_delete,
                     &mut to_duplicate,
                     open_reference,
+                    clip_copy,
+                    clip_paste,
                     renaming_folder,
                     workspace_dir,
                     project_dir,
@@ -988,6 +1115,7 @@ pub fn show_project_tree(
                     *new_file_parent_folder = None;
                     ui.close();
                 }
+                paste_menu_item(ui, SRC_ROOT, false, clip_paste);
                 ui.separator();
                 // The src/ ROOT of the firmware crate.
                 reveal_menu_items(ui, project_dir, SRC_ROOT);
@@ -1049,7 +1177,11 @@ pub fn show_project_tree(
     // ── Splitter ─────────────────────────────────────────────────────────────
     // Same pattern as the bottom diagnostics panel's handle: allocate a thin
     // strip, interact with it for drags, and paint a line plus grip dots.
-    if has_libs {
+    //
+    // Rendered even with NO libraries: the section still has a header worth
+    // pulling up, and a handle that silently disappears reads as a broken
+    // panel rather than an empty one.
+    {
         let (handle_rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), SPLIT_HANDLE_H),
             egui::Sense::hover(),
@@ -1094,9 +1226,9 @@ pub fn show_project_tree(
         .filter(|c| full_tree.contains_key(c.as_str()))
         .cloned()
         .collect();
-    ui.add_space(4.0);
+    ui.add_space(LIBS_HEADER_PAD);
     ui.separator();
-    ui.horizontal(|ui| {
+    let libs_header = ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("LIBRARIES")
                 .size(9.0)
@@ -1125,6 +1257,17 @@ pub fn show_project_tree(
             }
         });
     });
+    // A pasted library crate lands at the PROJECT ROOT, next to src/ — the only
+    // place a workspace member can live. The header row is the drop point for
+    // it, and the only one available when the section is still empty.
+    libs_header
+        .response
+        .interact(egui::Sense::click())
+        .context_menu(|ui| {
+            paste_menu_item(ui, "", true, clip_paste);
+            ui.separator();
+            reveal_menu_items(ui, project_dir, "");
+        });
 
     egui::ScrollArea::vertical()
         .id_salt("tree_libraries_scroll")
@@ -1237,6 +1380,8 @@ pub fn show_project_tree(
                         &mut to_delete,
                         &mut to_duplicate,
                         open_reference,
+                        clip_copy,
+                        clip_paste,
                         renaming_folder,
                         workspace_dir,
                         project_dir,
@@ -1282,6 +1427,8 @@ pub fn show_project_tree(
                         *new_file_parent_folder = None;
                         ui.close();
                     }
+                    ui.separator();
+                    copy_menu_item(ui, clipboard::ClipKind::Library, lib, clip_copy);
                     ui.separator();
                     if ui
                         .button(menu_label(ph::PENCIL_SIMPLE, "Rename library…", ICON_EDIT))
@@ -1408,6 +1555,8 @@ pub fn show_project_tree(
                             &mut to_delete,
                             &mut to_duplicate,
                             open_reference,
+                            clip_copy,
+                            clip_paste,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -1453,6 +1602,8 @@ pub fn show_project_tree(
                             *add_to_workspace = Some(lib.clone());
                             ui.close();
                         }
+                        ui.separator();
+                        copy_menu_item(ui, clipboard::ClipKind::Library, lib, clip_copy);
                         ui.separator();
                         if ui
                             .button(menu_label(ph::PENCIL_SIMPLE, "Rename library…", ICON_EDIT))
@@ -1576,6 +1727,48 @@ pub fn show_project_tree(
                 });
         }
     }
+
+    // ── Ctrl+V ───────────────────────────────────────────────────────────────
+    // egui-winit turns the paste shortcut into an `Event::Paste` and returns
+    // WITHOUT emitting a key, so there is no `Key::V` to consume — the event is
+    // the shortcut. It also means a paste is invisible here when the system
+    // clipboard is empty, which is one more reason Copy puts a token on it.
+    //
+    // Skipped while any text widget holds focus: that paste belongs to the
+    // editor, which is already consuming the same event. And anything that is
+    // not one of our tokens is ordinary text, so Ctrl+V with a normal clipboard
+    // is silently a no-op rather than a surprise.
+    if clip_paste.is_none() && !ui.ctx().wants_keyboard_input() {
+        let pasted = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Paste(t) => Some(t.clone()),
+                _ => None,
+            })
+        });
+        if let Some(id) = pasted.as_deref().and_then(clipboard::id_from_token) {
+            let is_lib = clipboard::load_manifest(id)
+                .is_some_and(|m| m.kind == clipboard::ClipKind::Library);
+            // A crate directory can only live at the project root; everything
+            // else lands beside the selected file, which is the closest thing
+            // the tree has to a "current folder" (folders aren't selectable).
+            let target_dir = if is_lib {
+                String::new()
+            } else {
+                match selected {
+                    ProjectFileId::UserFile(i) => user_src_files
+                        .get(*i)
+                        .and_then(|(p, _)| p.rsplit_once('/'))
+                        .map(|(dir, _)| dir.to_owned())
+                        .unwrap_or_else(|| SRC_ROOT.to_owned()),
+                    _ => SRC_ROOT.to_owned(),
+                }
+            };
+            *clip_paste = Some(clipboard::PasteRequest {
+                target_dir,
+                id: Some(id.to_owned()),
+            });
+        }
+    }
 }
 
 /// Recursively render tree nodes (files and folders).
@@ -1593,6 +1786,8 @@ fn render_tree_node(
     to_delete: &mut Option<usize>,
     to_duplicate: &mut Option<usize>,
     open_reference: &mut Option<String>,
+    clip_copy: &mut Option<clipboard::CopyRequest>,
+    clip_paste: &mut Option<clipboard::PasteRequest>,
     renaming_folder: &mut Option<(String, String)>,
     workspace_dir: &std::path::Path,
     project_dir: Option<&std::path::Path>,
@@ -1640,6 +1835,7 @@ fn render_tree_node(
                     cancel_rename_file,
                     to_duplicate,
                     open_reference,
+                    clip_copy,
                     can_duplicate,
                     &full_path,
                     project_dir,
@@ -1782,6 +1978,8 @@ fn render_tree_node(
                             to_delete,
                             to_duplicate,
                             open_reference,
+                            clip_copy,
+                            clip_paste,
                             renaming_folder,
                             workspace_dir,
                             project_dir,
@@ -1900,6 +2098,14 @@ fn render_tree_node(
                             );
                             return;
                         }
+                        ui.separator();
+                        copy_menu_item(
+                            ui,
+                            clipboard::ClipKind::Folder,
+                            &folder_path,
+                            clip_copy,
+                        );
+                        paste_menu_item(ui, &folder_path, false, clip_paste);
                         ui.separator();
                         // Turn this folder into a sibling crate you can publish.
                         if ui
@@ -2075,6 +2281,7 @@ fn user_file_row(
     // copy inside `pins/` would be pruned by the next pin sync.
     to_duplicate: &mut Option<usize>,
     open_reference: &mut Option<String>,
+    clip_copy: &mut Option<clipboard::CopyRequest>,
     can_duplicate: bool,
     // Project-root-relative path of this file + the saved project folder, for
     // the Show-in-Explorer / Copy-path entries.
@@ -2185,6 +2392,7 @@ fn user_file_row(
                 *to_duplicate = Some(idx);
                 ui.close();
             }
+            copy_menu_item(ui, clipboard::ClipKind::File, rel_path, clip_copy);
             ui.separator();
             if ui
                 .button(menu_label(ph::COLUMNS, "Open beside editor", ICON_VIEW))
@@ -2215,5 +2423,55 @@ fn user_file_row(
     row_hover_feedback(ui, row.response.rect, row.response.contains_pointer());
     if row.inner {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Realistic floor with egui's default spacing: 4 pad + 6 separator
+    /// + 2 * 3 item spacing + 18 row.
+    const FLOOR: f32 = 34.0;
+
+    /// The bug: with no libraries the section was sized by a formula that left
+    /// out the separator, so the header row — which carries the ONLY buttons
+    /// that can add a first library — rendered clipped at the panel's edge. It
+    /// must always get at least its floor.
+    #[test]
+    fn an_empty_section_still_gets_its_whole_header() {
+        assert_eq!(
+            libs_section_h(600.0, FLOOR, DEFAULT_SPLIT_RATIO, false),
+            FLOOR
+        );
+        // …and nothing more: an empty section must not eat into the tree.
+        let project_h = 600.0 - SPLIT_HANDLE_H - libs_section_h(600.0, FLOOR, DEFAULT_SPLIT_RATIO, false);
+        assert!(project_h > 550.0, "the tree keeps the rest, got {project_h}");
+    }
+
+    /// Dragging the handle works with no libraries too — that is how you make
+    /// room in an empty section before cloning a library into it.
+    #[test]
+    fn dragging_the_handle_resizes_an_empty_section() {
+        // Dragged UP from the default → the section grows past its floor.
+        let h = libs_section_h(600.0, FLOOR, 0.4, false);
+        assert!(h > FLOOR, "expected the drag to win, got {h}");
+        assert!((h - (600.0 - SPLIT_HANDLE_H) * 0.6).abs() < 0.01);
+    }
+
+    /// With libraries present the ratio governs from the start.
+    #[test]
+    fn the_ratio_governs_once_there_are_libraries() {
+        let h = libs_section_h(600.0, FLOOR, DEFAULT_SPLIT_RATIO, true);
+        assert!((h - (600.0 - SPLIT_HANDLE_H) * 0.4).abs() < 0.01, "{h}");
+    }
+
+    /// The floor outranks the ratio: a splitter dragged all the way down still
+    /// leaves the header visible.
+    #[test]
+    fn the_floor_survives_a_ratio_that_would_hide_the_header() {
+        assert_eq!(libs_section_h(600.0, FLOOR, 0.99, true), FLOOR);
+        // Same in a very short panel, where even the floor exceeds the share.
+        assert_eq!(libs_section_h(40.0, FLOOR, 0.5, true), FLOOR);
     }
 }
