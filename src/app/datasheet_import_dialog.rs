@@ -23,6 +23,12 @@ enum ImportJob {
     Done(Result<Extraction, String>),
 }
 
+/// A worker-thread result slot: `None` while the thread runs, `Some(result)`
+/// once it finishes. Three jobs share this shape (clock, package pre-pass,
+/// cross-check); spelling it out inline tripped `clippy::type_complexity` at
+/// every one of them.
+type JobSlot<T> = Arc<Mutex<Option<Result<T, String>>>>;
+
 /// A PDF the user picked (kept in memory until Extract or Remove).
 struct PdfPick {
     name: String,
@@ -252,9 +258,11 @@ pub(super) fn prompt_section(
         });
     ui.add_space(2.0);
     ui.label(
-        egui::RichText::new("Base prompt (read-only — carries the required JSON shape and rules):")
-            .size(10.0)
-            .color(egui::Color32::from_gray(130)),
+        egui::RichText::new(
+            "Base prompt (read-only — carries the required JSON shape and rules):",
+        )
+        .size(10.0)
+        .color(egui::Color32::from_gray(130)),
     );
     egui::Resize::default()
         .id_salt(format!("{id}_base_resize"))
@@ -353,12 +361,12 @@ pub(crate) struct DatasheetImport {
     /// `Some(result)` once the thread is done. A plain `Option<Result>` slot
     /// rather than reusing the standalone dialog's enum keeps the two dialogs
     /// decoupled.
-    clock_job: Option<Arc<Mutex<Option<Result<ds::ClockExtraction, String>>>>>,
+    clock_job: Option<JobSlot<ds::ClockExtraction>>,
     /// Green confirmation / red error from the combined clock extraction.
     clock_note: Option<String>,
     clock_error: Option<String>,
     /// The package-detection pre-pass worker (fills `detected_packages`).
-    pkg_job: Option<Arc<Mutex<Option<Result<Vec<String>, String>>>>>,
+    pkg_job: Option<JobSlot<Vec<String>>>,
     /// Packages found in the datasheet — shown as one-click chips that set
     /// `package`, so the user picks the exact name instead of typing it.
     detected_packages: Vec<String>,
@@ -376,6 +384,24 @@ pub(crate) struct DatasheetImport {
     /// The paste area. Collapsed by default because the PDF picker is the normal
     /// path — a 159-page datasheet is a file, not something anyone pastes.
     text_open: bool,
+
+    // ── Cross-check (step 5) ────────────────────────────────────────────────
+    /// Run a SECOND provider on the same document and diff the two answers.
+    /// OFF by default: it doubles the API spend, so it must be a deliberate act.
+    verify_enabled: bool,
+    /// Which provider gives the second opinion. Never the primary — comparing a
+    /// model with itself measures nothing.
+    verify_provider: ds::Provider,
+    /// That provider's stored key, reloaded when the picker changes rather than
+    /// every frame (it is a file read).
+    verify_key: String,
+    verify_job: Option<JobSlot<Extraction>>,
+    /// The two raw extractions, held until BOTH have landed — either thread can
+    /// finish first, and the diff needs the pair.
+    primary_chip: Option<ds::ExtractedChip>,
+    verify_chip: Option<ds::ExtractedChip>,
+    consensus: Option<ds::ConsensusReport>,
+    verify_error: Option<String>,
 }
 
 impl DatasheetImport {
@@ -407,6 +433,12 @@ impl DatasheetImport {
 impl DatasheetImport {
     fn new(form: &McuForm) -> Self {
         let provider = ds::load_last_provider();
+        // Default the second opinion to any provider but the primary — a model
+        // compared with itself measures nothing.
+        let verify_provider = ds::Provider::ALL
+            .into_iter()
+            .find(|p| *p != provider)
+            .unwrap_or(provider);
         Self {
             provider,
             api_key: ds::load_api_key(provider),
@@ -443,6 +475,14 @@ impl DatasheetImport {
             run_started: None,
             setup_open: false,
             text_open: false,
+            verify_enabled: false,
+            verify_provider,
+            verify_key: ds::load_api_key(verify_provider),
+            verify_job: None,
+            primary_chip: None,
+            verify_chip: None,
+            consensus: None,
+            verify_error: None,
         }
     }
 }
@@ -554,6 +594,9 @@ impl AppIde {
 
                         di.report = Some(rep);
                         di.error = None;
+                        // Kept raw for the cross-check, which may still be in
+                        // flight — the diff runs on whichever lands second.
+                        di.primary_chip = Some(ex.chip.clone());
                         // A fresh extraction just wrote a new cache entry.
                         di.cache_stats = ds::cache_stats();
                         di.cache_entries = cache_entry_labels();
@@ -590,7 +633,11 @@ impl AppIde {
                             "{} Clock tree imported ({} MHz SYSCLK){} — review it in the Clock tab.",
                             ph::CHECK_CIRCLE,
                             sysclk / 1_000_000,
-                            if ex.from_cache { " · from cache" } else { "" }
+                            if ex.from_cache {
+                                " · from cache"
+                            } else {
+                                ""
+                            }
                         ));
                         di.clock_error = None;
                         di.log(
@@ -615,6 +662,114 @@ impl AppIde {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(120));
             }
+        }
+
+        // ── Poll the cross-check worker (second provider, same document) ──────
+        // Its result is NEVER applied to the form — it exists only to be diffed
+        // against the primary, so a disagreement narrows the review instead of
+        // silently overwriting good pins with a second guess.
+        if let Some(job) = &di.verify_job {
+            let done = job.lock().unwrap().is_some();
+            if done {
+                let result = job.lock().unwrap().take();
+                di.verify_job = None;
+                match result {
+                    Some(Ok(ex)) => {
+                        di.log(
+                            LogKind::Step,
+                            format!(
+                                "Cross-check: {} replied{} — {} pin(s), not applied to the form.",
+                                di.verify_provider.label(),
+                                if ex.from_cache { " from cache" } else { "" },
+                                ex.chip.pins.len()
+                            ),
+                        );
+                        di.verify_chip = Some(ex.chip);
+                        di.verify_error = None;
+                    }
+                    Some(Err(e)) => {
+                        // Advisory: the primary extraction is unaffected.
+                        di.log(LogKind::Warn, format!("Cross-check FAILED: {e}"));
+                        di.verify_error = Some(e);
+                    }
+                    None => {}
+                }
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(120));
+            }
+        }
+        // Both sides in → diff them. Guarded on `consensus` being empty so this
+        // runs once per extraction, not once per frame.
+        if di.consensus.is_none()
+            && let (Some(a), Some(b)) = (di.primary_chip.as_ref(), di.verify_chip.as_ref())
+        {
+            let rep =
+                ds::compare_extractions(a, b, di.provider.label(), di.verify_provider.label());
+            if rep.is_clean() {
+                di.log(
+                    LogKind::Ok,
+                    format!(
+                        "Cross-check CLEAN — {} and {} agree on every pin, signal and \
+                             identity field. {}",
+                        rep.label_a,
+                        rep.label_b,
+                        rep.headline()
+                    ),
+                );
+            } else {
+                di.log(LogKind::Warn, format!("Cross-check: {}", rep.headline()));
+                // Name conflicts are the severe kind — two models reading
+                // different columns — so each one is named in full.
+                for c in &rep.name_conflicts {
+                    di.log(
+                        LogKind::Warn,
+                        format!(
+                            "  pin {}: {} says \"{}\", {} says \"{}\"",
+                            c.subject, rep.label_a, c.a, rep.label_b, c.b
+                        ),
+                    );
+                }
+                if !rep.only_a.is_empty() {
+                    di.log(
+                        LogKind::Warn,
+                        format!(
+                            "  only {} returned pin(s): {}",
+                            rep.label_a,
+                            rep.only_a.join(", ")
+                        ),
+                    );
+                }
+                if !rep.only_b.is_empty() {
+                    di.log(
+                        LogKind::Warn,
+                        format!(
+                            "  only {} returned pin(s): {}",
+                            rep.label_b,
+                            rep.only_b.join(", ")
+                        ),
+                    );
+                }
+                for c in &rep.identity_conflicts {
+                    di.log(
+                        LogKind::Warn,
+                        format!("  {}: \"{}\" vs \"{}\"", c.subject, c.a, c.b),
+                    );
+                }
+                // Signal diffs are usually many and usually minor; the count
+                // goes here, the detail stays in the panel below.
+                if !rep.signal_conflicts.is_empty() {
+                    di.log(
+                        LogKind::Step,
+                        format!(
+                            "  {} pin(s) differ only in their signal lists — see the \
+                                 Cross-check panel.",
+                            rep.signal_conflicts.len()
+                        ),
+                    );
+                }
+            }
+            di.consensus = Some(rep);
         }
 
         // ── Poll the package-detection pre-pass ───────────────────────────────
@@ -658,7 +813,10 @@ impl AppIde {
                     .request_repaint_after(std::time::Duration::from_millis(120));
             }
         }
-        let running = di.job.is_some() || di.clock_job.is_some() || di.pkg_job.is_some();
+        let running = di.job.is_some()
+            || di.clock_job.is_some()
+            || di.pkg_job.is_some()
+            || di.verify_job.is_some();
 
         let mut do_extract = false;
         let mut do_save_key = false;
@@ -1142,6 +1300,52 @@ impl AppIde {
                 }
             });
 
+            // ── Cross-check with a second provider ───────────────────────
+            // Two models reading the same table rarely invent the SAME wrong
+            // answer, so the pins they agree on are near-certainly right and
+            // only the disputed handful needs a human. Off by default: it is a
+            // second billed extraction.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.checkbox(&mut di.verify_enabled, "cross-check with")
+                    .on_hover_text(
+                        "Run a SECOND provider on the same document and diff the two \
+                         answers. Its result is never applied — it only tells you which \
+                         pins to check.\nCosts a second extraction.",
+                    );
+                let before = di.verify_provider;
+                egui::ComboBox::from_id_salt("ds_verify_provider")
+                    .selected_text(di.verify_provider.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        // The primary is excluded: comparing a model with itself
+                        // measures nothing.
+                        for p in ds::Provider::ALL.into_iter().filter(|p| *p != di.provider) {
+                            ui.selectable_value(&mut di.verify_provider, p, p.label());
+                        }
+                    });
+                if di.verify_provider != before {
+                    di.verify_key = ds::load_api_key(di.verify_provider);
+                }
+                // Switching the PRIMARY can leave the picker pointing at it.
+                if di.verify_provider == di.provider
+                    && let Some(p) = ds::Provider::ALL.into_iter().find(|p| *p != di.provider)
+                {
+                    di.verify_provider = p;
+                    di.verify_key = ds::load_api_key(p);
+                }
+                if di.verify_enabled && di.verify_key.trim().is_empty() {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "no {} key stored — cross-check will be skipped",
+                            di.verify_provider.label()
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(230, 170, 70)),
+                    );
+                }
+            });
+
             // ── Log ──────────────────────────────────────────────────────
             // An extraction is up to three requests across two threads with a
             // cache in front; a single red sentence at the end could not say
@@ -1270,9 +1474,12 @@ impl AppIde {
                     .show(ui, |ui| {
                         if !rep.patched.is_empty() {
                             ui.label(
-                                egui::RichText::new(format!("Filled: {}", rep.patched.join(" · ")))
-                                    .size(10.5)
-                                    .color(egui::Color32::from_gray(170)),
+                                egui::RichText::new(format!(
+                                    "Filled: {}",
+                                    rep.patched.join(" · ")
+                                ))
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(170)),
                             );
                         }
                         for w in &rep.warnings {
@@ -1305,6 +1512,136 @@ impl AppIde {
                     dismiss_report = true;
                 }
             }
+
+            // ── Cross-check result ───────────────────────────────────────
+            // The whole point is the SHORTLIST: name conflicts first (a pin the
+            // two providers disagree about is the one worth opening the
+            // datasheet for), then the merely-different signal lists.
+            if let Some(err) = &di.verify_error {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!("{} Cross-check not run: {err}", ph::WARNING))
+                        .size(10.5)
+                        .color(egui::Color32::from_rgb(220, 170, 70)),
+                );
+            }
+            if let Some(c) = &di.consensus {
+                ui.add_space(6.0);
+                ui.separator();
+                let clean = c.is_clean();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} Cross-check {} vs {} — {}",
+                        if clean { ph::CHECK_CIRCLE } else { ph::WARNING },
+                        c.label_a,
+                        c.label_b,
+                        c.headline()
+                    ))
+                    .size(11.5)
+                    .strong()
+                    .color(if clean {
+                        egui::Color32::from_rgb(120, 210, 120)
+                    } else {
+                        egui::Color32::from_rgb(230, 180, 80)
+                    }),
+                );
+                if clean {
+                    ui.label(
+                        egui::RichText::new(
+                            "Two providers read this document independently and matched. \
+                             That is the strongest signal available short of the datasheet \
+                             itself.",
+                        )
+                        .size(10.0)
+                        .italics()
+                        .color(egui::Color32::from_gray(150)),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Only the rows below are in doubt — everything else matched. \
+                             The second provider's answer was NOT applied.",
+                        )
+                        .size(10.0)
+                        .italics()
+                        .color(egui::Color32::from_gray(150)),
+                    );
+                    egui::ScrollArea::vertical()
+                        .id_salt("ds_consensus")
+                        .max_height(160.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for cf in &c.name_conflicts {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} pin {}: \"{}\" vs \"{}\"  — check this one",
+                                        ph::WARNING,
+                                        cf.subject,
+                                        cf.a,
+                                        cf.b
+                                    ))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(230, 150, 90)),
+                                );
+                            }
+                            for cf in &c.identity_conflicts {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} {}: \"{}\" vs \"{}\"",
+                                        ph::WARNING,
+                                        cf.subject,
+                                        cf.a,
+                                        cf.b
+                                    ))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(220, 170, 70)),
+                                );
+                            }
+                            for (label, list) in [(&c.label_a, &c.only_a), (&c.label_b, &c.only_b)]
+                            {
+                                if !list.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} only {label} returned pin(s): {}",
+                                            ph::DOT,
+                                            list.join(", ")
+                                        ))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(220, 170, 70)),
+                                    );
+                                }
+                            }
+                            if !c.signal_conflicts.is_empty() {
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Same pin, different alternate functions ({} — \
+                                         {} extra | {} extra):",
+                                        c.signal_conflicts.len(),
+                                        c.label_a,
+                                        c.label_b
+                                    ))
+                                    .size(10.0)
+                                    .italics()
+                                    .color(egui::Color32::from_gray(150)),
+                                );
+                                for cf in &c.signal_conflicts {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} pin {}:  {}  |  {}",
+                                            ph::DOT,
+                                            cf.subject,
+                                            cf.a,
+                                            cf.b
+                                        ))
+                                        .size(10.0)
+                                        .color(egui::Color32::from_gray(165)),
+                                    );
+                                }
+                            }
+                        });
+                }
+            }
         });
 
         // ── Deferred side effects ────────────────────────────────────────────
@@ -1330,8 +1667,7 @@ impl AppIde {
             di.cache_entries = cache_entry_labels();
         }
         if do_detect && di.pkg_job.is_none() {
-            let shared: Arc<Mutex<Option<Result<Vec<String>, String>>>> =
-                Arc::new(Mutex::new(None));
+            let shared: JobSlot<Vec<String>> = Arc::new(Mutex::new(None));
             di.pkg_job = Some(shared.clone());
             di.pkg_error = None;
             // The pre-pass can also be the FIRST thing a user clicks, so it
@@ -1367,6 +1703,11 @@ impl AppIde {
             di.report = None;
             di.clock_note = None;
             di.clock_error = None;
+            // A new run invalidates the previous cross-check entirely.
+            di.primary_chip = None;
+            di.verify_chip = None;
+            di.consensus = None;
+            di.verify_error = None;
 
             // Restart the clock BEFORE the first line, so the run reads from 0s.
             di.run_started = Some(std::time::Instant::now());
@@ -1439,8 +1780,7 @@ impl AppIde {
             // numeric self-check — kept a SEPARATE request so a clock failure
             // never discards good pins, and vice versa.
             if di.also_clock {
-                let clk_shared: Arc<Mutex<Option<Result<ds::ClockExtraction, String>>>> =
-                    Arc::new(Mutex::new(None));
+                let clk_shared: JobSlot<ds::ClockExtraction> = Arc::new(Mutex::new(None));
                 di.clock_job = Some(clk_shared.clone());
                 let clock_extra = ds::load_extra_prompt(ds::PromptSlot::Clock);
                 let (cp, ck, cm) = (provider, key.clone(), model.clone());
@@ -1451,6 +1791,44 @@ impl AppIde {
                     *clk_shared.lock().unwrap() = Some(res);
                     cctx.request_repaint();
                 });
+            }
+
+            // Cross-check: the SAME document, package and supplementary prompt
+            // through a different provider (and its own default model, since
+            // `di.model` names a model of the primary backend). Independent
+            // thread — a failed second opinion must not cost the primary run.
+            if di.verify_enabled && !di.verify_key.trim().is_empty() {
+                let vp = di.verify_provider;
+                let vmodel = vp.default_model().to_string();
+                di.log(
+                    LogKind::Step,
+                    format!("Cross-check requested · {} · {vmodel}", vp.label()),
+                );
+                let v_shared: JobSlot<Extraction> = Arc::new(Mutex::new(None));
+                di.verify_job = Some(v_shared.clone());
+                let (vkey, vfamily, vpackage, vextra) = (
+                    di.verify_key.clone(),
+                    family.clone(),
+                    package.clone(),
+                    extra.clone(),
+                );
+                let vsource = source.clone();
+                let vctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let res = ds::call_ai(
+                        vp, &vkey, &vmodel, &vfamily, &vpackage, &vextra, &vsource, use_cache,
+                    );
+                    *v_shared.lock().unwrap() = Some(res);
+                    vctx.request_repaint();
+                });
+            } else if di.verify_enabled {
+                di.log(
+                    LogKind::Warn,
+                    format!(
+                        "Cross-check SKIPPED — no API key stored for {}.",
+                        di.verify_provider.label()
+                    ),
+                );
             }
 
             std::thread::spawn(move || {

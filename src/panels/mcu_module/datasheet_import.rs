@@ -1149,8 +1149,360 @@ pub fn apply_to_form(chip: &ExtractedChip, form: &mut McuForm) -> ApplyReport {
             }
         ));
     }
+    // Structural checks that need no second opinion — gaps, out-of-range
+    // positions, repeated names, un-reserved supply rails.
+    r.warnings
+        .extend(consistency_warnings(&rows, form.package.trim()));
 
     r
+}
+
+// ── Cross-check: two providers, one document ────────────────────────────────
+
+/// One point on which two extractions disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    /// The pin number, or — for identity — the field name.
+    pub subject: String,
+    pub a: String,
+    pub b: String,
+}
+
+/// The result of diffing two independent extractions of the SAME document.
+///
+/// The point is not to pick a winner — neither provider is authoritative. It is
+/// to shrink the review: two models reading the same table rarely invent the
+/// same wrong answer, so the pins they AGREE on are almost certainly right and
+/// the handful they disagree about is where a human should look. Verifying 5
+/// pins is a task someone will actually do; verifying 64 is not.
+#[derive(Debug, Clone, Default)]
+pub struct ConsensusReport {
+    pub label_a: String,
+    pub label_b: String,
+    /// Positions present on both sides with the same name.
+    pub agreed_pins: usize,
+    /// Pin numbers only one side returned.
+    pub only_a: Vec<String>,
+    pub only_b: Vec<String>,
+    /// Same position, different name. The severe case: it is what reading two
+    /// different package columns looks like.
+    pub name_conflicts: Vec<Conflict>,
+    /// Same position and name, different alternate functions. Usually minor —
+    /// one model listing a signal the other skipped.
+    pub signal_conflicts: Vec<Conflict>,
+    /// Identity fields both sides filled in, differently.
+    pub identity_conflicts: Vec<Conflict>,
+}
+
+impl ConsensusReport {
+    /// Positions compared at all (agreed + disputed), ignoring one-sided pins.
+    pub fn compared(&self) -> usize {
+        self.agreed_pins + self.name_conflicts.len()
+    }
+
+    /// Share of compared positions whose NAME matched, 0–100. Names only:
+    /// signal lists differ for benign reasons and would drown the number.
+    pub fn agreement_pct(&self) -> f32 {
+        let total = self.compared();
+        if total == 0 {
+            return 0.0;
+        }
+        self.agreed_pins as f32 * 100.0 / total as f32
+    }
+
+    /// Nothing for a human to arbitrate.
+    pub fn is_clean(&self) -> bool {
+        self.name_conflicts.is_empty()
+            && self.only_a.is_empty()
+            && self.only_b.is_empty()
+            && self.identity_conflicts.is_empty()
+            && self.signal_conflicts.is_empty()
+    }
+
+    /// One-line verdict for the log.
+    pub fn headline(&self) -> String {
+        let mut parts = vec![format!(
+            "{}/{} pin name(s) agree ({:.0}%)",
+            self.agreed_pins,
+            self.compared(),
+            self.agreement_pct()
+        )];
+        if !self.name_conflicts.is_empty() {
+            parts.push(format!("{} name conflict(s)", self.name_conflicts.len()));
+        }
+        let one_sided = self.only_a.len() + self.only_b.len();
+        if one_sided > 0 {
+            parts.push(format!("{one_sided} pin(s) on one side only"));
+        }
+        if !self.identity_conflicts.is_empty() {
+            parts.push(format!(
+                "{} identity conflict(s)",
+                self.identity_conflicts.len()
+            ));
+        }
+        if !self.signal_conflicts.is_empty() {
+            parts.push(format!(
+                "{} pin(s) differ in signals",
+                self.signal_conflicts.len()
+            ));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// The comparable signal set of a pin: trimmed, upper-cased, and with the noise
+/// the importer drops anyway (EXTI / EVENTOUT / RCC / RTC / SYS / DEBUG) removed
+/// FIRST — otherwise every pin "disagrees" over housekeeping entries that never
+/// reach the form, and the report is useless.
+fn comparable_signals(p: &ExtractedPin) -> std::collections::BTreeSet<String> {
+    p.signals
+        .iter()
+        .filter_map(|s| {
+            let t = s.trim();
+            (!t.is_empty() && !stm32_pin_data::is_noise_signal(t)).then(|| t.to_ascii_uppercase())
+        })
+        .collect()
+}
+
+/// Diff two extractions of the same document. Pure — `label_a`/`label_b` are
+/// only used to caption the result.
+pub fn compare_extractions(
+    a: &ExtractedChip,
+    b: &ExtractedChip,
+    label_a: &str,
+    label_b: &str,
+) -> ConsensusReport {
+    use std::collections::BTreeMap;
+
+    let mut rep = ConsensusReport {
+        label_a: label_a.to_string(),
+        label_b: label_b.to_string(),
+        ..Default::default()
+    };
+
+    // Index by position. A number repeated within ONE extraction is already
+    // reported as a merged-variant fault, so last-wins is fine here.
+    let index = |c: &ExtractedChip| -> BTreeMap<String, ExtractedPin> {
+        c.pins
+            .iter()
+            .filter(|p| !stm32_pin_data::is_exposed_pad(&p.name))
+            .map(|p| (p.number.trim().to_string(), p.clone()))
+            .filter(|(n, _)| !n.is_empty())
+            .collect()
+    };
+    let (ia, ib) = (index(a), index(b));
+
+    for (num, pa) in &ia {
+        let Some(pb) = ib.get(num) else {
+            rep.only_a.push(num.clone());
+            continue;
+        };
+        let (na, nb) = (pa.name.trim(), pb.name.trim());
+        if !na.eq_ignore_ascii_case(nb) {
+            rep.name_conflicts.push(Conflict {
+                subject: num.clone(),
+                a: na.to_string(),
+                b: nb.to_string(),
+            });
+            // A position whose very name is disputed makes its signal lists
+            // incomparable — they describe different pins.
+            continue;
+        }
+        rep.agreed_pins += 1;
+        let (sa, sb) = (comparable_signals(pa), comparable_signals(pb));
+        if sa != sb {
+            let only_a: Vec<&String> = sa.difference(&sb).collect();
+            let only_b: Vec<&String> = sb.difference(&sa).collect();
+            let fmt = |v: &[&String]| {
+                if v.is_empty() {
+                    "—".to_string()
+                } else {
+                    v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                }
+            };
+            rep.signal_conflicts.push(Conflict {
+                subject: format!("{num} ({na})"),
+                a: fmt(&only_a),
+                b: fmt(&only_b),
+            });
+        }
+    }
+    for num in ib.keys() {
+        if !ia.contains_key(num) {
+            rep.only_b.push(num.clone());
+        }
+    }
+
+    // Numeric order, so the lists read like the package rather than like a hash.
+    let by_number = |v: &mut Vec<String>| {
+        v.sort_by_key(|n| n.parse::<usize>().unwrap_or(usize::MAX));
+    };
+    by_number(&mut rep.only_a);
+    by_number(&mut rep.only_b);
+    rep.name_conflicts
+        .sort_by_key(|c| c.subject.parse::<usize>().unwrap_or(usize::MAX));
+
+    // Identity: only where BOTH sides committed to a value. One side leaving a
+    // field empty is "not found", which is reported separately — not a conflict.
+    for (field, va, vb) in [
+        ("display name", &a.display_name, &b.display_name),
+        ("family", &a.family, &b.family),
+        ("CPU", &a.cpu, &b.cpu),
+        ("package", &a.package, &b.package),
+        ("flash origin", &a.flash_origin, &b.flash_origin),
+        ("flash size", &a.flash_size, &b.flash_size),
+        ("RAM origin", &a.ram_origin, &b.ram_origin),
+        ("RAM size", &a.ram_size, &b.ram_size),
+        ("probe-rs chip", &a.probe_chip, &b.probe_chip),
+    ] {
+        let (x, y) = (va.trim(), vb.trim());
+        if !x.is_empty() && !y.is_empty() && !x.eq_ignore_ascii_case(y) {
+            rep.identity_conflicts.push(Conflict {
+                subject: field.to_string(),
+                a: x.to_string(),
+                b: y.to_string(),
+            });
+        }
+    }
+    rep
+}
+
+/// Names that are power / ground / reset rails rather than usable I/O. Such a
+/// pin must carry `reserved = true`; when the model marks one as a normal GPIO
+/// it also hangs alternate functions off it, and the form would offer to
+/// configure a supply pin.
+///
+/// Prefix matching on purpose — the rails are numbered and suffixed per family
+/// (`VDDA`, `VSS_1`, `VREF+`, `VLXSMPS`). `PA13`/`PA14` are deliberately absent:
+/// SWD pins are real GPIOs that the user may legitimately reassign.
+fn looks_like_supply(name: &str) -> bool {
+    let n = name.trim().to_ascii_uppercase();
+    const PREFIXES: [&str; 7] = ["VDD", "VSS", "VBAT", "VREF", "VCAP", "VLX", "VCC"];
+    const EXACT: [&str; 5] = ["NRST", "RST", "RESET", "NC", "N.C."];
+    PREFIXES.iter().any(|p| n.starts_with(p)) || EXACT.contains(&n.as_str())
+}
+
+/// Structural checks over the pin rows that need no second opinion and no
+/// network — pure arithmetic over what was extracted.
+///
+/// These complement the existing cross-checks rather than repeating them. The
+/// count check already catches "48 expected, 47 returned"; what it CANNOT see is
+/// a run that returns the right NUMBER of pins with the wrong SET of positions
+/// (a gap at 23 plus a stray 49 balances out to 48). Those silent cases are the
+/// ones a reviewer would never think to look for, so they are named explicitly.
+///
+/// Deliberately advisory: everything here is a `warnings` entry, never an error.
+/// A datasheet can legitimately omit a pin, and blocking Save on a heuristic
+/// would be worse than the mistake it guards against.
+fn consistency_warnings(rows: &[PinRow], package: &str) -> Vec<String> {
+    /// Cap on how many numbers a single warning lists before eliding.
+    const MAX_LISTED: usize = 12;
+    fn listed(v: &[usize]) -> String {
+        let shown: Vec<String> = v.iter().take(MAX_LISTED).map(|n| n.to_string()).collect();
+        format!(
+            "{}{}",
+            shown.join(", "),
+            if v.len() > shown.len() {
+                format!(", … ({} total)", v.len())
+            } else {
+                String::new()
+            }
+        )
+    }
+
+    let mut w = Vec::new();
+    let nums: Vec<usize> = rows
+        .iter()
+        .filter_map(|r| r.number.trim().parse::<usize>().ok())
+        .collect();
+    if nums.is_empty() {
+        return w;
+    }
+    let present: std::collections::HashSet<usize> = nums.iter().copied().collect();
+    // Prefer the package's own pin count; fall back to the highest number seen,
+    // which still exposes an interior gap when the package name carries no digits.
+    let top = package_pin_count(package).unwrap_or_else(|| nums.iter().copied().max().unwrap_or(0));
+
+    if top > 0 {
+        let missing: Vec<usize> = (1..=top).filter(|n| !present.contains(n)).collect();
+        if !missing.is_empty() {
+            w.push(format!(
+                "Pin position(s) never extracted: {}. A pin marked '-' in this package's column is \
+                 correctly absent, but a gap is more often a row the model skipped — check these \
+                 against the datasheet.",
+                listed(&missing)
+            ));
+        }
+        let out_of_range: Vec<usize> = {
+            let mut v: Vec<usize> = nums.iter().copied().filter(|&n| n > top).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        if !out_of_range.is_empty() {
+            w.push(format!(
+                "Pin number(s) beyond the {top} positions this package has: {}. Those rows came \
+                 from a LARGER package's column.",
+                listed(&out_of_range)
+            ));
+        }
+    }
+    if present.contains(&0) {
+        w.push("A pin was numbered 0 — packages are numbered from 1.".to_string());
+    }
+
+    // Two pins with the same name is always an extraction fault: within one
+    // package a name is unique. (Duplicate NUMBERS are already reported, and
+    // catch a different failure — merged package variants.)
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut dup_names: std::collections::BTreeSet<String> = Default::default();
+    for row in rows {
+        let n = row.name.trim().to_ascii_uppercase();
+        // Supply rails legitimately repeat (VSS appears many times per package).
+        if n.is_empty() || looks_like_supply(&n) {
+            continue;
+        }
+        if !seen.insert(n.clone()) {
+            dup_names.insert(row.name.trim().to_string());
+        }
+    }
+    if !dup_names.is_empty() {
+        let names: Vec<String> = dup_names.iter().take(MAX_LISTED).cloned().collect();
+        w.push(format!(
+            "{} pin name(s) appear on more than one position: {}{}. Within one package a pin name \
+             is unique, so at least one of these is wrong.",
+            dup_names.len(),
+            names.join(", "),
+            if dup_names.len() > names.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    // A supply rail left un-reserved gets alternate functions attached and shows
+    // up in the form as a configurable I/O.
+    let unreserved: Vec<String> = rows
+        .iter()
+        .filter(|r| !r.reserved && looks_like_supply(&r.name))
+        .map(|r| format!("{} (pin {})", r.name.trim(), r.number.trim()))
+        .collect();
+    if !unreserved.is_empty() {
+        let shown: Vec<String> = unreserved.iter().take(MAX_LISTED).cloned().collect();
+        w.push(format!(
+            "{} power/reset pin(s) were NOT marked reserved: {}{}. Mark them reserved so the form \
+             stops offering them as I/O.",
+            unreserved.len(),
+            shown.join(", "),
+            if unreserved.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
+    w
 }
 
 /// Overwrite `dst` from a non-empty extracted `value`, recording the change.
@@ -2262,6 +2614,199 @@ mod tests {
             // The cap covers thinking + answer together, so it must be roomy.
             assert!(v["max_tokens"].as_u64().unwrap() >= 64000, "{kind:?}");
         }
+    }
+
+    // ── Step 5a: structural checks ──────────────────────────────────────────
+
+    fn row(number: &str, name: &str, reserved: bool) -> PinRow {
+        PinRow {
+            number: number.into(),
+            name: name.into(),
+            reserved,
+            functions: String::new(),
+            imported: true,
+        }
+    }
+
+    /// The case the pin-COUNT check cannot see: exactly 20 pins for a 20-pin
+    /// package, so the count matches — but position 3 is missing and a stray 21
+    /// takes its place. The two faults cancel out in the total.
+    #[test]
+    fn a_gap_balanced_by_an_out_of_range_pin_still_gets_caught() {
+        let mut rows: Vec<PinRow> = (1..=20)
+            .filter(|n| *n != 3)
+            .map(|n| row(&n.to_string(), &format!("PA{n}"), false))
+            .collect();
+        rows.push(row("21", "PB0", false));
+        assert_eq!(rows.len(), 20, "the count check would see nothing wrong");
+
+        let w = consistency_warnings(&rows, "TSSOP20");
+        assert!(
+            w.iter()
+                .any(|s| s.contains("never extracted") && s.contains('3')),
+            "{w:?}"
+        );
+        assert!(
+            w.iter().any(|s| s.contains("beyond the 20 positions")),
+            "{w:?}"
+        );
+    }
+
+    /// Within one package a pin name is unique — but supply rails repeat by
+    /// design and must not be reported.
+    #[test]
+    fn repeated_pin_names_are_flagged_but_supply_rails_are_not() {
+        let rows = vec![
+            row("1", "PA5", false),
+            row("2", "PA5", false),
+            row("3", "VSS", true),
+            row("4", "VSS", true),
+        ];
+        let w = consistency_warnings(&rows, "");
+        let dup = w.iter().find(|s| s.contains("more than one position"));
+        let dup = dup.unwrap_or_else(|| panic!("no duplicate-name warning in {w:?}"));
+        assert!(dup.contains("PA5"), "{dup}");
+        assert!(!dup.contains("VSS"), "{dup}");
+    }
+
+    #[test]
+    fn a_supply_pin_left_unreserved_is_flagged() {
+        let rows = vec![row("1", "VDDA", false), row("2", "NRST", false)];
+        let w = consistency_warnings(&rows, "");
+        let msg = w
+            .iter()
+            .find(|s| s.contains("NOT marked reserved"))
+            .unwrap_or_else(|| panic!("{w:?}"));
+        assert!(msg.contains("VDDA") && msg.contains("NRST"), "{msg}");
+    }
+
+    /// A complete, well-formed pinout must produce NO advisories — otherwise the
+    /// warnings become noise the user learns to skip.
+    ///
+    /// "SO8N" also pins the fallback: it has no trailing digit run, so
+    /// `package_pin_count` yields `None` and the checks bound themselves by the
+    /// highest number seen instead.
+    #[test]
+    fn a_complete_pinout_produces_no_structural_warnings() {
+        let rows: Vec<PinRow> = (1..=8)
+            .map(|n| row(&n.to_string(), &format!("PA{n}"), false))
+            .collect();
+        assert!(package_pin_count("SO8N").is_none());
+        assert!(consistency_warnings(&rows, "SO8N").is_empty());
+    }
+
+    // ── Step 5b: two-provider cross-check ───────────────────────────────────
+
+    fn epin(number: &str, name: &str, signals: &[&str]) -> ExtractedPin {
+        ExtractedPin {
+            number: number.into(),
+            name: name.into(),
+            reserved: false,
+            signals: signals.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn two_identical_extractions_agree_completely() {
+        let chip = ExtractedChip {
+            display_name: "STM32WBA55".into(),
+            pins: vec![epin("1", "PA0", &["USART1_TX"]), epin("2", "PA1", &[])],
+            ..Default::default()
+        };
+        let rep = compare_extractions(&chip, &chip, "A", "B");
+        assert!(rep.is_clean(), "{rep:?}");
+        assert_eq!(rep.agreed_pins, 2);
+        assert_eq!(rep.agreement_pct(), 100.0);
+    }
+
+    /// The severe disagreement: same position, different pin. This is what
+    /// reading two different package columns looks like from the outside.
+    #[test]
+    fn a_name_conflict_is_reported_and_does_not_count_as_agreement() {
+        let a = ExtractedChip {
+            pins: vec![epin("1", "PA0", &[]), epin("4", "PA7", &[])],
+            ..Default::default()
+        };
+        let b = ExtractedChip {
+            pins: vec![epin("1", "PA0", &[]), epin("4", "PB12", &[])],
+            ..Default::default()
+        };
+        let rep = compare_extractions(&a, &b, "A", "B");
+        assert_eq!(rep.name_conflicts.len(), 1);
+        assert_eq!(rep.name_conflicts[0].subject, "4");
+        assert_eq!(rep.name_conflicts[0].a, "PA7");
+        assert_eq!(rep.name_conflicts[0].b, "PB12");
+        assert_eq!(rep.agreed_pins, 1);
+        assert_eq!(rep.agreement_pct(), 50.0);
+        // A disputed position has no comparable signal list.
+        assert!(rep.signal_conflicts.is_empty());
+    }
+
+    #[test]
+    fn pins_returned_by_only_one_provider_are_listed_per_side() {
+        let a = ExtractedChip {
+            pins: vec![epin("1", "PA0", &[]), epin("2", "PA1", &[])],
+            ..Default::default()
+        };
+        let b = ExtractedChip {
+            pins: vec![epin("1", "PA0", &[]), epin("3", "PA2", &[])],
+            ..Default::default()
+        };
+        let rep = compare_extractions(&a, &b, "A", "B");
+        assert_eq!(rep.only_a, vec!["2".to_string()]);
+        assert_eq!(rep.only_b, vec!["3".to_string()]);
+        assert!(!rep.is_clean());
+    }
+
+    /// Noise is stripped BEFORE comparing, or every pin "disagrees" over
+    /// housekeeping signals that never reach the form anyway.
+    #[test]
+    fn signal_diffs_ignore_noise_but_report_real_peripherals() {
+        let a = ExtractedChip {
+            pins: vec![
+                epin("1", "PA0", &["USART1_TX", "EVENTOUT"]),
+                epin("2", "PA1", &["SPI1_SCK"]),
+            ],
+            ..Default::default()
+        };
+        let b = ExtractedChip {
+            pins: vec![
+                // Same real signal, noise only on one side → NOT a conflict.
+                epin("1", "PA0", &["USART1_TX"]),
+                // A real peripheral one side missed → IS a conflict.
+                epin("2", "PA1", &["SPI1_SCK", "I2C1_SDA"]),
+            ],
+            ..Default::default()
+        };
+        let rep = compare_extractions(&a, &b, "A", "B");
+        assert_eq!(rep.signal_conflicts.len(), 1, "{rep:?}");
+        let c = &rep.signal_conflicts[0];
+        assert!(c.subject.starts_with('2'), "{c:?}");
+        assert_eq!(c.a, "—"); // nothing extra on side A
+        assert_eq!(c.b, "I2C1_SDA");
+        // Names still agree, so this does not dent the headline percentage.
+        assert_eq!(rep.agreement_pct(), 100.0);
+    }
+
+    /// A field one side left EMPTY is "not found", already reported elsewhere —
+    /// treating it as a conflict would bury the real ones.
+    #[test]
+    fn identity_conflicts_need_both_sides_to_have_committed() {
+        let a = ExtractedChip {
+            flash_size: "128K".into(),
+            ram_size: "64K".into(),
+            ..Default::default()
+        };
+        let b = ExtractedChip {
+            flash_size: "256K".into(),
+            ram_size: String::new(),
+            ..Default::default()
+        };
+        let rep = compare_extractions(&a, &b, "A", "B");
+        assert_eq!(rep.identity_conflicts.len(), 1, "{rep:?}");
+        assert_eq!(rep.identity_conflicts[0].subject, "flash size");
+        assert_eq!(rep.identity_conflicts[0].a, "128K");
+        assert_eq!(rep.identity_conflicts[0].b, "256K");
     }
 
     /// Pin extraction must NOT run at high effort: `max_tokens` covers thinking
