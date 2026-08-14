@@ -4,6 +4,7 @@ pub mod file_row;
 pub mod help_panel;
 pub mod spinner;
 pub mod theme;
+pub mod window_title;
 
 pub use theme::apply_dark_theme;
 //pub use file_row::{file_row, user_file_row};

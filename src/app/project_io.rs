@@ -283,6 +283,31 @@ impl AppIde {
         }
     }
 
+    /// Keep the window title on the open project, so the taskbar peek and
+    /// Alt+Tab name the window by what is in it. Sent only on change — see
+    /// [`crate::app::helpers::window_title`] for the composition rules.
+    pub(super) fn refresh_window_title(&mut self, ui: &egui::Ui) {
+        // The instance marker, shown only when it disambiguates. Slot 0 is the
+        // pid fallback (every slot taken), where the number IS the identity.
+        let tag = match crate::workspace::slot() {
+            1 => None,
+            0 => Some(format!("#p{}", std::process::id())),
+            s => Some(format!("#{s}")),
+        };
+        let title = crate::app::helpers::window_title::compose(
+            self.project_name.as_deref(),
+            tag.as_deref(),
+            // Another window has this same project open: the names are equal,
+            // so the marker is the only thing telling the two apart.
+            self.project_lock_conflict.is_some(),
+        );
+        if title != self.window_title {
+            self.window_title = title.clone();
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+    }
+
     // ── Project rename ────────────────────────────────────────────────────────
 
     /// Rename the saved project's FOLDER (leaf only — always the same drive)

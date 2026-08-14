@@ -1511,6 +1511,11 @@ pub struct AppIde {
     /// Kept alive so the watcher thread lives as long as the app.
     _fs_watcher: Option<notify::RecommendedWatcher>,
 
+    /// The last title sent to the window, so the viewport command fires only
+    /// when it actually changes — the title is recomputed every frame, and
+    /// pushing it to the OS 60 times a second would be pure waste.
+    window_title: String,
+
     // ── Project-folder claim ──────────────────────────────────────────────────
     /// This instance's claim on the open project's FOLDER, held for as long as
     /// that project is open (see [`crate::workspace::claim_project`]). Isolating
@@ -1884,6 +1889,10 @@ impl AppIde {
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
+            // Empty, not the startup title: the first frame then always pushes
+            // one title, so what the window shows can't drift from what this
+            // app computes (a restored project renames it immediately anyway).
+            window_title: String::new(),
             project_lock: None,
             project_lock_conflict: None,
             project_lock_retry: None,
@@ -2257,6 +2266,11 @@ impl AppIde {
         // ── Re-take a project folder another window was holding ───────────────
         // No-op unless a conflict is up, and throttled to one probe every 2 s.
         self.retry_project_claim();
+
+        // ── Window title = the open project ───────────────────────────────────
+        // After the claim retry, so a conflict that just cleared drops the
+        // instance marker in the same frame.
+        self.refresh_window_title(ui);
 
         // ── MRU file history (Ctrl+Tab switching) ─────────────────────────────
         // One central change detector: whatever switched `selected_file` (tree
