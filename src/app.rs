@@ -1536,6 +1536,14 @@ pub struct AppIde {
 
 impl AppIde {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Always start maximized. `with_maximized(true)` on the viewport plus
+        // `forget_window_geometry` in `main` normally settle this before the
+        // window is ever shown; this is the belt-and-braces for the case where
+        // the storage file could not be parsed, and costs one frame at the old
+        // size instead of a session at it.
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+
         // ── Dark IDE theme ────────────────────────────────────────────────────
         apply_dark_theme(&cc.egui_ctx);
 

@@ -136,6 +136,106 @@ mod glyph_guard {
     }
 }
 
+/// Strip eframe's saved window geometry out of a storage file's RON text.
+///
+/// `None` means "leave the file alone": nothing stored, or the text did not
+/// survive a parse → serialize → parse round-trip. That check is the point — the
+/// file holds the ENTIRE persisted state (over a megabyte here) and we write it
+/// with a different `ron` major version than eframe reads it with, so the only
+/// acceptable way to touch it is to prove the replacement first.
+fn without_window_key(text: &str) -> Option<String> {
+    use std::collections::HashMap;
+    // eframe's `STORAGE_WINDOW_KEY`, private to it — hence the literal.
+    const WINDOW_KEY: &str = "window";
+
+    // Cheap gate first: after one cleanup the key never comes back (nothing
+    // writes it any more), and parsing a megabyte on every launch to learn
+    // there is nothing to do is a poor trade.
+    if !text.contains("\"window\":") {
+        return None;
+    }
+    let mut kv: HashMap<String, String> = ron::from_str(text).ok()?;
+    kv.remove(WINDOW_KEY)?;
+    let out = ron::ser::to_string_pretty(&kv, ron::ser::PrettyConfig::default()).ok()?;
+    (ron::from_str::<HashMap<String, String>>(&out).ok()? == kv).then_some(out)
+}
+
+/// Forget the window geometry a previous run saved, so this one can open
+/// maximized like it asks to.
+///
+/// `with_maximized(true)` on the viewport does NOT win on its own: a restored
+/// geometry is applied after it (`WindowSettings::initialize_viewport_builder`
+/// ends with `.with_maximized(self.maximized)`), so one session left small
+/// reopened small ever after. `persist_window: false` stops new writes, but
+/// eframe LOADS that entry regardless of the flag — an entry already on disk
+/// would keep winning. This removes it, once.
+///
+/// Best-effort from end to end: a storage file we cannot read, parse or replace
+/// is not worth failing a launch over, and the worst case is the old behaviour
+/// (which the viewport command in `AppIde::new` then corrects a frame later).
+/// The replace goes through a temp file and a rename so a crash mid-write
+/// cannot truncate the user's state.
+fn forget_window_geometry(app_name: &str) {
+    let Some(path) = eframe::storage_dir(app_name).map(|d| d.join("app.ron")) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Some(out) = without_window_key(&text) else {
+        return;
+    };
+    let tmp = path.with_extension("ron.tmp");
+    if std::fs::write(&tmp, out).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+#[cfg(test)]
+mod window_geometry_tests {
+    use super::without_window_key;
+
+    /// Shaped like eframe's real file: a map of strings whose VALUES are
+    /// themselves RON, quotes and all — the part a naive text edit would break.
+    fn storage() -> String {
+        r#"{
+    "egui": "(options:(theme_preference:Dark,zoom_factor:1.0))",
+    "window": "(outer_position_pixels:Some((x:139.0,y:0.0)),maximized:false)",
+    "embedded_ide_project_v1": "(user_src_files:[(\"src/app.rs\",\"fn main() {}\")])",
+}"#
+        .to_owned()
+    }
+
+    #[test]
+    fn the_window_entry_goes_and_the_rest_survives_verbatim() {
+        let out = without_window_key(&storage()).expect("the entry was there");
+        assert!(!out.contains("\"window\""));
+        // The other values must come back byte-identical — they are the user's
+        // whole persisted state, and one of them contains escaped quotes.
+        let kv: std::collections::HashMap<String, String> = ron::from_str(&out).unwrap();
+        assert_eq!(kv.len(), 2);
+        assert_eq!(
+            kv["embedded_ide_project_v1"],
+            r#"(user_src_files:[("src/app.rs","fn main() {}")])"#
+        );
+        assert!(kv["egui"].starts_with("(options:"));
+    }
+
+    #[test]
+    fn a_file_without_the_entry_is_left_alone() {
+        // Every launch after the first cleanup lands here — and must not rewrite
+        // a megabyte of state to change nothing.
+        assert_eq!(without_window_key(r#"{"egui": "(x:1)"}"#), None);
+    }
+
+    #[test]
+    fn unparseable_storage_is_left_alone() {
+        // Refusing to touch it is the whole safety story: the alternative is
+        // truncating the user's state over a cosmetic startup detail.
+        assert_eq!(without_window_key(r#"{"window": "(maxim"#), None);
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // FIRST, before anything can print: adopt the console we were launched from
     // (if any). A GUI-subsystem binary has no standard handles until this runs.
@@ -168,7 +268,15 @@ fn main() -> eframe::Result<()> {
         s => format!("Embedded IDE #{s}"),
     };
 
+    // Drop any geometry an earlier session stored, or it would override the
+    // `with_maximized(true)` below — see `forget_window_geometry`.
+    forget_window_geometry(&app_name);
+
     let options = eframe::NativeOptions {
+        // The window opens maximized every time, so there is nothing worth
+        // remembering about its size or position — and remembering it is
+        // precisely what stopped `with_maximized` from taking effect.
+        persist_window: false,
         viewport: egui::ViewportBuilder::default()
             .with_maximized(true)
             .with_title(&title)
