@@ -429,6 +429,216 @@ struct DefinitionView {
     highlight: usize,
 }
 
+// ── Horizontal layout minimums ────────────────────────────────────────────────
+// The window is three columns: [Editor][MCU Configurator][Project tree]. Only
+// the MCU zone is a `CentralPanel` — it has no width of its own and takes
+// whatever the other two leave, which is why it is the one that gets starved,
+// and why every rule below is written to protect IT.
+
+/// Narrowest useful code editor. Also the `Panel::left` min width.
+pub(crate) const EDITOR_MIN_W: f32 = 220.0;
+/// Narrowest useful MCU Configurator: the four-tab row plus a chip still big
+/// enough to read its pin labels. Below this the zone is chrome and nothing
+/// else — the pin canvas has no room left at all.
+pub(crate) const MCU_MIN_W: f32 = 420.0;
+/// Narrowest useful project tree — the panel's own default width.
+pub(crate) const TREE_MIN_W: f32 = 200.0;
+/// Below this the three columns cannot all hold their minimum at once. Derived,
+/// not picked: change a minimum above and this follows.
+///
+/// It is a floor, not the whole test — a window can clear it and still be a
+/// tall strip nobody wants three columns in. See [`room_for_three_columns`].
+pub(crate) const NARROW_W: f32 = EDITOR_MIN_W + MCU_MIN_W + TREE_MIN_W;
+
+/// Is there room for all three columns — editor, MCU zone and project tree?
+///
+/// Two gates, and BOTH must pass:
+///
+/// 1. **`content_w >= NARROW_W`** — the arithmetic floor. Below it the three
+///    minimums simply do not add up, whatever the screen looks like.
+/// 2. **The window is a landscape working area**: the display is wider than it
+///    is tall AND the window takes more than half of it. Either half failing
+///    means the user is working in a tall, narrow strip — a portrait monitor, or
+///    a window docked to one side of a landscape one — where three columns are
+///    arithmetically possible but miserable.
+///
+/// Gate 2 is an AND, not an OR. On an OR a landscape display would satisfy it by
+/// itself and every side-docked window would be back to three columns, which is
+/// the case this exists for.
+///
+/// `monitor` unknown (the backend does not report it) → gate 1 decides alone;
+/// guessing an orientation would be worse than not applying the rule.
+fn room_for_three_columns(content_w: f32, window_w: f32, monitor: Option<egui::Vec2>) -> bool {
+    if content_w < NARROW_W {
+        return false;
+    }
+    match monitor {
+        Some(m) => m.x > m.y && window_w > m.x / 2.0,
+        None => true,
+    }
+}
+
+/// The decision behind [`AppIde::enforce_narrow_layout`], as a function of what
+/// it actually depends on — separated from the app so the rule can be exercised
+/// without building a whole `AppIde`.
+///
+/// In and out: `(mcu_collapsed, tree_collapsed, wide_layout)`.
+fn narrow_layout_rule(
+    room_for_three: bool,
+    mcu_collapsed: bool,
+    tree_collapsed: bool,
+    wide: Option<(bool, bool)>,
+) -> (bool, bool, Option<(bool, bool)>) {
+    if room_for_three {
+        // Room for everyone again: hand the user back the arrangement they had,
+        // and forget it — from here on the live flags are theirs.
+        return match wide {
+            Some((mcu, tree)) => (mcu, tree, None),
+            None => (mcu_collapsed, tree_collapsed, None),
+        };
+    }
+    // Both open is the ONLY illegal combination. One open, or none, fits at any
+    // width, and forcing anything there would take away a choice the window can
+    // still honour.
+    if mcu_collapsed || tree_collapsed {
+        return (mcu_collapsed, tree_collapsed, wide);
+    }
+    // The tree wins. `wide.unwrap_or` and not an overwrite: only the FIRST
+    // crossing records the wide layout — re-recording later would capture the
+    // forced pair, leaving nothing to restore.
+    (true, false, Some(wide.unwrap_or((false, false))))
+}
+
+#[cfg(test)]
+mod narrow_layout_tests {
+    use super::{NARROW_W, narrow_layout_rule, room_for_three_columns};
+    use eframe::egui;
+
+    const ROOM: bool = true;
+    const CRAMPED: bool = false;
+
+    // ── The layout rule ───────────────────────────────────────────────────────
+
+    #[test]
+    fn room_for_three_leaves_both_zones_alone() {
+        assert_eq!(
+            narrow_layout_rule(ROOM, false, false, None),
+            (false, false, None)
+        );
+    }
+
+    #[test]
+    fn a_cramped_window_closes_the_mcu_zone_and_remembers() {
+        // Tree wins; the pair that was open is kept for the way back.
+        assert_eq!(
+            narrow_layout_rule(CRAMPED, false, false, None),
+            (true, false, Some((false, false)))
+        );
+    }
+
+    #[test]
+    fn a_cramped_window_leaves_a_legal_pair_alone() {
+        // Only one open — nothing to enforce, and nothing to remember either.
+        assert_eq!(
+            narrow_layout_rule(CRAMPED, true, false, None),
+            (true, false, None)
+        );
+        assert_eq!(
+            narrow_layout_rule(CRAMPED, false, true, None),
+            (false, true, None)
+        );
+        // Neither open (editor only) is legal too.
+        assert_eq!(
+            narrow_layout_rule(CRAMPED, true, true, None),
+            (true, true, None)
+        );
+    }
+
+    #[test]
+    fn choosing_the_mcu_zone_while_cramped_does_not_overwrite_the_memory() {
+        // The user swapped to the MCU zone; what they had while roomy must
+        // survive, or widening would restore the forced layout instead.
+        let remembered = Some((false, false));
+        assert_eq!(
+            narrow_layout_rule(CRAMPED, false, true, remembered),
+            (false, true, remembered)
+        );
+    }
+
+    #[test]
+    fn regaining_room_restores_the_remembered_pair_and_forgets_it() {
+        // Both come back even though the live flags say otherwise — including
+        // after a swap made while cramped, which is as temporary as the cramped
+        // layout itself.
+        assert_eq!(
+            narrow_layout_rule(ROOM, false, true, Some((false, false))),
+            (false, false, None)
+        );
+    }
+
+    // ── The verdict ───────────────────────────────────────────────────────────
+
+    /// A 1920x1080 desktop monitor.
+    const LANDSCAPE: Option<egui::Vec2> = Some(egui::Vec2::new(1920.0, 1080.0));
+    /// The same panel rotated — 1080 wide is plenty of pixels, and that is the
+    /// point: width alone would call this roomy.
+    const PORTRAIT: Option<egui::Vec2> = Some(egui::Vec2::new(1080.0, 1920.0));
+
+    #[test]
+    fn the_floor_fits_all_three_minimums() {
+        // Derived, not picked: it must be exactly what the three columns need,
+        // or the rule fires at a width that would have been fine (or fails to
+        // fire at one that isn't).
+        assert_eq!(
+            NARROW_W,
+            super::EDITOR_MIN_W + super::MCU_MIN_W + super::TREE_MIN_W
+        );
+    }
+
+    #[test]
+    fn a_maximised_landscape_window_has_room() {
+        assert!(room_for_three_columns(1900.0, 1920.0, LANDSCAPE));
+    }
+
+    #[test]
+    fn a_window_docked_to_half_a_landscape_screen_does_not() {
+        // The reported case. 960 px clears the arithmetic floor of 840, which is
+        // exactly why the floor alone was not enough.
+        assert!(!room_for_three_columns(940.0, 960.0, LANDSCAPE));
+        // Exactly half is not MORE than half — the boundary belongs to the
+        // two-panel side, so a window snapped to it is not treated as roomy.
+        assert!(!room_for_three_columns(940.0, 1920.0 / 2.0, LANDSCAPE));
+        // Past half, three columns are welcome again: the cutoff is a share of
+        // the screen, not a comfort judgement.
+        assert!(room_for_three_columns(1000.0, 1020.0, LANDSCAPE));
+    }
+
+    #[test]
+    fn a_portrait_display_never_has_room_however_wide_the_window() {
+        // Maximised on a rotated monitor: 1080 px, twice the floor, and still
+        // two panels — the user asked for this explicitly.
+        assert!(!room_for_three_columns(1080.0, 1080.0, PORTRAIT));
+    }
+
+    #[test]
+    fn the_arithmetic_floor_still_applies_on_a_landscape_screen() {
+        // Fullscreen on a small landscape display: the orientation gate passes
+        // and the width one must still refuse.
+        assert!(!room_for_three_columns(
+            800.0,
+            800.0,
+            Some(egui::Vec2::new(800.0, 600.0))
+        ));
+    }
+
+    #[test]
+    fn an_unknown_monitor_falls_back_to_the_width_floor() {
+        // Guessing an orientation would be worse than not applying the rule.
+        assert!(room_for_three_columns(NARROW_W, f32::INFINITY, None));
+        assert!(!room_for_three_columns(NARROW_W - 1.0, f32::INFINITY, None));
+    }
+}
+
 // ── Persisted project state ───────────────────────────────────────────────────
 // Everything that must survive an application restart.
 // Stored via eframe's platform storage (Registry on Windows, ~/.local on Linux).
@@ -1213,6 +1423,27 @@ pub struct AppIde {
     /// Orthogonal to `side_panels_collapsed`: the tree is a SIDE panel in every
     /// state, so which panel takes egui's central slot never depends on it.
     tree_collapsed: bool,
+    /// The `(side_panels_collapsed, tree_collapsed)` pair from before the window
+    /// stopped having room for three columns, put back when it regains it — see
+    /// [`AppIde::enforce_narrow_layout`]. `None` while there IS room and the
+    /// user's own arrangement is the live one.
+    ///
+    /// Transient by design: a layout the user never chose must not outlive the
+    /// window size that forced it, which is also why `save` persists THIS pair
+    /// in preference to the live flags.
+    wide_layout: Option<(bool, bool)>,
+    /// No room for three columns right now — see [`room_for_three_columns`],
+    /// which weighs the display's orientation as well as the width. Recomputed
+    /// every frame by [`AppIde::enforce_narrow_layout`]; the toolbar reads it so
+    /// its two toggles behave — and read — as a radio pair rather than two
+    /// independent checkboxes.
+    layout_narrow: bool,
+    /// Width the project tree had last frame, `0.0` while it is collapsed. The
+    /// editor's width cap needs it, and the editor is built BEFORE the tree —
+    /// so it reads the previous frame's value. One frame of lag while dragging
+    /// the tree's edge, which is not perceptible; the alternative is assuming
+    /// [`TREE_MIN_W`] and letting a widened tree starve the MCU zone anyway.
+    tree_width: f32,
     /// Bottom diagnostics panel reduced to its tab bar (toggled by the caret
     /// button right of "More"). The bar itself always stays visible — only the
     /// tab CONTENT is hidden. Persisted across restarts.
@@ -1612,6 +1843,9 @@ impl AppIde {
             pending_restore: None,
             side_panels_collapsed: persisted.side_panels_collapsed,
             tree_collapsed: persisted.tree_collapsed,
+            wide_layout: None,
+            layout_narrow: false,
+            tree_width: 0.0,
             diag_collapsed: persisted.diag_collapsed,
             diff_line_bg: !persisted.hide_diff_line_bg,
             // 0.0 = absent from an older build's state; clamp keeps a corrupt
@@ -2872,11 +3106,64 @@ impl AppIde {
             ctx.request_repaint();
         });
     }
+
+    /// Keep the MCU zone and the project tree from being open together in a
+    /// window with no room for both beside the editor — see
+    /// [`room_for_three_columns`] for what counts as room.
+    ///
+    /// The MCU Configurator is the `CentralPanel` — it has no width of its own
+    /// and gets whatever the two side panels leave. With all three open in a
+    /// cramped window that remainder collapses to a strip of chrome, and the pin
+    /// canvas drawn in it spills over the tree. Portrait displays and a window
+    /// docked to half a landscape screen both land here.
+    ///
+    /// **The tree wins.** It is how you navigate the project; the MCU
+    /// Configurator is somewhere you go deliberately, and the toolbar button
+    /// that brings it back is on screen the whole time.
+    ///
+    /// The pair the user had while wide is remembered and put back verbatim
+    /// when the window grows again — including any change they made while
+    /// narrow, which is treated as temporary, exactly like the narrow layout
+    /// itself. Dragging a window narrow and back must not quietly rearrange a
+    /// layout the user chose.
+    fn enforce_narrow_layout(&mut self, ui: &egui::Ui) {
+        // The window's OUTER width against the monitor: "more than half the
+        // screen" is about the window the user dragged, decorations included,
+        // not about the content area left after our own chrome. Both are in
+        // points, so they compare directly. No outer rect (some backends don't
+        // report one) → treat the window as unbounded and let the display
+        // orientation and the width floor decide.
+        let (window_w, monitor) = ui.ctx().input(|i| {
+            let vp = i.viewport();
+            (
+                vp.outer_rect.map_or(f32::INFINITY, |r| r.width()),
+                vp.monitor_size,
+            )
+        });
+        let room = room_for_three_columns(ui.available_width(), window_w, monitor);
+        self.layout_narrow = !room;
+        let (mcu, tree, wide) = narrow_layout_rule(
+            room,
+            self.side_panels_collapsed,
+            self.tree_collapsed,
+            self.wide_layout,
+        );
+        self.side_panels_collapsed = mcu;
+        self.tree_collapsed = tree;
+        self.wide_layout = wide;
+    }
 }
 
 impl eframe::App for AppIde {
     // ── Persistence: called by eframe on app exit (and periodically) ──────────
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // While the window is too narrow to hold both right-hand zones, the live
+        // flags are a FORCED layout, not a chosen one (see
+        // `enforce_narrow_layout`) — persist what the user actually had, so the
+        // next start on a bigger screen opens the way they left it.
+        let (side_panels_collapsed, tree_collapsed) = self
+            .wide_layout
+            .unwrap_or((self.side_panels_collapsed, self.tree_collapsed));
         let mut state = PersistedState {
             user_src_files: self.project_tree.user_src_files.clone(),
             user_src_folders: self.project_tree.user_src_folders.clone(),
@@ -2888,8 +3175,8 @@ impl eframe::App for AppIde {
                 .and_then(|p| p.to_str())
                 .map(String::from),
             selected_mcu_id: Some(self.selected_mcu_id.clone()),
-            side_panels_collapsed: self.side_panels_collapsed,
-            tree_collapsed: self.tree_collapsed,
+            side_panels_collapsed,
+            tree_collapsed,
             diag_collapsed: self.diag_collapsed,
             tree_split_ratio: self.tree_split_ratio,
             hide_diff_line_bg: !self.diff_line_bg,
@@ -3223,6 +3510,11 @@ impl eframe::App for AppIde {
         let project_files: Option<ProjectFiles> = self
             .selected_build_cfg()
             .map(|_| self.current_project_files());
+
+        // Narrow window? The MCU zone and the tree become a choice, not two
+        // independent toggles. Must run BEFORE any panel is built — it decides
+        // which ones exist this frame.
+        self.enforce_narrow_layout(ui);
 
         // ── Panel 1: Code Editor (leftmost) ─────
         // The layout is [Editor][MCU][Project]: the editor docks left, the

@@ -111,10 +111,17 @@ impl AppIde {
         let displayed_file = self.selected_file;
 
         // ── Panel 1: Code Editor (leftmost) ───────────────────────────────────
-        // Cap the width so the editor can never fully cover the MCU Configurator
-        // (the central panel) — a too-wide persisted/dragged width used to hide
-        // it entirely. Always leave ≥30% for the MCU panel.
+        // Cap the width so the editor can never starve the MCU Configurator
+        // (the central panel, which has no width of its own and takes only what
+        // the side panels leave).
         let avail = ui.available_width();
+        // What the other two columns need. The tree's width is last frame's
+        // (this panel is built first — see `AppIde::tree_width`); collapsed it
+        // costs nothing. Floored at the editor's own minimum, so a window too
+        // small for everyone still produces a usable cap instead of one below
+        // `min_width`.
+        let editor_max =
+            (avail - crate::app::MCU_MIN_W - self.tree_width).max(crate::app::EDITOR_MIN_W);
         // Read before the closure borrows `self`.
         let collapsed = self.side_panels_collapsed;
         // The body is bound ONCE and then moved into whichever container runs
@@ -1272,14 +1279,16 @@ impl AppIde {
             // doesn't apply.
             egui::CentralPanel::default().show_inside(ui, body);
         } else {
-            // Cap the width so the editor can never fully cover the MCU
-            // Configurator (the central panel) — a too-wide persisted/dragged
-            // width used to hide it entirely. Always leave ≥30 % for the MCU.
+            // `editor_max` (computed above) reserves the MCU zone's minimum and
+            // the tree's current width. It replaced a flat 70 % of the window,
+            // which said nothing about whether what was left could actually hold
+            // a chip diagram: on a half-screen window the editor kept a width
+            // dragged while maximised and squeezed the MCU zone to a strip.
             egui::Panel::left("code_editor")
                 .resizable(true)
                 .default_size(avail * 0.5)
-                .min_width(220.0)
-                .max_width(avail * 0.7)
+                .min_width(crate::app::EDITOR_MIN_W)
+                .max_width(editor_max)
                 .show_inside(ui, body);
         }
     }

@@ -525,6 +525,11 @@ impl AppIde {
                 // Deliberately a DIFFERENT glyph from the MCU toggle beside it:
                 // two identical carets sitting next to each other are a coin
                 // flip every time you reach for one.
+                // Too narrow for both right-hand zones (see
+                // `AppIde::enforce_narrow_layout`)? Then these two toggles are a
+                // radio pair: showing one hides the other, and the hover text
+                // says so rather than leaving the user to discover it.
+                let narrow = self.layout_narrow;
                 let tree_hidden = self.tree_collapsed;
                 if ui
                     .selectable_label(
@@ -537,15 +542,25 @@ impl AppIde {
                                 egui::Color32::GRAY
                             }),
                     )
-                    .on_hover_text(if tree_hidden {
-                        "Show the Project tree again"
-                    } else {
-                        "Hide the Project tree so the editor widens — this button \
-                         brings it back"
+                    .on_hover_text(match (tree_hidden, narrow) {
+                        (true, true) => {
+                            "Show the Project tree — the window is too narrow for \
+                             both, so the MCU Configurator gives way"
+                        }
+                        (true, false) => "Show the Project tree again",
+                        (false, _) => {
+                            "Hide the Project tree so the editor widens — this button \
+                             brings it back"
+                        }
                     })
                     .clicked()
                 {
                     self.tree_collapsed = !tree_hidden;
+                    // Showing the tree on a narrow window: the MCU zone is what
+                    // makes room for it.
+                    if narrow && !self.tree_collapsed {
+                        self.side_panels_collapsed = true;
+                    }
                 }
 
                 ui.add_space(4.0);
@@ -574,14 +589,23 @@ impl AppIde {
                             egui::Color32::GRAY
                         }),
                     )
-                    .on_hover_text(if collapsed {
-                        "Show the MCU Configurator again (Pins / Clock / Structure …)"
-                    } else {
-                        "Hide the MCU Configurator (Pins / Clock / Structure …) so the editor widens — the Project tree stays"
+                    .on_hover_text(match (collapsed, narrow) {
+                        (true, true) => {
+                            "Show the MCU Configurator (Pins / Clock / Structure …) — the \
+                             window is too narrow for both, so the Project tree gives way"
+                        }
+                        (true, false) => "Show the MCU Configurator again (Pins / Clock / Structure …)",
+                        (false, _) => {
+                            "Hide the MCU Configurator (Pins / Clock / Structure …) so the editor widens — the Project tree stays"
+                        }
                     })
                     .clicked()
                 {
                     self.side_panels_collapsed = !collapsed;
+                    // The other half of the radio pair — see the tree toggle.
+                    if narrow && !self.side_panels_collapsed {
+                        self.tree_collapsed = true;
+                    }
                 }
 
                 ui.add_space(4.0);

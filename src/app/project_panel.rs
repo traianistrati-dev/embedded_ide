@@ -155,10 +155,13 @@ impl AppIde {
         //
         // No collapsed strip is drawn: the toolbar's sidebar button is always
         // on screen and is the way back, exactly as it is for the MCU zone.
+        // Its width feeds the editor's cap next frame (see `AppIde::tree_width`)
+        // — collapsed it costs nothing, so the editor gets that space back.
+        let mut tree_width = 0.0_f32;
         if !self.tree_collapsed {
-            egui::Panel::right("project_tree")
+            let panel = egui::Panel::right("project_tree")
                 .resizable(true)
-                .default_size(200.0)
+                .default_size(crate::app::TREE_MIN_W)
                 .show_inside(ui, |ui| {
                     // ── Panel header row ──────────────────────────────────────────
                     ui.horizontal(|ui| {
@@ -316,7 +319,9 @@ impl AppIde {
                         }
                     }
                 });
+            tree_width = panel.response.rect.width();
         }
+        self.tree_width = tree_width;
 
         ProjectPanelSignals {
             open_clicked: open_project_clicked,
