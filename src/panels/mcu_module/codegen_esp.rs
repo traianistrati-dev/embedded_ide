@@ -427,7 +427,7 @@ fn make_gen_section(
     // code, and it is the ONLY record a reopened project has — `parse_main_rs`
     // rebuilds the diagram from these lines (`mcu.config` stores no pin
     // functions). Moving them into the config module would lose the pins.
-    for (label, calls) in bus_sections(&configured, usart, spi, i2c) {
+    for (label, calls) in bus_sections(&configured, usart, spi, i2c, runtime) {
         body.push('\n');
         body.push_str(&format!("    // ── {label} ──\n"));
         body.push_str(&calls);
@@ -636,9 +636,18 @@ fn bus_sections(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
+    runtime: EspRuntime,
 ) -> Vec<(String, String)> {
     let (uart, spi, i2c) = collect_buses(configured);
     let mut out = Vec::new();
+    // Async runtime → call the `init_async` twin, so the handles are the
+    // `.await`-able esp-hal drivers. `init` stays in the file for a bus the user
+    // would rather keep blocking; switching is a one-word edit here.
+    let init_fn = if runtime == EspRuntime::Async {
+        "init_async"
+    } else {
+        "init"
+    };
 
     // One `let` per wired pin, in `init`'s parameter order, returning the
     // binding names to pass along.
@@ -660,7 +669,7 @@ fn bus_sections(
             args.push(var);
         }
         body.push_str(&format!(
-            "    let mut {handle} = pins::configs::{module}::init({periph}, {});\n",
+            "    let mut {handle} = pins::configs::{module}::{init_fn}({periph}, {});\n",
             args.join(", ")
         ));
         body
@@ -995,12 +1004,19 @@ mod tests {
 {code}"
                 );
             }
-            for call in [
-                "pins::configs::uart0::init(peripherals.UART0",
-                "pins::configs::spi2::init(peripherals.SPI2",
-                "pins::configs::i2c0::init(peripherals.I2C0",
+            // Async calls the `init_async` twin; Blocking the plain `init`.
+            let init_fn = if runtime == EspRuntime::Async {
+                "init_async"
+            } else {
+                "init"
+            };
+            for (module, periph) in [
+                ("uart0", "UART0"),
+                ("spi2", "SPI2"),
+                ("i2c0", "I2C0"),
             ] {
-                assert!(code.contains(call), "{runtime:?} calls {call}:
+                let call = format!("pins::configs::{module}::{init_fn}(peripherals.{periph}");
+                assert!(code.contains(&call), "{runtime:?} calls {call}:
 {code}");
             }
             // Every wired pin still has its own line — that is what a reopened

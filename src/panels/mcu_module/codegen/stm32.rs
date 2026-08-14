@@ -1089,12 +1089,34 @@ where
     nb::block!(bx.enable_non_blocking()).ok();
     bx
 }
+
+// ── Using CAN1 ──
+// In main.rs, after the init above:
+//
+//     use bxcan::{Frame, StandardId};
+//
+//     // Send
+//     let id = StandardId::new(0x123).unwrap();
+//     let frame = Frame::new_data(id, [1u8, 2, 3, 4]);
+//     nb::block!(_can1.transmit(&frame)).ok();
+//
+//     // Receive (nb: Err(WouldBlock) while the mailboxes are empty)
+//     if let Ok(rx) = {HANDLE}.receive() {
+//         if let Some(data) = rx.data() {
+//             // data[..] holds the payload
+//         }
+//     }
+
 "#;
 
 fn can_config_file(cfg: Option<&CanModuleConfig>, pclk1: u32) -> String {
     let bitrate = cfg.map(|c| c.bitrate).unwrap_or(500_000);
     let btr = can_btr(bitrate, pclk1);
+    let sfx = cfg
+        .map(|c| module_label_sfx(&c.custom_label))
+        .unwrap_or_default();
     CAN_TMPL
+        .replace("{HANDLE}", &format!("_can{sfx}"))
         .replace("{BITRATE}", &bitrate.to_string())
         .replace("{PCLK1}", &pclk1.to_string())
         .replace("{BTR}", &format!("0x{btr:08X}"))
@@ -1204,6 +1226,24 @@ pub fn init(
     let (tx, rx) = Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split();
     SerialIo(tx, rx)
 }
+
+// ── Using USART{N} ──
+// Portable init — the handle is an `embedded-io` Read + Write, so this code
+// works unchanged on any HAL. In main.rs, after the init above:
+//
+//     use embedded_io::{Read, Write};
+//
+//     // Send
+//     {HANDLE}.write_all(b"hello\r\n").ok();
+//     {HANDLE}.flush().ok();
+//
+//     // Receive exactly N bytes (blocks until they arrive)
+//     let mut buf = [0u8; 4];
+//     {HANDLE}.read_exact(&mut buf).ok();
+//
+//     // Or take whatever is available right now
+//     let n = {HANDLE}.read(&mut buf).unwrap_or(0);
+
 "#;
 
 fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
@@ -1222,7 +1262,15 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         ApiStyle::Portable => USART_TMPL,
         ApiStyle::Native => USART_TMPL_NATIVE,
     };
-    tmpl.replace("{N}", &n.to_string())
+    // The handle the example names is the one `main.rs` actually binds —
+    // module label included (`_serial1_mw_radar`), or the split pair on Native.
+    let sfx = cfg
+        .map(|c| module_label_sfx(&c.custom_label))
+        .unwrap_or_default();
+    tmpl.replace("{HANDLE}", &format!("_serial{n}{sfx}"))
+        .replace("{TX}", &format!("_tx{n}{sfx}"))
+        .replace("{RX}", &format!("_rx{n}{sfx}"))
+        .replace("{N}", &n.to_string())
         .replace("{BAUD}", &baud.to_string())
         .replace("{DATA}", &data.to_string())
         .replace("{PARITY}", &parity.to_string())
@@ -1283,6 +1331,29 @@ pub fn init<PINS: serial::Pins<pac::USART{N}>>(
 ) -> (serial::Tx<pac::USART{N}>, serial::Rx<pac::USART{N}>) {
     Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split()
 }
+
+// ── Using USART{N} ──
+// Native init — `init` returns the HAL's own split halves, which are `nb`
+// (non-blocking) based. In main.rs, after the init above:
+//
+//     use nb::block;
+//
+//     // Send one byte at a time
+//     for b in b"hello\r\n" {
+//         block!({TX}.write(*b)).ok();
+//     }
+//     block!({TX}.flush()).ok();
+//
+//     // Receive one byte, blocking until it arrives
+//     let byte = block!({RX}.read()).unwrap_or(0);
+//
+//     // Non-blocking poll: Err(nb::Error::WouldBlock) means "nothing yet"
+//     match {RX}.read() {
+//         Ok(b) => { /* got b */ }
+//         Err(nb::Error::WouldBlock) => { /* try again later */ }
+//         Err(_) => { /* framing / overrun error */ }
+//     }
+
 "#;
 
 const SPI_TMPL: &str = r#"// <<< GENERATED>>>
@@ -1399,6 +1470,33 @@ pub fn init(
     let bus = Spi::spi{N}(spi, pins, {AFIO_ARG}get_mode(), CLOCK_KHZ.kHz(), *clocks);
     SpiBusIo(bus)
 }
+
+// ── Using SPI{N} ──
+// Portable init — the handle is an `embedded-hal` 1.0 `SpiBus`. In main.rs,
+// after the init above:
+//
+// NOTE: main.rs binds this handle as `let {HANDLE} = …` — add `mut`
+// there before calling anything below (bus methods take `&mut self`).
+//
+//     use embedded_hal::spi::SpiBus;
+//
+//     // Write only
+//     {HANDLE}.write(&[0x9F]).ok();
+//
+//     // Read only (clocks out zeros)
+//     let mut rx = [0u8; 3];
+//     {HANDLE}.read(&mut rx).ok();
+//
+//     // Full duplex, separate buffers
+//     {HANDLE}.transfer(&mut rx, &[0x9F, 0x00, 0x00]).ok();
+//
+//     // Full duplex in place: `buf` is sent, then overwritten by the reply
+//     let mut buf = [0x9F, 0x00, 0x00];
+//     {HANDLE}.transfer_in_place(&mut buf).ok();
+//     {HANDLE}.flush().ok();
+//
+//     // NSS/CS is a plain GPIO here — drive it low around a transaction.
+
 "#;
 
 fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, String)) -> String {
@@ -1411,7 +1509,11 @@ fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, Stri
     let (pins, remap) = pin_tys;
     // Only SPI1 can be remapped, so only `Spi::spi1` takes the AFIO register.
     let (afio_param, afio_arg) = afio_subst(n == 1);
-    tmpl.replace("{N}", &n.to_string())
+    let sfx = cfg
+        .map(|c| module_label_sfx(&c.custom_label))
+        .unwrap_or_default();
+    tmpl.replace("{HANDLE}", &format!("_spi{n}{sfx}"))
+        .replace("{N}", &n.to_string())
         .replace("{MODE}", &mode.to_string())
         .replace("{KHZ}", &khz.to_string())
         .replace("{PINS}", pins)
@@ -1493,6 +1595,31 @@ pub fn init(
 ) -> Handle {
     Spi::spi{N}(spi, pins, {AFIO_ARG}get_mode(), CLOCK_KHZ.kHz(), *clocks)
 }
+
+// ── Using SPI{N} ──
+// Native init — the concrete `stm32f1xx-hal` Spi, whose traits are
+// `embedded-hal` 0.2. In main.rs, after the init above:
+//
+// NOTE: the Native path needs the 0.2 traits, which the IDE only adds to
+// Cargo.toml for PORTABLE modules. Add them yourself:
+//   embedded-hal-0-2 = { package = "embedded-hal", version = "0.2.7", features = ["unproven"] }
+// — or switch this module's Init API to Portable, where the handle is an
+// embedded-hal 1.0 bus and no extra dependency is needed.
+//
+// NOTE: main.rs binds this handle as `let {HANDLE} = …` — add `mut`
+// there before calling anything below (bus methods take `&mut self`).
+//
+//     use embedded_hal_0_2::blocking::spi::{Transfer, Write};
+//
+//     // Write only
+//     {HANDLE}.write(&[0x9F]).ok();
+//
+//     // Full duplex in place: the buffer is sent, then holds the reply
+//     let mut buf = [0x9F, 0x00, 0x00];
+//     {HANDLE}.transfer(&mut buf).ok();
+//
+//     // NSS/CS is a plain GPIO here — drive it low around a transaction.
+
 "#;
 
 const I2C_TMPL: &str = r#"// <<< GENERATED>>>
@@ -1602,6 +1729,29 @@ pub fn init(
     let bus = BlockingI2c::i2c{N}(i2c, pins, {AFIO_ARG}get_mode(), *clocks, 1000, 10, 1000, 1000);
     I2cIo(bus)
 }
+
+// ── Using I2C{N} ──
+// Portable init — the handle is an `embedded-hal` 1.0 `I2c`. In main.rs,
+// after the init above:
+//
+// NOTE: main.rs binds this handle as `let {HANDLE} = …` — add `mut`
+// there before calling anything below (bus methods take `&mut self`).
+//
+//     use embedded_hal::i2c::I2c;
+//
+//     const ADDR: u8 = 0x3C; // 7-bit device address
+//
+//     // Write to a register
+//     {HANDLE}.write(ADDR, &[0x10, 0x42]).ok();
+//
+//     // Read bytes
+//     let mut rx = [0u8; 2];
+//     {HANDLE}.read(ADDR, &mut rx).ok();
+//
+//     // Register read: write the address, then read WITHOUT releasing the bus
+//     // (repeated START) — what most sensors expect.
+//     {HANDLE}.write_read(ADDR, &[0x10], &mut rx).ok();
+
 "#;
 
 fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>, pins: &str) -> String {
@@ -1612,7 +1762,11 @@ fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>, pins: &str) -> String {
     };
     // Only I2C1 can be remapped (PB8/PB9), so only `i2c1` takes the AFIO.
     let (afio_param, afio_arg) = afio_subst(n == 1);
-    tmpl.replace("{N}", &n.to_string())
+    let sfx = cfg
+        .map(|c| module_label_sfx(&c.custom_label))
+        .unwrap_or_default();
+    tmpl.replace("{HANDLE}", &format!("_i2c{n}{sfx}"))
+        .replace("{N}", &n.to_string())
         .replace("{KHZ}", &khz.to_string())
         .replace("{PINS}", pins)
         .replace("{AFIO_PARAM}", afio_param)
@@ -1669,6 +1823,30 @@ pub fn init(
 ) -> Handle {
     BlockingI2c::i2c{N}(i2c, pins, {AFIO_ARG}get_mode(), *clocks, 1000, 10, 1000, 1000)
 }
+
+// ── Using I2C{N} ──
+// Native init — the concrete `stm32f1xx-hal` BlockingI2c, whose traits are
+// `embedded-hal` 0.2. In main.rs, after the init above:
+//
+// NOTE: the Native path needs the 0.2 traits, which the IDE only adds to
+// Cargo.toml for PORTABLE modules. Add them yourself:
+//   embedded-hal-0-2 = { package = "embedded-hal", version = "0.2.7", features = ["unproven"] }
+// — or switch this module's Init API to Portable, where the handle is an
+// embedded-hal 1.0 bus and no extra dependency is needed.
+//
+// NOTE: main.rs binds this handle as `let {HANDLE} = …` — add `mut`
+// there before calling anything below (bus methods take `&mut self`).
+//
+//     use embedded_hal_0_2::blocking::i2c::{Read, Write, WriteRead};
+//
+//     const ADDR: u8 = 0x3C; // 7-bit device address
+//
+//     {HANDLE}.write(ADDR, &[0x10, 0x42]).ok();
+//
+//     let mut rx = [0u8; 2];
+//     {HANDLE}.read(ADDR, &mut rx).ok();
+//     {HANDLE}.write_read(ADDR, &[0x10], &mut rx).ok();
+
 "#;
 
 /// The section header older versions inserted before the appended helpers.

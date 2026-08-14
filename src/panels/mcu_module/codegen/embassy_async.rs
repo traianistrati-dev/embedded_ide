@@ -182,6 +182,32 @@ pub fn init<'d>(
     let rx_buf = RX_BUF.init([0; BUF_LEN]);
     BufferedUart::new(usart, rx, tx, tx_buf, rx_buf, Irqs, get_config()).unwrap()
 }
+
+// ── Using USART{N} ──
+// The handle is an `embedded-io-async` Read + Write over embassy's BufferedUart.
+// In main.rs, inside the async fn after the init above:
+//
+//     use embedded_io_async::{Read, Write};
+//
+//     // Send — yields to the executor instead of spinning
+//     {HANDLE}.write_all(b"hello\r\n").await.ok();
+//     {HANDLE}.flush().await.ok();
+//
+//     // Receive exactly N bytes
+//     let mut buf = [0u8; 4];
+//     {HANDLE}.read_exact(&mut buf).await.ok();
+//
+//     // Or take whatever has arrived (returns as soon as there is >= 1 byte)
+//     let n = {HANDLE}.read(&mut buf).await.unwrap_or(0);
+//
+//     // Time out a read — the whole point of doing this on an executor:
+//     use embassy_time::{with_timeout, Duration};
+//     match with_timeout(Duration::from_millis(500), {HANDLE}.read(&mut buf)).await {
+//         Ok(Ok(n)) => { /* n bytes */ }
+//         Ok(Err(_)) => { /* UART error */ }
+//         Err(_) => { /* timed out */ }
+//     }
+
 "#;
 
 /// The USART peripheral instances that have BOTH a TX and an RX pin configured —
@@ -414,7 +440,13 @@ pub fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         Some(StopBits::Two) => 2,
         _ => 1,
     };
+    let sfx = cfg
+        .map(|c| sanitize_label(&c.custom_label))
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("_{s}"))
+        .unwrap_or_default();
     ASYNC_USART_TMPL
+        .replace("{HANDLE}", &format!("_serial{n}{sfx}"))
         .replace("{N}", &n.to_string())
         .replace("{BAUD}", &baud.to_string())
         .replace("{DATA}", &data.to_string())
@@ -464,6 +496,18 @@ pub fn init<'d>(
 ) -> impl embedded_hal::spi::SpiBus<u8> + 'd {
     Spi::new_blocking(spi, sck, mosi, miso, get_config())
 }
+
+// ── Using SPI{N} ──
+// Blocking init inside an async project: the handle is an `embedded-hal` 1.0
+// `SpiBus` — no `.await`, the transfer busy-waits. Fine for short bursts;
+// switch the module to Async-DMA when a transfer is long enough to matter.
+//
+//     use embedded_hal::spi::SpiBus;
+//
+//     let mut buf = [0x9F, 0x00, 0x00];
+//     {HANDLE}.transfer_in_place(&mut buf).ok();
+//     {HANDLE}.flush().ok();
+
 "#;
 
 /// Async DMA SPI (`Spi::new`) exposed as `embedded-hal-async` `SpiBus<u8>`
@@ -509,6 +553,22 @@ pub fn init<'d>(
 ) -> impl embedded_hal_async::spi::SpiBus<u8> + 'd {
     Spi::new(spi, sck, mosi, miso, tx_dma, rx_dma, get_config())
 }
+
+// ── Using SPI{N} ──
+// Async-DMA init: the handle is an `embedded-hal-async` `SpiBus`, so a transfer
+// hands the bytes to DMA and yields until it finishes.
+//
+//     use embedded_hal_async::spi::SpiBus;
+//
+//     {HANDLE}.write(&[0x9F]).await.ok();
+//
+//     let mut rx = [0u8; 3];
+//     {HANDLE}.transfer(&mut rx, &[0x9F, 0x00, 0x00]).await.ok();
+//
+//     let mut buf = [0x9F, 0x00, 0x00];
+//     {HANDLE}.transfer_in_place(&mut buf).await.ok();
+//     {HANDLE}.flush().await.ok();
+
 "#;
 
 /// Render the SPI config file for instance `n`, picking the blocking or
@@ -520,7 +580,13 @@ pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>) -> String {
         AsyncBusMode::Blocking => ASYNC_SPI_TMPL_BLOCKING,
         AsyncBusMode::AsyncDma => ASYNC_SPI_TMPL_DMA,
     };
-    tmpl.replace("{N}", &n.to_string())
+    let sfx = cfg
+        .map(|c| sanitize_label(&c.custom_label))
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("_{s}"))
+        .unwrap_or_default();
+    tmpl.replace("{HANDLE}", &format!("_spi{n}{sfx}"))
+        .replace("{N}", &n.to_string())
         .replace("{MODE}", &mode.to_string())
         .replace("{CLK}", &clk.to_string())
 }
@@ -559,6 +625,17 @@ pub fn init<'d>(
 ) -> impl embedded_hal::i2c::I2c + 'd {
     I2c::new_blocking(i2c, scl, sda, get_config())
 }
+
+// ── Using I2C{N} ──
+// Blocking init inside an async project: the handle is an `embedded-hal` 1.0
+// `I2c` — no `.await`. Switch the module to Async-DMA for long transfers.
+//
+//     use embedded_hal::i2c::I2c;
+//
+//     const ADDR: u8 = 0x3C;
+//     let mut rx = [0u8; 2];
+//     {HANDLE}.write_read(ADDR, &[0x10], &mut rx).ok();
+
 "#;
 
 /// Async DMA I2C (`I2c::new`) exposed as `embedded-hal-async` `I2c`
@@ -602,6 +679,20 @@ pub fn init<'d>(
 ) -> impl embedded_hal_async::i2c::I2c + 'd {
     I2c::new(i2c, scl, sda, Irqs, tx_dma, rx_dma, get_config())
 }
+
+// ── Using I2C{N} ──
+// Async-DMA init: the handle is an `embedded-hal-async` `I2c`.
+//
+//     use embedded_hal_async::i2c::I2c;
+//
+//     const ADDR: u8 = 0x3C;
+//
+//     {HANDLE}.write(ADDR, &[0x10, 0x42]).await.ok();
+//
+//     let mut rx = [0u8; 2];
+//     {HANDLE}.read(ADDR, &mut rx).await.ok();
+//     {HANDLE}.write_read(ADDR, &[0x10], &mut rx).await.ok();
+
 "#;
 
 /// Render the I2C config file for instance `n`, picking the blocking or
@@ -612,6 +703,12 @@ pub fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
         AsyncBusMode::Blocking => ASYNC_I2C_TMPL_BLOCKING,
         AsyncBusMode::AsyncDma => ASYNC_I2C_TMPL_DMA,
     };
-    tmpl.replace("{N}", &n.to_string())
+    let sfx = cfg
+        .map(|c| sanitize_label(&c.custom_label))
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("_{s}"))
+        .unwrap_or_default();
+    tmpl.replace("{HANDLE}", &format!("_i2c{n}{sfx}"))
+        .replace("{N}", &n.to_string())
         .replace("{CLK}", &clk.to_string())
 }

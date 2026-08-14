@@ -204,7 +204,7 @@ impl FamilyBackend for Esp32Backend {
     }
 
     fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
-        esp_config_files(mcu)
+        esp_config_files(mcu, EspRuntime::Blocking)
     }
 }
 
@@ -231,7 +231,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
 /// instance. Shared by both ESP backends: the config modules are the same
 /// blocking esp-hal drivers on either runtime (esp-rtos does not change how a
 /// `Uart` is built), so Async gets exactly the same files.
-fn esp_config_files(mcu: &Mcu) -> Vec<(String, String)> {
+fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
     let all = pins_of(mcu);
     let configured: Vec<&Pin> = all
         .iter()
@@ -246,6 +246,7 @@ fn esp_config_files(mcu: &Mcu) -> Vec<(String, String)> {
         &modules::usart_configs(&mcu.modules),
         &modules::spi_configs(&mcu.modules),
         &modules::i2c_configs(&mcu.modules),
+        runtime,
     )
 }
 
@@ -303,7 +304,7 @@ impl FamilyBackend for AsyncEspBackend {
     }
 
     fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
-        esp_config_files(mcu)
+        esp_config_files(mcu, EspRuntime::Async)
     }
 }
 
@@ -739,6 +740,141 @@ mod tests {
                 backend_for_runtime("esp32c3", rt).unwrap().family_id(),
                 "esp32c3"
             );
+        }
+    }
+
+    /// The usage examples at the bottom of every `pins/configs/*.rs` name a
+    /// handle. That handle must be the one `main.rs` actually binds — including
+    /// the Virtual Module's label (`_serial1_mw_radar`, not `_serial1`) — and no
+    /// `{PLACEHOLDER}` may survive into the file.
+    ///
+    /// An example that names a variable which does not exist is worse than no
+    /// example: it sends the reader debugging our documentation.
+    #[test]
+    fn config_examples_name_handles_that_main_rs_really_binds() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::modules::{ApiStyle, ModuleConfig, ModuleKind};
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        // Pull `_serial1_label`-shaped identifiers out of the comment block.
+        let handles_in = |file: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            for line in file.lines().filter(|l| l.trim_start().starts_with("//")) {
+                let mut rest = line;
+                while let Some(i) = rest.find('_') {
+                    let tail = &rest[i..];
+                    let ident: String = tail
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    let is_handle = ["_serial", "_spi", "_i2c", "_can", "_tx", "_rx", "_uart"]
+                        .iter()
+                        .any(|p| ident.starts_with(p));
+                    // Only when it is CALLED — `_i2c1.write(…)`, not prose.
+                    if is_handle && tail[ident.len()..].starts_with('.') {
+                        out.push(ident.clone());
+                    }
+                    rest = &tail[ident.len().max(1)..];
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
+        };
+
+        let stm32 = |family: &str, id: &str| {
+            let mut def =
+                crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+            def.family = family.into();
+            def.id = id.into();
+            def.build_mcu()
+        };
+
+        // (label, mcu, runtime, per-module api style)
+        let cases: Vec<(&str, Mcu, Runtime, Option<ApiStyle>)> = vec![
+            (
+                "stm32f1 portable",
+                stm32("stm32f1", "stm32f103c8t6"),
+                Runtime::Blocking,
+                Some(ApiStyle::Portable),
+            ),
+            (
+                "stm32f1 native",
+                stm32("stm32f1", "stm32f103c8t6"),
+                Runtime::Blocking,
+                Some(ApiStyle::Native),
+            ),
+            (
+                "stm32f4 async",
+                stm32("stm32f4", "stm32f411re"),
+                Runtime::Async,
+                None,
+            ),
+            (
+                "esp blocking",
+                crate::panels::mcu_module::mock_esp32c3::create_esp32c3(),
+                Runtime::Blocking,
+                None,
+            ),
+            (
+                "esp async",
+                crate::panels::mcu_module::mock_esp32c3::create_esp32c3(),
+                Runtime::Async,
+                None,
+            ),
+        ];
+
+        for (what, mut mcu, runtime, style) in cases {
+            mcu.runtime = runtime;
+            // Wire a USART, an SPI and an I2C the way the user would, and give
+            // one of them a label — the case that made `{HANDLE}` necessary.
+            for kind in [
+                ModuleKind::GenericInterfaceUsart,
+                ModuleKind::GenericInterfaceSpi,
+                ModuleKind::GenericInterfaceI2c,
+            ] {
+                mcu.add_module(kind);
+            }
+            for md in &mut mcu.modules {
+                match &mut md.config {
+                    ModuleConfig::Usart(c) => {
+                        c.custom_label = "mw radar".into();
+                        if let Some(s) = style {
+                            c.api_style = s;
+                        }
+                    }
+                    ModuleConfig::Spi(c) => {
+                        if let Some(s) = style {
+                            c.api_style = s;
+                        }
+                    }
+                    ModuleConfig::I2c(c) => {
+                        if let Some(s) = style {
+                            c.api_style = s;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let _ = PinFunction::Unset; // (kept in scope for the import above)
+
+            let main_rs = mcu.fresh_main_rs();
+            let files = mcu.config_files();
+            assert!(!files.is_empty(), "{what}: wired buses produce configs");
+
+            for (name, body) in &files {
+                assert!(
+                    !body.contains("{HANDLE}") && !body.contains("{TX}") && !body.contains("{RX}"),
+                    "{what}/{name}: unsubstituted placeholder:\n{body}"
+                );
+                for h in handles_in(body) {
+                    assert!(
+                        main_rs.contains(&h),
+                        "{what}/{name}: the example calls `{h}`, which main.rs never binds.\n\
+                         main.rs:\n{main_rs}"
+                    );
+                }
+            }
         }
     }
 
@@ -1353,3 +1489,4 @@ mod tests {
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_END));
     }
 }
+
