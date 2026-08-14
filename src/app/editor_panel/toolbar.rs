@@ -23,7 +23,18 @@ impl AppIde {
     /// button (was a top-toolbar button before 2026-07-08).
     pub(crate) fn scan_usb(&mut self) {
         self.build_tab = BuildPanelTab::Dfu;
+        // An explicit Scan means "show me what is there now", so the previous
+        // pick is dropped. The AUTOMATIC scan must not do this — see
+        // `scan_usb_keep_selection`.
         self.dfu_sel_programmer = String::new();
+        self.scan_usb_keep_selection();
+    }
+
+    /// The same USB enumeration, without touching the current selection or the
+    /// active tab — what the Flash tab runs by itself on entry. Losing the
+    /// chosen programmer just because you looked at the tab would be worse than
+    /// having a stale list.
+    pub(crate) fn scan_usb_keep_selection(&mut self) {
         dfu::detect_dfu(
             Arc::clone(&self.dfu_state),
             Arc::clone(&self.dfu_log),
@@ -33,11 +44,35 @@ impl AppIde {
     }
 
     /// Enumerate the connected debug probes via `probe-rs list` for the shared
-    /// RTT / Debug probe selector. Runs synchronously — `probe-rs list` returns
-    /// in well under a second — and keeps the current selection if that probe is
-    /// still attached, otherwise falls back to auto-select.
+    /// probe selector (RTT / Debug / Flash / Profile).
+    ///
+    /// Runs on a THREAD: `probe-rs list` shells out, and while it usually
+    /// answers immediately, a probe held by another process or left wedged makes
+    /// it take seconds — inline, that is the whole IDE frozen. The result lands
+    /// in `probe_scan_inbox` and [`apply_probe_scan`] picks it up next frame.
     pub(crate) fn scan_probes(&mut self) {
-        match crate::probe::list_probes() {
+        if self.probe_scanning {
+            return; // one enumeration at a time
+        }
+        self.probe_scanning = true;
+        let inbox = Arc::clone(&self.probe_scan_inbox);
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::probe::list_probes();
+            *inbox.lock().unwrap() = Some(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Apply a finished probe scan. Keeps the current selection when that probe
+    /// is still attached, otherwise falls back to auto-select. Call once a
+    /// frame; a no-op while nothing has arrived.
+    pub(crate) fn apply_probe_scan(&mut self) {
+        let Some(result) = self.probe_scan_inbox.lock().unwrap().take() else {
+            return;
+        };
+        self.probe_scanning = false;
+        match result {
             Ok(list) => {
                 if let Some(sel) = &self.selected_probe {
                     if !list.iter().any(|p| &p.selector == sel) {
@@ -51,6 +86,32 @@ impl AppIde {
                 self.probe_list.clear();
                 self.probe_scan_err = Some(e);
             }
+        }
+    }
+
+    /// Get the Flash tab's device lists ready the moment it is opened, so the
+    /// first thing you see is what is actually attached.
+    ///
+    /// Only on a real click on the tab (a flash or a Size run switches to it by
+    /// itself — enumerating right as the probe is being claimed helps nobody),
+    /// and at most once every [`FLASH_AUTOSCAN_EVERY`], so flipping between tabs
+    /// doesn't spawn a scan per click.
+    pub(crate) fn autoscan_flash_devices(&mut self, missing_tools: &[&'static str]) {
+        const FLASH_AUTOSCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+        if self
+            .last_flash_autoscan
+            .is_some_and(|t| t.elapsed() < FLASH_AUTOSCAN_EVERY)
+        {
+            return;
+        }
+        self.last_flash_autoscan = Some(std::time::Instant::now());
+        // USB programmers: both toolchains need this list — the ST-Link for
+        // STM32, the USB-serial adapter for espflash.
+        self.scan_usb_keep_selection();
+        // Debug probes: skipped when probe-rs is known missing, or the scan
+        // would just write the same error into the tab on every visit.
+        if !crate::app::tabs::tool_missing(missing_tools, "probe-rs") {
+            self.scan_probes();
         }
     }
 

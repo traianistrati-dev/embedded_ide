@@ -51,6 +51,10 @@ impl AppIde {
         // invisible in practice, and it keeps the check out of the render path.
         let entered_git =
             self.build_tab != self.last_build_tab && self.build_tab == BuildPanelTab::Git;
+        // Same edge for the Flash tab: its device lists are only useful if they
+        // describe what is plugged in RIGHT NOW.
+        let entered_flash =
+            self.build_tab != self.last_build_tab && self.build_tab == BuildPanelTab::Dfu;
         self.last_build_tab = self.build_tab;
 
         // The panel used to hide itself whenever no tab had activity. It no
@@ -465,6 +469,15 @@ impl AppIde {
         if probe_scan {
             self.scan_probes();
         }
+        // Opening the Flash tab BY CLICKING it gets both device lists refreshed,
+        // so Flash is ready to press. `tab_clicked` is the difference between
+        // the user asking for the tab and a flash/Size run switching to it —
+        // enumerating while the probe is being claimed helps nobody.
+        if entered_flash && tab_clicked {
+            self.autoscan_flash_devices(&missing_tools);
+        }
+        // Pick up a finished probe enumeration (it runs on a thread).
+        self.apply_probe_scan();
         // Profile-tab "Analyze" button → cargo bloat.
         if profile_run {
             self.start_profile();

@@ -1106,6 +1106,17 @@ pub struct AppIde {
     selected_probe: Option<String>,
     /// Error from the last probe scan (e.g. probe-rs missing), shown in the tab.
     probe_scan_err: Option<String>,
+    /// Result of a probe scan running on its own thread, waiting to be applied.
+    /// `probe-rs list` shells out, and a busy or wedged probe makes it take far
+    /// longer than the "well under a second" it usually does — long enough to
+    /// freeze the UI if it ran inline, which is exactly what the automatic scan
+    /// on entering the Flash tab would have done.
+    probe_scan_inbox: Arc<Mutex<Option<Result<Vec<crate::probe::ProbeInfo>, String>>>>,
+    /// A scan is in flight (drops overlapping requests).
+    probe_scanning: bool,
+    /// When the Flash tab last auto-scanned, so flipping between tabs doesn't
+    /// spawn an enumeration per click.
+    last_flash_autoscan: Option<std::time::Instant>,
     /// Source breakpoints per workspace-relative path (1-based lines), toggled
     /// from the editor's line-number gutter. Session-only (not persisted).
     breakpoints: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
@@ -1734,6 +1745,9 @@ impl AppIde {
             probe_list: Vec::new(),
             selected_probe: None,
             probe_scan_err: None,
+            probe_scan_inbox: Arc::new(Mutex::new(None)),
+            probe_scanning: false,
+            last_flash_autoscan: None,
             breakpoints: std::collections::BTreeMap::new(),
             // Completer: seeded with Rust keywords/types + learns words from code
             completer: Completer::new_with_syntax(&Syntax::rust())
