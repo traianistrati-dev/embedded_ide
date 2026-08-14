@@ -592,6 +592,11 @@ struct PersistedState {
     /// Editor-only layout (MCU + Project panels collapsed away).
     #[serde(default)]
     side_panels_collapsed: bool,
+    /// Project tree hidden. Independent of `side_panels_collapsed`: either
+    /// panel can be away without the other. Serde default `false` = shown, so
+    /// older state opens exactly as it did.
+    #[serde(default)]
+    tree_collapsed: bool,
     /// Bottom diagnostics panel reduced to its tab bar.
     #[serde(default)]
     diag_collapsed: bool,
@@ -1199,9 +1204,15 @@ pub struct AppIde {
     /// Confirmed restore, applied at the next editor render so `display_code`
     /// refreshes with it (same deferral as `pending_discard_file`).
     pending_restore: Option<(String, String)>,
-    /// Collapse the MCU Configurator + Project tree so the editor fills the
-    /// window (toggled from the editor toolbar). Persisted across restarts.
+    /// Collapse the MCU Configurator (Pins / Clock / Structure …) so the editor
+    /// takes the central slot (toggled from the editor toolbar). Persisted.
     side_panels_collapsed: bool,
+    /// Hide the Project tree panel on the far right (toggled from the editor
+    /// toolbar, next to the MCU toggle). Persisted across restarts.
+    ///
+    /// Orthogonal to `side_panels_collapsed`: the tree is a SIDE panel in every
+    /// state, so which panel takes egui's central slot never depends on it.
+    tree_collapsed: bool,
     /// Bottom diagnostics panel reduced to its tab bar (toggled by the caret
     /// button right of "More"). The bar itself always stays visible — only the
     /// tab CONTENT is hidden. Persisted across restarts.
@@ -1600,6 +1611,7 @@ impl AppIde {
             git_delete_branch_confirm: None,
             pending_restore: None,
             side_panels_collapsed: persisted.side_panels_collapsed,
+            tree_collapsed: persisted.tree_collapsed,
             diag_collapsed: persisted.diag_collapsed,
             diff_line_bg: !persisted.hide_diff_line_bg,
             // 0.0 = absent from an older build's state; clamp keeps a corrupt
@@ -2877,6 +2889,7 @@ impl eframe::App for AppIde {
                 .map(String::from),
             selected_mcu_id: Some(self.selected_mcu_id.clone()),
             side_panels_collapsed: self.side_panels_collapsed,
+            tree_collapsed: self.tree_collapsed,
             diag_collapsed: self.diag_collapsed,
             tree_split_ratio: self.tree_split_ratio,
             hide_diff_line_bg: !self.diff_line_bg,

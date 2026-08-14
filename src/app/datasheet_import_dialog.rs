@@ -258,11 +258,9 @@ pub(super) fn prompt_section(
         });
     ui.add_space(2.0);
     ui.label(
-        egui::RichText::new(
-            "Base prompt (read-only — carries the required JSON shape and rules):",
-        )
-        .size(10.0)
-        .color(egui::Color32::from_gray(130)),
+        egui::RichText::new("Base prompt (read-only — carries the required JSON shape and rules):")
+            .size(10.0)
+            .color(egui::Color32::from_gray(130)),
     );
     egui::Resize::default()
         .id_salt(format!("{id}_base_resize"))
@@ -633,11 +631,7 @@ impl AppIde {
                             "{} Clock tree imported ({} MHz SYSCLK){} — review it in the Clock tab.",
                             ph::CHECK_CIRCLE,
                             sysclk / 1_000_000,
-                            if ex.from_cache {
-                                " · from cache"
-                            } else {
-                                ""
-                            }
+                            if ex.from_cache { " · from cache" } else { "" }
                         ));
                         di.clock_error = None;
                         di.log(
@@ -1474,12 +1468,9 @@ impl AppIde {
                     .show(ui, |ui| {
                         if !rep.patched.is_empty() {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "Filled: {}",
-                                    rep.patched.join(" · ")
-                                ))
-                                .size(10.5)
-                                .color(egui::Color32::from_gray(170)),
+                                egui::RichText::new(format!("Filled: {}", rep.patched.join(" · ")))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_gray(170)),
                             );
                         }
                         for w in &rep.warnings {

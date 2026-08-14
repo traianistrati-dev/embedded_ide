@@ -521,6 +521,35 @@ impl AppIde {
         ui.horizontal(|ui| {
             ui.heading("Code Editor");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // ── Collapse / expand the Project tree (far-right panel) ──
+                // Deliberately a DIFFERENT glyph from the MCU toggle beside it:
+                // two identical carets sitting next to each other are a coin
+                // flip every time you reach for one.
+                let tree_hidden = self.tree_collapsed;
+                if ui
+                    .selectable_label(
+                        tree_hidden,
+                        egui::RichText::new(ph::SIDEBAR_SIMPLE)
+                            .size(11.0)
+                            .color(if tree_hidden {
+                                egui::Color32::from_rgb(120, 190, 240)
+                            } else {
+                                egui::Color32::GRAY
+                            }),
+                    )
+                    .on_hover_text(if tree_hidden {
+                        "Show the Project tree again"
+                    } else {
+                        "Hide the Project tree so the editor widens — this button \
+                         brings it back"
+                    })
+                    .clicked()
+                {
+                    self.tree_collapsed = !tree_hidden;
+                }
+
+                ui.add_space(4.0);
+
                 // ── Collapse / expand the middle (MCU Configurator) zone ──
                 // Hides Pins / Clock / Structure / … so the editor widens; the
                 // Project tree on the far right always stays.
@@ -722,9 +751,15 @@ impl AppIde {
                         .unwrap_or_else(|| "src/???".to_string()),
                     other => other.label().to_string(),
                 };
+                // Matched to the "Code Editor" heading at the other end of the
+                // row, so the two anchors of the toolbar read at the same
+                // weight. Resolved from the STYLE rather than hardcoded: the
+                // heading is `ui.heading`, so a theme change moves both
+                // together instead of silently splitting them apart.
+                let heading_size = egui::TextStyle::Heading.resolve(ui.style()).size;
                 ui.label(
                     egui::RichText::new(&open_label)
-                        .size(10.0)
+                        .size(heading_size)
                         .color(egui::Color32::from_rgb(120, 160, 200)),
                 );
             });

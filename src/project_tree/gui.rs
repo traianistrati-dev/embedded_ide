@@ -1101,7 +1101,14 @@ pub fn show_project_tree(
                     .button(menu_label(ph::FILE_PLUS, "New File", ICON_NEW))
                     .clicked()
                 {
-                    begin_inline_new(ui, false, "", new_src_name, new_file_parent_folder);
+                    // SRC_ROOT, not "": `inline_new_item` renders only while the
+                    // pending parent EQUALS the parent it is called with, and
+                    // the src/ inputs above are called with SRC_ROOT — so a ""
+                    // here armed a state nothing would ever draw, and New File
+                    // / New Folder on src/ looked like dead menu entries.
+                    // Paths are project-root-relative, so "" would also have
+                    // built `foo.rs` at the project root rather than in src/.
+                    begin_inline_new(ui, false, SRC_ROOT, new_src_name, new_file_parent_folder);
                     *new_src_folder_name = None;
                     *new_folder_parent_folder = None;
                     ui.close();
@@ -1110,7 +1117,13 @@ pub fn show_project_tree(
                     .button(menu_label(ph::FOLDER_PLUS, "New Folder", ICON_FOLDER))
                     .clicked()
                 {
-                    begin_inline_new(ui, true, "", new_src_folder_name, new_folder_parent_folder);
+                    begin_inline_new(
+                        ui,
+                        true,
+                        SRC_ROOT,
+                        new_src_folder_name,
+                        new_folder_parent_folder,
+                    );
                     *new_src_name = None;
                     *new_file_parent_folder = None;
                     ui.close();
