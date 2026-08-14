@@ -439,6 +439,17 @@ pub fn parse_pin_labels(source: &str) -> Vec<(String, String)> {
 /// for every recognisable pin.  Unknown or comment-only lines are skipped.
 ///
 /// Handles both STM32 format ("let pc13 = …") and ESP32 format ("let gpio2 = …").
+///
+/// The label may also sit on its OWN line, immediately above the code it
+/// describes — the shape the ESP bus builders emit:
+/// ```text
+///     // USART0  RX
+///     .with_rx(peripherals.GPIO20)
+/// ```
+/// They moved there because a trailing comment SWALLOWS the chain's terminating
+/// `;`. Without this, every USART/SPI/I2C pin on an ESP project was lost on
+/// reload: `apply_saved_pins` clears the diagram and re-applies only what parsed
+/// here, so an unparsed pin comes back Unset and its Virtual Module unwired.
 pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
     let Some(begin_pos) = source.find(GEN_BEGIN) else {
         return vec![];
@@ -452,9 +463,21 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
 
     let gen_block = &source[begin_pos..end_pos];
     let mut result = Vec::new();
+    // A comment-only line labels the line RIGHT below it (see the doc comment).
+    // Deliberately one line of memory, not a running "last comment seen": a
+    // section header like `// ── UART0 ──` must not leak onto a `.with_` line
+    // three lines further down. Consumed (taken) by whatever line follows it,
+    // matched or not.
+    let mut pending_label: Option<String> = None;
 
     for line in gen_block.lines() {
         let trimmed = line.trim();
+
+        if let Some(rest) = trimmed.strip_prefix("//") {
+            pending_label = Some(rest.trim().to_owned());
+            continue;
+        }
+        let label_above = pending_label.take();
 
         // ── STM32: "let [mut ]p{port}{num} = ..." ────────────────────────────
         // trimmed = "let pc13 = &mut gpioc.pc13.into_push_pull_output(…); // …"
@@ -574,14 +597,14 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
             }
             let pin_name = format!("GPIO{num_str}");
 
-            let Some(comment_pos) = trimmed.rfind("// ") else {
+            // Either shape: the label trailing the call (older projects, still
+            // on disk) or sitting on the line above it (what is generated now).
+            let trailing = trimmed
+                .rfind("// ")
+                .map(|p| trimmed[p + 3..].trim().trim_end_matches(';').trim());
+            let Some(label) = trailing.or(label_above.as_deref()) else {
                 continue;
             };
-            // Strip trailing ';' — appears on the last method of a builder chain
-            let label = trimmed[comment_pos + 3..]
-                .trim()
-                .trim_end_matches(';')
-                .trim();
 
             if let Some(func) = PinFunction::from_label(label) {
                 result.push((pin_name, func));
@@ -804,3 +827,4 @@ mod tests {
         assert_eq!(find_pin_mention_line(&src, "PC13"), None);
     }
 }
+

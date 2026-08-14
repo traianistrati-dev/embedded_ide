@@ -202,6 +202,10 @@ impl FamilyBackend for Esp32Backend {
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         esp_update_main_rs(mcu, existing, EspRuntime::Blocking)
     }
+
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        esp_config_files(mcu)
+    }
 }
 
 /// A fresh ESP `main.rs` on `runtime` — shared by the blocking and async ESP
@@ -220,6 +224,28 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &i2c,
         &mcu.custom_module_inits(),
         runtime,
+    )
+}
+
+/// The `src/pins/configs/*.rs` an ESP project needs — one per wired bus
+/// instance. Shared by both ESP backends: the config modules are the same
+/// blocking esp-hal drivers on either runtime (esp-rtos does not change how a
+/// `Uart` is built), so Async gets exactly the same files.
+fn esp_config_files(mcu: &Mcu) -> Vec<(String, String)> {
+    let all = pins_of(mcu);
+    let configured: Vec<&Pin> = all
+        .iter()
+        .copied()
+        .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+        .collect();
+    let (uart, spi_n, i2c_n) = codegen_esp::bus_instances(&configured);
+    crate::panels::mcu_module::codegen_esp_configs::config_files(
+        &uart,
+        &spi_n,
+        &i2c_n,
+        &modules::usart_configs(&mcu.modules),
+        &modules::spi_configs(&mcu.modules),
+        &modules::i2c_configs(&mcu.modules),
     )
 }
 
@@ -274,6 +300,10 @@ impl FamilyBackend for AsyncEspBackend {
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         esp_update_main_rs(mcu, existing, EspRuntime::Async)
+    }
+
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        esp_config_files(mcu)
     }
 }
 
@@ -712,6 +742,122 @@ mod tests {
         }
     }
 
+    /// Every pin the ESP backend WRITES must parse back out of the file it
+    /// wrote. This is the loop a project actually goes through on reload —
+    /// `apply_saved_pins` wipes the diagram and re-applies only what
+    /// [`parse_main_rs`] returns — so a pin that does not round-trip comes back
+    /// Unset and takes its Virtual Module's wiring with it.
+    ///
+    /// Regression: moving the bus labels onto their own line (to stop a trailing
+    /// comment swallowing the chain's `;`) left the `.with_xxx(...)` lines
+    /// unlabelled, and USART/SPI/I2C pins silently stopped surviving a restart —
+    /// 1 of 5 pins came back.
+    ///
+    /// [`parse_main_rs`]: super::super::parse_main_rs
+    #[test]
+    fn every_esp_pin_survives_a_generate_parse_round_trip() {
+        use crate::panels::mcu_module::mcu::Runtime;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        use std::collections::BTreeMap;
+
+        // One of everything the ESP backend can emit a pin for.
+        let plan = [
+            ("GPIO2", PinFunction::GpioOutput),
+            ("GPIO3", PinFunction::GpioInput),
+            ("GPIO21", PinFunction::UsartTx(0)),
+            ("GPIO20", PinFunction::UsartRx(0)),
+            ("GPIO4", PinFunction::SpiSck(2)),
+            ("GPIO5", PinFunction::SpiMosi(2)),
+            ("GPIO6", PinFunction::SpiMiso(2)),
+            ("GPIO7", PinFunction::SpiNss(2)),
+            ("GPIO8", PinFunction::I2cScl(0)),
+            ("GPIO9", PinFunction::I2cSda(0)),
+        ];
+
+        for runtime in [Runtime::Blocking, Runtime::Async] {
+            let mut mcu = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+            mcu.runtime = runtime;
+            for (name, func) in &plan {
+                let pin = mcu
+                    .iter_all_pins_mut()
+                    .find(|p| p.name == *name)
+                    .unwrap_or_else(|| panic!("{name} exists"));
+                pin.selected_function = func.clone();
+            }
+            let code = mcu.fresh_main_rs();
+            let parsed: BTreeMap<String, PinFunction> =
+                super::super::parse_main_rs(&code).into_iter().collect();
+
+            for (name, func) in &plan {
+                assert_eq!(
+                    parsed.get(*name),
+                    Some(func),
+                    "{runtime:?}: {name} did not round-trip\n{code}"
+                );
+            }
+            assert_eq!(parsed.len(), plan.len(), "{runtime:?}: {parsed:?}");
+
+            // ...and re-applying the parse must reproduce the same file, which
+            // is what makes a reopened project regenerate identical code.
+            let mut reloaded = crate::panels::mcu_module::mock_esp32c3::create_esp32c3();
+            reloaded.runtime = runtime;
+            reloaded.apply_saved_pins(&super::super::parse_main_rs(&code));
+            assert_eq!(
+                reloaded.fresh_main_rs(),
+                code,
+                "{runtime:?}: reload changed the generated file"
+            );
+        }
+    }
+
+    /// A label that trails the call — the shape older projects have on disk —
+    /// still parses, so reopening one written before the layout change restores
+    /// its pins too.
+    #[test]
+    fn legacy_trailing_bus_labels_still_parse() {
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        let legacy = format!(
+            "{}\n\
+             #[esp_hal::main]\n\
+             fn main() -> ! {{\n\
+             \x20   let mut _uart0 = Uart::new(peripherals.UART0, UartConfig::default())\n\
+             \x20       .with_rx(peripherals.GPIO20) // USART0  RX\n\
+             \x20       .with_tx(peripherals.GPIO21) // USART0  TX;\n\
+             {}\n",
+            super::super::GEN_BEGIN,
+            super::super::GEN_END,
+        );
+        let parsed = super::super::parse_main_rs(&legacy);
+        assert_eq!(
+            parsed,
+            vec![
+                ("GPIO20".to_owned(), PinFunction::UsartRx(0)),
+                ("GPIO21".to_owned(), PinFunction::UsartTx(0)),
+            ],
+            "legacy trailing labels:\n{legacy}"
+        );
+    }
+
+    /// A section header must NOT leak onto a later builder line — the label
+    /// applies to the line immediately below it and nothing else.
+    #[test]
+    fn section_headers_do_not_label_pins() {
+        let src = format!(
+            "{}\n\
+             \x20   // ── I2C0 ──\n\
+             \x20   let mut _i2c0 = I2c::new(peripherals.I2C0, I2cConfig::default())\n\
+             \x20       .unwrap()\n\
+             \x20       .with_scl(peripherals.GPIO8)\n\
+             {}\n",
+            super::super::GEN_BEGIN,
+            super::super::GEN_END,
+        );
+        assert!(
+            super::super::parse_main_rs(&src).is_empty(),
+            "an unlabelled pin must stay unparsed, not inherit the header"
+        );
+    }
+
     /// Switching the ESP runtime re-splices ONLY the generated block, both ways,
     /// leaving the user's loop body untouched — the whole entry-point difference
     /// lives inside the markers, so the invariant header never moves.
@@ -827,7 +973,27 @@ mod tests {
             Err(_) => mcu.fresh_main_rs(),
         };
         fs::write(out.join("src/main.rs"), main_rs).unwrap();
-        fs::write(out.join("src/pins/mod.rs"), "").unwrap(); // header declares it
+
+        // The per-peripheral init modules main.rs calls into, plus the `mod`
+        // declarations the real project tree writes (see
+        // `ProjectTreeState::sync_config_files` / `sync_pin_files`).
+        let cfgs = mcu.config_files();
+        fs::create_dir_all(out.join("src/pins/configs")).unwrap();
+        let mut decls = String::new();
+        for (name, body) in &cfgs {
+            fs::write(out.join("src/pins/configs").join(name), body).unwrap();
+            decls.push_str(&format!("pub mod {};\n", name.trim_end_matches(".rs")));
+        }
+        fs::write(out.join("src/pins/configs/mod.rs"), decls).unwrap();
+        fs::write(
+            out.join("src/pins/mod.rs"),
+            if cfgs.is_empty() {
+                String::new()
+            } else {
+                "pub mod configs;\n".to_owned()
+            },
+        )
+        .unwrap();
     }
 
     /// The ESP async backend swaps the entry point for `#[esp_rtos::main]` and

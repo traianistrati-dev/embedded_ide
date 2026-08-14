@@ -2356,7 +2356,15 @@ impl AppIde {
             // (all `ApiStyle::Native`), so NONE of the portable trait-bridge
             // crates are pulled — same as async, for a different reason.
             let is_native = self.mcu.as_ref().is_some_and(|m| m.is_native());
-            let needs_can = !is_async && has_cfg("can");
+            // ESP config modules speak esp-hal DIRECTLY (`Uart<'d, Blocking>`,
+            // `I2c<'d, Blocking>`) — no portable bridge, so none of the trait
+            // crates below apply. Without this an ESP project with a USART
+            // module collected `embedded-io` / `nb` / `embedded-hal`, which
+            // nothing in its generated code ever mentions.
+            let is_esp = self
+                .selected_build_cfg()
+                .is_some_and(|(_, tc)| tc == ToolchainKind::EspRust);
+            let needs_can = !is_async && !is_esp && has_cfg("can");
             // Trait crates only for PORTABLE modules on the Blocking path.
             let (mut needs_usart, mut needs_spi, mut needs_i2c) = (false, false, false);
             // Async SPI/I2C deps: `embedded-hal` 1.0 for any bus, plus
@@ -2367,7 +2375,7 @@ impl AppIde {
             // stm32f1xx-hal `Tx`/`Rx` are nb-based (`nb::block!(rx.read())`).
             // (Async USART uses embedded-io-async → no nb.)
             let mut any_usart_blocking = false;
-            if let Some(m) = &self.mcu {
+            if let Some(m) = &self.mcu.as_ref().filter(|_| !is_esp) {
                 use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode, ModuleConfig};
                 for md in &m.modules {
                     if is_async {

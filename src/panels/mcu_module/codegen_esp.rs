@@ -421,121 +421,16 @@ fn make_gen_section(
         }
     }
 
-    // ── UART — grouped by peripheral instance ────────────────────────────────
-    if has_uart {
-        let mut uart_tx: BTreeMap<u8, &Pin> = BTreeMap::new();
-        let mut uart_rx: BTreeMap<u8, &Pin> = BTreeMap::new();
-        for p in configured.iter() {
-            match p.selected_function {
-                PinFunction::UsartTx(n) => {
-                    uart_tx.insert(n, p);
-                }
-                PinFunction::UsartRx(n) => {
-                    uart_rx.insert(n, p);
-                }
-                _ => {}
-            }
-        }
-        let instances: BTreeSet<u8> = uart_tx.keys().chain(uart_rx.keys()).copied().collect();
-        for n in instances {
-            body.push('\n');
-            body.push_str(&format!("    // ── UART{n} ──\n"));
-            let rx_part = with_pin("with_rx", uart_rx.get(&n));
-            let tx_part = with_pin("with_tx", uart_tx.get(&n));
-            // A wired _USART module sets the baud rate; else esp-hal's default.
-            let cfg = match usart.get(&n) {
-                Some(c) => format!("UartConfig::default().with_baudrate({})", c.baud_rate),
-                None => "UartConfig::default()".to_owned(),
-            };
-            let sfx = usart
-                .get(&n)
-                .map(|c| module_label_sfx(&c.custom_label))
-                .unwrap_or_default();
-            body.push_str(&format!(
-                "    let mut _uart{n}{sfx} = Uart::new(peripherals.UART{n}, {cfg})\
-                 {UNWRAP_CFG}{rx_part}{tx_part};\n"
-            ));
-        }
-    }
-
-    // ── SPI — grouped by peripheral instance ─────────────────────────────────
-    if has_spi {
-        let mut spi_sck: BTreeMap<u8, &Pin> = BTreeMap::new();
-        let mut spi_mosi: BTreeMap<u8, &Pin> = BTreeMap::new();
-        let mut spi_miso: BTreeMap<u8, &Pin> = BTreeMap::new();
-        let mut spi_nss: BTreeMap<u8, &Pin> = BTreeMap::new();
-        for p in configured.iter() {
-            match p.selected_function {
-                PinFunction::SpiSck(n) => {
-                    spi_sck.insert(n, p);
-                }
-                PinFunction::SpiMosi(n) => {
-                    spi_mosi.insert(n, p);
-                }
-                PinFunction::SpiMiso(n) => {
-                    spi_miso.insert(n, p);
-                }
-                PinFunction::SpiNss(n) => {
-                    spi_nss.insert(n, p);
-                }
-                _ => {}
-            }
-        }
-        let instances: BTreeSet<u8> = spi_sck
-            .keys()
-            .chain(spi_mosi.keys())
-            .chain(spi_miso.keys())
-            .chain(spi_nss.keys())
-            .copied()
-            .collect();
-        for n in instances {
-            body.push('\n');
-            body.push_str(&format!("    // ── SPI{n} ──\n"));
-            let sck_part = with_pin("with_sck", spi_sck.get(&n));
-            let mosi_part = with_pin("with_mosi", spi_mosi.get(&n));
-            let miso_part = with_pin("with_miso", spi_miso.get(&n));
-            let nss_part = with_pin("with_cs", spi_nss.get(&n));
-            let sfx = spi
-                .get(&n)
-                .map(|c| module_label_sfx(&c.custom_label))
-                .unwrap_or_default();
-            body.push_str(&format!(
-                "    let mut _spi{n}{sfx} = Spi::new(peripherals.SPI{n}, SpiConfig::default())\
-                 {UNWRAP_CFG}{sck_part}{mosi_part}{miso_part}{nss_part};\n"
-            ));
-        }
-    }
-
-    // ── I2C — grouped by peripheral instance ─────────────────────────────────
-    if has_i2c {
-        let mut i2c_scl: BTreeMap<u8, &Pin> = BTreeMap::new();
-        let mut i2c_sda: BTreeMap<u8, &Pin> = BTreeMap::new();
-        for p in configured.iter() {
-            match p.selected_function {
-                PinFunction::I2cScl(n) => {
-                    i2c_scl.insert(n, p);
-                }
-                PinFunction::I2cSda(n) => {
-                    i2c_sda.insert(n, p);
-                }
-                _ => {}
-            }
-        }
-        let instances: BTreeSet<u8> = i2c_scl.keys().chain(i2c_sda.keys()).copied().collect();
-        for n in instances {
-            body.push('\n');
-            body.push_str(&format!("    // ── I2C{n} ──\n"));
-            let scl_part = with_pin("with_scl", i2c_scl.get(&n));
-            let sda_part = with_pin("with_sda", i2c_sda.get(&n));
-            let sfx = i2c
-                .get(&n)
-                .map(|c| module_label_sfx(&c.custom_label))
-                .unwrap_or_default();
-            body.push_str(&format!(
-                "    let mut _i2c{n}{sfx} = I2c::new(peripherals.I2C{n}, I2cConfig::default())\
-                 {UNWRAP_CFG}{scl_part}{sda_part};\n"
-            ));
-        }
+    // ── Buses: bind the pins here, initialise in `pins/configs/<bus>.rs` ─────
+    // Every wired pin keeps its OWN `let … = peripherals.GPIOn; // LABEL` line.
+    // Two reasons: the canvas assignment stays visible where the user reads the
+    // code, and it is the ONLY record a reopened project has — `parse_main_rs`
+    // rebuilds the diagram from these lines (`mcu.config` stores no pin
+    // functions). Moving them into the config module would lose the pins.
+    for (label, calls) in bus_sections(&configured, usart, spi, i2c) {
+        body.push('\n');
+        body.push_str(&format!("    // ── {label} ──\n"));
+        body.push_str(&calls);
     }
 
     // ── TWAI (CAN-compatible) — comment only ─────────────────────────────────
@@ -637,17 +532,9 @@ fn build_use_block(
     if has_adc {
         lines.push("use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};".into());
     }
-    if has_uart {
-        // esp-hal 1.1 exposes `uart::Config` directly — the old `uart::config`
-        // submodule is gone (SPI/I2C keep theirs under `master`).
-        lines.push("use esp_hal::uart::{Config as UartConfig, Uart};".into());
-    }
-    if has_spi {
-        lines.push("use esp_hal::spi::master::{Config as SpiConfig, Spi};".into());
-    }
-    if has_i2c {
-        lines.push("use esp_hal::i2c::master::{Config as I2cConfig, I2c};".into());
-    }
+    // No bus imports: UART/SPI/I2C are built inside `pins/configs/<bus>.rs`, and
+    // `main.rs` only hands them peripherals it already has in scope.
+    let _ = (has_uart, has_spi, has_i2c);
     // No imports at all (blocking, and only USB/TWAI — which are comments —
     // selected): emit nothing rather than two stray blank lines above `fn main`.
     if lines.is_empty() {
@@ -674,6 +561,160 @@ fn pin_var(pin_name: &str) -> String {
 /// ESP analogue of the STM32 `<pin>_<type>` format.
 fn esp_binding(p: &Pin) -> String {
     pin_binding(&pin_var(&p.name), &p.selected_function, &p.custom_label)
+}
+
+/// The wired instances of each bus, as `(instance, signal → pin)` maps. One
+/// pass over the pins instead of three near-identical ones.
+type BusPins<'a> = BTreeMap<u8, BTreeMap<&'static str, &'a Pin>>;
+
+fn collect_buses<'a>(configured: &[&'a Pin]) -> (BusPins<'a>, BusPins<'a>, BusPins<'a>) {
+    let (mut uart, mut spi, mut i2c): (BusPins, BusPins, BusPins) = Default::default();
+    for p in configured {
+        let (bus, n, sig) = match p.selected_function {
+            PinFunction::UsartRx(n) => (&mut uart, n, "rx"),
+            PinFunction::UsartTx(n) => (&mut uart, n, "tx"),
+            PinFunction::SpiSck(n) => (&mut spi, n, "sck"),
+            PinFunction::SpiMosi(n) => (&mut spi, n, "mosi"),
+            PinFunction::SpiMiso(n) => (&mut spi, n, "miso"),
+            PinFunction::SpiNss(n) => (&mut spi, n, "cs"),
+            PinFunction::I2cScl(n) => (&mut i2c, n, "scl"),
+            PinFunction::I2cSda(n) => (&mut i2c, n, "sda"),
+            _ => continue,
+        };
+        bus.entry(n).or_default().insert(sig, p);
+    }
+    (uart, spi, i2c)
+}
+
+/// `(instance, wired signals)` for each bus, in the order `init` takes them.
+///
+/// The SIGNALS matter as much as the instance: the generated `init` declares a
+/// parameter per wired line, so a bus with no MISO gets a three-argument `init`
+/// rather than one that ignores an argument — no unused-variable warnings in
+/// the user's `main.rs`, and no pretending a pin is used when it is not. The
+/// call site and the module are built from this same list, so they cannot
+/// disagree.
+pub fn bus_instances(configured: &[&Pin]) -> (BusWiring, BusWiring, BusWiring) {
+    let (uart, spi, i2c) = collect_buses(configured);
+    let flatten = |b: BusPins, order: &[&'static str]| -> BusWiring {
+        b.into_iter()
+            .map(|(n, pins)| {
+                let sigs = order
+                    .iter()
+                    .filter(|s| pins.contains_key(*s))
+                    .copied()
+                    .collect();
+                (n, sigs)
+            })
+            .collect()
+    };
+    (
+        flatten(uart, UART_ORDER),
+        flatten(spi, SPI_ORDER),
+        flatten(i2c, I2C_ORDER),
+    )
+}
+
+/// `(instance, signals)` pairs — see [`bus_instances`].
+pub type BusWiring = Vec<(u8, Vec<&'static str>)>;
+
+/// Signal order for each bus: the order the pins are bound in `main.rs` and
+/// declared in the generated `init`. One definition, used by both.
+pub const UART_ORDER: &[&str] = &["rx", "tx"];
+pub const SPI_ORDER: &[&str] = &["sck", "mosi", "miso", "cs"];
+pub const I2C_ORDER: &[&str] = &["scl", "sda"];
+
+/// `(section label, body)` for every wired bus instance: one `let` per pin,
+/// then the `pins::configs::<bus><n>::init(…)` call that consumes them.
+///
+/// Signals the canvas did not wire are simply absent — `init` takes only what
+/// its template declares (SCK+MOSI for SPI, both lines for UART/I2C), so a
+/// half-wired bus is reported as a TODO comment rather than emitting a call
+/// that would not compile.
+fn bus_sections(
+    configured: &[&Pin],
+    usart: &BTreeMap<u8, UsartModuleConfig>,
+    spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
+    i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
+) -> Vec<(String, String)> {
+    let (uart, spi, i2c) = collect_buses(configured);
+    let mut out = Vec::new();
+
+    // One `let` per wired pin, in `init`'s parameter order, returning the
+    // binding names to pass along.
+    let section = |pins: &BTreeMap<&'static str, &Pin>,
+                   order: &[&'static str],
+                   handle: String,
+                   module: String,
+                   periph: String| {
+        let mut body = String::new();
+        let mut args = Vec::new();
+        for sig in order.iter().filter(|s| pins.contains_key(*s)) {
+            let p = pins[sig];
+            let var = esp_binding(p);
+            body.push_str(&format!(
+                "    let {var} = peripherals.{gpio}; // {label}\n",
+                gpio = p.name,
+                label = p.selected_function.label(),
+            ));
+            args.push(var);
+        }
+        body.push_str(&format!(
+            "    let mut {handle} = pins::configs::{module}::init({periph}, {});\n",
+            args.join(", ")
+        ));
+        body
+    };
+
+    for (n, pins) in &uart {
+        let sfx = usart
+            .get(n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        out.push((
+            format!("UART{n}"),
+            section(
+                pins,
+                UART_ORDER,
+                format!("_uart{n}{sfx}"),
+                format!("uart{n}"),
+                format!("peripherals.UART{n}"),
+            ),
+        ));
+    }
+    for (n, pins) in &spi {
+        let sfx = spi_cfg
+            .get(n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        out.push((
+            format!("SPI{n}"),
+            section(
+                pins,
+                SPI_ORDER,
+                format!("_spi{n}{sfx}"),
+                format!("spi{n}"),
+                format!("peripherals.SPI{n}"),
+            ),
+        ));
+    }
+    for (n, pins) in &i2c {
+        let sfx = i2c_cfg
+            .get(n)
+            .map(|c| module_label_sfx(&c.custom_label))
+            .unwrap_or_default();
+        out.push((
+            format!("I2C{n}"),
+            section(
+                pins,
+                I2C_ORDER,
+                format!("_i2c{n}{sfx}"),
+                format!("i2c{n}"),
+                format!("peripherals.I2C{n}"),
+            ),
+        ));
+    }
+    out
 }
 
 /// One `.with_xxx(peripherals.GPIOn)` link of an esp-hal builder chain, with the
@@ -945,23 +986,36 @@ mod tests {
                     );
                 }
             }
-            // Each bus is one statement, so one `;` per builder.
+            // Buses are no longer built here: main.rs binds the pins and calls
+            // into `pins/configs/<bus>.rs` (see `codegen_esp_configs`).
             for head in ["Uart::new", "Spi::new", "I2c::new"] {
-                assert!(code.contains(head), "{runtime:?} emits {head}:\n{code}");
+                assert!(
+                    !code.contains(head),
+                    "{runtime:?} builds {head} in main.rs, not in its config module:
+{code}"
+                );
             }
-            // esp-hal 1.1: the three constructors return Result, so the
-            // `.with_xxx` links below them need the value unwrapped first.
-            assert_eq!(
-                code.matches(".unwrap()").count(),
-                3,
-                "{runtime:?} one unwrap per bus:\n{code}"
-            );
-            // esp-hal 1.1 moved UART's Config out of a `config` submodule.
-            assert!(
-                code.contains("use esp_hal::uart::{Config as UartConfig, Uart};"),
-                "{runtime:?} uart import:\n{code}"
-            );
-            assert!(!code.contains("uart::config"), "{runtime:?}:\n{code}");
+            for call in [
+                "pins::configs::uart0::init(peripherals.UART0",
+                "pins::configs::spi2::init(peripherals.SPI2",
+                "pins::configs::i2c0::init(peripherals.I2C0",
+            ] {
+                assert!(code.contains(call), "{runtime:?} calls {call}:
+{code}");
+            }
+            // Every wired pin still has its own line — that is what a reopened
+            // project reads back (see the round-trip test in `codegen::family`).
+            for (var, gpio) in [
+                ("gpio20_usart0_rx", "GPIO20"),
+                ("gpio21_usart0_tx", "GPIO21"),
+                ("gpio8_i2c0_scl", "GPIO8"),
+            ] {
+                assert!(
+                    code.contains(&format!("let {var} = peripherals.{gpio};")),
+                    "{runtime:?} binds {gpio}:
+{code}"
+                );
+            }
         }
     }
 
@@ -990,27 +1044,22 @@ mod tests {
             "",
             EspRuntime::Blocking,
         );
+        // The baud lives in the CONFIG MODULE now, not in main.rs — main.rs
+        // only names the module. (The consts themselves are covered by
+        // `codegen_esp_configs::tests::module_settings_land_inside_the_generated_block`.)
         assert!(
-            code.contains("with_baudrate(9600)"),
-            "baud on Uart::new:\n{code}"
-        );
-
-        // No module → plain default config.
-        let plain = fresh_esp32c3_main_rs(
-            &[&tx, &rx],
-            &ClockConfig::None,
-            "ESP32-C3",
-            "esp32c3",
-            &no_usart(),
-            &no_spi(),
-            &no_i2c(),
-            "",
-            EspRuntime::Blocking,
+            code.contains("pins::configs::uart0::init(peripherals.UART0"),
+            "main.rs calls the config module:
+{code}"
         );
         assert!(
-            plain.contains("UartConfig::default())"),
-            "default config:\n{plain}"
+            !code.contains("with_baudrate"),
+            "the baud is not in main.rs any more:
+{code}"
         );
-        assert!(!plain.contains("with_baudrate"));
+        // Both pins keep their own line, labelled — this is what a reopened
+        // project parses back.
+        assert!(code.contains("let gpio20_usart0_rx = peripherals.GPIO20; // USART0  RX"));
+        assert!(code.contains("let gpio21_usart0_tx = peripherals.GPIO21; // USART0  TX"));
     }
 }

@@ -243,25 +243,29 @@ impl ProjectTreeState {
         }
     }
 
-    /// Synchronize pin files in the pins/ directory.
-    /// Removes old pin files, creates new ones, and rebuilds pins/mod.rs.
-    pub fn sync_pin_files(&mut self, all_pins: &[(usize, String, PinFunction)]) {
+    /// Keep the `src/pins/` scaffold in step with the pin configuration:
+    /// register the folder, ensure `pins/mod.rs` exists, sweep away stray
+    /// per-pin files, and declare `pub mod configs;` when the per-peripheral
+    /// init modules exist (they are written by [`Self::sync_config_files`]).
+    ///
+    /// **Per-pin files are no longer generated.** Each configured pin used to
+    /// get its own `src/pins/pin<N>_<name>_<type>.rs` holding a HAL type alias,
+    /// renamed whenever the pin's function changed. That was turned off
+    /// deliberately in `4899d16` ("disabled auto adding pin files") — the pin
+    /// bindings live in `main.rs`'s generated block and the reusable helpers in
+    /// the user's own `pins/utils/`, so a file per pin was churn nobody read.
+    ///
+    /// The parameter is kept: this is the hook the pin configuration already
+    /// calls on every change, and re-enabling means filling `configured` again
+    /// (the rest of the function still handles creation, renaming and pruning).
+    /// `configured` staying empty is exactly what makes step 3 a sweeper for
+    /// files left behind by projects generated before that commit.
+    pub fn sync_pin_files(&mut self, _all_pins: &[(usize, String, PinFunction)]) {
         const MOD_PATH: &str = "src/pins/mod.rs";
 
-        // Build the authoritative set of configured pins
+        // Empty on purpose — see the note above. Typed as it was so the code
+        // below (which still creates / splices / prunes) needs no changes.
         let configured: Vec<(String, usize, &str, &PinFunction)> = Vec::new();
-        // all_pins
-        // .iter()
-        // .filter(|(_, _, f)| *f != PinFunction::Unset)
-        // .map(|(num, name, func)| {
-        //     // Suffix the file/module name with the selected function type
-        //     // (e.g. `pin2_pc13_out`). Changing a pin's function renames its
-        //     // file accordingly — the old file is dropped in step 3.
-        //     let slug = format!("pin{}_{}_{}", num, name.to_lowercase(), func.file_token());
-        //     (slug, *num, name.as_str(), func)
-        // })
-        // .collect();
-
         let active_slugs: Vec<&str> = configured.iter().map(|(s, ..)| s.as_str()).collect();
 
         // 1. Ensure pins/ folder is registered
@@ -995,83 +999,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_generates_gpio_output_pin() {
-        let mut state = ProjectTreeState::new();
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
-        state.sync_pin_files(&pins);
-
-        assert_file_exists(&state, "src/pins/pin1_pa0_out.rs");
-        let entry = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/pin1_pa0_out.rs")
-            .unwrap();
-        assert!(entry.1.contains("pub type PinType = Pin<'A', 0,"));
-    }
-
-    #[test]
-    fn test_sync_pin_file_name_includes_type() {
-        let mut state = ProjectTreeState::new();
-        let pins = vec![
-            (2usize, "PC13".to_string(), PinFunction::GpioOutput),
-            (10usize, "PA0".to_string(), PinFunction::GpioInput),
-            (
-                11usize,
-                "PA1".to_string(),
-                PinFunction::AdcChannel { adc: 1, channel: 1 },
-            ),
-            (
-                30usize,
-                "PA9".to_string(),
-                PinFunction::TimerPwm {
-                    timer: 1,
-                    channel: 2,
-                },
-            ),
-        ];
-        state.sync_pin_files(&pins);
-
-        // File names carry the selected function type (e.g. pin2_pc13_out.rs).
-        assert_file_exists(&state, "src/pins/pin2_pc13_out.rs");
-        assert_file_exists(&state, "src/pins/pin10_pa0_in.rs");
-        assert_file_exists(&state, "src/pins/pin11_pa1_adc.rs");
-        assert_file_exists(&state, "src/pins/pin30_pa9_pwm.rs");
-
-        // mod.rs declares the type-suffixed modules.
-        let mod_file = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/mod.rs")
-            .unwrap();
-        assert!(mod_file.1.contains("pub mod pin2_pc13_out;"));
-        assert!(mod_file.1.contains("pub mod pin30_pa9_pwm;"));
-    }
-
-    #[test]
-    fn test_sync_removes_old_pins() {
-        let mut state = ProjectTreeState::new();
-
-        // Add old pins (using the type-suffixed naming convention)
-        state
-            .user_src_files
-            .push(("src/pins/pin1_pa0_out.rs".to_string(), "".to_string()));
-        state
-            .user_src_files
-            .push(("src/pins/pin2_pa1_out.rs".to_string(), "".to_string()));
-        state.user_src_folders.push("src/pins".to_string());
-        state
-            .user_src_files
-            .push(("src/pins/mod.rs".to_string(), "".to_string()));
-
-        // Sync with only pin1 configured
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
-        state.sync_pin_files(&pins);
-
-        assert_file_exists(&state, "src/pins/pin1_pa0_out.rs");
-        assert_file_not_exists(&state, "src/pins/pin2_pa1_out.rs");
-    }
-
-    #[test]
     fn test_sync_preserves_custom_code() {
         let mut state = ProjectTreeState::new();
         let custom_code = "pub mod custom_utils;\npub fn helper() {}";
@@ -1111,24 +1038,73 @@ mod tests {
         assert!(mod_file.1.trim().is_empty() || !mod_file.1.contains("pub mod"));
     }
 
+    /// Per-pin files were disabled in `4899d16`, which turned step 3 into a
+    /// SWEEPER: a project generated before that commit still carries
+    /// `src/pins/pin*.rs`, and they must be cleared out rather than left to be
+    /// declared by a `mod.rs` that no longer mentions them (which would not
+    /// compile). Everything else under `src/pins/` is the user's and stays.
     #[test]
-    fn test_sync_mod_rs_empty_to_generated() {
+    fn test_sync_sweeps_pin_files_left_by_older_projects() {
         let mut state = ProjectTreeState::new();
+        for path in [
+            "src/pins/pin1_pa0_out.rs",  // legacy generated pin file
+            "src/pins/pin13_pc13_in.rs", // …and another
+            "src/pins/mod.rs",
+            "src/pins/utils/gpio_out.rs", // user's own helpers — keep
+            "src/pins/my_notes.rs",       // not a `pin*` file — keep
+        ] {
+            state.user_src_files.push((path.to_string(), String::new()));
+        }
+
+        state.sync_pin_files(&[(1usize, "PA0".to_string(), PinFunction::GpioOutput)]);
+
+        assert_file_not_exists(&state, "src/pins/pin1_pa0_out.rs");
+        assert_file_not_exists(&state, "src/pins/pin13_pc13_in.rs");
+        assert_file_exists(&state, "src/pins/mod.rs");
+        assert_file_exists(&state, "src/pins/utils/gpio_out.rs");
+        assert_file_exists(&state, "src/pins/my_notes.rs");
+    }
+
+    /// `pins/mod.rs` must declare `pub mod configs;` exactly when the
+    /// per-peripheral init modules exist — this is the live half of the
+    /// function, and the STM32 config files do not compile without it.
+    #[test]
+    fn test_sync_declares_configs_module_only_when_present() {
+        let mut state = ProjectTreeState::new();
+        state.sync_pin_files(&[]);
+        let mod_of = |s: &ProjectTreeState| {
+            s.user_src_files
+                .iter()
+                .find(|(p, _)| p == "src/pins/mod.rs")
+                .map(|(_, c)| c.clone())
+                .expect("mod.rs")
+        };
+        assert!(
+            !mod_of(&state).contains("pub mod configs;"),
+            "nothing to declare yet"
+        );
+
+        state.user_src_files.push((
+            "src/pins/configs/usart1.rs".to_string(),
+            "pub fn init() {}".to_string(),
+        ));
+        state.sync_pin_files(&[]);
+        assert!(
+            mod_of(&state).contains("pub mod configs;"),
+            "configs/ exists -> declared:\n{}",
+            mod_of(&state)
+        );
+
+        // …and it goes away again with the last config file.
         state
             .user_src_files
-            .push(("src/pins/mod.rs".to_string(), "".to_string()));
-        state.user_src_folders.push("src/pins".to_string());
-
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
-        state.sync_pin_files(&pins);
-
-        let mod_file = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/mod.rs")
-            .unwrap();
-        assert!(mod_file.1.contains("// <<< GENERATED>>>"));
-        assert!(mod_file.1.contains("pub mod pin1_pa0_out;"));
+            .retain(|(p, _)| !p.starts_with("src/pins/configs/"));
+        state.sync_pin_files(&[]);
+        assert!(
+            !mod_of(&state).contains("pub mod configs;"),
+            "declaration removed with the folder:\n{}",
+            mod_of(&state)
+        );
     }
 
     #[test]
@@ -1150,86 +1126,6 @@ mod tests {
         let count_after = state.user_src_folders.len() + state.user_src_files.len();
 
         assert_eq!(count_before, count_after, "Scaffold should be idempotent");
-    }
-
-    #[test]
-    fn test_sync_updates_pintype_on_function_change() {
-        let mut state = ProjectTreeState::new();
-
-        // Start with PA0 as GPIO Output
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
-        state.sync_pin_files(&pins);
-
-        let entry = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/pin1_pa0_out.rs")
-            .unwrap();
-        assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"));
-
-        // Change to ADC (Analog) — the file renames to the new type suffix.
-        let pins = vec![(
-            1usize,
-            "PA0".to_string(),
-            PinFunction::AdcChannel { adc: 1, channel: 0 },
-        )];
-        state.sync_pin_files(&pins);
-
-        assert_file_not_exists(&state, "src/pins/pin1_pa0_out.rs");
-        let entry = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/pin1_pa0_adc.rs")
-            .unwrap();
-        // After function change, the file should be regenerated with new type
-        assert!(entry.1.contains("pub type PinType = Pin<'A', 0, Analog>;"));
-        assert!(
-            !entry.1.contains("Output"),
-            "Old Output type should be removed"
-        );
-    }
-
-    #[test]
-    fn test_sync_updates_pin_comment_on_function_change() {
-        let mut state = ProjectTreeState::new();
-
-        // Start with GPIO Output (no function comment on type alias)
-        let pins = vec![(1usize, "PA0".to_string(), PinFunction::GpioOutput)];
-        state.sync_pin_files(&pins);
-
-        let entry = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/pin1_pa0_out.rs")
-            .unwrap();
-        // GPIO pins should have PinType line without function comment
-        assert!(
-            entry.1.contains("pub type PinType = Pin<'A', 0, Output>;"),
-            "GPIO pins should have no function comment on PinType: {}",
-            entry.1
-        );
-
-        // Change to ADC with function label
-        let pins = vec![(
-            1usize,
-            "PA0".to_string(),
-            PinFunction::AdcChannel { adc: 1, channel: 0 },
-        )];
-        state.sync_pin_files(&pins);
-
-        let entry = state
-            .user_src_files
-            .iter()
-            .find(|(p, _)| p == "src/pins/pin1_pa0_adc.rs")
-            .unwrap();
-        // ADC should have a comment with the function label on PinType line
-        assert!(
-            entry
-                .1
-                .contains("pub type PinType = Pin<'A', 0, Analog>; // ADC1  IN0"),
-            "ADC pin should have function label comment on PinType: {}",
-            entry.1
-        );
     }
 
     /// `configs/mod.rs` re-exports a Custom module's contents so its struct is
