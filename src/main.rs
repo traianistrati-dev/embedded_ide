@@ -11,6 +11,7 @@
 #![windows_subsystem = "windows"]
 
 use eframe::egui;
+use std::path::PathBuf;
 pub mod activity;
 pub mod app;
 use app::AppIde;
@@ -32,6 +33,7 @@ pub mod probe;
 pub mod probe_flash;
 pub mod profile;
 pub mod project_tree;
+pub mod recent;
 pub mod required_tools;
 pub mod reveal;
 pub mod rtt;
@@ -41,6 +43,7 @@ pub mod serial_frames;
 pub mod serial_matrix;
 pub mod serial_plot;
 pub mod size;
+pub mod startup;
 pub mod terminal;
 pub mod udev;
 pub mod workspace;
@@ -236,6 +239,99 @@ mod window_geometry_tests {
     }
 }
 
+/// The project folder asked for on the command line, if any.
+///
+/// Accepts `embedded_ide_0 <folder>` and `embedded_ide_0 --project <folder>`.
+/// The bare form is what makes a per-project Windows shortcut, a drag of a
+/// folder onto the exe, and "Open with" all work without extra syntax.
+///
+/// Which project a window opens used to be decided by LAUNCH ORDER — the slot
+/// picked the eframe storage, and the storage remembered a project — so the
+/// second window reopened whatever the second window last had. This is the way
+/// to say it outright.
+///
+/// Returns `Err(reason)` for an argument that was given but can't be used, so
+/// the caller can say why instead of silently opening something else.
+fn project_arg<I: Iterator<Item = String>>(args: I) -> Result<Option<PathBuf>, String> {
+    let mut args = args.skip(1); // argv[0] is the exe
+    let Some(first) = args.next() else {
+        return Ok(None);
+    };
+    let raw = match first.as_str() {
+        "--project" | "-p" => args
+            .next()
+            .ok_or_else(|| "--project needs a folder path".to_owned())?,
+        // A lone flag we don't know isn't a path — ignore it rather than
+        // trying to open `--verbose` as a project.
+        other if other.starts_with('-') => return Ok(None),
+        other => other.to_owned(),
+    };
+    let path = PathBuf::from(&raw);
+    if !path.is_dir() {
+        return Err(format!("\"{raw}\" is not a folder"));
+    }
+    // A project is a cargo project; opening a random folder would produce an
+    // empty tree and a chip detected from nothing.
+    if !path.join("Cargo.toml").is_file() {
+        return Err(format!("\"{raw}\" has no Cargo.toml — not a project folder"));
+    }
+    Ok(Some(
+        std::fs::canonicalize(&path).unwrap_or(path),
+    ))
+}
+
+#[cfg(test)]
+mod project_arg_tests {
+    use super::project_arg;
+
+    fn args(list: &[&str]) -> std::vec::IntoIter<String> {
+        std::iter::once("embedded_ide_0.exe".to_owned())
+            .chain(list.iter().map(|s| (*s).to_owned()))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn no_argument_means_the_remembered_project() {
+        assert_eq!(project_arg(args(&[])), Ok(None));
+    }
+
+    #[test]
+    fn both_the_bare_and_flagged_forms_resolve_the_same_folder() {
+        let dir = std::env::temp_dir().join(format!("eide_arg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        let p = dir.to_string_lossy().into_owned();
+
+        let bare = project_arg(args(&[&p])).expect("accepted");
+        let flagged = project_arg(args(&["--project", &p])).expect("accepted");
+        assert!(bare.is_some());
+        assert_eq!(bare, flagged);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_project_is_reported_not_opened() {
+        let dir = std::env::temp_dir().join(format!("eide_arg_bad_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.to_string_lossy().into_owned();
+        assert!(
+            project_arg(args(&[&p])).is_err(),
+            "no Cargo.toml — say so rather than opening an empty tree"
+        );
+        assert!(project_arg(args(&["/no/such/folder"])).is_err());
+        assert!(project_arg(args(&["--project"])).is_err(), "missing value");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown flag is not a path — it must not be opened as one.
+    #[test]
+    fn unknown_flags_are_ignored() {
+        assert_eq!(project_arg(args(&["--verbose"])), Ok(None));
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // FIRST, before anything can print: adopt the console we were launched from
     // (if any). A GUI-subsystem binary has no standard handles until this runs.
@@ -243,6 +339,14 @@ fn main() -> eframe::Result<()> {
     // Then make a crash survivable to diagnose — double-clicked, there is no
     // stderr for the panic message to reach, so it also goes to a file.
     build::install_panic_logger();
+
+    // Which project this window should open, if the caller said so.
+    let (cli_project, cli_project_error) = match project_arg(std::env::args()) {
+        Ok(p) => (p, None),
+        // A bad path must not stop the IDE from starting — open normally and
+        // let the app say what was wrong with the argument.
+        Err(e) => (None, Some(e)),
+    };
 
     // Claim this instance's scratch workspace BEFORE anything can look it up —
     // `msvc::warm_up` below already spawns a thread, and every later reader
@@ -293,6 +397,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         &app_name,
         options,
-        Box::new(|cc| Ok(Box::new(AppIde::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(AppIde::new(cc, cli_project, cli_project_error)))),
     )
 }

@@ -210,6 +210,12 @@ impl AppIde {
             self.gitignore = load(ConfigFile::GitIgnore, root.join(".gitignore"));
         }
 
+        // Remember it for "Open Recent" and for starting another window on it.
+        // Here, at the END of the load: `selected_mcu_id` is settled by now, so
+        // the entry carries the chip that was actually detected — which is what
+        // tells two projects apart in a one-line menu.
+        crate::recent::record(root, Some(&self.selected_mcu_id));
+
         // Baseline the dependency fingerprint so the FIRST Save after the user
         // edits a library in Cargo.toml auto-builds (see `last_saved_deps`).
         self.last_saved_deps = Some(crate::panels::mcu_module::project_gen::deps_fingerprint(

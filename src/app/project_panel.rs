@@ -18,6 +18,10 @@ pub(super) struct ProjectPanelSignals {
     pub open_clicked: bool,
     pub new_clicked: bool,
     pub save_clicked: bool,
+    /// A project picked from "Open Recent" — the same destructive load as
+    /// `open_clicked`, minus the folder picker, so it goes through the same
+    /// unsaved-changes gate.
+    pub open_recent: Option<std::path::PathBuf>,
     /// Folder (relative to `src/`) the user asked to extract into its own crate.
     pub extract_folder: Option<String>,
     /// The LIBRARIES "+" button was clicked — create an empty library crate.
@@ -134,6 +138,7 @@ impl AppIde {
         save_project_needed: &mut bool,
     ) -> ProjectPanelSignals {
         let mut open_project_clicked = false;
+        let mut open_recent: Option<std::path::PathBuf> = None;
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
         let mut extract_folder: Option<String> = None;
@@ -189,6 +194,53 @@ impl AppIde {
                                         open_project_clicked = true;
                                         ui.close();
                                     }
+                                    // "Open Recent" — read from disk only while
+                                    // the submenu is being built, so the shared
+                                    // list (another window may have just added
+                                    // to it) is never stale, and nothing is read
+                                    // on a frame where the menu is closed.
+                                    ui.menu_button(
+                                        format!("{} Open Recent", ph::CLOCK_COUNTER_CLOCKWISE),
+                                        |ui| {
+                                            let list = crate::recent::load();
+                                            if list.is_empty() {
+                                                ui.label(
+                                                    egui::RichText::new("No recent projects")
+                                                        .size(10.5)
+                                                        .italics()
+                                                        .color(egui::Color32::from_gray(140)),
+                                                );
+                                                return;
+                                            }
+                                            for entry in list {
+                                                // Skip the project already open
+                                                // in THIS window — reopening it
+                                                // would only throw work away.
+                                                if self
+                                                    .project_dir
+                                                    .as_ref()
+                                                    .is_some_and(|d| {
+                                                        crate::recent::is_same_path(d, &entry.path)
+                                                    })
+                                                {
+                                                    continue;
+                                                }
+                                                let label = match &entry.mcu_id {
+                                                    Some(id) => format!("{}   ({id})", entry.name),
+                                                    None => entry.name.clone(),
+                                                };
+                                                if ui
+                                                    .button(label)
+                                                    .on_hover_text(&entry.path)
+                                                    .clicked()
+                                                {
+                                                    open_recent =
+                                                        Some(std::path::PathBuf::from(&entry.path));
+                                                    ui.close();
+                                                }
+                                            }
+                                        },
+                                    );
                                     let can_save = project_files.is_some();
                                     if ui
                                         .add_enabled(
@@ -325,6 +377,7 @@ impl AppIde {
 
         ProjectPanelSignals {
             open_clicked: open_project_clicked,
+            open_recent,
             new_clicked: new_project_clicked,
             save_clicked: save_project_clicked,
             extract_folder,

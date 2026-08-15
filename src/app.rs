@@ -46,6 +46,8 @@ mod project_io;
 
 mod loading_overlay;
 
+mod startup_picker;
+
 // ── Project file selector ─────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
@@ -1522,6 +1524,27 @@ pub struct AppIde {
     /// Kept alive so the watcher thread lives as long as the app.
     _fs_watcher: Option<notify::RecommendedWatcher>,
 
+    /// A project chosen from "Open Recent", waiting for the unsaved-changes
+    /// gate. Consumed by `pick_and_open_project`, which opens the folder picker
+    /// only when this is empty.
+    pending_open_dir: Option<std::path::PathBuf>,
+
+    /// `Some` while the startup picker is up (see [`startup_picker`]) — the
+    /// window has nothing open and the user is choosing what it should be.
+    startup_picker: Option<startup_picker::StartupPicker>,
+
+    /// Set by code that runs OUTSIDE the frame's `save_project_needed` local
+    /// (the startup picker) to ask for the same workspace rewrite. OR-ed into
+    /// that flag for one frame.
+    workspace_write_requested: bool,
+
+    /// A `--project` argument that could not be used (missing folder, no
+    /// `Cargo.toml`). Shown as a banner and dismissible: a bad argument must
+    /// not stop the IDE from starting, but it must not be swallowed either —
+    /// the window would otherwise open on a different project with no
+    /// explanation.
+    cli_project_error: Option<String>,
+
     /// The last title sent to the window, so the viewport command fires only
     /// when it actually changes — the title is recomputed every frame, and
     /// pushing it to the OS 60 times a second would be pure waste.
@@ -1551,7 +1574,19 @@ pub struct AppIde {
 }
 
 impl AppIde {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// Build the app.
+    ///
+    /// `cli_project` is the folder named on the command line, which OUTRANKS the
+    /// project this instance's storage remembers. Without it, which project a
+    /// window opens is decided by launch order (the slot picks the storage, the
+    /// storage remembers a project), so the second window reopens whatever the
+    /// second window last had — surprising every time. `cli_error` carries an
+    /// argument that could not be used, to be surfaced once the UI exists.
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        cli_project: Option<std::path::PathBuf>,
+        cli_error: Option<String>,
+    ) -> Self {
         // Always start maximized. `with_maximized(true)` on the viewport plus
         // `forget_window_geometry` in `main` normally settle this before the
         // window is ever shown; this is the belt-and-braces for the case where
@@ -1609,7 +1644,19 @@ impl AppIde {
         // Drop source buffers that have no project folder to belong to (see
         // `drop_homeless_files`) — including state an older build wrote before
         // the rule existed. What's left is the folder to reopen, if any.
-        let saved_project_dir = persisted.drop_homeless_files();
+        let mut saved_project_dir = persisted.drop_homeless_files();
+
+        // A project named on the command line wins over the remembered one. The
+        // buffers restored above belong to THAT project, so they go too — the
+        // load below rebuilds the tree from the chosen folder, and keeping them
+        // would mix two projects' files in one window.
+        if let Some(dir) = &cli_project {
+            if saved_project_dir.as_deref() != Some(dir.as_path()) {
+                persisted.user_src_files.clear();
+                persisted.user_src_folders.clear();
+            }
+            saved_project_dir = Some(dir.clone());
+        }
 
         // Load the MCU registry: bundled built-ins + any user `.ron` imports
         // from the per-user `mcus/` folder (Phase 5 — runtime import).
@@ -1903,6 +1950,10 @@ impl AppIde {
             project_dir: saved_project_dir.clone(),
             fs_rx: Some(fs_rx),
             _fs_watcher: watcher.ok(),
+            pending_open_dir: None,
+            startup_picker: None,
+            workspace_write_requested: false,
+            cli_project_error: cli_error,
             // Empty, not the startup title: the first frame then always pushes
             // one title, so what the window shows can't drift from what this
             // app computes (a restored project renames it immediately anyway).
@@ -1919,11 +1970,49 @@ impl AppIde {
         // closed. `saved_project_dir` is already filtered to a folder that
         // exists — when it is `None` the state above was cleared to match, so
         // there is a clean empty project here rather than a half-restored one.
-        if let Some(dir) = &saved_project_dir {
-            app.load_project_from_dir(dir);
-            // Same overlay, restated for what this actually is — the load
-            // above armed it as an "Open".
-            app.begin_project_loading(loading_overlay::LoadKind::Restore);
+        // …unless the command line named another one, the preference says to
+        // ask every time, or the remembered project is already open in another
+        // window — see `crate::startup::decide` for the rule and why.
+        match crate::startup::decide(
+            cli_project,
+            crate::startup::load_mode(),
+            saved_project_dir,
+            // Probing IS claiming: the claim is dropped immediately and retaken
+            // by the load below. A window that grabs the folder in between is a
+            // race no desktop user can hit, and the folder banner covers it.
+            |dir| {
+                matches!(
+                    crate::workspace::claim_project(dir),
+                    crate::workspace::ProjectClaim::Busy
+                )
+            },
+        ) {
+            crate::startup::StartupAction::Open(dir) => {
+                app.load_project_from_dir(&dir);
+                // Same overlay, restated for what this actually is — the load
+                // above armed it as an "Open".
+                app.begin_project_loading(loading_overlay::LoadKind::Restore);
+            }
+            action => {
+                // Nothing is being opened, so the restored buffers have no
+                // project to belong to — the `drop_homeless_files` rule, applied
+                // to a project we chose NOT to reopen. Leaving them would show
+                // one project's files in a window holding another.
+                app.project_dir = None;
+                app.project_name = None;
+                app.project_tree.user_src_files.clear();
+                app.project_tree.user_src_folders.clear();
+                if let crate::startup::StartupAction::Ask { blocked } = action {
+                    app.startup_picker = Some(startup_picker::StartupPicker::new(
+                        blocked.map(|d| {
+                            d.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| d.display().to_string())
+                        }),
+                        crate::startup::load_mode(),
+                    ));
+                }
+            }
         }
 
         app
@@ -3437,6 +3526,36 @@ impl eframe::App for AppIde {
             }
         }
 
+        // ── Bad `--project` argument banner ───────────────────────────────────
+        // The window opened on something else than the caller asked for; say so
+        // rather than letting a typo in a shortcut look like the IDE ignoring it.
+        if let Some(err) = self.cli_project_error.clone() {
+            let mut dismiss = false;
+            egui::Panel::top("cli_project_error_banner").show_inside(ui, |ui| {
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(58, 40, 20))
+                    .inner_margin(7.0)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  Couldn't open the project from the command line: {err}",
+                                    egui_phosphor::regular::WARNING
+                                ))
+                                .size(11.5)
+                                .color(egui::Color32::from_rgb(245, 200, 130)),
+                            );
+                            if ui.button("Dismiss").clicked() {
+                                dismiss = true;
+                            }
+                        });
+                    });
+            });
+            if dismiss {
+                self.cli_project_error = None;
+            }
+        }
+
         // ── Project-open-elsewhere banner ─────────────────────────────────────
         // The project's folder is claimed by another IDE window. Both windows
         // write the WHOLE project on save, so whoever saves last wins — silently,
@@ -3585,7 +3704,7 @@ impl eframe::App for AppIde {
         let mut save_project_needed = false;
         let signals =
             self.show_project_panel(ui, &project_files, ctrl_s_pressed, &mut save_project_needed);
-        let open_project_clicked = signals.open_clicked;
+        let mut open_project_clicked = signals.open_clicked;
         let new_project_clicked = signals.new_clicked;
         let save_project_clicked = signals.save_clicked;
         // Cross-instance tree clipboard. Copy stages the item and puts a token
@@ -3664,6 +3783,16 @@ impl eframe::App for AppIde {
         // "Open Project" → folder picker, then load files. Loading REPLACES
         // everything in memory, so unsaved work is warned about first with the
         // same modal the window close uses.
+        // "Open Recent" → the folder is already known, so it skips the picker
+        // (see `pick_and_open_project`) but takes the SAME unsaved gate: it is
+        // just as destructive as any other open.
+        if let Some(dir) = signals.open_recent {
+            if self.save_in_progress.is_none() {
+                self.pending_open_dir = Some(dir);
+                open_project_clicked = true;
+            }
+        }
+
         if open_project_clicked && self.save_in_progress.is_none() {
             if self.unsaved_files().is_empty() {
                 self.pick_and_open_project(&mut save_project_needed);
@@ -3796,6 +3925,11 @@ impl eframe::App for AppIde {
                     // folder we already hold), so only when it changed.
                     if self.project_dir != had_dir {
                         self.claim_open_project();
+                        // A project only becomes openable-by-path at its first
+                        // Save, so this is where a NEW one enters the history.
+                        if let Some(dir) = self.project_dir.clone() {
+                            crate::recent::record(&dir, Some(&self.selected_mcu_id));
+                        }
                     }
                     // "Save and close": the files are on disk now, so finish
                     // the close the prompt put on hold.
@@ -3857,6 +3991,9 @@ impl eframe::App for AppIde {
         // Write the entire project to the workspace directory when the file
         // tree changed (file added, deleted, or project opened/cleared).
         // This ensures Cargo.toml and all other required files are in sync.
+        // The startup picker runs after this point in the frame, so its load
+        // asks for the rewrite through a field instead of the local.
+        save_project_needed |= std::mem::take(&mut self.workspace_write_requested);
         if save_project_needed {
             if self.selected_build_cfg().is_some() {
                 let workspace = crate::workspace::dir();
@@ -3888,6 +4025,12 @@ impl eframe::App for AppIde {
         } else {
             self.show_mcu_panel(ui);
         }
+
+        // ── Startup picker ───────────────────────────────────────────────────
+        // Before the loading overlay: the two never coexist (nothing loads while
+        // the user is still choosing), and a project picked here arms the
+        // overlay for the frames that follow.
+        self.show_startup_picker(ui);
 
         // ── Project-switch overlay ───────────────────────────────────────────
         // Dead last: it covers the WHOLE window (panels, banners and dialogs

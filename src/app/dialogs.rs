@@ -205,6 +205,9 @@ impl AppIde {
             UnsavedChoice::Cancel => {
                 self.open_prompt = false;
                 self.open_after_save = false;
+                // Drop a recent-project choice this prompt was gating, or it
+                // would hijack the NEXT "Open Project…" and skip its picker.
+                self.pending_open_dir = None;
             }
             UnsavedChoice::None => {}
         }
@@ -266,13 +269,23 @@ impl AppIde {
         self.pending_mcu_id = None;
     }
 
-    /// Native folder picker → load that project. Cancelling the picker leaves
-    /// the current project untouched.
+    /// Open a project: the folder already chosen from "Open Recent", or the
+    /// native picker. Cancelling the picker leaves the current project untouched.
+    ///
+    /// One entry point for both on purpose — this is what the unsaved-changes
+    /// gate calls, directly and after a "Save and open…", so a recent project
+    /// gets exactly the same protection as a picked one without duplicating
+    /// that flow.
     pub(super) fn pick_and_open_project(&mut self, save_needed: &mut bool) {
-        if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Open Embedded IDE Project — pick the project root folder")
-            .pick_folder()
-        {
+        let chosen = self
+            .pending_open_dir
+            .take()
+            .or_else(|| {
+                rfd::FileDialog::new()
+                    .set_title("Open Embedded IDE Project — pick the project root folder")
+                    .pick_folder()
+            });
+        if let Some(folder) = chosen {
             self.load_project_from_dir(&folder);
             *save_needed = true;
         }
