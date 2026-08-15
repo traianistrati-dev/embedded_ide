@@ -277,14 +277,11 @@ impl AppIde {
     /// gets exactly the same protection as a picked one without duplicating
     /// that flow.
     pub(super) fn pick_and_open_project(&mut self, save_needed: &mut bool) {
-        let chosen = self
-            .pending_open_dir
-            .take()
-            .or_else(|| {
-                rfd::FileDialog::new()
-                    .set_title("Open Embedded IDE Project — pick the project root folder")
-                    .pick_folder()
-            });
+        let chosen = self.pending_open_dir.take().or_else(|| {
+            rfd::FileDialog::new()
+                .set_title("Open Embedded IDE Project — pick the project root folder")
+                .pick_folder()
+        });
         if let Some(folder) = chosen {
             self.load_project_from_dir(&folder);
             *save_needed = true;

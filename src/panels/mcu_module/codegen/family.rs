@@ -1489,4 +1489,3 @@ mod tests {
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_END));
     }
 }
-

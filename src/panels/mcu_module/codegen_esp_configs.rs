@@ -81,8 +81,18 @@ fn example_block(title: &str, lines: &[String]) -> String {
 }
 
 /// Pick the example for the runtime and substitute the handle name.
-fn example_for(title: &str, handle: &str, blocking: &[&str], asyncs: &[&str], rt: EspRuntime) -> String {
-    let src = if rt == EspRuntime::Async { asyncs } else { blocking };
+fn example_for(
+    title: &str,
+    handle: &str,
+    blocking: &[&str],
+    asyncs: &[&str],
+    rt: EspRuntime,
+) -> String {
+    let src = if rt == EspRuntime::Async {
+        asyncs
+    } else {
+        blocking
+    };
     let lines: Vec<String> = src.iter().map(|l| l.replace("{H}", handle)).collect();
     example_block(
         &format!(
@@ -546,7 +556,12 @@ mod tests {
     /// parameter would warn in the user's build and misdescribe the peripheral.
     #[test]
     fn the_signature_mirrors_the_wiring() {
-        let full = spi_file(2, &["sck", "mosi", "miso", "cs"], None, EspRuntime::Blocking);
+        let full = spi_file(
+            2,
+            &["sck", "mosi", "miso", "cs"],
+            None,
+            EspRuntime::Blocking,
+        );
         for (param, method) in [
             ("sck:", ".with_sck(sck)"),
             ("mosi:", ".with_mosi(mosi)"),

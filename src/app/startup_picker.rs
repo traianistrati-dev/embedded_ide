@@ -150,10 +150,8 @@ impl AppIde {
                                 // click land and the conflict banner explain later.
                                 let resp = ui.add_enabled(
                                     !row.taken,
-                                    egui::Button::new(
-                                        egui::RichText::new(&row.label).size(12.5),
-                                    )
-                                    .min_size(egui::vec2(ui.available_width(), 0.0)),
+                                    egui::Button::new(egui::RichText::new(&row.label).size(12.5))
+                                        .min_size(egui::vec2(ui.available_width(), 0.0)),
                                 );
                                 if resp.on_hover_text(&row.path).clicked() {
                                     choice =
@@ -166,11 +164,9 @@ impl AppIde {
                                         format!("   {}", row.path)
                                     })
                                     .size(9.5)
-                                    .color(egui::Color32::from_gray(if row.taken {
-                                        150
-                                    } else {
-                                        115
-                                    })),
+                                    .color(
+                                        egui::Color32::from_gray(if row.taken { 150 } else { 115 }),
+                                    ),
                                 );
                                 ui.add_space(4.0);
                             }

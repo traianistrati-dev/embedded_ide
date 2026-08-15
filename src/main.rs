@@ -273,11 +273,11 @@ fn project_arg<I: Iterator<Item = String>>(args: I) -> Result<Option<PathBuf>, S
     // A project is a cargo project; opening a random folder would produce an
     // empty tree and a chip detected from nothing.
     if !path.join("Cargo.toml").is_file() {
-        return Err(format!("\"{raw}\" has no Cargo.toml — not a project folder"));
+        return Err(format!(
+            "\"{raw}\" has no Cargo.toml — not a project folder"
+        ));
     }
-    Ok(Some(
-        std::fs::canonicalize(&path).unwrap_or(path),
-    ))
+    Ok(Some(std::fs::canonicalize(&path).unwrap_or(path)))
 }
 
 #[cfg(test)]

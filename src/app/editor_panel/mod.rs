@@ -31,6 +31,8 @@ mod doc_md;
 mod duplicate_line;
 pub(crate) mod file_cycle;
 pub(crate) mod find_replace;
+mod fold;
+mod fold_ui;
 mod format;
 mod generics;
 mod inlay_hint;
@@ -402,6 +404,14 @@ impl AppIde {
             // the editor so `/` is never typed into the text).
             let mut ctrl_slash_pressed = editor_kbd_active
                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Slash));
+            // Ctrl+Shift+Q → collapse every function body, or expand everything
+            // if anything is folded. Consumed here with the other shortcuts and
+            // applied just before the fold projection is built, so the change
+            // shows on THIS frame.
+            let fold_all_pressed = editor_kbd_active
+                && ui.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Q)
+                });
             // Ctrl+Shift+Up / Down → multi-cursor add/undo (see
             // `multi_cursor` module docs). Consumed BEFORE Ctrl+Up/Down
             // below: `consume_key` is lenient about Shift (see that
@@ -698,6 +708,55 @@ impl AppIde {
             let underline_ranges: Vec<(usize, usize)> =
                 self.generic_underline_ranges(&display_code).to_vec();
 
+            // ── Code folding ──────────────────────────────────────────────
+            // An edit and a fold cannot coexist: the editor writes back the
+            // text it was GIVEN, which while folded is a projection missing
+            // whole lines — writing that back would delete the hidden code.
+            // So any keystroke that could modify the buffer unfolds this file
+            // FIRST, before the editor renders, and the keystroke then lands on
+            // the full text as usual. Everything below therefore runs either
+            // fully folded (and read-only for this frame) or not folded at all.
+            let fold_key = usages_rel_path.clone().filter(|_| is_rust_file);
+            if let Some(rel) = &fold_key {
+                // The line-op shortcuts CONSUMED their key events further up, so
+                // `edit_pending` can no longer see them — their flags have to be
+                // checked directly. Each one rewrites the buffer using caret
+                // indices taken from the galley, which while folded belongs to
+                // the projection: without this they would edit the wrong lines.
+                let line_op = ctrl_slash_pressed
+                    || ctrl_up_pressed
+                    || ctrl_down_pressed
+                    || cut_line_pressed
+                    || ctrl_d_pressed
+                    || format_pressed
+                    || mc_up_pressed
+                    || mc_down_pressed;
+                let editing = editor_kbd_active && (line_op || fold::edit_pending(ui));
+                if editing && self.folds.contains_key(rel) {
+                    self.folds.remove(rel);
+                }
+                // Ctrl+Shift+Q, applied before the projection below so it takes
+                // effect this frame. After the unfold-on-edit check: a frame
+                // that both edits and toggles should end up unfolded.
+                if fold_all_pressed && !editing {
+                    let current = self.folds.get(rel).cloned().unwrap_or_default();
+                    let next = fold::toggle_all(&display_code, &current);
+                    if next.is_empty() {
+                        self.folds.remove(rel);
+                    } else {
+                        self.folds.insert(rel.clone(), next);
+                    }
+                }
+            }
+            let fold_map = match &fold_key {
+                Some(rel) => match self.folds.get(rel) {
+                    Some(set) if !set.is_empty() => fold::FoldMap::new(&display_code, set),
+                    _ => fold::FoldMap::identity(&display_code),
+                },
+                None => fold::FoldMap::identity(&display_code),
+            };
+            let folded = !fold_map.is_identity();
+
             // Snapshot right before the editor mutates `display_code`, so
             // the multi-cursor replay below can diff exactly what the
             // editor itself changed this frame (typing / backspace / paste)
@@ -705,10 +764,18 @@ impl AppIde {
             // bar's own edits, above.
             let text_before_typing = display_code.clone();
 
+            // While folded the editor is handed the projection and its result is
+            // discarded; `display_code` keeps holding the real buffer for the
+            // write-back and for every analysis below.
+            let mut editor_text = if folded {
+                fold_map.display().to_owned()
+            } else {
+                display_code.clone()
+            };
             let editor_resp = if is_rust_file {
                 crate::editor::gui::code_editor::show_rust_with_completer(
                     ui,
-                    &mut display_code,
+                    &mut editor_text,
                     &ColorTheme::GRUVBOX,
                     font_size,
                     editor_rows,
@@ -717,9 +784,10 @@ impl AppIde {
                     &mut self.completer,
                     suppress_keyword_completer,
                     crate::editor::gui::code_editor::Marks {
-                        dead: &dead_ranges,
-                        underline: &underline_ranges,
+                        dead: &fold_map.map_ranges(&dead_ranges),
+                        underline: &fold_map.map_ranges(&underline_ranges),
                     },
+                    fold_map.line_numbers(),
                 )
             } else {
                 // Config files (Cargo.toml, .cargo/config.toml, .gitignore)
@@ -749,6 +817,12 @@ impl AppIde {
                 }
                 out
             };
+            // Unfolded: the editor owns the text, so adopt what it produced.
+            // Folded: it was handed a projection — discard it (nothing can have
+            // edited it; see the unfold-first rule above).
+            if !folded {
+                display_code = editor_text;
+            }
 
             // ── Keep the caret in view when it moves off-screen ───────────
             // egui_code_editor nests a horizontal ScrollArea *inside* the
@@ -763,68 +837,76 @@ impl AppIde {
             // panel). Runs after caret-follow so its precise offset wins.
             self.apply_pending_scroll(ui, &editor_resp, &editor_id, displayed_file);
 
-            // Highlight every occurrence of the word the user selected
-            // (double-click / Ctrl+Shift+Left/Right). Painted here — while
-            // `display_code` still matches the galley the editor just built —
-            // and before the diagnostics overlay so squiggles render on top.
-            // Double-click: replace egui's UAX#29 word selection (which
-            // glues `name:Type` into one "word" via the `:` MidLetter rule)
-            // with the plain identifier run under the pointer.
-            self.fix_double_click_selection(ui, &editor_resp, &display_code);
-            // Ctrl(+Shift)+Left/Right: our own word jump, for the same
-            // reason — the keys were consumed before the editor rendered.
-            if let Some((right, extend)) = word_move {
-                self.apply_word_move(ui, &editor_resp, &display_code, right, extend);
-            }
-            Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
-            // Highlight all occurrences of the active find query (current one
-            // in amber), so matches show even when the find field has focus.
-            self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
-            // Triple-clicking a `{`/`}` or a definition's header line
-            // highlights the WHOLE definition in white and copies it on
-            // Ctrl+C. (The single-block highlight moved off "selecting a
-            // brace" to the explicit Ctrl+[ / Ctrl+] shortcut, applied
-            // after the context menu below.)
-            self.highlight_full_definition(
-                &editor_resp,
-                &display_code,
-                displayed_file,
-                editor_clip,
-                ui,
-                copy_requested,
-            );
-            // Unused generic parameters pulse a translucent white highlight on
-            // top of their fade. Drawn before the "N refs" pills so a pill can
-            // never end up under the wash.
-            generics::show_unused_generics_overlay(
-                ui,
-                editor_resp.galley_pos,
-                editor_clip,
-                &editor_resp.galley,
-                &display_code,
-                self.generic_pulse_ranges(&display_code),
-            );
-            // …and the underlined ones explain themselves on hover.
-            generics::show_impl_only_tooltips(
-                ui,
-                editor_resp.galley_pos,
-                editor_clip,
-                &editor_resp.galley,
-                &display_code,
-                &underline_ranges,
-            );
-            // "N refs" indicator + popup on every used item (unused ones were
-            // already faded by the highlighter, above, via `dead_ranges`).
-            if let Some(rel) = &usages_rel_path {
-                self.show_usages_overlay(
+            // Everything from here on pairs `display_code` (the buffer) with the
+            // galley the editor just built. While folded those two describe
+            // different texts, so an overlay would paint on the wrong line —
+            // they are skipped for that frame rather than lied to. The fade and
+            // underline marks are unaffected: they went into the layout already
+            // translated (`fold_map.map_ranges`).
+            if !folded {
+                // Highlight every occurrence of the word the user selected
+                // (double-click / Ctrl+Shift+Left/Right). Painted here — while
+                // `display_code` still matches the galley the editor just built —
+                // and before the diagnostics overlay so squiggles render on top.
+                // Double-click: replace egui's UAX#29 word selection (which
+                // glues `name:Type` into one "word" via the `:` MidLetter rule)
+                // with the plain identifier run under the pointer.
+                self.fix_double_click_selection(ui, &editor_resp, &display_code);
+                // Ctrl(+Shift)+Left/Right: our own word jump, for the same
+                // reason — the keys were consumed before the editor rendered.
+                if let Some((right, extend)) = word_move {
+                    self.apply_word_move(ui, &editor_resp, &display_code, right, extend);
+                }
+                Self::highlight_selected_word(&editor_resp, &display_code, editor_clip, ui);
+                // Highlight all occurrences of the active find query (current one
+                // in amber), so matches show even when the find field has focus.
+                self.paint_find_matches(&editor_resp, &display_code, editor_clip, ui);
+                // Triple-clicking a `{`/`}` or a definition's header line
+                // highlights the WHOLE definition in white and copies it on
+                // Ctrl+C. (The single-block highlight moved off "selecting a
+                // brace" to the explicit Ctrl+[ / Ctrl+] shortcut, applied
+                // after the context menu below.)
+                self.highlight_full_definition(
+                    &editor_resp,
+                    &display_code,
+                    displayed_file,
+                    editor_clip,
+                    ui,
+                    copy_requested,
+                );
+                // Unused generic parameters pulse a translucent white highlight on
+                // top of their fade. Drawn before the "N refs" pills so a pill can
+                // never end up under the wash.
+                generics::show_unused_generics_overlay(
                     ui,
                     editor_resp.galley_pos,
                     editor_clip,
                     &editor_resp.galley,
                     &display_code,
-                    rel,
+                    self.generic_pulse_ranges(&display_code),
                 );
-            }
+                // …and the underlined ones explain themselves on hover.
+                generics::show_impl_only_tooltips(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &editor_resp.galley,
+                    &display_code,
+                    &underline_ranges,
+                );
+                // "N refs" indicator + popup on every used item (unused ones were
+                // already faded by the highlighter, above, via `dead_ranges`).
+                if let Some(rel) = &usages_rel_path {
+                    self.show_usages_overlay(
+                        ui,
+                        editor_resp.galley_pos,
+                        editor_clip,
+                        &editor_resp.galley,
+                        &display_code,
+                        rel,
+                    );
+                }
+            } // end `if !folded` — galley-dependent overlays
 
             // ── Multi-cursor (Ctrl+Shift+Up/Down) ─────────────────────────
             // Add/remove an extra caret, then replay this frame's text edit
@@ -882,24 +964,45 @@ impl AppIde {
                     st.store(ui.ctx(), editor_resp.response.id);
                 }
             }
-            self.paint_extra_cursors(
-                ui,
-                editor_resp.galley_pos,
-                editor_clip,
-                &editor_resp.galley,
-                &display_code,
-            );
-            self.paint_primary_caret(ui, &editor_resp, editor_clip);
-            // Git gutter marks (live diff vs HEAD, sees unsaved edits) +
-            // click-to-revert. A revert mutates `display_code`; the
-            // write-back below persists it (same as the context-menu Cut).
-            self.tick_diff_gutter(&display_code);
-            self.paint_diff_gutter(ui, &editor_resp, editor_clip, &display_code);
-            // Breakpoint dots + click-to-toggle in the line-number column.
-            self.paint_breakpoint_gutter(ui, &editor_resp, editor_clip, &display_code);
-            // Hover-to-evaluate: value tooltip for the identifier under the
-            // pointer while a debug session is halted.
-            self.paint_debug_hover(ui, &editor_resp, editor_clip, &display_code);
+            // Same rule as the overlay block above: these all pair the buffer
+            // with the folded galley, so they sit out a folded frame.
+            if !folded {
+                self.paint_extra_cursors(
+                    ui,
+                    editor_resp.galley_pos,
+                    editor_clip,
+                    &editor_resp.galley,
+                    &display_code,
+                );
+                self.paint_primary_caret(ui, &editor_resp, editor_clip);
+                // Git gutter marks (live diff vs HEAD, sees unsaved edits) +
+                // click-to-revert. A revert mutates `display_code`; the
+                // write-back below persists it (same as the context-menu Cut).
+                self.tick_diff_gutter(&display_code);
+                self.paint_diff_gutter(ui, &editor_resp, editor_clip, &display_code);
+                // Breakpoint dots + click-to-toggle in the line-number column.
+                self.paint_breakpoint_gutter(ui, &editor_resp, editor_clip, &display_code);
+                // Hover-to-evaluate: value tooltip for the identifier under the
+                // pointer while a debug session is halted.
+                self.paint_debug_hover(ui, &editor_resp, editor_clip, &display_code);
+            }
+
+            // Fold carets + the "N lines hidden" badge. LAST on purpose: they
+            // share the number column with the breakpoint strip, and egui gives
+            // a click to the widget registered latest — so the caret wins the
+            // primary button while the strip keeps the secondary one. Outside
+            // the `!folded` guard, since unfolding must stay possible.
+            if let Some(rel) = fold_key.clone() {
+                self.paint_fold_gutter(
+                    ui,
+                    &editor_resp,
+                    editor_clip,
+                    &display_code,
+                    &fold_map,
+                    &rel,
+                    font_size,
+                );
+            }
 
             // ── Ctrl+Enter code actions (RA assists / quick-fixes) ────────
             if ctrl_enter_pressed {
@@ -960,6 +1063,20 @@ impl AppIde {
                     Some(A::NextFile) => cycle_next_pressed = true,
                     Some(A::PrevFile) => cycle_prev_pressed = true,
                     Some(A::Format) => format_pressed = true,
+                    Some(A::ToggleFoldAll) => {
+                        // Applied straight to the state, not via the keyboard
+                        // flag: this runs AFTER the fold projection was built,
+                        // so it lands on the next frame either way.
+                        if let Some(rel) = &fold_key {
+                            let current = self.folds.get(rel).cloned().unwrap_or_default();
+                            let next = fold::toggle_all(&display_code, &current);
+                            if next.is_empty() {
+                                self.folds.remove(rel);
+                            } else {
+                                self.folds.insert(rel.clone(), next);
+                            }
+                        }
+                    }
                     Some(A::Rename) => ctrl_r_pressed = true,
                     Some(A::GoToDef) => f12_pressed = true,
                     Some(A::GoToImpl) => ctrl_f12_pressed = true,

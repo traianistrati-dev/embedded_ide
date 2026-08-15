@@ -184,6 +184,8 @@ impl AppIde {
             egui::Id::new("bp_gutter").with(&rel),
             egui::Sense::click(),
         );
+        // The fold carets sit inside this strip and are registered AFTER it, so
+        // they take the primary click; this only ever acts on the secondary one.
         let hovered_line: Option<u32> = resp.hover_pos().and_then(|pos| {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             // Binary search the line whose row contains pos.y (rows are
@@ -229,11 +231,15 @@ impl AppIde {
                 }
             }
             resp.clone().on_hover_text(if already {
-                "Remove breakpoint"
+                "Right-click to remove this breakpoint"
             } else {
-                "Set breakpoint"
+                "Right-click to set a breakpoint"
             });
-            if resp.clicked() {
+            // SECONDARY click: the left button belongs to the fold carets, which
+            // live in this same strip (the number column). One gutter, two
+            // actions — a left click that silently set a breakpoint made the
+            // fold arrows unusable.
+            if resp.secondary_clicked() {
                 let set = self.breakpoints.entry(rel.clone()).or_default();
                 if !set.remove(&line) {
                     set.insert(line);

@@ -216,13 +216,9 @@ impl AppIde {
                                                 // Skip the project already open
                                                 // in THIS window — reopening it
                                                 // would only throw work away.
-                                                if self
-                                                    .project_dir
-                                                    .as_ref()
-                                                    .is_some_and(|d| {
-                                                        crate::recent::is_same_path(d, &entry.path)
-                                                    })
-                                                {
+                                                if self.project_dir.as_ref().is_some_and(|d| {
+                                                    crate::recent::is_same_path(d, &entry.path)
+                                                }) {
                                                     continue;
                                                 }
                                                 let label = match &entry.mcu_id {

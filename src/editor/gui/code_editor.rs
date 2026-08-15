@@ -21,6 +21,11 @@ use egui_code_editor::{ColorTheme, Completer, Syntax, TokenType};
 /// Rust lifetimes (`'a`, `'static`) — blue, per request (RGB 0,100,255).
 const LIFETIME_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 100, 255);
 
+/// Character cells reserved to the RIGHT of the line numbers for the fold
+/// carets. The number column is the only place with room: the diff bars and the
+/// breakpoint dot already fill everything between it and the code.
+pub const FOLD_GUTTER_CHARS: usize = 2;
+
 fn is_ident_start(c: char) -> bool {
     c.is_alphabetic() || c == '_'
 }
@@ -407,6 +412,10 @@ fn numlines_show(
     fontsize: f32,
     rows: usize,
     id: &str,
+    // Explicit 1-based numbers, one per rendered row, when the text on screen is
+    // a FOLDED projection of the buffer — the rows are then 1, 2, 40, 41, … and
+    // counting them would be a lie. Empty = the text is the whole buffer.
+    numbers: &[usize],
 ) {
     use egui::TextBuffer;
 
@@ -416,19 +425,39 @@ fn numlines_show(
         text.lines().count()
     }
     .max(rows);
-    let max_indent = total.to_string().len();
-    let mut counter = (1..=total)
-        .map(|i| {
-            let label = i.to_string();
-            format!(
-                "{}{label}",
-                " ".repeat(max_indent.saturating_sub(label.len()))
-            )
-        })
-        .collect::<Vec<String>>()
-        .join("\n");
+    // The column is sized by the WIDEST number shown, which while folded is the
+    // last buffer line, not the row count.
+    let max_indent = numbers
+        .last()
+        .copied()
+        .unwrap_or(total)
+        .max(total)
+        .to_string()
+        .len();
+    // Two trailing blanks widen the column past the numbers, reserving the strip
+    // the fold carets are drawn in (`fold_ui`). Without it there is nowhere to
+    // put them: the numbers run to `gp.x - 12` and the diff bars + breakpoint dot
+    // own everything from there to the text.
+    let pad = |n: usize| {
+        let label = n.to_string();
+        format!(
+            "{}{label}{}",
+            " ".repeat(max_indent.saturating_sub(label.len())),
+            " ".repeat(FOLD_GUTTER_CHARS),
+        )
+    };
+    let mut counter = if numbers.is_empty() {
+        (1..=total).map(pad).collect::<Vec<String>>().join("\n")
+    } else {
+        // Trailing blanks keep the column as tall as `desired_rows`.
+        let mut v: Vec<String> = numbers.iter().map(|&n| pad(n)).collect();
+        while v.len() < rows {
+            v.push(" ".repeat(max_indent));
+        }
+        v.join("\n")
+    };
 
-    let width = max_indent as f32 * fontsize * 0.5;
+    let width = (max_indent + FOLD_GUTTER_CHARS) as f32 * fontsize * 0.5;
     let mut layouter = |ui: &egui::Ui, buf: &dyn TextBuffer, _wrap: f32| {
         let job = egui::text::LayoutJob::single_section(
             buf.as_str().to_string(),
@@ -464,13 +493,14 @@ fn show_rust_editor(
     syntax: &Syntax,
     id: &str,
     marks: Marks<'_>,
+    line_numbers: &[usize],
 ) -> TextEditOutput {
     let mut out: Option<TextEditOutput> = None;
     let code_editor = |ui: &mut egui::Ui| {
         egui::Frame::new().fill(theme.bg()).show(ui, |ui| {
             ui.horizontal_top(|h| {
                 theme.modify_style(h, fontsize);
-                numlines_show(h, text.as_str(), theme, fontsize, rows, id);
+                numlines_show(h, text.as_str(), theme, fontsize, rows, id, line_numbers);
                 egui::ScrollArea::horizontal()
                     .id_salt(format!("{id}_inner_scroll"))
                     .show(h, |ui| {
@@ -538,6 +568,7 @@ pub fn show_rust_editor_plain(
         &Syntax::rust(),
         id,
         Marks::default(),
+        &[],
     )
 }
 
@@ -552,11 +583,22 @@ pub fn show_rust_with_completer(
     completer: &mut Completer,
     suppress_keyword_completer: bool,
     marks: Marks<'_>,
+    line_numbers: &[usize],
 ) -> TextEditOutput {
     if !suppress_keyword_completer {
         completer.handle_input(ui.ctx());
     }
-    let mut out = show_rust_editor(ui, text, theme, fontsize, rows, syntax, id, marks);
+    let mut out = show_rust_editor(
+        ui,
+        text,
+        theme,
+        fontsize,
+        rows,
+        syntax,
+        id,
+        marks,
+        line_numbers,
+    );
     completer.text_edit_id = Some(out.response.id);
     if !suppress_keyword_completer {
         completer.show(syntax, theme, fontsize, &mut out);

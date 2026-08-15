@@ -177,13 +177,16 @@ mod tests {
 
     #[test]
     fn the_list_is_capped() {
-        let mut list: Vec<RecentProject> =
-            (0..MAX_ENTRIES).map(|i| entry(&format!("/p/{i}"))).collect();
+        let mut list: Vec<RecentProject> = (0..MAX_ENTRIES)
+            .map(|i| entry(&format!("/p/{i}")))
+            .collect();
         list = promote(list, Path::new("/p/new"), None, 5);
         assert_eq!(list.len(), MAX_ENTRIES);
         assert!(list[0].path.ends_with("/p/new"));
         assert!(
-            !list.iter().any(|e| e.path.ends_with(&format!("/p/{}", MAX_ENTRIES - 1))),
+            !list
+                .iter()
+                .any(|e| e.path.ends_with(&format!("/p/{}", MAX_ENTRIES - 1))),
             "the oldest entry falls off the end"
         );
     }

@@ -17,6 +17,8 @@ pub(super) enum EditorAction {
     MoveUp,
     MoveDown,
     Format,
+    /// Collapse every function body, or expand everything (Ctrl+Shift+Q).
+    ToggleFoldAll,
     Rename,
     GoToDef,
     GoToImpl,
@@ -144,6 +146,13 @@ pub(super) fn editor_menu(ui: &mut egui::Ui, is_rs: bool, is_cargo: bool) -> Opt
 
     if is_rs {
         ui.separator();
+        item(
+            ui,
+            ph::ARROWS_IN_LINE_VERTICAL,
+            "Collapse / expand all functions",
+            "Ctrl+Shift+Q",
+            EditorAction::ToggleFoldAll,
+        );
         item(
             ui,
             ph::TEXT_INDENT,

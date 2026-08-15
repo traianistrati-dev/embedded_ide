@@ -1010,14 +1010,13 @@ mod tests {
             } else {
                 "init"
             };
-            for (module, periph) in [
-                ("uart0", "UART0"),
-                ("spi2", "SPI2"),
-                ("i2c0", "I2C0"),
-            ] {
+            for (module, periph) in [("uart0", "UART0"), ("spi2", "SPI2"), ("i2c0", "I2C0")] {
                 let call = format!("pins::configs::{module}::{init_fn}(peripherals.{periph}");
-                assert!(code.contains(&call), "{runtime:?} calls {call}:
-{code}");
+                assert!(
+                    code.contains(&call),
+                    "{runtime:?} calls {call}:
+{code}"
+                );
             }
             // Every wired pin still has its own line — that is what a reopened
             // project reads back (see the round-trip test in `codegen::family`).

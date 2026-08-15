@@ -1099,6 +1099,11 @@ pub struct AppIde {
     espflash_used_port: Arc<Mutex<String>>,
     /// On-target debug session (DAP client over probe-rs dap-server).
     debugger: crate::debugger::Debugger,
+    /// Collapsed blocks per file: rel path → the 0-based line carrying the `{`
+    /// of each folded block. View state only — never persisted, and cleared for
+    /// a file the moment anything is typed into it (see
+    /// [`fold`](crate::app::editor_panel::fold)).
+    folds: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
     /// Debug probes from the last `probe-rs list` scan — the shared selector on
     /// the RTT and Debug tabs (both drive probe-rs). Populated by `scan_probes`.
     probe_list: Vec<crate::probe::ProbeInfo>,
@@ -1789,6 +1794,7 @@ impl AppIde {
             esp_monitor_auto: !persisted.esp_monitor_no_auto,
             espflash_used_port: Arc::new(Mutex::new(String::new())),
             debugger: crate::debugger::Debugger::default(),
+            folds: std::collections::HashMap::new(),
             probe_list: Vec::new(),
             selected_probe: None,
             probe_scan_err: None,

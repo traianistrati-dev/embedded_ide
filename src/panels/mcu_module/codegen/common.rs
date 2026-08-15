@@ -827,4 +827,3 @@ mod tests {
         assert_eq!(find_pin_mention_line(&src, "PC13"), None);
     }
 }
-

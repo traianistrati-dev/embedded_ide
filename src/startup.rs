@@ -115,7 +115,12 @@ mod tests {
     fn the_command_line_wins_over_everything() {
         // Even over "always ask": naming a folder IS the answer to the question.
         assert_eq!(
-            decide(dir("/cli"), StartupMode::AlwaysAsk, dir("/last"), everything_open),
+            decide(
+                dir("/cli"),
+                StartupMode::AlwaysAsk,
+                dir("/last"),
+                everything_open
+            ),
             StartupAction::Open(PathBuf::from("/cli"))
         );
         // And even over another window holding it — the banner covers that.
@@ -143,7 +148,12 @@ mod tests {
     #[test]
     fn a_project_open_elsewhere_asks_instead_of_reopening() {
         assert_eq!(
-            decide(None, StartupMode::ReopenLast, dir("/shared"), everything_open),
+            decide(
+                None,
+                StartupMode::ReopenLast,
+                dir("/shared"),
+                everything_open
+            ),
             StartupAction::Ask {
                 blocked: Some(PathBuf::from("/shared"))
             }
