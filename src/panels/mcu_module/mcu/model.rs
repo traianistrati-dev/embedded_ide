@@ -220,6 +220,10 @@ pub struct Mcu {
     pub grid: Option<PinGrid>,
     /// Currently selected pin number (None = no pin selected)
     pub selected_pin: Option<usize>,
+    /// Pins-toolbar search box (next to "Rotate"). Pins that match stay bright,
+    /// the rest are painted at half opacity. Transient view state: not persisted,
+    /// not part of the codegen hash. See [`Mcu::pin_search_hits`].
+    pub pin_search: String,
     /// Function whose ⓘ info window is open (None = closed)
     pub show_info: Option<PinFunction>,
     /// Vertical scroll offset (pixels) of the function list inside the chip.

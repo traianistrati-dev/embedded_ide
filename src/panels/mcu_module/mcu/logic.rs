@@ -87,6 +87,7 @@ impl Mcu {
             // afterwards (see `McuDefinition::build_mcu`).
             grid: None,
             selected_pin: None,
+            pin_search: String::new(),
             show_info: None,
             fn_scroll_offset: 0.0,
             clock,
@@ -740,6 +741,48 @@ impl Mcu {
         self.show_info = None;
     }
 
+    /// Pin numbers matching the toolbar search box. Three ways to hit, because
+    /// three different labels are printed on the diagram:
+    /// * the pin NAME — case-insensitive substring (`pa5`, `osc`, `ph1`);
+    /// * the package DESIGNATOR of a ball — same, case-insensitive substring
+    ///   (`n13`, `m1`), so a BGA can be searched by the label under the ball;
+    /// * the pin NUMBER — EXACT (`13` finds pin 13, not 13/1/31).
+    ///
+    /// Substring for the two text labels and exact for the number on purpose: a
+    /// name/designator is what the user half-remembers off the package, a number
+    /// is something they read precisely.
+    ///
+    /// The designator matters more than it looks on a ball-grid part: there the
+    /// number is our own ordinal and is never drawn — the designator IS what the
+    /// user sees under the ball, so searching "N13" has to work.
+    pub fn pin_search_hits(&self) -> std::collections::HashSet<usize> {
+        let q = self.pin_search.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return std::collections::HashSet::new();
+        }
+        let mut hits: std::collections::HashSet<usize> = self
+            .iter_all_pins()
+            .filter(|p| p.name.to_ascii_lowercase().contains(&q) || p.number.to_string() == q)
+            .map(|p| p.number)
+            .collect();
+        for cell in self.grid.iter().flat_map(|g| g.cells.iter()) {
+            if cell.designator().to_ascii_lowercase().contains(&q) {
+                hits.insert(cell.pin.number);
+            }
+        }
+        hits
+    }
+
+    /// The set the diagram highlights, or `None` when nothing should be dimmed.
+    ///
+    /// `None` covers both "no search" and "search matches nothing": fading the
+    /// WHOLE chip while the user is still typing a prefix that hasn't matched yet
+    /// would be noise, not feedback.
+    pub fn pin_search_highlight(&self) -> Option<std::collections::HashSet<usize>> {
+        let hits = self.pin_search_hits();
+        (!hits.is_empty()).then_some(hits)
+    }
+
     /// Iterator over every pin (all four sides), immutable.
     pub fn iter_all_pins(&self) -> impl Iterator<Item = &Pin> {
         self.top_pins
@@ -937,6 +980,94 @@ impl Mcu {
     /// Finds a pin by number (mutable)
     pub fn find_pin_mut(&mut self, number: usize) -> Option<&mut Pin> {
         self.iter_all_pins_mut().find(|p| p.number == number)
+    }
+}
+
+#[cfg(test)]
+mod pin_search_tests {
+    use crate::panels::mcu_module::create_stm32f103c8tx;
+
+    #[test]
+    fn name_matches_any_part_case_insensitively() {
+        let mut mcu = create_stm32f103c8tx();
+        mcu.pin_search = "pb1".to_owned();
+        let hits = mcu.pin_search_hits();
+        // PB1 and PB10..PB15 — a substring, which is what a half-remembered
+        // name needs.
+        let names: Vec<String> = mcu
+            .iter_all_pins()
+            .filter(|p| hits.contains(&p.number))
+            .map(|p| p.name.clone())
+            .collect();
+        assert!(names.contains(&"PB1".to_owned()), "{names:?}");
+        assert!(names.contains(&"PB12".to_owned()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("PA")), "{names:?}");
+
+        // Case doesn't matter.
+        mcu.pin_search = "PB1".to_owned();
+        assert_eq!(mcu.pin_search_hits(), hits);
+    }
+
+    /// On a ball-grid package the pin NUMBER is our own ordinal and is never
+    /// drawn — the designator under the ball is what the user reads, so it has
+    /// to be searchable (the reported bug: "N13" found nothing).
+    #[test]
+    fn ball_designator_is_searchable() {
+        use crate::panels::mcu_module::mcu::model::{GridCell, PinGrid};
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+
+        let mut mcu = create_stm32f103c8tx();
+        // Row 11 = "M", row 12 = "N" (JEDEC skips I/O/Q/S/X/Z); col 12 = "13".
+        mcu.grid = Some(PinGrid {
+            rows: 13,
+            cols: 13,
+            cells: vec![
+                GridCell {
+                    row: 12,
+                    col: 12,
+                    pin: Pin::new(900, "PH12"),
+                },
+                GridCell {
+                    row: 11,
+                    col: 11,
+                    pin: Pin::new(901, "PH11"),
+                },
+            ],
+        });
+        mcu.pin_search = "N13".to_owned();
+        let hits = mcu.pin_search_hits();
+        assert!(hits.contains(&900), "designator N13 -> {hits:?}");
+        assert!(!hits.contains(&901), "M12 must stay dimmed: {hits:?}");
+        // Lower case works the same, and the NAME still matches on its own.
+        mcu.pin_search = "n13".to_owned();
+        assert!(mcu.pin_search_hits().contains(&900));
+        mcu.pin_search = "ph12".to_owned();
+        assert!(mcu.pin_search_hits().contains(&900));
+    }
+
+    /// A number is EXACT: "13" is pin 13, not 13 + 1 + 31.
+    #[test]
+    fn number_matches_exactly() {
+        let mut mcu = create_stm32f103c8tx();
+        mcu.pin_search = "13".to_owned();
+        let hits = mcu.pin_search_hits();
+        assert!(hits.contains(&13));
+        assert!(!hits.contains(&1) && !hits.contains(&31), "{hits:?}");
+    }
+
+    /// Empty box, or a query nothing matches → NOTHING is dimmed. Fading the
+    /// whole chip while the user is mid-word would be noise.
+    #[test]
+    fn no_query_and_no_match_both_dim_nothing() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.pin_search_highlight().is_none());
+        mcu.pin_search = "   ".to_owned();
+        assert!(mcu.pin_search_highlight().is_none());
+        mcu.pin_search = "zzz".to_owned();
+        assert!(mcu.pin_search_hits().is_empty());
+        assert!(mcu.pin_search_highlight().is_none());
+        mcu.pin_search = "pa5".to_owned();
+        assert!(mcu.pin_search_highlight().is_some());
     }
 }
 

@@ -352,6 +352,46 @@ impl AppIde {
                                     }
                                     mcu.io_pin_pos.clear();
                                 }
+
+                                // Find a pin on the diagram: matches stay bright,
+                                // every other pin fades to half opacity. Purely a
+                                // view filter — nothing is selected or changed.
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new(ph::MAGNIFYING_GLASS)
+                                        .size(12.0)
+                                        .color(egui::Color32::from_gray(160)),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut mcu.pin_search)
+                                        .hint_text("find pin")
+                                        .desired_width(96.0)
+                                        .font(egui::FontId::proportional(11.0)),
+                                )
+                                .on_hover_text(
+                                    "Highlight pins by NAME (any part: pa5, osc, pb) or by \
+                                     NUMBER (exact: 13). Everything else fades to 50%.",
+                                );
+                                if !mcu.pin_search.trim().is_empty() {
+                                    // Match count doubles as the "nothing found"
+                                    // signal — the diagram deliberately does NOT
+                                    // fade at all when a query matches nothing.
+                                    let n = mcu.pin_search_hits().len();
+                                    let (txt, col) = if n == 0 {
+                                        ("no match".to_owned(), egui::Color32::from_rgb(220, 160, 70))
+                                    } else {
+                                        (format!("{n} pin{}", if n == 1 { "" } else { "s" }),
+                                         egui::Color32::from_gray(150))
+                                    };
+                                    ui.label(egui::RichText::new(txt).size(10.5).color(col));
+                                    if ui
+                                        .button(egui::RichText::new(ph::X).size(11.0))
+                                        .on_hover_text("Clear the search")
+                                        .clicked()
+                                    {
+                                        mcu.pin_search.clear();
+                                    }
+                                }
                                 if !any_supported {
                                     ui.label(
                                         egui::RichText::new(

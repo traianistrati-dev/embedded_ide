@@ -61,6 +61,23 @@ fn draw_designator(
     painter.text(pos, align, designator, num_font(), color);
 }
 
+/// A painter that fades everything drawn through it to half opacity — how a pin
+/// that does NOT match the toolbar search is shown, so the matches read as the
+/// bright ones without changing any of their own colours.
+///
+/// `dim` comes from [`Mcu::pin_search_highlight`], which is `None` (nothing
+/// faded) both when the box is empty and when the query matches no pin at all.
+fn dimmed(painter: &egui::Painter, dim: bool) -> egui::Painter {
+    let mut p = painter.clone();
+    if dim {
+        p.set_opacity(SEARCH_DIM);
+    }
+    p
+}
+
+/// Opacity of a pin filtered out by the search box.
+const SEARCH_DIM: f32 = 0.3;
+
 /// Draw the chip body (gray rectangle).
 pub fn draw_chip_body(painter: &egui::Painter, chip_rect: egui::Rect) {
     painter.rect_filled(chip_rect, 4.0, egui::Color32::from_rgb(45, 45, 55));
@@ -107,10 +124,15 @@ fn render_quarter(
     ui: &mut egui::Ui,
 ) -> Option<usize> {
     let selected = mcu.selected_pin;
+    let hits = mcu.pin_search_highlight();
     let mut clicked = None;
     for lp in pin_geometry(mcu, chip_rect) {
         let rr = egui::Rect::from_points(&rot.quad(lp.rect));
         let is_sel = selected == Some(lp.pin.number);
+        let painter = &dimmed(
+            painter,
+            hits.as_ref().is_some_and(|h| !h.contains(&lp.pin.number)),
+        );
         let (x, y) = (rr.min.x, rr.min.y);
         let hit = match ScreenSide::from_outward(rot.vec(lp.outward)) {
             ScreenSide::Right => {
@@ -159,6 +181,7 @@ fn render_diamond(
     ui: &mut egui::Ui,
 ) -> Option<usize> {
     let selected = mcu.selected_pin;
+    let hits = mcu.pin_search_highlight();
     let locals: Vec<PinGeom> = pin_geometry(mcu, chip_rect).collect();
 
     let mut bb = egui::Rect::from_points(&rot.quad(chip_rect));
@@ -177,6 +200,10 @@ fn render_diamond(
     for lp in &locals {
         let is_sel = selected == Some(lp.pin.number);
         let hovered = hover_local.is_some_and(|p| lp.rect.contains(p));
+        let painter = &dimmed(
+            painter,
+            hits.as_ref().is_some_and(|h| !h.contains(&lp.pin.number)),
+        );
         painter.add(egui::Shape::convex_polygon(
             rot.quad(lp.rect),
             lp.pin.get_background_color(),
@@ -272,6 +299,7 @@ pub fn render_pins_and_detect_clicks(
 ) -> Option<usize> {
     let mut clicked_pin: Option<usize> = None;
     let selected = mcu.selected_pin;
+    let hits = mcu.pin_search_highlight();
 
     for g in pin_geometry(mcu, chip_rect) {
         // Balls live INSIDE the body — the very area a selected pin's function
@@ -283,6 +311,13 @@ pub fn render_pins_and_detect_clicks(
             continue;
         }
         let is_sel = selected == Some(g.pin.number);
+        // Pins the search filtered out are painted through a half-opacity
+        // painter — background, label, number and all, so nothing of theirs
+        // stays at full strength.
+        let painter = &dimmed(
+            painter,
+            hits.as_ref().is_some_and(|h| !h.contains(&g.pin.number)),
+        );
         let hit = match &g.place {
             PinPlace::Edge(side) => {
                 let draw = match side {
@@ -308,13 +343,9 @@ pub fn render_pins_and_detect_clicks(
         // The pin's identity on the package: its number along an edge, its
         // designator ("A2") under a ball.
         match &g.place {
-            PinPlace::Edge(_) => draw_number(
-                painter,
-                selected.is_none(),
-                g.num_pos,
-                g.num_align,
-                g.pin,
-            ),
+            PinPlace::Edge(_) => {
+                draw_number(painter, selected.is_none(), g.num_pos, g.num_align, g.pin)
+            }
             PinPlace::Ball { designator } => draw_designator(
                 painter,
                 selected.is_none(),
