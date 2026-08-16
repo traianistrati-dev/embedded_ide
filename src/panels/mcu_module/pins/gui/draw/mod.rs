@@ -75,6 +75,62 @@ impl Pin {
         (rect, clicked)
     }
 
+    /// Draws the pin as a BALL of a grid package (WLCSP / BGA) — a filled circle
+    /// inside the chip body, with the name across it. Returns `clicked`.
+    ///
+    /// Circles, not the edge stub's rectangle, because that is how every ballout
+    /// drawing shows them, and because a pad under the die has no edge to stick
+    /// out of. Interaction is the shared [`listeners::listen_on_rect`] contract
+    /// (same id scheme, same hover/selected colours) with the fill re-drawn as a
+    /// circle on top.
+    pub fn draw_ball(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        ui: Option<&egui::Ui>,
+        is_selected: bool,
+    ) -> bool {
+        let radius = rect.width().min(rect.height()) / 2.0;
+        // The rect fill this paints is immediately covered by the circle below;
+        // what we want from it is the interaction + the hover/selected colour.
+        let clicked = ui.map_or(false, |ui| {
+            listeners::listen_on_rect(self, painter, ui, rect, is_selected)
+        });
+        let hovered = ui.is_some_and(|ui| {
+            ui.rect_contains_pointer(rect) && !self.reserved
+        });
+        let fill = if is_selected {
+            egui::Color32::from_rgb(60, 60, 80)
+        } else if hovered {
+            egui::Color32::DARK_GRAY
+        } else {
+            self.get_background_color()
+        };
+        // Repaint the body over the square the listener filled, so the ball
+        // reads as round at every state.
+        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(45, 45, 55));
+        painter.circle_filled(rect.center(), radius, fill);
+
+        let (text_color, font_size, stroke_w) = selection_style(self, is_selected);
+        let font = egui::FontId::monospace(font_size);
+        let label = text::fit(painter, &self.name, font.clone(), radius * 2.0 - 4.0);
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            font,
+            text_color,
+        );
+        if is_selected {
+            painter.circle_stroke(
+                rect.center(),
+                radius,
+                egui::Stroke::new(stroke_w, SELECTION_COLOR),
+            );
+        }
+        clicked
+    }
+
     /// Draws pin on the left side. Returns (rect, clicked).
     pub fn draw_left(
         &self,

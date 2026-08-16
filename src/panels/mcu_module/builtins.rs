@@ -52,6 +52,8 @@ mod tests {
 
     fn layout(m: &Mcu) -> PinLayout {
         PinLayout {
+            // Built-ins are all edge-packaged; a ball grid comes from a `.ron`.
+            grid: None,
             top: m.top_pins.iter().map(PinDef::from_pin).collect(),
             bottom: m.bottom_pins.iter().map(PinDef::from_pin).collect(),
             left: m.left_pins.iter().map(PinDef::from_pin).collect(),

@@ -8,6 +8,7 @@
 
 pub mod chip;
 pub mod clock;
+pub mod geometry;
 pub mod info;
 pub mod io_arrows;
 pub mod layout;
@@ -38,8 +39,12 @@ impl Mcu {
         // Drop any module wire whose pin was re-purposed away from USART.
         self.reconcile_modules();
 
-        let (mcu_width, mcu_height, base_w, base_h) =
-            layout::calculate_layout(top_count, left_count);
+        let (mcu_width, mcu_height, base_w, base_h) = match &self.grid {
+            // A ball-grid package has no edge pins to size the body from — the
+            // body must instead be big enough to HOLD the grid.
+            Some(g) => layout::calculate_grid_layout(geometry::grid_body_size(g)),
+            None => layout::calculate_layout(top_count, left_count),
+        };
 
         // Diagram rotation (view-only): a 2-sided chip turns 90°, a 4-sided one
         // becomes a 45° diamond. `local_chip` is the un-rotated body used to

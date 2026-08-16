@@ -191,6 +191,10 @@ pub struct McuForm {
     pub imported_clock: Option<ClockDef>,
     // Pins, per side
     pub pins: [Vec<PinRow>; 4],
+    /// A ball grid (WLCSP / BGA) the form cannot re-author yet: carried through
+    /// Edit -> Save verbatim, for the same reason as `imported_clock`. Editing a
+    /// grid chip must not silently drop its balls.
+    pub grid: Option<crate::panels::mcu_module::mcu_def::PinGridDef>,
     /// True when the form was opened to EDIT/clone an existing chip (so the
     /// dialog can warn before an id collision silently overrides a built-in).
     pub editing: bool,
@@ -206,6 +210,7 @@ impl McuForm {
     /// A blank STM32-flavoured starting point (the most common authoring case).
     pub fn blank() -> Self {
         Self {
+            grid: None,
             id: String::new(),
             display_name: String::new(),
             family: "stm32f1".into(),
@@ -305,6 +310,7 @@ impl McuForm {
                 .collect()
         };
         Self {
+            grid: def.pins.grid.clone(),
             id: def.id.clone(),
             display_name: def.display_name.clone(),
             family: def.family.clone(),
@@ -418,8 +424,18 @@ impl McuForm {
                 self.family.trim()
             ));
         }
-        if self.pins.iter().all(|s| s.is_empty()) {
+        // A ball-grid chip legitimately has NO edge pins — its pads are in the
+        // grid, which the form carries but does not edit.
+        if self.pins.iter().all(|s| s.is_empty()) && self.grid.is_none() {
             w.push("No pins defined — the Pins canvas will be empty.".into());
+        }
+        if let Some(g) = &self.grid {
+            w.push(format!(
+                "{} ball(s) on a {}x{} grid. The form edits edge pins only, so the                  grid is carried through unchanged — edit it in the .ron.",
+                g.cells.len(),
+                g.rows,
+                g.cols
+            ));
         }
         if self.package.trim().is_empty() {
             w.push(
@@ -495,6 +511,11 @@ impl McuForm {
                 bottom: side(&self.pins[1]),
                 left: side(&self.pins[2]),
                 right: side(&self.pins[3]),
+                // The form edits the four sides only; a ball grid is authored in
+                // the `.ron` for now (the grid editor is a later phase). Editing
+                // a grid chip here would silently drop its balls, which is why
+                // `mcu_form_dialog` refuses to open one — see `from_definition`.
+                grid: self.grid.clone(),
             },
             clock: self.effective_clock(),
             // Each graph family ships its own ceilings so its preset isn't

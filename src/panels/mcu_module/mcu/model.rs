@@ -110,6 +110,86 @@ impl AutoBuild {
 
 // ── Mcu struct ───────────────────────────────────────────────────────────────
 
+/// A pad at one cell of the package's ball grid. Sparse: only the cells that
+/// carry a ball are listed, which is what reproduces the staggered patterns
+/// small WLCSP parts use.
+#[derive(Clone)]
+pub struct GridCell {
+    /// 0-based, from the top — row 0 is "A".
+    pub row: usize,
+    /// 0-based, from the left — column 0 is "1".
+    pub col: usize,
+    pub pin: Pin,
+}
+
+impl GridCell {
+    /// The datasheet designator for this cell — "A2", "F3".
+    ///
+    /// Row letters follow JEDEC: **I, O, Q, S, X and Z are skipped**, because
+    /// they read as 1, 0, and each other on a package photo. Column numbers
+    /// start at 1.
+    pub fn designator(&self) -> String {
+        format!("{}{}", row_letter(self.row), self.col + 1)
+    }
+}
+
+/// The JEDEC row alphabet: I, O, Q, S, X and Z are absent because they read as
+/// 1, 0, and each other on a package photo.
+const ROW_LETTERS: &[u8] = b"ABCDEFGHJKLMNPRTUVWY";
+
+/// JEDEC row letter for a 0-based row index.
+pub fn row_letter(row: usize) -> String {
+    let n = ROW_LETTERS.len();
+    // Past the alphabet, JEDEC doubles the letter: AA, AB, … Rare, but a 21-row
+    // BGA must not silently label two rows the same.
+    if row < n {
+        (ROW_LETTERS[row] as char).to_string()
+    } else {
+        let (hi, lo) = (row / n - 1, row % n);
+        format!("{}{}", ROW_LETTERS[hi] as char, ROW_LETTERS[lo] as char)
+    }
+}
+
+/// 0-based row index for a JEDEC row letter — the inverse of [`row_letter`].
+/// `None` for a letter the standard doesn't use.
+pub fn row_index(letters: &str) -> Option<usize> {
+    let n = ROW_LETTERS.len();
+    let idx = |c: char| ROW_LETTERS.iter().position(|l| *l as char == c);
+    let mut chars = letters.chars();
+    let first = idx(chars.next()?)?;
+    match chars.next() {
+        None => Some(first),
+        Some(c) => {
+            let second = idx(c)?;
+            chars.next().is_none().then_some((first + 1) * n + second)
+        }
+    }
+}
+
+/// Split a package designator ("A2", "AB13") into 0-based `(row, col)`.
+///
+/// `None` for anything that isn't letters-then-digits — a plain pin number, an
+/// empty string, a thermal pad's blank position.
+pub fn parse_designator(pos: &str) -> Option<(usize, usize)> {
+    let pos = pos.trim();
+    let split = pos.find(|c: char| c.is_ascii_digit())?;
+    if split == 0 {
+        return None; // starts with a digit: a pin NUMBER, not a designator
+    }
+    let (letters, digits) = pos.split_at(split);
+    let col: usize = digits.parse().ok()?;
+    // Columns are 1-based on a package; 0 would be a malformed designator.
+    Some((row_index(letters)?, col.checked_sub(1)?))
+}
+
+/// The package's ball grid.
+#[derive(Clone)]
+pub struct PinGrid {
+    pub rows: usize,
+    pub cols: usize,
+    pub cells: Vec<GridCell>,
+}
+
 /// Represents a microcontroller with four sides of pins and UI state.
 #[derive(Clone)]
 pub struct Mcu {
@@ -129,6 +209,15 @@ pub struct Mcu {
     pub bottom_pins: Vec<Pin>,
     pub left_pins: Vec<Pin>,
     pub right_pins: Vec<Pin>,
+    /// Ball grid for packages whose pads sit UNDER the die instead of along its
+    /// edges — WLCSP, BGA, and the sparse staggered arrays small parts use
+    /// (STM32C011D6Yx WLCSP12 has 12 balls in a 4×6 grid).
+    ///
+    /// Additive on purpose: the four side vectors stay, empty, and everything
+    /// downstream reaches pins through [`Mcu::iter_all_pins`], which chains this
+    /// in. So autowire, codegen, `mcu.config` persistence and jump-to-code work
+    /// on a ball-grid chip without knowing it exists — only the LAYOUT differs.
+    pub grid: Option<PinGrid>,
     /// Currently selected pin number (None = no pin selected)
     pub selected_pin: Option<usize>,
     /// Function whose ⓘ info window is open (None = closed)

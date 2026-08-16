@@ -32,6 +32,42 @@ const SB_W: f32 = 4.0;
 const SB_GAP: f32 = 3.0;
 /// Height of a GPIO-mode chip (the row under the active function).
 const MODE_H: f32 = 19.0;
+/// Side of the square close button in the list's top-right corner.
+const CLOSE_W: f32 = 18.0;
+
+/// The close button in the header's top-right corner: paints it, returns whether
+/// it was clicked.
+///
+/// The ✕ is drawn with two strokes rather than set as text — everything else in
+/// this list is painted (it scales with the canvas' `Scene`), and a glyph would
+/// also have to survive the font fallback the rest of the UI works around.
+fn draw_close(painter: &egui::Painter, ui: &mut egui::Ui, rect: egui::Rect, num: usize) -> bool {
+    let resp = ui.interact(rect, ui.id().with(("fn_close", num)), egui::Sense::click());
+    let (bg, fg) = if resp.hovered() {
+        (
+            egui::Color32::from_rgb(150, 60, 60),
+            egui::Color32::WHITE,
+        )
+    } else {
+        (
+            egui::Color32::from_rgb(55, 55, 75),
+            egui::Color32::from_rgb(200, 200, 215),
+        )
+    };
+    painter.rect_filled(rect, 4.0, bg);
+    let c = rect.center();
+    let r = 4.5;
+    let stroke = egui::Stroke::new(1.6, fg);
+    painter.line_segment(
+        [egui::pos2(c.x - r, c.y - r), egui::pos2(c.x + r, c.y + r)],
+        stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(c.x - r, c.y + r), egui::pos2(c.x + r, c.y - r)],
+        stroke,
+    );
+    resp.clicked()
+}
 
 /// The functions offered for `num`: everything the pin can do, minus what is
 /// already taken by another pin (GPIO In/Out are always offered — any pin can be
@@ -90,6 +126,14 @@ pub fn draw_pin_functions(
         egui::FontId::proportional(13.0),
         egui::Color32::WHITE,
     );
+    // Close, top-right of the header — the same "focus nothing" as clicking the
+    // pin again or clicking empty canvas. Applied at the end of the function so
+    // this frame still draws a complete list.
+    let close_rect = egui::Rect::from_min_size(
+        egui::pos2(content_rect.right() - 8.0 - CLOSE_W, content_rect.top() + 6.0),
+        egui::vec2(CLOSE_W, CLOSE_W),
+    );
+    let close_clicked = draw_close(painter, ui, close_rect, num);
     let sep_y = header_pos.y + 14.0;
     painter.line_segment(
         [
@@ -283,6 +327,11 @@ pub fn draw_pin_functions(
     }
 
     // ── Apply ────────────────────────────────────────────────────────────────
+    if close_clicked {
+        mcu.selected_pin = None;
+        mcu.show_info = None;
+        mcu.fn_scroll_offset = 0.0;
+    }
     // Applying also clears `show_info`, so it runs before the toggle below.
     let mut changed = new_function.and_then(|(n, f)| mcu.apply_pin_function(n, f));
     // A mode change rewrites the pin's `let` line (it is in the state hash), so

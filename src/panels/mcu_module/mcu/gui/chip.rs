@@ -1,14 +1,11 @@
 //! Chip body and pin rendering — draws the MCU chip and its pins on 4 sides.
 
+use super::geometry::{PinGeom, PinPlace, PinSide, pin_geometry};
 use super::layout;
 use super::rotate::{Rot, RotMode, ScreenSide};
-use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+use crate::panels::mcu_module::mcu::model::{Mcu, PIN_HEIGHT, PIN_WIDTH};
 use crate::panels::mcu_module::pins::logic::pin::{PIN_FONT_SIZE, Pin};
 use eframe::egui;
-
-// ── Pin-number label (drawn INSIDE the chip body) ───────────────────────────
-/// Inset from the chip edge for the number.
-const NUM_MARGIN: f32 = 4.0;
 /// Default number colour (plain GPIO / analog / power pins).
 const NUM_COLOR: egui::Color32 = egui::Color32::WHITE;
 /// Number colour for pins carrying a serial-bus function (USART / SPI / I2C /
@@ -42,6 +39,28 @@ fn draw_number(
     painter.text(pos, align, pin.number, num_font(), color);
 }
 
+/// The package designator of a ball ("A2"), drawn just under it — the label the
+/// datasheet's ballout puts there, and the only way to find a ball on a real
+/// package (its pin NUMBER is our own ordinal and means nothing to the board).
+fn draw_designator(
+    painter: &egui::Painter,
+    show: bool,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    designator: &str,
+    pin: &Pin,
+) {
+    if !show {
+        return;
+    }
+    let color = if pin.has_bus_function() {
+        NUM_COLOR_BUS
+    } else {
+        NUM_COLOR
+    };
+    painter.text(pos, align, designator, num_font(), color);
+}
+
 /// Draw the chip body (gray rectangle).
 pub fn draw_chip_body(painter: &egui::Painter, chip_rect: egui::Rect) {
     painter.rect_filled(chip_rect, 4.0, egui::Color32::from_rgb(45, 45, 55));
@@ -57,75 +76,9 @@ pub fn draw_chip_body_diamond(painter: &egui::Painter, chip_rect: egui::Rect, ro
 }
 
 // ── Rotated pin rendering ────────────────────────────────────────────────────
-/// One pin's LOCAL (un-rotated) geometry — identical to the default per-side
-/// layout above — so the rotated renderers can compute once then apply [`Rot`].
-struct LocalPin<'a> {
-    pin: &'a Pin,
-    /// Pin stub rect (local frame).
-    rect: egui::Rect,
-    /// Unit vector pointing away from the chip.
-    outward: egui::Vec2,
-    /// Pin-number position, just inside the chip edge.
-    num_pos: egui::Pos2,
-}
-
-/// Every pin with its local geometry, mirroring [`render_pins_and_detect_clicks`].
-fn local_pins(mcu: &Mcu, chip_rect: egui::Rect) -> Vec<LocalPin<'_>> {
-    let mut v = Vec::new();
-    for (i, pin) in mcu.right_pins.iter().enumerate() {
-        let y = chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(chip_rect.right(), y),
-            egui::vec2(PIN_HEIGHT, PIN_WIDTH),
-        );
-        v.push(LocalPin {
-            pin,
-            rect,
-            outward: egui::vec2(1.0, 0.0),
-            num_pos: egui::pos2(chip_rect.right() - NUM_MARGIN, y + PIN_WIDTH / 2.0),
-        });
-    }
-    for (i, pin) in mcu.left_pins.iter().enumerate() {
-        let y = chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(chip_rect.left() - PIN_HEIGHT, y),
-            egui::vec2(PIN_HEIGHT, PIN_WIDTH),
-        );
-        v.push(LocalPin {
-            pin,
-            rect,
-            outward: egui::vec2(-1.0, 0.0),
-            num_pos: egui::pos2(chip_rect.left() + NUM_MARGIN, y + PIN_WIDTH / 2.0),
-        });
-    }
-    for (i, pin) in mcu.top_pins.iter().enumerate() {
-        let x = chip_rect.left() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(x, chip_rect.top() - PIN_HEIGHT),
-            egui::vec2(PIN_WIDTH, PIN_HEIGHT),
-        );
-        v.push(LocalPin {
-            pin,
-            rect,
-            outward: egui::vec2(0.0, -1.0),
-            num_pos: egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.top() + NUM_MARGIN),
-        });
-    }
-    for (i, pin) in mcu.bottom_pins.iter().enumerate() {
-        let x = chip_rect.left() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(x, chip_rect.bottom()),
-            egui::vec2(PIN_WIDTH, PIN_HEIGHT),
-        );
-        v.push(LocalPin {
-            pin,
-            rect,
-            outward: egui::vec2(0.0, 1.0),
-            num_pos: egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.bottom() - NUM_MARGIN),
-        });
-    }
-    v
-}
+// Geometry comes from `super::geometry` — the same source the un-rotated
+// renderer and the module anchors read, so a rotated diagram can't drift from
+// an upright one.
 
 /// Render pins for a rotated chip. `chip_rect` is the LOCAL (un-rotated) body
 /// rect; `rot` carries the angle + centre. Returns the clicked pin number.
@@ -155,7 +108,7 @@ fn render_quarter(
 ) -> Option<usize> {
     let selected = mcu.selected_pin;
     let mut clicked = None;
-    for lp in local_pins(mcu, chip_rect) {
+    for lp in pin_geometry(mcu, chip_rect) {
         let rr = egui::Rect::from_points(&rot.quad(lp.rect));
         let is_sel = selected == Some(lp.pin.number);
         let (x, y) = (rr.min.x, rr.min.y);
@@ -206,7 +159,7 @@ fn render_diamond(
     ui: &mut egui::Ui,
 ) -> Option<usize> {
     let selected = mcu.selected_pin;
-    let locals = local_pins(mcu, chip_rect);
+    let locals: Vec<PinGeom> = pin_geometry(mcu, chip_rect).collect();
 
     let mut bb = egui::Rect::from_points(&rot.quad(chip_rect));
     for lp in &locals {
@@ -305,8 +258,12 @@ fn render_diamond(
     clicked
 }
 
-/// Render all pins on all 4 sides and detect clicks.
+/// Render every pin upright and detect clicks.
 /// Returns `Some(pin_number)` if a pin was clicked.
+///
+/// One loop over [`pin_geometry`], not four hand-rolled per-side loops: the
+/// placement is the shared one, and only the per-side DRAW call differs (each
+/// `Pin::draw_*` puts the label and the notch on its own edge).
 pub fn render_pins_and_detect_clicks(
     mcu: &Mcu,
     painter: &egui::Painter,
@@ -316,107 +273,59 @@ pub fn render_pins_and_detect_clicks(
     let mut clicked_pin: Option<usize> = None;
     let selected = mcu.selected_pin;
 
-    // RIGHT
-    for (i, pin) in mcu.right_pins.iter().enumerate() {
-        let y = chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let x = chip_rect.right();
-        let (_, hit) = pin.draw_right(
-            &painter,
-            x,
-            y,
-            PIN_HEIGHT,
-            PIN_WIDTH,
-            Some(ui),
-            selected == Some(pin.number),
-        );
-        // Pin number inside the chip, right-aligned just inside the right edge.
-        draw_number(
-            painter,
-            selected.is_none(),
-            egui::pos2(chip_rect.right() - NUM_MARGIN, y + PIN_WIDTH / 2.0),
-            egui::Align2::RIGHT_CENTER,
-            pin,
-        );
-        if hit {
-            clicked_pin = Some(pin.number);
+    for g in pin_geometry(mcu, chip_rect) {
+        // Balls live INSIDE the body — the very area a selected pin's function
+        // list takes over. Drawing them under it would show through the rows and,
+        // worse, keep a click target beneath every row. So they step aside while
+        // the list is open, exactly as the pin numbers do; clicking off the chip
+        // closes the list and brings them back.
+        if selected.is_some() && matches!(g.place, PinPlace::Ball { .. }) {
+            continue;
         }
-    }
-
-    // LEFT
-    for (i, pin) in mcu.left_pins.iter().enumerate() {
-        let y = chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let x = chip_rect.left() - PIN_HEIGHT;
-        let (_, hit) = pin.draw_left(
-            &painter,
-            x,
-            y,
-            PIN_HEIGHT,
-            PIN_WIDTH,
-            Some(ui),
-            selected == Some(pin.number),
-        );
-        // Pin number inside the chip, left-aligned just inside the left edge.
-        draw_number(
-            painter,
-            selected.is_none(),
-            egui::pos2(chip_rect.left() + NUM_MARGIN, y + PIN_WIDTH / 2.0),
-            egui::Align2::LEFT_CENTER,
-            pin,
-        );
-        if hit {
-            clicked_pin = Some(pin.number);
+        let is_sel = selected == Some(g.pin.number);
+        let hit = match &g.place {
+            PinPlace::Edge(side) => {
+                let draw = match side {
+                    PinSide::Right => Pin::draw_right,
+                    PinSide::Left => Pin::draw_left,
+                    PinSide::Top => Pin::draw_top,
+                    PinSide::Bottom => Pin::draw_bottom,
+                };
+                draw(
+                    g.pin,
+                    painter,
+                    g.rect.min.x,
+                    g.rect.min.y,
+                    PIN_HEIGHT,
+                    PIN_WIDTH,
+                    Some(ui),
+                    is_sel,
+                )
+                .1
+            }
+            PinPlace::Ball { .. } => g.pin.draw_ball(painter, g.rect, Some(ui), is_sel),
+        };
+        // The pin's identity on the package: its number along an edge, its
+        // designator ("A2") under a ball.
+        match &g.place {
+            PinPlace::Edge(_) => draw_number(
+                painter,
+                selected.is_none(),
+                g.num_pos,
+                g.num_align,
+                g.pin,
+            ),
+            PinPlace::Ball { designator } => draw_designator(
+                painter,
+                selected.is_none(),
+                g.num_pos,
+                g.num_align,
+                designator,
+                g.pin,
+            ),
         }
-    }
-
-    // TOP
-    for (i, pin) in mcu.top_pins.iter().enumerate() {
-        let x = chip_rect.left() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let y = chip_rect.top() - PIN_HEIGHT;
-        let (_, hit) = pin.draw_top(
-            &painter,
-            x,
-            y,
-            PIN_HEIGHT,
-            PIN_WIDTH,
-            Some(ui),
-            selected == Some(pin.number),
-        );
-        // Pin number inside the chip, just below the top edge.
-        draw_number(
-            painter,
-            selected.is_none(),
-            egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.top() + NUM_MARGIN),
-            egui::Align2::CENTER_TOP,
-            pin,
-        );
         if hit {
-            clicked_pin = Some(pin.number);
-        }
-    }
-
-    // BOTTOM
-    for (i, pin) in mcu.bottom_pins.iter().enumerate() {
-        let x = chip_rect.left() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING);
-        let y = chip_rect.bottom();
-        let (_, hit) = pin.draw_bottom(
-            &painter,
-            x,
-            y,
-            PIN_HEIGHT,
-            PIN_WIDTH,
-            Some(ui),
-            selected == Some(pin.number),
-        );
-        // Pin number inside the chip, just above the bottom edge.
-        draw_number(
-            painter,
-            selected.is_none(),
-            egui::pos2(x + PIN_WIDTH / 2.0, chip_rect.bottom() - NUM_MARGIN),
-            egui::Align2::CENTER_BOTTOM,
-            pin,
-        );
-        if hit {
-            clicked_pin = Some(pin.number);
+            clicked_pin = Some(g.pin.number);
         }
     }
 

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::clock::graph::GraphClock;
 use super::clock::{ClockConfig, ClockLimits, ClockPreset, Stm32f1Clock};
 use super::mcu::Mcu;
+use super::mcu::model::{GridCell, PinGrid};
 use super::mcu_catalog::ToolchainKind;
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
@@ -57,7 +58,32 @@ impl PinDef {
     }
 }
 
-/// The four physical sides of the chip, drawn around the package.
+/// One pad of a ball grid: where it sits, and the pin itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GridCellDef {
+    /// 0-based row from the top (0 = "A"), column from the left (0 = "1").
+    pub row: usize,
+    pub col: usize,
+    pub pin: PinDef,
+}
+
+/// A ball grid — WLCSP / BGA, where the pads sit under the die rather than
+/// along its edges. Sparse: list only the cells that carry a ball, which is how
+/// a staggered pattern like WLCSP12's is described.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PinGridDef {
+    pub rows: usize,
+    pub cols: usize,
+    pub cells: Vec<GridCellDef>,
+}
+
+/// Where a chip's pins are: along the four sides, in a ball grid, or both.
+///
+/// `grid` is an ADDITIVE option rather than `PinLayout` becoming an enum. An
+/// enum would change the serialized shape of `layout:` and break every `.ron`
+/// already on disk — the bundled ones and, worse, every chip a user imported
+/// from ST's XML. With a defaulted field, an old file parses unchanged and an
+/// edge-packaged chip is exactly what it always was.
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct PinLayout {
     #[serde(default)]
@@ -68,6 +94,8 @@ pub struct PinLayout {
     pub left: Vec<PinDef>,
     #[serde(default)]
     pub right: Vec<PinDef>,
+    #[serde(default)]
+    pub grid: Option<PinGridDef>,
 }
 
 /// Project-generation parameters: target triple, HAL dependency line, memory
@@ -205,6 +233,19 @@ impl McuDefinition {
             map(&self.pins.right),
         );
         mcu.id = self.id.clone();
+        mcu.grid = self.pins.grid.as_ref().map(|g| PinGrid {
+            rows: g.rows,
+            cols: g.cols,
+            cells: g
+                .cells
+                .iter()
+                .map(|c| GridCell {
+                    row: c.row,
+                    col: c.col,
+                    pin: c.pin.to_pin(),
+                })
+                .collect(),
+        });
         mcu.clock = self.clock.to_config(&self.clock_limits);
         // The definition's tree is this chip's factory clock — snapshot it for
         // the Clock tab's "Reset" button before any saved state is applied.
@@ -241,6 +282,39 @@ mod tests {
 
     fn stm_def() -> McuDefinition {
         builtin_for("stm32f103c8t6").expect("built-in stm32f103c8t6 definition")
+    }
+
+    /// The WLCSP12 example must parse and build — it is the reference for the
+    /// ball-grid format, and a `.ron` nobody loads is documentation that rots.
+    #[test]
+    fn the_ball_grid_example_parses_and_builds() {
+        const SRC: &str = include_str!("../../../assets/mcus/examples/stm32c011d6yx_wlcsp12.ron");
+        let def: McuDefinition = ron::from_str(SRC).expect("the WLCSP12 example must parse");
+        let grid = def.pins.grid.as_ref().expect("it is a ball-grid chip");
+        assert_eq!((grid.rows, grid.cols), (6, 4));
+        assert_eq!(grid.cells.len(), 12, "WLCSP12 has twelve balls");
+        assert!(
+            def.pins.top.is_empty() && def.pins.left.is_empty(),
+            "a WLCSP has no edge pins at all"
+        );
+
+        let mcu = def.build_mcu();
+        assert_eq!(
+            mcu.iter_all_pins().count(),
+            12,
+            "balls must reach the normal pin iterator, or codegen and autowire \
+             would not see them"
+        );
+        assert!(mcu.find_pin(1).is_some_and(|p| p.name == "PB6"));
+    }
+
+    /// An existing `.ron` predates the `grid` field and must still parse — the
+    /// reason the layout gained an optional field instead of becoming an enum.
+    #[test]
+    fn a_definition_without_a_grid_still_parses() {
+        let layout: PinLayout = ron::from_str("(top: [], bottom: [], left: [], right: [])")
+            .expect("the pre-grid shape must still load");
+        assert!(layout.grid.is_none());
     }
 
     #[test]

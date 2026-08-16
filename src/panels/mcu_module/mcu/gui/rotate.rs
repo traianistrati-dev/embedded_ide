@@ -30,7 +30,12 @@ pub enum RotMode {
 impl RotMode {
     /// Pick the mode from the chip's package and its `rotated` toggle.
     pub fn of(mcu: &Mcu) -> Self {
-        if !mcu.rotated {
+        // A ball grid has no edges to rotate onto: turning it means transposing
+        // (row, column), which is a different operation from either mode here.
+        // Until that exists, a grid package simply doesn't rotate.
+        if mcu.grid.is_some() {
+            RotMode::None
+        } else if !mcu.rotated {
             RotMode::None
         } else if mcu.is_quad_package() {
             RotMode::Diamond

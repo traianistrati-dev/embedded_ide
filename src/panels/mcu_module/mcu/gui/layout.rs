@@ -21,6 +21,14 @@ pub fn calculate_layout(top_count: usize, left_count: usize) -> (f32, f32, f32, 
     (mcu_width, mcu_height, canvas_w, canvas_h)
 }
 
+/// Body + canvas for a BALL-GRID package, whose size comes from the grid it has
+/// to contain rather than from pin counts along the edges. The canvas keeps the
+/// same margin the edge-pin layout leaves, so the two look consistent side by
+/// side in the chip selector.
+pub fn calculate_grid_layout(body: egui::Vec2) -> (f32, f32, f32, f32) {
+    (body.x, body.y, body.x + 20.0, body.y + 20.0)
+}
+
 /// Calculate pin Y position for pins on left/right sides.
 pub fn pin_y_position(i: usize) -> f32 {
     PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING)

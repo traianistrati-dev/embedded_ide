@@ -1,0 +1,105 @@
+// STM32C011D6Yx — WLCSP12, the ball-grid layout example.
+//
+// The 12 balls sit in a 4x6 STAGGERED grid (row A on columns 2 and 4, row B on
+// 1 and 3, and so on), exactly as Figure 4 of the datasheet draws them. Only the
+// cells that carry a ball are listed — that sparseness IS the pattern.
+//
+// Row/col are 0-based: row 0 is "A", col 0 is "1". The IDE derives the
+// designator ("A2", "F3") from them, so nothing here repeats it.
+//
+// Two things this file does NOT solve yet, both listed as later phases:
+//  * Several balls carry MORE than one die pad (F1 is PA3/PA4/PA5/PA6, F3 is
+//    PF2-NRST/PA0/PA1/PA2, D1 is PA11[PA9]/PA8). Here each is one pin named
+//    after its whole group; modelling them as several pins sharing a cell is
+//    the phase that makes each selectable on its own.
+//  * `number` is our own ordinal (1..12, reading order), NOT a package number —
+//    a WLCSP has no pin numbers, only designators. It stays a `usize` because
+//    codegen, `mcu.config` and jump-to-code all key off it.
+//
+// This lives in `examples/` rather than being a bundled chip: the project
+// parameters below are plausible but unverified, and the C0 family has no
+// codegen backend yet. Copy it into your user `mcus/` folder to load it.
+McuDefinition(
+    id: "stm32c011d6yx-wlcsp12",
+    display_name: "STM32C011D6Yx (WLCSP12)",
+    family: "stm32c0",
+    package: "WLCSP12",
+    cpu: "ARM Cortex-M0+",
+    toolchain: RustEmbedded,
+    project: ProjectDef(
+        pkg_name: "stm32c011d6yx",
+        target: "thumbv6m-none-eabi",
+        flash_origin: "0x08000000",
+        flash_size: "32K",
+        ram_origin: "0x20000000",
+        ram_size: "6K",
+        hal_dep: "stm32c0xx-hal = { version = \"0.0\", features = [\"stm32c011\", \"rt\"] }",
+        probe_chip: "STM32C011D6Yx",
+        memory_comment: "STM32C011D6Yx  —  32 KiB Flash / 6 KiB RAM (WLCSP12)",
+    ),
+    pins: PinLayout(
+        top: [],
+        bottom: [],
+        left: [],
+        right: [],
+        grid: Some(PinGridDef(
+            rows: 6,
+            cols: 4,
+            cells: [
+                // ── Row A ──────────────────────────────────────────────────
+                GridCellDef(row: 0, col: 1, pin: PinDef(
+                    number: 1, name: "PB6",
+                    functions: [GpioInput, GpioOutput, UsartTx(1), I2cScl(1)],
+                )),
+                GridCellDef(row: 0, col: 3, pin: PinDef(
+                    number: 2, name: "PC15",
+                    functions: [GpioInput, GpioOutput],
+                )),
+                // ── Row B ──────────────────────────────────────────────────
+                GridCellDef(row: 1, col: 0, pin: PinDef(
+                    number: 3, name: "PA13",
+                    functions: [GpioInput, GpioOutput, SwdIo],
+                )),
+                GridCellDef(row: 1, col: 2, pin: PinDef(
+                    number: 4, name: "PC14",
+                    functions: [GpioInput, GpioOutput],
+                )),
+                // ── Row C ──────────────────────────────────────────────────
+                GridCellDef(row: 2, col: 1, pin: PinDef(
+                    number: 5, name: "PA14",
+                    functions: [GpioInput, GpioOutput, SwdClk],
+                )),
+                GridCellDef(row: 2, col: 3, pin: PinDef(
+                    number: 6, name: "VDD", reserved: true, functions: [],
+                )),
+                // ── Row D ──────────────────────────────────────────────────
+                GridCellDef(row: 3, col: 0, pin: PinDef(
+                    number: 7, name: "PA11/PA8",
+                    functions: [GpioInput, GpioOutput],
+                )),
+                GridCellDef(row: 3, col: 2, pin: PinDef(
+                    number: 8, name: "PB7",
+                    functions: [GpioInput, GpioOutput, UsartRx(1), I2cSda(1)],
+                )),
+                // ── Row E ──────────────────────────────────────────────────
+                GridCellDef(row: 4, col: 1, pin: PinDef(
+                    number: 9, name: "PA12/PA7",
+                    functions: [GpioInput, GpioOutput],
+                )),
+                GridCellDef(row: 4, col: 3, pin: PinDef(
+                    number: 10, name: "VSS", reserved: true, functions: [],
+                )),
+                // ── Row F ──────────────────────────────────────────────────
+                GridCellDef(row: 5, col: 0, pin: PinDef(
+                    number: 11, name: "PA3/PA4/PA5/PA6",
+                    functions: [GpioInput, GpioOutput],
+                )),
+                GridCellDef(row: 5, col: 2, pin: PinDef(
+                    number: 12, name: "NRST/PA0/PA1/PA2",
+                    functions: [GpioInput, GpioOutput],
+                )),
+            ],
+        )),
+    ),
+    clock: None,
+)

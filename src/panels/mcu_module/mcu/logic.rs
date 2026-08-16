@@ -83,6 +83,9 @@ impl Mcu {
             bottom_pins,
             left_pins,
             right_pins,
+            // Edge-packaged by default; a ball-grid chip fills this in
+            // afterwards (see `McuDefinition::build_mcu`).
+            grid: None,
             selected_pin: None,
             show_info: None,
             fn_scroll_offset: 0.0,
@@ -744,6 +747,9 @@ impl Mcu {
             .chain(self.bottom_pins.iter())
             .chain(self.left_pins.iter())
             .chain(self.right_pins.iter())
+            // Ball-grid pads are pins like any other — chaining them HERE is
+            // what lets autowire, codegen and persistence stay layout-blind.
+            .chain(self.grid.iter().flat_map(|g| g.cells.iter().map(|c| &c.pin)))
     }
 
     /// Iterator over every pin (all four sides), mutable.
@@ -753,6 +759,11 @@ impl Mcu {
             .chain(self.bottom_pins.iter_mut())
             .chain(self.left_pins.iter_mut())
             .chain(self.right_pins.iter_mut())
+            .chain(
+                self.grid
+                    .iter_mut()
+                    .flat_map(|g| g.cells.iter_mut().map(|c| &mut c.pin)),
+            )
     }
 
     /// Auto-assigns partner functions when `source_pin` receives `func`: the

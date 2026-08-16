@@ -2,7 +2,7 @@
 //! Pins canvas — a simplified schematic. Read-only (add/remove is in the Pins
 //! tab toolbar; config is the Module panel).
 
-use super::super::model::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};
+use super::super::model::{Mcu, PIN_HEIGHT};
 use super::rotate::Rot;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
@@ -190,37 +190,9 @@ fn pin_anchor_local(
     chip_rect: egui::Rect,
     pin_num: usize,
 ) -> Option<(egui::Pos2, egui::Vec2)> {
-    let row_y = |i: usize| {
-        chip_rect.top() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING) + PIN_WIDTH / 2.0
-    };
-    let col_x = |i: usize| {
-        chip_rect.left() + PIN_SPACING + i as f32 * (PIN_WIDTH + PIN_SPACING) + PIN_WIDTH / 2.0
-    };
-    if let Some(i) = mcu.right_pins.iter().position(|p| p.number == pin_num) {
-        return Some((
-            egui::pos2(chip_rect.right() + PIN_HEIGHT, row_y(i)),
-            egui::vec2(1.0, 0.0),
-        ));
-    }
-    if let Some(i) = mcu.left_pins.iter().position(|p| p.number == pin_num) {
-        return Some((
-            egui::pos2(chip_rect.left() - PIN_HEIGHT, row_y(i)),
-            egui::vec2(-1.0, 0.0),
-        ));
-    }
-    if let Some(i) = mcu.top_pins.iter().position(|p| p.number == pin_num) {
-        return Some((
-            egui::pos2(col_x(i), chip_rect.top() - PIN_HEIGHT),
-            egui::vec2(0.0, -1.0),
-        ));
-    }
-    if let Some(i) = mcu.bottom_pins.iter().position(|p| p.number == pin_num) {
-        return Some((
-            egui::pos2(col_x(i), chip_rect.bottom() + PIN_HEIGHT),
-            egui::vec2(0.0, 1.0),
-        ));
-    }
-    None
+    // The same placement the chip is drawn from — a wire that computed its own
+    // would land beside the pin the moment either formula moved.
+    super::geometry::pin_geom(mcu, chip_rect, pin_num).map(|g| (g.anchor(), g.outward))
 }
 
 /// A fixed-size arrowhead at `to`, pointing along `from → to`. Used on custom

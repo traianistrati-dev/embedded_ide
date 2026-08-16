@@ -18,7 +18,8 @@
 //! Pins canvas needs.
 
 use super::mcu_catalog::ToolchainKind;
-use super::mcu_form::{ClockChoice, McuForm, PinRow};
+use super::mcu_def::{GridCellDef, PinDef, PinGridDef};
+use super::mcu_form::{ClockChoice, McuForm, PinRow, parse_functions};
 
 /// One chip produced from the XML (a range file yields several), plus any
 /// per-file advisories to surface after the import.
@@ -53,6 +54,8 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
     let mut rams: Vec<u64> = Vec::new();
     let mut flashes: Vec<u64> = Vec::new();
     let mut pin_rows: Vec<PinRow> = Vec::new();
+    // Balls of a grid package, with the cell their designator resolves to.
+    let mut ball_rows: Vec<(usize, usize, PinRow)> = Vec::new();
     let mut skipped_positions = 0usize;
 
     for ch in mcu.children().filter(|n| n.is_element()) {
@@ -76,13 +79,6 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
                 if is_exposed_pad(name_raw) {
                     continue;
                 }
-                // BGA / non-numeric positions ("A1") can't be a pin number here.
-                if position.parse::<usize>().is_err() {
-                    if !position.is_empty() {
-                        skipped_positions += 1;
-                    }
-                    continue;
-                }
                 let reserved = !(ptype == "I/O" || ptype == "MonoIO");
                 let mut tokens: Vec<String> = Vec::new();
                 if !reserved {
@@ -99,13 +95,28 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
                         }
                     }
                 }
-                pin_rows.push(PinRow {
+                let row = PinRow {
                     number: position.to_string(),
                     name: clean_pin_name(name_raw),
                     reserved,
                     functions: tokens.join(" "),
                     imported: false,
-                });
+                };
+                // A package position is either a NUMBER (QFP, DIP: pins along
+                // the edges) or a DESIGNATOR like "A2" (WLCSP, BGA: balls under
+                // the die). The two are different layouts, so they go into
+                // different buckets here — designators used to be dropped with a
+                // "BGA package?" warning, which is what made those chips
+                // unimportable.
+                match crate::panels::mcu_module::mcu::model::parse_designator(position) {
+                    Some((r, c)) => ball_rows.push((r, c, row)),
+                    None if position.parse::<usize>().is_ok() => pin_rows.push(row),
+                    None => {
+                        if !position.is_empty() {
+                            skipped_positions += 1;
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -123,14 +134,35 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
     let target = core_to_target(&core).to_string();
     let cpu = core.trim_start_matches("Arm ").trim().to_string();
 
+    // Balls become a grid layout; the four sides stay empty for such a package,
+    // because a WLCSP/BGA genuinely has no edge pins.
+    let grid = build_grid(&ball_rows);
+
     let mut base_warnings = Vec::new();
     if skipped_positions > 0 {
         base_warnings.push(format!(
-            "{skipped_positions} pin(s) had non-numeric positions (BGA package?) and were skipped."
+            "{skipped_positions} pin(s) had a position that is neither a number nor a \
+             package designator, and were skipped."
         ));
     }
-    if pin_rows.is_empty() {
-        base_warnings.push("No usable (numeric-position) pins were found.".into());
+    if let Some(g) = &grid {
+        base_warnings.push(format!(
+            "{} ball(s) laid out on a {}x{} grid ({package}). Rotation is not available \
+             for grid packages.",
+            g.cells.len(),
+            g.rows,
+            g.cols
+        ));
+        if !pin_rows.is_empty() {
+            base_warnings.push(format!(
+                "{} pin(s) also had plain numeric positions and were placed on the \
+                 edges — check the result.",
+                pin_rows.len()
+            ));
+        }
+    }
+    if pin_rows.is_empty() && grid.is_none() {
+        base_warnings.push("No usable pins were found.".into());
     }
 
     let mut chips = Vec::new();
@@ -161,12 +193,46 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
             sides[2].clone(),
             sides[3].clone(),
         ];
+        form.grid = grid.clone();
         chips.push(ConvertedChip {
             form,
             warnings: base_warnings.clone(),
         });
     }
     Ok(chips)
+}
+
+/// Turn the collected balls into a [`PinGridDef`], or `None` when the package
+/// has none.
+///
+/// Pin NUMBERS are assigned here, 1..N in reading order (row, then column),
+/// because a grid package has none of its own: the board knows a ball by its
+/// designator ("A2"), which the IDE derives back from `(row, col)`. The number
+/// is purely our internal key — codegen, `mcu.config` and jump-to-code all use
+/// it, so it must be stable and dense.
+fn build_grid(balls: &[(usize, usize, PinRow)]) -> Option<PinGridDef> {
+    if balls.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&(usize, usize, PinRow)> = balls.iter().collect();
+    sorted.sort_by_key(|(r, c, _)| (*r, *c));
+    let rows = sorted.iter().map(|(r, ..)| *r).max().unwrap_or(0) + 1;
+    let cols = sorted.iter().map(|(_, c, _)| *c).max().unwrap_or(0) + 1;
+    let cells = sorted
+        .iter()
+        .enumerate()
+        .map(|(i, (r, c, row))| GridCellDef {
+            row: *r,
+            col: *c,
+            pin: PinDef {
+                number: i + 1,
+                name: row.name.clone(),
+                reserved: row.reserved,
+                functions: parse_functions(&row.functions),
+            },
+        })
+        .collect();
+    Some(PinGridDef { rows, cols, cells })
 }
 
 /// `true` for the exposed thermal / ground pad under QFN-style packages —
@@ -529,6 +595,7 @@ fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::mcu_module::PinFunction;
 
     /// A compact but format-accurate fixture (default namespace, range RefName,
     /// two `<Flash>`, and pins exercising every signal-mapping branch — plus a
@@ -580,6 +647,92 @@ mod tests {
         <Signal Name="GPIO"/>
     </Pin>
 </Mcu>"#;
+
+    /// A WLCSP fixture in the shape ST publishes: `Position` is a package
+    /// DESIGNATOR, not a number. Six of the twelve balls of the C011 part, which
+    /// is enough to pin down the staggered pattern and the grid extent.
+    const WLCSP: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Mcu Family="STM32C0" Line="STM32C011" Package="WLCSP12" RefName="STM32C011D6Yx" xmlns="http://dummy.com">
+    <Core>Arm Cortex-M0+</Core>
+    <Ram>6</Ram>
+    <Flash>32</Flash>
+    <Pin Name="PB6" Position="A2" Type="I/O">
+        <Signal Name="USART1_TX"/>
+        <Signal Name="GPIO"/>
+    </Pin>
+    <Pin Name="PC15-OSCX_OUT" Position="A4" Type="I/O">
+        <Signal Name="GPIO"/>
+    </Pin>
+    <Pin Name="PA13" Position="B1" Type="I/O">
+        <Signal Name="SYS_JTMS-SWDIO"/>
+        <Signal Name="GPIO"/>
+    </Pin>
+    <Pin Name="PC14-OSCX_IN" Position="B3" Type="I/O">
+        <Signal Name="GPIO"/>
+    </Pin>
+    <Pin Name="VDD" Position="C4" Type="Power"/>
+    <Pin Name="PF2-NRST" Position="F3" Type="I/O">
+        <Signal Name="GPIO"/>
+    </Pin>
+</Mcu>"#;
+
+    /// The whole point of the phase: a designator package imports as a GRID
+    /// instead of being dropped with a "BGA package?" warning.
+    #[test]
+    fn a_wlcsp_package_imports_as_a_ball_grid() {
+        let chips = convert_xml(WLCSP).expect("parses");
+        let form = &chips[0].form;
+        let grid = form.grid.as_ref().expect("balls become a grid");
+
+        // F3 is the lowest row and A4 the rightmost column -> 6 rows, 4 columns.
+        assert_eq!((grid.rows, grid.cols), (6, 4));
+        assert_eq!(grid.cells.len(), 6);
+        assert!(
+            form.pins.iter().all(|side| side.is_empty()),
+            "a WLCSP has no edge pins, so no side may be populated"
+        );
+
+        // Cells carry the designator's coordinates, 0-based.
+        let cell = |name: &str| {
+            grid.cells
+                .iter()
+                .find(|c| c.pin.name.starts_with(name))
+                .unwrap_or_else(|| panic!("{name} missing"))
+        };
+        assert_eq!((cell("PB6").row, cell("PB6").col), (0, 1), "A2");
+        assert_eq!((cell("PA13").row, cell("PA13").col), (1, 0), "B1");
+        assert_eq!((cell("PF2").row, cell("PF2").col), (5, 2), "F3");
+
+        // Numbers are ours, dense and in reading order — a WLCSP has none.
+        let mut numbers: Vec<usize> = grid.cells.iter().map(|c| c.pin.number).collect();
+        numbers.sort_unstable();
+        assert_eq!(numbers, (1..=6).collect::<Vec<_>>());
+        assert_eq!(cell("PB6").pin.number, 1, "first in reading order");
+
+        // Signals are mapped exactly as they are for edge pins.
+        assert!(
+            cell("PB6")
+                .pin
+                .functions
+                .iter()
+                .any(|f| matches!(f, PinFunction::UsartTx(1))),
+            "USART1_TX must survive the grid path"
+        );
+        assert!(cell("VDD").pin.reserved, "power pins stay reserved");
+        assert!(
+            chips[0].warnings.iter().any(|w| w.contains("6x4 grid")),
+            "the import must say what it did: {:?}",
+            chips[0].warnings
+        );
+    }
+
+    /// An edge-pin package must be completely unaffected by the grid path.
+    #[test]
+    fn a_numbered_package_still_has_no_grid() {
+        let chips = convert_xml(F103).expect("parses");
+        assert!(chips[0].form.grid.is_none());
+        assert!(chips[0].form.pins.iter().any(|s| !s.is_empty()));
+    }
 
     fn find<'a>(form: &'a McuForm, name: &str) -> &'a PinRow {
         form.pins
