@@ -198,9 +198,79 @@ pub fn splice_config(
     c: &ProjectDef,
     toolchain: &ToolchainKind,
 ) -> String {
-    file.body(c, toolchain)
+    let spliced = file
+        .body(c, toolchain)
         .map(|(style, body)| splice_block(existing, style, &body))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    match file {
+        ConfigFile::CargoToml => keep_user_dep_edits(existing, &spliced),
+        _ => spliced,
+    }
+}
+
+/// Carry a user's edit of a GENERATED dependency line through the refresh.
+///
+/// The generated block is rewritten wholesale on every splice, which is right
+/// for the package name, the profiles and the flash comment — but wrong for the
+/// HAL line. That line is a version and a chip feature, and both are things only
+/// the user can settle when the derived guess is wrong (an unsupported part, a
+/// crate that has since moved on). Before this, editing it did nothing: the next
+/// project open silently put the broken line back, and the only escape was to
+/// delete the block markers entirely.
+///
+/// Scope, deliberately narrow: a line inside `[dependencies]` whose KEY the
+/// generated block also has, and which the IDE does not own ([`DEP_MARKER`] —
+/// those are re-derived every frame from what the project actually uses).
+/// Dependencies the user ADDS still belong below the block, as its own footer
+/// comment says; only an override of a generated key is kept.
+fn keep_user_dep_edits(existing: &str, spliced: &str) -> String {
+    // A file the IDE isn't managing (no markers, so `splice_block` returned it
+    // unchanged) has nothing to reconcile.
+    if existing.trim().is_empty() || existing == spliced {
+        return spliced.to_owned();
+    }
+    let user_deps: Vec<&str> = section_lines(existing, "[dependencies]")
+        .filter(|l| !is_ide_owned(l) && dep_key(l).is_some())
+        .collect();
+    if user_deps.is_empty() {
+        return spliced.to_owned();
+    }
+    let mut out = String::with_capacity(spliced.len());
+    let mut in_deps = false;
+    for line in spliced.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            in_deps = trimmed.starts_with("[dependencies]");
+        }
+        let replacement = in_deps
+            .then(|| dep_key(line))
+            .flatten()
+            .and_then(|key| user_deps.iter().find(|u| dep_key(u) == Some(key)))
+            .filter(|u| **u != line);
+        out.push_str(replacement.copied().unwrap_or(line));
+        out.push('\n');
+    }
+    out
+}
+
+/// The dependency KEY of a `name = …` line, or `None` for anything else
+/// (comments, headers, blanks, continuation lines).
+fn dep_key(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+        return None;
+    }
+    let key = t.split('=').next()?.trim();
+    (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)))
+        .then_some(key)
+}
+
+/// The lines of one TOML section, stopping at the next `[header]`.
+fn section_lines<'a>(text: &'a str, header: &'a str) -> impl Iterator<Item = &'a str> {
+    text.lines()
+        .skip_while(move |l| l.trim() != header)
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with('['))
 }
 
 /// Trailing marker on the `[dependencies]` lines the IDE added ITSELF.
@@ -1469,6 +1539,103 @@ fn cargo_config_esp(c: &ProjectDef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ProjectDef whose HAL line is the one the XML importer derives.
+    fn embassy_project() -> ProjectDef {
+        ProjectDef {
+            pkg_name: "h5".into(),
+            target: "thumbv8m.main-none-eabihf".into(),
+            flash_origin: "0x08000000".into(),
+            flash_size: "128K".into(),
+            ram_origin: "0x20000000".into(),
+            ram_size: "32K".into(),
+            hal_dep: "embassy-stm32 = { version = \"0.6\", features = [\"stm32h5f4aj\"] }".into(),
+            probe_chip: "STM32H5".into(),
+            memory_comment: "test".into(),
+        }
+    }
+
+    /// The reported bug: the HAL line sits INSIDE the generated block, so fixing
+    /// a wrong chip feature by hand was undone by the next project open — the
+    /// user could not repair a project the importer had guessed wrong for.
+    #[test]
+    fn a_user_edit_of_the_hal_line_survives_the_refresh() {
+        let c = embassy_project();
+        let tc = ToolchainKind::RustEmbedded;
+        let generated = gen_config(ConfigFile::CargoToml, &c, &tc);
+        assert!(generated.contains("stm32h5f4aj"), "fixture sanity");
+
+        // The user corrects the feature to one that exists.
+        let edited = generated.replace("stm32h5f4aj", "stm32h563zi");
+        let after = splice_config(ConfigFile::CargoToml, &edited, &c, &tc);
+        assert!(
+            after.contains("stm32h563zi"),
+            "the corrected feature must survive:\n{after}"
+        );
+        assert!(!after.contains("stm32h5f4aj"), "and the guess must not return");
+
+        // Idempotent: splicing the result again keeps it.
+        let twice = splice_config(ConfigFile::CargoToml, &after, &c, &tc);
+        assert_eq!(twice, after);
+    }
+
+    /// Everything else in the block is still refreshed from the chip — the edit
+    /// exception is for dependency lines only.
+    #[test]
+    fn the_rest_of_the_generated_block_is_still_regenerated() {
+        let c = embassy_project();
+        let tc = ToolchainKind::RustEmbedded;
+        let stale = gen_config(ConfigFile::CargoToml, &c, &tc)
+            .replace("h5-project", "renamed-by-hand")
+            .replace("opt-level     = \"s\"", "opt-level     = \"z\"");
+        let after = splice_config(ConfigFile::CargoToml, &stale, &c, &tc);
+        assert!(
+            !after.contains("renamed-by-hand"),
+            "the package name comes from the chip:\n{after}"
+        );
+        assert!(after.contains("opt-level     = \"s\""), "profiles too");
+    }
+
+    /// IDE-owned lines are re-derived every frame from what the project uses, so
+    /// an edit to one of those is NOT preserved — otherwise a stale hand-edit
+    /// would fight the peripheral sync forever.
+    #[test]
+    fn ide_owned_dependency_lines_are_not_user_overridable() {
+        let c = embassy_project();
+        let tc = ToolchainKind::RustEmbedded;
+        let generated = gen_config(ConfigFile::CargoToml, &c, &tc);
+        let with_dep = ensure_peripheral_deps(&generated, false, true, false, false, false, false, &[]);
+        assert!(with_dep.contains(DEP_MARKER), "fixture: an IDE-owned line exists");
+        let edited = with_dep.replace("embedded-io  = \"0.7\"", "embedded-io  = \"0.5\"");
+        let after = splice_config(ConfigFile::CargoToml, &edited, &c, &tc);
+        assert!(
+            !after.contains("embedded-io  = \"0.5\""),
+            "an IDE-owned line is not a user override:\n{after}"
+        );
+    }
+
+    /// A file the IDE does not manage (markers removed) is still left alone.
+    #[test]
+    fn a_manifest_without_markers_is_untouched() {
+        let c = embassy_project();
+        let tc = ToolchainKind::RustEmbedded;
+        let hand = "[package]\nname = \"mine\"\n\n[dependencies]\nembassy-stm32 = \"0.6\"\n";
+        assert_eq!(
+            splice_config(ConfigFile::CargoToml, hand, &c, &tc),
+            hand,
+            "no markers means the IDE does not own this file"
+        );
+    }
+
+    #[test]
+    fn dep_key_reads_only_dependency_lines() {
+        assert_eq!(dep_key("embassy-stm32 = { version = \"0.6\" }"), Some("embassy-stm32"));
+        assert_eq!(dep_key("  cortex-m    = \"0.7\""), Some("cortex-m"));
+        assert_eq!(dep_key("# a comment"), None);
+        assert_eq!(dep_key("[dependencies]"), None);
+        assert_eq!(dep_key(""), None);
+        assert_eq!(dep_key("features = [\"a\"] }"), Some("features"));
+    }
 
     #[test]
     fn blocking_gpio_keeps_embedded_hal_through_the_async_pass() {

@@ -3927,6 +3927,14 @@ impl eframe::App for AppIde {
                     // First save into a folder → claim it. Re-claiming on every
                     // save would be wasted work (and would briefly release a
                     // folder we already hold), so only when it changed.
+                    // The manifest on disk just changed, and it is what
+                    // `cargo metadata` reads. Without this, fixing a broken
+                    // dependency by hand left the "rust-analyzer can't load this
+                    // project" banner up until the project was reopened — which
+                    // reads exactly like the edit having done nothing.
+                    if self.workspace_load_error.is_some() {
+                        self.recheck_workspace_health();
+                    }
                     if self.project_dir != had_dir {
                         self.claim_open_project();
                         // A project only becomes openable-by-path at its first
