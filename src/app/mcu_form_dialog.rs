@@ -277,9 +277,26 @@ impl AppIde {
                                 });
                             }
                         }
-                        // The deterministic path for an ST part: CubeMX ships the
-                        // clock tree ST draws, coordinates included, so this
-                        // imports the real figure instead of inferring one.
+                        // The best path for an ST part: the chip's own pin-data
+                        // XML names which CubeMX files describe ITS clock tree
+                        // and which conditional branches it has, so this is a
+                        // per-chip lookup with nothing guessed.
+                        if ui
+                            .button(format!("{} STM32 chip XML (+ CubeMX)…", ph::CPU))
+                            .on_hover_text(
+                                "Pick a chip from STM32_open_pin_data (mcu/STM32….xml). Its \
+                                 ClockTree / RCC version / peripheral list select the exact \
+                                 CubeMX files, which must be installed.",
+                            )
+                            .clicked()
+                            && let Some(path) = rfd::FileDialog::new()
+                                .add_filter("STM32 chip XML", &["xml"])
+                                .pick_file()
+                        {
+                            clock_note = Some(import_chip_clock(&path, &mut form));
+                        }
+                        // Fallback when there is no pin-data repo: pick the
+                        // family's clock file directly.
                         if ui
                             .button(format!("{} CubeMX clock XML…", ph::FILE_CODE))
                             .on_hover_text(
@@ -689,5 +706,33 @@ fn import_cubemx_clock(path: &std::path::Path, form: &mut McuForm) -> Result<Str
     form.set_imported_clock(GraphClock { graph, layout });
     Ok(format!(
         "Imported {family} from CubeMX: {nodes} nodes, with ST's own diagram layout."
+    ))
+}
+
+/// Import the clock tree of ONE chip: its `STM32_open_pin_data` `mcu/*.xml`
+/// names the CubeMX files, a CubeMX installation supplies them.
+///
+/// The pin-data file has no clock tree in it — but it carries `ClockTree=`
+/// (which of a family's several topologies this part uses), the RCC IP
+/// `Version=` (which of several parameter files), and the peripheral instance
+/// list (which conditional branches exist). So nothing is guessed, and the
+/// result is that part's tree rather than its family's.
+fn import_chip_clock(path: &std::path::Path, form: &mut McuForm) -> Result<String, String> {
+    use crate::panels::mcu_module::clock::graph::{GraphClock, cubemx, derive};
+
+    let xml = std::fs::read_to_string(path).map_err(|e| format!("Could not read the file: {e}"))?;
+    let key = cubemx::clock_key_from_mcu_xml(&xml)?;
+    let db = cubemx::default_db_dir().ok_or(
+        "No STM32CubeMX installation found. Install it, or use \"CubeMX clock XML…\" and \
+         point at db/plugins/clock/ yourself.",
+    )?;
+
+    let (graph, boxes) = cubemx::import_for_chip(&db, &key)?;
+    let nodes = graph.nodes.len();
+    let layout = derive(&graph, boxes);
+    form.set_imported_clock(GraphClock { graph, layout });
+    Ok(format!(
+        "Imported {} nodes from {} (RCC {}), with ST's own diagram layout.",
+        nodes, key.clock_tree, key.rcc_version
     ))
 }

@@ -43,6 +43,10 @@ pub struct Param {
     pub min: Option<u32>,
     pub max: Option<u32>,
     pub default: String,
+    /// `Unit="KHz"` / `"MHz"` — what the `Comment` numbers are expressed in when
+    /// the parameter is a FREQUENCY list (MSI's range enum). Absent for the
+    /// dividers, whose Comments are plain factors.
+    pub unit: Option<String>,
 }
 
 impl Param {
@@ -62,6 +66,21 @@ impl Param {
             .iter()
             .position(|(v, _)| *v == self.default)
             .unwrap_or(0)
+    }
+
+    /// The `Comment`s read as FREQUENCIES, honouring `Unit` — MSI's range enum
+    /// lists `Comment="4000"` with `Unit="KHz"`, i.e. 4 MHz.
+    fn frequencies(&self) -> Vec<u32> {
+        let scale: u64 = match self.unit.as_deref().map(str::trim) {
+            Some(u) if u.eq_ignore_ascii_case("KHz") => 1_000,
+            Some(u) if u.eq_ignore_ascii_case("MHz") => 1_000_000,
+            _ => 1,
+        };
+        self.values
+            .iter()
+            .filter_map(|(_, c)| c.trim().parse::<u64>().ok())
+            .map(|v| (v * scale).min(u32::MAX as u64) as u32)
+            .collect()
     }
 }
 
@@ -92,6 +111,7 @@ pub fn parse_rcc_params(xml: &str) -> Result<RccParams, String> {
                 min: p.attribute("Min").and_then(|v| v.trim().parse().ok()),
                 max: p.attribute("Max").and_then(|v| v.trim().parse().ok()),
                 default: p.attribute("DefaultValue").unwrap_or_default().to_owned(),
+                unit: p.attribute("Unit").map(str::to_owned),
             },
         );
     }
@@ -109,7 +129,7 @@ pub fn parse_rcc_params(xml: &str) -> Result<RccParams, String> {
 /// Unknown tokens are FALSE: a family file mentions peripherals a given part may
 /// not have, and importing a branch for hardware that isn't there is worse than
 /// leaving it out (the user can always add it in the editor).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Variant {
     pub defines: Vec<String>,
 }
@@ -339,6 +359,32 @@ fn shape(r: &RawElement, p: Option<&Param>) -> (NodeKind, NodeState) {
                 },
             )
         }
+        // A source whose frequency is picked from a list — MSI's range enum.
+        // Used by 20 of the 66 family files (every MSI part: L4/L5/U5/WB/WL),
+        // and it is what SYSCLK boots on there, so getting it wrong zeroes the
+        // whole tree downstream.
+        "distinctValsSource" => {
+            let hz = p.map(|p| p.frequencies()).unwrap_or_default();
+            let sel = p
+                .map(|p| p.default_index())
+                .and_then(|i| hz.get(i).copied())
+                .unwrap_or_else(|| hz.first().copied().unwrap_or(0));
+            let (min, max) = (
+                hz.iter().copied().min().unwrap_or(sel),
+                hz.iter().copied().max().unwrap_or(sel),
+            );
+            (
+                NodeKind::Source {
+                    min_hz: min,
+                    max_hz: max.max(min),
+                    gated: true,
+                },
+                NodeState::Source {
+                    enabled: true,
+                    hz: sel,
+                },
+            )
+        }
         "multiplexor" => {
             let n = p.map(|p| p.values.len()).unwrap_or(r.inputs.len()).max(1);
             let sel = p.map(|p| p.default_index()).unwrap_or(0);
@@ -415,12 +461,26 @@ pub fn set_limit(graph: &mut ClockGraph, id: &str, hz: u32) {
 
 // ── Locating the two files ───────────────────────────────────────────────────
 
-/// The RCC IP file that goes with a clock-tree file.
+/// The RCC IP file for an exact IP version, as a chip's pin-data XML names it
+/// (`Version="STM32H5_rcc_v1_1"` → `RCC-STM32H5_rcc_v1_1_Modes.xml`).
 ///
-/// It cannot be derived by formatting a name: the version suffix varies
-/// (`_rcc_v1_0_`, `_rcc_v1_2_`) and so does the separator — ST ships
-/// `RCC-STM32WBA_rcc_v1_0_Modes.xml` next to `RCC-STM32F411-rcc_v1_0_Modes.xml`.
-/// So it is FOUND by prefix, and the newest match wins.
+/// Exact beats guessing: H5 alone ships `v1_0`, `v1_1`, `v1_128_0` and
+/// `v1_512_0`, and [`find_rcc_file`]'s newest-wins fallback picks the wrong one.
+/// The version string carries the separator quirk too — ST writes
+/// `STM32WBA_rcc_v1_0` but `STM32F411-rcc_v1_0`.
+pub fn rcc_file_for_version(db_dir: &std::path::Path, version: &str) -> Option<std::path::PathBuf> {
+    let p = db_dir
+        .join("mcu")
+        .join("IP")
+        .join(format!("RCC-{version}_Modes.xml"));
+    p.is_file().then_some(p)
+}
+
+/// The RCC IP file that goes with a clock-tree file, when no exact version is
+/// known — FOUND by prefix, newest match wins.
+///
+/// Prefer [`rcc_file_for_version`]: this is the fallback for a bare file pick,
+/// and on a family with several IP versions it can pick the wrong one.
 pub fn find_rcc_file(db_dir: &std::path::Path, family: &str) -> Option<std::path::PathBuf> {
     let ip = db_dir.join("mcu").join("IP");
     let want = format!("rcc-{}", family.to_ascii_lowercase());
@@ -459,17 +519,142 @@ pub fn import_from_db(
     family: &str,
     variant: &Variant,
 ) -> Result<(ClockGraph, Vec<NodeBox>), String> {
+    let rcc_path = find_rcc_file(db_dir, family)
+        .ok_or_else(|| format!("no RCC IP file for {family} under {}", db_dir.display()))?;
+    import_files(db_dir, family, &rcc_path, variant)
+}
+
+/// Read the two named files and parse them.
+fn import_files(
+    db_dir: &std::path::Path,
+    clock_tree: &str,
+    rcc_path: &std::path::Path,
+    variant: &Variant,
+) -> Result<(ClockGraph, Vec<NodeBox>), String> {
     let clock_path = db_dir
         .join("plugins")
         .join("clock")
-        .join(format!("{family}.xml"));
+        .join(format!("{clock_tree}.xml"));
     let clock = std::fs::read_to_string(&clock_path)
         .map_err(|e| format!("could not read {}: {e}", clock_path.display()))?;
-    let rcc_path = find_rcc_file(db_dir, family)
-        .ok_or_else(|| format!("no RCC IP file for {family} under {}", db_dir.display()))?;
-    let rcc = std::fs::read_to_string(&rcc_path)
+    let rcc = std::fs::read_to_string(rcc_path)
         .map_err(|e| format!("could not read {}: {e}", rcc_path.display()))?;
     parse_clock_tree(&clock, &parse_rcc_params(&rcc)?, variant)
+}
+
+// ── Driving the import from a chip's own pin-data XML ────────────────────────
+
+/// Everything a chip's `STM32_open_pin_data` `mcu/*.xml` says about its clock.
+///
+/// That file has no clock tree in it — but it names, exactly, which CubeMX files
+/// describe one, and which conditional branches this particular part has. Which
+/// turns the import from per-FAMILY guesswork into a per-CHIP lookup:
+///
+/// - `<Mcu ClockTree="STM32H5_4M">` → `db/plugins/clock/STM32H5_4M.xml`. H5 alone
+///   ships four topologies (`STM32H5`, `_128`, `_4M`, `_512`); the family name
+///   picks the wrong one.
+/// - `<IP Name="RCC" Version="STM32H5_rcc_v1_1">` → the exact RCC parameter file.
+/// - every `<IP InstanceName>` → the `<NAME>_Exist` tokens CubeMX's conditions
+///   test (L4's clock file gates on `LCD_Exist` and `USB_OTG_FS_Exist`), and
+///   `<Mcu Line="STM32WBAx5">` → the family-variant tokens WBA gates on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChipClockKey {
+    /// Name of the clock-tree file, without `.xml`.
+    pub clock_tree: String,
+    /// RCC IP version, as it appears in the file name.
+    pub rcc_version: String,
+    pub variant: Variant,
+}
+
+/// Read the clock keys out of a chip's pin-data XML.
+pub fn clock_key_from_mcu_xml(xml: &str) -> Result<ChipClockKey, String> {
+    let doc = roxmltree::Document::parse(xml).map_err(|e| format!("MCU XML parse error: {e}"))?;
+    let mcu = doc
+        .descendants()
+        .find(|n| n.has_tag_name("Mcu"))
+        .ok_or("no <Mcu> element — is this an STM32_open_pin_data mcu/*.xml?")?;
+
+    let clock_tree = mcu
+        .attribute("ClockTree")
+        .ok_or("this chip's XML has no ClockTree attribute")?
+        .to_owned();
+
+    let mut defines: Vec<String> = Vec::new();
+    // Family-variant tokens: `Line="STM32WBAx5"` is literally what WBA's
+    // conditions test; Family and RefName cost nothing and may be tested too.
+    for attr in ["Line", "Family", "RefName"] {
+        if let Some(v) = mcu.attribute(attr).filter(|v| !v.is_empty()) {
+            defines.push(v.to_owned());
+        }
+    }
+    let mut rcc_version = String::new();
+    for ip in doc.descendants().filter(|n| n.has_tag_name("IP")) {
+        if ip.attribute("Name") == Some("RCC")
+            && let Some(v) = ip.attribute("Version")
+        {
+            rcc_version = v.to_owned();
+        }
+        // A peripheral this part HAS — CubeMX asks `<NAME>_Exist`.
+        for attr in ["InstanceName", "Name"] {
+            if let Some(name) = ip.attribute(attr).filter(|n| !n.is_empty()) {
+                defines.push(format!("{name}_Exist"));
+                defines.push(name.to_owned());
+            }
+        }
+    }
+    defines.sort();
+    defines.dedup();
+
+    if rcc_version.is_empty() {
+        return Err("this chip's XML has no RCC IP version".into());
+    }
+    Ok(ChipClockKey {
+        clock_tree,
+        rcc_version,
+        variant: Variant { defines },
+    })
+}
+
+/// Import the clock tree of one specific chip: its pin-data XML names the files,
+/// the CubeMX `db` supplies them.
+pub fn import_for_chip(
+    db_dir: &std::path::Path,
+    key: &ChipClockKey,
+) -> Result<(ClockGraph, Vec<NodeBox>), String> {
+    // Exact version first; a family fallback keeps an unusual naming working.
+    let rcc_path = rcc_file_for_version(db_dir, &key.rcc_version)
+        .or_else(|| find_rcc_file(db_dir, &key.clock_tree))
+        .ok_or_else(|| {
+            format!(
+                "no RCC IP file `RCC-{}_Modes.xml` under {}",
+                key.rcc_version,
+                db_dir.display()
+            )
+        })?;
+    import_files(db_dir, &key.clock_tree, &rcc_path, &key.variant)
+}
+
+/// The `db` directory of a standard STM32CubeMX installation, if there is one.
+pub fn default_db_dir() -> Option<std::path::PathBuf> {
+    let candidates = [
+        r"C:\Program Files\STMicroelectronics\STM32Cube\STM32CubeMX\db",
+        r"C:\Program Files (x86)\STMicroelectronics\STM32Cube\STM32CubeMX\db",
+        "/Applications/STMicroelectronics/STM32CubeMX.app/Contents/Resources/db",
+        "/opt/STMicroelectronics/STM32Cube/STM32CubeMX/db",
+    ];
+    candidates
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.is_dir())
+        .or_else(|| {
+            // A per-user install (the Linux/macOS default offered by the
+            // installer) lives under the home directory.
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+            let p = std::path::PathBuf::from(home)
+                .join("STM32CubeMX")
+                .join("db");
+            p.is_dir().then_some(p)
+        })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -614,6 +799,49 @@ mod tests {
         ));
     }
 
+    /// MSI is a source whose frequency comes from a range ENUM, in kHz. Every
+    /// MSI part (L4/L5/U5/WB/WL — 20 of the 66 family files) boots SYSCLK on it,
+    /// so reading it as a plain pass-through zeroes the entire tree: the L4
+    /// import went from 13 evaluated nodes to all 90 once this was handled.
+    #[test]
+    fn an_msi_style_range_source_is_read_in_its_own_unit() {
+        let rcc = r#"<IP>
+            <RefParameter Name="MSIClockRange" Type="list" Unit="KHz" DefaultValue="RCC_MSIRANGE_6">
+                <PossibleValue Comment="100"  Value="RCC_MSIRANGE_0"/>
+                <PossibleValue Comment="4000" Value="RCC_MSIRANGE_6"/>
+                <PossibleValue Comment="48000" Value="RCC_MSIRANGE_11"/>
+            </RefParameter>
+            <RefParameter Name="AHBCLKDivider" Type="list" DefaultValue="RCC_SYSCLK_DIV1">
+                <PossibleValue Value="RCC_SYSCLK_DIV1" Comment="1"/>
+                <PossibleValue Value="RCC_SYSCLK_DIV2" Comment="2"/>
+            </RefParameter>
+        </IP>"#;
+        let clock = r#"<Clock>
+            <Element id="MSIRC" type="distinctValsSource" refParameter="MSIClockRange" x="1" y="1"/>
+            <Element id="AHB" type="devisor" refParameter="AHBCLKDivider" x="2" y="2">
+                <Input signalId="s" from="MSIRC"/>
+            </Element>
+        </Clock>"#;
+        let params = parse_rcc_params(rcc).unwrap();
+        let (graph, _) = parse_clock_tree(clock, &params, &Variant::default()).unwrap();
+
+        let msi = graph.node("MSIRC").unwrap();
+        assert!(
+            matches!(
+                msi.kind,
+                NodeKind::Source {
+                    min_hz: 100_000,
+                    max_hz: 48_000_000,
+                    ..
+                }
+            ),
+            "the range is in kHz: {:?}",
+            msi.kind
+        );
+        // RCC_MSIRANGE_6 = 4000 kHz = 4 MHz, the L4 reset default.
+        assert_eq!(evaluate(&graph)["AHB"], 4_000_000);
+    }
+
     /// The condition language: `&` binds tighter than `|`, `!` negates, and
     /// unknown tokens are false.
     #[test]
@@ -646,6 +874,103 @@ mod tests {
                 .contains("no clock elements")
         );
         assert!(parse_rcc_params("not xml at all <<<").is_err());
+    }
+
+    /// A chip's pin-data XML carries no clock tree — but it names, exactly, the
+    /// two CubeMX files that describe one, plus the conditions this part meets.
+    #[test]
+    fn a_chips_pin_data_xml_names_its_clock_files() {
+        // The shape of a real STM32_open_pin_data mcu/*.xml, cut to the keys.
+        let xml = r#"<Mcu ClockTree="STM32H5_4M" Family="STM32H5" Line="STM32H5x5"
+                          RefName="STM32H5F5IJKxQ" Package="UFBGA176">
+            <Core>ARM Cortex-M33</Core>
+            <IP InstanceName="RCC" Name="RCC" Version="STM32H5_rcc_v1_1"/>
+            <IP InstanceName="SAI1" Name="SAI"/>
+            <IP InstanceName="USB_OTG_FS" Name="USB_OTG_FS"/>
+            <Pin Name="PA0" Position="1"/>
+        </Mcu>"#;
+        let key = clock_key_from_mcu_xml(xml).expect("keys");
+
+        // H5 ships four topologies; the family name would pick the wrong one.
+        assert_eq!(key.clock_tree, "STM32H5_4M");
+        assert_eq!(key.rcc_version, "STM32H5_rcc_v1_1");
+
+        // Variant tokens: the family line WBA gates on, and the `_Exist` tokens
+        // L4's file gates on.
+        assert!(key.variant.eval("STM32H5x5"), "the Line token");
+        assert!(key.variant.eval("SAI1_Exist"), "a peripheral it has");
+        assert!(key.variant.eval("USB_OTG_FS_Exist"));
+        assert!(!key.variant.eval("LCD_Exist"), "one it does not have");
+        assert!(key.variant.eval("!LCD_Exist & SAI1_Exist"));
+    }
+
+    #[test]
+    fn a_pin_data_xml_without_the_keys_is_reported() {
+        assert!(
+            clock_key_from_mcu_xml("<Nope/>")
+                .unwrap_err()
+                .contains("<Mcu>")
+        );
+        let no_tree = r#"<Mcu Family="X"><IP Name="RCC" Version="v"/></Mcu>"#;
+        assert!(
+            clock_key_from_mcu_xml(no_tree)
+                .unwrap_err()
+                .contains("ClockTree")
+        );
+        let no_rcc = r#"<Mcu ClockTree="T"><IP Name="GPIO"/></Mcu>"#;
+        assert!(
+            clock_key_from_mcu_xml(no_rcc)
+                .unwrap_err()
+                .contains("RCC IP version")
+        );
+    }
+
+    /// End to end on the REAL files, driven by a chip's own pin-data XML
+    /// (ignored — needs both a CubeMX install and the pin-data repo):
+    /// `cargo test -- --ignored cubemx_for_a_real_chip --nocapture`
+    #[test]
+    #[ignore]
+    fn cubemx_for_a_real_chip() {
+        let Some(db) = default_db_dir() else {
+            eprintln!("no CubeMX install found — skipping");
+            return;
+        };
+        let repo = std::path::Path::new(
+            r"F:\RUST_bootcampCourse\MyProjects\STM32_open_pin_data-master\mcu",
+        );
+        if !repo.is_dir() {
+            eprintln!("no pin-data repo at {} — skipping", repo.display());
+            return;
+        }
+        for chip in [
+            "STM32H5F5IJKxQ",
+            "STM32WBA55CGUx",
+            "STM32L476R(C-E-G)Tx",
+            "STM32F411R(C-E)Tx",
+        ] {
+            let path = repo.join(format!("{chip}.xml"));
+            let Ok(xml) = std::fs::read_to_string(&path) else {
+                eprintln!("{chip}: not in the repo, skipping");
+                continue;
+            };
+            let key = clock_key_from_mcu_xml(&xml).expect("keys");
+            match import_for_chip(&db, &key) {
+                Ok((graph, boxes)) => {
+                    let freqs = evaluate(&graph);
+                    let live = freqs.values().filter(|hz| **hz > 0).count();
+                    eprintln!(
+                        "{chip}: tree={} rcc={} -> {} nodes, {} edges, {live} live, {} boxes",
+                        key.clock_tree,
+                        key.rcc_version,
+                        graph.nodes.len(),
+                        graph.edges.len(),
+                        boxes.len()
+                    );
+                    assert!(graph.nodes.len() > 20);
+                }
+                Err(e) => eprintln!("{chip}: {e}"),
+            }
+        }
     }
 
     /// Run against a REAL CubeMX install (ignored — it needs one):
