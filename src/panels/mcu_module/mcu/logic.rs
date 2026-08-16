@@ -741,6 +741,16 @@ impl Mcu {
         self.show_info = None;
     }
 
+    /// Whether the package carries pins INSIDE the body (a ball grid) rather
+    /// than only around its edges.
+    ///
+    /// The body is shared real estate: an edge package has it empty and can put
+    /// the chip name there, a grid package has it full of pads. Anything drawn in
+    /// the middle has to ask this first.
+    pub fn has_inner_pins(&self) -> bool {
+        self.grid.as_ref().is_some_and(|g| !g.cells.is_empty())
+    }
+
     /// Pin numbers matching the toolbar search box. Three ways to hit, because
     /// three different labels are printed on the diagram:
     /// * the pin NAME — case-insensitive substring (`pa5`, `osc`, `ph1`);

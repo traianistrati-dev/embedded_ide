@@ -175,17 +175,22 @@ impl Mcu {
 
         // ── Inner chip panel ─────────────────────────────────────────────────
         // A selected pin turns the body into its function list; otherwise the
-        // body just carries the chip's name.
+        // body carries the chip's name — but ONLY on a package whose pins are on
+        // the outside. A ball grid fills that same body with pads, so the name
+        // would be painted straight through them (and through their designators).
+        // The chip is named in the tab header anyway; the balls are not.
         if self.selected_pin.is_some() {
             panel::draw_pin_functions(self, &painter, ui, content_rect)
         } else {
-            painter.text(
-                content_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                &self.name,
-                egui::FontId::proportional(22.0),
-                egui::Color32::WHITE,
-            );
+            if !self.has_inner_pins() {
+                painter.text(
+                    content_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &self.name,
+                    egui::FontId::proportional(22.0),
+                    egui::Color32::WHITE,
+                );
+            }
             (None, egui::Rect::NOTHING)
         }
     }
