@@ -96,9 +96,7 @@ impl Pin {
         let clicked = ui.map_or(false, |ui| {
             listeners::listen_on_rect(self, painter, ui, rect, is_selected)
         });
-        let hovered = ui.is_some_and(|ui| {
-            ui.rect_contains_pointer(rect) && !self.reserved
-        });
+        let hovered = ui.is_some_and(|ui| ui.rect_contains_pointer(rect) && !self.reserved);
         let fill = if is_selected {
             egui::Color32::from_rgb(60, 60, 80)
         } else if hovered {

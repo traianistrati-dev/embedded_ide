@@ -370,7 +370,7 @@ impl AppIde {
                                 )
                                 .on_hover_text(
                                     "Highlight pins by NAME (any part: pa5, osc, pb) or by \
-                                     NUMBER (exact: 13). Everything else fades to 50%.",
+                                     NUMBER (exact: 13). Everything else fades to 30%.",
                                 );
                                 if !mcu.pin_search.trim().is_empty() {
                                     // Match count doubles as the "nothing found"

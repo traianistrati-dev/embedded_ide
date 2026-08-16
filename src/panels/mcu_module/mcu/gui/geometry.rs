@@ -221,10 +221,7 @@ pub fn pin_geometry(mcu: &Mcu, chip: egui::Rect) -> impl Iterator<Item = PinGeom
 /// Size the chip body must have to hold `grid` with a margin around the balls.
 pub fn grid_body_size(grid: &PinGrid) -> egui::Vec2 {
     let span = |n: usize| (n.saturating_sub(1)) as f32 * BALL_PITCH + BALL_D;
-    egui::vec2(
-        span(grid.cols) + BALL_PITCH,
-        span(grid.rows) + BALL_PITCH,
-    )
+    egui::vec2(span(grid.cols) + BALL_PITCH, span(grid.rows) + BALL_PITCH)
 }
 
 /// Placement of one pin by number. `None` if it isn't on this chip.
@@ -268,7 +265,10 @@ mod tests {
         let right0 = pin_geometry(&mcu, c)
             .find(|g| g.side() == Some(PinSide::Right))
             .unwrap();
-        assert_eq!(right0.rect.min, egui::pos2(c.right(), c.top() + PIN_SPACING));
+        assert_eq!(
+            right0.rect.min,
+            egui::pos2(c.right(), c.top() + PIN_SPACING)
+        );
         assert_eq!(right0.rect.size(), egui::vec2(PIN_HEIGHT, PIN_WIDTH));
 
         let left1 = pin_geometry(&mcu, c)

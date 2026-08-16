@@ -44,10 +44,7 @@ const CLOSE_W: f32 = 18.0;
 fn draw_close(painter: &egui::Painter, ui: &mut egui::Ui, rect: egui::Rect, num: usize) -> bool {
     let resp = ui.interact(rect, ui.id().with(("fn_close", num)), egui::Sense::click());
     let (bg, fg) = if resp.hovered() {
-        (
-            egui::Color32::from_rgb(150, 60, 60),
-            egui::Color32::WHITE,
-        )
+        (egui::Color32::from_rgb(150, 60, 60), egui::Color32::WHITE)
     } else {
         (
             egui::Color32::from_rgb(55, 55, 75),
@@ -130,7 +127,10 @@ pub fn draw_pin_functions(
     // pin again or clicking empty canvas. Applied at the end of the function so
     // this frame still draws a complete list.
     let close_rect = egui::Rect::from_min_size(
-        egui::pos2(content_rect.right() - 8.0 - CLOSE_W, content_rect.top() + 6.0),
+        egui::pos2(
+            content_rect.right() - 8.0 - CLOSE_W,
+            content_rect.top() + 6.0,
+        ),
         egui::vec2(CLOSE_W, CLOSE_W),
     );
     let close_clicked = draw_close(painter, ui, close_rect, num);

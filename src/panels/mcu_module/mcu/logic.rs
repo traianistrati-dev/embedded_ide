@@ -792,7 +792,11 @@ impl Mcu {
             .chain(self.right_pins.iter())
             // Ball-grid pads are pins like any other — chaining them HERE is
             // what lets autowire, codegen and persistence stay layout-blind.
-            .chain(self.grid.iter().flat_map(|g| g.cells.iter().map(|c| &c.pin)))
+            .chain(
+                self.grid
+                    .iter()
+                    .flat_map(|g| g.cells.iter().map(|c| &c.pin)),
+            )
     }
 
     /// Iterator over every pin (all four sides), mutable.

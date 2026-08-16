@@ -2,12 +2,13 @@
 //!
 //! `Ctrl+Space` inside a dependency table suggests embedded-relevant crates;
 //! after a crate is chosen (`name = ""`), it suggests that crate's available
-//! versions.
+//! versions; and inside `features = [ … ]` it suggests that crate's features.
 //!
 //! The crate-name list is a curated, **offline** set (a raw crates.io search is
-//! far too noisy for an embedded IDE — thousands of irrelevant hits). The
-//! version list is fetched **live** from the crates.io sparse index in a
-//! background thread, so it always reflects what is actually published.
+//! far too noisy for an embedded IDE — thousands of irrelevant hits). Versions
+//! AND features come from one **live** fetch of the crates.io sparse index in a
+//! background thread — features are per-version and sit in the same entry, so a
+//! second request would be pure waste.
 
 use crate::app::{AppIde, ProjectFileId};
 use eframe::egui;
@@ -29,12 +30,26 @@ pub(crate) enum CargoAccept {
     CrateName(String),
     /// Insert the chosen version string (the cursor is already inside quotes).
     Version(String),
+    /// Insert a feature name into a `features = [ … ]` array. `quoted` is true
+    /// when the caret is already inside a pair of quotes, so only the bare name
+    /// goes in; otherwise the quotes are inserted too.
+    Feature { name: String, quoted: bool },
 }
 
-/// Async result of fetching one crate's versions from the sparse index.
+/// What one crate's sparse-index entry gives us. Both completions are served
+/// from the SAME fetch: features are per-version and already sit next to the
+/// version numbers in the index, so asking twice would be pure waste.
+pub(crate) struct IndexData {
+    /// Non-yanked versions, newest first.
+    pub versions: Vec<String>,
+    /// Version -> its user-facing feature names.
+    pub features: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Async result of fetching one crate's entry from the sparse index.
 pub(crate) enum VersionFetch {
     Loading,
-    Done(Vec<String>),
+    Done(IndexData),
     Error(String),
 }
 
@@ -70,6 +85,20 @@ pub(crate) enum CargoCtx {
     /// Typing a version value for `crate_name` — replace `[start..cursor]`.
     Version {
         crate_name: String,
+        start: usize,
+        prefix: String,
+    },
+    /// Typing inside `features = [ … ]` for `crate_name`.
+    Feature {
+        crate_name: String,
+        /// The version requirement written in the manifest, if any — features
+        /// differ between releases, so the list is taken from the version the
+        /// project actually uses rather than always the newest.
+        version_req: Option<String>,
+        /// Feature names already in the array; never suggested again.
+        already: Vec<String>,
+        /// The caret sits between quotes (insert the bare name).
+        quoted: bool,
         start: usize,
         prefix: String,
     },
@@ -161,8 +190,11 @@ impl AppIde {
     fn open_cargo_popup(&mut self, ctx: &CargoCtx) {
         self.cargo_complete.open = true;
         self.cargo_complete.sel = 0;
-        if let CargoCtx::Version { crate_name, .. } = ctx {
-            self.ensure_version_fetch(crate_name);
+        match ctx {
+            CargoCtx::Version { crate_name, .. } | CargoCtx::Feature { crate_name, .. } => {
+                self.ensure_version_fetch(crate_name)
+            }
+            CargoCtx::Name { .. } => {}
         }
     }
 
@@ -183,9 +215,10 @@ impl AppIde {
                 match guard.as_deref() {
                     Some(VersionFetch::Loading) | None => (Vec::new(), true, None),
                     Some(VersionFetch::Error(e)) => (Vec::new(), false, Some(e.clone())),
-                    Some(VersionFetch::Done(versions)) => {
+                    Some(VersionFetch::Done(data)) => {
                         let pl = prefix.to_lowercase();
-                        let items = versions
+                        let items = data
+                            .versions
                             .iter()
                             .filter(|v| pl.is_empty() || v.to_lowercase().starts_with(&pl))
                             .take(60)
@@ -204,6 +237,37 @@ impl AppIde {
                     }
                 }
             }
+            CargoCtx::Feature {
+                crate_name,
+                version_req,
+                already,
+                prefix,
+                quoted,
+                ..
+            } => {
+                self.ensure_version_fetch(crate_name);
+                let guard = self
+                    .cargo_complete
+                    .version_fetch
+                    .as_ref()
+                    .map(|a| a.lock().unwrap());
+                match guard.as_deref() {
+                    Some(VersionFetch::Loading) | None => (Vec::new(), true, None),
+                    Some(VersionFetch::Error(e)) => (Vec::new(), false, Some(e.clone())),
+                    Some(VersionFetch::Done(data)) => {
+                        let ver = pick_version(&data.versions, version_req.as_deref());
+                        let names = ver
+                            .and_then(|v| data.features.get(v))
+                            .cloned()
+                            .unwrap_or_default();
+                        (
+                            filter_features(&names, prefix, already, *quoted),
+                            false,
+                            None,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -219,8 +283,10 @@ impl AppIde {
         let name = name.to_string();
         std::thread::spawn(move || {
             let result = match fetch_versions(&name) {
-                Ok(v) if v.is_empty() => VersionFetch::Error("no published versions".into()),
-                Ok(v) => VersionFetch::Done(v),
+                Ok(d) if d.versions.is_empty() => {
+                    VersionFetch::Error("no published versions".into())
+                }
+                Ok(d) => VersionFetch::Done(d),
                 Err(e) => VersionFetch::Error(e),
             };
             *shared.lock().unwrap() = result;
@@ -263,6 +329,24 @@ impl AppIde {
                     self.cargo_complete.open = true;
                     self.cargo_complete.sel = 0;
                     ui.ctx().request_repaint();
+                }
+            }
+            CargoAccept::Feature { name, quoted } => {
+                if let CargoCtx::Feature { start, .. } = ctx {
+                    let start = start.min(cursor);
+                    // Outside quotes (`features = [|]`) the quotes come with it.
+                    let insert = if quoted {
+                        name.clone()
+                    } else {
+                        format!("\"{name}\"")
+                    };
+                    let before: String = chars[..start].iter().collect();
+                    let after: String = chars[cursor..].iter().collect();
+                    *display_code = format!("{before}{insert}{after}");
+                    let new_cursor = start + insert.chars().count();
+                    self.store_cargo_cursor(ui, editor_resp, new_cursor);
+                    self.persist_cargo_toml(display_code);
+                    self.cargo_complete.open = false;
                 }
             }
             CargoAccept::Version(ver) => {
@@ -465,6 +549,12 @@ pub(crate) fn cargo_context(text: &str, cursor: usize) -> Option<CargoCtx> {
     let line_chars: Vec<char> = line.chars().collect();
     let first_eq = line_chars.iter().position(|&c| c == '=');
 
+    // A `features = [ … ]` array wins over everything else: it can span lines,
+    // so it is checked against the whole text before the line-local rules.
+    if let Some(ctx) = feature_ctx(&chars, cursor, &section) {
+        return Some(ctx);
+    }
+
     match first_eq {
         // No '=' yet, or cursor is on the key side → crate-name completion.
         Some(eq) if col <= eq => name_ctx(&section, &line_chars, line_start, col),
@@ -472,6 +562,210 @@ pub(crate) fn cargo_context(text: &str, cursor: usize) -> Option<CargoCtx> {
         // Cursor on the value side → version completion.
         Some(eq) => version_ctx(&section, &line_chars, line_start, col, eq),
     }
+}
+
+/// Is the caret inside a `features = [ … ]` array, and for which crate?
+///
+/// Scans BACKWARDS for an unclosed `[`, which is what makes the multi-line form
+/// (`features = [\n  "a",\n  "b",\n]`, the usual shape under
+/// `[dependencies.foo]`) work as well as the inline one. The walk stops at a
+/// table header, so a stray bracket earlier in the file cannot drag the search
+/// out of the current entry.
+fn feature_ctx(chars: &[char], cursor: usize, section: &DepSection) -> Option<CargoCtx> {
+    let open = unclosed_bracket(chars, cursor)?;
+    // The key right before the `[` must be `features`.
+    let mut i = open;
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || chars[i - 1] != '=' {
+        return None;
+    }
+    i -= 1;
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    let key_end = i;
+    while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_' || chars[i - 1] == '-') {
+        i -= 1;
+    }
+    if chars[i..key_end].iter().collect::<String>() != "features" {
+        return None;
+    }
+
+    // Which crate does this array belong to?
+    let key_line_start = chars[..i]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let crate_name = match section {
+        DepSection::Entry(name) => name.clone(),
+        // Inline table: `foo = { …, features = [ … ] }` — the crate is the key
+        // before the line's FIRST `=`.
+        DepSection::Table => {
+            let line_end = chars[key_line_start..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map(|p| key_line_start + p)
+                .unwrap_or(chars.len());
+            let eq = chars[key_line_start..line_end]
+                .iter()
+                .position(|&c| c == '=')?;
+            chars[key_line_start..key_line_start + eq]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string()
+        }
+    };
+    if crate_name.is_empty() {
+        return None;
+    }
+
+    // A path / git dependency has no index entry — nothing to suggest, and the
+    // "crate not found" error a lookup would produce reads like a defect.
+    let entry = entry_text(chars, section, key_line_start);
+    if field_of(&entry, "path").is_some() || field_of(&entry, "git").is_some() {
+        return None;
+    }
+
+    // Everything already in the array, and where the current word starts.
+    let already = quoted_strings(&chars[open + 1..cursor]);
+    let region = &chars[open + 1..cursor];
+    let quoted = region.iter().filter(|&&c| c == '"').count() % 2 == 1;
+    let start = if quoted {
+        open + 2 + region.iter().rposition(|&c| c == '"').unwrap()
+    } else {
+        // Between elements: the word begins after the last `[` `,` or space.
+        open + 1
+            + region
+                .iter()
+                .rposition(|&c| c == ',' || c.is_whitespace())
+                .map(|p| p + 1)
+                .unwrap_or(0)
+    };
+    let prefix: String = chars[start.min(cursor)..cursor].iter().collect();
+    // Anything else in there (a nested array, an `=`) means this is not a plain
+    // list of feature names.
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+
+    Some(CargoCtx::Feature {
+        crate_name,
+        version_req: field_of(&entry, "version"),
+        already,
+        quoted,
+        start: start.min(cursor),
+        prefix,
+    })
+}
+
+/// Index of the `[` that is still open at `cursor`, searching back to the
+/// nearest table header.
+fn unclosed_bracket(chars: &[char], cursor: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = cursor;
+    while i > 0 {
+        i -= 1;
+        match chars[i] {
+            ']' => depth += 1,
+            '[' => {
+                if depth == 0 {
+                    // A `[` at the start of its line is a table header, not an
+                    // array — the search has left the entry.
+                    let at_line_start = chars[..i]
+                        .iter()
+                        .rev()
+                        .take_while(|&&c| c != '\n')
+                        .all(|c| c.is_whitespace());
+                    return (!at_line_start).then_some(i);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The text of the dependency entry that owns `key_line_start`: the whole line
+/// for an inline table, or the table body up to the next header for
+/// `[dependencies.foo]`.
+fn entry_text(chars: &[char], section: &DepSection, key_line_start: usize) -> String {
+    match section {
+        DepSection::Table => {
+            let end = chars[key_line_start..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map(|p| key_line_start + p)
+                .unwrap_or(chars.len());
+            chars[key_line_start..end].iter().collect()
+        }
+        DepSection::Entry(_) => {
+            let header = chars[..key_line_start]
+                .iter()
+                .collect::<String>()
+                .rfind('[')
+                .unwrap_or(0);
+            let text: String = chars[header..].iter().collect();
+            // Up to the next table header.
+            let mut out = String::new();
+            for (n, l) in text.lines().enumerate() {
+                if n > 0 && l.trim_start().starts_with('[') {
+                    break;
+                }
+                out.push_str(l);
+                out.push('\n');
+            }
+            out
+        }
+    }
+}
+
+/// The quoted value of `key = "…"` inside a dependency entry.
+fn field_of(entry: &str, key: &str) -> Option<String> {
+    let chars: Vec<char> = entry.chars().collect();
+    let mut i = 0;
+    while i + key.len() < chars.len() {
+        if chars[i..].starts_with(&key.chars().collect::<Vec<_>>()[..])
+            && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_'))
+        {
+            let mut j = i + key.chars().count();
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if chars.get(j) == Some(&'=') {
+                let rest: String = chars[j + 1..].iter().collect();
+                let val = rest.split('"').nth(1)?;
+                return Some(val.to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every `"…"` string in `region`.
+fn quoted_strings(region: &[char]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Option<String> = None;
+    for &c in region {
+        match (c, &mut cur) {
+            ('"', None) => cur = Some(String::new()),
+            ('"', Some(s)) => {
+                out.push(std::mem::take(s));
+                cur = None;
+            }
+            (c, Some(s)) => s.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The dependency table that encloses `line_start`, if any.
@@ -610,6 +904,68 @@ fn version_ctx(
     })
 }
 
+/// The published version whose features to show: the newest one matching what
+/// the manifest asks for, else the newest overall.
+///
+/// A plain prefix match, not a semver resolver: `"0.2"` picks the newest
+/// `0.2.x`, `"1"` the newest `1.x`. Leading `^ ~ = >=` and spaces are stripped.
+/// Full requirement matching would mean pulling in a semver crate to change the
+/// answer only for ranges nobody writes in a firmware manifest.
+fn pick_version<'a>(versions: &'a [String], req: Option<&str>) -> Option<&'a String> {
+    let req = req
+        .map(|r| r.trim_start_matches(['^', '~', '=', '>', '<', ' ']).trim())
+        .filter(|r| !r.is_empty());
+    let Some(req) = req else {
+        return versions.first();
+    };
+    versions
+        .iter()
+        .find(|v| *v == req || v.starts_with(&format!("{req}.")))
+        .or_else(|| versions.first())
+}
+
+/// Feature rows for the popup: prefix matches first, then substring, with what
+/// is already in the array removed — re-suggesting a feature you can see two
+/// characters to the left is noise.
+fn filter_features(
+    names: &[String],
+    prefix: &str,
+    already: &[String],
+    quoted: bool,
+) -> Vec<CargoItem> {
+    let p = prefix.to_lowercase();
+    let mut starts: Vec<&String> = Vec::new();
+    let mut contains: Vec<&String> = Vec::new();
+    for n in names {
+        if already.iter().any(|a| a == n) {
+            continue;
+        }
+        let low = n.to_lowercase();
+        if p.is_empty() || low.starts_with(&p) {
+            starts.push(n);
+        } else if low.contains(&p) {
+            contains.push(n);
+        }
+    }
+    starts
+        .into_iter()
+        .chain(contains)
+        .take(60)
+        .map(|n| CargoItem {
+            label: n.clone(),
+            detail: if n == "default" {
+                "enabled unless default-features = false".into()
+            } else {
+                String::new()
+            },
+            action: CargoAccept::Feature {
+                name: n.clone(),
+                quoted,
+            },
+        })
+        .collect()
+}
+
 /// Filter the curated embedded-crate list by `prefix` (case-insensitive).
 /// Prefix matches rank before substring matches; both are alphabetical within.
 fn filter_crates(prefix: &str) -> Vec<CargoItem> {
@@ -653,8 +1009,8 @@ fn sparse_index_path(name: &str) -> String {
     }
 }
 
-/// Fetch a crate's published versions from the crates.io sparse index.
-fn fetch_versions(name: &str) -> Result<Vec<String>, String> {
+/// Fetch a crate's sparse-index entry (versions + per-version features).
+fn fetch_versions(name: &str) -> Result<IndexData, String> {
     let url = format!("https://index.crates.io/{}", sparse_index_path(name));
     let body = ureq::get(&url)
         .set("User-Agent", "embedded_ide_0 (crate version lookup)")
@@ -665,13 +1021,14 @@ fn fetch_versions(name: &str) -> Result<Vec<String>, String> {
         })?
         .into_string()
         .map_err(|e| e.to_string())?;
-    Ok(parse_index_versions(&body))
+    Ok(parse_index(&body))
 }
 
-/// Parse a sparse-index body (newline-delimited JSON) into a newest-first list
-/// of non-yanked versions.
-fn parse_index_versions(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
+/// Parse a sparse-index body (newline-delimited JSON): non-yanked versions,
+/// newest first, plus each one's feature names.
+fn parse_index(body: &str) -> IndexData {
+    let mut versions = Vec::new();
+    let mut features = std::collections::BTreeMap::new();
     for line in body.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -681,12 +1038,34 @@ fn parse_index_versions(body: &str) -> Vec<String> {
             if v.get("yanked").and_then(|y| y.as_bool()).unwrap_or(false) {
                 continue;
             }
-            if let Some(ver) = v.get("vers").and_then(|s| s.as_str()) {
-                out.push(ver.to_string());
-            }
+            let Some(ver) = v.get("vers").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            versions.push(ver.to_string());
+            features.insert(ver.to_string(), parse_features(&v));
         }
     }
-    out.reverse(); // index lists oldest→newest; show newest first.
+    versions.reverse(); // index lists oldest->newest; show newest first.
+    IndexData { versions, features }
+}
+
+/// The feature names of one index entry. `features2` is the newer index field
+/// (it carries the ones that reference optional dependencies) and is merged in.
+/// `dep:foo` entries are Cargo's own plumbing for optional dependencies — they
+/// are not written in a manifest, so they are dropped.
+fn parse_features(entry: &serde_json::Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for key in ["features", "features2"] {
+        if let Some(map) = entry.get(key).and_then(|f| f.as_object()) {
+            out.extend(
+                map.keys()
+                    .filter(|k| !k.starts_with("dep:"))
+                    .map(|k| k.to_string()),
+            );
+        }
+    }
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -816,6 +1195,154 @@ mod tests {
         cargo_context(&cleaned, cursor)
     }
 
+    // ── features = [ … ] ─────────────────────────────────────────────────────
+
+    /// `(crate, version_req, already, quoted, prefix)` of a Feature context.
+    fn feat(text: &str) -> Option<(String, Option<String>, Vec<String>, bool, String)> {
+        match ctx(text)? {
+            CargoCtx::Feature {
+                crate_name,
+                version_req,
+                already,
+                quoted,
+                prefix,
+                ..
+            } => Some((crate_name, version_req, already, quoted, prefix)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn feature_ctx_inline_table() {
+        let (name, req, already, quoted, prefix) = feat(
+            "[dependencies]\nembassy-stm32 = { version = \"0.2\", features = [\"stm32f4|\"] }\n",
+        )
+        .expect("inline features array");
+        assert_eq!(name, "embassy-stm32");
+        assert_eq!(req.as_deref(), Some("0.2"));
+        assert!(quoted);
+        assert_eq!(prefix, "stm32f4");
+        // The string being typed is not "already there".
+        assert_eq!(already, Vec::<String>::new());
+    }
+
+    #[test]
+    fn feature_ctx_multi_line_table_entry() {
+        let src = "[dependencies.defmt]\nversion = \"0.3\"\nfeatures = [\n    \"alloc\",\n    \"e|\",\n]\n";
+        let (name, req, already, quoted, prefix) = feat(src).expect("multi-line features array");
+        assert_eq!(name, "defmt");
+        assert_eq!(req.as_deref(), Some("0.3"));
+        assert_eq!(already, ["alloc"]);
+        assert!(quoted);
+        assert_eq!(prefix, "e");
+    }
+
+    #[test]
+    fn feature_ctx_outside_quotes_still_completes() {
+        // Ctrl+Space right after the opening bracket — the accept adds quotes.
+        let (name, _, _, quoted, prefix) =
+            feat("[dependencies]\nfoo = { version = \"1\", features = [|] }\n")
+                .expect("empty array");
+        assert_eq!(name, "foo");
+        assert!(!quoted);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn feature_ctx_after_a_comma() {
+        let (_, _, already, quoted, prefix) =
+            feat("[dependencies]\nfoo = { features = [\"a\", |] }\n").expect("after comma");
+        assert_eq!(already, ["a"]);
+        assert!(!quoted);
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn feature_ctx_ignores_path_and_git_dependencies() {
+        assert!(
+            feat("[dependencies]\nfoo = { path = \"../foo\", features = [\"a|\"] }\n").is_none()
+        );
+        assert!(
+            feat("[dependencies]\nfoo = { git = \"http://x\", features = [\"a|\"] }\n").is_none()
+        );
+    }
+
+    #[test]
+    fn a_closed_array_is_not_a_feature_context() {
+        // Caret after the `]` — the array is closed, so this is not it.
+        assert!(feat("[dependencies]\nfoo = { features = [\"a\"] }|\n").is_none());
+    }
+
+    #[test]
+    fn a_non_features_array_is_not_a_feature_context() {
+        assert!(feat("[dependencies]\nfoo = { targets = [\"a|\"] }\n").is_none());
+    }
+
+    #[test]
+    fn a_table_header_is_not_an_open_array() {
+        // The `[` of `[dependencies]` must not be mistaken for an array.
+        assert!(feat("[dependencies]\nfo|\n").is_none());
+    }
+
+    #[test]
+    fn version_completion_still_wins_on_the_version_field() {
+        assert!(matches!(
+            ctx("[dependencies]\nfoo = { version = \"0.|\" }\n"),
+            Some(CargoCtx::Version { .. })
+        ));
+    }
+
+    // ── Index parsing / version pick / filtering ─────────────────────────────
+
+    #[test]
+    fn parse_index_reads_features_and_drops_dep_entries() {
+        let body = "{\"vers\":\"0.1.0\",\"features\":{\"default\":[\"std\"],\"std\":[]}}\n\
+                    {\"vers\":\"0.2.0\",\"features\":{\"default\":[]},\
+                      \"features2\":{\"async\":[\"dep:tokio\"],\"dep:tokio\":[]}}\n";
+        let d = parse_index(body);
+        assert_eq!(d.versions, ["0.2.0", "0.1.0"]);
+        assert_eq!(d.features["0.1.0"], ["default", "std"]);
+        // `features2` merged in, `dep:` plumbing dropped.
+        assert_eq!(d.features["0.2.0"], ["async", "default"]);
+    }
+
+    #[test]
+    fn pick_version_matches_the_manifest_requirement() {
+        let v: Vec<String> = ["1.2.0", "0.2.5", "0.2.1", "0.1.0"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_version(&v, Some("0.2")).unwrap(), "0.2.5");
+        assert_eq!(pick_version(&v, Some("^0.2")).unwrap(), "0.2.5");
+        assert_eq!(pick_version(&v, Some("0.2.1")).unwrap(), "0.2.1");
+        assert_eq!(pick_version(&v, Some("1")).unwrap(), "1.2.0");
+        // No requirement, or one nothing matches → newest.
+        assert_eq!(pick_version(&v, None).unwrap(), "1.2.0");
+        assert_eq!(pick_version(&v, Some("9")).unwrap(), "1.2.0");
+    }
+
+    #[test]
+    fn filter_features_drops_what_is_already_there() {
+        let names: Vec<String> = ["alloc", "default", "encoding-rzcobs", "std"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let items = filter_features(&names, "", &["default".to_string()], true);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["alloc", "encoding-rzcobs", "std"]);
+    }
+
+    #[test]
+    fn filter_features_ranks_prefix_before_substring() {
+        let names: Vec<String> = ["encoding-rzcobs", "std", "cobs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let items = filter_features(&names, "co", &[], true);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["cobs", "encoding-rzcobs"]);
+    }
+
     #[test]
     fn name_context_in_dependencies() {
         let c = ctx("[dependencies]\nstm|\n");
@@ -878,8 +1405,10 @@ mod tests {
 
     #[test]
     fn features_field_is_not_version() {
+        // Was `None` before feature completion existed; the point of the test —
+        // that this is not a VERSION — still holds.
         let c = ctx("[dependencies]\nserde = { features = [\"de|\"] }\n");
-        assert_eq!(c, None);
+        assert!(matches!(c, Some(CargoCtx::Feature { .. })), "got {c:?}");
     }
 
     #[test]
@@ -916,7 +1445,7 @@ mod tests {
 {\"name\":\"x\",\"vers\":\"0.2.0\",\"yanked\":true}
 {\"name\":\"x\",\"vers\":\"0.3.0\",\"yanked\":false}
 ";
-        assert_eq!(parse_index_versions(body), vec!["0.3.0", "0.1.0"]);
+        assert_eq!(parse_index(body).versions, vec!["0.3.0", "0.1.0"]);
     }
 
     #[test]
@@ -941,10 +1470,12 @@ foo = \"1\"
         // And the offsets it reports are always inside the text.
         if let Some(ctx) = cargo_context(text, 10_000) {
             let len = text.chars().count();
-            match ctx {
-                CargoCtx::Name { start, .. } => assert!(start <= len, "start {start} > {len}"),
-                CargoCtx::Version { start, .. } => assert!(start <= len, "start {start} > {len}"),
-            }
+            let start = match ctx {
+                CargoCtx::Name { start, .. }
+                | CargoCtx::Version { start, .. }
+                | CargoCtx::Feature { start, .. } => start,
+            };
+            assert!(start <= len, "start {start} > {len}");
         }
     }
 }
