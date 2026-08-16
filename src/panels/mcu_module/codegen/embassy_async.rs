@@ -43,6 +43,7 @@ pub fn invariant_header(mcu_name: &str, mcu_id: &str) -> String {
          #![no_std]\n\
          #![no_main]\n\
          #![allow(unused_variables, unused_mut)]\n\n\
+         pub mod pins;\n\n\
          use embassy_executor::Spawner;\n\
          use panic_halt as _;\n\n",
         id = mcu_id_marker_line(mcu_id),

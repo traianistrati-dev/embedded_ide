@@ -865,16 +865,48 @@ fn clean_cargo_error(stderr: &str) -> String {
         .find(|l| l.starts_with("error"))
         .copied()
         .unwrap_or(lines[0]);
+
+    let mut out = vec![head];
     // The LAST `Caused by:` entry is usually the root cause.
-    let cause = lines
+    if let Some(cause) = lines
         .iter()
         .rposition(|l| l.starts_with("Caused by:"))
         .and_then(|i| lines.get(i + 1))
-        .copied();
-    match cause {
-        Some(c) if c != head => format!("{head}\n{c}"),
-        _ => head.to_owned(),
+        .copied()
+    {
+        out.push(cause);
     }
+    // Cargo's DEPENDENCY-RESOLUTION failures carry no `Caused by:` at all: the
+    // head says only "failed to select a version for `x`" and the reason sits in
+    // the middle of the report. Keeping just the head left the user with a
+    // message that named the crate and nothing else — the reported case was a
+    // chip feature that does not exist, and the line saying so was dropped.
+    for l in &lines {
+        if is_resolution_detail(l) && !out.contains(l) {
+            out.push(l);
+        }
+    }
+    out.join("\n")
+}
+
+/// Does this stderr line carry the REASON a dependency failed to resolve?
+///
+/// Matched by cargo's own phrasing rather than by position: these lines appear
+/// between the head and the trailing summary, in an order that varies.
+fn is_resolution_detail(line: &str) -> bool {
+    const MARKERS: [&str; 5] = [
+        // "…, with features: `stm32h5f4aj` but `embassy-stm32` does not have
+        // these features." — the one that names the missing feature.
+        "does not have these features",
+        // "candidate versions found which didn't match: 0.4.0"
+        "candidate versions found",
+        // "versions that meet the requirements `^0.4` are: 0.4.0"
+        "versions that meet the requirements",
+        // "location searched: crates.io index" / "required by package `x`"
+        "location searched",
+        "no matching package named",
+    ];
+    MARKERS.iter().any(|m| line.contains(m))
 }
 
 impl AppIde {
@@ -1288,6 +1320,65 @@ pub(super) fn apply_fs_create(
     };
     if !user_src_files.iter().any(|(p, _)| p == rel) {
         user_src_files.push((rel.to_owned(), content));
+    }
+}
+
+#[cfg(test)]
+mod cargo_error_tests {
+    use super::clean_cargo_error;
+
+    /// The reported case: an imported chip whose `embassy-stm32` feature does
+    /// not exist. Cargo emits NO `Caused by:` here, so the old cleaner kept only
+    /// the head — the user saw the crate name and nothing that could be acted on.
+    #[test]
+    fn a_missing_feature_is_explained_not_just_named() {
+        const STDERR: &str = "\
+error: failed to select a version for `embassy-stm32`.
+    ... required by package `blink v0.1.0 (/tmp/x)`
+versions that meet the requirements `^0.4` are: 0.4.0
+
+the package `blink` depends on `embassy-stm32`, with features: `stm32h5f4aj` but `embassy-stm32` does not have these features.
+
+failed to select a version for `embassy-stm32` which could resolve this conflict";
+        let msg = clean_cargo_error(STDERR);
+        assert!(msg.starts_with("error: failed to select a version"));
+        assert!(
+            msg.contains("does not have these features"),
+            "the actionable line must survive: {msg}"
+        );
+        assert!(
+            msg.contains("stm32h5f4aj"),
+            "and it must still name the offending feature: {msg}"
+        );
+    }
+
+    /// A missing crate names what was searched for and where.
+    #[test]
+    fn a_missing_crate_keeps_its_reason() {
+        const STDERR: &str = "\
+error: no matching package named `embassy-stm32-nope` found
+location searched: registry `crates.io`
+required by package `blink v0.1.0`";
+        let msg = clean_cargo_error(STDERR);
+        assert!(msg.contains("location searched"));
+    }
+
+    /// The `Caused by:` path (a malformed manifest) is unchanged.
+    #[test]
+    fn a_caused_by_error_still_reports_its_root_cause() {
+        const STDERR: &str = "\
+error: failed to parse manifest at `/tmp/x/Cargo.toml`
+
+Caused by:
+  invalid type: string, expected a table";
+        let msg = clean_cargo_error(STDERR);
+        assert!(msg.contains("failed to parse manifest"));
+        assert!(msg.contains("invalid type: string"));
+    }
+
+    #[test]
+    fn empty_output_says_so_instead_of_being_blank() {
+        assert!(clean_cargo_error("   \n\n").contains("no output"));
     }
 }
 

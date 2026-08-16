@@ -23,6 +23,7 @@ pub fn invariant_header(mcu_name: &str, mcu_id: &str) -> String {
          {id}\n\
          #![no_std]\n\
          #![no_main]\n\n\
+         pub mod pins;\n\n\
          use panic_halt as _;\n\
          use cortex_m_rt::entry;\n\n",
         id = mcu_id_marker_line(mcu_id),
@@ -156,5 +157,192 @@ fn pin_binding_line(p: &Pin) -> String {
         }
         // Bus / analog / debug: bind the raw peripheral, ready for its driver.
         _ => format!("    let {var} = p.{singleton}; // {label}"),
+    }
+}
+
+#[cfg(test)]
+mod emit_for_manual_compile {
+    //! A generator, not an assertion: it writes a complete embassy-stm32
+    //! project to a temp folder so the version pin can be verified the only way
+    //! that counts — by compiling it.
+    //!
+    //! `#[ignore]`d because it needs the `thumbv7em-none-eabihf` target and the
+    //! network. Run it, then check the output:
+    //!
+    //! ```text
+    //! cargo test --bin embedded_ide_0 emit_embassy_project -- --ignored --nocapture
+    //! cd %TEMP%\eide_embassy_check && cargo check --target thumbv7em-none-eabihf
+    //! ```
+
+    use crate::panels::mcu_module::builtins::builtin_for;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+    use crate::panels::mcu_module::{project_gen, stm32_pin_data};
+
+    #[test]
+    #[ignore = "writes a project to disk for a manual cross-compile"]
+    fn emit_embassy_project() {
+        // No embassy chip is bundled (the two built-ins are F1 and ESP32-C3), so
+        // build the F411 the XML importer would: same pin data, the family and
+        // dependency line an import produces.
+        let mut def = builtin_for("stm32f103c8t6").expect("built-in F103");
+        def.id = "stm32f411re".into();
+        def.display_name = "STM32F411RETx".into();
+        def.family = "stm32f4".into();
+        def.project.pkg_name = "stm32f411re".into();
+        def.project.target = "thumbv7em-none-eabihf".into();
+        def.project.probe_chip = "STM32F411RETx".into();
+        def.project.hal_dep = stm32_pin_data::hal_dep_for_name("stm32f4", "STM32F411RETx");
+        def.clock = crate::panels::mcu_module::mcu_def::ClockDef::None;
+
+        let mut mcu = def.build_mcu();
+        // One GPIO out and one GPIO in — the two shapes `gpio_binding` emits.
+        let nums: Vec<usize> = mcu
+            .iter_all_pins()
+            .filter(|p| !p.reserved)
+            .map(|p| p.number)
+            .take(2)
+            .collect();
+        if let Some(p) = mcu.find_pin_mut(nums[0]) {
+            p.selected_function = PinFunction::GpioOutput;
+        }
+        if let Some(p) = mcu.find_pin_mut(nums[1]) {
+            p.selected_function = PinFunction::GpioInput;
+        }
+        let main_rs = mcu.fresh_main_rs();
+        let files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+
+        // `sync_pin_files` always keeps `src/pins/mod.rs` in a real project, and
+        // every invariant header declares `pub mod pins;` — so the harness has to
+        // supply it too, or it tests a project shape the app never produces.
+        let pins_mod: Vec<(String, String)> =
+            vec![("src/pins/mod.rs".into(), "pub mod configs;
+".into()),
+                 ("src/pins/configs/mod.rs".into(), String::new())];
+        let dir = std::env::temp_dir().join("eide_embassy_check");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &pins_mod, "", "").expect("write project");
+        println!("wrote {}", dir.display());
+        println!("hal_dep: {}", def.project.hal_dep);
+
+        // ── The ASYNC variant ────────────────────────────────────────────────
+        // Same chip on the Async runtime: this is where the version pin is most
+        // exposed, because `embassy-executor` and `embassy-time` are pinned
+        // SEPARATELY from `embassy-stm32` and have to agree with it.
+        mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
+        let main_rs = mcu.fresh_main_rs();
+        let mut files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+        files.cargo_toml = project_gen::ensure_async_deps(
+            &files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            false,
+            false,
+            false,
+            &[],
+        );
+        let adir = std::env::temp_dir().join("eide_embassy_check_async");
+        let _ = std::fs::remove_dir_all(&adir);
+        project_gen::write_project(&adir, &files, &pins_mod, "", "").expect("write async project");
+        println!("wrote {}", adir.display());
+
+        // ── Async + USART ────────────────────────────────────────────────────
+        // `BufferedUart` is the embassy API most likely to move between
+        // versions, and it lives in a generated config file rather than main.rs.
+        for (name, func) in [("PA9", PinFunction::UsartTx(1)), ("PA10", PinFunction::UsartRx(1))] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        mcu.reconcile_modules();
+        let main_rs = mcu.fresh_main_rs();
+        let mut files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        println!(
+            "config files: {:?}",
+            configs.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        files.cargo_toml = project_gen::ensure_async_deps(
+            &files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            !configs.is_empty(),
+            false,
+            false,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;
+".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};
+", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let udir = std::env::temp_dir().join("eide_embassy_check_usart");
+        let _ = std::fs::remove_dir_all(&udir);
+        project_gen::write_project(&udir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write usart project");
+        println!("wrote {}", udir.display());
+
+        // ── The F1 blocking USART, unchanged by this migration ───────────────
+        // `embedded-io` is shared by both seams, so bumping it for embassy has
+        // to be proved harmless for the stm32f1xx-hal bridge too.
+        let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
+        let mut m1 = f1.build_mcu();
+        for (name, func) in [("PA9", PinFunction::UsartTx(1)), ("PA10", PinFunction::UsartRx(1))] {
+            let num = m1.iter_all_pins().find(|p| p.name == name).map(|p| p.number);
+            if let Some(p) = num.and_then(|n| m1.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        m1.reconcile_modules();
+        let main_rs = m1.fresh_main_rs();
+        let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
+        let configs = m1.config_files();
+        files.cargo_toml = project_gen::ensure_peripheral_deps(
+            &files.cargo_toml,
+            false,
+            true,
+            false,
+            false,
+            false,
+            true,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;
+".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};
+", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let f1dir = std::env::temp_dir().join("eide_f1_check_usart");
+        let _ = std::fs::remove_dir_all(&f1dir);
+        project_gen::write_project(&f1dir, &files, &user, &m1.mcu_config_text(), "")
+            .expect("write f1 project");
+        println!("wrote {}", f1dir.display());
     }
 }

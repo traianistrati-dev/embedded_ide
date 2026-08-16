@@ -1178,6 +1178,14 @@ pub struct SerialIo<TX, RX>(pub TX, pub RX);
 
 #[derive(Debug)]
 pub struct IoError;
+// embedded-io 0.7 requires `Error: core::error::Error`, which in turn wants
+// Display. Two tiny impls, and the bridge works on 0.6 and 0.7 alike.
+impl core::fmt::Display for IoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("serial I/O error")
+    }
+}
+impl core::error::Error for IoError {}
 impl embedded_io::Error for IoError {
     fn kind(&self) -> embedded_io::ErrorKind {
         embedded_io::ErrorKind::Other

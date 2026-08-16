@@ -347,7 +347,7 @@ pub fn ensure_peripheral_deps(
         &s,
         "embedded-io",
         needs_usart,
-        "embedded-io  = \"0.6\"",
+        "embedded-io  = \"0.7\"",
         sources,
     );
     s = ensure_dep(
@@ -574,7 +574,7 @@ pub fn ensure_async_deps(
         &s,
         "embedded-io-async",
         needs_async_usart,
-        "embedded-io-async = \"0.6\"",
+        "embedded-io-async = \"0.7\"",
         sources,
     );
     s = ensure_dep(
@@ -1810,7 +1810,7 @@ mod tests {
 
         // USART only → embedded-io + embedded-hal-0-2 + nb; NO embedded-hal 1.0.
         let usart = ensure_peripheral_deps(&base, false, true, false, false, false, true, &[]);
-        assert!(usart.contains("embedded-io  = \"0.6\""), "{usart}");
+        assert!(usart.contains("embedded-io  = \"0.7\""), "{usart}");
         assert!(
             usart.contains("embedded-hal-0-2 = { package = \"embedded-hal\""),
             "{usart}"
@@ -2133,7 +2133,7 @@ fn f() {}
         // Add an async USART → embedded-io-async + static_cell appear too.
         let with_usart = ensure_async_deps(base, true, AsyncFlavor::Stm32, true, false, false, &[]);
         assert!(
-            with_usart.contains("embedded-io-async = \"0.6\""),
+            with_usart.contains("embedded-io-async = \"0.7\""),
             "async serial trait crate:\n{with_usart}"
         );
         assert!(

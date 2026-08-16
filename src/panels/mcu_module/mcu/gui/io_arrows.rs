@@ -1,9 +1,13 @@
-//! In/out arrow graphics for GPIO Input / Output / PWM pins on the Pins canvas.
+//! In/out arrow graphics for the independently-bound pins on the Pins canvas.
 //!
 //! A lightweight cousin of the virtual-module schematic ([`super::modules`]):
-//! every pin configured as **GPIO Output** or **PWM** gets an arrow pointing
-//! away from the chip (a driven output), every **GPIO Input** an arrow pointing
-//! into the chip. Each arrow carries a small text field to rename the pin; the
+//! every pin that becomes **its own variable** in the generated code gets an
+//! arrow and a rename field here — GPIO In/Out, PWM, ADC, MCO and the generic
+//! alternate functions. A BUS pin does not: it is consumed by its peripheral's
+//! `init_*` and is drawn as a wire to that module's box instead. The arrow
+//! points away from the chip for a driven signal, into it for one the MCU reads,
+//! and carries no head when the function's direction is unknown (see
+//! [`io_dir`]). Each arrow carries a small text field to rename the pin; the
 //! typed text is appended to the generated binding name, e.g. a `pc13` output
 //! labelled "led" becomes `let pc13_out_led = …`. No add/remove buttons — the
 //! arrows simply mirror the pin functions.
@@ -15,11 +19,19 @@ use super::rotate::Rot;
 /// Line from `from` to `to` with a FIXED-size arrowhead at `to`. egui's
 /// `Painter::arrow` scales the head with the vector length, so a long connector
 /// (to a far / dragged field) grows a huge head — this keeps it constant.
-fn connector(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32) {
+fn connector(
+    painter: &egui::Painter,
+    from: egui::Pos2,
+    to: egui::Pos2,
+    color: egui::Color32,
+    // `false` for a signal whose direction we don't know (a generic alternate
+    // function): a plain line says "wired here", an arrow would be a guess.
+    head: bool,
+) {
     let stroke = egui::Stroke::new(2.0, color);
     painter.line_segment([from, to], stroke);
     let v = to - from;
-    if v.length() < 1.0 {
+    if !head || v.length() < 1.0 {
         return;
     }
     let dir = v.normalized();
@@ -45,12 +57,68 @@ const FIELD_H: f32 = 18.0;
 pub const MARGIN_X: f32 = PIN_HEIGHT + ARROW_LEN + GAP + FIELD_W + 14.0;
 pub const MARGIN_Y: f32 = PIN_HEIGHT + ARROW_LEN + GAP + FIELD_H + 14.0;
 
-/// `Some(true)` for an outbound pin (GPIO Output / PWM), `Some(false)` for an
-/// inbound pin (GPIO Input), `None` for anything else.
-fn io_outbound(func: &PinFunction) -> Option<bool> {
+/// Field centres for ball-grid pads: a column just outside the body on the side
+/// the pad leans to (`dir_x`), pads stacked top-down in their own row order.
+///
+/// `pads` is `(pin number, anchor y, outward x)`; `row` is the vertical pitch of
+/// one field + its preview strip. Pure, so the rule that matters — the field
+/// lands OUTSIDE `body`, and two pads never share a slot — is testable without
+/// an egui context.
+fn ball_columns(
+    pads: &[(usize, f32, f32)],
+    body: egui::Rect,
+    row: f32,
+) -> std::collections::HashMap<usize, egui::Pos2> {
+    let mut out = std::collections::HashMap::new();
+    for right in [true, false] {
+        let mut group: Vec<&(usize, f32, f32)> = pads
+            .iter()
+            .filter(|(_, _, dx)| (*dx >= 0.0) == right)
+            .collect();
+        group.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let col_x = if right {
+            body.right() + ARROW_LEN + GAP + FIELD_W / 2.0
+        } else {
+            body.left() - ARROW_LEN - GAP - FIELD_W / 2.0
+        };
+        for (i, (num, _, _)) in group.iter().enumerate() {
+            out.insert(*num, egui::pos2(col_x, body.top() + i as f32 * row));
+        }
+    }
+    out
+}
+
+/// Which way a pin's signal flows, for the arrowhead.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IoDir {
+    /// Driven by the MCU — arrow points away from the chip.
+    Out,
+    /// Read by the MCU — arrow points into the chip.
+    In,
+    /// Unknown: a generic alternate function carries only the datasheet's signal
+    /// name, which says nothing about direction. Drawn as a plain line.
+    Plain,
+}
+
+/// The arrow direction for a pin that gets its OWN binding on the diagram, or
+/// `None` for a pin that gets no field at all.
+///
+/// The rule is "does this pin become a variable the user can rename": every
+/// non-bus function does (`let pa1_adc = …`, `let pa8_mco = …`), while a BUS pin
+/// is consumed by its peripheral's `init_*` and is drawn as a wire to that
+/// module's box instead — and SWD generates a comment, not a binding, so there
+/// is nothing to name.
+fn io_dir(func: &PinFunction) -> Option<IoDir> {
+    if func.is_bus() {
+        return None;
+    }
     match func {
-        PinFunction::GpioOutput | PinFunction::TimerPwm { .. } => Some(true),
-        PinFunction::GpioInput => Some(false),
+        PinFunction::GpioOutput | PinFunction::TimerPwm { .. } | PinFunction::Mco => Some(IoDir::Out),
+        PinFunction::GpioInput | PinFunction::AdcChannel { .. } => Some(IoDir::In),
+        PinFunction::Other(_) => Some(IoDir::Plain),
+        // Unset has no binding; SWD/JTAG generate a comment, not a variable.
+        PinFunction::Unset | PinFunction::SwdIo | PinFunction::SwdClk => None,
+        // Every remaining variant is a bus pin, already returned above.
         _ => None,
     }
 }
@@ -59,7 +127,7 @@ fn io_outbound(func: &PinFunction) -> Option<bool> {
 /// a margin for arrows).
 pub fn has_io_pins(mcu: &Mcu) -> bool {
     mcu.iter_all_pins()
-        .any(|p| !p.reserved && io_outbound(&p.selected_function).is_some())
+        .any(|p| !p.reserved && io_dir(&p.selected_function).is_some())
 }
 
 /// Draw an in/out arrow + rename field for every GPIO In/Out/PWM pin. The text
@@ -77,7 +145,7 @@ pub fn draw_io_arrows(
         num: usize,
         anchor: egui::Pos2,
         dir: egui::Vec2,
-        outbound: bool,
+        flow: IoDir,
         color: egui::Color32,
         preview_base: String,
     }
@@ -89,7 +157,7 @@ pub fn draw_io_arrows(
         if p.reserved || owned.contains(&p.number) {
             continue;
         }
-        let Some(outbound) = io_outbound(&p.selected_function) else {
+        let Some(flow) = io_dir(&p.selected_function) else {
             continue;
         };
         let Some((anchor, dir)) = pin_anchor_dir(mcu, local_chip, rot, p.number) else {
@@ -99,7 +167,7 @@ pub fn draw_io_arrows(
             num: p.number,
             anchor,
             dir,
-            outbound,
+            flow,
             color: p.selected_function.color(),
             // Base binding the label is appended to, e.g. "pc13_out" / "gpio2_out".
             preview_base: pin_binding(&p.name.to_ascii_lowercase(), &p.selected_function, ""),
@@ -116,12 +184,34 @@ pub fn draw_io_arrows(
     let pitch = PIN_WIDTH + PIN_SPACING;
     let row = FIELD_H + 16.0 + 8.0; // field + preview strip + gap
     let mut packed: std::collections::HashMap<usize, egui::Pos2> = std::collections::HashMap::new();
+
+    // ── Ball-grid pads ───────────────────────────────────────────────────────
+    // A ball sits INSIDE the body, so "a short arrow along the pin's outward
+    // direction" lands its field on top of the neighbouring balls (and their
+    // labels). Those pads get their fields stacked in a column OUTSIDE the body
+    // instead — left or right, whichever half of the grid the pad is on — which
+    // is both out of the way and non-overlapping. Edge pins are untouched: their
+    // stubs already stick out, so the simple placement below is right for them.
+    let ball_pins: std::collections::HashSet<usize> = mcu
+        .grid
+        .iter()
+        .flat_map(|g| g.cells.iter().map(|c| c.pin.number))
+        .collect();
+    let body = egui::Rect::from_points(&rot.quad(local_chip));
+    if !ball_pins.is_empty() {
+        let pads: Vec<(usize, f32, f32)> = items
+            .iter()
+            .filter(|it| !mcu.io_pin_pos.contains_key(&it.num) && ball_pins.contains(&it.num))
+            .map(|it| (it.num, it.anchor.y, it.dir.x))
+            .collect();
+        packed.extend(ball_columns(&pads, body, row));
+    }
     {
         // Bucket diagonal, non-dragged io pins by edge (sign of the outward dir).
         let mut by_side: std::collections::BTreeMap<(i32, i32), Vec<&Item>> =
             std::collections::BTreeMap::new();
         for it in &items {
-            if mcu.io_pin_pos.contains_key(&it.num) {
+            if mcu.io_pin_pos.contains_key(&it.num) || ball_pins.contains(&it.num) {
                 continue;
             }
             if it.dir.x.abs() > 0.3 && it.dir.y.abs() > 0.3 {
@@ -205,19 +295,19 @@ pub fn draw_io_arrows(
         // as it moves), arrowhead pointing the data direction (out of / into pin).
         let routed = manual.is_some() || packed_center.is_some();
         painter.circle_filled(it.anchor, 2.5, it.color);
-        let (from, to) = if routed {
-            let edge = nearest_edge(field_rect, it.anchor);
-            if it.outbound {
-                (it.anchor, edge)
-            } else {
-                (edge, it.anchor)
-            }
-        } else if it.outbound {
-            (it.anchor, it.anchor + it.dir * ARROW_LEN)
+        let outward = it.anchor + it.dir * ARROW_LEN;
+        let far = if routed {
+            nearest_edge(field_rect, it.anchor)
         } else {
-            (it.anchor + it.dir * ARROW_LEN, it.anchor)
+            outward
         };
-        connector(painter, from, to, it.color);
+        // The head points the way the data flows; an unknown direction gets a
+        // plain line, drawn outward like an output so the geometry is the same.
+        let (from, to) = match it.flow {
+            IoDir::In => (far, it.anchor),
+            IoDir::Out | IoDir::Plain => (it.anchor, far),
+        };
+        connector(painter, from, to, it.color, it.flow != IoDir::Plain);
 
         // Preview of the resulting binding name — faint above the field, and the
         // DRAG HANDLE (the field itself is a text box, so drag from its label).
@@ -387,6 +477,71 @@ pub fn draw_io_arrows(
             mcu.request_pin_goto(num);
         }
         ui.ctx().request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every pin that becomes its OWN variable gets a field; a bus pin (drawn as
+    /// a wire to its module's box) and a pin that generates only a comment do
+    /// not. This is the list that decides what appears beside the chip.
+    #[test]
+    fn every_independently_bound_function_gets_a_field() {
+        use PinFunction::*;
+        for (func, want) in [
+            (GpioOutput, Some(IoDir::Out)),
+            (TimerPwm { timer: 3, channel: 1 }, Some(IoDir::Out)),
+            (Mco, Some(IoDir::Out)),
+            (GpioInput, Some(IoDir::In)),
+            (AdcChannel { adc: 1, channel: 4 }, Some(IoDir::In)),
+            (Other("SAI1_SD_A".into()), Some(IoDir::Plain)),
+            // No binding to name: SWD is a comment, Unset is nothing.
+            (SwdIo, None),
+            (SwdClk, None),
+            (Unset, None),
+            // Bus pins belong to a Virtual Module's box, not to a floating field.
+            (UsartTx(1), None),
+            (SpiSck(1), None),
+            (I2cSda(1), None),
+            (CanRx, None),
+            (UsbDp, None),
+        ] {
+            assert!(
+                io_dir(&func) == want,
+                "{func:?} should {} a field",
+                if want.is_some() { "get" } else { "not get" }
+            );
+        }
+    }
+
+    /// A ball's field must leave the body — that is the whole point: a pad in
+    /// the middle of the grid used to get its field dropped on its neighbours.
+    #[test]
+    fn ball_fields_land_outside_the_body_and_never_share_a_slot() {
+        let body = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 400.0));
+        let row = 42.0;
+        // Two pads leaning right, one leaning left — all deep inside the body.
+        let pads = [(1usize, 300.0_f32, 0.7_f32), (2, 120.0, 0.4), (3, 200.0, -0.5)];
+        let out = ball_columns(&pads, body, row);
+
+        assert_eq!(out.len(), 3);
+        for (num, c) in &out {
+            let field = egui::Rect::from_center_size(*c, egui::vec2(FIELD_W, FIELD_H));
+            assert!(
+                field.left() > body.right() || field.right() < body.left(),
+                "pin {num} field {field:?} still overlaps the body {body:?}"
+            );
+        }
+        // Right column: the upper pad (2) takes the first slot, the lower (1) the
+        // second — order follows the grid, and they are a full `row` apart.
+        assert_eq!(out[&2].x, out[&1].x);
+        assert_eq!(out[&2].y, body.top());
+        assert_eq!(out[&1].y, body.top() + row);
+        // The left column starts at the top again, on the other side.
+        assert!(out[&3].x < body.left());
+        assert_eq!(out[&3].y, body.top());
     }
 }
 

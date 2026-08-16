@@ -533,7 +533,7 @@ fn hal_dep_for(family: &str, line: &str, name: &str) -> String {
         // Generic embassy backend. The chip feature is just the part number —
         // verified to compile with only `features = ["<chip>"]`.
         return format!(
-            "embassy-stm32 = {{ version = \"0.4\", features = [\"{}\"] }}",
+            "embassy-stm32 = {{ version = \"{EMBASSY_VERSION}\", features = [\"{}\"] }}",
             embassy_chip_feature(name)
         );
     }
@@ -570,6 +570,42 @@ fn f1_line_from_name(name: &str) -> Option<String> {
         && slug.as_bytes()[7].is_ascii_digit()
         && slug.as_bytes()[8].is_ascii_digit();
     ok.then(|| slug[..9].to_string())
+}
+
+/// The `embassy-stm32` version every generated STM32 project (except F1) pins.
+///
+/// One constant because it appears in a generated manifest AND in the
+/// import-time feature check — two copies would drift, and the check would then
+/// validate a version the project doesn't use.
+///
+/// Moved 0.4 -> 0.6 on 2026-08-15. What made it safe to move: `embassy-time`
+/// stays `^0.5` across both (0.4 wanted ^0.5.0, 0.6 wants ^0.5.1), so the
+/// `embassy-executor` 0.9 / `embassy-time` 0.5 pair the async template writes
+/// still resolves; the crates that DID move are embassy-stm32's own private
+/// deps (embassy-sync 0.7->0.8, embassy-hal-internal 0.3->0.5), which a
+/// generated project never names. 0.6 also publishes ~50 more chip features
+/// than 0.4.
+pub const EMBASSY_VERSION: &str = "0.6";
+
+/// The crate name that goes with it.
+pub const EMBASSY_CRATE: &str = "embassy-stm32";
+
+/// The chip feature written in an `embassy-stm32` dependency line, if that is
+/// what this line is.
+///
+/// Pulled back OUT of the generated line rather than threaded through every
+/// caller: the line is what actually ends up in `Cargo.toml`, so checking it is
+/// checking the real thing — including a line the user has since edited.
+pub fn embassy_feature_in(dep_line: &str) -> Option<&str> {
+    let line = dep_line.trim();
+    if !line.starts_with(EMBASSY_CRATE) {
+        return None;
+    }
+    let features = line.split_once("features")?.1;
+    let start = features.find('"')? + 1;
+    let rest = &features[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end]).filter(|f| !f.is_empty())
 }
 
 /// The embassy-stm32 chip feature for a concrete part: the part number without
@@ -724,6 +760,31 @@ mod tests {
             "the import must say what it did: {:?}",
             chips[0].warnings
         );
+    }
+
+    /// The import-time check reads the feature back out of the generated line,
+    /// so the two must agree — including after the user edits the line by hand.
+    #[test]
+    fn the_embassy_feature_is_recoverable_from_the_dependency_line() {
+        let line = hal_dep_for("stm32h5", "STM32H5", "STM32H563ZITx");
+        assert!(line.contains(EMBASSY_CRATE));
+        assert!(
+            line.contains(&format!("version = \"{EMBASSY_VERSION}\"")),
+            "the version must come from the one constant: {line}"
+        );
+        assert_eq!(embassy_feature_in(&line), Some("stm32h563zi"));
+
+        // A hand-edited line, with the fields in another order and extra spaces.
+        assert_eq!(
+            embassy_feature_in(
+                "embassy-stm32 = { features = [ \"stm32h563zi\", \"defmt\" ], version = \"0.4\" }"
+            ),
+            Some("stm32h563zi")
+        );
+        // Lines that are not an embassy dependency, or carry no feature.
+        assert_eq!(embassy_feature_in("stm32f1xx-hal = { features = [\"x\"] }"), None);
+        assert_eq!(embassy_feature_in("embassy-stm32 = \"0.4\""), None);
+        assert_eq!(embassy_feature_in("embassy-stm32 = { features = [\"\"] }"), None);
     }
 
     /// An edge-pin package must be completely unaffected by the grid path.

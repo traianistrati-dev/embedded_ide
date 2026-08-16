@@ -1009,11 +1009,36 @@ fn sparse_index_path(name: &str) -> String {
     }
 }
 
+/// The feature names a crate publishes at the version matching `version_req`.
+///
+/// `None` when the answer isn't knowable right now — offline, crate not found,
+/// index unreachable. Callers must treat that as "don't know", never as "the
+/// feature is missing": warning about a feature on a failed lookup would be
+/// worse than not checking at all.
+///
+/// Short timeout on purpose: this runs on the UI thread during an import, and a
+/// user with no network must wait seconds, not minutes.
+pub(crate) fn known_features(name: &str, version_req: &str) -> Option<Vec<String>> {
+    let data = fetch_versions_with_timeout(name, std::time::Duration::from_secs(4)).ok()?;
+    let version = pick_version(&data.versions, Some(version_req))?;
+    data.features.get(version).cloned()
+}
+
 /// Fetch a crate's sparse-index entry (versions + per-version features).
 fn fetch_versions(name: &str) -> Result<IndexData, String> {
+    // The interactive completion has no deadline of its own — it already runs on
+    // a background thread and the popup simply shows "Loading…".
+    fetch_versions_with_timeout(name, std::time::Duration::from_secs(30))
+}
+
+fn fetch_versions_with_timeout(
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<IndexData, String> {
     let url = format!("https://index.crates.io/{}", sparse_index_path(name));
     let body = ureq::get(&url)
         .set("User-Agent", "embedded_ide_0 (crate version lookup)")
+        .timeout(timeout)
         .call()
         .map_err(|e| match e {
             ureq::Error::Status(404, _) => "crate not found".to_string(),

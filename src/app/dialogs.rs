@@ -708,6 +708,15 @@ impl AppIde {
         let mut skipped = 0usize;
         let mut last_id: Option<String> = None;
         let mut first_err: Option<String> = None;
+        // Chip features that `embassy-stm32` does not publish. The dependency
+        // line is DERIVED from the part number, so a part the crate doesn't
+        // support (or a name our derivation gets wrong) produces a manifest
+        // cargo cannot resolve — which kills rust-analyzer for the whole project
+        // and used to surface only as "failed to select a version". Checking here
+        // turns that into a sentence at import time. One index lookup per import,
+        // cached below; unknowable (offline) means no warning.
+        let mut bad_features: Vec<String> = Vec::new();
+        let mut embassy_features: Option<Option<Vec<String>>> = None;
 
         for path in paths {
             let xml = match std::fs::read_to_string(path) {
@@ -733,6 +742,20 @@ impl AppIde {
                         // override the form's F411-class default.
                         if def.family == "stm32f4" {
                             def.clock_limits = stm32_pin_data::f4_limits_for_chip(&def.id);
+                        }
+                        if let Some(feat) = stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
+                        {
+                            let known = embassy_features.get_or_insert_with(|| {
+                                crate::app::editor_panel::cargo_complete::known_features(
+                                    stm32_pin_data::EMBASSY_CRATE,
+                                    stm32_pin_data::EMBASSY_VERSION,
+                                )
+                            });
+                            if let Some(list) = known {
+                                if !list.iter().any(|f| f == feat) {
+                                    bad_features.push(format!("{} ({feat})", def.display_name));
+                                }
+                            }
                         }
                         match registry::save_definition(&def) {
                             Ok(_) => {
@@ -769,6 +792,26 @@ impl AppIde {
                 if let Some(e) = first_err {
                     msg.push_str(&format!(" ({e})"));
                 }
+            }
+            if !bad_features.is_empty() {
+                // Named here, at import, because the alternative is finding out
+                // when a project on that chip refuses to load.
+                let shown: Vec<&str> = bad_features.iter().take(3).map(String::as_str).collect();
+                msg.push_str(&format!(
+                    "\n{}  {} chip(s) ask for an {} feature that version {} does not \
+                     publish: {}{}. A project on one of these will not resolve — fix \
+                     the HAL line in its Cargo.toml.",
+                    ph::WARNING,
+                    bad_features.len(),
+                    stm32_pin_data::EMBASSY_CRATE,
+                    stm32_pin_data::EMBASSY_VERSION,
+                    shown.join(", "),
+                    if bad_features.len() > shown.len() {
+                        ", …"
+                    } else {
+                        ""
+                    }
+                ));
             }
             msg
         } else {
