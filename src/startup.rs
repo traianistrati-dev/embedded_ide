@@ -13,13 +13,28 @@ const FILE_NAME: &str = "startup.ron";
 /// How a window decides what to open when nothing was named on the command line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartupMode {
-    /// Reopen the project this instance had last — the behaviour that has
-    /// always been, and the right default for a single window.
-    #[default]
+    /// Reopen the project this instance had last, without asking.
     ReopenLast,
-    /// Always show the picker. For someone who keeps several projects and
-    /// several windows, and wants to say which is which every time.
+    /// Show the picker on every start.
+    ///
+    /// The default: with several projects and several windows, which one a
+    /// window opens should be a choice, not a consequence of launch order. The
+    /// picker offers the last project as its primary action bound to Enter, so
+    /// a single-window session still costs one keypress, not a hunt.
+    #[default]
     AlwaysAsk,
+}
+
+/// The project this instance had last, and whether it can be reopened.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LastProject {
+    /// Nothing remembered (a fresh install, or the folder is gone).
+    None,
+    /// Remembered and free — the picker offers it as "Continue with…".
+    Available(PathBuf),
+    /// Remembered but another window has it. Named in the picker as the reason
+    /// this window didn't just reopen it, rather than silently missing.
+    OpenElsewhere(PathBuf),
 }
 
 /// What the app should do at startup.
@@ -27,10 +42,8 @@ pub enum StartupMode {
 pub enum StartupAction {
     /// Open this folder straight away.
     Open(PathBuf),
-    /// Show the picker. `blocked` is the project that WOULD have reopened but
-    /// is already open in another window — worth saying, since otherwise the
-    /// picker looks like it forgot the last project.
-    Ask { blocked: Option<PathBuf> },
+    /// Show the picker, told what became of the last project.
+    Ask { last: LastProject },
     /// Start with no project at all.
     Empty,
 }
@@ -58,13 +71,18 @@ pub fn decide(
     if let Some(dir) = cli {
         return StartupAction::Open(dir);
     }
-    if mode == StartupMode::AlwaysAsk {
-        return StartupAction::Ask { blocked: None };
-    }
-    match remembered {
-        Some(dir) if is_open_elsewhere(&dir) => StartupAction::Ask { blocked: Some(dir) },
-        Some(dir) => StartupAction::Open(dir),
-        None => StartupAction::Empty,
+    let last = match remembered {
+        None => LastProject::None,
+        Some(dir) if is_open_elsewhere(&dir) => LastProject::OpenElsewhere(dir),
+        Some(dir) => LastProject::Available(dir),
+    };
+    match (mode, &last) {
+        (StartupMode::AlwaysAsk, _) => StartupAction::Ask { last },
+        (StartupMode::ReopenLast, LastProject::Available(dir)) => StartupAction::Open(dir.clone()),
+        // Nothing to reopen, and the user didn't ask to be asked.
+        (StartupMode::ReopenLast, LastProject::None) => StartupAction::Empty,
+        // Taken by another window: asking is the only honest move.
+        (StartupMode::ReopenLast, LastProject::OpenElsewhere(_)) => StartupAction::Ask { last },
     }
 }
 
@@ -131,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn reopen_last_is_the_default_path() {
+    fn reopen_last_skips_the_picker_entirely() {
         assert_eq!(
             decide(None, StartupMode::ReopenLast, dir("/last"), nothing_open),
             StartupAction::Open(PathBuf::from("/last"))
@@ -144,7 +162,7 @@ mod tests {
     }
 
     /// The whole point of the second window: it must not silently reopen a
-    /// project the first window is already writing to.
+    /// project the first window is already writing to — in EITHER mode.
     #[test]
     fn a_project_open_elsewhere_asks_instead_of_reopening() {
         assert_eq!(
@@ -155,28 +173,43 @@ mod tests {
                 everything_open
             ),
             StartupAction::Ask {
-                blocked: Some(PathBuf::from("/shared"))
+                last: LastProject::OpenElsewhere(PathBuf::from("/shared"))
             }
         );
     }
 
+    /// Asking still carries the last project, so the picker can offer it as the
+    /// one-keypress way through.
     #[test]
-    fn always_ask_asks_even_with_a_free_project_remembered() {
+    fn always_ask_offers_the_last_project_as_the_default_action() {
         assert_eq!(
             decide(None, StartupMode::AlwaysAsk, dir("/last"), nothing_open),
-            StartupAction::Ask { blocked: None }
+            StartupAction::Ask {
+                last: LastProject::Available(PathBuf::from("/last"))
+            }
+        );
+        assert_eq!(
+            decide(None, StartupMode::AlwaysAsk, None, nothing_open),
+            StartupAction::Ask {
+                last: LastProject::None
+            },
+            "a first run has nothing to continue — the list is the whole screen"
         );
     }
 
     #[test]
-    fn the_preference_round_trips_and_defaults_to_reopen_last() {
-        assert_eq!(StartupMode::default(), StartupMode::ReopenLast);
+    fn the_preference_round_trips_and_defaults_to_asking() {
+        assert_eq!(
+            StartupMode::default(),
+            StartupMode::AlwaysAsk,
+            "which project a window opens is a choice, not a consequence of launch order"
+        );
         let text =
-            ron::ser::to_string_pretty(&StartupMode::AlwaysAsk, ron::ser::PrettyConfig::default())
+            ron::ser::to_string_pretty(&StartupMode::ReopenLast, ron::ser::PrettyConfig::default())
                 .unwrap();
         assert_eq!(
             ron::from_str::<StartupMode>(&text).unwrap(),
-            StartupMode::AlwaysAsk
+            StartupMode::ReopenLast
         );
         assert!(
             ron::from_str::<StartupMode>("garbage").is_err(),

@@ -237,6 +237,31 @@ impl AppIde {
                                             }
                                         },
                                     );
+                                    // The startup preference's OTHER home. Its
+                                    // only switch used to be inside the picker
+                                    // — which does not appear while the setting
+                                    // is off, so it could never be turned back
+                                    // on from the UI. Read inside the closure:
+                                    // that runs only while the menu is open.
+                                    let mut ask = crate::startup::load_mode()
+                                        == crate::startup::StartupMode::AlwaysAsk;
+                                    if ui
+                                        .checkbox(&mut ask, "Ask at startup")
+                                        .on_hover_text(
+                                            "On: every new window asks which project to \
+                                             open. Off: a window reopens the project it \
+                                             had last, unless another window has it.",
+                                        )
+                                        .changed()
+                                    {
+                                        crate::startup::save_mode(if ask {
+                                            crate::startup::StartupMode::AlwaysAsk
+                                        } else {
+                                            crate::startup::StartupMode::ReopenLast
+                                        });
+                                    }
+                                    ui.separator();
+
                                     let can_save = project_files.is_some();
                                     if ui
                                         .add_enabled(

@@ -31,9 +31,9 @@ struct Row {
 
 /// In-flight picker state. `None` on `AppIde` means no picker.
 pub(super) struct StartupPicker {
-    /// The project that would have reopened but is held by another window.
-    /// Shown as the reason this screen is up at all.
-    pub blocked: Option<String>,
+    /// What became of the project this instance had last: the primary action
+    /// when it is free, the reason this screen is up when it is not.
+    pub last: crate::startup::LastProject,
     /// Live copy of the preference, so the checkbox reflects edits made here.
     pub mode: StartupMode,
     rows: Vec<Row>,
@@ -41,9 +41,9 @@ pub(super) struct StartupPicker {
 }
 
 impl StartupPicker {
-    pub(super) fn new(blocked: Option<String>, mode: StartupMode) -> Self {
+    pub(super) fn new(last: crate::startup::LastProject, mode: StartupMode) -> Self {
         Self {
-            blocked,
+            last,
             mode,
             rows: build_rows(),
             refreshed_at: std::time::Instant::now(),
@@ -57,6 +57,13 @@ impl StartupPicker {
             self.refreshed_at = std::time::Instant::now();
         }
     }
+}
+
+/// Folder leaf of a path — how a project is named everywhere in the UI.
+fn leaf(dir: &std::path::Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dir.display().to_string())
 }
 
 /// Read the recent list and probe each entry's claim — the only filesystem work
@@ -98,9 +105,14 @@ impl AppIde {
         };
         state.refresh_if_due();
         let state = &*state;
-        let blocked = state.blocked.clone();
         let mut mode = state.mode;
         let mut choice: Option<Choice> = None;
+        // The last project, split into the two things the UI does with it.
+        let (resume, blocked) = match &state.last {
+            crate::startup::LastProject::Available(dir) => (Some(dir.clone()), None),
+            crate::startup::LastProject::OpenElsewhere(dir) => (None, Some(leaf(dir))),
+            crate::startup::LastProject::None => (None, None),
+        };
 
         egui::Modal::new(egui::Id::new("startup_picker"))
             .backdrop_color(egui::Color32::from_black_alpha(242))
@@ -131,6 +143,31 @@ impl AppIde {
                     );
                 }
                 ui.add_space(10.0);
+
+                // ── Continue with the last project ────────────────────────────
+                // The one-keypress way through, which is what lets the picker be
+                // the DEFAULT without taxing a single-window session.
+                if let Some(dir) = &resume {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!(
+                                    "{}  Continue with \"{}\"",
+                                    ph::ARROW_FAT_RIGHT,
+                                    leaf(dir)
+                                ))
+                                .size(13.0)
+                                .strong(),
+                            )
+                            .min_size(egui::vec2(ui.available_width(), 30.0)),
+                        )
+                        .on_hover_text("Enter")
+                        .clicked()
+                    {
+                        choice = Some(Choice::Open(dir.clone()));
+                    }
+                    ui.add_space(12.0);
+                }
 
                 // ── Recent projects ───────────────────────────────────────────
                 if state.rows.is_empty() {
@@ -222,10 +259,19 @@ impl AppIde {
                 );
             });
 
-        // Escape = start empty, matching every other modal in the app.
-        if ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
-            choice = Some(Choice::Empty);
-        }
+        // Enter takes the primary action, Escape starts empty — the same pair
+        // every other modal in the app uses. Nothing else has focus behind a
+        // modal, so reading the keys without consuming them is safe.
+        ui.ctx().input(|i| {
+            if i.key_pressed(egui::Key::Enter) {
+                if let Some(dir) = &resume {
+                    choice = Some(Choice::Open(dir.clone()));
+                }
+            }
+            if i.key_pressed(egui::Key::Escape) {
+                choice = Some(Choice::Empty);
+            }
+        });
 
         // Keep the (possibly toggled) preference visible in the checkbox.
         if let Some(s) = &mut self.startup_picker {

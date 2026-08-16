@@ -2008,13 +2008,9 @@ impl AppIde {
                 app.project_name = None;
                 app.project_tree.user_src_files.clear();
                 app.project_tree.user_src_folders.clear();
-                if let crate::startup::StartupAction::Ask { blocked } = action {
+                if let crate::startup::StartupAction::Ask { last } = action {
                     app.startup_picker = Some(startup_picker::StartupPicker::new(
-                        blocked.map(|d| {
-                            d.file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| d.display().to_string())
-                        }),
+                        last,
                         crate::startup::load_mode(),
                     ));
                 }
