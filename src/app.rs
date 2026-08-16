@@ -48,6 +48,8 @@ mod loading_overlay;
 
 mod startup_picker;
 
+mod settings_menu;
+
 // ── Project file selector ─────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
