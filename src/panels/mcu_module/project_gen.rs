@@ -1677,7 +1677,9 @@ mod tests {
                     embassy-stm32 = { version = \"0.6\", features = [\"stm32h563zi\"] }\n";
         let once = ensure_usb_deps(base, true, &[]);
         assert_eq!(
-            once.lines().filter(|l| is_dep_line(l, "usb-device")).count(),
+            once.lines()
+                .filter(|l| is_dep_line(l, "usb-device"))
+                .count(),
             1,
             "the first call adds it once:\n{once}"
         );
@@ -1688,7 +1690,10 @@ mod tests {
             s = ensure_usb_deps(&s, true, &[]);
         }
         assert_eq!(s, once, "repeated calls must be a no-op:\n{s}");
-        assert_eq!(s.lines().filter(|l| is_dep_line(l, "usbd-serial")).count(), 1);
+        assert_eq!(
+            s.lines().filter(|l| is_dep_line(l, "usbd-serial")).count(),
+            1
+        );
 
         // And removal still works from that state.
         let off = ensure_usb_deps(&s, false, &[]);
@@ -1704,7 +1709,10 @@ mod tests {
                     stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"rt\"] }\n";
         let on = ensure_usb_deps(base, true, &[]);
         assert!(on.contains("\"stm32-usbd\""), "feature added:\n{on}");
-        assert_eq!(on.lines().filter(|l| is_dep_line(l, "usb-device")).count(), 1);
+        assert_eq!(
+            on.lines().filter(|l| is_dep_line(l, "usb-device")).count(),
+            1
+        );
         // Idempotent here too.
         assert_eq!(ensure_usb_deps(&on, true, &[]), on);
 

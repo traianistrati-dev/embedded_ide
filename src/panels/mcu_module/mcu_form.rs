@@ -58,6 +58,12 @@ pub enum ClockChoice {
     Stm32wba,
     /// STM32F4 tree (data-driven graph — ships the 100 MHz HSI→PLL preset).
     Stm32f4,
+    /// STM32F2 tree. The same topology as [`ClockChoice::Stm32f4`] (one embassy
+    /// RCC module covers F2/F4/F7), kept SEPARATE because the PLLN window is
+    /// not the same: F2's PAC has `MUL192..=MUL432` where F4 has `MUL2..`, so an
+    /// N the F4 accepts can name a variant the F2 does not have. Also its own
+    /// ceilings — 120 MHz HCLK, 30/60 MHz APB — versus F4's 100/50/100.
+    Stm32f2,
     /// STM32G4 tree (data-driven graph — ships the 150 MHz HSI→PLL preset). No
     /// hand-authored layout: the diagram is auto-generated from the topology.
     Stm32g4,
@@ -88,8 +94,10 @@ impl ClockChoice {
         match family {
             "stm32f1" => ClockChoice::Stm32f1,
             "stm32wba" => ClockChoice::Stm32wba,
-            // F2/F4/F7 share embassy's f247 RCC → one tree (see `rcc::rcc_recipe`).
-            "stm32f2" | "stm32f4" | "stm32f7" => ClockChoice::Stm32f4,
+            // F2/F4/F7 share embassy's f247 RCC, but NOT the PLLN window or the
+            // clock ceilings — see `ClockChoice::Stm32f2`.
+            "stm32f2" => ClockChoice::Stm32f2,
+            "stm32f4" | "stm32f7" => ClockChoice::Stm32f4,
             "stm32g4" => ClockChoice::Stm32g4,
             "stm32g0" => ClockChoice::Stm32g0,
             "stm32l4" => ClockChoice::Stm32l4,
@@ -104,7 +112,8 @@ impl ClockChoice {
             ClockChoice::Stm32f1 => "STM32F1 tree",
             ClockChoice::Esp32c3 => "ESP32-C3 tree",
             ClockChoice::Stm32wba => "STM32WBA tree",
-            ClockChoice::Stm32f4 => "STM32F2/F4/F7 tree",
+            ClockChoice::Stm32f4 => "STM32F4/F7 tree",
+            ClockChoice::Stm32f2 => "STM32F2 tree",
             ClockChoice::Stm32g4 => "STM32G4 tree",
             ClockChoice::Stm32g0 => "STM32G0 tree",
             ClockChoice::Stm32l4 => "STM32L4 tree",
@@ -112,8 +121,8 @@ impl ClockChoice {
     }
     fn to_def(self) -> ClockDef {
         use crate::panels::mcu_module::clock::graph::{
-            GraphClock, stm32f4_graph, stm32f4_layout, stm32g0_graph, stm32g4_graph, stm32l4_graph,
-            stm32wba_graph, stm32wba_layout,
+            GraphClock, stm32f2_graph, stm32f2_layout, stm32f4_graph, stm32f4_layout,
+            stm32g0_graph, stm32g4_graph, stm32l4_graph, stm32wba_graph, stm32wba_layout,
         };
         match self {
             ClockChoice::None => ClockDef::None,
@@ -126,6 +135,10 @@ impl ClockChoice {
             ClockChoice::Stm32f4 => ClockDef::Graph(GraphClock {
                 graph: stm32f4_graph(),
                 layout: stm32f4_layout(),
+            }),
+            ClockChoice::Stm32f2 => ClockDef::Graph(GraphClock {
+                graph: stm32f2_graph(),
+                layout: stm32f2_layout(),
             }),
             // Empty layout on purpose — `auto_layout` draws the diagram from the
             // graph topology, so a new family needs no hand-tuned positions.
@@ -1071,9 +1084,11 @@ mod tests {
 
         assert_eq!(ClockChoice::for_family("stm32g4"), ClockChoice::Stm32g4);
         assert_eq!(ClockChoice::for_family("stm32g0"), ClockChoice::Stm32g0);
-        // The f247 family shares one tree.
-        assert_eq!(ClockChoice::for_family("stm32f2"), ClockChoice::Stm32f4);
+        // The f247 families share one TOPOLOGY, but the F2 gets its own choice:
+        // its PLLN window and clock ceilings differ, and mapping it onto the F4
+        // tree is what generated an uncompilable `PllMul::MUL144`.
         assert_eq!(ClockChoice::for_family("stm32f7"), ClockChoice::Stm32f4);
+        assert_eq!(ClockChoice::for_family("stm32f2"), ClockChoice::Stm32f2);
         // A family with no tree yet → None (reset-default clock, still compiles).
         assert_eq!(ClockChoice::for_family("stm32h7"), ClockChoice::None);
 

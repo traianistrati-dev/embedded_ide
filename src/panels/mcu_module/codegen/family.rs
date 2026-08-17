@@ -642,6 +642,49 @@ pub fn gpio_bridge_supported(family: &str) -> bool {
     native_supported(family)
 }
 
+/// Why the **Native** runtime is unavailable on `family`, or `None` when it is
+/// available. Phrased for the System tab, next to the card it explains.
+///
+/// The distinction Native draws — concrete HAL types instead of the portable
+/// bridges — only exists where the bridges do. On an embassy family the blocking
+/// types are ALREADY concrete, so Native would emit byte-for-byte what Blocking
+/// emits: not a missing feature, a choice with no object.
+pub fn native_unavailable_reason(family: &str) -> Option<String> {
+    if native_supported(family) {
+        return None;
+    }
+    Some(if family.starts_with("esp") {
+        format!(
+            "`{family}` uses the ESP HAL's own scheme — there are no portable bridges to opt out of."
+        )
+    } else {
+        format!(
+            "`{family}` runs on embassy-stm32, whose blocking types are already concrete — \
+             Blocking generates exactly that code, so Native would be identical to it."
+        )
+    })
+}
+
+/// Why **RTIC** is unavailable on `family`, or `None` when it is available.
+///
+/// Unlike Native, this one IS missing work rather than a category error: RTIC 2
+/// runs on any Cortex-M, so an F2/F4/H5 would be eligible. What is F1-specific is
+/// the generated code.
+pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
+    if rtic_supported(family) {
+        return None;
+    }
+    Some(if family.starts_with("esp") {
+        format!("RTIC 2 has Cortex-M backends only, and `{family}` is RISC-V.")
+    } else {
+        format!(
+            "Not written for `{family}` yet: the generated interrupt tasks use \
+             stm32f1xx-hal's ExtiPin (make_interrupt_source / trigger_on_edge / \
+             clear_interrupt_pending_bit), which embassy-stm32 does not expose."
+        )
+    })
+}
+
 /// Does a USB virtual module DO anything on this family?
 ///
 /// - **stm32f1** — yes: the backend emits the whole CDC-ACM device
@@ -700,6 +743,39 @@ mod blocking_note_tests {
         for family in ["stm32f2", "stm32f4", "stm32wba", "esp32c3"] {
             assert!(!gpio_bridge_supported(family), "{family}");
         }
+    }
+
+    /// A greyed card must be able to say why — and the two reasons are NOT the
+    /// same kind of thing, which is the point of having separate texts.
+    #[test]
+    fn every_unavailable_runtime_can_explain_itself() {
+        use super::{native_unavailable_reason, rtic_unavailable_reason};
+        // Available: nothing to explain.
+        assert!(native_unavailable_reason("stm32f1").is_none());
+        assert!(rtic_unavailable_reason("stm32f1").is_none());
+
+        for family in ["stm32f2", "stm32f4", "stm32h5"] {
+            let native =
+                native_unavailable_reason(family).expect("greyed means it must explain itself");
+            // Native is a category error: it would generate the same code.
+            assert!(native.contains(family), "name the chip's family: {native}");
+            assert!(
+                native.contains("identical") || native.contains("already concrete"),
+                "say it would be the same code, not that it is missing: {native}"
+            );
+
+            let rtic =
+                rtic_unavailable_reason(family).expect("greyed means it must explain itself");
+            // RTIC is missing work — it must NOT read as impossible.
+            assert!(
+                rtic.contains("ExtiPin") && rtic.contains("yet"),
+                "name what is missing: {rtic}"
+            );
+        }
+
+        // RISC-V is a different answer again.
+        let esp = rtic_unavailable_reason("esp32c3").expect("greyed means it must explain itself");
+        assert!(esp.contains("RISC-V"), "{esp}");
     }
 
     /// USB follows what the BACKEND writes, not what the pins allow.

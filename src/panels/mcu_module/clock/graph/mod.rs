@@ -35,8 +35,8 @@ pub use model::{ClockGraph, Edge, LimitKey, Node, NodeKind, NodeState};
 pub use render::{graph_frequencies, value_from_graph, value_node_id};
 pub use stm32f1::{graph_to_stm32f1, stm32f1_graph};
 pub use stm32f4::{
-    F4Clock, F4Sys, graph_to_f4, is_f4_graph, stm32f4_graph, stm32f4_layout, stm32f4_limits,
-    stm32f4_limits_default,
+    F2_PLL_N, F4_PLL_N, F4Clock, F4Sys, graph_to_f4, is_f4_graph, stm32f2_graph, stm32f2_layout,
+    stm32f2_limits, stm32f4_graph, stm32f4_layout, stm32f4_limits, stm32f4_limits_default,
 };
 pub use stm32g0::{is_g0_graph, stm32g0_graph};
 pub use stm32g4::{is_g4_graph, stm32g4_graph};

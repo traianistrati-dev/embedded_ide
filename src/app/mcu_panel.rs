@@ -1113,7 +1113,8 @@ impl AppIde {
 
             // ── Native (concrete HAL) ────────────────────────────────────────
             let native_sel = mcu.pending_runtime == Runtime::Native;
-            let native_resp = runtime_card(
+            let native_why = family::native_unavailable_reason(&mcu.family);
+            let mut native_resp = runtime_card(
                 ui,
                 native_sel,
                 native_ok,
@@ -1121,9 +1122,16 @@ impl AppIde {
                 "#[entry] fn main() -> !  ·  concrete HAL types everywhere \
                  (Serial / Spi / BlockingI2c) — no portable bridges",
             );
+            if let Some(why) = &native_why {
+                native_resp = native_resp.on_hover_text(why);
+            }
             if native_resp.clicked() && native_ok {
                 mcu.pending_runtime = Runtime::Native;
             }
+            // The reason a card is greyed belongs BESIDE it, not three clicks
+            // deep in "Details" — a disabled control with no explanation is the
+            // question this answers.
+            disabled_reason(ui, native_why.as_deref());
             runtime_details(
                 ui,
                 "rt_details_native",
@@ -1229,16 +1237,21 @@ impl AppIde {
             );
 
             let rtic_sel = mcu.pending_runtime == Runtime::Rtic;
-            let rtic_resp = runtime_card(
+            let rtic_why = family::rtic_unavailable_reason(&mcu.family);
+            let mut rtic_resp = runtime_card(
                 ui,
                 rtic_sel,
                 rtic_ok,
                 "RTIC 2",
                 "#[rtic::app] with Shared / Local / init / idle  ·                   one hardware task per interrupt pin",
             );
+            if let Some(why) = &rtic_why {
+                rtic_resp = rtic_resp.on_hover_text(why);
+            }
             if rtic_resp.clicked() && rtic_ok {
                 mcu.pending_runtime = Runtime::Rtic;
             }
+            disabled_reason(ui, rtic_why.as_deref());
             runtime_details(
                 ui,
                 "rt_details_rtic",
@@ -1257,17 +1270,11 @@ impl AppIde {
             );
 
             ui.add_space(10.0);
-            if !async_ok && !native_ok && !rtic_ok {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}  {} only supports Blocking here (Native = STM32F1 concrete HAL; \
-                         Async = embassy on STM32F4/G0/G4/L4/H7/… and esp-rtos on ESP32-C3).",
-                        ph::WARNING,
-                        mcu.family,
-                    ))
-                    .color(egui::Color32::from_rgb(210, 170, 90)),
-                );
-            } else if native_sel {
+            // The old catch-all summary here ("only Blocking is supported…") is
+            // gone: every unavailable card now carries its OWN reason, and that
+            // sentence hardcoded a family list ("STM32F4/G0/G4/L4/H7/…") that
+            // goes stale the moment a family is added.
+            if native_sel {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  All USART/SPI/I2C peripherals now expose the concrete \
@@ -1779,6 +1786,26 @@ impl AppIde {
 /// accent; `enabled == false` greys the text and swallows clicks (the disabled
 /// Async option on families without an embassy backend). Returns the click
 /// [`egui::Response`] so the caller decides what a click does.
+/// The one-line "why is this greyed out" note under a disabled runtime card.
+/// `None` — the card is enabled — draws nothing at all.
+///
+/// Both cards stay VISIBLE when unavailable rather than being hidden: the
+/// question they answer ("why can't I pick RTIC on this chip?") can only be
+/// asked about something you can see.
+fn disabled_reason(ui: &mut egui::Ui, why: Option<&str>) {
+    let Some(why) = why else {
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(12.0);
+        ui.label(
+            egui::RichText::new(format!("{}  {why}", ph::INFO))
+                .size(10.5)
+                .color(egui::Color32::from_rgb(170, 150, 110)),
+        );
+    });
+}
+
 fn runtime_card(
     ui: &mut egui::Ui,
     selected: bool,

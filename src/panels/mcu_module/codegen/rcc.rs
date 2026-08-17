@@ -31,9 +31,19 @@ pub fn rcc_recipe(family: &str) -> Option<(ReadSpec, RccDescriptor)> {
     match family {
         // F2 / F4 / F7 share embassy's `rcc/f247.rs` (same Config/Pll/Sysclk),
         // so they share ONE recipe — families on a common RCC module cost only
-        // an extra pattern here. (Their N range differs but the shipped graph's
-        // 50–432 window is valid for all three; verified vs metapac rcc_f2/f7.)
-        "stm32f2" | "stm32f4" | "stm32f7" => Some((ReadSpec::f4(), RccDescriptor::f4())),
+        // an extra pattern here.
+        //
+        // What they do NOT share is the PLLN window, and an earlier note here
+        // claimed otherwise ("the shipped 50-432 window is valid for all three,
+        // verified vs metapac rcc_f2/f7"). It is not: metapac's `rcc_f2` block
+        // has `MUL192..=MUL432` where `rcc_f4`/`rcc_f7` have `MUL2..=MUL432`,
+        // and `PllMul` IS that PAC enum. An F2 project with N=144 therefore
+        // failed to compile on a name that does not exist.
+        "stm32f2" => Some((
+            ReadSpec::f4(),
+            RccDescriptor::f4().with_pll_n(super::super::clock::graph::F2_PLL_N),
+        )),
+        "stm32f4" | "stm32f7" => Some((ReadSpec::f4(), RccDescriptor::f4())),
         "stm32g0" => Some((ReadSpec::g0(), RccDescriptor::g0())),
         "stm32g4" => Some((ReadSpec::g4(), RccDescriptor::g4())),
         "stm32l4" => Some((ReadSpec::l4(), RccDescriptor::l4())),
@@ -195,9 +205,23 @@ pub struct RccDescriptor {
     /// `hsi: bool = false`); false where HSI is on by default (F4/G4/G0) or
     /// unused (WBA fixed HSE).
     pub hsi_needs_enable: bool,
+    /// Inclusive `PllMul::MUL<n>` range this family's PAC actually defines.
+    ///
+    /// `PllMul` is not a shared embassy type — it is `pac::rcc::vals::Plln`,
+    /// generated per chip. So the same recipe can serve several families whose
+    /// legal N differs, and emitting a value outside this window produces code
+    /// that names a variant which does not exist. `None` = no window known for
+    /// the family, so nothing is checked (the pre-existing behaviour).
+    pub pll_n: Option<(u32, u32)>,
 }
 
 impl RccDescriptor {
+    /// Narrow this family's PLLN window — see [`RccDescriptor::pll_n`].
+    pub fn with_pll_n(mut self, range: (u32, u32)) -> Self {
+        self.pll_n = Some(range);
+        self
+    }
+
     /// STM32F4: separate `pll_src`, P output, no voltage scale, APB1/2.
     pub fn f4() -> Self {
         Self {
@@ -213,6 +237,9 @@ impl RccDescriptor {
             hse_label: HseLabel::WithMhz,
             pll_desc_via: "PLLP",
             hsi_needs_enable: false,
+            // No window known for this family; `with_pll_n` narrows it where
+            // one is (see `rcc_recipe`).
+            pll_n: None,
         }
     }
 
@@ -237,6 +264,9 @@ impl RccDescriptor {
             hse_label: HseLabel::WithMhz,
             pll_desc_via: "PLLR",
             hsi_needs_enable: false,
+            // No window known for this family; `with_pll_n` narrows it where
+            // one is (see `rcc_recipe`).
+            pll_n: None,
         }
     }
 
@@ -248,6 +278,9 @@ impl RccDescriptor {
     pub fn l4() -> Self {
         Self {
             hsi_needs_enable: true,
+            // No window known for this family; `with_pll_n` narrows it where
+            // one is (see `rcc_recipe`).
+            pll_n: None,
             ..Self::g4()
         }
     }
@@ -276,6 +309,9 @@ impl RccDescriptor {
             hse_label: HseLabel::Fixed("HSE32"),
             pll_desc_via: "PLL1R",
             hsi_needs_enable: false,
+            // No window known for this family; `with_pll_n` narrows it where
+            // one is (see `rcc_recipe`).
+            pll_n: None,
         }
     }
 }
@@ -600,6 +636,28 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
             "            prediv: rcc::PllPreDiv::DIV{},\n",
             v.pll_m
         ));
+        // The net. `PllMul` is the chip's own PAC enum, so an N outside the
+        // family's window names a variant that does not exist and rustc reports
+        // it as "no associated item named `MUL144`" — true, and useless.
+        //
+        // NOT clamped: silently retuning the user's clock is worse than not
+        // building. The value goes out as configured, with the explanation
+        // attached where the compiler will point.
+        if let Some((lo, hi)) = desc.pll_n
+            && !(lo..=hi).contains(&v.pll_n)
+        {
+            b.push_str(&format!(
+                "            // !! PLLN {} is outside this chip's range {}..={} — \
+                 embassy's PllMul has no MUL{} for it.\n",
+                v.pll_n, lo, hi, v.pll_n
+            ));
+            b.push_str(&format!(
+                "            // !! Raise PLLM until N lands in range: the same \
+                 SYSCLK usually has a legal (M, N) pair (e.g. /{} x{}).\n",
+                v.pll_m * 2,
+                v.pll_n * 2
+            ));
+        }
         b.push_str(&format!("            mul: rcc::PllMul::MUL{},\n", v.pll_n));
         // Three outputs; the one this family uses gets the value, the rest None.
         for out in ["divp", "divq", "divr"] {
@@ -658,6 +716,64 @@ fn apb_human(field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The F2 recipe must carry a PLLN window; the F4/F7 one shares every other
+    /// field with it.
+    #[test]
+    fn only_the_f2_recipe_narrows_the_pll_n_window() {
+        let (_, f2) = rcc_recipe("stm32f2").expect("stm32f2 has a recipe");
+        let (_, f4) = rcc_recipe("stm32f4").expect("stm32f4 has a recipe");
+        assert_eq!(f2.pll_n, Some((192, 432)));
+        assert_eq!(f4.pll_n, None);
+        // Same recipe otherwise — the window is the ONLY difference, which is
+        // what lets them share `RccDescriptor::f4()`.
+        assert_eq!(RccDescriptor { pll_n: None, ..f2 }, f4);
+    }
+
+    /// The net: an N the chip cannot encode is emitted AS CONFIGURED, with the
+    /// reason attached. Clamping it would silently retune the user's clock,
+    /// which is worse than not building.
+    #[test]
+    fn an_out_of_range_pll_n_is_explained_not_clamped() {
+        let (_, desc) = rcc_recipe("stm32f2").unwrap();
+        // The exact configuration from the STM32F217 bug report: 144 MHz via
+        // HSI16 /8 x144 /2. Legal arithmetic, illegal N for this family.
+        let mut v = f4_100mhz();
+        v.pll_n = 144;
+        v.sysclk_hz = 144_000_000;
+        let out = emit_rcc_block(&desc, &v);
+        assert!(
+            out.contains("mul: rcc::PllMul::MUL144,"),
+            "the configured value must survive verbatim:
+{out}"
+        );
+        assert!(
+            out.contains("PLLN 144 is outside this chip's range 192..=432"),
+            "{out}"
+        );
+        assert!(out.contains("Raise PLLM"), "{out}");
+    }
+
+    /// …and says nothing when the value is fine, on either family.
+    #[test]
+    fn an_in_range_pll_n_emits_no_warning() {
+        for family in ["stm32f2", "stm32f4"] {
+            let (_, desc) = rcc_recipe(family).unwrap();
+            let mut v = f4_100mhz();
+            // Legal on both: 192 is the F2 floor and well above the F4's.
+            v.pll_n = 192;
+            let out = emit_rcc_block(&desc, &v);
+            assert!(
+                !out.contains("!!"),
+                "{family} warned about a legal N:
+{out}"
+            );
+        }
+        // The F4's own default (N=100) is below the F2 floor but fine for F4 —
+        // proof the window is per-family and not a global tightening.
+        let (_, f4) = rcc_recipe("stm32f4").unwrap();
+        assert!(!emit_rcc_block(&f4, &f4_100mhz()).contains("!!"));
+    }
 
     fn f4_100mhz() -> RccValues {
         // The shipped F4 default: HSI /8 ×100 /2 → 100 MHz, APB1 /2.
@@ -922,8 +1038,35 @@ mod tests {
         // Same embassy rcc module (f247.rs) → identical emitted RCC block.
         let f4 = graph_clock_block("stm32f4", &gc());
         assert_eq!(graph_clock_block("stm32f7", &gc()), f4);
-        assert_eq!(graph_clock_block("stm32f2", &gc()), f4);
         assert!(f4.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"));
+
+        // The F2 is byte-identical too — but only for an N it can encode. This
+        // test used to feed it the F4 preset (N=100) and assert equality, which
+        // is what let `PllMul::MUL144` reach a real project: 100 is below the
+        // F2's floor of 192 just as 144 is. Its own graph carries a legal one.
+        use crate::panels::mcu_module::clock::graph::{stm32f2_graph, stm32f2_layout};
+        let f2 = graph_clock_block(
+            "stm32f2",
+            &ClockConfig::Graph(GraphClock {
+                graph: stm32f2_graph(),
+                layout: stm32f2_layout(),
+            }),
+        );
+        assert!(
+            !f2.contains("!!"),
+            "the F2 default must be encodable:
+{f2}"
+        );
+        // Same shape, same 100 MHz, different (M, N) to get there.
+        assert!(f2.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"));
+        assert!(
+            f2.contains("SYSCLK 100 MHz (HSI16 /16 x200 /2 via PLLP)"),
+            "{f2}"
+        );
+        assert_eq!(
+            f2.replace("DIV16", "DIV8").replace("MUL200", "MUL100"),
+            f4.replace("/8 x100", "/16 x200"),
+        );
     }
 
     #[test]

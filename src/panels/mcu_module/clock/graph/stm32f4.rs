@@ -70,8 +70,55 @@ pub fn stm32f4_limits_default() -> ClockLimits {
     stm32f4_limits(100 * M, 50 * M, 100 * M)
 }
 
+/// STM32F2 ceilings, from embassy-stm32's own `#[cfg(stm32f2)] mod max`
+/// (`rcc/f247.rs`): SYSCLK/HCLK 120 MHz, PCLK1 = /4, PCLK2 = /2. Those are
+/// `rcc_assert!`s, i.e. a debug build PANICS AT BOOT on a violation — not a
+/// datasheet nicety. The F2 shipped with F4's numbers (100/50/100), which are
+/// wrong in both directions: too low for HCLK, too high for both APBs.
+pub fn stm32f2_limits() -> ClockLimits {
+    ClockLimits {
+        // F2's ADC tops out below F4's; the rest come straight from `max`.
+        adcclk_max: 30 * M,
+        ..stm32f4_limits(120 * M, 30 * M, 60 * M)
+    }
+}
+
+/// The PLLN window for the F2, which is NOT the F4's.
+///
+/// embassy's `PllMul` is the chip's own PAC enum (`pac::rcc::vals::Plln`), and
+/// metapac's `rcc_f2` block only has `MUL192..=MUL432` — 241 variants against
+/// F4/F7's 385. So an N the F4 accepts, say 144, is not merely out of spec on an
+/// F2: it names a variant that does not exist, and the generated code does not
+/// compile. embassy's `max::PLL_VCO` for F2 (192..432 MHz at 1 MHz PLL input)
+/// says the same thing in frequency terms.
+pub const F2_PLL_N: (u32, u32) = (192, 432);
+/// F4/F7's window. Narrower than the PAC enum (which starts at 2) because the
+/// datasheet requires 50 — the PAC is not the tighter constraint here.
+pub const F4_PLL_N: (u32, u32) = (50, 432);
+
 /// Build the F4 graph with the crystal-free 100 MHz HSI→PLL preset selected.
 pub fn stm32f4_graph() -> ClockGraph {
+    // /8 → 2 MHz, ×100 → VCO 200, /2 → 100 MHz.
+    f247_graph(F4_PLL_N, 1, 100)
+}
+
+/// The same tree for the F2, whose PLLN floor of 192 makes the F4's preset
+/// unreachable: at PLLM /8 (2 MHz in) the smallest legal N already gives a
+/// 192 MHz VCO and a 96 MHz SYSCLK. Dividing to 1 MHz instead puts the whole
+/// useful range back in reach — and lands on the same 100 MHz default.
+///
+/// The rule worth remembering for this family: with PLLM /16 from HSI16,
+/// N = 2 x SYSCLK[MHz] at /P = 2, so N in 192..432 covers 96..216 MHz.
+pub fn stm32f2_graph() -> ClockGraph {
+    // /16 → 1 MHz, ×200 → VCO 200, /2 → 100 MHz.
+    f247_graph(F2_PLL_N, 3, 200)
+}
+
+/// The shared F2/F4/F7 tree (embassy's `rcc/f247.rs` covers all three), with the
+/// PLLN window and the default PLLM/PLLN that differ between them.
+///
+/// `m_index` indexes the PLLM divisor list below, not the divisor itself.
+fn f247_graph(pll_n: (u32, u32), m_index: usize, n_default: u32) -> ClockGraph {
     let bus_div: Vec<u32> = vec![1, 2, 4, 8, 16];
     // HPRE skips /32 on F4.
     let ahb_div: Vec<u32> = vec![1, 2, 4, 8, 16, 64, 128, 256, 512];
@@ -109,13 +156,16 @@ pub fn stm32f4_graph() -> ClockGraph {
         n(
             "pllm",
             NodeKind::Divider { options: pll_m },
-            NodeState::Index(1),
-        ), // /8 → 2 MHz
+            NodeState::Index(m_index),
+        ),
         n(
             "plln",
-            NodeKind::Multiplier { min: 50, max: 432 },
-            NodeState::Value(100),
-        ), // VCO 200
+            NodeKind::Multiplier {
+                min: pll_n.0,
+                max: pll_n.1,
+            },
+            NodeState::Value(n_default),
+        ),
         n(
             "pllp",
             NodeKind::Divider { options: pll_p },
@@ -240,6 +290,17 @@ pub fn stm32f4_graph() -> ClockGraph {
 /// sources left, PLL chain across the middle, SYSCLK mux, bus dividers and the
 /// delivered clocks down the right margin.
 pub fn stm32f4_layout() -> ClockLayout {
+    f247_layout(F4_PLL_N)
+}
+
+/// The same diagram for the F2 — identical topology, but the ×N dropdown must
+/// only offer values its PAC actually has (see [`F2_PLL_N`]). Offering 144 there
+/// is how the uncompilable `PllMul::MUL144` got generated in the first place.
+pub fn stm32f2_layout() -> ClockLayout {
+    f247_layout(F2_PLL_N)
+}
+
+fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
     let combo =
         |node: &str, x: f32, y: f32, w: f32, options: Vec<(String, NodeState)>| Widget::Combo {
             node: node.into(),
@@ -264,10 +325,16 @@ pub fn stm32f4_layout() -> ClockLayout {
     let bus = [1u32, 2, 4, 8, 16];
     let pll_m = [4u32, 8, 12, 16, 20, 25];
     let pll_p = [2u32, 4, 6, 8];
-    // Curated ×N list around the useful VCO window (full 50..432 lives in RON).
-    let plln = [
-        50u32, 72, 84, 96, 100, 120, 144, 168, 180, 192, 200, 240, 336, 432,
-    ];
+    // Curated ×N list around the useful VCO window (the full range lives in the
+    // graph node, and in RON). Filtered to the family's window: the F2 floor of
+    // 192 drops the first nine of these, which is the whole point — every one of
+    // them names a `PllMul` variant that family does not have.
+    let plln: Vec<u32> = [
+        50u32, 72, 84, 96, 100, 120, 144, 168, 180, 192, 200, 216, 240, 288, 336, 432,
+    ]
+    .into_iter()
+    .filter(|n| (pll_n.0..=pll_n.1).contains(n))
+    .collect();
 
     ClockLayout {
         // Hand-authored: the primitives below ARE the layout, so there are
@@ -607,6 +674,84 @@ impl F4Clock {
 mod tests {
     use super::super::evaluate;
     use super::*;
+
+    /// The F2 shares the tree but not the PLLN window: metapac's `rcc_f2` block
+    /// only defines `MUL192..=MUL432`, so anything the F4 preset reaches below
+    /// 192 names a `PllMul` variant that does not exist. This is the bug that
+    /// produced `PllMul::MUL144` for an STM32F217.
+    #[test]
+    fn the_f2_pll_n_window_starts_at_192() {
+        assert_eq!(F2_PLL_N, (192, 432));
+        assert_eq!(F4_PLL_N, (50, 432));
+        let g = stm32f2_graph();
+        let Some(NodeKind::Multiplier { min, max }) = g.node("plln").map(|n| n.kind.clone()) else {
+            panic!("the F2 graph must have a plln multiplier");
+        };
+        assert_eq!((min, max), F2_PLL_N);
+    }
+
+    /// The default preset has to be REACHABLE in that window. Keeping F4's
+    /// /8 x100 would have shipped an N below the floor — a chip that cannot
+    /// build out of the box.
+    #[test]
+    fn the_f2_default_preset_is_legal_and_still_100_mhz() {
+        let g = stm32f2_graph();
+        let f = evaluate(&g);
+        assert_eq!(f.get("sysclk").copied(), Some(100 * M), "{f:?}");
+        let Some(NodeState::Value(n)) = g.node("plln").map(|n| n.state.clone()) else {
+            panic!("plln must carry a value");
+        };
+        assert!(
+            (F2_PLL_N.0..=F2_PLL_N.1).contains(&n),
+            "default N {n} is outside {F2_PLL_N:?}"
+        );
+        // embassy's `max::PLL_VCO` for F2 is 192..432 MHz and `PLL_IN` is
+        // 0.95..2.1 MHz — both are `rcc_assert!`, i.e. a boot-time panic.
+        let f_in = f.get("pllm").copied().expect("pllm frequency");
+        assert!((950_000..=2_100_000).contains(&f_in), "PLL input {f_in} Hz");
+        let vco = f_in * n;
+        assert!((192 * M..=432 * M).contains(&vco), "VCO {vco} Hz");
+    }
+
+    /// The diagram's x-N dropdown must not offer what the family cannot encode:
+    /// picking 144 from it is exactly how the broken project was configured.
+    #[test]
+    fn the_f2_dropdown_offers_no_illegal_multiplier() {
+        let l = stm32f2_layout();
+        let opts: Vec<u32> = l
+            .widgets
+            .iter()
+            .filter_map(|w| match w {
+                Widget::Combo { node, options, .. } if node == "plln" => Some(options),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|(_, st)| match st {
+                NodeState::Value(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert!(!opts.is_empty(), "the F2 layout must offer x-N choices");
+        assert!(
+            opts.iter().all(|n| (F2_PLL_N.0..=F2_PLL_N.1).contains(n)),
+            "illegal multipliers offered: {opts:?}"
+        );
+        // The F4 keeps its own, wider set — this must not have narrowed both.
+        let f4: Vec<u32> = stm32f4_layout()
+            .widgets
+            .iter()
+            .filter_map(|w| match w {
+                Widget::Combo { node, options, .. } if node == "plln" => Some(options),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|(_, st)| match st {
+                NodeState::Value(v) => Some(*v),
+                _ => None,
+            })
+            .collect();
+        assert!(f4.contains(&50), "F4 must still offer x50: {f4:?}");
+    }
 
     /// The shipped default is the 100 MHz HSI→PLL preset, and the generic
     /// evaluator agrees with the bridge's own arithmetic.

@@ -743,6 +743,15 @@ impl AppIde {
                         if def.family == "stm32f4" {
                             def.clock_limits = stm32_pin_data::f4_limits_for_chip(&def.id);
                         }
+                        // F2 shares the F4 clock TREE but none of its ceilings:
+                        // 120 MHz HCLK with APB /4 and /2, per embassy's own
+                        // `#[cfg(stm32f2)] mod max` — which is `rcc_assert!`, so
+                        // exceeding it panics at boot on a debug build. Imports
+                        // before this carried F4's 100/50/100.
+                        if def.family == "stm32f2" {
+                            def.clock_limits =
+                                crate::panels::mcu_module::clock::graph::stm32f2_limits();
+                        }
                         if let Some(feat) = stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
                         {
                             let known = embassy_features.get_or_insert_with(|| {
