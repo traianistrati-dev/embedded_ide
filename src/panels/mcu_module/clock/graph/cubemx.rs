@@ -976,22 +976,30 @@ mod tests {
     /// Write a chip's imported clock tree out as a `.ron` template.
     ///
     /// Ignored, like the other generators in this crate — it needs a CubeMX
-    /// install and writes into the repo. Point `CHIP_XML` at the part's
-    /// `STM32_open_pin_data` file and run:
-    /// `cargo test -- --ignored generate_chip_clock_ron --nocapture`
+    /// install and writes into the repo. The part and the destination come from
+    /// the environment, so generating another chip needs no code edit:
+    ///
+    /// ```text
+    /// CLOCK_CHIP_XML=…/mcu/STM32WBA55CGUx.xml \
+    /// CLOCK_OUT_RON=assets/mcus/examples/stm32wba55_graphclock.ron \
+    /// cargo test -- --ignored generate_chip_clock_ron --nocapture
+    /// ```
     #[test]
     #[ignore]
     fn generate_chip_clock_ron() {
         use super::super::{GraphClock, derive, export_clock_ron};
 
-        const CHIP_XML: &str = r"C:\Users\istra\Downloads\STM32F217Z(E-G)Tx.xml";
-        const OUT: &str = "assets/mcus/examples/stm32f217_graphclock.ron";
+        let chip_xml = std::env::var("CLOCK_CHIP_XML")
+            .unwrap_or_else(|_| r"C:\Users\istra\Downloads\STM32F217Z(E-G)Tx.xml".to_owned());
+        let out = std::env::var("CLOCK_OUT_RON")
+            .unwrap_or_else(|_| "assets/mcus/examples/stm32f217_graphclock.ron".to_owned());
+        let (chip_xml, out) = (chip_xml.as_str(), out.as_str());
 
         let Some(db) = default_db_dir() else {
             eprintln!("no CubeMX install found — skipping");
             return;
         };
-        let xml = std::fs::read_to_string(CHIP_XML).expect("the chip's pin-data XML");
+        let xml = std::fs::read_to_string(chip_xml).expect("the chip's pin-data XML");
         let key = clock_key_from_mcu_xml(&xml).expect("clock keys");
         let (graph, boxes) = import_for_chip(&db, &key).expect("import");
 
@@ -999,7 +1007,7 @@ mod tests {
         let live = freqs.values().filter(|hz| **hz > 0).count();
         eprintln!(
             "{} -> tree={} rcc={} : {} nodes, {} edges, {live} live",
-            CHIP_XML,
+            chip_xml,
             key.clock_tree,
             key.rcc_version,
             graph.nodes.len(),
@@ -1013,11 +1021,11 @@ mod tests {
 
         let layout = derive(&graph, boxes);
         let gc = GraphClock { graph, layout };
-        std::fs::write(OUT, export_clock_ron(&gc)).expect("write the .ron");
-        eprintln!("wrote {OUT}");
+        std::fs::write(out, export_clock_ron(&gc)).expect("write the .ron");
+        eprintln!("wrote {out}");
 
         // What was written must import back — the same guard Layer 1 applies.
-        let back = super::super::parse_clock_ron(&std::fs::read_to_string(OUT).unwrap())
+        let back = super::super::parse_clock_ron(&std::fs::read_to_string(out).unwrap())
             .expect("the generated file must re-import");
         assert_eq!(back.graph, gc.graph);
     }
