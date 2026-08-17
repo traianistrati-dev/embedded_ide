@@ -25,7 +25,7 @@ use super::graph::{
     ClockGraph, GraphClock, edit, evaluate, graph_to_stm32f1, over_limits, stm32f1_graph,
     value_from_graph,
 };
-use super::model::ClockLimits;
+use super::model::{ClockConfig, ClockLimits};
 use super::presets::{ClockPreset, stm32f1_presets};
 use super::validate::{Severity, warnings};
 use crate::panels::mcu_module::structure_config::ClockPositions;
@@ -622,6 +622,246 @@ pub fn draw_graph_clock(
 
     out.changed = changed;
     out
+}
+
+// ── No clock yet ──────────────────────────────────────────────────────────────
+
+/// The Clock tab for a chip whose definition carries no tree.
+///
+/// This used to be a sentence and nothing else — *"not modelled yet"* — which was
+/// true of the DEFINITION but not of the IDE: the editor can build a tree from
+/// nothing and the importers can fetch an exact one. Every family outside the
+/// nine `ClockChoice::for_family` knows (H5, H7, U5, F3, C0, WB, WL…) landed
+/// here, including the chips whose clock code is now hand-written — so the one
+/// place they could look at their clock was blank.
+///
+/// Returns the clock the user chose to create, if any. Importing is offered
+/// FIRST and drawing last, deliberately: an H5 tree is 178 nodes — two clicks to
+/// import, an afternoon to draw.
+pub fn draw_no_clock(
+    ui: &mut egui::Ui,
+    chip: &str,
+    family: &str,
+    limits: &ClockLimits,
+    state: &mut ClockUiState,
+) -> Option<ClockConfig> {
+    use crate::panels::mcu_module::mcu_form::ClockChoice;
+
+    let mut chosen: Option<ClockConfig> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("no_clock_scroll")
+        .show(ui, |ui| {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{chip} has no clock tree yet"))
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Give it one and the diagram, the fields list and the frequency checks \
+                         all come alive. Save it to the chip afterwards — a tree belongs to the \
+                         chip definition, not to this project.",
+                    )
+                    .size(11.0)
+                    .color(egui::Color32::GRAY),
+                );
+                ui.add_space(14.0);
+
+                // 1. The family template, when this IDE ships one.
+                let template = ClockChoice::for_family(family);
+                if template != ClockChoice::None
+                    && ui
+                        .button(format!(
+                            "{}  Use the {} template",
+                            ph::LIGHTNING,
+                            template.label()
+                        ))
+                        .on_hover_text("The tree this IDE ships for the family, ready to tune")
+                        .clicked()
+                {
+                    chosen = Some(template.to_def().to_config(limits));
+                    state.note = format!("Started from the {} template.", template.label());
+                }
+
+                // 2. The exact tree for THIS part, from a CubeMX installation.
+                if ui
+                    .button(format!("{}  Import from a chip XML (+ CubeMX)…", ph::CPU))
+                    .on_hover_text(
+                        "Pick this part in STM32_open_pin_data (mcu/STM32….xml). Its ClockTree \
+                         and RCC version select the exact CubeMX files.",
+                    )
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("STM32 chip XML", &["xml"])
+                        .pick_file()
+                {
+                    match import_chip_xml(&path, family) {
+                        Ok((gc, msg)) => {
+                            chosen = Some(ClockConfig::Graph(gc));
+                            state.note = msg;
+                        }
+                        Err(e) => state.note = e,
+                    }
+                }
+
+                // 3. A family's CubeMX clock file, when the pin-data repo is not
+                //    at hand.
+                if ui
+                    .button(format!("{}  Import a CubeMX clock XML…", ph::FILE_CODE))
+                    .on_hover_text("db/plugins/clock/STM32<FAMILY>.xml from a CubeMX install")
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("CubeMX clock XML", &["xml"])
+                        .pick_file()
+                {
+                    match import_cubemx_family(&path, family) {
+                        Ok((gc, msg)) => {
+                            chosen = Some(ClockConfig::Graph(gc));
+                            state.note = msg;
+                        }
+                        Err(e) => state.note = e,
+                    }
+                }
+
+                // 4. A tree someone already exported.
+                if ui
+                    .button(format!("{}  Import a clock .ron…", ph::DOWNLOAD_SIMPLE))
+                    .on_hover_text("A GraphClock or a bare ClockGraph, validated on import")
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("RON", &["ron"])
+                        .pick_file()
+                {
+                    state.note = match std::fs::read_to_string(&path)
+                        .map_err(|e| format!("Could not read the file: {e}"))
+                        .and_then(|text| super::graph::parse_clock_ron(&text))
+                    {
+                        Ok(gc) => {
+                            let n = gc.graph.nodes.len();
+                            chosen = Some(ClockConfig::Graph(gc));
+                            format!("Imported {n} nodes.")
+                        }
+                        Err(e) => e,
+                    };
+                }
+
+                ui.add_space(10.0);
+                if ui
+                    .button(format!("{}  Start an empty tree", ph::PENCIL_SIMPLE))
+                    .on_hover_text("Draw it yourself, node by node, in the editor")
+                    .clicked()
+                {
+                    chosen = Some(ClockConfig::Graph(GraphClock {
+                        graph: ClockGraph {
+                            nodes: Vec::new(),
+                            edges: Vec::new(),
+                        },
+                        layout: Default::default(),
+                        bindings: Default::default(),
+                    }));
+                    state.note = "Empty tree — add nodes from the palette.".to_owned();
+                    start_editing(ui);
+                }
+
+                ui.add_space(12.0);
+                if !state.note.is_empty() {
+                    ui.label(
+                        egui::RichText::new(&state.note)
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(150, 200, 160)),
+                    );
+                }
+                if template == ClockChoice::None {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  This IDE ships no template for `{family}` — importing is the \
+                             quickest route.",
+                            ph::INFO
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                    );
+                }
+            });
+        });
+    chosen
+}
+
+/// Open the editor on the next frame — what "Start an empty tree" means, since
+/// an empty diagram has nothing to look at.
+fn start_editing(ui: &egui::Ui) {
+    let id = egui::Id::new("graph_clock_view");
+    let mut view: ClockView = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    view.edit = true;
+    ui.data_mut(|d| d.insert_temp(id, view));
+}
+
+/// Import this part's exact tree: its pin-data XML names the CubeMX files.
+fn import_chip_xml(path: &std::path::Path, family: &str) -> Result<(GraphClock, String), String> {
+    use super::graph::cubemx;
+    let xml = std::fs::read_to_string(path).map_err(|e| format!("Could not read the file: {e}"))?;
+    let key = cubemx::clock_key_from_mcu_xml(&xml)?;
+    let db = cubemx::default_db_dir().ok_or(
+        "No STM32CubeMX installation found — use the CubeMX clock XML button and point at \
+         db/plugins/clock/ yourself.",
+    )?;
+    let (graph, boxes) = cubemx::import_for_chip(&db, &key)?;
+    Ok(bound_import(graph, boxes, family, &key.clock_tree))
+}
+
+/// Import a family's CubeMX clock file directly. Variant-conditional branches
+/// stay out — nothing here names the part.
+fn import_cubemx_family(
+    path: &std::path::Path,
+    family: &str,
+) -> Result<(GraphClock, String), String> {
+    use super::graph::cubemx;
+    let tree = cubemx::family_of(path).ok_or("that file has no name to take a family from")?;
+    let db = path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or("expected the file to sit in <CubeMX>/db/plugins/clock/")?;
+    let (graph, boxes) = cubemx::import_from_db(db, &tree, &cubemx::Variant::default())?;
+    Ok(bound_import(graph, boxes, family, &tree))
+}
+
+/// Finish an import: lay it out, propose the codegen bindings, and say what is
+/// still unbound — an id with no node means that value falls back to a default.
+fn bound_import(
+    graph: super::graph::ClockGraph,
+    boxes: Vec<super::graph::NodeBox>,
+    family: &str,
+    source: &str,
+) -> (GraphClock, String) {
+    use super::graph::{bind, derive};
+    use crate::panels::mcu_module::codegen::rcc::codegen_node_ids;
+
+    let ids = codegen_node_ids(family);
+    let bindings = bind::propose(&ids, &graph);
+    let missing = bind::unbound(&ids, &bindings);
+    let nodes = graph.nodes.len();
+    let layout = derive(&graph, boxes);
+    let note = if missing.is_empty() {
+        format!("Imported {nodes} nodes from {source}.")
+    } else {
+        format!(
+            "Imported {nodes} nodes from {source} · {} codegen id(s) unbound ({}).",
+            missing.len(),
+            missing.join(", ")
+        )
+    };
+    (
+        GraphClock {
+            graph,
+            layout,
+            bindings,
+        },
+        note,
+    )
 }
 
 // ── Fields view ───────────────────────────────────────────────────────────────
@@ -1507,7 +1747,7 @@ fn graph_info_zone(
     family: &str,
     clock_manual: &mut bool,
 ) -> bool {
-    let mut changed = clock_manual_switch(ui, family, clock_manual);
+    let changed = clock_manual_switch(ui, family, clock_manual);
     if is_stm32f1 {
         let c = graph_to_stm32f1(&gc.for_codegen());
         let ws = warnings(&c, &frequencies(&c), l);

@@ -43,16 +43,23 @@ impl Mcu {
                 clock_manual,
             ),
             ClockConfig::None => {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Clock configuration for {name} is not modelled yet.",
-                        ))
-                        .size(14.0)
-                        .color(egui::Color32::GRAY),
-                    );
-                });
-                clock_gui::ClockTabOut::default()
+                // Not a dead end any more: the chip has no tree YET, and every
+                // way of giving it one is offered here. A tree made this way is
+                // the chip's, so it only outlives the session once "Save to
+                // chip" writes it into the definition.
+                match clock_gui::draw_no_clock(ui, name, family, clock_limits, state) {
+                    Some(new_clock) => {
+                        if let ClockConfig::Graph(gc) = &new_clock {
+                            *clock_defaults = Some(gc.graph.clone());
+                        }
+                        *clock = new_clock;
+                        clock_gui::ClockTabOut {
+                            changed: true,
+                            save_to_definition: false,
+                        }
+                    }
+                    None => clock_gui::ClockTabOut::default(),
+                }
             }
         }
     }

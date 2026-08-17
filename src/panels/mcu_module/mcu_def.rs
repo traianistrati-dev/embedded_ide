@@ -617,6 +617,28 @@ mod tests {
         assert!(matches!(def.build_mcu().clock, ClockConfig::None));
     }
 
+    /// A family with no template still builds — it just arrives with no tree,
+    /// which the Clock tab now offers to create instead of refusing.
+    #[test]
+    fn a_family_without_a_template_builds_without_a_clock() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+        use crate::panels::mcu_module::mcu_form::ClockChoice;
+
+        let mut def = stm_def();
+        def.clock = ClockDef::None;
+        // H5 is the case that matters: importable from XML, no template, and
+        // its clock code is hand-written.
+        def.family = "stm32h5".into();
+        assert_eq!(ClockChoice::for_family("stm32h5"), ClockChoice::None);
+
+        let mcu = def.build_mcu();
+        assert!(matches!(mcu.clock, ClockConfig::None), "no tree yet");
+        assert!(
+            mcu.clock_manual,
+            "and its clock block is hand-written, since nothing generates it"
+        );
+    }
+
     /// A declared clock is never overridden by the family fallback.
     #[test]
     fn a_declared_clock_wins_over_the_family_fallback() {

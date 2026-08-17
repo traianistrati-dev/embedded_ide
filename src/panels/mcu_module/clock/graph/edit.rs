@@ -538,6 +538,40 @@ mod tests {
         assert_eq!(b.len(), 3, "every node got a box");
     }
 
+    /// A chip that starts with NO tree at all — the "Start an empty tree" route
+    /// — must survive every step the tab takes: laying out, evaluating,
+    /// validating and generating, before a single node exists.
+    #[test]
+    fn an_empty_tree_survives_the_whole_pipeline() {
+        use crate::panels::mcu_module::clock::graph::{auto_layout, place};
+        use crate::panels::mcu_module::clock::model::{ClockConfig, ClockLimits};
+        use crate::panels::mcu_module::codegen::rcc::graph_clock_block;
+
+        let (mut g, mut b) = empty();
+        let lay = auto_layout(&g);
+        assert!(lay.is_empty(), "nothing to draw yet");
+        assert!(place(&g).is_empty());
+        assert!(evaluate(&g).is_empty());
+        assert!(issues(&g).is_empty(), "an empty tree is not malformed");
+        let (w, h) = lay.bounds();
+        assert!(w > 0.0 && h > 0.0, "the canvas still has a size");
+
+        // Code generation falls back cleanly rather than panicking.
+        let gc = crate::panels::mcu_module::clock::graph::GraphClock {
+            graph: g.clone(),
+            layout: lay,
+            bindings: Default::default(),
+        };
+        let block = graph_clock_block("stm32h5", &ClockConfig::Graph(gc), false);
+        assert!(block.contains("embassy_stm32::init"));
+        let _ = ClockLimits::default();
+
+        // And the first node added makes it a real tree.
+        let src = add(&mut g, &mut b, PaletteKind::Source);
+        assert_eq!(evaluate(&g)[&src], 8_000_000);
+        assert_eq!(auto_layout(&g).nodes.len(), 1);
+    }
+
     #[test]
     fn ids_are_unique_per_kind() {
         let (mut g, mut b) = empty();
