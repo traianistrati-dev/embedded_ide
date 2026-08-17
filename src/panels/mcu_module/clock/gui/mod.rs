@@ -748,6 +748,33 @@ pub fn draw_no_clock(
                 }
 
                 ui.add_space(10.0);
+
+                // 5. The spine every MCU has, under the ids code generation
+                //    reads — a starting point rather than a blank canvas.
+                if ui
+                    .button(format!("{}  Start from a minimal tree", ph::TREE_STRUCTURE))
+                    .on_hover_text(
+                        "The universal spine — HSI/HSE, PLL, SYSCLK, AHB, APB1/APB2 — at its \
+                         reset settings. Generic: it computes frequencies but claims none of \
+                         this chip's limits, so set the oscillators from the datasheet.",
+                    )
+                    .clicked()
+                {
+                    let graph = super::graph::minimal_graph();
+                    let n = graph.nodes.len();
+                    let layout = super::graph::auto_layout(&graph);
+                    chosen = Some(ClockConfig::Graph(GraphClock {
+                        graph,
+                        layout,
+                        // The ids ARE the canonical ones, so nothing to map.
+                        bindings: Default::default(),
+                    }));
+                    state.note = format!(
+                        "Generic {n}-node tree at reset (SYSCLK on HSI). Set HSI/HSE from the \
+                         datasheet — the ceilings are not this chip's."
+                    );
+                }
+
                 if ui
                     .button(format!("{}  Start an empty tree", ph::PENCIL_SIMPLE))
                     .on_hover_text("Draw it yourself, node by node, in the editor")
