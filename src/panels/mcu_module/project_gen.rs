@@ -36,7 +36,10 @@ use std::{fs, io, path::Path};
 
 /// All generated file contents for one project snapshot.
 /// Cheap to build (pure string formatting); regenerated every UI frame.
-#[derive(Clone)]
+///
+/// `Default` is the no-chip project: every file empty, because with no target
+/// selected there is nothing to derive a Cargo.toml or a memory.x from.
+#[derive(Clone, Default)]
 pub struct ProjectFiles {
     pub main_rs: String,
     pub cargo_toml: String,
@@ -261,8 +264,11 @@ fn dep_key(line: &str) -> Option<&str> {
         return None;
     }
     let key = t.split('=').next()?.trim();
-    (!key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)))
-        .then_some(key)
+    (!key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)))
+    .then_some(key)
 }
 
 /// The lines of one TOML section, stopping at the next `[header]`.
@@ -449,10 +455,19 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool, sources: &[&str]) -> S
     };
     let is_hal = |line: &str| line.trim_start().starts_with("stm32f1xx-hal");
     let has_usb_dep = cargo_toml.lines().any(|l| is_dep(l, "usb-device"));
+    // The `stm32-usbd` feature rides on the `stm32f1xx-hal` line, so it is only
+    // part of "the desired state" when that line EXISTS. Without this, a chip on
+    // any other HAL (embassy-stm32 on every STM32 but F1) could never satisfy
+    // the guard: `has_feature` stayed false forever, the function ran its insert
+    // loop on every call, and since dragging a module box bumps the regeneration
+    // hash, one drag appended `usb-device` + `usbd-serial` per FRAME — dozens of
+    // duplicate lines in a second.
+    let has_hal_line = cargo_toml.lines().any(is_hal);
     let has_feature = cargo_toml
         .lines()
         .any(|l| is_hal(l) && l.contains("\"stm32-usbd\""));
-    if needs_usb == has_usb_dep && needs_usb == has_feature {
+    let feature_ok = !has_hal_line || needs_usb == has_feature;
+    if needs_usb == has_usb_dep && feature_ok {
         return cargo_toml.to_owned(); // already in the desired state
     }
 
@@ -475,7 +490,11 @@ pub fn ensure_usb_deps(cargo_toml: &str, needs_usb: bool, sources: &[&str]) -> S
             continue;
         }
         out.push(line.to_string());
-        if needs_usb && !inserted && line.trim() == "[dependencies]" {
+        // `!has_usb_dep` is belt to the guard's braces: whatever brings us here,
+        // the lines are never added when they are already present. The guard
+        // above decides WHETHER to run; this decides whether there is anything
+        // left to add.
+        if needs_usb && !has_usb_dep && !inserted && line.trim() == "[dependencies]" {
             // Versions matched to stm32f1xx-hal 0.10's `usb` module (stm32-usbd),
             // which targets usb-device 0.2 / usbd-serial 0.1 (`.product()` API).
             out.push(format!("usb-device  = \"0.2\"   {DEP_MARKER}"));
@@ -1572,7 +1591,10 @@ mod tests {
             after.contains("stm32h563zi"),
             "the corrected feature must survive:\n{after}"
         );
-        assert!(!after.contains("stm32h5f4aj"), "and the guess must not return");
+        assert!(
+            !after.contains("stm32h5f4aj"),
+            "and the guess must not return"
+        );
 
         // Idempotent: splicing the result again keeps it.
         let twice = splice_config(ConfigFile::CargoToml, &after, &c, &tc);
@@ -1604,8 +1626,12 @@ mod tests {
         let c = embassy_project();
         let tc = ToolchainKind::RustEmbedded;
         let generated = gen_config(ConfigFile::CargoToml, &c, &tc);
-        let with_dep = ensure_peripheral_deps(&generated, false, true, false, false, false, false, &[]);
-        assert!(with_dep.contains(DEP_MARKER), "fixture: an IDE-owned line exists");
+        let with_dep =
+            ensure_peripheral_deps(&generated, false, true, false, false, false, false, &[]);
+        assert!(
+            with_dep.contains(DEP_MARKER),
+            "fixture: an IDE-owned line exists"
+        );
         let edited = with_dep.replace("embedded-io  = \"0.7\"", "embedded-io  = \"0.5\"");
         let after = splice_config(ConfigFile::CargoToml, &edited, &c, &tc);
         assert!(
@@ -1629,12 +1655,78 @@ mod tests {
 
     #[test]
     fn dep_key_reads_only_dependency_lines() {
-        assert_eq!(dep_key("embassy-stm32 = { version = \"0.6\" }"), Some("embassy-stm32"));
+        assert_eq!(
+            dep_key("embassy-stm32 = { version = \"0.6\" }"),
+            Some("embassy-stm32")
+        );
         assert_eq!(dep_key("  cortex-m    = \"0.7\""), Some("cortex-m"));
         assert_eq!(dep_key("# a comment"), None);
         assert_eq!(dep_key("[dependencies]"), None);
         assert_eq!(dep_key(""), None);
         assert_eq!(dep_key("features = [\"a\"] }"), Some("features"));
+    }
+
+    /// The reported bug: on a chip whose HAL is NOT `stm32f1xx-hal` (every STM32
+    /// but F1), each call appended `usb-device` + `usbd-serial` again — and since
+    /// dragging a module box bumps the regeneration hash, one drag wrote dozens
+    /// of duplicate lines. Every USB test until now used an F1 manifest, where
+    /// the `stm32-usbd` feature lands on the HAL line and closes the guard.
+    #[test]
+    fn usb_deps_are_idempotent_without_an_f1_hal_line() {
+        let base = "[package]\nname = \"h5\"\n\n[dependencies]\n\
+                    embassy-stm32 = { version = \"0.6\", features = [\"stm32h563zi\"] }\n";
+        let once = ensure_usb_deps(base, true, &[]);
+        assert_eq!(
+            once.lines().filter(|l| is_dep_line(l, "usb-device")).count(),
+            1,
+            "the first call adds it once:\n{once}"
+        );
+
+        // Ten more calls — a fraction of one drag — must change nothing.
+        let mut s = once.clone();
+        for _ in 0..10 {
+            s = ensure_usb_deps(&s, true, &[]);
+        }
+        assert_eq!(s, once, "repeated calls must be a no-op:\n{s}");
+        assert_eq!(s.lines().filter(|l| is_dep_line(l, "usbd-serial")).count(), 1);
+
+        // And removal still works from that state.
+        let off = ensure_usb_deps(&s, false, &[]);
+        assert!(!off.lines().any(|l| is_dep_line(l, "usb-device")), "{off}");
+        assert!(!off.lines().any(|l| is_dep_line(l, "usbd-serial")), "{off}");
+    }
+
+    /// The F1 path — where the `stm32-usbd` HAL feature IS part of the state —
+    /// keeps working exactly as before.
+    #[test]
+    fn usb_deps_still_toggle_the_f1_hal_feature() {
+        let base = "[package]\nname = \"f1\"\n\n[dependencies]\n\
+                    stm32f1xx-hal = { version = \"0.10\", features = [\"stm32f103\", \"rt\"] }\n";
+        let on = ensure_usb_deps(base, true, &[]);
+        assert!(on.contains("\"stm32-usbd\""), "feature added:\n{on}");
+        assert_eq!(on.lines().filter(|l| is_dep_line(l, "usb-device")).count(), 1);
+        // Idempotent here too.
+        assert_eq!(ensure_usb_deps(&on, true, &[]), on);
+
+        let off = ensure_usb_deps(&on, false, &[]);
+        assert!(!off.contains("\"stm32-usbd\""), "feature removed:\n{off}");
+        assert!(!off.lines().any(|l| is_dep_line(l, "usb-device")));
+    }
+
+    /// A duplicate that a previous build already wrote must not survive a
+    /// removal pass — the loop drops every matching IDE-owned line, not one.
+    #[test]
+    fn removal_cleans_up_lines_an_older_build_duplicated() {
+        let mut s = String::from("[package]\nname = \"h5\"\n\n[dependencies]\n");
+        for _ in 0..5 {
+            s.push_str(&format!("usb-device  = \"0.2\"   {DEP_MARKER}\n"));
+            s.push_str(&format!("usbd-serial = \"0.1\"   {DEP_MARKER}\n"));
+        }
+        let off = ensure_usb_deps(&s, false, &[]);
+        assert!(
+            !off.lines().any(|l| is_dep_line(l, "usb-device")),
+            "all copies go, not just the first:\n{off}"
+        );
     }
 
     #[test]

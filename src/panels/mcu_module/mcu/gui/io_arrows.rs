@@ -113,7 +113,9 @@ fn io_dir(func: &PinFunction) -> Option<IoDir> {
         return None;
     }
     match func {
-        PinFunction::GpioOutput | PinFunction::TimerPwm { .. } | PinFunction::Mco => Some(IoDir::Out),
+        PinFunction::GpioOutput | PinFunction::TimerPwm { .. } | PinFunction::Mco => {
+            Some(IoDir::Out)
+        }
         PinFunction::GpioInput | PinFunction::AdcChannel { .. } => Some(IoDir::In),
         PinFunction::Other(_) => Some(IoDir::Plain),
         // Unset has no binding; SWD/JTAG generate a comment, not a variable.
@@ -492,7 +494,13 @@ mod tests {
         use PinFunction::*;
         for (func, want) in [
             (GpioOutput, Some(IoDir::Out)),
-            (TimerPwm { timer: 3, channel: 1 }, Some(IoDir::Out)),
+            (
+                TimerPwm {
+                    timer: 3,
+                    channel: 1,
+                },
+                Some(IoDir::Out),
+            ),
             (Mco, Some(IoDir::Out)),
             (GpioInput, Some(IoDir::In)),
             (AdcChannel { adc: 1, channel: 4 }, Some(IoDir::In)),
@@ -523,7 +531,11 @@ mod tests {
         let body = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 400.0));
         let row = 42.0;
         // Two pads leaning right, one leaning left — all deep inside the body.
-        let pads = [(1usize, 300.0_f32, 0.7_f32), (2, 120.0, 0.4), (3, 200.0, -0.5)];
+        let pads = [
+            (1usize, 300.0_f32, 0.7_f32),
+            (2, 120.0, 0.4),
+            (3, 200.0, -0.5),
+        ];
         let out = ball_columns(&pads, body, row);
 
         assert_eq!(out.len(), 3);

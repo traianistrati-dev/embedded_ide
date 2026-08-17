@@ -795,14 +795,6 @@ struct PersistedState {
     /// [`AppIde::save`].
     #[serde(default)]
     project_dir: Option<String>,
-    /// Chip the session ended on. Unlike everything else about the MCU (pins,
-    /// clock, modules — all read back from `mcu.config`), this survives a
-    /// project that was never saved: reopening on the chip you were working
-    /// with costs nothing, and it is the half of a lost session worth keeping.
-    /// `None` (older state) or an id whose definition has since been deleted
-    /// falls back to the built-in default.
-    #[serde(default)]
-    selected_mcu_id: Option<String>,
     /// Editor-only layout (MCU + Project panels collapsed away).
     #[serde(default)]
     side_panels_collapsed: bool,
@@ -878,20 +870,17 @@ mod persisted_state_tests {
             user_src_folders: vec!["src/pins".to_owned()],
             project_name: Some("blinky".to_owned()),
             project_dir: dir.map(String::from),
-            selected_mcu_id: Some("esp32c3".to_owned()),
             ..Default::default()
         }
     }
 
     #[test]
-    fn a_project_with_no_folder_keeps_only_the_chip() {
+    fn a_project_with_no_folder_keeps_nothing() {
         let mut s = with_files(None);
         assert_eq!(s.drop_homeless_files(), None);
         assert!(s.user_src_files.is_empty());
         assert!(s.user_src_folders.is_empty());
         assert_eq!(s.project_name, None);
-        // The chip survives — that is the whole point of keeping it separate.
-        assert_eq!(s.selected_mcu_id.as_deref(), Some("esp32c3"));
     }
 
     #[test]
@@ -1668,28 +1657,23 @@ impl AppIde {
         // Load the MCU registry: bundled built-ins + any user `.ron` imports
         // from the per-user `mcus/` folder (Phase 5 — runtime import).
         let mcu_registry = registry::load_registry();
-        // The chip DOES outlive an unsaved session (see the field's doc). A
-        // definition that has since been deleted — a user `.ron` — would make
-        // the `expect` below fire, so the id is checked against the registry
-        // rather than trusted.
-        let selected_mcu_id = persisted
-            .selected_mcu_id
-            .take()
-            .filter(|id| mcu_registry.iter().any(|d| &d.id == id))
-            .unwrap_or_else(|| "stm32f103c8t6".to_owned());
-        let mcu = Self::build_mcu_for(&mcu_registry, &selected_mcu_id)
-            .expect("the chip id was just validated against the registry");
-        let generated_code = mcu.fresh_main_rs();
-
-        // Seed the editable project config files from the default chip — each
-        // carries a `<<< GENERATED >>>` block plus a user-editable tail.
-        let init_files = {
-            let d = mcu_registry
-                .iter()
-                .find(|d| d.id == selected_mcu_id)
-                .expect("selected definition exists");
-            project_gen::build_project_files(&d.project, &d.toolchain, &generated_code)
-        };
+        // ── No chip until one is asked for ───────────────────────────────────
+        // A restored project names its own (`load_project_from_dir` reads the
+        // marker in main.rs); with no project there is nothing to infer one
+        // from, and inventing one is not harmless — a selected chip means a
+        // generated `main.rs`, a Cargo.toml and a memory.x, i.e. a whole
+        // project's worth of code the user never asked for. Earlier builds
+        // defaulted to the STM32F103 and then persisted the last chip; both
+        // produced exactly that.
+        //
+        // The empty state is representable throughout: `selected_def()`,
+        // `selected_build_cfg()` and `has_project()` all key off this id, and
+        // every MCU tab has a no-chip branch (`show_no_mcu_notice`) that offers
+        // the picker.
+        let selected_mcu_id = String::new();
+        let mcu: Option<Mcu> = None;
+        let generated_code = String::new();
+        let init_files = ProjectFiles::default();
 
         // ── Start filesystem watcher on the build workspace src/ dir ─────────
         // The watcher runs on a background thread and sends events through a
@@ -1739,7 +1723,7 @@ impl AppIde {
             build_rs: init_files.build_rs,
             gitignore: init_files.gitignore,
             cached_project_files: None,
-            mcu: Some(mcu),
+            mcu,
             active_tab: McuTab::Pins,
             renaming_project: None,
             renaming_project_focus: false,
@@ -2223,18 +2207,30 @@ impl AppIde {
     /// (a clean slate, like clearing `user_src_files`). Toolchains that don't use
     /// a file (e.g. `memory.x`/`build.rs` on ESP) get an empty string.
     fn reset_config_files(&mut self) {
-        if let Some((cfg, tc)) = self.selected_build_cfg() {
-            let f = project_gen::build_project_files(&cfg, &tc, &self.generated_code);
-            self.cargo_toml = f.cargo_toml;
-            self.cargo_config = f.cargo_config;
-            self.memory_x = f.memory_x;
-            self.build_rs = f.build_rs;
-            self.gitignore = f.gitignore;
-            // Baseline the deps so a New Project auto-builds on the first Save
-            // after the user's config adds libraries (USART/SPI/embassy/…).
-            self.last_saved_deps = Some(project_gen::deps_fingerprint(&self.cargo_toml));
+        // No chip, no files. This used to be an early return, which left the
+        // PREVIOUS chip's Cargo.toml and memory.x in a project that had just
+        // been emptied — every one of them derived from a target that is no
+        // longer selected.
+        let Some((cfg, tc)) = self.selected_build_cfg() else {
+            self.cargo_toml.clear();
+            self.cargo_config.clear();
+            self.memory_x.clear();
+            self.build_rs.clear();
+            self.gitignore.clear();
+            self.last_saved_deps = None;
             self.invalidate_project_files_cache();
-        }
+            return;
+        };
+        let f = project_gen::build_project_files(&cfg, &tc, &self.generated_code);
+        self.cargo_toml = f.cargo_toml;
+        self.cargo_config = f.cargo_config;
+        self.memory_x = f.memory_x;
+        self.build_rs = f.build_rs;
+        self.gitignore = f.gitignore;
+        // Baseline the deps so a New Project auto-builds on the first Save
+        // after the user's config adds libraries (USART/SPI/embassy/…).
+        self.last_saved_deps = Some(project_gen::deps_fingerprint(&self.cargo_toml));
+        self.invalidate_project_files_cache();
     }
 
     /// File + 1-based line of the code that defines pin `pin_num`'s variable, or
@@ -3311,7 +3307,6 @@ impl eframe::App for AppIde {
                 .as_ref()
                 .and_then(|p| p.to_str())
                 .map(String::from),
-            selected_mcu_id: Some(self.selected_mcu_id.clone()),
             side_panels_collapsed,
             tree_collapsed,
             diag_collapsed: self.diag_collapsed,
@@ -3841,9 +3836,7 @@ impl eframe::App for AppIde {
                         // created from the parent either way.
                         .set_file_name(project_io::folder_name_for_chip(&chip))
                         .pick_folder()
-                        .map(|parent| {
-                            project_io::new_project_dir(&parent, &chip, |p| p.exists())
-                        })
+                        .map(|parent| project_io::new_project_dir(&parent, &chip, |p| p.exists()))
                 }
             };
             // Create it up front: the save worker writes files, and a missing
@@ -3851,12 +3844,11 @@ impl eframe::App for AppIde {
             // never typed.
             if let Some(d) = &dest {
                 if let Err(e) = std::fs::create_dir_all(d) {
-                    self.export_msg =
-                        format!(
-                            "{}  couldn't create {}: {e}",
-                            egui_phosphor::regular::X_CIRCLE,
-                            d.display()
-                        );
+                    self.export_msg = format!(
+                        "{}  couldn't create {}: {e}",
+                        egui_phosphor::regular::X_CIRCLE,
+                        d.display()
+                    );
                     self.export_status_until =
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
                 }
@@ -4011,6 +4003,16 @@ impl eframe::App for AppIde {
                     self.new_after_save = false;
                 }
             }
+        } else if save_requested && self.save_in_progress.is_none() {
+            // The guard above needs a build config, i.e. a chip. Without one
+            // there is genuinely nothing to write — but Save is an explicit
+            // action and must not vanish silently.
+            self.export_msg = format!(
+                "{}  Nothing to save yet — select a chip first (System tab)",
+                egui_phosphor::regular::WARNING
+            );
+            self.export_status_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
         }
 
         // ── Modal dialog: New Project ─────────────────────────────

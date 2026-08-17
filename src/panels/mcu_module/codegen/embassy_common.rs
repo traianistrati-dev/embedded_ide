@@ -218,10 +218,15 @@ mod emit_for_manual_compile {
         // `sync_pin_files` always keeps `src/pins/mod.rs` in a real project, and
         // every invariant header declares `pub mod pins;` — so the harness has to
         // supply it too, or it tests a project shape the app never produces.
-        let pins_mod: Vec<(String, String)> =
-            vec![("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
-                 ("src/pins/configs/mod.rs".into(), String::new())];
+        let pins_mod: Vec<(String, String)> = vec![
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
+            ("src/pins/configs/mod.rs".into(), String::new()),
+        ];
         let dir = std::env::temp_dir().join("eide_embassy_check");
         let _ = std::fs::remove_dir_all(&dir);
         project_gen::write_project(&dir, &files, &pins_mod, "", "").expect("write project");
@@ -252,7 +257,10 @@ mod emit_for_manual_compile {
         // ── Async + USART ────────────────────────────────────────────────────
         // `BufferedUart` is the embassy API most likely to move between
         // versions, and it lives in a generated config file rather than main.rs.
-        for (name, func) in [("PA9", PinFunction::UsartTx(1)), ("PA10", PinFunction::UsartRx(1))] {
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+        ] {
             let num = mcu
                 .iter_all_pins()
                 .find(|p| p.name == name)
@@ -279,14 +287,23 @@ mod emit_for_manual_compile {
             &[],
         );
         let mut user: Vec<(String, String)> = vec![
-            ("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
             (
                 "src/pins/configs/mod.rs".into(),
                 configs
                     .iter()
-                    .map(|(n, _)| format!("pub mod {};
-", n.trim_end_matches(".rs")))
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
                     .collect(),
             ),
         ];
@@ -306,8 +323,14 @@ mod emit_for_manual_compile {
         // to be proved harmless for the stm32f1xx-hal bridge too.
         let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
         let mut m1 = f1.build_mcu();
-        for (name, func) in [("PA9", PinFunction::UsartTx(1)), ("PA10", PinFunction::UsartRx(1))] {
-            let num = m1.iter_all_pins().find(|p| p.name == name).map(|p| p.number);
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+        ] {
+            let num = m1
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
             if let Some(p) = num.and_then(|n| m1.find_pin_mut(n)) {
                 p.selected_function = func;
             }
@@ -327,14 +350,23 @@ mod emit_for_manual_compile {
             &[],
         );
         let mut user: Vec<(String, String)> = vec![
-            ("src/pins/mod.rs".into(), "pub mod configs;
-".into()),
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
             (
                 "src/pins/configs/mod.rs".into(),
                 configs
                     .iter()
-                    .map(|(n, _)| format!("pub mod {};
-", n.trim_end_matches(".rs")))
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
                     .collect(),
             ),
         ];

@@ -214,7 +214,12 @@ impl AppIde {
         // Here, at the END of the load: `selected_mcu_id` is settled by now, so
         // the entry carries the chip that was actually detected — which is what
         // tells two projects apart in a one-line menu.
-        crate::recent::record(root, Some(&self.selected_mcu_id));
+        // `None` rather than an empty id: a project whose chip could not be
+        // detected has no chip, and the menu should show nothing, not a blank.
+        crate::recent::record(
+            root,
+            Some(self.selected_mcu_id.as_str()).filter(|id| !id.is_empty()),
+        );
 
         // Baseline the dependency fingerprint so the FIRST Save after the user
         // edits a library in Cargo.toml auto-builds (see `last_saved_deps`).
@@ -1259,7 +1264,9 @@ pub(super) fn folder_name_for_chip(chip: &str) -> String {
         }
         out.push(ch);
     }
-    let out = out.trim_matches(|c| c == '_' || c == '.' || c == ' ').to_owned();
+    let out = out
+        .trim_matches(|c| c == '_' || c == '.' || c == ' ')
+        .to_owned();
     if valid_project_name(&out).is_ok() {
         out
     } else {
@@ -1448,10 +1455,8 @@ mod new_project_dir_tests {
     #[test]
     fn the_folder_is_the_chip_name_then_numbered() {
         let parent = Path::new("/projects");
-        let taken: Vec<PathBuf> = vec![
-            parent.join("STM32F217ZGTx"),
-            parent.join("STM32F217ZGTx_1"),
-        ];
+        let taken: Vec<PathBuf> =
+            vec![parent.join("STM32F217ZGTx"), parent.join("STM32F217ZGTx_1")];
         let exists = |p: &Path| taken.iter().any(|t| t == p);
 
         // Free name: no suffix at all.

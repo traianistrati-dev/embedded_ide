@@ -150,6 +150,16 @@ impl Mcu {
         if kind.is_custom() {
             return true;
         }
+        // Support is derived from the PINS below, which is right for every
+        // peripheral whose init the backend can actually write. USB is the
+        // exception: the D-/D+ pins exist on chips whose backend generates no
+        // USB code at all, so the module was addable and produced nothing but
+        // two stray dependencies. Only the family can answer that.
+        if kind == crate::panels::mcu_module::modules::ModuleKind::GenericInterfaceUsb
+            && !crate::panels::mcu_module::codegen::family::usb_supported(&self.family)
+        {
+            return false;
+        }
         let (required, optional) = kind.signals();
         autowire::pick_pins(
             self,
@@ -1147,6 +1157,38 @@ mod module_support_tests {
                 );
             }
         }
+    }
+
+    /// USB is the one kind gated by FAMILY as well as by pins: the D-/D+ pins
+    /// exist on chips whose backend writes no USB code, where adding the module
+    /// only ever produced two stray dependencies.
+    #[test]
+    fn usb_is_offered_only_where_the_backend_generates_it() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(
+            mcu.supports_module(ModuleKind::GenericInterfaceUsb),
+            "F1 generates the whole CDC device"
+        );
+
+        // Same chip, same pins, a family whose backend emits no USB code.
+        for family in ["stm32f4", "stm32h5", "stm32wba"] {
+            mcu.family = family.to_string();
+            assert!(
+                !mcu.supports_module(ModuleKind::GenericInterfaceUsb),
+                "{family} must not offer USB"
+            );
+            // …and every other kind is unaffected by the gate.
+            assert!(
+                mcu.supports_module(ModuleKind::GenericInterfaceUsart),
+                "{family} still offers USART"
+            );
+            assert!(mcu.supports_module(ModuleKind::GenericInterfaceSpi));
+        }
+
+        // ESP acknowledges its hardware-fixed USB peripheral in the generated
+        // code, so the module still means something there.
+        mcu.family = "esp32c3".into();
+        assert!(mcu.supports_module(ModuleKind::GenericInterfaceUsb));
     }
 
     /// Support is derived from the PINS: strip a peripheral's pins and its kind

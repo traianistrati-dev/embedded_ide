@@ -1098,31 +1098,41 @@ impl AppIde {
                         )
                         .clicked()
                     {
-                        // ── Apply chip change (if any) ────────────────────
-                        if let Some(new_id) = self.pending_mcu_id.take() {
-                            if new_id != self.selected_mcu_id {
-                                self.selected_mcu_id = new_id;
-                                self.mcu =
-                                    Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
-                                // A new chip starts in the default orientation —
-                                // never inherit the previous chip's rotation (its
-                                // package may differ). The fresh build already
-                                // clears it; kept explicit so it can't regress.
-                                if let Some(m) = &mut self.mcu {
-                                    m.rotated = false;
-                                }
-                                // Re-fit the Pins canvas to the new chip.
-                                self.mcu_view_adjusted = false;
-                                self.generated_code = self
-                                    .mcu
-                                    .as_ref()
-                                    .map(|m| m.fresh_main_rs())
-                                    .unwrap_or_default();
-                                self.active_tab = McuTab::Pins;
-                                self.lsp_state.lock().unwrap().reset();
-                                self.lsp_selected_diagnostic = None;
-                            }
+                        // ── Adopt the chosen chip ─────────────────────────
+                        // UNCONDITIONALLY, including "— Empty —" (`None`) and
+                        // re-picking the chip that is already selected. Both used
+                        // to be skipped — the first left the previous project's
+                        // chip and code in place behind an "Empty" label, the
+                        // second kept every configured pin and the user's own
+                        // main.rs tail in a project that says it is new.
+                        self.selected_mcu_id = self.pending_mcu_id.take().unwrap_or_default();
+                        self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                        // A new chip starts in the default orientation — never
+                        // inherit the previous chip's rotation (its package may
+                        // differ). The fresh build already clears it; kept
+                        // explicit so it can't regress.
+                        if let Some(m) = &mut self.mcu {
+                            m.rotated = false;
                         }
+                        // Re-fit the Pins canvas to the new chip.
+                        self.mcu_view_adjusted = false;
+                        // No chip, no code — `init_frame` only regenerates while
+                        // `mcu` is `Some`, so an empty project would otherwise
+                        // keep showing the previous chip's main.rs forever.
+                        self.generated_code = self
+                            .mcu
+                            .as_ref()
+                            .map(|m| m.fresh_main_rs())
+                            .unwrap_or_default();
+                        // Re-arm the change detector: the fresh MCU must look
+                        // new to `init_frame` even when the chip is unchanged.
+                        self.mcu_state_hash = 0;
+                        // System first — Runtime is the choice everything else
+                        // is generated from, so it comes before pins. With no
+                        // chip it is also where the picker lives.
+                        self.active_tab = McuTab::System;
+                        self.lsp_state.lock().unwrap().reset();
+                        self.lsp_selected_diagnostic = None;
                         // ── Reset project files ───────────────────────────
                         self.project_tree.user_src_files.clear();
                         self.project_tree.user_src_folders.clear();
@@ -1146,17 +1156,24 @@ impl AppIde {
                         self.structure_overrides.clear();
                         self.structure_cache = None;
                         self.structure_view = Default::default();
-                        // Pre-populate the pins/ scaffold so the tree shows
-                        // the folder immediately, before any pin is configured.
-                        self.project_tree.init_pins_scaffold();
                         // New project = fresh deps → drop the stale workspace lock
                         // so the next check re-resolves (saves otherwise keep it).
                         self.reset_workspace_lock();
                         *save_project_needed = true;
-                        // Nothing is read from disk here, but everything after
-                        // still runs (workspace rewrite, RA restart on a chip
-                        // change, re-index, check) — same wait, same overlay.
-                        self.begin_project_loading(super::loading_overlay::LoadKind::New);
+                        // Both of these only make sense once there is a chip.
+                        // `pins/mod.rs` is generated code, which an empty project
+                        // must not have; and the overlay would announce a load
+                        // with nothing to load (`write_project` is skipped
+                        // without a build config, so the chain never starts).
+                        if self.mcu.is_some() {
+                            // Pre-populate the pins/ scaffold so the tree shows
+                            // the folder immediately, before any pin is configured.
+                            self.project_tree.init_pins_scaffold();
+                            // Nothing is read from disk here, but everything after
+                            // still runs (workspace rewrite, RA restart on a chip
+                            // change, re-index, check) — same wait, same overlay.
+                            self.begin_project_loading(super::loading_overlay::LoadKind::New);
+                        }
                     }
                     ui.add_space(8.0);
                     if ui.button("Cancel").clicked() {

@@ -782,9 +782,15 @@ mod tests {
             Some("stm32h563zi")
         );
         // Lines that are not an embassy dependency, or carry no feature.
-        assert_eq!(embassy_feature_in("stm32f1xx-hal = { features = [\"x\"] }"), None);
+        assert_eq!(
+            embassy_feature_in("stm32f1xx-hal = { features = [\"x\"] }"),
+            None
+        );
         assert_eq!(embassy_feature_in("embassy-stm32 = \"0.4\""), None);
-        assert_eq!(embassy_feature_in("embassy-stm32 = { features = [\"\"] }"), None);
+        assert_eq!(
+            embassy_feature_in("embassy-stm32 = { features = [\"\"] }"),
+            None
+        );
     }
 
     /// An edge-pin package must be completely unaffected by the grid path.

@@ -642,6 +642,25 @@ pub fn gpio_bridge_supported(family: &str) -> bool {
     native_supported(family)
 }
 
+/// Does a USB virtual module DO anything on this family?
+///
+/// - **stm32f1** — yes: the backend emits the whole CDC-ACM device
+///   (`usb-device` + `usbd-serial` + the HAL's `stm32-usbd` feature).
+/// - **ESP** — yes: the USB Serial/JTAG peripheral is hardware-fixed to two
+///   pins, and the generated code says so. Nothing to configure, but the module
+///   shows a real thing on the diagram.
+/// - **every other STM32** — no. The embassy backends generate no USB code at
+///   all, so adding the module produced exactly two stray dependencies and
+///   nothing else. Offering a peripheral that cannot be generated is how a
+///   configuration silently fails to reach `main.rs`.
+///
+/// Keyed on the family rather than on the pins, unlike the rest of
+/// [`crate::panels::mcu_module::mcu::Mcu::supports_module`]: the pins exist on
+/// every chip with USB, so only the BACKEND can answer this.
+pub fn usb_supported(family: &str) -> bool {
+    family == "stm32f1" || family.starts_with("esp")
+}
+
 #[cfg(test)]
 mod blocking_note_tests {
     use super::{backend_for, blocking_hal_note, gpio_bridge_supported};
@@ -680,6 +699,20 @@ mod blocking_note_tests {
         assert!(gpio_bridge_supported("stm32f1"));
         for family in ["stm32f2", "stm32f4", "stm32wba", "esp32c3"] {
             assert!(!gpio_bridge_supported(family), "{family}");
+        }
+    }
+
+    /// USB follows what the BACKEND writes, not what the pins allow.
+    #[test]
+    fn usb_follows_the_backend_not_the_pins() {
+        use super::usb_supported;
+        // F1 emits the full CDC device; ESP acknowledges its fixed peripheral.
+        assert!(usb_supported("stm32f1"));
+        assert!(usb_supported("esp32c3"));
+        // The embassy families emit nothing — offering it there added two
+        // dependencies and no code.
+        for family in ["stm32f2", "stm32f4", "stm32g0", "stm32h5", "stm32wba"] {
+            assert!(!usb_supported(family), "{family}");
         }
     }
 }

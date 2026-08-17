@@ -10,6 +10,64 @@ use eframe::egui;
 use egui_phosphor::regular as ph;
 
 impl AppIde {
+    /// What an MCU tab shows when there is no [`Mcu`](crate::panels::mcu_module::mcu::model::Mcu)
+    /// to draw.
+    ///
+    /// Two different situations hide behind that one `None`, and they need
+    /// opposite answers:
+    ///
+    /// * **No chip chosen at all** — a fresh New Project. Offer the picker: it
+    ///   is the only way forward, and this is where the user is already looking.
+    /// * **A chip whose definition exists but has no runtime support yet.**
+    ///   Nothing to pick; say so.
+    ///
+    /// The old text said "coming soon" for both, which named a chip that wasn't
+    /// selected and offered no way out of an empty project.
+    fn show_no_mcu_notice(&mut self, ui: &mut egui::Ui, what: &str) {
+        let chip = self.selected_label();
+        ui.add_space((ui.available_height() * 0.3).min(160.0));
+        ui.vertical_centered(|ui| {
+            if !chip.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  {chip}  —  {what} not supported yet",
+                        ph::GEAR
+                    ))
+                    .size(16.0)
+                    .color(egui::Color32::GRAY),
+                );
+                return;
+            }
+            ui.label(
+                egui::RichText::new(format!("{}  No MCU selected", ph::CPU))
+                    .size(17.0)
+                    .color(egui::Color32::from_rgb(150, 158, 172)),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{what} needs a chip — the project's code is generated from it."
+                ))
+                .size(12.0)
+                .color(egui::Color32::from_gray(120)),
+            );
+            ui.add_space(12.0);
+            if ui
+                .button(egui::RichText::new(format!("{}  Select a chip…", ph::CPU)).size(13.0))
+                .on_hover_text("Choose the MCU this project targets")
+                .clicked()
+            {
+                // The same dialog New Project uses — it IS the chip picker.
+                // Safe to reach for here: the project is empty by definition,
+                // so its "this clears everything" has nothing to clear.
+                self.begin_new_project();
+                // That dialog is rendered EARLIER in the frame than this panel,
+                // so it first appears next frame — guarantee there is one.
+                ui.ctx().request_repaint();
+            }
+        });
+    }
+
     /// Render the central MCU configurator panel.
     ///
     /// Two-level navigation (2026-07-10): a GROUP row — "MCU" (chip config)
@@ -208,6 +266,13 @@ impl AppIde {
             }
 
             ui.separator();
+
+            // Set by a tab that has no MCU to draw, and rendered AFTER the
+            // match: those arms sit inside `match &mut self.mcu`, whose borrow
+            // is live across them, so the notice (which takes `&mut self`)
+            // cannot be drawn from inside one. Nothing else is drawn there
+            // either, so it lands in the same place on screen.
+            let mut no_mcu: Option<&'static str> = None;
 
             // Tab content
             match self.active_tab {
@@ -725,8 +790,6 @@ impl AppIde {
                     }
 
                     // Diagram fills the remaining (top) area.
-                    // Computed before borrowing `self.mcu` mutably below.
-                    let chip_label = self.selected_label();
                     let pin_changed = match &mut self.mcu {
                         Some(mcu) => {
                             // The chip + virtual modules are drawn at their
@@ -901,16 +964,7 @@ impl AppIde {
                             inner
                         }
                         None => {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}  {}  —  support coming soon",
-                                        ph::GEAR, chip_label
-                                    ))
-                                    .size(18.0)
-                                    .color(egui::Color32::GRAY),
-                                );
-                            });
+                            no_mcu = Some("Pin configuration");
                             None
                         }
                     };
@@ -924,6 +978,13 @@ impl AppIde {
                             self.project_tree.sync_pin_files(&all_pins);
                         }
                     }
+                }
+                McuTab::Peripherals if self.mcu.is_none() => {
+                    // Checked here rather than letting `show_peripherals_tab`
+                    // draw its own note, so every tab says the same thing and
+                    // offers the same way out. Its guard stays as defence for
+                    // any other caller.
+                    no_mcu = Some("Peripheral configuration");
                 }
                 McuTab::Peripherals => {
                     // Assigning a function here mutates the MCU just like the
@@ -951,39 +1012,21 @@ impl AppIde {
                             self.save_clock_to_definition();
                         }
                     }
-                    None => {
-                        ui.centered_and_justified(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  Clock configuration — coming soon",
-                                    ph::CLOCK
-                                ))
-                                .size(16.0)
-                                .color(egui::Color32::GRAY),
-                            );
-                        });
-                    }
+                    None => no_mcu = Some("Clock configuration"),
                 },
                 McuTab::System => match &mut self.mcu {
                     Some(mcu) => Self::show_system_tab(ui, mcu),
-                    None => {
-                        ui.centered_and_justified(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  System configuration — select an MCU first",
-                                    ph::GEAR
-                                ))
-                                .size(16.0)
-                                .color(egui::Color32::GRAY),
-                            );
-                        });
-                    }
+                    None => no_mcu = Some("System configuration"),
                 },
                 // Module-relationship diagram — chip-agnostic (works with no
                 // MCU selected), so it doesn't gate on `self.mcu`.
                 McuTab::Structure => self.show_structure_tab(ui),
                 McuTab::Definition => self.show_definition_tab(ui),
                 McuTab::Reference => self.show_reference_tab(ui),
+            }
+
+            if let Some(what) = no_mcu {
+                self.show_no_mcu_notice(ui, what);
             }
         });
     }
