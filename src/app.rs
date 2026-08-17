@@ -3822,12 +3822,45 @@ impl eframe::App for AppIde {
         let mut auto_build_release = false;
         if save_requested && self.save_in_progress.is_none() && self.selected_build_cfg().is_some()
         {
+            // A saved project goes back to its own folder. A NEW one asks for a
+            // PARENT and gets a folder of its own underneath, named after the
+            // chip — `STM32F217ZGTx`, then `_1`, `_2`, … if that is taken. Saving
+            // straight into the picked folder used to scatter `Cargo.toml`,
+            // `src/`, `memory.x` into it, and a second project chosen there would
+            // have written over the first.
             let dest: Option<std::path::PathBuf> = match &self.project_dir {
                 Some(dir) => Some(dir.clone()),
-                None => rfd::FileDialog::new()
-                    .set_title("Choose folder to save the new project")
-                    .pick_folder(),
+                None => {
+                    let chip = self.selected_label();
+                    rfd::FileDialog::new()
+                        .set_title(format!(
+                            "Choose where to create \"{}\" — a folder is made for it",
+                            project_io::folder_name_for_chip(&chip)
+                        ))
+                        // A hint for the dialogs that show it; the folder is
+                        // created from the parent either way.
+                        .set_file_name(project_io::folder_name_for_chip(&chip))
+                        .pick_folder()
+                        .map(|parent| {
+                            project_io::new_project_dir(&parent, &chip, |p| p.exists())
+                        })
+                }
             };
+            // Create it up front: the save worker writes files, and a missing
+            // parent would fail per-file with a message about a path the user
+            // never typed.
+            if let Some(d) = &dest {
+                if let Err(e) = std::fs::create_dir_all(d) {
+                    self.export_msg =
+                        format!(
+                            "{}  couldn't create {}: {e}",
+                            egui_phosphor::regular::X_CIRCLE,
+                            d.display()
+                        );
+                    self.export_status_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
+                }
+            }
             if let Some(dest) = dest {
                 // If a dependency was added/edited/removed since the last Save
                 // (by the user editing Cargo.toml, or the codegen), run the

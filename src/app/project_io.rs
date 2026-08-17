@@ -1242,6 +1242,62 @@ impl AppIde {
     }
 }
 
+/// A folder name derived from a chip's display name.
+///
+/// Display names carry things a folder should not (`STM32C011D6Yx (WLCSP12)`),
+/// so the characters Windows refuses become `_`, runs collapse, and the trailing
+/// dot/space Windows silently strips is trimmed. Empty input — a chip with no
+/// name — falls back to `project`, because a folder must be called something.
+pub(super) fn folder_name_for_chip(chip: &str) -> String {
+    let mut out = String::with_capacity(chip.len());
+    for c in chip.trim().chars() {
+        let ok = c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+        let ch = if ok { c } else { '_' };
+        // Collapse runs of the replacement so "(WLCSP12)" doesn't become "__…__".
+        if ch == '_' && out.ends_with('_') {
+            continue;
+        }
+        out.push(ch);
+    }
+    let out = out.trim_matches(|c| c == '_' || c == '.' || c == ' ').to_owned();
+    if valid_project_name(&out).is_ok() {
+        out
+    } else {
+        "project".to_owned()
+    }
+}
+
+/// Where a NEW project's folder goes: `<parent>/<chip>`, or `<chip>_1`, `_2`, …
+/// when that name is taken.
+///
+/// The user picks a PARENT in the file dialog and the project gets its own
+/// folder underneath — saving straight into the picked folder used to scatter
+/// `Cargo.toml`, `src/`, `memory.x` into whatever directory happened to be
+/// selected, and a second project into the same place would have overwritten the
+/// first.
+///
+/// `exists` is injected so the numbering rule is testable without a filesystem.
+pub(super) fn new_project_dir(
+    parent: &std::path::Path,
+    chip: &str,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> std::path::PathBuf {
+    let base = folder_name_for_chip(chip);
+    let first = parent.join(&base);
+    if !exists(&first) {
+        return first;
+    }
+    // Bounded: a parent with 10 000 same-named projects is not a real case, and
+    // an unbounded loop on a lying `exists` would hang the UI thread.
+    for n in 1..10_000 {
+        let candidate = parent.join(format!("{base}_{n}"));
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    parent.join(format!("{base}_{}", std::process::id()))
+}
+
 /// Validate a project FOLDER name for Windows: non-empty, no reserved
 /// characters, no trailing dot/space, not a reserved device name.
 pub(super) fn valid_project_name(name: &str) -> Result<(), String> {
@@ -1379,6 +1435,68 @@ Caused by:
     #[test]
     fn empty_output_says_so_instead_of_being_blank() {
         assert!(clean_cargo_error("   \n\n").contains("no output"));
+    }
+}
+
+#[cfg(test)]
+mod new_project_dir_tests {
+    use super::{folder_name_for_chip, new_project_dir};
+    use std::path::{Path, PathBuf};
+
+    /// The requested behaviour: a new project lands in its own folder named
+    /// after the chip, and repeats get `_1`, `_2`, …
+    #[test]
+    fn the_folder_is_the_chip_name_then_numbered() {
+        let parent = Path::new("/projects");
+        let taken: Vec<PathBuf> = vec![
+            parent.join("STM32F217ZGTx"),
+            parent.join("STM32F217ZGTx_1"),
+        ];
+        let exists = |p: &Path| taken.iter().any(|t| t == p);
+
+        // Free name: no suffix at all.
+        assert_eq!(
+            new_project_dir(parent, "STM32F411RETx", exists),
+            parent.join("STM32F411RETx")
+        );
+        // Taken, and `_1` too → the first free number.
+        assert_eq!(
+            new_project_dir(parent, "STM32F217ZGTx", exists),
+            parent.join("STM32F217ZGTx_2")
+        );
+    }
+
+    /// A display name is not a folder name.
+    #[test]
+    fn the_chip_name_is_made_safe_for_a_folder() {
+        assert_eq!(folder_name_for_chip("STM32F217ZGTx"), "STM32F217ZGTx");
+        // Spaces and brackets collapse into single underscores, none trailing.
+        assert_eq!(
+            folder_name_for_chip("STM32C011D6Yx (WLCSP12)"),
+            "STM32C011D6Yx_WLCSP12"
+        );
+        // Path separators must never survive — they would escape the parent.
+        assert_eq!(folder_name_for_chip("a/b\\c"), "a_b_c");
+        // Windows strips a trailing dot or space, so we must not create one.
+        assert_eq!(folder_name_for_chip("chip. "), "chip");
+        // Nothing usable, and a reserved device name, both fall back.
+        assert_eq!(folder_name_for_chip("   "), "project");
+        assert_eq!(folder_name_for_chip("CON"), "project");
+    }
+
+    /// Whatever the chip is called, the result stays INSIDE the chosen parent.
+    #[test]
+    fn the_result_never_escapes_the_parent() {
+        let parent = Path::new("/projects");
+        for chip in ["../../etc", "C:\\Windows", "..", "a/../b"] {
+            let dir = new_project_dir(parent, chip, |_| false);
+            assert_eq!(
+                dir.parent(),
+                Some(parent),
+                "{chip} produced {}",
+                dir.display()
+            );
+        }
     }
 }
 

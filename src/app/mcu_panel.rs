@@ -1020,13 +1020,20 @@ impl AppIde {
 
             // ── Blocking ─────────────────────────────────────────────────────
             let blocking_sel = mcu.pending_runtime == Runtime::Blocking;
+            // The subtitle names the HAL this CHIP will use — see
+            // `family::blocking_hal_note`. A fixed sentence described the F1 path
+            // only, which made embassy-stm32 appearing in a Blocking project on
+            // any other STM32 look like the choice had been ignored.
+            let blocking_note = format!(
+                "#[entry] fn main() -> !  ·  {}",
+                family::blocking_hal_note(&mcu.family)
+            );
             if runtime_card(
                 ui,
                 blocking_sel,
                 true,
-                "Blocking (bare-metal, portable)",
-                "#[entry] fn main() -> !  ·  portable blocking drivers \
-                 (embedded-io / embedded-hal 1.0); per-module Native opt-in",
+                "Blocking (bare-metal)",
+                &blocking_note,
             )
             .clicked()
             {
@@ -1239,7 +1246,12 @@ impl AppIde {
             }
 
             // ── GPIO In/Out bridge (io.rs) ───────────────────────────────────
+            // Shown ONLY where the choice exists. The `io.rs` bridge is an F1
+            // feature; elsewhere GPIO binds straight to the HAL's own types, and
+            // rendering the section greyed out on those chips was dead UI that
+            // read like a misconfiguration — its own subtitle said "STM32F1".
             use crate::panels::mcu_module::modules::ApiStyle;
+            if family::gpio_bridge_supported(&mcu.family) {
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(10.0);
@@ -1288,17 +1300,9 @@ impl AppIde {
             }
 
             ui.add_space(8.0);
-            if !native_ok {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}  The io.rs bridge is an STM32F1 feature. {} binds GPIO via \
-                         its own HAL (embassy `Output`/`Input` on non-F1).",
-                        ph::WARNING,
-                        mcu.family,
-                    ))
-                    .color(egui::Color32::from_rgb(210, 170, 90)),
-                );
-            } else if mcu.pending_runtime == Runtime::Native {
+            // The "this is an F1 feature" warning is gone with the section it
+            // explained — a chip that never shows the choice needs no excuse.
+            if mcu.pending_runtime == Runtime::Native {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  The Native runtime already binds all GPIO raw — this choice \
@@ -1308,6 +1312,7 @@ impl AppIde {
                     .color(egui::Color32::from_rgb(120, 170, 220)),
                 );
             }
+            } // end: only families with the io.rs bridge
 
             // ── Build on Save ────────────────────────────────────────────────
             // A workflow preference (NOT a codegen choice) — applied immediately,

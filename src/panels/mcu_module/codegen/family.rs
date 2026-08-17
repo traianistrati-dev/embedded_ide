@@ -609,6 +609,81 @@ pub fn native_supported(family: &str) -> bool {
     family == "stm32f1"
 }
 
+/// What the **Blocking** runtime actually generates for `family` — the HAL crate
+/// and the driver style.
+///
+/// Family-dependent because the answer is: `stm32f1xx-hal` with the portable
+/// bridges on F1, `embassy-stm32` used SYNCHRONOUSLY on every other STM32, and
+/// `esp-hal` on the ESP parts. A single fixed sentence described only the F1
+/// case, so a user on an F2/F4/H5 read "portable blocking drivers" in the UI and
+/// then found `embassy_stm32::init(...)` in `main.rs` — which reads as the
+/// Runtime choice having been ignored. It has not: Blocking emits
+/// `#[entry] fn main() -> !` with no executor and no `.await`; embassy-stm32 is
+/// simply that family's HAL, and it is a perfectly ordinary blocking one.
+pub fn blocking_hal_note(family: &str) -> &'static str {
+    if family == "stm32f1" {
+        "stm32f1xx-hal  ·  portable blocking drivers (embedded-io / \
+         embedded-hal 1.0); per-module Native opt-in"
+    } else if family == "stm32wba" || (family.starts_with("stm32") && family != "stm32f1") {
+        "embassy-stm32 used SYNCHRONOUSLY — it is this family's HAL; no \
+         executor, no .await"
+    } else if family.starts_with("esp") {
+        "esp-hal  ·  blocking drivers"
+    } else {
+        "the family's HAL, blocking"
+    }
+}
+
+/// Does this family have the `pins/configs/io.rs` GPIO bridge (the Portable /
+/// Native choice)? Only the F1 backend generates it — elsewhere GPIO binds
+/// straight to the HAL's own types, so the choice does not exist and its UI
+/// section is hidden rather than shown greyed out.
+pub fn gpio_bridge_supported(family: &str) -> bool {
+    native_supported(family)
+}
+
+#[cfg(test)]
+mod blocking_note_tests {
+    use super::{backend_for, blocking_hal_note, gpio_bridge_supported};
+
+    /// The card must name the HAL the chip will ACTUALLY get — the mismatch
+    /// that made a Blocking F2 project look mis-generated.
+    #[test]
+    fn the_note_matches_the_backend_that_will_run() {
+        for family in ["stm32f2", "stm32f4", "stm32g0", "stm32h5", "stm32wba"] {
+            let note = blocking_hal_note(family);
+            assert!(
+                note.contains("embassy-stm32"),
+                "{family} generates embassy code on Blocking, so say so: {note}"
+            );
+            assert!(
+                note.contains("no executor"),
+                "and say it is the SYNC use of it: {note}"
+            );
+            assert!(
+                backend_for(family).is_some(),
+                "fixture: {family} has a backend"
+            );
+        }
+        let f1 = blocking_hal_note("stm32f1");
+        assert!(f1.contains("stm32f1xx-hal"), "{f1}");
+        assert!(
+            !f1.contains("embassy"),
+            "F1 does not use embassy on Blocking: {f1}"
+        );
+        assert!(blocking_hal_note("esp32c3").contains("esp-hal"));
+    }
+
+    /// The GPIO Portable/Native choice exists only where `io.rs` is generated.
+    #[test]
+    fn the_gpio_bridge_is_f1_only() {
+        assert!(gpio_bridge_supported("stm32f1"));
+        for family in ["stm32f2", "stm32f4", "stm32wba", "esp32c3"] {
+            assert!(!gpio_bridge_supported(family), "{family}");
+        }
+    }
+}
+
 /// Look up the backend for a family key, if one is registered.
 ///
 /// Families without a backend yet (e.g. "stm8") return `None`; callers fall
@@ -680,7 +755,11 @@ mod tests {
         def.family = "stm32h7".into();
         def.id = "stm32h743zi".into();
         let code = def.build_mcu().fresh_main_rs();
-        assert!(code.contains("HAL: embassy-stm32 (blocking)"));
+        assert!(code.contains("HAL: embassy-stm32 (blocking"));
+        assert!(
+            code.contains("no executor"),
+            "the header must say WHY embassy appears on the blocking runtime"
+        );
         assert!(code.contains("fn main() -> !"));
         assert!(code.contains("embassy_stm32::init(Default::default())"));
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
@@ -1243,7 +1322,7 @@ mod tests {
         mcu.runtime = Runtime::Blocking;
         let back = mcu.update_main_rs(&now_async);
         assert!(back.contains("fn main() -> !"));
-        assert!(back.contains("HAL: embassy-stm32 (blocking)"));
+        assert!(back.contains("HAL: embassy-stm32 (blocking"));
         assert!(
             !back.contains("#[embassy_executor::main]"),
             "async entry gone"
