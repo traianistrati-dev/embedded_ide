@@ -96,9 +96,9 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
 /// graph. Families with no recipe — or a non-graph / reset-equivalent clock —
 /// get embassy's reset default. Replaces the per-family `f4::clock_block` /
 /// `wba::clock_block` and the `stm_clock_block` sniffing with one dispatch.
-pub fn graph_clock_block(family: &str, clock: &ClockConfig) -> String {
+pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> String {
     let Some((spec, desc)) = rcc_recipe(family) else {
-        return EMBASSY_RESET_INIT.to_string();
+        return wrap(hand_written_skeleton(), manual);
     };
     let values = match clock {
         // `for_codegen` applies the chip's id bindings; with none declared it
@@ -110,9 +110,74 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig) -> String {
     // reset (HSI). L4/L5/U5 default to MSI, so a reset-equivalent graph must
     // still emit an explicit HSI block, not `init(Default::default())`.
     if spec.reset_is_hw_default && values == spec.reset {
-        return EMBASSY_RESET_INIT.to_string();
+        return wrap(EMBASSY_RESET_INIT.to_string(), manual);
     }
-    emit_rcc_block(&desc, &values)
+    wrap(emit_rcc_block(&desc, &values), manual)
+}
+
+/// Fence the block off so a regeneration leaves it alone — only in manual mode,
+/// so a generated project's `main.rs` is unchanged.
+fn wrap(block: String, manual: bool) -> String {
+    use super::common::{CLOCK_BEGIN, CLOCK_END};
+    if manual {
+        format!("{CLOCK_BEGIN}\n{block}{CLOCK_END}\n")
+    } else {
+        block
+    }
+}
+
+/// What a chip whose family has no RCC recipe gets: a WORKING default plus the
+/// shape of the real thing, commented out.
+///
+/// The active line keeps the project compiling and warning-free; the comment
+/// above it is the code to uncomment, in the same idiom the generated blocks
+/// use, so setting the clock by hand is filling in numbers rather than looking
+/// up embassy's API. Both are inside the manual markers, so the moment it is
+/// edited the edit survives.
+fn hand_written_skeleton() -> String {
+    [
+        "    // Clock: this chip's family has no generated RCC recipe yet, so the",
+        "    // Clock tab's tree cannot be turned into code automatically. Set it",
+        "    // here — this block is kept across regeneration.",
+        "    //",
+        "    //   let mut config = embassy_stm32::Config::default();",
+        "    //   {",
+        "    //       use embassy_stm32::rcc;",
+        "    //       config.rcc.hse = Some(rcc::Hse {",
+        "    //           freq: embassy_stm32::time::Hertz(8_000_000),",
+        "    //           mode: rcc::HseMode::Oscillator,",
+        "    //       });",
+        "    //       config.rcc.sys = rcc::Sysclk::PLL1_P;",
+        "    //   }",
+        "    //   let p = embassy_stm32::init(config);",
+        "    //",
+        "    // Then delete the line below.",
+        "    let p = embassy_stm32::init(Default::default()); // reset clock (HSI)",
+        "",
+    ]
+    .join("\n")
+}
+
+/// Does this family's clock code come from the Clock tab at all?
+///
+/// `false` means the tree cannot be turned into code — the block is the
+/// hand-written skeleton, and manual mode is the only way to configure it.
+///
+/// STM32F1 and ESP32-C3 are here even though they have no [`rcc_recipe`]: they
+/// generate through their own HALs (`graph_to_stm32f1`, `esp_init_line`). Left
+/// out, every F1 project would have opened defaulted to hand-written — with the
+/// generator still overwriting the block, since those paths carry no markers.
+pub fn generates_clock_code(family: &str) -> bool {
+    matches!(family, "stm32f1" | "esp32c3") || rcc_recipe(family).is_some()
+}
+
+/// Can the clock block be hand-written and PRESERVED for this family?
+///
+/// Only the embassy path fences the block off. F1 and ESP generate real clock
+/// code through their own HALs and are not marker-wrapped, so offering the
+/// switch there would promise a preservation that does not happen.
+pub fn supports_manual_clock(family: &str) -> bool {
+    !matches!(family, "stm32f1" | "esp32c3")
 }
 
 /// The clock selections, family-neutral — what the generic emitter consumes and
@@ -925,6 +990,7 @@ mod tests {
                     layout: Default::default(),
                     bindings,
                 }),
+                false,
             )
         };
 
@@ -945,6 +1011,100 @@ mod tests {
         let bindings = bind::propose(&codegen_node_ids("stm32f4"), &vendor);
         assert_eq!(bindings["sw"], "SysClkSource", "{bindings:?}");
         assert_eq!(block(&vendor, bindings), want);
+    }
+
+    /// A family with no RCC recipe gets a real starting point, not a dead end:
+    /// a working default plus the shape of the code to write.
+    #[test]
+    fn a_family_without_a_recipe_gets_an_editable_skeleton() {
+        // H5 has no recipe — and that is the chip whose 178-node tree cannot be
+        // turned into code, so the skeleton is all it has.
+        assert!(rcc_recipe("stm32h5").is_none());
+        assert!(!generates_clock_code("stm32h5"));
+
+        let s = graph_clock_block("stm32h5", &ClockConfig::None, false);
+        assert!(
+            s.contains("let p = embassy_stm32::init(Default::default())"),
+            "it must still compile and run: {s}"
+        );
+        assert!(s.contains("// Clock: this chip's family has no generated RCC recipe"));
+        assert!(
+            s.contains("//       config.rcc.sys = rcc::Sysclk::PLL1_P;"),
+            "the shape to uncomment is there"
+        );
+        // Nothing active is `mut`, so no project picks up a warning from it.
+        assert!(!s.contains(
+            "
+    let mut config"
+        ));
+    }
+
+    /// The markers appear ONLY in manual mode — that is what keeps every
+    /// generated project's `main.rs` byte-for-byte what it was.
+    #[test]
+    fn markers_are_absent_unless_the_clock_is_hand_written() {
+        use super::super::common::{CLOCK_BEGIN, CLOCK_END};
+        let generated = graph_clock_block("stm32h5", &ClockConfig::None, false);
+        assert!(!generated.contains(CLOCK_BEGIN) && !generated.contains(CLOCK_END));
+
+        let manual = graph_clock_block("stm32h5", &ClockConfig::None, true);
+        assert!(manual.contains(CLOCK_BEGIN) && manual.contains(CLOCK_END));
+        assert!(manual.contains("let p = embassy_stm32::init"));
+
+        // A family WITH a recipe is unaffected while generated.
+        let f4 = graph_clock_block("stm32f4", &ClockConfig::None, false);
+        assert!(!f4.contains(CLOCK_BEGIN));
+    }
+
+    /// Which families can be hand-written, and which already generate.
+    #[test]
+    fn the_family_predicates_agree_with_the_paths_that_exist() {
+        for f in ["stm32f4", "stm32wba", "stm32g0", "stm32f1", "esp32c3"] {
+            assert!(generates_clock_code(f), "{f} generates its clock");
+        }
+        for f in ["stm32h5", "stm32h7", "stm32u5", "stm32f3"] {
+            assert!(!generates_clock_code(f), "{f} has no generator yet");
+        }
+        // The switch is offered only where the block is marker-wrapped.
+        assert!(supports_manual_clock("stm32h5"));
+        assert!(supports_manual_clock("stm32f4"));
+        assert!(!supports_manual_clock("stm32f1"));
+        assert!(!supports_manual_clock("esp32c3"));
+    }
+
+    /// A hand-written block survives regeneration; going back to generated
+    /// discards it.
+    #[test]
+    fn a_hand_written_block_survives_regeneration() {
+        use super::super::common::keep_manual_clock;
+
+        let generated = graph_clock_block("stm32h5", &ClockConfig::None, true);
+        let edited = generated.replace(
+            "let p = embassy_stm32::init(Default::default()); // reset clock (HSI)",
+            "let p = embassy_stm32::init(my_config()); // 250 MHz, by hand",
+        );
+        let existing = format!(
+            "// header
+{edited}// rest of the file
+"
+        );
+
+        // Regenerating in manual mode keeps the edit…
+        let kept = keep_manual_clock(&existing, generated.clone(), true);
+        assert!(kept.contains("my_config()"), "{kept}");
+        // …and turning the switch off puts the generated block back.
+        let dropped = keep_manual_clock(&existing, generated.clone(), false);
+        assert!(!dropped.contains("my_config()"));
+
+        // First time in manual mode there is nothing to keep, so the freshly
+        // generated block stays — the seed the user then edits.
+        let fresh = keep_manual_clock(
+            "// no markers here
+",
+            generated.clone(),
+            true,
+        );
+        assert_eq!(fresh, generated);
     }
 
     /// The editor asks which node ids code generation reads, so it can mark them
@@ -989,7 +1149,7 @@ mod tests {
             layout: Default::default(),
             bindings: Default::default(),
         };
-        let s = graph_clock_block("stm32f4", &ClockConfig::Graph(f4));
+        let s = graph_clock_block("stm32f4", &ClockConfig::Graph(f4), false);
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"), "{s}");
         assert!(
             s.contains("SYSCLK 100 MHz (HSI16 /8 x100 /2 via PLLP)"),
@@ -1014,6 +1174,7 @@ mod tests {
                 layout: Default::default(),
                 bindings: Default::default(),
             }),
+            false,
         );
         assert!(s.contains("config.rcc.hse = Some(rcc::Hse { freq: embassy_stm32::time::Hertz(25000000), mode: rcc::HseMode::Oscillator });"), "{s}");
         assert!(
@@ -1028,7 +1189,7 @@ mod tests {
             layout: Default::default(),
             bindings: Default::default(),
         };
-        let s = graph_clock_block("stm32wba", &ClockConfig::Graph(wba));
+        let s = graph_clock_block("stm32wba", &ClockConfig::Graph(wba), false);
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_R;"), "{s}");
         assert!(s.contains("VoltageScale::RANGE1"), "{s}");
 
@@ -1040,13 +1201,13 @@ mod tests {
             bindings: Default::default(),
         };
         assert!(
-            graph_clock_block("stm32h7", &ClockConfig::Graph(g))
+            graph_clock_block("stm32h7", &ClockConfig::Graph(g), false)
                 .contains("embassy_stm32::init(Default::default())")
         );
 
         // Non-graph clock → reset init.
         assert!(
-            graph_clock_block("stm32f4", &ClockConfig::None)
+            graph_clock_block("stm32f4", &ClockConfig::None, false)
                 .contains("embassy_stm32::init(Default::default())")
         );
     }
@@ -1072,6 +1233,7 @@ mod tests {
                 layout: Default::default(),
                 bindings: Default::default(),
             }),
+            false,
         );
         for needle in [
             "source: rcc::PllSource::HSI,",
@@ -1102,8 +1264,8 @@ mod tests {
             })
         };
         // Same embassy rcc module (f247.rs) → identical emitted RCC block.
-        let f4 = graph_clock_block("stm32f4", &gc());
-        assert_eq!(graph_clock_block("stm32f7", &gc()), f4);
+        let f4 = graph_clock_block("stm32f4", &gc(), false);
+        assert_eq!(graph_clock_block("stm32f7", &gc(), false), f4);
         assert!(f4.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"));
 
         // The F2 is byte-identical too — but only for an N it can encode. This
@@ -1118,6 +1280,7 @@ mod tests {
                 layout: stm32f2_layout(),
                 bindings: Default::default(),
             }),
+            false,
         );
         assert!(
             !f2.contains("!!"),
@@ -1148,6 +1311,7 @@ mod tests {
                 layout: Default::default(),
                 bindings: Default::default(),
             }),
+            false,
         );
         for needle in [
             "config.rcc.hsi = true;", // L4 boots with HSI off — must switch it on
@@ -1171,6 +1335,7 @@ mod tests {
                 layout: Default::default(),
                 bindings: Default::default(),
             }),
+            false,
         );
         assert!(s2.contains("config.rcc.hsi = true;"), "{s2}");
         assert!(s2.contains("config.rcc.sys = rcc::Sysclk::HSI;"), "{s2}");
@@ -1198,6 +1363,7 @@ mod tests {
                 layout: Default::default(),
                 bindings: Default::default(),
             }),
+            false,
         );
         for needle in [
             "source: rcc::PllSource::HSI,",

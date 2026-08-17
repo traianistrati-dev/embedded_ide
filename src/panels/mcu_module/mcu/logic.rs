@@ -71,6 +71,9 @@ impl Mcu {
         };
         // The tree as built here IS the default — `build_mcu` re-captures after
         // overriding `clock` from the definition.
+        // A family with no RCC recipe cannot have its clock generated, so its
+        // block is hand-written from the start.
+        let clock_manual = !crate::panels::mcu_module::codegen::rcc::generates_clock_code(&family);
         let clock_defaults = match &clock {
             ClockConfig::Graph(gc) => Some(gc.graph.clone()),
             ClockConfig::None => None,
@@ -95,6 +98,7 @@ impl Mcu {
             clock_limits: ClockLimits::default(),
             clock_presets: Vec::new(),
             clock_defaults,
+            clock_manual,
             modules: Vec::new(),
             runtime: crate::panels::mcu_module::mcu::model::Runtime::default(),
             gpio_api: crate::panels::mcu_module::modules::ApiStyle::default(),
@@ -443,6 +447,16 @@ impl Mcu {
             }
             s.push_str(&debug_build);
         }
+        // Hand-written clock (`@clockmanual`) — this one is NOT a view
+        // preference: it decides whether the generated clock block is replaced
+        // or preserved, so it has to travel with the project's config.
+        let clock_manual = mcu_config::clock_manual_section(self.clock_manual);
+        if !clock_manual.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&clock_manual);
+        }
         // Diagram rotation (`@rotation`) — view preference, same append pattern.
         let rotation = mcu_config::rotation_section(self.rotated);
         if !rotation.is_empty() {
@@ -513,6 +527,12 @@ impl Mcu {
         self.debug_build = mcu_config::parse_debug_build(text);
         // Diagram rotation (`@rotation`) — missing restores the default (0°).
         self.rotated = mcu_config::parse_rotation(text);
+        // Hand-written clock (`@clockmanual`). A MISSING section keeps whatever
+        // the chip's family decided (manual when it has no RCC recipe), so a
+        // project saved before this existed still gets the right behaviour.
+        if let Some(manual) = mcu_config::parse_clock_manual(text) {
+            self.clock_manual = manual;
+        }
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
         self.io_pin_pos = mcu_config::parse_iopins(text);
         // Interrupt edges (`@irq`) — a missing section means every input is

@@ -26,6 +26,7 @@ impl Mcu {
             clock_limits,
             clock_presets,
             clock_defaults,
+            clock_manual,
             family,
             name,
             ..
@@ -39,6 +40,7 @@ impl Mcu {
                 clock_defaults.as_ref(),
                 family,
                 state,
+                clock_manual,
             ),
             ClockConfig::None => {
                 ui.centered_and_justified(|ui| {

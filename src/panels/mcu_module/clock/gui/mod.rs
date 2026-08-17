@@ -73,6 +73,7 @@ pub fn draw_graph_clock(
     defaults: Option<&ClockGraph>,
     family: &str,
     state: &mut ClockUiState,
+    clock_manual: &mut bool,
 ) -> ClockTabOut {
     // Destructured so the parts keep their old names below.
     let ClockUiState {
@@ -177,7 +178,17 @@ pub fn draw_graph_clock(
                         egui::ScrollArea::vertical()
                             .id_salt("ginfo_scroll")
                             .show(ui, |ui| {
-                                graph_info_zone(ui, gc, limits, &freqs, is_stm32f1);
+                                if graph_info_zone(
+                                    ui,
+                                    gc,
+                                    limits,
+                                    &freqs,
+                                    is_stm32f1,
+                                    family,
+                                    clock_manual,
+                                ) {
+                                    changed = true;
+                                }
                             });
                     },
                 );
@@ -1493,7 +1504,10 @@ fn graph_info_zone(
     l: &ClockLimits,
     freqs: &std::collections::BTreeMap<String, u32>,
     is_stm32f1: bool,
-) {
+    family: &str,
+    clock_manual: &mut bool,
+) -> bool {
+    let mut changed = clock_manual_switch(ui, family, clock_manual);
     if is_stm32f1 {
         let c = graph_to_stm32f1(&gc.for_codegen());
         let ws = warnings(&c, &frequencies(&c), l);
@@ -1563,6 +1577,57 @@ fn graph_info_zone(
     for line in lines {
         ui.label(egui::RichText::new(line).size(11.0).color(dim));
     }
+    changed
+}
+
+/// The hand-written-clock switch, and the warning that goes with it.
+///
+/// While it is on, the tree below is NOT what ends up in `main.rs` — the block
+/// there is whatever the user wrote. Saying so is the whole point: a diagram
+/// that silently stopped driving the code would be a lie.
+fn clock_manual_switch(ui: &mut egui::Ui, family: &str, manual: &mut bool) -> bool {
+    use crate::panels::mcu_module::codegen::rcc::{generates_clock_code, supports_manual_clock};
+    let generated = generates_clock_code(family);
+    let mut changed = false;
+    // F1 and ESP generate their clock through their own HALs, which are not
+    // marker-wrapped — the switch would promise a preservation that never
+    // happens, so it is not offered there.
+    if !supports_manual_clock(family) {
+        return false;
+    }
+
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(manual, "Write the clock by hand")
+            .on_hover_text(
+                "Fence the clock block off in main.rs and keep your edits across                  regeneration. Turning it back off lets the Clock tab drive it again                  — and discards what you wrote.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        if !generated {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}  {family} has no code generator for its clock yet",
+                    ph::WARNING
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(225, 185, 60)),
+            );
+        }
+    });
+    if *manual {
+        ui.colored_label(
+            egui::Color32::from_rgb(225, 185, 60),
+            format!(
+                "{}  main.rs keeps its own clock block — the tree below shows                  frequencies, but does not generate them.",
+                ph::WARNING
+            ),
+        );
+    }
+    ui.separator();
+    changed
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────

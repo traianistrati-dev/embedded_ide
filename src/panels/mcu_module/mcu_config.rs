@@ -31,6 +31,7 @@ const AUTOBUILD_HEADER: &str = "@autobuild";
 const STRICT_HEADER: &str = "@strict";
 const DEBUGBUILD_HEADER: &str = "@debugbuild";
 const ROTATION_HEADER: &str = "@rotation";
+const CLOCK_MANUAL_HEADER: &str = "@clockmanual";
 const IOPINS_HEADER: &str = "@iopins";
 const IRQ_HEADER: &str = "@irq";
 const IOMODE_HEADER: &str = "@iomode";
@@ -96,6 +97,31 @@ pub fn rotation_section(rotated: bool) -> String {
     } else {
         String::new()
     }
+}
+
+/// The `@clockmanual` section text (or "" when the clock is generated) — the
+/// hand-written-clock switch. In `mcu.config` rather than the view-state file
+/// because it CHANGES THE GENERATED CODE, so it belongs in Git with the rest of
+/// the project's configuration. Appended like `@autobuild`.
+pub fn clock_manual_section(manual: bool) -> String {
+    if manual {
+        format!(
+            "{CLOCK_MANUAL_HEADER}
+on
+"
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// The hand-written-clock preference recorded in `@clockmanual`.
+///
+/// A MISSING section is not simply "off": a chip whose family has no RCC recipe
+/// defaults to manual, and that default is applied by the caller — this only
+/// reports what the file says.
+pub fn parse_clock_manual(text: &str) -> Option<bool> {
+    section_body(text, CLOCK_MANUAL_HEADER).map(|b| b == "on")
 }
 
 /// The diagram-rotation preference recorded in `@rotation`; missing / anything

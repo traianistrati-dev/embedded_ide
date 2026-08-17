@@ -341,6 +341,7 @@ impl FamilyBackend for WbaBackend {
                 &all,
                 &mcu.clock,
                 &mcu.custom_module_inits(),
+                mcu.clock_manual,
             ),
             tail = USER_TAIL,
         )
@@ -348,8 +349,14 @@ impl FamilyBackend for WbaBackend {
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let all = pins_of(mcu);
-        let section =
-            wba::make_generated_section(&mcu.name, &all, &mcu.clock, &mcu.custom_module_inits());
+        let section = wba::make_generated_section(
+            &mcu.name,
+            &all,
+            &mcu.clock,
+            &mcu.custom_module_inits(),
+            mcu.clock_manual,
+        );
+        let section = super::common::keep_manual_clock(existing, section, mcu.clock_manual);
         wba::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
     // No per-peripheral config files yet — bus init is documented inline (v1).
@@ -396,7 +403,7 @@ impl FamilyBackend for StmEmbassyBackend {
             section = embassy_common::make_generated_section(
                 &mcu.name,
                 &all,
-                &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+                &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
                 &mcu.custom_module_inits(),
             ),
             tail = USER_TAIL,
@@ -408,9 +415,10 @@ impl FamilyBackend for StmEmbassyBackend {
         let section = embassy_common::make_generated_section(
             &mcu.name,
             &all,
-            &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+            &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
             &mcu.custom_module_inits(),
         );
+        let section = super::common::keep_manual_clock(existing, section, mcu.clock_manual);
         embassy_common::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
 }
@@ -456,6 +464,7 @@ impl FamilyBackend for AsyncEmbassyBackend {
 
     fn update_main_rs(&self, mcu: &Mcu, existing: &str) -> String {
         let section = async_section(mcu);
+        let section = super::common::keep_manual_clock(existing, section, mcu.clock_manual);
         embassy_async::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
 
@@ -490,7 +499,7 @@ fn async_section(mcu: &Mcu) -> String {
     embassy_async::make_generated_section(
         &mcu.name,
         &gpio_pins,
-        &rcc::graph_clock_block(&mcu.family, &mcu.clock),
+        &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
         &periphs.init_calls,
         &mcu.custom_module_inits(),
     )

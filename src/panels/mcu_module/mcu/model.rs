@@ -245,6 +245,15 @@ pub struct Mcu {
     /// really returns to the factory tree and not to whatever the project was
     /// opened with. `None` for chips with no modelled clock tree.
     pub clock_defaults: Option<ClockGraph>,
+    /// Write the clock setup by HAND: the generated `main.rs` fences the clock
+    /// block off and preserves whatever is inside it across regenerations.
+    ///
+    /// Defaults to ON exactly when the chip's family has no RCC recipe — there
+    /// the Clock tab cannot produce code at all, so hand-writing it is the only
+    /// way, and leaving the block generated would silently discard the edit.
+    /// Persisted in `mcu.config` (`@clockmanual`), because it changes what is
+    /// generated and so belongs in the project's reviewable config.
+    pub clock_manual: bool,
     /// Virtual electronic modules (e.g. _USART) wired to the chip's pins and
     /// drawn beside it on the Pins canvas.
     pub modules: Vec<crate::panels::mcu_module::modules::VirtualModule>,

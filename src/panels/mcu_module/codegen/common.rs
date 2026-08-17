@@ -39,6 +39,46 @@ pub fn parse_mcu_id(source: &str) -> Option<String> {
     })
 }
 
+// ── Hand-written clock block ──────────────────────────────────────────────────
+//
+// The clock setup sits INSIDE the generated section, so it is normally replaced
+// on every regeneration like everything else there. A chip whose family has no
+// RCC recipe cannot have that setup generated at all, though — the tree in the
+// Clock tab has nothing to be turned into. For those the block is written by
+// hand, and these markers carve out the one region of the generated section that
+// survives a regen.
+//
+// They are emitted ONLY in manual mode, so every project that lets the IDE
+// generate its clock keeps exactly the output it had.
+
+pub const CLOCK_BEGIN: &str = "    // <<< CLOCK BEGIN — hand-written, kept across regeneration >>>";
+pub const CLOCK_END: &str = "    // <<< CLOCK END >>>";
+
+/// The hand-written clock region of `source`, markers included.
+pub fn clock_region(source: &str) -> Option<&str> {
+    let begin = source.find(CLOCK_BEGIN)?;
+    let end = source[begin..].find(CLOCK_END)? + begin + CLOCK_END.len();
+    Some(&source[begin..end])
+}
+
+/// Carry the user's hand-written clock block from `existing` into `section`.
+///
+/// Only in manual mode, and only when both sides actually have the region:
+/// - not manual → `section` is returned untouched, so generated projects are
+///   byte-for-byte what they were;
+/// - manual but the old file has no region → the freshly generated block stays,
+///   which is exactly the seed the user then edits;
+/// - manual and both have one → the user's text wins.
+pub fn keep_manual_clock(existing: &str, section: String, manual: bool) -> String {
+    if !manual {
+        return section;
+    }
+    let (Some(old), Some(new)) = (clock_region(existing), clock_region(&section)) else {
+        return section;
+    };
+    section.replace(new, old)
+}
+
 // ── User tail — closes fn main() ─────────────────────────────────────────────
 //
 // Written once on first generation; the loop body is user-editable and is
