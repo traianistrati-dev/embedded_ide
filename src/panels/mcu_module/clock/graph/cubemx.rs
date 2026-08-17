@@ -1019,8 +1019,26 @@ mod tests {
             }
         }
 
+        // The generated file carries its codegen bindings, so importing it is
+        // enough to produce real code — see `bind::propose`.
+        let family = std::env::var("CLOCK_FAMILY").unwrap_or_else(|_| {
+            // The IDE's family key, guessed from the tree name for the message.
+            key.clock_tree.to_ascii_lowercase()[..8.min(key.clock_tree.len())].to_owned()
+        });
+        let ids = crate::panels::mcu_module::codegen::rcc::codegen_node_ids(&family);
+        let bindings = super::super::bind::propose(&ids, &graph);
+        let unbound = super::super::bind::unbound(&ids, &bindings);
+        eprintln!(
+            "   family={family} bindings={} unbound={unbound:?}",
+            bindings.len()
+        );
+
         let layout = derive(&graph, boxes);
-        let gc = GraphClock { graph, layout };
+        let gc = GraphClock {
+            graph,
+            layout,
+            bindings,
+        };
         std::fs::write(out, export_clock_ron(&gc)).expect("write the .ron");
         eprintln!("wrote {out}");
 

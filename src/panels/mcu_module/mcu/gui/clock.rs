@@ -10,14 +10,14 @@ impl Mcu {
     /// frame in `init_frame`) and whether the user asked to write the edited tree
     /// back into the chip definition.
     ///
-    /// `positions` are the project's dragged node positions (edit mode reads and
-    /// writes them); they persist in `project_structure.config`, not in the
+    /// `state` is the project's Clock-tab state — dragged node positions, the
+    /// last action's note, and whether the fields list is shown. The positions
+    /// and the view preference persist in `project_structure.config`, not in the
     /// clock config, so moving a box never regenerates code.
     pub fn draw_clock_tab(
         &mut self,
         ui: &mut egui::Ui,
-        positions: &mut crate::panels::mcu_module::structure_config::ClockPositions,
-        note: &mut String,
+        state: &mut clock_gui::ClockUiState,
     ) -> clock_gui::ClockTabOut {
         // Destructure so the config borrows mutably while the chip's limits,
         // presets and family stay readable alongside it.
@@ -38,8 +38,7 @@ impl Mcu {
                 clock_presets,
                 clock_defaults.as_ref(),
                 family,
-                positions,
-                note,
+                state,
             ),
             ClockConfig::None => {
                 ui.centered_and_justified(|ui| {

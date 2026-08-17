@@ -126,12 +126,13 @@ pub fn esp32c3_graph() -> ClockGraph {
 
 /// A clean left→right diagram layout for the ESP32-C3 clock tree.
 pub fn esp32c3_layout() -> ClockLayout {
-    let blk = |x, y, w, h, label: &str| BlockDef {
+    let blk = |x, y, w, h, label: &str, node: &str| BlockDef {
         x,
         y,
         w,
         h,
         label: label.to_owned(),
+        node: (!node.is_empty()).then(|| node.to_owned()),
     };
     let out = |x, y, w, h, label: &str, node: &str| OutputDef {
         x,
@@ -149,10 +150,11 @@ pub fn esp32c3_layout() -> ClockLayout {
         src: ValueSrc::Node(node.to_owned()),
         limit: None,
     };
-    let lbl = |x, y, text: &str| LabelDef {
+    let lbl = |x, y, text: &str, node: &str| LabelDef {
         x,
         y,
         text: text.to_owned(),
+        node: (!node.is_empty()).then(|| node.to_owned()),
     };
     // CubeMX-style trapezoid mux (many inputs → 1 output). Inputs are labelled
     // stubs (label, dy, mux index) so no long crossing wires are needed.
@@ -172,14 +174,14 @@ pub fn esp32c3_layout() -> ClockLayout {
         // no node boxes to derive them from.
         nodes: Vec::new(),
         blocks: vec![
-            blk(28.0, 92.0, 120.0, 36.0, "XTAL\n40 MHz"),
-            blk(28.0, 300.0, 120.0, 36.0, "RC_FAST\n17.5 MHz"),
-            blk(28.0, 470.0, 120.0, 36.0, "RC_SLOW\n136 kHz"),
-            blk(28.0, 550.0, 120.0, 36.0, "XTAL32K\n32.768 kHz"),
-            blk(28.0, 630.0, 120.0, 36.0, "RC32K\n~32 kHz"),
-            blk(220.0, 92.0, 120.0, 36.0, "SPLL\n×12 -> 480 MHz"),
-            blk(220.0, 250.0, 56.0, 24.0, "/2"),
-            blk(390.0, 200.0, 95.0, 28.0, "APB /6"),
+            blk(28.0, 92.0, 120.0, 36.0, "XTAL\n40 MHz", "xtal"),
+            blk(28.0, 300.0, 120.0, 36.0, "RC_FAST\n17.5 MHz", "rc_fast"),
+            blk(28.0, 470.0, 120.0, 36.0, "RC_SLOW\n136 kHz", "rc_slow"),
+            blk(28.0, 550.0, 120.0, 36.0, "XTAL32K\n32.768 kHz", "xtal32k"),
+            blk(28.0, 630.0, 120.0, 36.0, "RC32K\n~32 kHz", "rc32k"),
+            blk(220.0, 92.0, 120.0, 36.0, "SPLL\n×12 -> 480 MHz", "pll"),
+            blk(220.0, 250.0, 56.0, 24.0, "/2", "xtal_d2"),
+            blk(390.0, 200.0, 95.0, 28.0, "APB /6", "apb"),
         ],
         outputs: vec![
             out(720.0, 105.0, 210.0, 30.0, "CPU_CLK -> core", "cpu"),
@@ -191,12 +193,15 @@ pub fn esp32c3_layout() -> ClockLayout {
             tag(655.0, 120.0, "CPU", "cpu"),
             tag(505.0, 214.0, "APB", "apb"),
         ],
-        labels_above: vec![lbl(220.0, 86.0, "PLL ×12"), lbl(390.0, 91.0, "CPU divider")],
+        labels_above: vec![
+            lbl(220.0, 86.0, "PLL ×12", "pll"),
+            lbl(390.0, 91.0, "CPU divider", "cpu_div"),
+        ],
         // Mux names (CENTER_BOTTOM-anchored above each trapezoid).
         mux_titles: vec![
-            lbl(582.0, 76.0, "CPU Mux"),
-            lbl(422.0, 284.0, "RTC Fast"),
-            lbl(422.0, 452.0, "RTC Slow"),
+            lbl(582.0, 76.0, "CPU Mux", "cpu"),
+            lbl(422.0, 284.0, "RTC Fast", "rtc_fast"),
+            lbl(422.0, 452.0, "RTC Slow", "rtc_slow"),
         ],
         wires: vec![
             vec![(148.0, 110.0), (220.0, 110.0)], // xtal → pll

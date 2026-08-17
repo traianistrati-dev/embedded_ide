@@ -36,9 +36,21 @@ pub type StructureViewPersist = (bool, Option<usize>, u8, bool);
 /// project nobody dragged in carries no section at all.
 pub type ClockPositions = std::collections::BTreeMap<String, (f32, f32)>;
 
+/// Clock-tab view options persisted per project: whether the FIELDS list is
+/// shown beside the diagram.
+///
+/// A bare `bool` because that is all there is; if the tab grows another view
+/// option this becomes a tuple, and an older file then simply fails to parse and
+/// falls back to the default — acceptable for a gitignored view-state file.
+pub type ClockViewPersist = bool;
+
+/// A fresh project shows the diagram alone.
+pub const CLOCK_VIEW_DEFAULT: ClockViewPersist = false;
+
 pub(super) const LAYOUT_HEADER: &str = "@structure_layout";
 pub(super) const VIEW_HEADER: &str = "@structure_view";
 pub(super) const CLOCK_HEADER: &str = "@clock_layout";
+pub(super) const CLOCK_VIEW_HEADER: &str = "@clock_view";
 
 /// Full file text. Empty when there is nothing to persist (no dragged positions
 /// in either diagram AND a default view), so the caller can skip writing (and
@@ -47,6 +59,7 @@ pub fn serialize(
     positions: &StructurePositions,
     view: &StructureViewPersist,
     clock: &ClockPositions,
+    clock_view: &ClockViewPersist,
 ) -> String {
     let mut out = String::new();
     let section = |out: &mut String, header: &str, body: String| {
@@ -71,6 +84,13 @@ pub fn serialize(
     }
     if !clock.is_empty() {
         section(&mut out, CLOCK_HEADER, pretty(clock));
+    }
+    if *clock_view != CLOCK_VIEW_DEFAULT {
+        section(
+            &mut out,
+            CLOCK_VIEW_HEADER,
+            ron::to_string(clock_view).unwrap_or_default(),
+        );
     }
     out
 }
@@ -102,6 +122,13 @@ pub fn parse_view(text: &str) -> Option<StructureViewPersist> {
         .and_then(|body| ron::from_str::<StructureViewPersist>(body.trim()).ok())
 }
 
+/// Parse the `@clock_view` section (absent/garbled → the default).
+pub fn parse_clock_view(text: &str) -> ClockViewPersist {
+    mcu_config::section_body(text, CLOCK_VIEW_HEADER)
+        .and_then(|body| ron::from_str::<ClockViewPersist>(body.trim()).ok())
+        .unwrap_or(CLOCK_VIEW_DEFAULT)
+}
+
 /// Parse the `@clock_layout` section (absent/garbled → empty map).
 pub fn parse_clock(text: &str) -> ClockPositions {
     mcu_config::section_body(text, CLOCK_HEADER)
@@ -120,12 +147,18 @@ pub fn load(
     StructurePositions,
     Option<StructureViewPersist>,
     ClockPositions,
+    ClockViewPersist,
 ) {
     let text = match std::fs::read_to_string(root.join(FILE_NAME)) {
         Ok(t) => t,
         Err(_) => std::fs::read_to_string(root.join(mcu_config::FILE_NAME)).unwrap_or_default(),
     };
-    (parse_layout(&text), parse_view(&text), parse_clock(&text))
+    (
+        parse_layout(&text),
+        parse_view(&text),
+        parse_clock(&text),
+        parse_clock_view(&text),
+    )
 }
 
 #[cfg(test)]
@@ -142,7 +175,12 @@ mod tests {
     #[test]
     fn round_trips_positions_and_view() {
         let view: StructureViewPersist = (true, Some(3), 1, true);
-        let text = serialize(&positions(), &view, &ClockPositions::new());
+        let text = serialize(
+            &positions(),
+            &view,
+            &ClockPositions::new(),
+            &CLOCK_VIEW_DEFAULT,
+        );
         assert_eq!(parse_layout(&text), positions());
         assert_eq!(parse_view(&text), Some(view));
     }
@@ -155,7 +193,8 @@ mod tests {
             serialize(
                 &StructurePositions::new(),
                 &default_view(),
-                &ClockPositions::new()
+                &ClockPositions::new(),
+                &CLOCK_VIEW_DEFAULT
             ),
             "",
             "empty layout + default view must write nothing"
@@ -164,7 +203,12 @@ mod tests {
 
     #[test]
     fn positions_alone_are_enough_to_write() {
-        let text = serialize(&positions(), &default_view(), &ClockPositions::new());
+        let text = serialize(
+            &positions(),
+            &default_view(),
+            &ClockPositions::new(),
+            &CLOCK_VIEW_DEFAULT,
+        );
         assert!(text.contains(LAYOUT_HEADER));
         assert!(!text.contains(VIEW_HEADER), "default view stays implicit");
     }
@@ -178,12 +222,13 @@ mod tests {
             serialize(
                 &positions(),
                 &(true, Some(2), 0, false),
-                &ClockPositions::new()
+                &ClockPositions::new(),
+                &CLOCK_VIEW_DEFAULT
             )
         );
         std::fs::write(dir.path().join(mcu_config::FILE_NAME), legacy).unwrap();
 
-        let (pos, view, _clock) = load(dir.path());
+        let (pos, view, _clock, _cv) = load(dir.path());
         assert_eq!(pos, positions(), "layout recovered from mcu.config");
         assert_eq!(view, Some((true, Some(2), 0, false)));
     }
@@ -197,12 +242,22 @@ mod tests {
         stale.insert("main.rs".into(), (999.0, 999.0));
         std::fs::write(
             dir.path().join(mcu_config::FILE_NAME),
-            serialize(&stale, &default_view(), &ClockPositions::new()),
+            serialize(
+                &stale,
+                &default_view(),
+                &ClockPositions::new(),
+                &CLOCK_VIEW_DEFAULT,
+            ),
         )
         .unwrap();
         std::fs::write(
             dir.path().join(FILE_NAME),
-            serialize(&positions(), &default_view(), &ClockPositions::new()),
+            serialize(
+                &positions(),
+                &default_view(),
+                &ClockPositions::new(),
+                &CLOCK_VIEW_DEFAULT,
+            ),
         )
         .unwrap();
 
@@ -217,11 +272,16 @@ mod tests {
         clock.insert("pllm".into(), (240.0, 118.0));
         clock.insert("sysclk".into(), (612.5, 46.0));
 
-        let text = serialize(&positions(), &default_view(), &clock);
+        let text = serialize(&positions(), &default_view(), &clock, &CLOCK_VIEW_DEFAULT);
         assert_eq!(parse_clock(&text), clock);
         assert_eq!(parse_layout(&text), positions(), "sections stay separate");
 
-        let without = serialize(&positions(), &default_view(), &ClockPositions::new());
+        let without = serialize(
+            &positions(),
+            &default_view(),
+            &ClockPositions::new(),
+            &CLOCK_VIEW_DEFAULT,
+        );
         assert!(
             !without.contains(CLOCK_HEADER),
             "an undragged clock diagram writes no section"
@@ -234,15 +294,46 @@ mod tests {
     fn clock_positions_alone_are_enough_to_write() {
         let mut clock = ClockPositions::new();
         clock.insert("hclk".into(), (700.0, 300.0));
-        let text = serialize(&StructurePositions::new(), &default_view(), &clock);
+        let text = serialize(
+            &StructurePositions::new(),
+            &default_view(),
+            &clock,
+            &CLOCK_VIEW_DEFAULT,
+        );
         assert!(text.contains(CLOCK_HEADER));
         assert!(!text.contains(LAYOUT_HEADER));
+    }
+
+    /// The Clock tab's fields-view preference is per project, and absent from a
+    /// file that never turned it on.
+    #[test]
+    fn the_clock_view_preference_round_trips() {
+        let empty = StructurePositions::new();
+        let none = ClockPositions::new();
+
+        let on = serialize(&empty, &default_view(), &none, &true);
+        assert!(on.contains(CLOCK_VIEW_HEADER));
+        assert!(parse_clock_view(&on));
+
+        let off = serialize(&empty, &default_view(), &none, &CLOCK_VIEW_DEFAULT);
+        assert_eq!(off, "", "the default writes nothing at all");
+        assert_eq!(parse_clock_view(&off), CLOCK_VIEW_DEFAULT);
+
+        // A file written before the section existed keeps working.
+        assert_eq!(
+            parse_clock_view(
+                "@modules
+[]
+"
+            ),
+            CLOCK_VIEW_DEFAULT
+        );
     }
 
     #[test]
     fn missing_files_are_not_an_error() {
         let dir = tempfile::TempDir::new().unwrap();
-        let (pos, view, clock) = load(dir.path());
+        let (pos, view, clock, _cv) = load(dir.path());
         assert!(pos.is_empty());
         assert!(clock.is_empty());
         assert!(view.is_none());

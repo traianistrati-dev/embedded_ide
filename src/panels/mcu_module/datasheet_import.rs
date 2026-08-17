@@ -2117,7 +2117,11 @@ pub fn call_ai_clock_branches(
         let boxes = auto_layout::place_missing(&graph, base.layout.nodes.clone());
         let layout = auto_layout::derive(&graph, boxes);
         Ok(ClockBranchExtraction {
-            clock: crate::panels::mcu_module::clock::graph::GraphClock { graph, layout },
+            clock: crate::panels::mcu_module::clock::graph::GraphClock {
+                graph,
+                layout,
+                bindings: Default::default(),
+            },
             report,
             from_cache: false,
         })

@@ -690,7 +690,7 @@ fn pin_side_editor(
 /// so nothing is assumed: conditional branches stay out, and the user adds what
 /// their part has in the clock editor.
 fn import_cubemx_clock(path: &std::path::Path, form: &mut McuForm) -> Result<String, String> {
-    use crate::panels::mcu_module::clock::graph::{GraphClock, cubemx, derive};
+    use crate::panels::mcu_module::clock::graph::cubemx;
 
     let family = cubemx::family_of(path).ok_or("that file has no name to take a family from")?;
     // …/db/plugins/clock/STM32WBA.xml -> …/db
@@ -701,11 +701,10 @@ fn import_cubemx_clock(path: &std::path::Path, form: &mut McuForm) -> Result<Str
         .ok_or("expected the file to sit in <CubeMX>/db/plugins/clock/")?;
 
     let (graph, boxes) = cubemx::import_from_db(db, &family, &cubemx::Variant::default())?;
-    let nodes = graph.nodes.len();
-    let layout = derive(&graph, boxes);
-    form.set_imported_clock(GraphClock { graph, layout });
+    let (nodes, missing) = attach_imported_clock(form, graph, boxes);
     Ok(format!(
-        "Imported {family} from CubeMX: {nodes} nodes, with ST's own diagram layout."
+        "Imported {family} from CubeMX: {nodes} nodes, with ST's own diagram layout.{}",
+        unbound_note(&missing)
     ))
 }
 
@@ -718,7 +717,7 @@ fn import_cubemx_clock(path: &std::path::Path, form: &mut McuForm) -> Result<Str
 /// list (which conditional branches exist). So nothing is guessed, and the
 /// result is that part's tree rather than its family's.
 fn import_chip_clock(path: &std::path::Path, form: &mut McuForm) -> Result<String, String> {
-    use crate::panels::mcu_module::clock::graph::{GraphClock, cubemx, derive};
+    use crate::panels::mcu_module::clock::graph::cubemx;
 
     let xml = std::fs::read_to_string(path).map_err(|e| format!("Could not read the file: {e}"))?;
     let key = cubemx::clock_key_from_mcu_xml(&xml)?;
@@ -728,11 +727,52 @@ fn import_chip_clock(path: &std::path::Path, form: &mut McuForm) -> Result<Strin
     )?;
 
     let (graph, boxes) = cubemx::import_for_chip(&db, &key)?;
+    let (nodes, missing) = attach_imported_clock(form, graph, boxes);
+    Ok(format!(
+        "Imported {} nodes from {} (RCC {}), with ST's own diagram layout.{}",
+        nodes,
+        key.clock_tree,
+        key.rcc_version,
+        unbound_note(&missing)
+    ))
+}
+
+/// Attach an imported tree to the form, with its codegen bindings proposed.
+///
+/// An imported tree uses the vendor's node names, which code generation does not
+/// know; `bind::propose` matches them against the ids this family's generator
+/// reads. The result is a filled-in mapping the user confirms in the Clock tab —
+/// and the ids that found no plausible node are named in the message, because a
+/// missing binding means that value silently falls back to a default.
+fn attach_imported_clock(
+    form: &mut McuForm,
+    graph: crate::panels::mcu_module::clock::graph::ClockGraph,
+    boxes: Vec<crate::panels::mcu_module::clock::graph::NodeBox>,
+) -> (usize, Vec<String>) {
+    use crate::panels::mcu_module::clock::graph::{GraphClock, bind, derive};
+    use crate::panels::mcu_module::codegen::rcc::codegen_node_ids;
+
+    let ids = codegen_node_ids(&form.family);
+    let bindings = bind::propose(&ids, &graph);
+    let missing = bind::unbound(&ids, &bindings);
     let nodes = graph.nodes.len();
     let layout = derive(&graph, boxes);
-    form.set_imported_clock(GraphClock { graph, layout });
-    Ok(format!(
-        "Imported {} nodes from {} (RCC {}), with ST's own diagram layout.",
-        nodes, key.clock_tree, key.rcc_version
-    ))
+    form.set_imported_clock(GraphClock {
+        graph,
+        layout,
+        bindings,
+    });
+    (nodes, missing)
+}
+
+/// " · N codegen id(s) still unbound: a, b" — appended to an import message.
+fn unbound_note(missing: &[String]) -> String {
+    if missing.is_empty() {
+        return String::new();
+    }
+    format!(
+        " · {} codegen id(s) unbound ({}) — bind them in the Clock tab or those values fall back          to defaults.",
+        missing.len(),
+        missing.join(", ")
+    )
 }

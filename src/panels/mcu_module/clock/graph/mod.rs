@@ -6,6 +6,7 @@
 //!               evaluator matches the hardcoded `compute.rs`.
 
 pub mod auto_layout;
+pub mod bind;
 pub mod config;
 pub mod cubemx;
 pub mod edit;

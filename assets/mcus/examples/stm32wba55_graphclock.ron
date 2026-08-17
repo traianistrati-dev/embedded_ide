@@ -13731,4 +13731,16 @@ GraphClock(
             ),
         ],
     ),
+    bindings: {
+        "ahb": "AHBPrescaler",
+        "apb1": "APB1Prescaler",
+        "apb2": "APB2Prescaler",
+        "apb7": "APB7Prescaler",
+        "hse": "HSEOSC",
+        "pllm": "PLLM",
+        "plln": "PLLN",
+        "pllr": "PLL1R",
+        "pllsrc": "PLLSource",
+        "sw": "SysClkSource",
+    },
 )

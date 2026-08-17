@@ -105,7 +105,7 @@ pub fn clock_setup_chain(clock: &ClockConfig) -> String {
         // The graph is the only clock model — read its node states back into
         // the typed codegen intermediate.
         ClockConfig::Graph(gc) => {
-            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.graph)
+            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.for_codegen())
         }
         ClockConfig::None => Stm32f1Clock::default(),
     };
@@ -1010,7 +1010,7 @@ impl<D: embedded_hal_0_2::blocking::delay::DelayUs<u32>> embedded_hal::delay::De
 fn pclk1_of(clock: &ClockConfig) -> u32 {
     let c: Stm32f1Clock = match clock {
         ClockConfig::Graph(gc) => {
-            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.graph)
+            crate::panels::mcu_module::clock::graph::graph_to_stm32f1(&gc.for_codegen())
         }
         ClockConfig::None => Stm32f1Clock::default(),
     };

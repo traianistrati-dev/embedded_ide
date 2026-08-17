@@ -1240,6 +1240,7 @@ mod tests {
         mcu.clock = ClockConfig::Graph(GraphClock {
             graph: stm32f1_graph(&cfg),
             layout: stm32f1_layout(&ClockLimits::default()),
+            bindings: Default::default(),
         });
 
         let code = mcu.fresh_main_rs();
@@ -1256,6 +1257,7 @@ mod tests {
         ClockConfig::Graph(GraphClock {
             graph: stm32f1_graph(cfg),
             layout: stm32f1_layout(&ClockLimits::default()),
+            bindings: Default::default(),
         })
     }
 

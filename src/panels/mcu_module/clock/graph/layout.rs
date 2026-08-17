@@ -56,6 +56,15 @@ pub struct BlockDef {
     pub w: f32,
     pub h: f32,
     pub label: String,
+    /// Which graph node this box DRAWS, when it draws one.
+    ///
+    /// Editing a hand-authored figure needs to know who owns each primitive:
+    /// without it a source box is just a label at coordinates, so the editor
+    /// cannot find it, move it, or delete it with its node — which is why
+    /// converting a figure used to scatter every un-owned box below the diagram.
+    /// `None` is legitimate for pure decoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// A delivered-clock box on the right margin (value + label, red over limit).
@@ -86,6 +95,10 @@ pub struct LabelDef {
     pub x: f32,
     pub y: f32,
     pub text: String,
+    /// The node this text belongs to (a mux's title, a node's name), so it
+    /// travels with it. `None` for free-standing legend text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// An interactive control overlaid on the diagram, editing one graph node's
@@ -193,6 +206,183 @@ impl ClockLayout {
             && self.widgets.is_empty()
     }
 
+    /// A box per node the figure can LOCATE — the handles edit mode drags.
+    ///
+    /// This is what lets a hand-authored figure be edited **in place**. Every
+    /// primitive that names a node contributes to that node's bounding box:
+    /// controls, owned blocks and labels, and the outputs/tags whose
+    /// [`ValueSrc::Node`] already named one. A node the figure never draws is
+    /// simply not returned — it has no handle, rather than being relocated.
+    ///
+    /// Unlike [`nodes`](Self::nodes) these are DERIVED each time; they are not
+    /// the source of truth, the primitives are.
+    pub fn node_anchors(&self) -> Vec<NodeBox> {
+        use std::collections::BTreeMap;
+        // Owned keys: the primitives are borrowed from `self` for the whole walk,
+        // and one `String` per node is nothing next to redrawing the diagram.
+        let mut acc: BTreeMap<String, (f32, f32, f32, f32)> = BTreeMap::new();
+        let mut add = |id: &str, x: f32, y: f32, w: f32, h: f32| {
+            if id.is_empty() {
+                return;
+            }
+            let e = acc
+                .entry(id.to_owned())
+                .or_insert((f32::MAX, f32::MAX, f32::MIN, f32::MIN));
+            e.0 = e.0.min(x);
+            e.1 = e.1.min(y);
+            e.2 = e.2.max(x + w);
+            e.3 = e.3.max(y + h);
+        };
+        fn node_of(src: &ValueSrc) -> Option<&str> {
+            match src {
+                ValueSrc::Node(id) => Some(id.as_str()),
+                _ => None,
+            }
+        }
+
+        for b in &self.blocks {
+            if let Some(n) = &b.node {
+                add(n, b.x, b.y, b.w, b.h);
+            }
+        }
+        for l in self.labels_above.iter().chain(&self.mux_titles) {
+            if let Some(n) = &l.node {
+                add(n, l.x, l.y, 0.0, 0.0);
+            }
+        }
+        for o in &self.outputs {
+            if let Some(n) = node_of(&o.src) {
+                add(n, o.x, o.y, o.w, o.h);
+            }
+        }
+        for t in &self.tags {
+            if let Some(n) = node_of(&t.src) {
+                add(n, t.x, t.y, 0.0, 12.0);
+            }
+        }
+        for w in &self.widgets {
+            let (x, y, ww, hh) = match w {
+                Widget::Combo { x, y, w, .. } => (*x, *y, *w, 26.0),
+                Widget::DragMhz { x, y, w, .. } => (*x, *y, *w, 22.0),
+                Widget::MuxRadios { x, y, w, h, .. } => (*x, *y, *w, *h),
+            };
+            add(w.node_id(), x, y, ww, hh);
+        }
+
+        acc.into_iter()
+            .map(|(node, (x0, y0, x1, y1))| NodeBox {
+                node,
+                x: x0,
+                y: y0,
+                w: (x1 - x0).max(24.0),
+                h: (y1 - y0).max(18.0),
+            })
+            .collect()
+    }
+
+    /// Translate every primitive that belongs to `node` — wires included.
+    ///
+    /// A wire is a bare polyline: it records no owner, and the hand-drawn figures
+    /// were authored long before anything needed one. Rather than change the
+    /// stored format (which would invalidate every `.ron` already written), the
+    /// attachment is worked out from GEOMETRY: a wire end sitting on this node's
+    /// box is this node's end. Only that end moves, and its neighbouring bend
+    /// follows just enough to keep the segment orthogonal — so the other end
+    /// stays put and the route is not redrawn.
+    pub fn move_node(&mut self, node: &str, dx: f32, dy: f32) {
+        // Measured BEFORE the primitives move, since that is where the wires
+        // are still attached.
+        let anchor = self.node_anchors().into_iter().find(|a| a.node == node);
+        let owns = |n: &Option<String>| n.as_deref() == Some(node);
+        let owns_src = |src: &ValueSrc| matches!(src, ValueSrc::Node(id) if id == node);
+
+        for b in &mut self.blocks {
+            if owns(&b.node) {
+                b.x += dx;
+                b.y += dy;
+            }
+        }
+        for l in self.labels_above.iter_mut().chain(&mut self.mux_titles) {
+            if owns(&l.node) {
+                l.x += dx;
+                l.y += dy;
+            }
+        }
+        for o in &mut self.outputs {
+            if owns_src(&o.src) {
+                o.x += dx;
+                o.y += dy;
+            }
+        }
+        for t in &mut self.tags {
+            if owns_src(&t.src) {
+                t.x += dx;
+                t.y += dy;
+            }
+        }
+        for w in &mut self.widgets {
+            if w.node_id() != node {
+                continue;
+            }
+            match w {
+                Widget::Combo { x, y, .. }
+                | Widget::DragMhz { x, y, .. }
+                | Widget::MuxRadios { x, y, .. } => {
+                    *x += dx;
+                    *y += dy;
+                }
+            }
+        }
+        for nb in &mut self.nodes {
+            if nb.node == node {
+                nb.x += dx;
+                nb.y += dy;
+            }
+        }
+        if let Some(a) = anchor {
+            self.move_wire_ends_at(&a, dx, dy);
+        }
+    }
+
+    /// Drag along the wire ends that sit on `a`, keeping the routes orthogonal.
+    fn move_wire_ends_at(&mut self, a: &NodeBox, dx: f32, dy: f32) {
+        /// How far off the box an end may sit and still count as attached. A
+        /// wire meets its node ON the boundary, so this only absorbs the small
+        /// insets the figures draw with.
+        const TOL: f32 = 14.0;
+        let attached = |p: (f32, f32)| {
+            p.0 >= a.x - TOL && p.0 <= a.x + a.w + TOL && p.1 >= a.y - TOL && p.1 <= a.y + a.h + TOL
+        };
+        for wire in &mut self.wires {
+            if wire.len() < 2 {
+                continue;
+            }
+            let last = wire.len() - 1;
+            // Both ends first, so a wire attached at both is simply translated.
+            let (head, tail) = (attached(wire[0]), attached(wire[last]));
+            if head {
+                shift_wire_end(wire, 0, dx, dy);
+            }
+            if tail {
+                shift_wire_end(wire, last, dx, dy);
+            }
+        }
+    }
+
+    /// Drop every primitive that belongs to `node` — used when the editor
+    /// deletes it from a hand-authored figure.
+    pub fn remove_node_primitives(&mut self, node: &str) {
+        let keep = |n: &Option<String>| n.as_deref() != Some(node);
+        let keep_src = |src: &ValueSrc| !matches!(src, ValueSrc::Node(id) if id == node);
+        self.blocks.retain(|b| keep(&b.node));
+        self.labels_above.retain(|l| keep(&l.node));
+        self.mux_titles.retain(|l| keep(&l.node));
+        self.outputs.retain(|o| keep_src(&o.src));
+        self.tags.retain(|t| keep_src(&t.src));
+        self.widgets.retain(|w| w.node_id() != node);
+        self.nodes.retain(|nb| nb.node != node);
+    }
+
     /// The drawn extent `(w, h)` in virtual coordinates — every primitive plus a
     /// margin.
     ///
@@ -270,17 +460,41 @@ impl ClockLayout {
     }
 }
 
+/// Move one end of a routed wire, taking its first bend along far enough to keep
+/// the segment orthogonal.
+///
+/// A route is a chain of horizontal and vertical runs. Moving only the endpoint
+/// would tilt the run it belongs to; moving the whole polyline would drag the
+/// far end off its own node. So the neighbouring point follows in the ONE axis
+/// that run is aligned on — vertical run: take `dx`; horizontal run: take `dy`.
+fn shift_wire_end(wire: &mut [(f32, f32)], idx: usize, dx: f32, dy: f32) {
+    let neighbour = if idx == 0 { 1 } else { idx - 1 };
+    let (ex, ey) = wire[idx];
+    let (nx, ny) = wire[neighbour];
+    let vertical = (nx - ex).abs() < f32::EPSILON;
+    let horizontal = (ny - ey).abs() < f32::EPSILON;
+
+    wire[idx] = (ex + dx, ey + dy);
+    if vertical {
+        wire[neighbour].0 += dx;
+    }
+    if horizontal {
+        wire[neighbour].1 += dy;
+    }
+}
+
 const M: u32 = 1_000_000;
 
 /// The STM32F103 Figure-2 static layout (ported verbatim from the original
 /// `gui/diagram.rs`). Takes `limits` only to print the HSE crystal range.
 pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
-    let blk = |x, y, w, h, label: &str| BlockDef {
+    let blk = |x, y, w, h, label: &str, node: &str| BlockDef {
         x,
         y,
         w,
         h,
         label: label.to_owned(),
+        node: (!node.is_empty()).then(|| node.to_owned()),
     };
     let out = |x, y, w, h, label: &str, src, limit| OutputDef {
         x,
@@ -298,10 +512,11 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
         src,
         limit,
     };
-    let lbl = |x, y, text: &str| LabelDef {
+    let lbl = |x, y, text: &str, node: &str| LabelDef {
         x,
         y,
         text: text.to_owned(),
+        node: (!node.is_empty()).then(|| node.to_owned()),
     };
     let combo = |node: &str, x, y, w, options: Vec<(String, NodeState)>| Widget::Combo {
         node: node.to_owned(),
@@ -339,11 +554,11 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
         // no node boxes to derive them from.
         nodes: Vec::new(),
         blocks: vec![
-            blk(28.0, 78.0, 92.0, 34.0, "LSE OSC\n32.768 kHz"),
-            blk(170.0, 84.0, 46.0, 22.0, "/128"),
-            blk(28.0, 153.0, 92.0, 34.0, "LSI RC\n40 kHz"),
-            blk(28.0, 283.0, 92.0, 34.0, "HSI RC\n8 MHz"),
-            blk(175.0, 372.0, 40.0, 22.0, "/2"),
+            blk(28.0, 78.0, 92.0, 34.0, "LSE OSC\n32.768 kHz", "lse"),
+            blk(170.0, 84.0, 46.0, 22.0, "/128", "hse_div128"),
+            blk(28.0, 153.0, 92.0, 34.0, "LSI RC\n40 kHz", "lsi"),
+            blk(28.0, 283.0, 92.0, 34.0, "HSI RC\n8 MHz", "hsi"),
+            blk(175.0, 372.0, 40.0, 22.0, "/2", "hsi_div2"),
             blk(
                 28.0,
                 483.0,
@@ -354,6 +569,7 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
                     limits.hse_min_hz / M,
                     limits.hse_max_hz / M
                 ),
+                "hse",
             ),
         ],
         outputs: vec![
@@ -505,21 +721,21 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
             ),
         ],
         labels_above: vec![
-            lbl(148.0, 478.0, "PLLXTPRE"),
-            lbl(336.0, 418.0, "PLLMUL"),
-            lbl(470.0, 228.0, "USB Prescaler"),
-            lbl(540.0, 335.0, "AHB Prescaler"),
-            lbl(700.0, 408.0, "SysTick"),
-            lbl(720.0, 518.0, "APB1 Prescaler"),
-            lbl(720.0, 638.0, "APB2 Prescaler"),
-            lbl(720.0, 738.0, "ADC Prescaler"),
-            lbl(28.0, 521.0, "HSE crystal"),
+            lbl(148.0, 478.0, "PLLXTPRE", "pllxtpre"),
+            lbl(336.0, 418.0, "PLLMUL", "pllmul"),
+            lbl(470.0, 228.0, "USB Prescaler", "usb"),
+            lbl(540.0, 335.0, "AHB Prescaler", "ahb"),
+            lbl(700.0, 408.0, "SysTick", "systick"),
+            lbl(720.0, 518.0, "APB1 Prescaler", "apb1"),
+            lbl(720.0, 638.0, "APB2 Prescaler", "apb2"),
+            lbl(720.0, 738.0, "ADC Prescaler", "adc"),
+            lbl(28.0, 521.0, "HSE crystal", "hse"),
         ],
         mux_titles: vec![
-            lbl(270.0, 64.0, "RTC Mux"),
-            lbl(270.0, 364.0, "PLL Source"),
-            lbl(490.0, 294.0, "System Clock Mux"),
-            lbl(270.0, 574.0, "MCO Mux"),
+            lbl(270.0, 64.0, "RTC Mux", "rtc"),
+            lbl(270.0, 364.0, "PLL Source", "pllsrc"),
+            lbl(490.0, 294.0, "System Clock Mux", "sw"),
+            lbl(270.0, 574.0, "MCO Mux", "mco"),
         ],
         wires: vec![
             vec![(120.0, 300.0), (120.0, 383.0), (175.0, 383.0)], // HSI → /2 (single bend)
@@ -656,6 +872,232 @@ pub fn stm32f1_layout(limits: &ClockLimits) -> ClockLayout {
 mod tests {
     use super::*;
 
+    /// The hand-drawn F103 figure can be EDITED IN PLACE: every node it draws
+    /// gets a handle, and moving one takes its own primitives along and nothing
+    /// else. This is what replaced converting the figure to a generated one,
+    /// which used to scatter every box the seed could not identify.
+    #[test]
+    fn a_hand_authored_figure_anchors_and_moves_its_nodes() {
+        let mut lay = stm32f1_layout(&ClockLimits::default());
+        assert!(lay.nodes.is_empty(), "a hand-authored layout owns no boxes");
+
+        let anchors = lay.node_anchors();
+        for id in [
+            "hse", "hsi", "lse", "lsi", "sw", "pllmul", "ahb", "apb1", "rtc", "mco",
+        ] {
+            assert!(
+                anchors.iter().any(|a| a.node == id),
+                "`{id}` should have a handle: {:?}",
+                anchors.iter().map(|a| &a.node).collect::<Vec<_>>()
+            );
+        }
+
+        // Moving one node takes its block, its label and its widget with it…
+        let hse_block = |l: &ClockLayout| {
+            let b = l
+                .blocks
+                .iter()
+                .find(|b| b.node.as_deref() == Some("hse"))
+                .unwrap();
+            (b.x, b.y)
+        };
+        let hse_widget =
+            |l: &ClockLayout| match l.widgets.iter().find(|w| w.node_id() == "hse").unwrap() {
+                Widget::Combo { x, y, .. }
+                | Widget::DragMhz { x, y, .. }
+                | Widget::MuxRadios { x, y, .. } => (*x, *y),
+            };
+        let (b0, w0) = (hse_block(&lay), hse_widget(&lay));
+        // …and leaves a different node exactly where it was.
+        let hsi0 = hse_block(&lay);
+        let lsi_block = |l: &ClockLayout| {
+            let b = l
+                .blocks
+                .iter()
+                .find(|b| b.node.as_deref() == Some("lsi"))
+                .unwrap();
+            (b.x, b.y)
+        };
+        let lsi0 = lsi_block(&lay);
+        let _ = hsi0;
+
+        lay.move_node("hse", 40.0, -15.0);
+        assert_eq!(hse_block(&lay), (b0.0 + 40.0, b0.1 - 15.0));
+        assert_eq!(hse_widget(&lay), (w0.0 + 40.0, w0.1 - 15.0));
+        assert_eq!(lsi_block(&lay), lsi0, "an unrelated node must not move");
+    }
+
+    /// Deleting a node from a hand-drawn figure removes what drew it — and only
+    /// that.
+    #[test]
+    fn removing_a_node_takes_only_its_own_primitives() {
+        let mut lay = stm32f1_layout(&ClockLimits::default());
+        let before = lay.blocks.len() + lay.widgets.len() + lay.outputs.len();
+
+        lay.remove_node_primitives("hse");
+        assert!(!lay.blocks.iter().any(|b| b.node.as_deref() == Some("hse")));
+        assert!(!lay.widgets.iter().any(|w| w.node_id() == "hse"));
+        assert!(lay.node_anchors().iter().all(|a| a.node != "hse"));
+
+        let after = lay.blocks.len() + lay.widgets.len() + lay.outputs.len();
+        assert!(after < before, "something was removed");
+        assert!(
+            lay.blocks.iter().any(|b| b.node.as_deref() == Some("lsi")),
+            "the rest of the figure survives"
+        );
+    }
+
+    /// A node's wires travel with it: the attached END moves, the far end stays
+    /// on its own node, and the route stays orthogonal.
+    #[test]
+    fn wires_follow_the_node_they_are_attached_to() {
+        let mut lay = ClockLayout {
+            blocks: vec![BlockDef {
+                x: 100.0,
+                y: 100.0,
+                w: 60.0,
+                h: 20.0,
+                label: "src".into(),
+                node: Some("src".into()),
+            }],
+            // Leaves the box's right edge, bends, ends far away on another node.
+            wires: vec![vec![
+                (160.0, 110.0),
+                (200.0, 110.0),
+                (200.0, 300.0),
+                (400.0, 300.0),
+            ]],
+            ..Default::default()
+        };
+
+        lay.move_node("src", 30.0, -10.0);
+        let w = &lay.wires[0];
+        assert_eq!(w[0], (190.0, 100.0), "the attached end moved with the node");
+        assert_eq!(
+            w[1],
+            (200.0, 100.0),
+            "the bend took the vertical run's dy so the first run stays horizontal"
+        );
+        assert_eq!(w[2], (200.0, 300.0), "the middle of the route is untouched");
+        assert_eq!(
+            w[3],
+            (400.0, 300.0),
+            "and the far end stays on its own node"
+        );
+        // Still orthogonal end to end.
+        for pair in w.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                a.0 == b.0 || a.1 == b.1,
+                "segment {a:?}->{b:?} went diagonal"
+            );
+        }
+    }
+
+    /// A wire that merely passes nearby is not claimed — only ENDS attach.
+    #[test]
+    fn a_passing_wire_is_not_dragged() {
+        let mut lay = ClockLayout {
+            blocks: vec![BlockDef {
+                x: 100.0,
+                y: 100.0,
+                w: 60.0,
+                h: 20.0,
+                label: "src".into(),
+                node: Some("src".into()),
+            }],
+            // Runs straight THROUGH the box, ending well away from it.
+            wires: vec![vec![(0.0, 110.0), (400.0, 110.0)]],
+            ..Default::default()
+        };
+        let before = lay.wires[0].clone();
+        lay.move_node("src", 30.0, 30.0);
+        assert_eq!(lay.wires[0], before);
+    }
+
+    /// On the real F103 figure, moving a node takes its wiring along.
+    #[test]
+    fn the_f103_figure_keeps_its_wires_attached() {
+        let mut lay = stm32f1_layout(&ClockLimits::default());
+        let hse = lay
+            .node_anchors()
+            .into_iter()
+            .find(|a| a.node == "hse")
+            .expect("hse is locatable");
+        let touching = |l: &ClockLayout, a: &NodeBox| -> usize {
+            l.wires
+                .iter()
+                .filter(|w| {
+                    w.iter().any(|p| {
+                        p.0 >= a.x - 14.0
+                            && p.0 <= a.x + a.w + 14.0
+                            && p.1 >= a.y - 14.0
+                            && p.1 <= a.y + a.h + 14.0
+                    })
+                })
+                .count()
+        };
+        assert!(touching(&lay, &hse) > 0, "the HSE box has wiring");
+
+        let before = lay.wires.clone();
+        lay.move_node("hse", 25.0, 25.0);
+        assert_ne!(lay.wires, before, "its wires moved with it");
+
+        // Every route stays orthogonal after the move.
+        for w in &lay.wires {
+            for pair in w.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                assert!(
+                    (a.0 - b.0).abs() < 0.01 || (a.1 - b.1).abs() < 0.01,
+                    "segment {a:?}->{b:?} went diagonal"
+                );
+            }
+        }
+    }
+
+    /// Decoration stays decoration: a primitive that names no node is never
+    /// claimed by one, and never moved by one. Built here rather than taken from
+    /// a shipped figure — every label in those is owned now, and this must hold
+    /// regardless of how thoroughly they are annotated.
+    #[test]
+    fn unowned_primitives_belong_to_nobody() {
+        let owned = |node: &str| LabelDef {
+            x: 10.0,
+            y: 10.0,
+            text: "t".into(),
+            node: Some(node.to_owned()),
+        };
+        let legend = LabelDef {
+            x: 500.0,
+            y: 700.0,
+            text: "HSE = high-speed external".into(),
+            node: None,
+        };
+        let mut lay = ClockLayout {
+            labels_above: vec![owned("hse"), legend.clone()],
+            blocks: vec![BlockDef {
+                x: 0.0,
+                y: 0.0,
+                w: 50.0,
+                h: 20.0,
+                label: "decor".into(),
+                node: None,
+            }],
+            ..Default::default()
+        };
+
+        // It is not a handle…
+        assert_eq!(lay.node_anchors().len(), 1, "only `hse` is locatable");
+        // …it does not move…
+        lay.move_node("hse", 100.0, 100.0);
+        assert_eq!(lay.labels_above[1], legend);
+        assert_eq!((lay.blocks[0].x, lay.blocks[0].y), (0.0, 0.0));
+        // …and it is not deleted with the node.
+        lay.remove_node_primitives("hse");
+        assert_eq!(lay.labels_above, vec![legend]);
+        assert_eq!(lay.blocks.len(), 1);
+    }
+
     /// The hand-authored STM32F103 figure measures back at roughly the 1000×790
     /// canvas it was drawn against — so replacing that constant with a measured
     /// extent did not move it.
@@ -690,6 +1132,7 @@ mod tests {
                 w: 100.0,
                 h: 20.0,
                 label: "HSI".to_owned(),
+                node: None,
             }],
             ..Default::default()
         };

@@ -29,7 +29,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::layout::{BlockDef, ClockLayout, LabelDef, NodeBox, TagDef, ValueSrc, Widget};
-use super::model::{ClockGraph, Edge, NodeKind, NodeState};
+use super::model::{ClockGraph, Edge, Node, NodeKind, NodeState};
 
 const MARGIN: f32 = 46.0;
 const NODE_W: f32 = 96.0;
@@ -201,6 +201,59 @@ pub fn place_missing(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
     kept
 }
 
+/// The choices a node offers, as `(label, state to apply)` — or `None` when the
+/// node has nothing to pick.
+///
+/// The single source of both the diagram's dropdowns and the fields view's, so
+/// the two cannot drift apart. A `Source` is deliberately absent: its value is a
+/// frequency to type, not a choice from a list.
+pub fn options_for(graph: &ClockGraph, node: &Node) -> Option<Vec<(String, NodeState)>> {
+    Some(match &node.kind {
+        NodeKind::Mux { inputs } => (0..*inputs)
+            .map(|k| {
+                // Label each input by the node that feeds it.
+                let label = graph
+                    .edges
+                    .iter()
+                    .find(|e| e.to == node.id && e.input == k)
+                    .map(|e| e.from.clone())
+                    .unwrap_or_else(|| format!("in{k}"));
+                (label, NodeState::Index(k))
+            })
+            .collect(),
+        NodeKind::Divider { options } => options
+            .iter()
+            .enumerate()
+            .map(|(k, v)| (format!("/{v}"), NodeState::Index(k)))
+            .collect(),
+        NodeKind::Choice { ratios } => ratios
+            .iter()
+            .enumerate()
+            .map(|(k, (num, den))| {
+                let label = if *den == 1 {
+                    format!("×{num}")
+                } else {
+                    format!("×{num}/{den}")
+                };
+                (label, NodeState::Index(k))
+            })
+            .collect(),
+        NodeKind::Multiplier { min, max } => (*min..=*max)
+            .map(|v| (format!("×{v}"), NodeState::Value(v)))
+            .collect(),
+        // An EN box is a two-state pick, so it reuses the same dropdown.
+        NodeKind::Gate => vec![
+            ("EN on".to_owned(), NodeState::Fixed),
+            ("EN off".to_owned(), NodeState::Unset),
+        ],
+        NodeKind::Source { .. }
+        | NodeKind::FixedDiv { .. }
+        | NodeKind::TimerMul { .. }
+        | NodeKind::Tap
+        | NodeKind::Output => return None,
+    })
+}
+
 /// Turn node positions into a drawable [`ClockLayout`]: per node a name label, a
 /// control and a live frequency tag; per edge an orthogonal wire. `boxes` is
 /// kept in [`ClockLayout::nodes`] as the layout's source of truth.
@@ -222,6 +275,7 @@ pub fn derive(graph: &ClockGraph, boxes: Vec<NodeBox>) -> ClockLayout {
             x,
             y: y - 3.0,
             text: node.id.clone(),
+            node: Some(node.id.clone()),
         });
         lay.tags.push(TagDef {
             x,
@@ -243,86 +297,23 @@ pub fn derive(graph: &ClockGraph, boxes: Vec<NodeBox>) -> ClockLayout {
                     max_mhz: (*max_hz as f32 / 1e6).max(lo),
                 });
             }
-            NodeKind::Mux { inputs } => {
-                let options = (0..*inputs)
-                    .map(|k| {
-                        // Label each input by the node that feeds it.
-                        let label = graph
-                            .edges
-                            .iter()
-                            .find(|e| e.to == node.id && e.input == k)
-                            .map(|e| e.from.clone())
-                            .unwrap_or_else(|| format!("in{k}"));
-                        (label, NodeState::Index(k))
-                    })
-                    .collect();
-                lay.widgets.push(Widget::Combo {
-                    node: node.id.clone(),
-                    x,
-                    y,
-                    w,
-                    options,
-                });
-            }
-            NodeKind::Divider { options } => {
-                let opts = options
-                    .iter()
-                    .enumerate()
-                    .map(|(k, v)| (format!("/{v}"), NodeState::Index(k)))
-                    .collect();
-                lay.widgets.push(Widget::Combo {
-                    node: node.id.clone(),
-                    x,
-                    y,
-                    w,
-                    options: opts,
-                });
-            }
-            NodeKind::Choice { ratios } => {
-                let opts = ratios
-                    .iter()
-                    .enumerate()
-                    .map(|(k, (num, den))| {
-                        let label = if *den == 1 {
-                            format!("×{num}")
-                        } else {
-                            format!("×{num}/{den}")
-                        };
-                        (label, NodeState::Index(k))
-                    })
-                    .collect();
-                lay.widgets.push(Widget::Combo {
-                    node: node.id.clone(),
-                    x,
-                    y,
-                    w,
-                    options: opts,
-                });
-            }
-            NodeKind::Multiplier { min, max } => {
-                let opts = (*min..=*max)
-                    .map(|v| (format!("×{v}"), NodeState::Value(v)))
-                    .collect();
-                lay.widgets.push(Widget::Combo {
-                    node: node.id.clone(),
-                    x,
-                    y,
-                    w,
-                    options: opts,
-                });
-            }
-            // An EN box is a two-state pick, so it reuses the same dropdown.
-            NodeKind::Gate => {
-                lay.widgets.push(Widget::Combo {
-                    node: node.id.clone(),
-                    x,
-                    y,
-                    w,
-                    options: vec![
-                        ("EN on".to_owned(), NodeState::Fixed),
-                        ("EN off".to_owned(), NodeState::Unset),
-                    ],
-                });
+            // Everything selectable is one dropdown, and its options come from
+            // the SHARED builder — so the fields view offers exactly the same
+            // choices as the diagram, by construction rather than by agreement.
+            NodeKind::Mux { .. }
+            | NodeKind::Divider { .. }
+            | NodeKind::Choice { .. }
+            | NodeKind::Multiplier { .. }
+            | NodeKind::Gate => {
+                if let Some(options) = options_for(graph, node) {
+                    lay.widgets.push(Widget::Combo {
+                        node: node.id.clone(),
+                        x,
+                        y,
+                        w,
+                        options,
+                    });
+                }
             }
             // Non-editable nodes render as a static labelled box.
             NodeKind::FixedDiv { by } => {
@@ -389,6 +380,7 @@ fn box_at(nb: &NodeBox, label: String) -> BlockDef {
         w: nb.w,
         h: nb.h,
         label,
+        node: Some(nb.node.clone()),
     }
 }
 
@@ -479,6 +471,40 @@ mod tests {
             assert!(
                 l.x >= 0.0 && l.x <= w && l.y >= 0.0 && l.y <= h,
                 "{l:?} outside the measured bounds {w}×{h}"
+            );
+        }
+    }
+
+    /// The diagram and the fields view must offer the SAME choices — they do,
+    /// because both ask this one function.
+    #[test]
+    fn options_are_built_once_for_both_views() {
+        let g = chain();
+        let div = g.node("ahb").unwrap();
+        let opts = options_for(&g, div).expect("a divider is selectable");
+        assert_eq!(
+            opts.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            ["/1", "/2", "/4"]
+        );
+        assert_eq!(opts[1].1, NodeState::Index(1));
+
+        // And the layout's dropdown carries exactly that list.
+        let lay = auto_layout(&g);
+        let Some(Widget::Combo { options, .. }) = lay.widgets.iter().find(|w| w.node_id() == "ahb")
+        else {
+            panic!("the divider draws a dropdown");
+        };
+        assert_eq!(options, &opts);
+    }
+
+    /// A node with nothing to pick says so, rather than offering an empty list.
+    #[test]
+    fn nodes_with_nothing_to_pick_have_no_options() {
+        let g = chain();
+        for id in ["hsi", "hclk"] {
+            assert!(
+                options_for(&g, g.node(id).unwrap()).is_none(),
+                "`{id}` has nothing to select"
             );
         }
     }

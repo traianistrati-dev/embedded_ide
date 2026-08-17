@@ -50,6 +50,7 @@ fn parse_shape(text: &str) -> Result<GraphClock, String> {
             Ok(graph) => Ok(GraphClock {
                 graph,
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
             Err(_) => Err(format!("not a valid clock .ron: {full_err}")),
         },
@@ -74,6 +75,7 @@ mod tests {
         GraphClock {
             graph: stm32f4_graph(),
             layout: stm32f4_layout(),
+            bindings: Default::default(),
         }
     }
 
@@ -150,6 +152,7 @@ mod tests {
                 ],
             },
             layout: Default::default(),
+            bindings: Default::default(),
         };
         let back = parse_clock_ron(&export_clock_ron(&gc)).expect("re-import");
         assert_eq!(gc.graph, back.graph);
@@ -172,6 +175,7 @@ mod tests {
         let derived = GraphClock {
             graph: sample().graph,
             layout: auto_layout(&sample().graph),
+            bindings: Default::default(),
         };
         assert!(!derived.layout.nodes.is_empty(), "auto layout places boxes");
         let back = parse_clock_ron(&export_clock_ron(&derived)).expect("re-import");

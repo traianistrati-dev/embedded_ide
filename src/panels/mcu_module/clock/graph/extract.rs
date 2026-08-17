@@ -437,6 +437,7 @@ pub fn to_graph_clock(ex: &ExtractedClock) -> Result<GraphClock, String> {
     let gc = GraphClock {
         graph: ClockGraph { nodes, edges },
         layout: Default::default(),
+        bindings: Default::default(),
     };
     self_check(ex, &gc.graph)?;
     Ok(gc)

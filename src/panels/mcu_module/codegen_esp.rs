@@ -130,7 +130,7 @@ impl EspRuntime {
 fn esp_init_line(clock: &ClockConfig) -> String {
     let cpu = match clock {
         ClockConfig::Graph(gc) => {
-            let cpu_hz = evaluate(&gc.graph).get("cpu").copied().unwrap_or(0);
+            let cpu_hz = evaluate(&gc.for_codegen()).get("cpu").copied().unwrap_or(0);
             if cpu_hz >= 120_000_000 {
                 "esp_hal::clock::CpuClock::_160MHz"
             } else {
@@ -766,6 +766,7 @@ mod tests {
         GraphClock {
             graph: esp32c3_graph(),
             layout: esp32c3_layout(),
+            bindings: Default::default(),
         }
     }
 

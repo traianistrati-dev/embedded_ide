@@ -64,21 +64,12 @@ pub fn rcc_recipe(family: &str) -> Option<(ReadSpec, RccDescriptor)> {
 pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
     match family {
         // Its own HAL: `graph_to_stm32f1` reads the whole F103 tree.
+        // (`pll_input` is NOT here: it is a field of the computed frequencies,
+        // not a node `graph_to_stm32f1` looks up — listing it made the editor
+        // demand a binding for something code generation never reads.)
         "stm32f1" => vec![
-            "hse",
-            "pllsrc",
-            "pllxtpre",
-            "pll_input",
-            "pllmul",
-            "sw",
-            "ahb",
-            "apb1",
-            "apb2",
-            "adc",
-            "usb",
-            "systick",
-            "rtc",
-            "mco",
+            "hse", "pllsrc", "pllxtpre", "pllmul", "sw", "ahb", "apb1", "apb2", "adc", "usb",
+            "systick", "rtc", "mco",
         ],
         // esp-hal exposes only the CPU clock.
         "esp32c3" => vec!["cpu"],
@@ -110,7 +101,9 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig) -> String {
         return EMBASSY_RESET_INIT.to_string();
     };
     let values = match clock {
-        ClockConfig::Graph(gc) => read_rcc_values(&gc.graph, &spec),
+        // `for_codegen` applies the chip's id bindings; with none declared it
+        // borrows the graph unchanged, so the emitted block is byte-identical.
+        ClockConfig::Graph(gc) => read_rcc_values(&gc.for_codegen(), &spec),
         _ => spec.reset.clone(),
     };
     // The reset shortcut only applies when the chip's HW default equals this
@@ -891,6 +884,69 @@ mod tests {
         assert_eq!(read_rcc_values(&g, &spec), spec.reset);
     }
 
+    /// THE point of the bindings: a tree with the vendor's node names generates
+    /// exactly what the same tree named canonically would.
+    #[test]
+    fn a_bound_vendor_named_tree_generates_the_same_block() {
+        use crate::panels::mcu_module::clock::graph::{GraphClock, bind, stm32f4_graph};
+
+        // The shipped F4 tree, renamed the way CubeMX writes it.
+        let canonical = stm32f4_graph();
+        let renames = [
+            ("hse", "HSEOSC"),
+            ("sw", "SysClkSource"),
+            ("pllsrc", "PLLSource"),
+            ("pllm", "PLLM"),
+            ("plln", "PLLN"),
+            ("pllp", "PLLP"),
+            ("ahb", "AHBPrescaler"),
+            ("apb1", "APB1Prescaler"),
+            ("apb2", "APB2Prescaler"),
+        ];
+        let mut vendor = canonical.clone();
+        for (from, to) in renames {
+            let mut boxes = Vec::new();
+            crate::panels::mcu_module::clock::graph::edit::rename_node(
+                &mut vendor,
+                &mut boxes,
+                from,
+                to,
+            )
+            .expect("rename");
+        }
+        assert!(vendor.node("SysClkSource").is_some(), "renamed");
+        assert!(vendor.node("sw").is_none());
+
+        let block = |graph: &ClockGraph, bindings: std::collections::BTreeMap<String, String>| {
+            graph_clock_block(
+                "stm32f4",
+                &ClockConfig::Graph(GraphClock {
+                    graph: graph.clone(),
+                    layout: Default::default(),
+                    bindings,
+                }),
+            )
+        };
+
+        // What the tree is worth: the canonical one emits a real PLL block.
+        let want = block(&canonical, Default::default());
+        assert!(want.contains("Pll"), "the reference must be a PLL block");
+
+        // UNBOUND, the vendor-named tree reads as nothing at all — every value
+        // falls back, which is exactly the silent failure the bindings exist to
+        // prevent.
+        assert_ne!(
+            block(&vendor, Default::default()),
+            want,
+            "an unbound vendor-named tree must NOT generate the right block"
+        );
+
+        // BOUND — proposed from the vendor names themselves — it is identical.
+        let bindings = bind::propose(&codegen_node_ids("stm32f4"), &vendor);
+        assert_eq!(bindings["sw"], "SysClkSource", "{bindings:?}");
+        assert_eq!(block(&vendor, bindings), want);
+    }
+
     /// The editor asks which node ids code generation reads, so it can mark them
     /// and report the ones that went missing. They must match what the readers
     /// actually look up.
@@ -913,7 +969,11 @@ mod tests {
         assert!(g0.contains(&"apb1") && !g0.contains(&"apb2"), "{g0:?}");
 
         // The families on their own generators.
-        assert!(codegen_node_ids("stm32f1").contains(&"pllmul"));
+        let f1 = codegen_node_ids("stm32f1");
+        assert!(f1.contains(&"pllmul"));
+        // `pll_input` is a computed frequency, not a node the bridge reads;
+        // listing it would make the editor ask for an impossible binding.
+        assert!(!f1.contains(&"pll_input"), "{f1:?}");
         assert_eq!(codegen_node_ids("esp32c3"), vec!["cpu"]);
         // No recipe, nothing to protect.
         assert!(codegen_node_ids("stm8").is_empty());
@@ -927,6 +987,7 @@ mod tests {
         let f4 = GraphClock {
             graph: stm32f4_graph(),
             layout: Default::default(),
+            bindings: Default::default(),
         };
         let s = graph_clock_block("stm32f4", &ClockConfig::Graph(f4));
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_P;"), "{s}");
@@ -951,6 +1012,7 @@ mod tests {
             &ClockConfig::Graph(GraphClock {
                 graph: hse,
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
         );
         assert!(s.contains("config.rcc.hse = Some(rcc::Hse { freq: embassy_stm32::time::Hertz(25000000), mode: rcc::HseMode::Oscillator });"), "{s}");
@@ -964,6 +1026,7 @@ mod tests {
         let wba = GraphClock {
             graph: stm32wba_graph(),
             layout: Default::default(),
+            bindings: Default::default(),
         };
         let s = graph_clock_block("stm32wba", &ClockConfig::Graph(wba));
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_R;"), "{s}");
@@ -974,6 +1037,7 @@ mod tests {
         let g = GraphClock {
             graph: stm32f4_graph(),
             layout: Default::default(),
+            bindings: Default::default(),
         };
         assert!(
             graph_clock_block("stm32h7", &ClockConfig::Graph(g))
@@ -1006,6 +1070,7 @@ mod tests {
             &ClockConfig::Graph(GraphClock {
                 graph: stm32g4_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
         );
         for needle in [
@@ -1033,6 +1098,7 @@ mod tests {
             ClockConfig::Graph(GraphClock {
                 graph: stm32f4_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             })
         };
         // Same embassy rcc module (f247.rs) → identical emitted RCC block.
@@ -1050,6 +1116,7 @@ mod tests {
             &ClockConfig::Graph(GraphClock {
                 graph: stm32f2_graph(),
                 layout: stm32f2_layout(),
+                bindings: Default::default(),
             }),
         );
         assert!(
@@ -1079,6 +1146,7 @@ mod tests {
             &ClockConfig::Graph(GraphClock {
                 graph: stm32l4_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
         );
         for needle in [
@@ -1101,6 +1169,7 @@ mod tests {
             &ClockConfig::Graph(GraphClock {
                 graph: g,
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
         );
         assert!(s2.contains("config.rcc.hsi = true;"), "{s2}");
@@ -1127,6 +1196,7 @@ mod tests {
             &ClockConfig::Graph(GraphClock {
                 graph: stm32g0_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
         );
         for needle in [

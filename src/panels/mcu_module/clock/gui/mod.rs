@@ -30,6 +30,23 @@ use super::presets::{ClockPreset, stm32f1_presets};
 use super::validate::{Severity, warnings};
 use crate::panels::mcu_module::structure_config::ClockPositions;
 
+/// The Clock tab's per-project state, owned by the app.
+///
+/// Bundled rather than passed as three more parameters: it is one thing —
+/// "what this project remembers about its clock view" — and the next addition
+/// then costs nothing at the call sites.
+#[derive(Default)]
+pub struct ClockUiState {
+    /// Node positions the user dragged; persisted in `project_structure.config`.
+    pub positions: ClockPositions,
+    /// One-line result of the last edit action, shown under the palette row.
+    /// Session-only.
+    pub note: String,
+    /// Show the FIELDS list beside the diagram. Persisted per project — it is a
+    /// working preference, not a momentary one.
+    pub fields: bool,
+}
+
 /// What the Clock tab wants the app to do after this frame.
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ClockTabOut {
@@ -55,9 +72,14 @@ pub fn draw_graph_clock(
     presets: &[ClockPreset],
     defaults: Option<&ClockGraph>,
     family: &str,
-    positions: &mut ClockPositions,
-    note: &mut String,
+    state: &mut ClockUiState,
 ) -> ClockTabOut {
+    // Destructured so the parts keep their old names below.
+    let ClockUiState {
+        positions,
+        note,
+        fields,
+    } = state;
     let mut out = ClockTabOut::default();
     let mut changed = false;
     let is_stm32f1 = family == "stm32f1";
@@ -179,9 +201,10 @@ pub fn draw_graph_clock(
     // Saved node positions (from `project_structure.config`) are applied over the
     // generated layout — once, whenever either side changes, since re-deriving
     // per frame would rebuild every dropdown's option list.
+    // Only a DERIVED layout can take them: they are `NodeBox` positions, and a
+    // hand-authored figure has none (its own positions are the primitives').
     let pos_sig = positions_signature(positions);
-    let editable = !gc.layout.nodes.is_empty();
-    if editable && (view.pos_sig != pos_sig || view.layout_sig != sig) {
+    if !gc.layout.nodes.is_empty() && (view.pos_sig != pos_sig || view.layout_sig != sig) {
         view.pos_sig = pos_sig;
         view.layout_sig = sig;
         apply_positions(gc, positions);
@@ -212,6 +235,19 @@ pub fn draw_graph_clock(
         }
         ui.separator();
 
+        // The fields list sits BESIDE the diagram rather than replacing it, so
+        // the toggle is a visibility switch, not a view switch.
+        if ui
+            .add(
+                egui::Button::new(format!("{} Fields", ph::LIST_BULLETS)).selected(*fields),
+            )
+            .on_hover_text("Show every selectable value as a list beside the diagram")
+            .clicked()
+        {
+            *fields = !*fields;
+        }
+        ui.separator();
+
         // Edit mode — move the node boxes around. Only for GENERATED layouts:
         // the hand-drawn figures (F1/F4/WBA/ESP) place their primitives directly
         // and carry no boxes to drag.
@@ -224,9 +260,10 @@ pub fn draw_graph_clock(
         )
         .selected(view.edit);
         if ui
-            .add_enabled(editable, edit_btn)
-            .on_hover_text("Build the tree: drag boxes, add / delete nodes, wire them up")
-            .on_disabled_hover_text("This chip ships a hand-drawn figure — nothing to drag")
+            .add(edit_btn)
+            .on_hover_text(
+                "Build the tree: drag nodes, add / delete them, wire them up. A                  hand-drawn figure is edited in place — only its wires stay where                  its author routed them.",
+            )
             .clicked()
         {
             view.edit = !view.edit;
@@ -270,10 +307,7 @@ pub fn draw_graph_clock(
                         // never dropped on top of an existing one. The graph
                         // signature changes, which re-fits the view onto it.
                         let (_, h) = gc.layout.bounds();
-                        let mut boxes = std::mem::take(&mut gc.layout.nodes);
-                        let id =
-                            edit::add_node(&mut gc.graph, &mut boxes, kind, 46.0, h, 96.0, 26.0);
-                        gc.layout = super::graph::derive(&gc.graph, boxes);
+                        let id = add_node_to(gc, kind, 46.0, h);
                         view.selected = Some(id);
                         structural = true;
                         ui.close();
@@ -288,9 +322,7 @@ pub fn draw_graph_clock(
                 .clicked()
                 && let Some(id) = view.selected.take()
             {
-                let mut boxes = std::mem::take(&mut gc.layout.nodes);
-                edit::remove_node(&mut gc.graph, &mut boxes, &id);
-                gc.layout = super::graph::derive(&gc.graph, boxes);
+                remove_node_from(gc, &id);
                 positions.remove(&id);
                 structural = true;
             }
@@ -376,6 +408,18 @@ pub fn draw_graph_clock(
         }
     }
 
+    // ── Fields (left, beside the diagram) ────────────────────────────────────
+    if *fields {
+        egui::SidePanel::left("clock_fields")
+            .resizable(true)
+            .default_width(300.0)
+            .show_inside(ui, |ui| {
+                if fields_panel(ui, gc, limits, &freqs) {
+                    changed = true;
+                }
+            });
+    }
+
     // The rect the Scene will fill — the cursor-anchored zoom below replicates
     // the Scene's own scene→screen fit from it, so it must be exactly that rect
     // (measured AFTER the toolbar and the properties panel, not before).
@@ -392,6 +436,18 @@ pub fn draw_graph_clock(
     let mut scene_rect = view.scene;
     let mut content_bounds = egui::Rect::NOTHING;
     let mut hits = diagram::EditHits::default();
+
+    // The draggable handles. A DERIVED layout owns its boxes; a HAND-AUTHORED
+    // figure has none, so they are derived from the primitives that name a node
+    // — which is what lets such a figure be edited in place instead of being
+    // regenerated. `before` is kept so a drag can be applied as a delta.
+    let derived = !gc.layout.nodes.is_empty();
+    let mut handles = if derived {
+        gc.layout.nodes.clone()
+    } else {
+        gc.layout.node_anchors()
+    };
+    let before = handles.clone();
 
     // egui's Scene PANS on a plain wheel; turn that into a cursor-anchored zoom
     // (Ctrl+wheel stays the Scene's own zoom) by replicating its scene→screen
@@ -446,7 +502,7 @@ pub fn draw_graph_clock(
                     hits = diagram::edit_nodes(
                         ui,
                         &tf,
-                        &mut gc.layout.nodes,
+                        &mut handles,
                         view.selected.as_deref(),
                         view.linking.as_deref(),
                     );
@@ -460,10 +516,23 @@ pub fn draw_graph_clock(
     // positions for `project_structure.config`. NOT `changed` — the layout is
     // cosmetic and must not regenerate `main.rs` on every mouse move.
     if hits.dragged {
-        let boxes = std::mem::take(&mut gc.layout.nodes);
-        gc.layout = super::graph::derive(&gc.graph, boxes);
-        *positions = moved_positions(gc);
-        view.pos_sig = positions_signature(positions);
+        if derived {
+            gc.layout.nodes = handles;
+            let boxes = std::mem::take(&mut gc.layout.nodes);
+            gc.layout = super::graph::derive(&gc.graph, boxes);
+            *positions = moved_positions(gc);
+            view.pos_sig = positions_signature(positions);
+        } else {
+            // In place: move exactly the primitives that belong to the node, so
+            // the hand-drawn figure survives the edit. Its wires are not moved —
+            // nothing says which node a routed polyline belongs to.
+            for (now, was) in handles.iter().zip(&before) {
+                let (dx, dy) = (now.x - was.x, now.y - was.y);
+                if dx != 0.0 || dy != 0.0 {
+                    gc.layout.move_node(&now.node, dx, dy);
+                }
+            }
+        }
     }
     if let Some(id) = hits.select {
         view.selected = Some(id);
@@ -542,6 +611,171 @@ pub fn draw_graph_clock(
 
     out.changed = changed;
     out
+}
+
+// ── Fields view ───────────────────────────────────────────────────────────────
+
+/// Every SELECTABLE value as a list, beside the diagram.
+///
+/// The same choices the diagram's dropdowns offer — both come from
+/// [`options_for`](super::graph::auto_layout::options_for), so they cannot drift
+/// apart — and the same node states, so everything downstream (frequencies,
+/// checks, generated code) is unaffected by which one you used.
+///
+/// Only editable nodes appear: taps and outputs have nothing to pick, and the
+/// frequencies they deliver are already in the footer. Rows follow the graph's
+/// TOPOLOGICAL order — sources, then the PLL, then SYSCLK, then the buses —
+/// which is the order the datasheet reads in, not alphabetical.
+///
+/// Returns `true` when a value changed.
+fn fields_panel(
+    ui: &mut egui::Ui,
+    gc: &mut GraphClock,
+    limits: &ClockLimits,
+    freqs: &std::collections::BTreeMap<String, u32>,
+) -> bool {
+    use super::graph::auto_layout::{options_for, place};
+    use super::graph::model::{NodeKind, NodeState};
+
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.strong("Fields");
+        ui.label(
+            egui::RichText::new("every selectable value")
+                .size(10.0)
+                .color(egui::Color32::GRAY),
+        );
+    });
+    ui.separator();
+
+    // Reading order = the layering `place` already computes (column, then row).
+    // Cheap at this size, and it keeps the list in step with the diagram.
+    let order: Vec<(String, f32, f32)> = place(&gc.graph)
+        .into_iter()
+        .map(|b| (b.node, b.x, b.y))
+        .collect();
+    let rank = |id: &str| {
+        order
+            .iter()
+            .find(|(n, _, _)| n == id)
+            .map(|(_, x, y)| (*x as i32, *y as i32))
+            .unwrap_or((i32::MAX, 0))
+    };
+    let mut ids: Vec<String> = gc
+        .graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            options_for(&gc.graph, n).is_some() || matches!(n.kind, NodeKind::Source { .. })
+        })
+        .map(|n| n.id.clone())
+        .collect();
+    ids.sort_by_key(|id| rank(id));
+
+    if ids.is_empty() {
+        ui.label(
+            egui::RichText::new("This tree has nothing to select.")
+                .size(11.0)
+                .color(egui::Color32::GRAY),
+        );
+        return false;
+    }
+
+    let mut pending: Option<(String, NodeState)> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("clock_fields_scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("clock_fields_grid")
+                .num_columns(3)
+                .spacing([10.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for id in &ids {
+                        let Some(node) = gc.graph.node(id) else {
+                            continue;
+                        };
+                        ui.label(egui::RichText::new(id).size(11.0));
+
+                        match &node.kind {
+                            // A source is a frequency to TYPE, not a choice.
+                            NodeKind::Source { min_hz, max_hz, .. } => {
+                                let NodeState::Source { enabled, hz } = node.state.clone() else {
+                                    ui.label("");
+                                    ui.label("");
+                                    ui.end_row();
+                                    continue;
+                                };
+                                let (lo, hi) = (*min_hz as f64 / 1e6, *max_hz as f64 / 1e6);
+                                let mut mhz = hz as f64 / 1e6;
+                                let fixed = (hi - lo).abs() < f64::EPSILON;
+                                let resp = ui.add_enabled(
+                                    !fixed,
+                                    egui::DragValue::new(&mut mhz)
+                                        .range(lo..=hi.max(lo))
+                                        .speed(0.1)
+                                        .suffix(" MHz"),
+                                );
+                                if resp.changed() {
+                                    pending = Some((
+                                        id.clone(),
+                                        NodeState::Source {
+                                            enabled,
+                                            hz: (mhz * 1e6).round() as u32,
+                                        },
+                                    ));
+                                }
+                            }
+                            _ => {
+                                let options = options_for(&gc.graph, node).unwrap_or_default();
+                                let current = options
+                                    .iter()
+                                    .find(|(_, s)| *s == node.state)
+                                    .map(|(l, _)| l.clone())
+                                    .unwrap_or_else(|| "—".to_owned());
+                                egui::ComboBox::from_id_salt(("clock_field", id))
+                                    .selected_text(egui::RichText::new(current).size(11.0))
+                                    .width(110.0)
+                                    .show_ui(ui, |ui| {
+                                        for (label, state) in &options {
+                                            if ui
+                                                .selectable_label(*state == node.state, label)
+                                                .clicked()
+                                            {
+                                                pending = Some((id.clone(), state.clone()));
+                                            }
+                                        }
+                                    });
+                            }
+                        }
+
+                        // The frequency this node ends up producing, red past a
+                        // ceiling — the same rule the diagram's tags use.
+                        let hz = freqs.get(id).copied().unwrap_or(0);
+                        let over = node
+                            .limit
+                            .and_then(|k| ceiling_for(k, limits))
+                            .is_some_and(|lim| hz > lim);
+                        ui.colored_label(
+                            if over {
+                                egui::Color32::from_rgb(230, 90, 80)
+                            } else {
+                                egui::Color32::from_rgb(150, 200, 160)
+                            },
+                            egui::RichText::new(fmt_mhz(hz)).size(11.0),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+
+    if let Some((id, state)) = pending
+        && let Some(n) = gc.graph.node_mut(&id)
+        && n.state != state
+    {
+        n.state = state;
+        changed = true;
+    }
+    changed
 }
 
 // ── Pan / zoom view ───────────────────────────────────────────────────────────
@@ -623,8 +857,10 @@ fn properties_panel(
                 .color(egui::Color32::GRAY),
         );
         ui.add_space(10.0);
+        let bound = binding_table(ui, gc, family);
+        ui.add_space(10.0);
         issue_list(ui, gc, family);
-        return false;
+        return bound;
     };
     if gc.graph.node(&id).is_none() {
         view.selected = None;
@@ -847,6 +1083,10 @@ fn properties_panel(
     }
 
     ui.add_space(10.0);
+    if binding_table(ui, gc, family) {
+        changed = true;
+    }
+    ui.add_space(10.0);
     issue_list(ui, gc, family);
     changed
 }
@@ -857,21 +1097,114 @@ fn codegen_ids(family: &str) -> Vec<&'static str> {
     crate::panels::mcu_module::codegen::rcc::codegen_node_ids(family)
 }
 
+/// The binding table: which node answers for each id code generation reads.
+///
+/// This is what makes an IMPORTED tree generate real code. The tree keeps the
+/// vendor's names (`SysClkSource`, `AHBPrescaler`) — the ones printed in the
+/// datasheet figure — and the mapping to `sw` / `ahb` lives here, proposed
+/// automatically at import and correctable by hand. An id left unbound is an
+/// error in Checks, because it means that value quietly becomes a default.
+///
+/// Returns `true` when a binding changed (the caller regenerates code).
+fn binding_table(ui: &mut egui::Ui, gc: &mut GraphClock, family: &str) -> bool {
+    let ids = codegen_ids(family);
+    if ids.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+
+    ui.label(egui::RichText::new("Code generation").strong());
+    ui.label(
+        egui::RichText::new("which node answers for each id main.rs is generated from")
+            .size(10.0)
+            .color(egui::Color32::GRAY),
+    );
+
+    // Only nodes that can carry a value are offered; a label would be noise.
+    let node_ids: Vec<String> = gc.graph.nodes.iter().map(|n| n.id.clone()).collect();
+
+    egui::ScrollArea::vertical()
+        .id_salt("clock_binding_scroll")
+        .max_height(200.0)
+        .show(ui, |ui| {
+            egui::Grid::new("clock_bindings")
+                .num_columns(2)
+                .spacing([8.0, 3.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for id in &ids {
+                        // A graph that uses the canonical name needs no entry.
+                        let bound = gc.bindings.get(*id).cloned();
+                        let direct = node_ids.iter().any(|n| n == id);
+                        let current = bound.clone().unwrap_or_else(|| {
+                            if direct {
+                                (*id).to_string()
+                            } else {
+                                "—".to_string()
+                            }
+                        });
+                        let ok = bound.is_some() || direct;
+                        ui.label(egui::RichText::new(*id).size(11.0).color(if ok {
+                            egui::Color32::from_rgb(150, 200, 160)
+                        } else {
+                            egui::Color32::from_rgb(230, 90, 80)
+                        }));
+                        let mut pick: Option<Option<String>> = None;
+                        egui::ComboBox::from_id_salt(("clock_bind", *id))
+                            .selected_text(egui::RichText::new(current).size(11.0))
+                            .width(150.0)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(bound.is_none(), "— none —").clicked() {
+                                    pick = Some(None);
+                                }
+                                for n in &node_ids {
+                                    if ui
+                                        .selectable_label(bound.as_deref() == Some(n), n)
+                                        .clicked()
+                                    {
+                                        pick = Some(Some(n.clone()));
+                                    }
+                                }
+                            });
+                        if let Some(p) = pick {
+                            match p {
+                                Some(node) => gc.bindings.insert((*id).to_string(), node),
+                                None => gc.bindings.remove(*id),
+                            };
+                            changed = true;
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+
+    if ui
+        .small_button("Propose from names")
+        .on_hover_text("Match the ids against the node names again, replacing the bindings")
+        .clicked()
+    {
+        gc.bindings = super::graph::bind::propose(&ids, &gc.graph);
+        changed = true;
+    }
+    changed
+}
+
 /// Structural problems, worst first — the editor's own validation, separate
 /// from the datasheet-ceiling checks in the footer.
 fn issue_list(ui: &mut egui::Ui, gc: &GraphClock, family: &str) {
     let mut found = edit::issues(&gc.graph);
     // Family-aware check the pure validator cannot make: an id the code
-    // generator looks up has gone missing, so that value silently falls back to
-    // a default in `main.rs`.
+    // generator looks up is neither a node nor bound to one, so that value
+    // silently falls back to a default in `main.rs`.
     for id in codegen_ids(family) {
-        if !gc.graph.nodes.iter().any(|n| n.id == id) {
+        let resolved = gc.bindings.get(id).map_or(id, |n| n.as_str());
+        if !gc.graph.nodes.iter().any(|n| n.id == resolved) {
             found.insert(
                 0,
                 edit::Issue {
                     node: None,
                     msg: format!(
-                        "`{id}` is missing — code generation reads it, so main.rs will fall back \
+                        "`{id}` is unbound — code generation reads it, so main.rs will fall back \
                          to a default."
                     ),
                     severity: Severity::Error,
@@ -969,6 +1302,42 @@ fn apply_param_text(node: &mut super::graph::model::Node, text: &str) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Add a node, drawing it in whichever kind of layout this is.
+///
+/// A DERIVED layout is regenerated from its boxes. A HAND-AUTHORED one is not —
+/// it keeps its figure, and the new node's primitives are APPENDED: exactly what
+/// `derive` would have produced for that one node. So a hand-drawn diagram can
+/// grow without being redrawn.
+fn add_node_to(gc: &mut GraphClock, kind: edit::PaletteKind, x: f32, y: f32) -> String {
+    let derived = !gc.layout.nodes.is_empty();
+    let mut boxes = std::mem::take(&mut gc.layout.nodes);
+    let id = edit::add_node(&mut gc.graph, &mut boxes, kind, x, y, 96.0, 26.0);
+    if derived {
+        gc.layout = super::graph::derive(&gc.graph, boxes);
+    } else {
+        // Only the newcomer is drawn; everything already on the figure is left
+        // exactly as its author placed it.
+        let one = super::graph::derive(&gc.graph, vec![boxes.pop().expect("the new box")]);
+        gc.layout.blocks.extend(one.blocks);
+        gc.layout.tags.extend(one.tags);
+        gc.layout.labels_above.extend(one.labels_above);
+        gc.layout.widgets.extend(one.widgets);
+    }
+    id
+}
+
+/// Delete a node and whatever draws it, in either kind of layout.
+fn remove_node_from(gc: &mut GraphClock, id: &str) {
+    let derived = !gc.layout.nodes.is_empty();
+    let mut boxes = std::mem::take(&mut gc.layout.nodes);
+    edit::remove_node(&mut gc.graph, &mut boxes, id);
+    if derived {
+        gc.layout = super::graph::derive(&gc.graph, boxes);
+    } else {
+        gc.layout.remove_node_primitives(id);
     }
 }
 
@@ -1126,7 +1495,7 @@ fn graph_info_zone(
     is_stm32f1: bool,
 ) {
     if is_stm32f1 {
-        let c = graph_to_stm32f1(&gc.graph);
+        let c = graph_to_stm32f1(&gc.for_codegen());
         let ws = warnings(&c, &frequencies(&c), l);
         if ws.is_empty() {
             ui.colored_label(
@@ -1274,7 +1643,11 @@ mod tests {
             ],
         };
         let layout = auto_layout(&graph);
-        GraphClock { graph, layout }
+        GraphClock {
+            graph,
+            layout,
+            bindings: Default::default(),
+        }
     }
 
     fn box_of(gc: &GraphClock, id: &str) -> (f32, f32) {

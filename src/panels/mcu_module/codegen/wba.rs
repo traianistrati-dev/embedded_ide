@@ -133,6 +133,7 @@ mod tests {
         let gc = GraphClock {
             graph: stm32wba_graph(),
             layout: Default::default(),
+            bindings: Default::default(),
         };
         let section = make_generated_section("WBA", &[], &ClockConfig::Graph(gc.clone()), "");
         for needle in [

@@ -149,10 +149,12 @@ impl ClockDef {
             ClockDef::Stm32f1(c) => ClockConfig::Graph(GraphClock {
                 graph: stm32f1_graph(c),
                 layout: stm32f1_layout(limits),
+                bindings: Default::default(),
             }),
             ClockDef::Esp32c3 => ClockConfig::Graph(GraphClock {
                 graph: esp32c3_graph(),
                 layout: esp32c3_layout(),
+                bindings: Default::default(),
             }),
             ClockDef::Graph(g) => ClockConfig::Graph(g.clone()),
             ClockDef::None => ClockConfig::None,
@@ -220,6 +222,28 @@ pub struct McuDefinition {
 }
 
 impl McuDefinition {
+    /// This chip's clock, falling back to its FAMILY's tree when the definition
+    /// declares none.
+    ///
+    /// `clock: None` means "no tree in this file", which is not the same as "no
+    /// tree exists". A definition saved before its family had one — or by a form
+    /// where the dropdown was left at None — otherwise shows *"Clock
+    /// configuration is not modelled yet"* for a chip the IDE models perfectly
+    /// well. That is what a stale user `mcus/esp32c3.ron` did: it overrode the
+    /// bundled definition (same id) and took the ESP32-C3's clock tab with it.
+    ///
+    /// [`ClockChoice::for_family`] is the single source of truth for that
+    /// mapping — the same one the XML and datasheet importers use — so a family
+    /// with no modelled tree (STM8, …) still yields `None` and the message is
+    /// then true.
+    pub fn effective_clock(&self) -> ClockDef {
+        use crate::panels::mcu_module::mcu_form::ClockChoice;
+        match &self.clock {
+            ClockDef::None => ClockChoice::for_family(&self.family).to_def(),
+            declared => declared.clone(),
+        }
+    }
+
     /// Build the runtime [`Mcu`] (pin diagram + clock) from this definition.
     pub fn build_mcu(&self) -> Mcu {
         let map = |defs: &[PinDef]| defs.iter().map(PinDef::to_pin).collect::<Vec<_>>();
@@ -246,7 +270,7 @@ impl McuDefinition {
                 })
                 .collect(),
         });
-        mcu.clock = self.clock.to_config(&self.clock_limits);
+        mcu.clock = self.effective_clock().to_config(&self.clock_limits);
         // The definition's tree is this chip's factory clock — snapshot it for
         // the Clock tab's "Reset" button before any saved state is applied.
         mcu.capture_clock_defaults();
@@ -464,6 +488,7 @@ mod tests {
         let gc = GraphClock {
             graph: stm32f1_graph(&Stm32f1Clock::default()),
             layout: stm32f1_layout(&ClockLimits::default()),
+            bindings: Default::default(),
         };
         let mut def = stm_def();
         def.clock = ClockDef::Graph(gc);
@@ -537,6 +562,7 @@ mod tests {
         let edited = GraphClock {
             graph: gc.graph.clone(),
             layout: gc.layout.clone(),
+            bindings: Default::default(),
         };
 
         let mut def = stm_def();
@@ -560,6 +586,44 @@ mod tests {
         );
         // The saved tree is the chip's factory config now, so Reset aims at it.
         assert!(rebuilt.clock_is_default());
+    }
+
+    /// A definition that declares no clock still gets its FAMILY's tree.
+    ///
+    /// The bug: a stale user `mcus/esp32c3.ron` with `clock: None` overrode the
+    /// bundled ESP32-C3 (same id) and the Clock tab said "not modelled yet" for
+    /// a chip the IDE models fully.
+    #[test]
+    fn a_definition_without_a_clock_falls_back_to_its_family() {
+        use crate::panels::mcu_module::clock::ClockConfig;
+
+        let mut def = stm_def();
+        def.clock = ClockDef::None;
+        def.family = "esp32c3".into();
+        assert!(
+            matches!(def.effective_clock(), ClockDef::Esp32c3),
+            "esp32c3 has a modelled tree"
+        );
+        assert!(matches!(def.build_mcu().clock, ClockConfig::Graph(_)));
+
+        // The same for an STM32 family.
+        def.family = "stm32f1".into();
+        assert!(matches!(def.effective_clock(), ClockDef::Stm32f1(_)));
+        assert!(matches!(def.build_mcu().clock, ClockConfig::Graph(_)));
+
+        // A family with no modelled tree keeps None — the message is true there.
+        def.family = "stm8".into();
+        assert!(matches!(def.effective_clock(), ClockDef::None));
+        assert!(matches!(def.build_mcu().clock, ClockConfig::None));
+    }
+
+    /// A declared clock is never overridden by the family fallback.
+    #[test]
+    fn a_declared_clock_wins_over_the_family_fallback() {
+        let mut def = stm_def();
+        def.family = "esp32c3".into(); // family says ESP…
+        def.clock = ClockDef::Stm32f1(Stm32f1Clock::default()); // …the file says F1
+        assert!(matches!(def.effective_clock(), ClockDef::Stm32f1(_)));
     }
 
     /// A saved project's clock is adopted AFTER the snapshot, so Reset targets

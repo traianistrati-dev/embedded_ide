@@ -106,12 +106,13 @@ impl AppIde {
         // lived before it got its own file.
         {
             use crate::panels::mcu_module::structure_config;
-            let (positions, view, clock) = structure_config::load(root);
+            let (positions, view, clock, clock_view) = structure_config::load(root);
             self.structure_overrides = positions;
             // Clock-diagram node positions — applied by the Clock tab over the
             // generated layout (unknown ids, e.g. after a chip change, are
             // simply ignored).
-            self.clock_overrides = clock;
+            self.clock_ui.positions = clock;
+            self.clock_ui.fields = clock_view;
             // View options (Calls / depth / path style / externals) — absent
             // section (older projects) keeps the defaults.
             if let Some((show_calls, depth, style, externals)) = view {

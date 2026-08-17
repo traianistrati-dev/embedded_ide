@@ -65,6 +65,7 @@ impl Mcu {
             "stm32f1" => ClockConfig::Graph(GraphClock {
                 graph: stm32f1_graph(&Stm32f1Clock::default()),
                 layout: stm32f1_layout(&ClockLimits::default()),
+                bindings: Default::default(),
             }),
             _ => ClockConfig::None,
         };
@@ -409,7 +410,7 @@ impl Mcu {
         use crate::panels::mcu_module::mcu_config;
         let clock = if self.family == "stm32f1" {
             Some(match &self.clock {
-                ClockConfig::Graph(gc) => graph_to_stm32f1(&gc.graph),
+                ClockConfig::Graph(gc) => graph_to_stm32f1(&gc.for_codegen()),
                 _ => Stm32f1Clock::default(),
             })
         } else {

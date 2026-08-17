@@ -119,7 +119,9 @@ impl ClockChoice {
             ClockChoice::Stm32l4 => "STM32L4 tree",
         }
     }
-    fn to_def(self) -> ClockDef {
+    /// Public so a definition can fall back to its family's tree when it
+    /// declares no clock of its own (see `McuDefinition::effective_clock`).
+    pub fn to_def(self) -> ClockDef {
         use crate::panels::mcu_module::clock::graph::{
             GraphClock, stm32f2_graph, stm32f2_layout, stm32f4_graph, stm32f4_layout,
             stm32g0_graph, stm32g4_graph, stm32l4_graph, stm32wba_graph, stm32wba_layout,
@@ -131,28 +133,34 @@ impl ClockChoice {
             ClockChoice::Stm32wba => ClockDef::Graph(GraphClock {
                 graph: stm32wba_graph(),
                 layout: stm32wba_layout(),
+                bindings: Default::default(),
             }),
             ClockChoice::Stm32f4 => ClockDef::Graph(GraphClock {
                 graph: stm32f4_graph(),
                 layout: stm32f4_layout(),
+                bindings: Default::default(),
             }),
             ClockChoice::Stm32f2 => ClockDef::Graph(GraphClock {
                 graph: stm32f2_graph(),
                 layout: stm32f2_layout(),
+                bindings: Default::default(),
             }),
             // Empty layout on purpose — `auto_layout` draws the diagram from the
             // graph topology, so a new family needs no hand-tuned positions.
             ClockChoice::Stm32g4 => ClockDef::Graph(GraphClock {
                 graph: stm32g4_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
             ClockChoice::Stm32g0 => ClockDef::Graph(GraphClock {
                 graph: stm32g0_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
             ClockChoice::Stm32l4 => ClockDef::Graph(GraphClock {
                 graph: stm32l4_graph(),
                 layout: Default::default(),
+                bindings: Default::default(),
             }),
         }
     }
@@ -930,6 +938,7 @@ mod tests {
                 edges: Vec::new(),
             },
             layout: Default::default(),
+            bindings: Default::default(),
         }); // an empty graph — not the WBA tree
         let edited = McuForm::from_definition(&imported);
         assert_eq!(edited.clock, ClockChoice::None);

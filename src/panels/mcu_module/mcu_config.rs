@@ -529,10 +529,12 @@ mod tests {
             ApiStyle::Portable,
         );
         text.push('\n');
+        use structure_config::CLOCK_VIEW_DEFAULT;
         text.push_str(&structure_config::serialize(
             &pos,
             &(true, Some(2), 0, false),
             &Default::default(),
+            &CLOCK_VIEW_DEFAULT,
         ));
 
         let (m, c) = parse(&text);

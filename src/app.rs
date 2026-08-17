@@ -969,16 +969,12 @@ pub struct AppIde {
     /// file. Applied over every automatic layout; persisted in the project's
     /// `project_structure.config` on Project Save.
     structure_overrides: crate::panels::mcu_module::structure_config::StructurePositions,
-    /// Manually dragged Clock-diagram node positions, keyed by graph node id.
-    /// Same deal as `structure_overrides` — applied over the generated layout,
-    /// persisted in `project_structure.config`, and deliberately NOT part of
-    /// `mcu.config`: moving a box is cosmetic, it must not show up in Git or
-    /// regenerate `main.rs`.
-    clock_overrides: crate::panels::mcu_module::structure_config::ClockPositions,
-    /// One-line result of the last Clock-tab edit action (wired / refused /
-    /// exported / saved to the chip). Shown in the tab's palette row, so the
-    /// answer appears where the button was; session-only.
-    clock_note: String,
+    /// The Clock tab's per-project state: dragged node positions, the last
+    /// action's note, and whether the fields list is shown. Same deal as
+    /// `structure_overrides` — persisted in `project_structure.config`, and
+    /// deliberately NOT in `mcu.config`: none of it is configuration, so it must
+    /// not show up in Git or regenerate `main.rs`.
+    clock_ui: crate::panels::mcu_module::clock::gui::ClockUiState,
     /// Currently selected file in the project tree
     selected_file: ProjectFileId,
     /// Shown briefly after a successful copy
@@ -1735,8 +1731,7 @@ impl AppIde {
             structure_calls: None,
             structure_layout_calls: 0,
             structure_overrides: Default::default(),
-            clock_overrides: Default::default(),
-            clock_note: String::new(),
+            clock_ui: Default::default(),
             selected_file: ProjectFileId::MainRs,
             copy_flash: 0,
             inline_errors_enabled: true,
@@ -2032,13 +2027,13 @@ impl AppIde {
             return;
         };
         let Some(def) = self.selected_def() else {
-            self.clock_note = "No chip selected.".to_owned();
+            self.clock_ui.note = "No chip selected.".to_owned();
             return;
         };
         let mut def = def.clone();
         def.clock = ClockDef::Graph(gc.clone());
 
-        self.clock_note = match registry::save_definition(&def) {
+        self.clock_ui.note = match registry::save_definition(&def) {
             Ok(path) => {
                 // Keep the live registry in step, so reopening the project (or
                 // the chip picker) sees the edited tree without a restart.
@@ -2198,7 +2193,8 @@ impl AppIde {
                 v.path_style.to_u8(),
                 v.show_externals,
             ),
-            &self.clock_overrides,
+            &self.clock_ui.positions,
+            &self.clock_ui.fields,
         )
     }
 

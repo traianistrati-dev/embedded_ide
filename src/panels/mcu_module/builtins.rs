@@ -467,6 +467,7 @@ mod tests {
         def.clock = ClockDef::Graph(GraphClock {
             graph: stm32f1_graph(&Stm32f1Clock::default()),
             layout: stm32f1_layout(&ClockLimits::default()),
+            bindings: Default::default(),
         });
 
         std::fs::create_dir_all("assets/mcus/examples").unwrap();
@@ -518,6 +519,7 @@ mod tests {
         def.clock = ClockDef::Graph(GraphClock {
             graph: esp32c3_graph(),
             layout: esp32c3_layout(),
+            bindings: Default::default(),
         });
 
         std::fs::create_dir_all("assets/mcus/examples").unwrap();

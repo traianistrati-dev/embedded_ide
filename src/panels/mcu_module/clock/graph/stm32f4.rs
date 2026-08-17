@@ -347,6 +347,7 @@ fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
                 w: 130.0,
                 h: 40.0,
                 label: "HSI\n16 MHz RC".into(),
+                node: None,
             },
             BlockDef {
                 x: 40.0,
@@ -354,6 +355,7 @@ fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
                 w: 130.0,
                 h: 40.0,
                 label: "HSE\n4–26 MHz".into(),
+                node: None,
             },
             BlockDef {
                 x: 40.0,
@@ -361,6 +363,7 @@ fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
                 w: 130.0,
                 h: 34.0,
                 label: "LSE 32.768 kHz".into(),
+                node: None,
             },
             BlockDef {
                 x: 40.0,
@@ -368,6 +371,7 @@ fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
                 w: 130.0,
                 h: 34.0,
                 label: "LSI 32 kHz".into(),
+                node: None,
             },
         ],
         outputs: vec![
@@ -447,31 +451,37 @@ fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
                 x: 250.0,
                 y: 292.0,
                 text: "PLL /M".into(),
+                node: None,
             },
             LabelDef {
                 x: 340.0,
                 y: 292.0,
                 text: "PLL xN".into(),
+                node: None,
             },
             LabelDef {
                 x: 430.0,
                 y: 292.0,
                 text: "PLL /P".into(),
+                node: None,
             },
             LabelDef {
                 x: 620.0,
                 y: 445.0,
                 text: "AHB".into(),
+                node: None,
             },
             LabelDef {
                 x: 700.0,
                 y: 445.0,
                 text: "APB1".into(),
+                node: None,
             },
             LabelDef {
                 x: 620.0,
                 y: 515.0,
                 text: "APB2".into(),
+                node: None,
             },
         ],
         mux_titles: vec![
@@ -479,11 +489,13 @@ fn f247_layout(pll_n: (u32, u32)) -> ClockLayout {
                 x: 250.0,
                 y: 195.0,
                 text: "PLLSRC".into(),
+                node: None,
             },
             LabelDef {
                 x: 640.0,
                 y: 135.0,
                 text: "SYSCLK mux".into(),
+                node: None,
             },
         ],
         wires: vec![
