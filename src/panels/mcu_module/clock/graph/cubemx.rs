@@ -973,6 +973,55 @@ mod tests {
         }
     }
 
+    /// Write a chip's imported clock tree out as a `.ron` template.
+    ///
+    /// Ignored, like the other generators in this crate — it needs a CubeMX
+    /// install and writes into the repo. Point `CHIP_XML` at the part's
+    /// `STM32_open_pin_data` file and run:
+    /// `cargo test -- --ignored generate_chip_clock_ron --nocapture`
+    #[test]
+    #[ignore]
+    fn generate_chip_clock_ron() {
+        use super::super::{GraphClock, derive, export_clock_ron};
+
+        const CHIP_XML: &str = r"C:\Users\istra\Downloads\STM32F217Z(E-G)Tx.xml";
+        const OUT: &str = "assets/mcus/examples/stm32f217_graphclock.ron";
+
+        let Some(db) = default_db_dir() else {
+            eprintln!("no CubeMX install found — skipping");
+            return;
+        };
+        let xml = std::fs::read_to_string(CHIP_XML).expect("the chip's pin-data XML");
+        let key = clock_key_from_mcu_xml(&xml).expect("clock keys");
+        let (graph, boxes) = import_for_chip(&db, &key).expect("import");
+
+        let freqs = evaluate(&graph);
+        let live = freqs.values().filter(|hz| **hz > 0).count();
+        eprintln!(
+            "{} -> tree={} rcc={} : {} nodes, {} edges, {live} live",
+            CHIP_XML,
+            key.clock_tree,
+            key.rcc_version,
+            graph.nodes.len(),
+            graph.edges.len()
+        );
+        for id in ["SysCLKOutput", "AHBOutput", "APB1Output", "APB2Output"] {
+            if let Some(hz) = freqs.get(id) {
+                eprintln!("   {id} = {} MHz", *hz as f64 / 1e6);
+            }
+        }
+
+        let layout = derive(&graph, boxes);
+        let gc = GraphClock { graph, layout };
+        std::fs::write(OUT, export_clock_ron(&gc)).expect("write the .ron");
+        eprintln!("wrote {OUT}");
+
+        // What was written must import back — the same guard Layer 1 applies.
+        let back = super::super::parse_clock_ron(&std::fs::read_to_string(OUT).unwrap())
+            .expect("the generated file must re-import");
+        assert_eq!(back.graph, gc.graph);
+    }
+
     /// Run against a REAL CubeMX install (ignored — it needs one):
     /// `cargo test -- --ignored cubemx_real_install --nocapture`
     #[test]
