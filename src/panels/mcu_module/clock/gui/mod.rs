@@ -55,6 +55,15 @@ pub struct ClockTabOut {
     /// The user asked to write the edited tree into the chip's `.ron`
     /// definition. Only the app can do it: it owns the registry.
     pub save_to_definition: bool,
+    /// The user deleted the tree — the chip goes back to having no clock, and
+    /// the tab back to [`draw_no_clock`]. Only the caller owns the
+    /// [`ClockConfig`] enum, so the tab can only ask.
+    pub remove_clock: bool,
+    /// A DIFFERENT tree was installed from the toolbar (an import, a template,
+    /// the minimal spine). The graph itself is already replaced in place; this
+    /// says the chip's "factory" snapshot behind Reset — and the hand-written
+    /// default — must be re-taken from it, which again only the caller can do.
+    pub adopt_defaults: bool,
 }
 
 /// Render the Clock tab for a graph clock.
@@ -146,7 +155,7 @@ pub fn draw_graph_clock(
     }
 
     // Evaluated AFTER any preset click so the footer reflects the new state.
-    let freqs = evaluate(&gc.graph);
+    let mut freqs = evaluate(&gc.graph);
 
     // ── Fixed footer: Frequencies | Info (always visible) ───────────────────
     egui::TopBottomPanel::bottom("graph_clock_footer")
@@ -227,8 +236,37 @@ pub fn draw_graph_clock(
     // zoom or a drag too. The clicks are only RECORDED here — applying them
     // needs the viewport rect, which is known once this row has been laid out.
     let mut zoom_click: Option<f32> = None;
+    let mut replaced = false;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Diagram").strong());
+        ui.separator();
+
+        // Where the tree came from — and where it goes. Having a tree used to be
+        // a one-way door: the importers lived only in the empty state, so a chip
+        // that had been given the generic spine (or the wrong family template)
+        // could never be pointed at its real one, nor emptied again.
+        ui.menu_button(format!("{} Tree", ph::TREE_STRUCTURE), |ui| {
+            if let Some(ClockConfig::Graph(new_gc)) = tree_sources(ui, family, limits, note) {
+                *gc = new_gc;
+                replaced = true;
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("{}  Remove this tree", ph::TRASH))
+                        .color(egui::Color32::from_rgb(220, 100, 80)),
+                )
+                .on_hover_text(
+                    "Back to 'no clock tree'. The chip's .ron definition is untouched — this \
+                     only drops the tree from the project until you save it to the chip.",
+                )
+                .clicked()
+            {
+                out.remove_clock = true;
+                ui.close();
+            }
+        });
         ui.separator();
         ui.label("Zoom:");
         if ui.small_button("−").on_hover_text("Ctrl+−").clicked() {
@@ -306,6 +344,23 @@ pub fn draw_graph_clock(
             .color(egui::Color32::from_rgb(150, 158, 172)),
         );
     });
+
+    // A different tree is now in `gc`. Everything derived from the old one has
+    // to go: the saved node positions address ids that may not exist, and the
+    // frequencies above were evaluated before the swap.
+    if replaced {
+        positions.clear();
+        if gc.layout.is_empty() {
+            gc.layout = super::graph::auto_layout(&gc.graph);
+        }
+        freqs = evaluate(&gc.graph);
+        view.selected = None;
+        view.linking = None;
+        view.pos_sig = positions_signature(positions);
+        view.adjusted = false;
+        changed = true;
+        out.adopt_defaults = true;
+    }
 
     // ── Palette row (edit mode) ──────────────────────────────────────────────
     if view.edit {
@@ -669,129 +724,9 @@ pub fn draw_no_clock(
                 );
                 ui.add_space(14.0);
 
-                // 1. The family template, when this IDE ships one.
+                chosen = tree_sources(ui, family, limits, &mut state.note);
+
                 let template = ClockChoice::for_family(family);
-                if template != ClockChoice::None
-                    && ui
-                        .button(format!(
-                            "{}  Use the {} template",
-                            ph::LIGHTNING,
-                            template.label()
-                        ))
-                        .on_hover_text("The tree this IDE ships for the family, ready to tune")
-                        .clicked()
-                {
-                    chosen = Some(template.to_def().to_config(limits));
-                    state.note = format!("Started from the {} template.", template.label());
-                }
-
-                // 2. The exact tree for THIS part, from a CubeMX installation.
-                if ui
-                    .button(format!("{}  Import from a chip XML (+ CubeMX)…", ph::CPU))
-                    .on_hover_text(
-                        "Pick this part in STM32_open_pin_data (mcu/STM32….xml). Its ClockTree \
-                         and RCC version select the exact CubeMX files.",
-                    )
-                    .clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("STM32 chip XML", &["xml"])
-                        .pick_file()
-                {
-                    match import_chip_xml(&path, family) {
-                        Ok((gc, msg)) => {
-                            chosen = Some(ClockConfig::Graph(gc));
-                            state.note = msg;
-                        }
-                        Err(e) => state.note = e,
-                    }
-                }
-
-                // 3. A family's CubeMX clock file, when the pin-data repo is not
-                //    at hand.
-                if ui
-                    .button(format!("{}  Import a CubeMX clock XML…", ph::FILE_CODE))
-                    .on_hover_text("db/plugins/clock/STM32<FAMILY>.xml from a CubeMX install")
-                    .clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("CubeMX clock XML", &["xml"])
-                        .pick_file()
-                {
-                    match import_cubemx_family(&path, family) {
-                        Ok((gc, msg)) => {
-                            chosen = Some(ClockConfig::Graph(gc));
-                            state.note = msg;
-                        }
-                        Err(e) => state.note = e,
-                    }
-                }
-
-                // 4. A tree someone already exported.
-                if ui
-                    .button(format!("{}  Import a clock .ron…", ph::DOWNLOAD_SIMPLE))
-                    .on_hover_text("A GraphClock or a bare ClockGraph, validated on import")
-                    .clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("RON", &["ron"])
-                        .pick_file()
-                {
-                    state.note = match std::fs::read_to_string(&path)
-                        .map_err(|e| format!("Could not read the file: {e}"))
-                        .and_then(|text| super::graph::parse_clock_ron(&text))
-                    {
-                        Ok(gc) => {
-                            let n = gc.graph.nodes.len();
-                            chosen = Some(ClockConfig::Graph(gc));
-                            format!("Imported {n} nodes.")
-                        }
-                        Err(e) => e,
-                    };
-                }
-
-                ui.add_space(10.0);
-
-                // 5. The spine every MCU has, under the ids code generation
-                //    reads — a starting point rather than a blank canvas.
-                if ui
-                    .button(format!("{}  Start from a minimal tree", ph::TREE_STRUCTURE))
-                    .on_hover_text(
-                        "The universal spine — HSI/HSE, PLL, SYSCLK, AHB, APB1/APB2 — at its \
-                         reset settings. Generic: it computes frequencies but claims none of \
-                         this chip's limits, so set the oscillators from the datasheet.",
-                    )
-                    .clicked()
-                {
-                    let graph = super::graph::minimal_graph();
-                    let n = graph.nodes.len();
-                    let layout = super::graph::auto_layout(&graph);
-                    chosen = Some(ClockConfig::Graph(GraphClock {
-                        graph,
-                        layout,
-                        // The ids ARE the canonical ones, so nothing to map.
-                        bindings: Default::default(),
-                    }));
-                    state.note = format!(
-                        "Generic {n}-node tree at reset (SYSCLK on HSI). Set HSI/HSE from the \
-                         datasheet — the ceilings are not this chip's."
-                    );
-                }
-
-                if ui
-                    .button(format!("{}  Start an empty tree", ph::PENCIL_SIMPLE))
-                    .on_hover_text("Draw it yourself, node by node, in the editor")
-                    .clicked()
-                {
-                    chosen = Some(ClockConfig::Graph(GraphClock {
-                        graph: ClockGraph {
-                            nodes: Vec::new(),
-                            edges: Vec::new(),
-                        },
-                        layout: Default::default(),
-                        bindings: Default::default(),
-                    }));
-                    state.note = "Empty tree — add nodes from the palette.".to_owned();
-                    start_editing(ui);
-                }
-
                 ui.add_space(12.0);
                 if !state.note.is_empty() {
                     ui.label(
@@ -814,6 +749,150 @@ pub fn draw_no_clock(
                 }
             });
         });
+    chosen
+}
+
+/// Every way of putting a tree in front of the user, as a column of buttons.
+///
+/// Shared by the empty state and by the toolbar's "Tree" menu, so the two cannot
+/// drift apart — and so a tree that turned out to be the wrong one (the generic
+/// spine, a template that isn't this part) is replaced from the same list that
+/// created it, instead of being a one-way door.
+///
+/// Importing comes FIRST and drawing last, deliberately: an H5 tree is 178 nodes
+/// — two clicks to import, an afternoon to draw.
+fn tree_sources(
+    ui: &mut egui::Ui,
+    family: &str,
+    limits: &ClockLimits,
+    note: &mut String,
+) -> Option<ClockConfig> {
+    use crate::panels::mcu_module::mcu_form::ClockChoice;
+
+    let mut chosen: Option<ClockConfig> = None;
+
+    // 1. The family template, when this IDE ships one.
+    let template = ClockChoice::for_family(family);
+    if template != ClockChoice::None
+        && ui
+            .button(format!(
+                "{}  Use the {} template",
+                ph::LIGHTNING,
+                template.label()
+            ))
+            .on_hover_text("The tree this IDE ships for the family, ready to tune")
+            .clicked()
+    {
+        chosen = Some(template.to_def().to_config(limits));
+        *note = format!("Started from the {} template.", template.label());
+    }
+
+    // 2. The exact tree for THIS part, from a CubeMX installation.
+    if ui
+        .button(format!("{}  Import from a chip XML (+ CubeMX)…", ph::CPU))
+        .on_hover_text(
+            "Pick this part in STM32_open_pin_data (mcu/STM32….xml). Its ClockTree and RCC \
+             version select the exact CubeMX files.",
+        )
+        .clicked()
+        && let Some(path) = rfd::FileDialog::new()
+            .add_filter("STM32 chip XML", &["xml"])
+            .pick_file()
+    {
+        match import_chip_xml(&path, family) {
+            Ok((gc, msg)) => {
+                chosen = Some(ClockConfig::Graph(gc));
+                *note = msg;
+            }
+            Err(e) => *note = e,
+        }
+    }
+
+    // 3. A family's CubeMX clock file, when the pin-data repo is not at hand.
+    if ui
+        .button(format!("{}  Import a CubeMX clock XML…", ph::FILE_CODE))
+        .on_hover_text("db/plugins/clock/STM32<FAMILY>.xml from a CubeMX install")
+        .clicked()
+        && let Some(path) = rfd::FileDialog::new()
+            .add_filter("CubeMX clock XML", &["xml"])
+            .pick_file()
+    {
+        match import_cubemx_family(&path, family) {
+            Ok((gc, msg)) => {
+                chosen = Some(ClockConfig::Graph(gc));
+                *note = msg;
+            }
+            Err(e) => *note = e,
+        }
+    }
+
+    // 4. A tree someone already exported.
+    if ui
+        .button(format!("{}  Import a clock .ron…", ph::DOWNLOAD_SIMPLE))
+        .on_hover_text("A GraphClock or a bare ClockGraph, validated on import")
+        .clicked()
+        && let Some(path) = rfd::FileDialog::new()
+            .add_filter("RON", &["ron"])
+            .pick_file()
+    {
+        *note = match std::fs::read_to_string(&path)
+            .map_err(|e| format!("Could not read the file: {e}"))
+            .and_then(|text| super::graph::parse_clock_ron(&text))
+        {
+            Ok(gc) => {
+                let n = gc.graph.nodes.len();
+                chosen = Some(ClockConfig::Graph(gc));
+                format!("Imported {n} nodes.")
+            }
+            Err(e) => e,
+        };
+    }
+
+    ui.add_space(10.0);
+
+    // 5. The spine every MCU has, under the ids code generation reads — a
+    //    starting point rather than a blank canvas.
+    if ui
+        .button(format!("{}  Start from a minimal tree", ph::TREE_STRUCTURE))
+        .on_hover_text(
+            "The universal spine — HSI/HSE, PLL, SYSCLK, AHB, APB1/APB2 — at its reset \
+             settings. Generic: it computes frequencies but claims none of this chip's limits, \
+             so set the oscillators from the datasheet.",
+        )
+        .clicked()
+    {
+        let graph = super::graph::minimal_graph();
+        let n = graph.nodes.len();
+        let layout = super::graph::auto_layout(&graph);
+        chosen = Some(ClockConfig::Graph(GraphClock {
+            graph,
+            layout,
+            // The ids ARE the canonical ones, so nothing to map.
+            bindings: Default::default(),
+        }));
+        *note = format!(
+            "Generic {n}-node tree at reset (SYSCLK on HSI). Set HSI/HSE from the datasheet — \
+             the ceilings are not this chip's."
+        );
+    }
+
+    if ui
+        .button(format!("{}  Start an empty tree", ph::PENCIL_SIMPLE))
+        .on_hover_text("Draw it yourself, node by node, in the editor")
+        .clicked()
+    {
+        chosen = Some(ClockConfig::Graph(GraphClock {
+            graph: ClockGraph {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            },
+            layout: Default::default(),
+            bindings: Default::default(),
+        }));
+        *note = "Empty tree — add nodes from the palette.".to_owned();
+        start_editing(ui);
+    }
+
     chosen
 }
 
@@ -1774,7 +1853,7 @@ fn graph_info_zone(
     family: &str,
     clock_manual: &mut bool,
 ) -> bool {
-    let changed = clock_manual_switch(ui, family, clock_manual);
+    let changed = clock_manual_switch(ui, family, gc, clock_manual);
     if is_stm32f1 {
         let c = graph_to_stm32f1(&gc.for_codegen());
         let ws = warnings(&c, &frequencies(&c), l);
@@ -1852,9 +1931,21 @@ fn graph_info_zone(
 /// While it is on, the tree below is NOT what ends up in `main.rs` — the block
 /// there is whatever the user wrote. Saying so is the whole point: a diagram
 /// that silently stopped driving the code would be a lie.
-fn clock_manual_switch(ui: &mut egui::Ui, family: &str, manual: &mut bool) -> bool {
-    use crate::panels::mcu_module::codegen::rcc::{generates_clock_code, supports_manual_clock};
-    let generated = generates_clock_code(family);
+fn clock_manual_switch(
+    ui: &mut egui::Ui,
+    family: &str,
+    gc: &GraphClock,
+    manual: &mut bool,
+) -> bool {
+    use crate::panels::mcu_module::codegen::rcc::{
+        generates_clock_code, generates_clock_code_for, supports_manual_clock,
+    };
+    // Per CHIP, not per family: a family with no recipe still generates from a
+    // tree that carries the canonical spine, and saying otherwise here would
+    // send the user hand-writing a block the IDE was about to write for them.
+    let clock = ClockConfig::Graph(gc.clone());
+    let generated = generates_clock_code_for(family, &clock);
+    let from_tree = generated && !generates_clock_code(family);
     let mut changed = false;
     // F1 and ESP generate their clock through their own HALs, which are not
     // marker-wrapped — the switch would promise a preservation that never
@@ -1881,6 +1972,16 @@ fn clock_manual_switch(ui: &mut egui::Ui, family: &str, manual: &mut bool) -> bo
                 ))
                 .size(11.0)
                 .color(egui::Color32::from_rgb(225, 185, 60)),
+            );
+        } else if from_tree {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}  generated from this tree with embassy's common RCC shape — check the \
+                     field names in main.rs",
+                    ph::INFO
+                ))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(150, 180, 220)),
             );
         }
     });

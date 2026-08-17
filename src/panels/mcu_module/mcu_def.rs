@@ -271,6 +271,16 @@ impl McuDefinition {
                 .collect(),
         });
         mcu.clock = self.effective_clock().to_config(&self.clock_limits);
+        // `Mcu::new` could only ask the FAMILY whether the clock is generated,
+        // and it answered before the tree arrived. Now that it has, ask again:
+        // a tree the generic recipe can read generates real code, so defaulting
+        // it to "hand-written" would fence off a block nobody wrote and freeze
+        // it there. A project's own `@clockmanual` still overrides this later.
+        mcu.clock_manual =
+            !crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                &mcu.family,
+                &mcu.clock,
+            );
         // The definition's tree is this chip's factory clock — snapshot it for
         // the Clock tab's "Reset" button before any saved state is applied.
         mcu.capture_clock_defaults();
@@ -637,6 +647,42 @@ mod tests {
             mcu.clock_manual,
             "and its clock block is hand-written, since nothing generates it"
         );
+    }
+
+    /// …but give that same chip a tree, and its clock is generated after all —
+    /// so it must NOT arrive fenced off as hand-written.
+    ///
+    /// This was the bug: `clock_manual` was decided by the FAMILY in `Mcu::new`,
+    /// before `build_mcu` had installed the tree. An H5 with a full clock tree
+    /// therefore opened in manual mode, `keep_manual_clock` preserved whatever
+    /// `main.rs` already had, and the Clock tab drove nothing for the life of the
+    /// project.
+    #[test]
+    fn a_tree_takes_the_chip_out_of_hand_written_mode() {
+        use crate::panels::mcu_module::clock::graph::{GraphClock, minimal_graph};
+
+        let mut def = stm_def();
+        def.family = "stm32h5".into();
+        def.clock = ClockDef::Graph(GraphClock {
+            graph: minimal_graph(),
+            layout: Default::default(),
+            bindings: Default::default(),
+        });
+
+        let mcu = def.build_mcu();
+        assert!(
+            !mcu.clock_manual,
+            "the tree generates the block, so the IDE keeps writing it"
+        );
+
+        // And the block really does follow the tree.
+        let block = crate::panels::mcu_module::codegen::rcc::graph_clock_block(
+            &mcu.family,
+            &mcu.clock,
+            mcu.clock_manual,
+        );
+        assert!(block.contains("embassy_stm32::init"), "{block}");
+        assert!(!block.contains("has no generated RCC recipe yet"), "{block}");
     }
 
     /// A declared clock is never overridden by the family fallback.

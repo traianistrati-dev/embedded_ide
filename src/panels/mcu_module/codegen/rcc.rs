@@ -92,19 +92,88 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
     }
 }
 
-/// Emit the RCC clock block for an embassy STM32 `family` from its Clock-tab
-/// graph. Families with no recipe — or a non-graph / reset-equivalent clock —
-/// get embassy's reset default. Replaces the per-family `f4::clock_block` /
-/// `wba::clock_block` and the `stm_clock_block` sniffing with one dispatch.
-pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> String {
-    let Some((spec, desc)) = rcc_recipe(family) else {
-        return wrap(hand_written_skeleton(), manual);
+// The APB bus sets a generic tree can have. `ReadSpec::apb` is `&'static`, so
+// the choice is between fixed slices rather than a built vector.
+const APB_1: &[(&str, &str)] = &[("apb1_pre", "apb1")];
+const APB_12: &[(&str, &str)] = &[("apb1_pre", "apb1"), ("apb2_pre", "apb2")];
+const APB_127: &[(&str, &str)] = &[
+    ("apb1_pre", "apb1"),
+    ("apb2_pre", "apb2"),
+    ("apb7_pre", "apb7"),
+];
+
+/// A recipe derived from the TREE, for a family this IDE has no verified one
+/// for.
+///
+/// The reason it can exist at all: every embassy STM32 `Config::rcc` is built
+/// the same way — an HSE, a `Pll { prediv, mul, div* }`, a `Sysclk`, an
+/// `ahb_pre` and one APB prescaler per bus. What differs between families is
+/// which of two spellings they use, and the tree says which: a graph that names
+/// its PLL output `pllr` is the modern nested-`Pll { source, … }` shape
+/// (G0/G4/L4/L5/U5/H5/C0/WBA…), one that names it `pllp` is the F2/F4/F7 shape
+/// with a separate `config.rcc.pll_src`. The bus count comes from the tree too.
+///
+/// Returns `None` unless the tree really carries that spine — an empty or
+/// foreign graph has nothing to read, and guessing at it would emit a clock the
+/// user never described. That case keeps [`hand_written_skeleton`].
+///
+/// This is a GUESS at the API surface, not at the user's intent: the numbers are
+/// exactly what the Clock tab shows. Where the guess is wrong the project fails
+/// to compile on a field name, which the emitted note says how to fix — versus
+/// the previous behaviour, where a configured tree produced no clock code at all
+/// and said nothing.
+pub fn generic_recipe(g: &ClockGraph) -> Option<(ReadSpec, RccDescriptor)> {
+    let has = |id: &str| g.node(id).is_some();
+    if !(has("sw") && has("ahb")) {
+        return None;
+    }
+    let (mut spec, desc) = if has("pllr") {
+        (ReadSpec::g4(), RccDescriptor::g4())
+    } else if has("pllp") {
+        (ReadSpec::f4(), RccDescriptor::f4())
+    } else {
+        return None;
     };
-    let values = match clock {
-        // `for_codegen` applies the chip's id bindings; with none declared it
-        // borrows the graph unchanged, so the emitted block is byte-identical.
-        ClockConfig::Graph(gc) => read_rcc_values(&gc.for_codegen(), &spec),
-        _ => spec.reset.clone(),
+    spec.apb = if has("apb7") {
+        APB_127
+    } else if has("apb2") {
+        APB_12
+    } else {
+        APB_1
+    };
+    spec.reset.apb = spec.apb.iter().map(|(field, _)| (*field, 1)).collect();
+    // Nothing here knows the family's power-on default, so the
+    // `init(Default::default())` shortcut is never taken: an explicit block
+    // states what the tree says instead of assuming the silicon agrees.
+    spec.reset_is_hw_default = false;
+    Some((spec, desc))
+}
+
+/// Emit the RCC clock block for an embassy STM32 `family` from its Clock-tab
+/// graph. A family with no recipe falls back to [`generic_recipe`] read off the
+/// tree, and only a tree that cannot be read at all gets the hand-written
+/// skeleton. Replaces the per-family `f4::clock_block` / `wba::clock_block` and
+/// the `stm_clock_block` sniffing with one dispatch.
+pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> String {
+    // `for_codegen` applies the chip's id bindings; with none declared it
+    // borrows the graph unchanged, so the emitted block is byte-identical.
+    let graph = match clock {
+        ClockConfig::Graph(gc) => Some(gc.for_codegen()),
+        _ => None,
+    };
+    let graph = graph.as_deref();
+    // The family's verified recipe first; the tree's own shape only as a
+    // fallback, so no existing family's output can change.
+    let (spec, desc, verified) = match rcc_recipe(family) {
+        Some((spec, desc)) => (spec, desc, true),
+        None => match graph.and_then(generic_recipe) {
+            Some((spec, desc)) => (spec, desc, false),
+            None => return wrap(hand_written_skeleton(), manual),
+        },
+    };
+    let values = match graph {
+        Some(g) => read_rcc_values(g, &spec),
+        None => spec.reset.clone(),
     };
     // The reset shortcut only applies when the chip's HW default equals this
     // reset (HSI). L4/L5/U5 default to MSI, so a reset-equivalent graph must
@@ -112,7 +181,30 @@ pub fn graph_clock_block(family: &str, clock: &ClockConfig, manual: bool) -> Str
     if spec.reset_is_hw_default && values == spec.reset {
         return wrap(EMBASSY_RESET_INIT.to_string(), manual);
     }
-    wrap(emit_rcc_block(&desc, &values), manual)
+    let block = emit_rcc_block(&desc, &values);
+    wrap(
+        if verified {
+            block
+        } else {
+            format!("{}{block}", unverified_note())
+        },
+        manual,
+    )
+}
+
+/// The header on a block emitted from [`generic_recipe`]. It says the one thing
+/// the user cannot see from the code itself: the field NAMES are a guess, the
+/// numbers are not.
+fn unverified_note() -> String {
+    [
+        "    // NOTE: this IDE has no verified RCC recipe for this family, so the",
+        "    // block below uses embassy's most common shape. The numbers come from",
+        "    // the Clock tab and are correct; a field name might not exist for this",
+        "    // chip. If it doesn't, fix it here and tick \"Write the clock by hand\"",
+        "    // in the Clock tab to keep the fix across regeneration.",
+        "",
+    ]
+    .join("\n")
 }
 
 /// Fence the block off so a regeneration leaves it alone — only in manual mode,
@@ -169,6 +261,21 @@ fn hand_written_skeleton() -> String {
 /// generator still overwriting the block, since those paths carry no markers.
 pub fn generates_clock_code(family: &str) -> bool {
     matches!(family, "stm32f1" | "esp32c3") || rcc_recipe(family).is_some()
+}
+
+/// Does THIS chip's clock reach `main.rs` — family recipe or tree?
+///
+/// The per-family answer above is no longer the whole story: a family with no
+/// recipe still generates real code once its tree carries the canonical spine
+/// (see [`generic_recipe`]). Which is exactly the case that was broken — a chip
+/// given a tree in the Clock tab kept the commented skeleton forever, because
+/// "no recipe" had already decided, at `Mcu::new`, that its clock was written by
+/// hand and must therefore be PRESERVED across regeneration.
+///
+/// So this is what the manual default and the tab's warning must ask.
+pub fn generates_clock_code_for(family: &str, clock: &ClockConfig) -> bool {
+    generates_clock_code(family)
+        || matches!(clock, ClockConfig::Graph(gc) if generic_recipe(&gc.for_codegen()).is_some())
 }
 
 /// Can the clock block be hand-written and PRESERVED for this family?
@@ -1056,6 +1163,76 @@ mod tests {
         assert!(!f4.contains(CLOCK_BEGIN));
     }
 
+    /// THE fix: a chip whose family has no recipe still generates real clock
+    /// code once it has a tree — and that code follows the tree.
+    #[test]
+    fn a_tree_generates_even_without_a_family_recipe() {
+        use crate::panels::mcu_module::clock::graph::{
+            GraphClock, minimal_graph, model::NodeState,
+        };
+        assert!(rcc_recipe("stm32h5").is_none());
+
+        let mut graph = minimal_graph();
+        // HSE 8 MHz /1 x60 /2 = 240 MHz on SYSCLK.
+        graph.node_mut("pllsrc").unwrap().state = NodeState::Index(1);
+        graph.node_mut("plln").unwrap().state = NodeState::Value(60);
+        graph.node_mut("sw").unwrap().state = NodeState::Index(2);
+        let clock = ClockConfig::Graph(GraphClock {
+            graph,
+            layout: Default::default(),
+            bindings: Default::default(),
+        });
+
+        let s = graph_clock_block("stm32h5", &clock, false);
+        // Active code, not a comment to uncomment.
+        assert!(s.contains("let mut config = embassy_stm32::Config::default();"));
+        assert!(s.contains("let p = embassy_stm32::init(config);"));
+        assert!(!s.contains("has no generated RCC recipe yet"));
+        // And it says what the tree says.
+        assert!(s.contains("SYSCLK 240 MHz"), "{s}");
+        assert!(s.contains("mul: rcc::PllMul::MUL60,"), "{s}");
+        assert!(s.contains("Hertz(8000000)"), "{s}");
+        // Honest about the one thing it guessed.
+        assert!(s.contains("no verified RCC recipe for this family"));
+        // Which in turn flips the hand-written default off, so it UPDATES.
+        assert!(generates_clock_code_for("stm32h5", &clock));
+        assert!(!generates_clock_code_for("stm32h5", &ClockConfig::None));
+    }
+
+    /// The minimal tree names `pllp`, a CubeMX-style one `pllr` — the tree picks
+    /// the embassy spelling, which is the whole basis of the generic recipe.
+    #[test]
+    fn the_tree_picks_the_embassy_shape() {
+        use crate::panels::mcu_module::clock::graph::minimal_graph;
+
+        let p = minimal_graph();
+        let (spec, desc) = generic_recipe(&p).expect("the spine is there");
+        assert_eq!(spec.pll_out_node, "pllp");
+        assert!(!desc.pll_source_nested, "F2/F4/F7 spelling");
+        assert_eq!(spec.apb.len(), 2);
+
+        let mut r = minimal_graph();
+        r.node_mut("pllp").unwrap().id = "pllr".into();
+        for e in &mut r.edges {
+            if e.from == "pllp" {
+                e.from = "pllr".into();
+            }
+            if e.to == "pllp" {
+                e.to = "pllr".into();
+            }
+        }
+        let (spec, desc) = generic_recipe(&r).unwrap();
+        assert_eq!(spec.pll_out_node, "pllr");
+        assert!(desc.pll_source_nested, "the modern nested-Pll spelling");
+
+        // A tree with no spine is not guessed at.
+        let empty = crate::panels::mcu_module::clock::graph::ClockGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+        assert!(generic_recipe(&empty).is_none());
+    }
+
     /// Which families can be hand-written, and which already generate.
     #[test]
     fn the_family_predicates_agree_with_the_paths_that_exist() {
@@ -1193,17 +1370,19 @@ mod tests {
         assert!(s.contains("config.rcc.sys = rcc::Sysclk::PLL1_R;"), "{s}");
         assert!(s.contains("VoltageScale::RANGE1"), "{s}");
 
-        // A family with no recipe (e.g. h7 until one lands) → embassy reset init,
-        // regardless of what graph it carries.
+        // A family with no recipe (e.g. h7 until one lands) generates from the
+        // tree it carries, via `generic_recipe`. It used to get the reset init
+        // no matter what the tree said — which meant a configured Clock tab
+        // produced no clock code at all.
         let g = GraphClock {
             graph: stm32f4_graph(),
             layout: Default::default(),
             bindings: Default::default(),
         };
-        assert!(
-            graph_clock_block("stm32h7", &ClockConfig::Graph(g), false)
-                .contains("embassy_stm32::init(Default::default())")
-        );
+        let s = graph_clock_block("stm32h7", &ClockConfig::Graph(g), false);
+        assert!(!s.contains("embassy_stm32::init(Default::default())"), "{s}");
+        assert!(s.contains("no verified RCC recipe for this family"), "{s}");
+        assert!(s.contains("let p = embassy_stm32::init(config);"), "{s}");
 
         // Non-graph clock → reset init.
         assert!(

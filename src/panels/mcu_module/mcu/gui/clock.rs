@@ -1,6 +1,7 @@
 //! Clock tab rendering — dispatches to the per-family clock GUI.
 
 use crate::panels::mcu_module::clock::{ClockConfig, gui as clock_gui};
+use crate::panels::mcu_module::codegen::rcc::generates_clock_code_for;
 use crate::panels::mcu_module::mcu::model::Mcu;
 use eframe::egui;
 
@@ -32,16 +33,37 @@ impl Mcu {
             ..
         } = self;
         match clock {
-            ClockConfig::Graph(gc) => clock_gui::draw_graph_clock(
-                ui,
-                gc,
-                clock_limits,
-                clock_presets,
-                clock_defaults.as_ref(),
-                family,
-                state,
-                clock_manual,
-            ),
+            ClockConfig::Graph(gc) => {
+                let mut out = clock_gui::draw_graph_clock(
+                    ui,
+                    gc,
+                    clock_limits,
+                    clock_presets,
+                    clock_defaults.as_ref(),
+                    family,
+                    state,
+                    clock_manual,
+                );
+                // The tab replaced the tree in place, or asked for it to go.
+                // Cloned while `gc` is still borrowed, so the swap below can
+                // take `*clock`.
+                let fresh = out.adopt_defaults.then(|| gc.graph.clone());
+                if out.remove_clock {
+                    *clock = ClockConfig::None;
+                    *clock_defaults = None;
+                    // Losing the tree changes the generated clock block as much
+                    // as retuning it does.
+                    out.changed = true;
+                } else if let Some(graph) = fresh {
+                    // A tree from the toolbar is this chip's new factory tree —
+                    // Reset must go back to IT, not to the one it replaced.
+                    *clock_defaults = Some(graph);
+                }
+                if out.remove_clock || out.adopt_defaults {
+                    *clock_manual = !generates_clock_code_for(family, clock);
+                }
+                out
+            }
             ClockConfig::None => {
                 // Not a dead end any more: the chip has no tree YET, and every
                 // way of giving it one is offered here. A tree made this way is
@@ -53,9 +75,14 @@ impl Mcu {
                             *clock_defaults = Some(gc.graph.clone());
                         }
                         *clock = new_clock;
+                        // A tree the generic recipe can read makes the clock
+                        // generated, so the hand-written default this chip got
+                        // for having no recipe no longer holds — leaving it on
+                        // would fence the block off and freeze it there.
+                        *clock_manual = !generates_clock_code_for(family, clock);
                         clock_gui::ClockTabOut {
                             changed: true,
-                            save_to_definition: false,
+                            ..Default::default()
                         }
                     }
                     None => clock_gui::ClockTabOut::default(),
