@@ -267,6 +267,29 @@ pub fn draw_graph_clock(
                 view.linking = None;
                 ui.close();
             }
+            // Re-space a figure that was imported before, or arranged into a
+            // mess. Works off the CURRENT positions, so it keeps the ordering
+            // (which column is left of which, which nodes share a row) and only
+            // fixes the spacing — the same thing an import now does on arrival.
+            if !gc.layout.nodes.is_empty()
+                && ui
+                    .button(format!("{} Tidy up the layout", ph::ARROWS_IN))
+                    .on_hover_text(
+                        "Re-space the diagram so nothing overlaps, keeping the arrangement.                          Discards positions you dragged.",
+                    )
+                    .clicked()
+            {
+                let boxes = std::mem::take(&mut gc.layout.nodes);
+                gc.layout = super::graph::derive(
+                    &gc.graph,
+                    super::graph::auto_layout::respace(&gc.graph, boxes),
+                );
+                positions.clear();
+                view.pos_sig = positions_signature(positions);
+                view.adjusted = false;
+                (*note) = "Layout re-spaced.".to_owned();
+                ui.close();
+            }
             ui.separator();
             if let Some(ClockConfig::Graph(new_gc)) = tree_sources(ui, family, limits, note) {
                 *gc = new_gc;

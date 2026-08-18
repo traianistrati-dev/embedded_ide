@@ -778,10 +778,10 @@ mod chip_import_tests {
             .find(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("STM32F358") && n.ends_with(".xml"))
+                    .is_some_and(|n| n.starts_with("STM32U575") && n.ends_with(".xml"))
             })
         else {
-            println!("no STM32F358 in this installation");
+            println!("no STM32U575 in this installation");
             return;
         };
         let xml = std::fs::read_to_string(&file).unwrap();
@@ -795,6 +795,25 @@ mod chip_import_tests {
         println!("{} nodes · overlaps {before} -> {after}", spaced.len());
         assert_eq!(after, 0, "nothing may sit on top of anything else");
         assert!(before > 0, "the bug was real, or this test proves nothing");
+
+        // A node several wires enter has to be tall enough to hold them.
+        let widest = graph
+            .nodes
+            .iter()
+            .map(|n| (graph.edges.iter().filter(|e| e.to == n.id).count(), &n.id))
+            .max()
+            .unwrap();
+        let tall = spaced.iter().find(|b| &b.node == widest.1).unwrap();
+        println!(
+            "widest node `{}` has {} inputs, h = {}",
+            widest.1, widest.0, tall.h
+        );
+        assert!(
+            tall.h >= widest.0 as f32 * 12.0,
+            "{} inputs will not fit in {} px",
+            widest.0,
+            tall.h
+        );
 
         // Straight wires: `derive` emits a bend-free run when the source centre
         // and the target entry line up.
@@ -820,10 +839,15 @@ mod chip_import_tests {
         import_for_chip(db, key).unwrap().1
     }
 
-    /// How many node footprints intersect. A footprint is the box plus the id
-    /// label above it and the frequency tag below — what is actually drawn.
+    /// How many node footprints intersect.
+    ///
+    /// The footprint is what is actually PAINTED, taken from `gui/diagram.rs`:
+    /// the id label is bottom-anchored at `y - 3` in an 8.5 px font, the control
+    /// runs `y .. y + h`, and the frequency tag is centred at `y + h + 12` in a
+    /// 9 px font. An earlier version of this test under-measured it and passed
+    /// on a figure the eye could see was crowded.
     fn overlaps(boxes: &[NodeBox]) -> usize {
-        let rect = |b: &NodeBox| (b.x, b.y - 14.0, b.x + b.w, b.y + b.h + 20.0);
+        let rect = |b: &NodeBox| (b.x, b.y - 15.0, b.x + b.w, b.y + b.h + 18.0);
         let mut n = 0;
         for (i, a) in boxes.iter().enumerate() {
             let (ax0, ay0, ax1, ay1) = rect(a);

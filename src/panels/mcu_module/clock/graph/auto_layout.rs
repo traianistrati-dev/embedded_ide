@@ -261,12 +261,32 @@ pub fn options_for(graph: &ClockGraph, node: &Node) -> Option<Vec<(String, NodeS
 const CLUSTER_TOL: f32 = 12.0;
 /// Blank space between two columns, after the widest box in the left one.
 const COL_GAP: f32 = 26.0;
-/// What one row costs us: the id label above, the 26 px control, the frequency
-/// tag below, and air. CubeMX's own rows are ~58 px apart and carry neither
-/// label nor tag, which is why its coordinates cannot be used as they are.
-const IMPORT_ROW_PITCH: f32 = 66.0;
 const MIN_NODE_W: f32 = 64.0;
 const MAX_NODE_W: f32 = 168.0;
+
+/// How tall a node must be for its INPUTS to fit inside it.
+///
+/// [`derive`] spreads a multi-input node's wire entries down its left edge, so
+/// eight inputs into a 26 px box arrive 3 px apart — a bundle of arrows aimed at
+/// one smudge, which is what a wide mux looked like. The box grows instead, and
+/// the control is centred in it.
+pub fn node_height(graph: &ClockGraph, id: &str) -> f32 {
+    let fan = graph.edges.iter().filter(|e| e.to == id).count();
+    if fan < 3 {
+        return NODE_H;
+    }
+    (fan as f32 * INPUT_PITCH + 10.0).max(NODE_H)
+}
+
+/// Vertical distance between two wires entering the same node.
+const INPUT_PITCH: f32 = 13.0;
+/// What a node occupies ABOVE its box: the id label (8.5 px, bottom-anchored at
+/// `y - 3`).
+const LABEL_H: f32 = 15.0;
+/// …and BELOW it: the frequency tag (9 px mono, centred at `y + h + 12`).
+const TAG_H: f32 = 20.0;
+/// Blank space between one node's tag and the next node's label.
+const ROW_GAP: f32 = 14.0;
 
 /// Roughly how wide a node needs to be, from the text it has to hold.
 ///
@@ -381,15 +401,31 @@ pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
         }
     }
 
+    // Row heights, then row positions. A fixed pitch cannot work now that a
+    // node's height depends on how many wires enter it: one wide mux in a row
+    // would push its label into the row above.
+    let heights: Vec<f32> = boxes.iter().map(|b| node_height(graph, &b.node)).collect();
+    let n_rows = row_of.iter().copied().max().unwrap_or(0) + 1;
+    let mut row_h = vec![NODE_H; n_rows];
+    for (i, &r) in row_of.iter().enumerate() {
+        row_h[r] = row_h[r].max(heights[i]);
+    }
+    let mut row_y = Vec::with_capacity(n_rows);
+    let mut y = MARGIN;
+    for h in &row_h {
+        row_y.push(y);
+        y += LABEL_H + h + TAG_H + ROW_GAP;
+    }
+
     boxes
         .iter()
         .enumerate()
         .map(|(i, b)| NodeBox {
             node: b.node.clone(),
             x: col_x[cols[i]],
-            y: MARGIN + row_of[i] as f32 * IMPORT_ROW_PITCH,
+            y: row_y[row_of[i]],
             w: col_w[cols[i]],
-            h: NODE_H,
+            h: heights[i],
         })
         .collect()
 }
@@ -446,10 +482,26 @@ pub fn derive(graph: &ClockGraph, boxes: Vec<NodeBox>) -> ClockLayout {
             | NodeKind::Multiplier { .. }
             | NodeKind::Gate => {
                 if let Some(options) = options_for(graph, node) {
+                    // A node tall enough to hold its inputs needs a body to
+                    // hold them IN: the dropdown is 26 px whatever the box is,
+                    // so without a frame the wires would arrive at empty space
+                    // above and below it. Drawn first, so the control sits on
+                    // top of it.
+                    if h > NODE_H + 1.0 {
+                        lay.blocks.push(BlockDef {
+                            x,
+                            y,
+                            w,
+                            h,
+                            label: String::new(),
+                            node: Some(node.id.clone()),
+                        });
+                    }
                     lay.widgets.push(Widget::Combo {
                         node: node.id.clone(),
                         x,
-                        y,
+                        // Centred, so the inputs spread symmetrically around it.
+                        y: y + (h - NODE_H).max(0.0) / 2.0,
                         w,
                         options,
                     });
