@@ -111,6 +111,38 @@ const F2: &[(Bus, u8, Dir, &[&str])] = &[
     (Bus::I2c, 3, Dir::Rx, &["DMA1_CH2"]),
 ];
 
+/// The F7 request map, harvested from an STM32F767ZI build and **verified by a
+/// real cross-compile** on an STM32F746ZG - the two were diffed over every
+/// instance below and are identical, which is what makes one table per family
+/// defensible here rather than one per part.
+///
+/// USART, SPI1/3 and I2C1 match [`F2`]; the differences are all extra room:
+/// SPI2 gains a second channel each way, I2C2's TX and I2C3 both directions
+/// gain one. Nothing F2 offers is missing, but the reverse is not true, so the
+/// tables stay separate.
+const F7: &[(Bus, u8, Dir, &[&str])] = &[
+    (Bus::Usart, 1, Dir::Tx, &["DMA2_CH7"]),
+    (Bus::Usart, 1, Dir::Rx, &["DMA2_CH5", "DMA2_CH2"]),
+    (Bus::Usart, 2, Dir::Tx, &["DMA1_CH6"]),
+    (Bus::Usart, 2, Dir::Rx, &["DMA1_CH5"]),
+    (Bus::Usart, 3, Dir::Tx, &["DMA1_CH3", "DMA1_CH4"]),
+    (Bus::Usart, 3, Dir::Rx, &["DMA1_CH1"]),
+    (Bus::Usart, 6, Dir::Tx, &["DMA2_CH6", "DMA2_CH7"]),
+    (Bus::Usart, 6, Dir::Rx, &["DMA2_CH1", "DMA2_CH2"]),
+    (Bus::Spi, 1, Dir::Tx, &["DMA2_CH3", "DMA2_CH5"]),
+    (Bus::Spi, 1, Dir::Rx, &["DMA2_CH0", "DMA2_CH2"]),
+    (Bus::Spi, 2, Dir::Tx, &["DMA1_CH4", "DMA1_CH6"]),
+    (Bus::Spi, 2, Dir::Rx, &["DMA1_CH3", "DMA1_CH1"]),
+    (Bus::Spi, 3, Dir::Tx, &["DMA1_CH5", "DMA1_CH7"]),
+    (Bus::Spi, 3, Dir::Rx, &["DMA1_CH0", "DMA1_CH2"]),
+    (Bus::I2c, 1, Dir::Tx, &["DMA1_CH6", "DMA1_CH7"]),
+    (Bus::I2c, 1, Dir::Rx, &["DMA1_CH0", "DMA1_CH5"]),
+    (Bus::I2c, 2, Dir::Tx, &["DMA1_CH7", "DMA1_CH4"]),
+    (Bus::I2c, 2, Dir::Rx, &["DMA1_CH2", "DMA1_CH3"]),
+    (Bus::I2c, 3, Dir::Tx, &["DMA1_CH4", "DMA1_CH0"]),
+    (Bus::I2c, 3, Dir::Rx, &["DMA1_CH2", "DMA1_CH1"]),
+];
+
 /// The candidate channels for one peripheral direction, best first.
 ///
 /// `None` for a family with no table yet - the caller then leaves its `TODO` in
@@ -120,10 +152,11 @@ fn candidates(family: &str, bus: Bus, instance: u8, dir: Dir) -> Option<&'static
     let table = match family {
         "stm32f4" => F4,
         "stm32f2" => F2,
-        // F7 shares the controller design and much of the request map with
-        // these two, but "much" is not "all" - F2 and F4 differ in six entries
-        // despite looking interchangeable. It stays on the TODO path until it
-        // is harvested and cross-compiled like the others.
+        "stm32f7" => F7,
+        // Every other family keeps the TODO. The three tables here differ from
+        // each other in ways no amount of squinting at the reference manuals
+        // would have predicted, so a new one means harvesting and compiling it,
+        // not extending a pattern.
         _ => return None,
     };
     table
@@ -142,7 +175,7 @@ fn irq_for(family: &str, channel: &str) -> Option<String> {
         // Both use ST's "stream" naming for the vector while embassy keeps
         // "channel" for the singleton. Verified against `dma_channel_impl!`
         // output for an F411 and an F217ZE.
-        "stm32f4" | "stm32f2" => Some(channel.replace("_CH", "_STREAM")),
+        "stm32f4" | "stm32f2" | "stm32f7" => Some(channel.replace("_CH", "_STREAM")),
         _ => None,
     }
 }
@@ -188,8 +221,29 @@ mod tests {
     fn a_family_without_a_table_picks_nothing() {
         // Silence is the contract: the caller keeps its TODO rather than
         // receiving a plausible-looking guess.
-        let mut a = DmaAllocator::new("stm32f7");
+        let mut a = DmaAllocator::new("stm32l4");
         assert_eq!(a.take(Bus::Usart, 1, Dir::Tx), None);
+    }
+
+    /// F7 is F2 plus room, never less - the one relationship between two of
+    /// these tables that IS a pattern, and worth pinning so a future edit that
+    /// narrows F7 shows up as a failure rather than a silent regression.
+    #[test]
+    fn f7_is_a_superset_of_f2() {
+        for (bus, n, dir) in [
+            (Bus::Usart, 1u8, Dir::Tx),
+            (Bus::Usart, 3, Dir::Rx),
+            (Bus::Spi, 2, Dir::Tx),
+            (Bus::I2c, 2, Dir::Tx),
+            (Bus::I2c, 3, Dir::Rx),
+        ] {
+            let f2 = candidates("stm32f2", bus, n, dir).unwrap_or(&[]);
+            let f7 = candidates("stm32f7", bus, n, dir).unwrap_or(&[]);
+            assert!(
+                f2.iter().all(|c| f7.contains(c)),
+                "F7 lost a channel F2 has: {bus:?}{n} {dir:?} - F2 {f2:?}, F7 {f7:?}"
+            );
+        }
     }
 
     /// F2 and F4 look interchangeable and are not. Sharing one table would have

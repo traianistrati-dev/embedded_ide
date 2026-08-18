@@ -1066,10 +1066,11 @@ mod usart_mode_tests {
             out.init_calls
         );
         // A family WITHOUT one keeps the placeholder rather than guessing.
-        // (F2 used to stand in here; it has its own table now, so the example
-        // moved to F7 — which is exactly why the table is per-family.)
+        // F2 stood here, then F7; both have their own table now. Whichever
+        // family fills this slot is by definition the next one worth
+        // harvesting.
         let bare = async_peripherals(
-            "stm32f7",
+            "stm32l4",
             &refs,
             &usart,
             &Default::default(),

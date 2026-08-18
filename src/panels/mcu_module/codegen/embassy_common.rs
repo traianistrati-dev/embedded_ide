@@ -637,6 +637,94 @@ mod emit_for_manual_compile {
             .expect("write f2 dma project");
         println!("wrote {}", f2dir.display());
 
+        // -- and on an F7 --------------------------------------------------
+        // STM32F767ZI: the part that used to fail in embassy's build script
+        // for want of a `single-bank` feature, before `needs_bank_feature`
+        // started emitting one. Its DMA map was diffed against an F746ZG over
+        // every instance in the table and they agree, so this stands for the
+        // family rather than for one chip.
+        let mut f7def = def.clone();
+        f7def.id = "stm32f767zi".into();
+        f7def.display_name = "STM32F767ZITx".into();
+        f7def.family = "stm32f7".into();
+        f7def.project.pkg_name = "stm32f767zi".into();
+        f7def.project.target = "thumbv7em-none-eabihf".into();
+        f7def.project.probe_chip = "STM32F767ZITx".into();
+        f7def.project.hal_dep = stm32_pin_data::hal_dep_for_name("stm32f7", "STM32F767ZITx");
+        let mut f7mcu = f7def.build_mcu();
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+        ] {
+            let num = f7mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| f7mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        f7mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
+        f7mcu.reconcile_modules();
+        for m in &mut f7mcu.modules {
+            use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig, UsartMode};
+            match &mut m.config {
+                ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::Usart(c) => c.mode = UsartMode::Dma,
+                _ => {}
+            }
+        }
+        let f7_main = f7mcu.fresh_main_rs();
+        let f7cfgs = f7mcu.config_files();
+        let mut f7files =
+            project_gen::build_project_files(&f7def.project, &f7def.toolchain, &f7_main);
+        f7files.cargo_toml = project_gen::ensure_async_deps(
+            &f7files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            !f7cfgs.is_empty(),
+            true,
+            true,
+            &[],
+        );
+        let mut f7user: Vec<(String, String)> = vec![
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
+            (
+                "src/pins/configs/mod.rs".into(),
+                f7cfgs
+                    .iter()
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
+                    .collect(),
+            ),
+        ];
+        f7user.extend(
+            f7cfgs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let f7dir = std::env::temp_dir().join("eide_embassy_check_dma_f7");
+        let _ = std::fs::remove_dir_all(&f7dir);
+        project_gen::write_project(&f7dir, &f7files, &f7user, &f7mcu.mcu_config_text(), "")
+            .expect("write f7 dma project");
+        println!("wrote {}", f7dir.display());
+
         // ── The F1 blocking USART, unchanged by this migration ───────────────
         // `embedded-io` is shared by both seams, so bumping it for embassy has
         // to be proved harmless for the stm32f1xx-hal bridge too.

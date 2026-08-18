@@ -722,14 +722,55 @@ fn hal_dep_for(family: &str, line: &str, name: &str) -> String {
         );
     }
     if family.starts_with("stm32") {
-        // Generic embassy backend. The chip feature is just the part number —
-        // verified to compile with only `features = ["<chip>"]`.
+        // Generic embassy backend. The chip feature is the part number, plus a
+        // flash-bank feature on the parts that need one (see `needs_bank_feature`).
+        let mut feats = format!("\"{}\"", embassy_chip_feature(name));
+        if needs_bank_feature(name) {
+            feats.push_str(", \"single-bank\"");
+        }
         return format!(
-            "embassy-stm32 = {{ version = \"{EMBASSY_VERSION}\", features = [\"{}\"] }}",
-            embassy_chip_feature(name)
+            "embassy-stm32 = {{ version = \"{EMBASSY_VERSION}\", features = [{feats}] }}"
         );
     }
     format!("# TODO: add the HAL / PAC dependency for family {family}")
+}
+
+/// Does this part need an explicit `single-bank` / `dual-bank` Cargo feature?
+///
+/// embassy's build script PANICS on a chip whose metapac metadata carries more
+/// than one memory configuration and neither feature is enabled:
+///
+/// > Chip supports single and dual bank configuration. No Cargo feature to
+/// > select one is enabled.
+///
+/// So the project failed before compiling a single line of generated code. The
+/// affected set is exactly 69 parts, derived by counting memory configurations
+/// across every chip in `stm32-metapac` 21 and checked part by part:
+///
+/// * **F42x/43x/46x/47x, 1 MB only** (`…g`). The 512 KB parts are single-bank
+///   and the 2 MB parts are always dual, so only the middle size is a choice.
+/// * **F76x/77x, every size**.
+///
+/// `single-bank` rather than `dual-bank` because that is the factory option-byte
+/// state on both families - the generated project should match a board as it
+/// comes out of the box, and a user who flips the option bytes can flip the
+/// feature next to it in the editable `Cargo.toml`.
+fn needs_bank_feature(name: &str) -> bool {
+    let slug = slugify(name);
+    let Some(line) = slug.get(..9) else {
+        return false;
+    };
+    // The size code is the character after the package letter, i.e. the 11th of
+    // `stm32f429zg…`; absent on a truncated name, which then needs nothing.
+    let size = slug.as_bytes().get(10).copied().map(char::from);
+    match line {
+        "stm32f427" | "stm32f429" | "stm32f437" | "stm32f439" | "stm32f469" | "stm32f479" => {
+            size == Some('g')
+        }
+        "stm32f765" | "stm32f767" | "stm32f768" | "stm32f769" | "stm32f777" | "stm32f778"
+        | "stm32f779" => true,
+        _ => false,
+    }
 }
 
 /// The HAL dependency line derived from a chip NAME alone — the path taken by
@@ -1411,5 +1452,46 @@ mod gpio_mode_tests {
             gpio_mode_tokens(Some("Input, output , ANALOG")).as_deref(),
             Some("analog")
         );
+    }
+}
+
+#[cfg(test)]
+mod bank_feature_tests {
+    use super::{hal_dep_for_name, needs_bank_feature};
+
+    /// The three shapes, on real parts checked against `stm32-metapac` 21.
+    #[test]
+    fn only_the_parts_with_two_memory_configurations_ask_for_one() {
+        // F4: the 1 MB parts are the only ones that can be either.
+        assert!(needs_bank_feature("STM32F429ZGTx"), "1 MB F429 is a choice");
+        assert!(
+            !needs_bank_feature("STM32F429ZITx"),
+            "2 MB F429 is dual only"
+        );
+        assert!(
+            !needs_bank_feature("STM32F429ZETx"),
+            "512 KB F429 is single only"
+        );
+        // F7: every size of the affected lines.
+        assert!(needs_bank_feature("STM32F767ZITx"));
+        assert!(needs_bank_feature("STM32F767ZGTx"));
+        // Neighbouring lines that are single-bank throughout.
+        assert!(!needs_bank_feature("STM32F746ZGTx"));
+        assert!(!needs_bank_feature("STM32F411RETx"));
+        assert!(!needs_bank_feature("STM32F217ZETx"));
+        // A truncated or odd name must not panic or guess.
+        assert!(!needs_bank_feature("STM32F4"));
+        assert!(!needs_bank_feature(""));
+    }
+
+    #[test]
+    fn the_feature_reaches_the_dependency_line() {
+        let f767 = hal_dep_for_name("stm32f7", "STM32F767ZITx");
+        assert!(f767.contains("\"stm32f767zi\", \"single-bank\""), "{f767}");
+        // …and nothing changes for a part that does not need it, so the whole
+        // existing corpus of generated projects is untouched.
+        let f746 = hal_dep_for_name("stm32f7", "STM32F746ZGTx");
+        assert!(f746.contains("features = [\"stm32f746zg\"]"), "{f746}");
+        assert!(!f746.contains("bank"), "{f746}");
     }
 }
