@@ -254,6 +254,146 @@ pub fn options_for(graph: &ClockGraph, node: &Node) -> Option<Vec<(String, NodeS
     })
 }
 
+// ── Re-spacing an imported figure ─────────────────────────────────────────────
+
+/// Two vendor coordinates this close mean the same column (or row) — CubeMX
+/// jitters them by a pixel or two.
+const CLUSTER_TOL: f32 = 12.0;
+/// Blank space between two columns, after the widest box in the left one.
+const COL_GAP: f32 = 26.0;
+/// What one row costs us: the id label above, the 26 px control, the frequency
+/// tag below, and air. CubeMX's own rows are ~58 px apart and carry neither
+/// label nor tag, which is why its coordinates cannot be used as they are.
+const IMPORT_ROW_PITCH: f32 = 66.0;
+const MIN_NODE_W: f32 = 64.0;
+const MAX_NODE_W: f32 = 168.0;
+
+/// Roughly how wide a node needs to be, from the text it has to hold.
+///
+/// The id sits ABOVE the control and is usually the longer of the two —
+/// `HSEPLLsourceDevisor` is 19 characters — so it, not the control, decides the
+/// footprint. Approximated rather than measured: laying out needs a width before
+/// there is a font to ask, and being 10% out only costs a little air.
+fn node_width(id: &str) -> f32 {
+    (id.chars().count() as f32 * 6.4 + 14.0).clamp(MIN_NODE_W, MAX_NODE_W)
+}
+
+/// Group sorted coordinates into clusters, returning each value's cluster index.
+fn cluster(values: &[f32]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut ix = vec![0usize; values.len()];
+    let mut current = 0usize;
+    let mut anchor = f32::NEG_INFINITY;
+    for &i in &order {
+        if anchor == f32::NEG_INFINITY {
+            anchor = values[i];
+        } else if values[i] - anchor > CLUSTER_TOL {
+            current += 1;
+            anchor = values[i];
+        }
+        ix[i] = current;
+    }
+    ix
+}
+
+/// Re-space an imported figure: keep the vendor's ARRANGEMENT, use our pitch.
+///
+/// A CubeMX figure cannot be pasted in at its own coordinates. Measured on
+/// `STM32F3.xml`: 34 columns, of which **33 sit closer together than the 96 px
+/// box we were drawing**, and 22 vertical pairs closer than the ~50 px a node
+/// needs — the tightest 1 px and 2 px apart. Overlap was arithmetic, not bad
+/// luck: CubeMX draws small glyphs at natural widths and carries neither an id
+/// label above nor a frequency below.
+///
+/// So the vendor's numbers are read as ORDER rather than position: x-clusters
+/// become columns, y-clusters become rows, and both are re-laid at a pitch that
+/// fits what we actually draw. What survives is everything a reader uses — which
+/// node is left of which, and which nodes share a row — while overlap becomes
+/// impossible by construction.
+///
+/// **Aligned rows are also what straightens the wires.** [`derive`] already
+/// emits a bend-free wire when a source and its target sit at the same height;
+/// with arbitrary vendor y's that almost never happened, and with a row grid it
+/// happens for every single-input link.
+///
+/// Import-only, deliberately: running this over a layout the user has dragged
+/// would throw their arrangement away.
+pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
+    if boxes.is_empty() {
+        return boxes;
+    }
+    let cols = cluster(&boxes.iter().map(|b| b.x).collect::<Vec<_>>());
+    let rows = cluster(&boxes.iter().map(|b| b.y).collect::<Vec<_>>());
+
+    // Column x is cumulative, so a column of long names widens only itself.
+    let n_cols = cols.iter().copied().max().unwrap_or(0) + 1;
+    let mut col_w = vec![MIN_NODE_W; n_cols];
+    for (b, &c) in boxes.iter().zip(&cols) {
+        col_w[c] = col_w[c].max(node_width(&b.node));
+    }
+    let mut col_x = Vec::with_capacity(n_cols);
+    let mut x = MARGIN;
+    for w in &col_w {
+        col_x.push(x);
+        x += w + COL_GAP;
+    }
+
+    // Two nodes can share a cell (the vendor stacked them within the tolerance);
+    // the later one takes the next free row in its column so nothing collides.
+    let mut taken: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut row_of: Vec<usize> = Vec::with_capacity(boxes.len());
+    for (&c, &r0) in cols.iter().zip(&rows) {
+        let mut r = r0;
+        while !taken.insert((c, r)) {
+            r += 1;
+        }
+        row_of.push(r);
+    }
+
+    // Straighten the simple chains. A node fed by exactly one source, sitting in
+    // a later column, is pulled onto that source's row when the cell is free —
+    // which turns its wire into a bend-free horizontal run. Left to right, so a
+    // chain straightens along its whole length rather than only at the first
+    // link. Anything with several inputs is left alone: a mux must show its
+    // inputs arriving separately, and only one of them could be straight anyway.
+    let index: std::collections::HashMap<&str, usize> = boxes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.node.as_str(), i))
+        .collect();
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_by_key(|&i| cols[i]);
+    for i in order {
+        let feeds: Vec<&Edge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.to == boxes[i].node)
+            .collect();
+        let [only] = feeds[..] else { continue };
+        let Some(&src) = index.get(only.from.as_str()) else {
+            continue;
+        };
+        let want = row_of[src];
+        if cols[src] < cols[i] && want != row_of[i] && taken.insert((cols[i], want)) {
+            taken.remove(&(cols[i], row_of[i]));
+            row_of[i] = want;
+        }
+    }
+
+    boxes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| NodeBox {
+            node: b.node.clone(),
+            x: col_x[cols[i]],
+            y: MARGIN + row_of[i] as f32 * IMPORT_ROW_PITCH,
+            w: col_w[cols[i]],
+            h: NODE_H,
+        })
+        .collect()
+}
+
 /// Turn node positions into a drawable [`ClockLayout`]: per node a name label, a
 /// control and a live frequency tag; per edge an orthogonal wire. `boxes` is
 /// kept in [`ClockLayout::nodes`] as the layout's source of truth.

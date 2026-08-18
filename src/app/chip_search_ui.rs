@@ -254,7 +254,11 @@ impl super::AppIde {
                                 let label = if known {
                                     egui::RichText::new(&hit.name)
                                 } else {
-                                    egui::RichText::new(format!("{}  {}", ph::DOWNLOAD_SIMPLE, hit.name))
+                                    egui::RichText::new(format!(
+                                        "{}  {}",
+                                        ph::DOWNLOAD_SIMPLE,
+                                        hit.name
+                                    ))
                                 };
                                 let btn = ui.add(
                                     egui::Button::new(label)
@@ -300,7 +304,9 @@ impl super::AppIde {
                                         "already added".to_string(),
                                         egui::Color32::from_rgb(120, 200, 120),
                                     ),
-                                    Origin::Disk { has_clock: true, .. } => (
+                                    Origin::Disk {
+                                        has_clock: true, ..
+                                    } => (
                                         "pins + clock".to_string(),
                                         egui::Color32::from_rgb(120, 190, 200),
                                     ),

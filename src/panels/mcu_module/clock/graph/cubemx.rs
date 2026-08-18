@@ -638,8 +638,18 @@ pub fn bind_graph(
 
     let ids = codegen_node_ids(family);
     let bindings = bind::propose(&ids, &graph);
-    let missing = bind::unbound(&ids, &bindings);
-    let layout = super::derive(&graph, boxes);
+    let mut missing = bind::unbound(&ids, &bindings);
+    // `pllp` and `pllr` are ALTERNATIVE spellings offered to a family with no
+    // recipe, not two things the tree owes us: at most one can ever bind, and a
+    // family whose PLL just multiplies (F0/F1/F3) has neither. Reporting them
+    // would put a permanent two-item warning on trees that are complete.
+    if crate::panels::mcu_module::codegen::rcc::rcc_recipe(family).is_none() {
+        missing.retain(|id| id != "pllp" && id != "pllr");
+    }
+    // The vendor's coordinates are read as ORDER, not position — see
+    // `auto_layout::respace`. Import is the only place this may run: it would
+    // otherwise throw away an arrangement the user had dragged.
+    let layout = super::derive(&graph, super::auto_layout::respace(&graph, boxes));
     (
         super::GraphClock {
             graph,
@@ -673,7 +683,10 @@ mod chip_import_tests {
         };
         use crate::panels::mcu_module::stm32_pin_data::convert_xml;
 
-        let Some(src) = chip_sources::all_sources().into_iter().find(|s| s.has_clock()) else {
+        let Some(src) = chip_sources::all_sources()
+            .into_iter()
+            .find(|s| s.has_clock())
+        else {
             println!("no CubeMX installation — nothing to check");
             return;
         };
@@ -736,6 +749,164 @@ mod chip_import_tests {
         // Printed because the FIELD NAMES here are a guess — the generic recipe
         // picks embassy's most common spelling off the tree's shape — and this
         // is the only place that guess can be eyeballed against a real family.
+        println!("--- generated for {family} ---\n{block}");
+    }
+
+    /// The other reported bug: the imported figure was unreadable.
+    ///
+    /// Two acceptance criteria, both measured rather than eyeballed — nothing
+    /// may overlap, and wires must mostly run straight.
+    ///
+    /// `cargo test -- --ignored an_imported_figure_does_not_overlap`
+    #[test]
+    #[ignore]
+    fn an_imported_figure_does_not_overlap() {
+        use crate::panels::mcu_module::chip_sources;
+
+        let Some(src) = chip_sources::all_sources()
+            .into_iter()
+            .find(|s| s.has_clock())
+        else {
+            println!("no CubeMX installation — nothing to check");
+            return;
+        };
+        let db = src.db.as_deref().unwrap();
+        let Some(file) = std::fs::read_dir(&src.chips)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("STM32F358") && n.ends_with(".xml"))
+            })
+        else {
+            println!("no STM32F358 in this installation");
+            return;
+        };
+        let xml = std::fs::read_to_string(&file).unwrap();
+        let key = clock_key_from_mcu_xml(&xml).unwrap();
+        let (graph, raw) = import_for_chip(db, &key).unwrap();
+
+        // What the vendor coordinates gave us, for comparison.
+        let before = overlaps(&raw);
+        let spaced = super::super::auto_layout::respace(&graph, raw);
+        let after = overlaps(&spaced);
+        println!("{} nodes · overlaps {before} -> {after}", spaced.len());
+        assert_eq!(after, 0, "nothing may sit on top of anything else");
+        assert!(before > 0, "the bug was real, or this test proves nothing");
+
+        // Straight wires: `derive` emits a bend-free run when the source centre
+        // and the target entry line up.
+        let straight =
+            |lay: &super::super::ClockLayout| lay.wires.iter().filter(|w| w.len() == 2).count();
+        let bent = super::super::derive(&graph, vendor_boxes(db, &key));
+        let ours = super::super::derive(&graph, spaced);
+        println!(
+            "straight wires {}/{} -> {}/{}",
+            straight(&bent),
+            bent.wires.len(),
+            straight(&ours),
+            ours.wires.len()
+        );
+        assert!(
+            straight(&ours) > straight(&bent),
+            "aligning the rows is what removes the bends"
+        );
+    }
+
+    /// The raw vendor boxes again — `import_for_chip` consumes them.
+    fn vendor_boxes(db: &std::path::Path, key: &ChipClockKey) -> Vec<NodeBox> {
+        import_for_chip(db, key).unwrap().1
+    }
+
+    /// How many node footprints intersect. A footprint is the box plus the id
+    /// label above it and the frequency tag below — what is actually drawn.
+    fn overlaps(boxes: &[NodeBox]) -> usize {
+        let rect = |b: &NodeBox| (b.x, b.y - 14.0, b.x + b.w, b.y + b.h + 20.0);
+        let mut n = 0;
+        for (i, a) in boxes.iter().enumerate() {
+            let (ax0, ay0, ax1, ay1) = rect(a);
+            for b in &boxes[i + 1..] {
+                let (bx0, by0, bx1, by1) = rect(b);
+                if ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// The reported bug, on the reported chip: an STM32F358 imported complete —
+    /// pins and its whole clock tree — and still generating no clock code,
+    /// because its PLL has no output divider for the generic recipe to key on.
+    ///
+    /// `cargo test -- --ignored an_f3_generates_its_clock`
+    #[test]
+    #[ignore]
+    fn an_f3_generates_its_clock() {
+        use crate::panels::mcu_module::chip_sources;
+        use crate::panels::mcu_module::clock::model::ClockConfig;
+        use crate::panels::mcu_module::codegen::rcc::{
+            generates_clock_code_for, graph_clock_block,
+        };
+        use crate::panels::mcu_module::stm32_pin_data::convert_xml;
+
+        let Some(src) = chip_sources::all_sources()
+            .into_iter()
+            .find(|s| s.has_clock())
+        else {
+            println!("no CubeMX installation — nothing to check");
+            return;
+        };
+        let db = src.db.as_deref().unwrap();
+        let Some(file) = std::fs::read_dir(&src.chips)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("STM32F358") && n.ends_with(".xml"))
+            })
+        else {
+            println!("no STM32F358 in this installation");
+            return;
+        };
+
+        let xml = std::fs::read_to_string(&file).unwrap();
+        let family = convert_xml(&xml).unwrap()[0].form.family.clone();
+        assert_eq!(family, "stm32f3");
+
+        let (gc, missing) = graph_for_chip_xml(db, &xml, &family).expect("clock");
+        println!(
+            "{} nodes, {} bound, unbound: {missing:?}",
+            gc.graph.nodes.len(),
+            gc.bindings.len()
+        );
+        // The PLL leg the old rule demanded simply does not exist here.
+        let ids: Vec<&str> = gc.bindings.keys().map(String::as_str).collect();
+        assert!(
+            !ids.contains(&"pllp") && !ids.contains(&"pllr"),
+            "F3's PLL multiplies and stops: {ids:?}"
+        );
+
+        let clock = ClockConfig::Graph(gc);
+        assert!(
+            generates_clock_code_for(&family, &clock),
+            "THE bug: a complete tree that generated nothing"
+        );
+        let block = graph_clock_block(&family, &clock, false);
+        assert!(
+            !block.contains("has no generated RCC recipe yet"),
+            "{block}"
+        );
+        // The f013 shape, field for field.
+        assert!(
+            !block.contains("divp"),
+            "F3's Pll has no output dividers:\n{block}"
+        );
+        assert!(!block.contains("source:"), "it spells it `src`:\n{block}");
         println!("--- generated for {family} ---\n{block}");
     }
 }

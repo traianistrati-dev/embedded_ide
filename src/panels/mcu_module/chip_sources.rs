@@ -491,7 +491,10 @@ mod tests {
         let src = from_path(&cube.join("db")).unwrap();
         let listed = index_from_listing(&src.chips).unwrap();
         assert_eq!(
-            listed.iter().map(|e| e.ref_name.as_str()).collect::<Vec<_>>(),
+            listed
+                .iter()
+                .map(|e| e.ref_name.as_str())
+                .collect::<Vec<_>>(),
             ["STM32F103C8Tx", "STM32F103CBTx"]
         );
         assert!(
@@ -525,7 +528,10 @@ mod tests {
         assert_eq!(f103.file, "STM32F103C(8-B)Tx");
         assert_eq!(f103.family, "stm32f1");
         assert_eq!(f103.mhz, 72);
-        assert!(src.chip_file(f103).is_file(), "and its file is where we say");
+        assert!(
+            src.chip_file(f103).is_file(),
+            "and its file is where we say"
+        );
 
         // Every entry must name a file that exists, or the search list offers
         // rows that cannot be imported.

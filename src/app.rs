@@ -23,10 +23,10 @@ pub(crate) mod tabs;
 pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
+mod chip_search_ui;
 mod clock_import_dialog;
 mod clone_project_dialog;
 mod datasheet_import_dialog;
-mod chip_search_ui;
 mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;

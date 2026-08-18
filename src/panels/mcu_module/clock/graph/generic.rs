@@ -167,8 +167,8 @@ pub fn minimal_graph() -> ClockGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{bind, evaluate};
+    use super::*;
     use crate::panels::mcu_module::codegen::rcc::codegen_node_ids;
 
     /// At reset it runs on the internal RC, all the way to the buses.
@@ -256,7 +256,9 @@ mod tests {
             .collect();
         assert_eq!(
             selectable,
-            ["pllsrc", "pllm", "plln", "pllp", "sw", "ahb", "apb1", "apb2"],
+            [
+                "pllsrc", "pllm", "plln", "pllp", "sw", "ahb", "apb1", "apb2"
+            ],
             "the spine's knobs, in reading order"
         );
     }

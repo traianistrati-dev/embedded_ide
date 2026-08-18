@@ -868,8 +868,10 @@ mod tests {
         use crate::panels::mcu_module::mcu_def::McuDefinition;
         let mut def: McuDefinition =
             crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
-        // Use a family WITHOUT an RCC recipe (h7) so the clock stays reset
-        // default — g0/g4/l4 now read the graph and would emit a config block.
+        // A family with no RCC recipe (h7). Its clock is no longer left at the
+        // reset default: `generic_recipe` reads the tree's canonical spine and
+        // emits an explicit block, which is the point of that path — a chip
+        // whose Clock tab is full has no business generating `Default::default`.
         def.family = "stm32h7".into();
         def.id = "stm32h743zi".into();
         let code = def.build_mcu().fresh_main_rs();
@@ -879,7 +881,11 @@ mod tests {
             "the header must say WHY embassy appears on the blocking runtime"
         );
         assert!(code.contains("fn main() -> !"));
-        assert!(code.contains("embassy_stm32::init(Default::default())"));
+        assert!(
+            code.contains("embassy_stm32::init(config)")
+                && code.contains("no verified RCC recipe for this family"),
+            "the tree drives the clock, and the block says the shape is a guess"
+        );
         assert!(code.contains(crate::panels::mcu_module::codegen::GEN_BEGIN));
     }
 

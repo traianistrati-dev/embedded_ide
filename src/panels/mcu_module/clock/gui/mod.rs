@@ -1,7 +1,7 @@
 //! Clock-tab GUI — the data-driven graph is the only clock model.
 //!
 //! [`draw_graph_clock`] renders an imported/built-in [`GraphClock`]:
-//! a Reset + presets bar, a fixed footer (Frequencies | Info with validation), a
+//! one toolbar (Reset, presets, view toggles, tools), a fixed Info footer, and
 //! zoom toolbar, and the interactive diagram (shared static renderer + widget
 //! overlay editing graph node states) inside an [`egui::Scene`] that pans and
 //! zooms it like the Pins canvas. The old typed `Stm32f1Clock` UI
@@ -112,96 +112,27 @@ pub fn draw_graph_clock(
     } else {
         presets
     };
-    if defaults.is_some() || !presets.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            // Reset — back to the chip definition's factory tree. Disabled (and
-            // grey) while the config already IS the default, so the button also
-            // reads as a "modified" indicator.
-            if let Some(def) = defaults {
-                let dirty = !gc.graph.states_match(def);
-                let color = if dirty {
-                    egui::Color32::from_rgb(220, 100, 80)
-                } else {
-                    egui::Color32::GRAY
-                };
-                let btn = egui::Button::new(
-                    egui::RichText::new(format!("{} Reset", ph::ARROW_COUNTER_CLOCKWISE))
-                        .color(color),
-                );
-                if ui
-                    .add_enabled(dirty, btn)
-                    .on_hover_text("Restore this chip's default clock configuration")
-                    .on_disabled_hover_text("Clock is already at the chip default")
-                    .clicked()
-                {
-                    gc.graph.adopt_states(def);
-                    changed = true;
-                }
-                if !presets.is_empty() {
-                    ui.separator();
-                }
-            }
-            if !presets.is_empty() {
-                ui.label(egui::RichText::new("Presets:").strong());
-                for p in presets {
-                    if ui.button(&p.name).on_hover_text(&p.description).clicked() {
-                        gc.graph.adopt_states(&stm32f1_graph(&p.config));
-                        changed = true;
-                    }
-                }
-            }
-        });
-        ui.separator();
-    }
 
     // Evaluated AFTER any preset click so the footer reflects the new state.
     let mut freqs = evaluate(&gc.graph);
 
-    // ── Fixed footer: Frequencies | Info (always visible) ───────────────────
+    // ── Fixed footer: Info (always visible) ─────────────────────────────────
     egui::TopBottomPanel::bottom("graph_clock_footer")
         .resizable(true)
         .default_height(190.0)
         .min_height(100.0)
         .show_inside(ui, |ui| {
-            let total = ui.available_width();
-            let h = ui.available_height();
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(total * 0.30, h),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.strong("Frequencies");
-                        egui::ScrollArea::vertical()
-                            .id_salt("gfreq_scroll")
-                            .show(ui, |ui| {
-                                graph_freq_table(ui, gc, limits, &freqs);
-                            });
-                    },
-                );
-                ui.separator();
-                ui.allocate_ui_with_layout(
-                    egui::vec2(total * 0.66, h),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.strong("Info");
-                        egui::ScrollArea::vertical()
-                            .id_salt("ginfo_scroll")
-                            .show(ui, |ui| {
-                                if graph_info_zone(
-                                    ui,
-                                    gc,
-                                    limits,
-                                    &freqs,
-                                    is_stm32f1,
-                                    family,
-                                    clock_manual,
-                                ) {
-                                    changed = true;
-                                }
-                            });
-                    },
-                );
-            });
+            // Info alone now. The "Frequencies" half listed the OUTPUTS, which
+            // the Fields list ends with instead — one place for every value,
+            // rather than the results being somewhere the inputs are not.
+            ui.strong("Info");
+            egui::ScrollArea::vertical()
+                .id_salt("ginfo_scroll")
+                .show(ui, |ui| {
+                    if graph_info_zone(ui, gc, limits, &freqs, is_stm32f1, family, *clock_manual) {
+                        changed = true;
+                    }
+                });
         });
 
     // ── View state (session-only, never persisted) ───────────────────────────
@@ -237,37 +168,57 @@ pub fn draw_graph_clock(
     // needs the viewport rect, which is known once this row has been laid out.
     let mut zoom_click: Option<f32> = None;
     let mut replaced = false;
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Diagram").strong());
+    let mut manual_changed = false;
+    ui.horizontal_wrapped(|ui| {
+        // The fields list sits BESIDE the diagram rather than replacing it, so
+        // the toggle is a visibility switch, not a view switch.
+        if ui
+            .add(egui::Button::new(format!("{} Fields", ph::LIST_BULLETS)).selected(*fields))
+            .on_hover_text("Show every selectable value as a list beside the diagram")
+            .clicked()
+        {
+            *fields = !*fields;
+        }
+        ui.separator();
+            // Reset — back to the chip definition's factory tree. Disabled (and
+            // grey) while the config already IS the default, so the button also
+            // reads as a "modified" indicator.
+            if let Some(def) = defaults {
+                let dirty = !gc.graph.states_match(def);
+                let color = if dirty {
+                    egui::Color32::from_rgb(220, 100, 80)
+                } else {
+                    egui::Color32::GRAY
+                };
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!("{} Reset", ph::ARROW_COUNTER_CLOCKWISE))
+                        .color(color),
+                );
+                if ui
+                    .add_enabled(dirty, btn)
+                    .on_hover_text("Restore this chip's default clock configuration")
+                    .on_disabled_hover_text("Clock is already at the chip default")
+                    .clicked()
+                {
+                    gc.graph.adopt_states(def);
+                    changed = true;
+                }
+                if !presets.is_empty() {
+                    ui.separator();
+                }
+            }
+            if !presets.is_empty() {
+                ui.label(egui::RichText::new("Presets:").strong());
+                for p in presets {
+                    if ui.button(&p.name).on_hover_text(&p.description).clicked() {
+                        gc.graph.adopt_states(&stm32f1_graph(&p.config));
+                        changed = true;
+                    }
+                }
+                ui.separator();
+            }
         ui.separator();
 
-        // Where the tree came from — and where it goes. Having a tree used to be
-        // a one-way door: the importers lived only in the empty state, so a chip
-        // that had been given the generic spine (or the wrong family template)
-        // could never be pointed at its real one, nor emptied again.
-        ui.menu_button(format!("{} Tree", ph::TREE_STRUCTURE), |ui| {
-            if let Some(ClockConfig::Graph(new_gc)) = tree_sources(ui, family, limits, note) {
-                *gc = new_gc;
-                replaced = true;
-                ui.close();
-            }
-            ui.separator();
-            if ui
-                .button(
-                    egui::RichText::new(format!("{}  Remove this tree", ph::TRASH))
-                        .color(egui::Color32::from_rgb(220, 100, 80)),
-                )
-                .on_hover_text(
-                    "Back to 'no clock tree'. The chip's .ron definition is untouched — this \
-                     only drops the tree from the project until you save it to the chip.",
-                )
-                .clicked()
-            {
-                out.remove_clock = true;
-                ui.close();
-            }
-        });
-        ui.separator();
         ui.label("Zoom:");
         if ui.small_button("−").on_hover_text("Ctrl+−").clicked() {
             zoom_click = Some(1.2);
@@ -297,41 +248,50 @@ pub fn draw_graph_clock(
         }
         ui.separator();
 
-        // Edit mode — move the node boxes around. Only for GENERATED layouts:
-        // the hand-drawn figures (F1/F4/WBA/ESP) place their primitives directly
-        // and carry no boxes to drag.
-        let edit_btn = egui::Button::new(
-            egui::RichText::new(format!("{} Edit", ph::ARROWS_OUT_CARDINAL)).color(if view.edit {
-                egui::Color32::from_rgb(225, 175, 75)
-            } else {
-                ui.visuals().text_color()
-            }),
-        )
-        .selected(view.edit);
-        if ui
-            .add(edit_btn)
-            .on_hover_text(
-                "Build the tree: drag nodes, add / delete them, wire them up. A                  hand-drawn figure is edited in place — only its wires stay where                  its author routed them.",
-            )
-            .clicked()
-        {
-            view.edit = !view.edit;
-            view.selected = None;
-            view.linking = None;
-        }
-        if view.edit
-            && !positions.is_empty()
-            && ui
-                .small_button("Auto-arrange")
+
+        // One "Tools" menu for the two things that CHANGE the tree, rather
+        // than two toggles competing with the view controls beside them.
+        ui.menu_button(format!("{} Tools", ph::WRENCH), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(format!("{} Edit the tree", ph::ARROWS_OUT_CARDINAL))
+                        .selected(view.edit),
+                )
                 .on_hover_text(
-                    "Drop the saved positions and lay the diagram out from the graph again",
+                    "Build the tree: drag nodes, add / delete them, wire them up. A hand-drawn                      figure is edited in place - only its wires stay where its author routed them.",
                 )
                 .clicked()
-        {
-            positions.clear();
-            gc.layout = super::graph::auto_layout(&gc.graph);
-            view.pos_sig = positions_signature(positions);
-            view.adjusted = false;
+            {
+                view.edit = !view.edit;
+                view.selected = None;
+                view.linking = None;
+                ui.close();
+            }
+            ui.separator();
+            if let Some(ClockConfig::Graph(new_gc)) = tree_sources(ui, family, limits, note) {
+                *gc = new_gc;
+                replaced = true;
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("{}  Remove this tree", ph::TRASH))
+                        .color(egui::Color32::from_rgb(220, 100, 80)),
+                )
+                .on_hover_text(
+                    "Back to 'no clock tree'. The chip's .ron definition is untouched — this \
+                     only drops the tree from the project until you save it to the chip.",
+                )
+                .clicked()
+            {
+                out.remove_clock = true;
+                ui.close();
+            }
+        });
+        ui.separator();
+        if clock_manual_checkbox(ui, family, clock_manual) {
+            manual_changed = true;
         }
 
         ui.label(
@@ -348,6 +308,17 @@ pub fn draw_graph_clock(
     // A different tree is now in `gc`. Everything derived from the old one has
     // to go: the saved node positions address ids that may not exist, and the
     // frequencies above were evaluated before the swap.
+    if manual_changed {
+        changed = true;
+    }
+    // The toolbar now sits BELOW the footer in code (the footer is a bottom
+    // panel, so it must be declared first), which means a Reset or a preset
+    // clicked up there lands after the footer has drawn. Re-evaluate so the
+    // DIAGRAM at least shows the new state this frame; the footer catches up on
+    // the next one, which is the same frame the user sees the click land.
+    if changed {
+        freqs = evaluate(&gc.graph);
+    }
     if replaced {
         positions.clear();
         if gc.layout.is_empty() {
@@ -1111,6 +1082,38 @@ fn fields_panel(
                         );
                         ui.end_row();
                     }
+
+                    // ── The results ──────────────────────────────────────────
+                    // Everything above is something you SET; these are what
+                    // comes out. They used to live in a separate "Frequencies"
+                    // panel — the outputs are not selectable, so `options_for`
+                    // excludes them and removing that panel would have taken the
+                    // only place they were listed.
+                    let outs = output_rows(gc, limits, freqs);
+                    if !outs.is_empty() {
+                        ui.end_row();
+                        ui.label(
+                            egui::RichText::new("Outputs")
+                                .size(10.5)
+                                .color(egui::Color32::GRAY),
+                        );
+                        ui.label("");
+                        ui.label("");
+                        ui.end_row();
+                        for (name, hz, over) in outs {
+                            ui.label(egui::RichText::new(name).size(11.0));
+                            ui.label(""); // nothing to pick
+                            ui.colored_label(
+                                if over {
+                                    egui::Color32::from_rgb(230, 90, 80)
+                                } else {
+                                    egui::Color32::from_rgb(150, 200, 160)
+                                },
+                                egui::RichText::new(fmt_mhz(hz)).size(11.0),
+                            );
+                            ui.end_row();
+                        }
+                    }
                 });
         });
 
@@ -1782,52 +1785,41 @@ fn zoom_by(view: &mut ClockView, f: f32, avail: egui::Vec2) {
 
 /// Delivered-clock table: prefers the layout's labelled output boxes; falls
 /// back to every Output / limit-bearing graph node.
-fn graph_freq_table(
-    ui: &mut egui::Ui,
+/// The clock OUTPUTS — what the tree produces, as `(name, hz, over limit)`.
+///
+/// Extracted from the old Frequencies panel so the Fields list can end with it.
+/// A hand-drawn figure names its outputs in the layout; a derived one has none,
+/// so the graph's `Output` nodes (and anything carrying a ceiling) stand in.
+fn output_rows(
     gc: &GraphClock,
     limits: &ClockLimits,
     freqs: &std::collections::BTreeMap<String, u32>,
-) {
-    let row = |ui: &mut egui::Ui, name: &str, hz: u32, over: bool| {
-        ui.label(name);
-        let color = if over {
-            egui::Color32::from_rgb(230, 90, 80)
-        } else {
-            egui::Color32::from_rgb(150, 200, 160)
-        };
-        ui.colored_label(color, fmt_mhz(hz));
-        ui.end_row();
-    };
-
-    egui::Grid::new("graph_clock_freqs")
-        .num_columns(2)
-        .spacing([16.0, 4.0])
-        .striped(true)
-        .show(ui, |ui| {
-            if !gc.layout.outputs.is_empty() {
-                for o in &gc.layout.outputs {
-                    let hz = value_from_graph(&o.src, freqs);
-                    let over = o
-                        .limit
-                        .and_then(|k| ceiling_for(k, limits))
-                        .map_or(false, |l| hz > l);
-                    row(ui, &o.label, hz, over);
-                }
-            } else {
-                use super::graph::model::NodeKind;
-                for node in &gc.graph.nodes {
-                    if !matches!(node.kind, NodeKind::Output) && node.limit.is_none() {
-                        continue;
-                    }
-                    let hz = freqs.get(&node.id).copied().unwrap_or(0);
-                    let over = node
-                        .limit
-                        .and_then(|k| ceiling_for(k, limits))
-                        .map_or(false, |l| hz > l);
-                    row(ui, &node.id, hz, over);
-                }
-            }
-        });
+) -> Vec<(String, u32, bool)> {
+    use super::graph::model::NodeKind;
+    let mut out = Vec::new();
+    if !gc.layout.outputs.is_empty() {
+        for o in &gc.layout.outputs {
+            let hz = value_from_graph(&o.src, freqs);
+            let over = o
+                .limit
+                .and_then(|k| ceiling_for(k, limits))
+                .is_some_and(|l| hz > l);
+            out.push((o.label.clone(), hz, over));
+        }
+        return out;
+    }
+    for node in &gc.graph.nodes {
+        if !matches!(node.kind, NodeKind::Output) {
+            continue;
+        }
+        let hz = freqs.get(&node.id).copied().unwrap_or(0);
+        let over = node
+            .limit
+            .and_then(|k| ceiling_for(k, limits))
+            .is_some_and(|l| hz > l);
+        out.push((node.id.clone(), hz, over));
+    }
+    out
 }
 
 /// Validation + legend. STM32F1-family graphs get the FULL typed validation
@@ -1840,9 +1832,12 @@ fn graph_info_zone(
     freqs: &std::collections::BTreeMap<String, u32>,
     is_stm32f1: bool,
     family: &str,
-    clock_manual: &mut bool,
+    manual: bool,
 ) -> bool {
-    let changed = clock_manual_switch(ui, family, gc, clock_manual);
+    // The checkbox itself moved to the toolbar; what stays here is what it
+    // MEANS — the amber warnings that a diagram driving nothing would hide.
+    clock_manual_note(ui, family, gc, manual);
+    let changed = false;
     if is_stm32f1 {
         let c = graph_to_stm32f1(&gc.for_codegen());
         let ws = warnings(&c, &frequencies(&c), l);
@@ -1915,76 +1910,79 @@ fn graph_info_zone(
     changed
 }
 
-/// The hand-written-clock switch, and the warning that goes with it.
+/// Whether this chip's clock reaches `main.rs` at all — the per-CHIP answer.
 ///
-/// While it is on, the tree below is NOT what ends up in `main.rs` — the block
-/// there is whatever the user wrote. Saying so is the whole point: a diagram
-/// that silently stopped driving the code would be a lie.
-fn clock_manual_switch(
-    ui: &mut egui::Ui,
-    family: &str,
-    gc: &GraphClock,
-    manual: &mut bool,
-) -> bool {
-    use crate::panels::mcu_module::codegen::rcc::{
-        generates_clock_code, generates_clock_code_for, supports_manual_clock,
-    };
-    // Per CHIP, not per family: a family with no recipe still generates from a
-    // tree that carries the canonical spine, and saying otherwise here would
-    // send the user hand-writing a block the IDE was about to write for them.
+/// Not per family: a family with no RCC recipe still generates from a tree that
+/// carries the canonical spine, and saying otherwise would send the user
+/// hand-writing a block the IDE was about to write for them.
+///
+/// Returns `(generated at all, generated from the TREE rather than a verified
+/// family recipe)`.
+fn clock_codegen_state(family: &str, gc: &GraphClock) -> (bool, bool) {
+    use crate::panels::mcu_module::codegen::rcc::{generates_clock_code, generates_clock_code_for};
     let clock = ClockConfig::Graph(gc.clone());
     let generated = generates_clock_code_for(family, &clock);
-    let from_tree = generated && !generates_clock_code(family);
-    let mut changed = false;
-    // F1 and ESP generate their clock through their own HALs, which are not
-    // marker-wrapped — the switch would promise a preservation that never
-    // happens, so it is not offered there.
+    (generated, generated && !generates_clock_code(family))
+}
+
+/// The hand-written-clock checkbox, in the toolbar.
+///
+/// F1 and ESP generate their clock through their own HALs, which are not
+/// marker-wrapped — the switch would promise a preservation that never happens,
+/// so it is not offered there and this draws nothing.
+fn clock_manual_checkbox(ui: &mut egui::Ui, family: &str, manual: &mut bool) -> bool {
+    use crate::panels::mcu_module::codegen::rcc::supports_manual_clock;
     if !supports_manual_clock(family) {
         return false;
     }
+    ui.checkbox(manual, "Write the clock by hand")
+        .on_hover_text(
+            "Fence the clock block off in main.rs and keep your edits across regeneration.              Turning it back off lets the Clock tab drive it again - and discards what you wrote.",
+        )
+        .changed()
+}
 
-    ui.horizontal(|ui| {
-        if ui
-            .checkbox(manual, "Write the clock by hand")
-            .on_hover_text(
-                "Fence the clock block off in main.rs and keep your edits across                  regeneration. Turning it back off lets the Clock tab drive it again                  — and discards what you wrote.",
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        if !generated {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{}  {family} has no code generator for its clock yet",
-                    ph::WARNING
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(225, 185, 60)),
-            );
-        } else if from_tree {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{}  generated from this tree with embassy's common RCC shape — check the \
-                     field names in main.rs",
-                    ph::INFO
-                ))
-                .size(11.0)
-                .color(egui::Color32::from_rgb(150, 180, 220)),
-            );
-        }
-    });
-    if *manual {
+/// What that checkbox MEANS, in the Info panel.
+///
+/// Kept beside the validation rather than beside the checkbox, because this is
+/// the part a user needs while reading the tree: a diagram that has quietly
+/// stopped driving the code would otherwise look exactly like one that drives it.
+fn clock_manual_note(ui: &mut egui::Ui, family: &str, gc: &GraphClock, manual: bool) {
+    use crate::panels::mcu_module::codegen::rcc::supports_manual_clock;
+    if !supports_manual_clock(family) {
+        return;
+    }
+    // THE thing a reader has to know, and the reason this note exists at all:
+    // while it is on, the tree below is not what ends up in `main.rs`.
+    if manual {
         ui.colored_label(
             egui::Color32::from_rgb(225, 185, 60),
             format!(
-                "{}  main.rs keeps its own clock block — the tree below shows                  frequencies, but does not generate them.",
+                "{}  main.rs keeps its own clock block - the tree shows frequencies, but does                  not generate them.",
                 ph::WARNING
             ),
         );
     }
-    ui.separator();
-    changed
+    let (generated, from_tree) = clock_codegen_state(family, gc);
+    if !generated {
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  {family} has no code generator for its clock yet",
+                ph::WARNING
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(225, 185, 60)),
+        );
+    } else if from_tree {
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  generated from this tree with embassy's common RCC shape - check the                  field names in main.rs",
+                ph::INFO
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(150, 180, 220)),
+        );
+    }
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────

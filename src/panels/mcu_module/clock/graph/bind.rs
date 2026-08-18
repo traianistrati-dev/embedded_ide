@@ -36,7 +36,21 @@ const SYNONYMS: &[(&str, &[&str])] = &[
     ("pllsrc", &["pllsource", "pllclocksource"]),
     ("pllmul", &["pllmul", "pllmultiplicator"]),
     ("pllxtpre", &["hsedivpll", "pllxtpre"]),
-    ("pllm", &["pllm", "plldivm"]),
+    // The PLL pre-divider. ST calls it PREDIV on F0/F1/F3 and spells it
+    // `HSEPLLsourceDevisor` in the CubeMX trees (its own typo) — without these
+    // an imported F3 left `pllm` unbound and generated the reset /1 whatever the
+    // diagram showed.
+    (
+        "pllm",
+        &[
+            "pllm",
+            "plldivm",
+            "prediv",
+            "pllprediv",
+            "hsepllsourcedevisor",
+            "hsepllsourcedivisor",
+        ],
+    ),
     ("plln", &["plln", "pllmul"]),
     ("pllp", &["pllp", "pll1p"]),
     ("pllr", &["pllr", "pll1r"]),

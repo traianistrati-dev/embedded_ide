@@ -276,11 +276,10 @@ impl McuDefinition {
         // a tree the generic recipe can read generates real code, so defaulting
         // it to "hand-written" would fence off a block nobody wrote and freeze
         // it there. A project's own `@clockmanual` still overrides this later.
-        mcu.clock_manual =
-            !crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
-                &mcu.family,
-                &mcu.clock,
-            );
+        mcu.clock_manual = !crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+            &mcu.family,
+            &mcu.clock,
+        );
         // The definition's tree is this chip's factory clock — snapshot it for
         // the Clock tab's "Reset" button before any saved state is applied.
         mcu.capture_clock_defaults();
@@ -682,7 +681,10 @@ mod tests {
             mcu.clock_manual,
         );
         assert!(block.contains("embassy_stm32::init"), "{block}");
-        assert!(!block.contains("has no generated RCC recipe yet"), "{block}");
+        assert!(
+            !block.contains("has no generated RCC recipe yet"),
+            "{block}"
+        );
     }
 
     /// A declared clock is never overridden by the family fallback.

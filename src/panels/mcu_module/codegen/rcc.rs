@@ -106,7 +106,7 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
             // config, so offering these ids for a family that will never take
             // that path would ask the editor to protect names nothing reads.
             None if family.starts_with("stm32") => vec![
-                "hse", "sw", "pllsrc", "pllm", "plln", "pllp", "pllr", "ahb", "apb1", "apb2",
+                "hsi", "hse", "sw", "pllsrc", "pllm", "plln", "pllp", "pllr", "ahb", "apb1", "apb2",
             ],
             None => Vec::new(),
         },
@@ -148,13 +148,27 @@ pub fn generic_recipe(g: &ClockGraph) -> Option<(ReadSpec, RccDescriptor)> {
     if !(has("sw") && has("ahb")) {
         return None;
     }
+    // Which PLL output divider the tree names decides the embassy shape — and
+    // NAMING NONE is itself an answer, not a failure: on F0/F1/F3 the PLL
+    // multiplies and stops. Treating that as "no match" is what left an
+    // imported STM32F358 tree generating nothing at all.
     let (mut spec, desc) = if has("pllr") {
         (ReadSpec::g4(), RccDescriptor::g4())
     } else if has("pllp") {
         (ReadSpec::f4(), RccDescriptor::f4())
     } else {
-        return None;
+        (ReadSpec::f013(), RccDescriptor::f013())
     };
+    // The internal RC is 8 MHz on some families and 16 on others, and the tree
+    // knows which. It only reaches the header comment — embassy computes the
+    // real frequency itself — but a comment that says 16 MHz on an 8 MHz part
+    // is a comment that will be believed.
+    if let Some(NodeState::Source { hz, .. }) = g.node("hsi").map(|n| &n.state) {
+        spec.hsi_hz = *hz;
+        if spec.reset.sys == SysSource::Hsi {
+            spec.reset.sysclk_hz = *hz;
+        }
+    }
     spec.apb = if has("apb7") {
         APB_127
     } else if has("apb2") {
@@ -361,14 +375,23 @@ pub enum HseLabel {
 pub struct RccDescriptor {
     /// The `config.rcc.<field>` that holds the PLL: `pll` (F4) / `pll1` (WBA).
     pub pll_field: &'static str,
-    /// `true`: PLL source is a nested `source:` line inside the `Pll { … }`
-    /// struct (WBA). `false`: a separate `config.rcc.pll_src` line (F4).
+    /// `true`: PLL source is a nested line inside the `Pll { … }` struct (WBA).
+    /// `false`: a separate `config.rcc.pll_src` line (F4).
     pub pll_source_nested: bool,
+    /// What that nested line is CALLED: `source` on the modern families,
+    /// `src` on F0/F1/F3. Verified against embassy-stm32 0.6 `rcc/g4.rs` and
+    /// `rcc/f013.rs` — the two spellings are not interchangeable, and picking
+    /// the wrong one is a compile error on a field name.
+    pub pll_source_field: &'static str,
     /// embassy divider TYPE for the used PLL output: `PllPDiv` (F4) / `PllDiv`
     /// (WBA).
     pub pll_out_div_type: &'static str,
     /// Which `Pll { … }` field the used output fills: `divp` (F4) / `divr`
     /// (WBA). The other two outputs are emitted as `None`.
+    ///
+    /// **Empty means the family's `Pll` has no output dividers at all** — F0/F1/F3
+    /// multiply and stop (`Pll { src, prediv, mul }`), so emitting `divp: None`
+    /// there names a field that does not exist.
     pub pll_out_field: &'static str,
     /// `Sysclk::<variant>` when SYSCLK is the PLL: `PLL1_P` (F4) / `PLL1_R`
     /// (WBA).
@@ -413,6 +436,7 @@ impl RccDescriptor {
         Self {
             pll_field: "pll",
             pll_source_nested: false,
+            pll_source_field: "source",
             pll_out_div_type: "PllPDiv",
             pll_out_field: "divp",
             sys_pll_variant: "PLL1_P",
@@ -440,6 +464,7 @@ impl RccDescriptor {
         Self {
             pll_field: "pll",
             pll_source_nested: true,
+            pll_source_field: "source",
             pll_out_div_type: "PllRDiv",
             pll_out_field: "divr",
             sys_pll_variant: "PLL1_R",
@@ -479,12 +504,49 @@ impl RccDescriptor {
         Self::g4() // same descriptor; the bus count is a ReadSpec concern
     }
 
+    /// STM32F0/F1/F3 — embassy's `rcc/f013.rs`, the families whose PLL just
+    /// multiplies: `Pll { src, prediv, mul }`, no output divider at all.
+    ///
+    /// Verified field-by-field against embassy-stm32 0.6: the nested source is
+    /// `src` (not `source`), there are no `divp`/`divq`/`divr` fields to emit,
+    /// `Sysclk::PLL1_P` still names the PLL, and HSI is **8 MHz** here, not the
+    /// 16 every other recipe assumes.
+    ///
+    /// This exists because those families were unreachable: [`generic_recipe`]
+    /// keyed on a PLL output divider, so a tree without one matched nothing and
+    /// generated no clock code — the STM32F358 case, imported complete and
+    /// still silent.
+    ///
+    /// L0/L1 also lack an output divider but are NOT this shape (`rcc/l.rs` has
+    /// `Pll { source, mul, div }`), so they land here and will need one field
+    /// corrected — which the emitted note says how to make permanent.
+    pub fn f013() -> Self {
+        Self {
+            pll_field: "pll",
+            pll_source_nested: true,
+            pll_source_field: "src",
+            // Unused: there is no output divider to type.
+            pll_out_div_type: "",
+            pll_out_field: "",
+            sys_pll_variant: "PLL1_P",
+            pll_has_frac: false,
+            hse_style: HseStyle::Freq,
+            voltage_scale_non_hsi: None,
+            hsi_label: "HSI8",
+            hse_label: HseLabel::WithMhz,
+            pll_desc_via: "PLL",
+            hsi_needs_enable: false,
+            pll_n: None,
+        }
+    }
+
     /// STM32WBA: `pll1` with nested source + frac, R output, RANGE1 off-HSI,
     /// fixed 32 MHz HSE, APB1/2/7.
     pub fn wba() -> Self {
         Self {
             pll_field: "pll1",
             pll_source_nested: true,
+            pll_source_field: "source",
             pll_out_div_type: "PllDiv",
             pll_out_field: "divr",
             sys_pll_variant: "PLL1_R",
@@ -623,6 +685,30 @@ impl ReadSpec {
                 pll_out: 2,
                 ahb: 1,
                 sysclk_hz: 16_000_000,
+                apb: vec![("apb1_pre", 1), ("apb2_pre", 1)],
+            },
+        }
+    }
+
+    /// F0/F1/F3: HSI is **8 MHz** here, and there is no PLL output divider —
+    /// `pll_out_node` names nothing, so the reader falls back to the `/1` below.
+    pub fn f013() -> Self {
+        Self {
+            reset_is_hw_default: false,
+            hsi_hz: 8_000_000,
+            hse_fixed_hz: None,
+            pll_out_node: "",
+            apb: &[("apb1_pre", "apb1"), ("apb2_pre", "apb2")],
+            reset: RccValues {
+                sys: SysSource::Hsi,
+                hse_on: false,
+                hse_hz: 8_000_000,
+                pll_src_hse: false,
+                pll_m: 1,
+                pll_n: 2,
+                pll_out: 1,
+                ahb: 1,
+                sysclk_hz: 8_000_000,
                 apb: vec![("apb1_pre", 1), ("apb2_pre", 1)],
             },
         }
@@ -816,7 +902,10 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
             field = desc.pll_field
         ));
         if desc.pll_source_nested {
-            b.push_str(&format!("            source: rcc::PllSource::{src},\n"));
+            b.push_str(&format!(
+                "            {}: rcc::PllSource::{src},\n",
+                desc.pll_source_field
+            ));
         }
         b.push_str(&format!(
             "            prediv: rcc::PllPreDiv::DIV{},\n",
@@ -846,15 +935,19 @@ pub fn emit_rcc_block(desc: &RccDescriptor, v: &RccValues) -> String {
         }
         b.push_str(&format!("            mul: rcc::PllMul::MUL{},\n", v.pll_n));
         // Three outputs; the one this family uses gets the value, the rest None.
-        for out in ["divp", "divq", "divr"] {
-            if out == desc.pll_out_field {
-                b.push_str(&format!(
-                    "            {out}: Some(rcc::{ty}::DIV{val}),\n",
-                    ty = desc.pll_out_div_type,
-                    val = v.pll_out,
-                ));
-            } else {
-                b.push_str(&format!("            {out}: None,\n"));
+        // An empty `pll_out_field` means the family has no such fields at all
+        // (F0/F1/F3), where even `divp: None` would not compile.
+        if !desc.pll_out_field.is_empty() {
+            for out in ["divp", "divq", "divr"] {
+                if out == desc.pll_out_field {
+                    b.push_str(&format!(
+                        "            {out}: Some(rcc::{ty}::DIV{val}),\n",
+                        ty = desc.pll_out_div_type,
+                        val = v.pll_out,
+                    ));
+                } else {
+                    b.push_str(&format!("            {out}: None,\n"));
+                }
             }
         }
         if desc.pll_has_frac {
@@ -1220,6 +1313,66 @@ mod tests {
         assert!(!generates_clock_code_for("stm32h5", &ClockConfig::None));
     }
 
+    /// A PLL that just multiplies is a SHAPE, not a missing piece.
+    ///
+    /// F0/F1/F3 have no PLL output divider at all. The generic recipe used to
+    /// key on one and refuse the tree, which is how an STM32F358 imported with
+    /// its whole clock tree still generated no clock code.
+    #[test]
+    fn a_pll_with_no_output_divider_is_its_own_shape() {
+        use crate::panels::mcu_module::clock::graph::{
+            ClockGraph, GraphClock, minimal_graph,
+            model::{NodeKind, NodeState},
+        };
+
+        // The minimal tree with its PLL output divider removed — F3's topology.
+        let mut g = minimal_graph();
+        g.nodes.retain(|n| n.id != "pllp");
+        for e in &mut g.edges {
+            if e.from == "pllp" {
+                e.from = "plln".into();
+            }
+        }
+        g.edges.retain(|e| e.to != "pllp");
+        // 8 MHz HSI, as on those families.
+        g.node_mut("hsi").unwrap().state = NodeState::Source {
+            enabled: true,
+            hz: 8_000_000,
+        };
+
+        let (spec, desc) = generic_recipe(&g).expect("a PLL without a divider still generates");
+        assert_eq!(desc.pll_source_field, "src", "f013 spells it `src`");
+        assert!(desc.pll_out_field.is_empty(), "there is nothing to divide");
+        assert_eq!(spec.hsi_hz, 8_000_000, "read from the tree, not assumed");
+
+        // Select the PLL and check what comes out.
+        g.node_mut("pllsrc").unwrap().state = NodeState::Index(1); // HSE
+        g.node_mut("plln").unwrap().state = NodeState::Value(9);
+        g.node_mut("sw").unwrap().state = NodeState::Index(2);
+        let clock = ClockConfig::Graph(GraphClock {
+            graph: g,
+            layout: Default::default(),
+            bindings: Default::default(),
+        });
+        let block = graph_clock_block("stm32f3", &clock, false);
+        assert!(block.contains("src: rcc::PllSource::HSE,"), "{block}");
+        assert!(block.contains("mul: rcc::PllMul::MUL9,"), "{block}");
+        assert!(
+            !block.contains("divp") && !block.contains("divq") && !block.contains("divr"),
+            "those fields do not exist on this family:\n{block}"
+        );
+        // 8 MHz HSE /1 x9 = 72 MHz, the classic F1/F3 maximum.
+        assert!(block.contains("SYSCLK 72 MHz"), "{block}");
+
+        // And an empty graph is still refused — the spine is what makes it work.
+        let empty = ClockGraph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+        assert!(generic_recipe(&empty).is_none());
+        let _ = NodeKind::Tap;
+    }
+
     /// The minimal tree names `pllp`, a CubeMX-style one `pllr` — the tree picks
     /// the embassy spelling, which is the whole basis of the generic recipe.
     #[test]
@@ -1414,7 +1567,10 @@ mod tests {
             bindings: Default::default(),
         };
         let s = graph_clock_block("stm32h7", &ClockConfig::Graph(g), false);
-        assert!(!s.contains("embassy_stm32::init(Default::default())"), "{s}");
+        assert!(
+            !s.contains("embassy_stm32::init(Default::default())"),
+            "{s}"
+        );
         assert!(s.contains("no verified RCC recipe for this family"), "{s}");
         assert!(s.contains("let p = embassy_stm32::init(config);"), "{s}");
 

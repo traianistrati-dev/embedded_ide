@@ -257,8 +257,8 @@ fn detail_of(e: &ChipEntry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::chip_sources::SourceKind;
+    use super::*;
     use std::path::PathBuf;
 
     fn entry(ref_name: &str, family: &str) -> ChipEntry {
