@@ -1092,6 +1092,11 @@ pub struct AppIde {
     /// a file the moment anything is typed into it (see
     /// [`fold`](crate::app::editor_panel::fold)).
     folds: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    /// Set by a fold toggle: `(rel path, the block's header line, the screen y
+    /// it had BEFORE the toggle)`. The next frame re-anchors the scroll offset
+    /// so that line stays exactly where it was — folding 200 lines otherwise
+    /// slides the whole page under the pointer.
+    fold_anchor: Option<(String, usize, f32)>,
     /// Debug probes from the last `probe-rs list` scan — the shared selector on
     /// the RTT and Debug tabs (both drive probe-rs). Populated by `scan_probes`.
     probe_list: Vec<crate::probe::ProbeInfo>,
@@ -1780,6 +1785,7 @@ impl AppIde {
             espflash_used_port: Arc::new(Mutex::new(String::new())),
             debugger: crate::debugger::Debugger::default(),
             folds: std::collections::HashMap::new(),
+            fold_anchor: None,
             probe_list: Vec::new(),
             selected_probe: None,
             probe_scan_err: None,

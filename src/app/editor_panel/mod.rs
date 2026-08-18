@@ -832,6 +832,11 @@ impl AppIde {
             // ScrollArea. Result: Shift+Up/Down (or typing) past the visible
             // area extends the selection but the window doesn't follow. We
             // drive the outer ScrollArea's offset ourselves.
+            // A fold toggled last frame: put its header back at the same screen
+            // position before anything else touches the scroll offset.
+            if let Some(rel) = &fold_key {
+                self.apply_fold_anchor(ui, &editor_resp, &editor_id, &fold_map, rel);
+            }
             self.scroll_caret_into_view(ui, &editor_resp, &editor_id, editor_clip);
             // Jump to a clicked diagnostic's line (queued by the bottom
             // panel). Runs after caret-follow so its precise offset wins.

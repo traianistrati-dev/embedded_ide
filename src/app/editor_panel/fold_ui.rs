@@ -72,7 +72,9 @@ impl AppIde {
                 + 5.0;
         let folded_now = self.folds.get(rel).cloned().unwrap_or_default();
         let painter = ui.painter().with_clip_rect(clip);
-        let mut toggle: Option<usize> = None;
+        // `(header line, its screen y)` — the y is what the next frame re-anchors
+        // the scroll offset on.
+        let mut toggle: Option<(usize, f32)> = None;
 
         for region in regions(display_code) {
             // Every block gets a caret — `is_fn` only narrows "collapse all".
@@ -129,7 +131,7 @@ impl AppIde {
                 color,
             );
             if resp.clicked() {
-                toggle = Some(head);
+                toggle = Some((head, top));
             }
 
             // Folded: say how much is hidden, at the end of the header line.
@@ -163,13 +165,13 @@ impl AppIde {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 if badge.clicked() {
-                    toggle = Some(head);
+                    toggle = Some((head, top));
                 }
                 badge.on_hover_text("Click to expand this block");
             }
         }
 
-        if let Some(head) = toggle {
+        if let Some((head, y)) = toggle {
             let set = self.folds.entry(rel.to_owned()).or_default();
             if !set.remove(&head) {
                 set.insert(head);
@@ -177,6 +179,75 @@ impl AppIde {
             if set.is_empty() {
                 self.folds.remove(rel);
             }
+            // Pin the block's header where it is. Hiding (or restoring) a couple
+            // of hundred lines changes what sits at every pixel below it, and
+            // egui also clamps the offset when the content shrinks — either way
+            // the page slides out from under the pointer unless we correct it.
+            self.fold_anchor = Some((rel.to_owned(), head, y));
+        }
+    }
+}
+
+impl AppIde {
+    /// Put the block whose caret was just clicked back where it was on screen.
+    ///
+    /// A toggle records the header's y; this runs the NEXT frame, once the
+    /// galley reflects the new fold state, and shifts the editor's outer scroll
+    /// offset by the difference. Folding 200 lines changes what sits at every
+    /// pixel below the header, and egui additionally clamps the offset when the
+    /// content shrinks — without this the page slides out from under the
+    /// pointer and you lose the block you were looking at.
+    ///
+    /// Same one-frame lag as `apply_pending_scroll`: the correction lands after
+    /// this frame was laid out, so a repaint is requested for it to show.
+    pub(super) fn apply_fold_anchor(
+        &mut self,
+        ui: &egui::Ui,
+        editor_resp: &egui::text_edit::TextEditOutput,
+        editor_id: &str,
+        map: &FoldMap,
+        rel: &str,
+    ) {
+        let Some((anchor_rel, line, old_y)) = self.fold_anchor.clone() else {
+            return;
+        };
+        if anchor_rel != rel {
+            return; // the view moved to another file first
+        }
+        self.fold_anchor = None;
+
+        let Some(disp_line) = map.display_line_of(line) else {
+            return; // the header ended up inside another fold
+        };
+        // Char index of that display line's first character.
+        let mut ci = 0usize;
+        let mut seen = 0usize;
+        if disp_line > 0 {
+            for (i, c) in map.display().chars().enumerate() {
+                if c == '\n' {
+                    seen += 1;
+                    if seen == disp_line {
+                        ci = i + 1;
+                        break;
+                    }
+                }
+            }
+        }
+        let loc = editor_resp
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(ci));
+        let new_y = editor_resp.galley_pos.y + loc.min.y;
+        let delta = new_y - old_y;
+        if delta.abs() < 0.5 {
+            return;
+        }
+        let scroll_id = ui
+            .id()
+            .with(egui::Id::new(format!("{editor_id}_outer_scroll")));
+        if let Some(mut state) = egui::containers::scroll_area::State::load(ui.ctx(), scroll_id) {
+            state.offset.y = (state.offset.y + delta).max(0.0);
+            state.store(ui.ctx(), scroll_id);
+            ui.ctx().request_repaint();
         }
     }
 }
