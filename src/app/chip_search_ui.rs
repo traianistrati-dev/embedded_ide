@@ -77,10 +77,15 @@ impl ChipSearchState {
 enum Action {
     /// A chip the registry already has.
     Select(String),
-    /// A vendor file to import, and the part that was actually asked for —
+    /// A vendor file to import, the source it came from (which decides whether
+    /// the clock tree comes with it), and the part that was actually asked for —
     /// a range file yields several chips, and the importer selects the LAST,
     /// which is rarely the one that was clicked.
-    Import(std::path::PathBuf, String),
+    Import {
+        path: std::path::PathBuf,
+        source: chip_sources::ChipSource,
+        part: String,
+    },
 }
 
 impl super::AppIde {
@@ -193,12 +198,14 @@ impl super::AppIde {
                                 if btn.clicked() {
                                     action = Some(match &hit.origin {
                                         Origin::Registry { id } => Action::Select(id.clone()),
-                                        Origin::Disk { source, file, .. } => Action::Import(
-                                            cat.sources[*source]
-                                                .chips
-                                                .join(format!("{file}.xml")),
-                                            hit.name.clone(),
-                                        ),
+                                        Origin::Disk { source, file, .. } => {
+                                            let src = &cat.sources[*source];
+                                            Action::Import {
+                                                path: src.chips.join(format!("{file}.xml")),
+                                                source: src.clone(),
+                                                part: hit.name.clone(),
+                                            }
+                                        }
                                     });
                                 }
                                 ui.label(
@@ -321,7 +328,9 @@ impl super::AppIde {
         }
         match action {
             Some(Action::Select(id)) => self.pending_mcu_id = Some(id),
-            Some(Action::Import(path, part)) => self.import_searched_chip(&path, &part),
+            Some(Action::Import { path, source, part }) => {
+                self.import_searched_chip(&path, &source, &part)
+            }
             None => {}
         }
     }
@@ -363,15 +372,22 @@ impl super::AppIde {
         self.chip_search.reload();
     }
 
-    /// Import the file a search hit names, then select the part that was
-    /// CLICKED.
+    /// Import the file a search hit names — pins AND clock — then select the
+    /// part that was CLICKED.
     ///
-    /// The bulk importer selects the last chip it saved, which for a range file
-    /// (`STM32F103C(8-B)Tx.xml` holds both the C8 and the CB) is the wrong one
-    /// about half the time. It has no way to know better — it takes files, not
-    /// part numbers — so the correction belongs here, where the part is known.
-    fn import_searched_chip(&mut self, path: &std::path::Path, part: &str) {
-        self.import_stm32_pin_data(std::slice::from_ref(&path.to_path_buf()));
+    /// The source is passed on rather than dropped: it is what says whether a
+    /// clock tree can come with the pins, and it is the row the user chose, not
+    /// a guess. The bulk importer selects the last chip it saved, which for a
+    /// range file (`STM32F103C(8-B)Tx.xml` holds both the C8 and the CB) is the
+    /// wrong one about half the time. It has no way to know better — it takes
+    /// files, not part numbers — so the correction belongs here.
+    fn import_searched_chip(
+        &mut self,
+        path: &std::path::Path,
+        source: &chip_sources::ChipSource,
+        part: &str,
+    ) {
+        self.import_stm32_pin_data_from(std::slice::from_ref(&path.to_path_buf()), Some(source));
         if let Some(def) = self
             .mcu_registry
             .iter()

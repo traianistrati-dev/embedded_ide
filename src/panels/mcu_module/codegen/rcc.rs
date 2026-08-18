@@ -87,6 +87,27 @@ pub fn codegen_node_ids(family: &str) -> Vec<&'static str> {
                 ids.extend(spec.apb.iter().map(|(_, node)| *node));
                 ids
             }
+            // No family recipe — but [`generic_recipe`] reads a tree that
+            // carries the canonical spine, so these ids are exactly as live as
+            // a recipe's.
+            //
+            // Returning nothing here used to make that unreachable in the one
+            // case it was written for: an imported vendor tree carries names
+            // like `SysClkSource`, and with no ids to bind, nothing renamed
+            // them, so the generic recipe found no `sw` and the chip generated
+            // no clock code at all. A 157-node diagram that drove nothing.
+            //
+            // Both PLL output dividers are listed because the tree decides the
+            // embassy spelling: whichever of `pllr` / `pllp` the vendor tree
+            // actually has is the one that binds, and `generic_recipe` reads the
+            // shape off that.
+            //
+            // STM32 only: what the generic recipe emits is `embassy_stm32`
+            // config, so offering these ids for a family that will never take
+            // that path would ask the editor to protect names nothing reads.
+            None if family.starts_with("stm32") => vec![
+                "hse", "sw", "pllsrc", "pllm", "plln", "pllp", "pllr", "ahb", "apb1", "apb2",
+            ],
             None => Vec::new(),
         },
     }
@@ -1312,8 +1333,21 @@ mod tests {
         // listing it would make the editor ask for an impossible binding.
         assert!(!f1.contains(&"pll_input"), "{f1:?}");
         assert_eq!(codegen_node_ids("esp32c3"), vec!["cpu"]);
-        // No recipe, nothing to protect.
+        // Not an STM32: nothing here would ever emit `embassy_stm32` config for
+        // it, so there is nothing to protect.
         assert!(codegen_node_ids("stm8").is_empty());
+
+        // An STM32 family with no recipe still has live ids — `generic_recipe`
+        // reads them off the tree. Without them an imported vendor tree keeps
+        // its own node names, binds nothing, and generates nothing.
+        let h5 = codegen_node_ids("stm32h5");
+        for id in ["hse", "sw", "pllsrc", "pllm", "plln", "ahb", "apb1", "apb2"] {
+            assert!(h5.contains(&id), "H5 needs `{id}` bound: {h5:?}");
+        }
+        assert!(
+            h5.contains(&"pllp") && h5.contains(&"pllr"),
+            "both spellings offered — the tree picks: {h5:?}"
+        );
     }
 
     #[test]

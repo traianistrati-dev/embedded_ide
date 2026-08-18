@@ -704,6 +704,28 @@ impl AppIde {
     /// expands into several chips; only variants whose form validates are
     /// saved. Result summary lands in `mcu_import_status`.
     pub(super) fn import_stm32_pin_data(&mut self, paths: &[std::path::PathBuf]) {
+        self.import_stm32_pin_data_from(paths, None);
+    }
+
+    /// The same import, optionally pulling each chip's CLOCK TREE as well.
+    ///
+    /// `clock_src` is the catalogue source the files came from. When it carries
+    /// a CubeMX `db`, every chip gets its real tree instead of the family
+    /// template — which for the families that have no template (H5, H7, U5, F3,
+    /// C0, WB, WL, L0/L1/L5) is the difference between a Clock tab that works
+    /// and one that says the chip has no clock.
+    ///
+    /// A clock that cannot be read is NOT fatal: the chip still imports with its
+    /// pins, and the reason is collected for the status line. Losing a whole
+    /// import over a missing RCC file would be a poor trade.
+    pub(super) fn import_stm32_pin_data_from(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        clock_src: Option<&crate::panels::mcu_module::chip_sources::ChipSource>,
+    ) {
+        let mut clocks = 0usize;
+        let mut clock_err: Option<String> = None;
+        let mut unbound_ids: Vec<String> = Vec::new();
         let mut saved = 0usize;
         let mut skipped = 0usize;
         let mut last_id: Option<String> = None;
@@ -727,6 +749,26 @@ impl AppIde {
                     continue;
                 }
             };
+            // Once per file: a range file's variants are the same silicon and
+            // therefore the same clock tree.
+            let mut clock: Option<crate::panels::mcu_module::clock::graph::GraphClock> = None;
+            if let Some(db) = clock_src.and_then(|s| s.db.as_deref()) {
+                let family = stm32_pin_data::convert_xml(&xml)
+                    .ok()
+                    .and_then(|c| c.first().map(|c| c.form.family.clone()))
+                    .unwrap_or_default();
+                match crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml(
+                    db, &xml, &family,
+                ) {
+                    Ok((gc, missing)) => {
+                        unbound_ids.extend(missing);
+                        clock = Some(gc);
+                    }
+                    Err(e) => {
+                        clock_err.get_or_insert(e);
+                    }
+                }
+            }
             match stm32_pin_data::convert_xml(&xml) {
                 Ok(chips) => {
                     for chip in chips {
@@ -751,6 +793,15 @@ impl AppIde {
                         if def.family == "stm32f2" {
                             def.clock_limits =
                                 crate::panels::mcu_module::clock::graph::stm32f2_limits();
+                        }
+                        // The vendor's own tree replaces the family template.
+                        // `convert_xml` can only offer what the IDE ships for
+                        // the family — `ClockChoice::None` for most of them —
+                        // so this is where a chip stops arriving clock-less.
+                        if let Some(gc) = &clock {
+                            def.clock =
+                                crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc.clone());
+                            clocks += 1;
                         }
                         if let Some(feat) = stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
                         {
@@ -801,6 +852,28 @@ impl AppIde {
                 if let Some(e) = first_err {
                     msg.push_str(&format!(" ({e})"));
                 }
+            }
+            if clocks > 0 {
+                msg.push_str(&format!("; {clocks} with their clock tree"));
+            }
+            if let Some(e) = &clock_err {
+                // The chip is in; only its clock is not.
+                msg.push_str(&format!(
+                    "
+{}  No clock tree imported: {e}",
+                    ph::WARNING
+                ));
+            }
+            if !unbound_ids.is_empty() {
+                unbound_ids.sort();
+                unbound_ids.dedup();
+                msg.push_str(&format!(
+                    "
+{}  {} clock id(s) unbound ({}) — those values fall back to a                      default in the generated code.",
+                    ph::WARNING,
+                    unbound_ids.len(),
+                    unbound_ids.join(", ")
+                ));
             }
             if !bad_features.is_empty() {
                 // Named here, at import, because the alternative is finding out

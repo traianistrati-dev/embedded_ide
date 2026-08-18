@@ -943,14 +943,10 @@ fn bound_import(
     family: &str,
     source: &str,
 ) -> (GraphClock, String) {
-    use super::graph::{bind, derive};
-    use crate::panels::mcu_module::codegen::rcc::codegen_node_ids;
-
-    let ids = codegen_node_ids(family);
-    let bindings = bind::propose(&ids, &graph);
-    let missing = bind::unbound(&ids, &bindings);
     let nodes = graph.nodes.len();
-    let layout = derive(&graph, boxes);
+    // The binding itself is shared with the chip import in New Project — see
+    // `cubemx::bind_graph`. Only the sentence is this module's business.
+    let (gc, missing) = super::graph::cubemx::bind_graph(graph, boxes, family);
     let note = if missing.is_empty() {
         format!("Imported {nodes} nodes from {source}.")
     } else {
@@ -960,14 +956,7 @@ fn bound_import(
             missing.join(", ")
         )
     };
-    (
-        GraphClock {
-            graph,
-            layout,
-            bindings,
-        },
-        note,
-    )
+    (gc, note)
 }
 
 // ── Fields view ───────────────────────────────────────────────────────────────

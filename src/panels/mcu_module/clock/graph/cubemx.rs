@@ -617,6 +617,145 @@ pub fn clock_key_from_mcu_xml(xml: &str) -> Result<ChipClockKey, String> {
 
 /// Import the clock tree of one specific chip: its pin-data XML names the files,
 /// the CubeMX `db` supplies them.
+/// Finish an import: lay the vendor boxes out and bind the vendor node names to
+/// the ids code generation reads.
+///
+/// The two callers that need this — the Clock tab's importers and the chip
+/// import in New Project — were about to grow a copy each. They must not: the
+/// bindings are what decide whether an imported tree reaches `main.rs` at all,
+/// so two versions of this would be two answers to that question.
+///
+/// Returns the ready-to-use clock and the codegen ids that found no node. A
+/// non-empty list is not an error — that value falls back to a default — but it
+/// is worth saying out loud, which is why it comes back instead of being logged.
+pub fn bind_graph(
+    graph: ClockGraph,
+    boxes: Vec<NodeBox>,
+    family: &str,
+) -> (super::GraphClock, Vec<String>) {
+    use super::bind;
+    use crate::panels::mcu_module::codegen::rcc::codegen_node_ids;
+
+    let ids = codegen_node_ids(family);
+    let bindings = bind::propose(&ids, &graph);
+    let missing = bind::unbound(&ids, &bindings);
+    let layout = super::derive(&graph, boxes);
+    (
+        super::GraphClock {
+            graph,
+            layout,
+            bindings,
+        },
+        missing,
+    )
+}
+
+#[cfg(test)]
+mod chip_import_tests {
+    use super::*;
+
+    /// The whole Phase 2 chain on real vendor data: a chip file the IDE ships no
+    /// clock template for, imported into pins AND a working clock that reaches
+    /// `main.rs`.
+    ///
+    /// H5 is the case that motivated all of it — importable, no template, and
+    /// no RCC recipe — so if it works here it works for the families that merely
+    /// lack a template.
+    ///
+    /// `cargo test -- --ignored a_chip_imports_with_its_clock`
+    #[test]
+    #[ignore]
+    fn a_chip_imports_with_its_clock() {
+        use crate::panels::mcu_module::chip_sources;
+        use crate::panels::mcu_module::clock::model::ClockConfig;
+        use crate::panels::mcu_module::codegen::rcc::{
+            generates_clock_code, generates_clock_code_for, graph_clock_block,
+        };
+        use crate::panels::mcu_module::stm32_pin_data::convert_xml;
+
+        let Some(src) = chip_sources::all_sources().into_iter().find(|s| s.has_clock()) else {
+            println!("no CubeMX installation — nothing to check");
+            return;
+        };
+        let db = src.db.as_deref().unwrap();
+
+        // Any H5 part; the file name varies by installation.
+        let Some(file) = std::fs::read_dir(&src.chips)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("STM32H563") && n.ends_with(".xml"))
+            })
+        else {
+            println!("no STM32H563 in this installation");
+            return;
+        };
+
+        let xml = std::fs::read_to_string(&file).unwrap();
+        let chips = convert_xml(&xml).expect("pins");
+        let family = chips[0].form.family.clone();
+        assert_eq!(family, "stm32h5");
+
+        // What the pin import alone produces: no tree at all.
+        assert!(
+            matches!(
+                chips[0].form.clock,
+                crate::panels::mcu_module::mcu_form::ClockChoice::None
+            ),
+            "the IDE ships no H5 template — that is the gap this closes"
+        );
+
+        let (gc, missing) = graph_for_chip_xml(db, &xml, &family).expect("clock");
+        println!(
+            "{}: {} nodes, {} bound, unbound: {missing:?}",
+            file.file_name().unwrap().to_string_lossy(),
+            gc.graph.nodes.len(),
+            gc.bindings.len()
+        );
+        assert!(gc.graph.nodes.len() > 50, "a real H5 tree is large");
+        assert!(!gc.layout.is_empty(), "and it has a diagram");
+
+        // And the payoff: that tree generates real clock code, via the generic
+        // recipe, on a family with no RCC recipe of its own.
+        assert!(!generates_clock_code(&family), "still no family recipe");
+        let clock = ClockConfig::Graph(gc);
+        assert!(
+            generates_clock_code_for(&family, &clock),
+            "but the TREE generates: {:?}",
+            clock
+        );
+        let block = graph_clock_block(&family, &clock, false);
+        assert!(
+            !block.contains("has no generated RCC recipe yet"),
+            "not the skeleton any more:\n{block}"
+        );
+        assert!(block.contains("embassy_stm32::init"), "{block}");
+        // Printed because the FIELD NAMES here are a guess — the generic recipe
+        // picks embassy's most common spelling off the tree's shape — and this
+        // is the only place that guess can be eyeballed against a real family.
+        println!("--- generated for {family} ---\n{block}");
+    }
+}
+
+/// This chip's clock, from its own pin-data XML plus a CubeMX installation.
+///
+/// The whole path in one call: the chip file names its clock tree and RCC
+/// version, those select the two CubeMX files, and the result is bound to
+/// `family`'s codegen ids. `family` is the IDE's key (`stm32h5`), which the
+/// caller already has — it is not derivable from the clock files.
+pub fn graph_for_chip_xml(
+    db_dir: &std::path::Path,
+    chip_xml: &str,
+    family: &str,
+) -> Result<(super::GraphClock, Vec<String>), String> {
+    let key = clock_key_from_mcu_xml(chip_xml)?;
+    let (graph, boxes) = import_for_chip(db_dir, &key)?;
+    Ok(bind_graph(graph, boxes, family))
+}
+
 pub fn import_for_chip(
     db_dir: &std::path::Path,
     key: &ChipClockKey,
