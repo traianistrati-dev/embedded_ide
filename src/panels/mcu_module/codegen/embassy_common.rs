@@ -53,15 +53,44 @@ pub(super) fn gpio_bindings(pins: &[&Pin]) -> (String, String) {
         .any(|p| p.selected_function == PinFunction::GpioInput);
 
     // Only import the gpio types actually used (no unused-import warnings).
+    // A pin wired as a raw alternate function needs Flex + AfType, and the
+    // AfType constructor pulls in Pull or OutputType/Speed depending on the mode.
+    let af_pins: Vec<&&Pin> = configured
+        .iter()
+        .filter(|p| matches!(&p.selected_function, PinFunction::Other(s) if p.af_of(s).is_some()))
+        .filter(|p| p.io_mode.is_some())
+        .copied()
+        .collect();
+    let af_input = af_pins.iter().any(|p| {
+        matches!(
+            p.io_mode,
+            Some(GpioMode::Floating | GpioMode::PullUp | GpioMode::PullDown)
+        )
+    });
+    let af_output = af_pins.iter().any(|p| {
+        matches!(p.io_mode, Some(GpioMode::PushPull | GpioMode::OpenDrain))
+    });
+
     let mut imports = Vec::new();
+    if any_input || af_input {
+        imports.push("Pull");
+    }
     if any_input {
         imports.push("Input");
-        imports.push("Pull");
     }
     if any_output {
         imports.push("Level");
         imports.push("Output");
+    }
+    if any_output || af_output {
         imports.push("Speed");
+    }
+    if !af_pins.is_empty() {
+        imports.push("AfType");
+        imports.push("Flex");
+    }
+    if af_output {
+        imports.push("OutputType");
     }
     imports.sort_unstable();
     imports.dedup();
@@ -159,6 +188,43 @@ fn pin_binding_line(p: &Pin) -> String {
             };
             format!("    let {var} = Input::new(p.{singleton}, {pull}); // {label}")
         }
+        // A generic alternate function whose AF index the vendor publishes: bind
+        // the pad AS that function. `Flex` + `set_as_af_unchecked` is embassy's
+        // own escape hatch for an AF it has no driver for, and the index is the
+        // one thing the user cannot look up from the IDE otherwise.
+        //
+        // The DIRECTION comes from the pin's mode, never from a guess: a signal
+        // like `SAI1_SD_A` is an input in one configuration and an output in
+        // another. Without a mode the pin binds raw, exactly as before, with the
+        // AF named in the comment so it can be wired by hand.
+        PinFunction::Other(signal) => match (p.af_of(signal), p.io_mode) {
+            (Some(af), Some(mode)) => {
+                let af_type = match mode {
+                    GpioMode::PullUp => "AfType::input(Pull::Up)",
+                    GpioMode::PullDown => "AfType::input(Pull::Down)",
+                    GpioMode::Floating => "AfType::input(Pull::None)",
+                    GpioMode::OpenDrain => {
+                        "AfType::output(OutputType::OpenDrain, Speed::Low)"
+                    }
+                    GpioMode::PushPull => "AfType::output(OutputType::PushPull, Speed::Low)",
+                };
+                // Two lines, one binding: `Flex::new` then the AF call. The
+                // second line's four-space indent is part of the payload — the
+                // generated file is not re-formatted.
+                // Two lines for one binding: `Flex::new`, then the AF call.
+                // Built separately so the indentation of the second line is not
+                // at the mercy of how this source file happens to be wrapped.
+                let bind = format!("    let mut {var} = Flex::new(p.{singleton});");
+                let wire = format!(
+                    "    {var}.set_as_af_unchecked({af}, {af_type}); // {label} (AF{af})"
+                );
+                format!("{bind}\n{wire}")
+            }
+            (Some(af), None) => format!(
+                "    let {var} = p.{singleton}; // {label} (AF{af} — pick a mode to wire it)"
+            ),
+            _ => format!("    let {var} = p.{singleton}; // {label}"),
+        },
         // Bus / analog / debug: bind the raw peripheral, ready for its driver.
         _ => format!("    let {var} = p.{singleton}; // {label}"),
     }
@@ -204,7 +270,7 @@ mod emit_for_manual_compile {
             .iter_all_pins()
             .filter(|p| !p.reserved)
             .map(|p| p.number)
-            .take(3)
+            .take(5)
             .collect();
         if let Some(p) = mcu.find_pin_mut(nums[0]) {
             p.selected_function = PinFunction::GpioOutput;
@@ -218,6 +284,23 @@ mod emit_for_manual_compile {
         if let Some(n) = nums.get(2).copied() {
             if let Some(p) = mcu.find_pin_mut(n) {
                 p.selected_function = PinFunction::GpioAnalog;
+            }
+        }
+        // A generic alternate function WITH a vendor AF index and a direction:
+        // the `Flex` + `set_as_af_unchecked` path. Only a real cross-compile
+        // proves that call, its argument order and the imports are right.
+        if let Some(n) = nums.get(3).copied() {
+            if let Some(p) = mcu.find_pin_mut(n) {
+                p.selected_function = PinFunction::Other("SAI1_SD_A".into());
+                p.af = vec![("SAI1_SD_A".into(), 6)];
+                p.io_mode = Some(crate::panels::mcu_module::pins::logic::pin::GpioMode::PushPull);
+            }
+        }
+        // …and one with an index but NO mode, which must stay a raw binding.
+        if let Some(n) = nums.get(4).copied() {
+            if let Some(p) = mcu.find_pin_mut(n) {
+                p.selected_function = PinFunction::Other("FMC_A0".into());
+                p.af = vec![("FMC_A0".into(), 12)];
             }
         }
         let main_rs = mcu.fresh_main_rs();
@@ -388,5 +471,69 @@ mod emit_for_manual_compile {
         project_gen::write_project(&f1dir, &files, &user, &m1.mcu_config_text(), "")
             .expect("write f1 project");
         println!("wrote {}", f1dir.display());
+    }
+}
+
+#[cfg(test)]
+mod af_binding_tests {
+    use super::gpio_bindings;
+    use crate::panels::mcu_module::pins::logic::pin::{GpioMode, Pin};
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    fn af_pin(name: &str, signal: &str, af: Option<u8>, mode: Option<GpioMode>) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = PinFunction::Other(signal.into());
+        p.af = af.map(|n| vec![(signal.to_string(), n)]).unwrap_or_default();
+        p.io_mode = mode;
+        p
+    }
+
+    /// Index + direction: the pad is wired AS the alternate function.
+    #[test]
+    fn a_known_af_with_a_mode_is_wired() {
+        let p = af_pin("PB6", "SAI1_SD_A", Some(6), Some(GpioMode::PushPull));
+        let (uses, body) = gpio_bindings(&[&p]);
+        assert!(
+            body.contains("set_as_af_unchecked(6, AfType::output(OutputType::PushPull, Speed::Low))"),
+            "{body}"
+        );
+        assert!(body.contains("Flex::new(p.PB6)"), "{body}");
+        // Only what the line needs is imported — no unused-import warnings.
+        for want in ["Flex", "AfType", "OutputType", "Speed"] {
+            assert!(uses.contains(want), "missing {want} in `{uses}`");
+        }
+        assert!(!uses.contains("Input"), "nothing here is an Input: {uses}");
+    }
+
+    /// An input direction picks the other `AfType` constructor and imports Pull.
+    #[test]
+    fn an_input_mode_uses_the_input_af_type() {
+        let p = af_pin("PA3", "SAI1_SD_B", Some(6), Some(GpioMode::PullUp));
+        let (uses, body) = gpio_bindings(&[&p]);
+        assert!(body.contains("AfType::input(Pull::Up)"), "{body}");
+        assert!(uses.contains("Pull"), "{uses}");
+        assert!(!uses.contains("OutputType"), "{uses}");
+    }
+
+    /// No direction stated -> no guess. The pin binds raw and the comment names
+    /// the AF, because an AF signal can be an input in one configuration and an
+    /// output in another; wiring it the wrong way round is a silent hardware bug.
+    #[test]
+    fn a_known_af_without_a_mode_is_not_guessed() {
+        let p = af_pin("PB5", "FMC_A0", Some(12), None);
+        let (uses, body) = gpio_bindings(&[&p]);
+        assert!(body.contains("let pb5_fmc_a0 = p.PB5;"), "{body}");
+        assert!(body.contains("AF12"), "the index is still shown: {body}");
+        assert!(!body.contains("set_as_af"), "{body}");
+        assert!(uses.is_empty(), "nothing to import: {uses}");
+    }
+
+    /// No index (STM32F1, or a definition imported before they were captured):
+    /// unchanged behaviour, and no mention of an AF that is not known.
+    #[test]
+    fn an_unknown_af_binds_exactly_as_before() {
+        let p = af_pin("PB4", "FMC_A1", None, Some(GpioMode::PushPull));
+        let (_, body) = gpio_bindings(&[&p]);
+        assert_eq!(body.trim(), "let pb4_fmc_a1 = p.PB4; // FMC_A1");
     }
 }

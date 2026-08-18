@@ -738,6 +738,11 @@ impl AppIde {
         // turns that into a sentence at import time. One index lookup per import,
         // cached below; unknowable (offline) means no warning.
         let mut bad_features: Vec<String> = Vec::new();
+        // GPIO IP version -> its AF table (None = the file was not found).
+        let mut af_tables: std::collections::HashMap<
+            String,
+            Option<std::sync::Arc<stm32_pin_data::GpioAf>>,
+        > = std::collections::HashMap::new();
         let mut embassy_features: Option<Option<Vec<String>>> = None;
 
         for path in paths {
@@ -769,7 +774,23 @@ impl AppIde {
                     }
                 }
             }
-            match stm32_pin_data::convert_xml(&xml) {
+            // The AF indices live in a sibling file, `<mcu dir>/IP/GPIO-<ver>_Modes.xml`.
+            // Cached per GPIO IP version: 98 files serve 2240 chips, so a bulk
+            // import of a whole family reads each one once.
+            let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|ver| {
+                if let Some(t) = af_tables.get(&ver) {
+                    return t.as_ref().map(std::sync::Arc::clone);
+                }
+                let file = path
+                    .parent()
+                    .map(|d| d.join("IP").join(stm32_pin_data::gpio_ip_file_name(&ver)));
+                let table = file
+                    .and_then(|f| std::fs::read_to_string(f).ok())
+                    .map(|text| std::sync::Arc::new(stm32_pin_data::GpioAf::parse(&text)));
+                af_tables.insert(ver, table.clone());
+                table
+            });
+            match stm32_pin_data::convert_xml_with_af(&xml, af.as_deref()) {
                 Ok(chips) => {
                     for chip in chips {
                         let errs = chip.form.errors();

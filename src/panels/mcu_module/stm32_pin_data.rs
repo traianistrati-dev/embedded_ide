@@ -31,7 +31,22 @@ pub struct ConvertedChip {
 
 /// Parse one STM32 open-pin-data `<Mcu>` document into one form per flash
 /// variant. `Err` only on unusable XML (not a `<Mcu>` / no `RefName`).
+///
+/// Without the companion GPIO IP table — see [`convert_xml_with_af`].
 pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
+    convert_xml_with_af(xml, None)
+}
+
+/// The same, plus the alternate-function indices from the chip's GPIO IP file.
+///
+/// Split so the converter itself stays PURE: it reads no files, and the caller
+/// (which already has the MCU file's path) resolves the sibling IP file. `None`
+/// simply means no AF numbers are recorded, which is also the right answer for
+/// STM32F1 and for a lone XML copied out of the vendor repo.
+pub fn convert_xml_with_af(
+    xml: &str,
+    af: Option<&GpioAf>,
+) -> Result<Vec<ConvertedChip>, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| format!("XML parse error: {e}"))?;
     let mcu = doc.root_element();
     // The document uses a default namespace (`xmlns="http://dummy.com"`), so we
@@ -82,12 +97,20 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
                 }
                 let reserved = !(ptype == "I/O" || ptype == "MonoIO");
                 let mut tokens: Vec<String> = Vec::new();
+                // AF indices for this pin's signals, from the GPIO IP file. The
+                // pin name is cleaned the same way on both sides so
+                // "PC14-OSC32_IN" matches "PC14".
+                let mut af_pairs: Vec<(String, u8)> = Vec::new();
+                let clean_name = clean_pin_name(name_raw);
                 if !reserved {
                     for sig in ch
                         .children()
                         .filter(|n| n.is_element() && n.tag_name().name() == "Signal")
                     {
                         let name = sig.attribute("Name").unwrap_or("");
+                        if let Some(n) = af.and_then(|t| t.af(&clean_name, name)) {
+                            af_pairs.push((name.to_owned(), n));
+                        }
                         // The GPIO signal carries the pin's I/O MODES in an
                         // attribute — `IOModes="Input,Output,Analog,EXTI"`. It is
                         // where CubeMX's `GPIO_Analog` row comes from, and it was
@@ -117,6 +140,7 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
                     reserved,
                     functions: tokens.join(" "),
                     imported: false,
+                    af: af_pairs,
                 };
                 // A package position is either a NUMBER (QFP, DIP: pins along
                 // the edges) or a DESIGNATOR like "A2" (WLCSP, BGA: balls under
@@ -179,6 +203,23 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
     }
     if pin_rows.is_empty() && grid.is_none() {
         base_warnings.push("No usable pins were found.".into());
+    }
+    // Say whether the AF indices came in. Silence would be ambiguous: "no
+    // numbers" is correct for STM32F1 (no per-pin mux) but a missing sibling
+    // file elsewhere, and the two need telling apart.
+    match af {
+        Some(t) if !t.is_empty() => base_warnings.push(format!(
+            "Alternate-function indices read for {} pin/signal pair(s).",
+            t.len()
+        )),
+        Some(_) if !family.starts_with("stm32f1") => base_warnings.push(
+            "The GPIO IP file carried no alternate-function indices for this chip.".into(),
+        ),
+        Some(_) => {}
+        None => base_warnings.push(
+            "No GPIO IP file was read, so no alternate-function indices were recorded.              Import from a full STM32_open_pin_data checkout (mcu/ next to mcu/IP/) to              capture them."
+                .into(),
+        ),
     }
 
     let mut chips = Vec::new();
@@ -245,10 +286,120 @@ fn build_grid(balls: &[(usize, usize, PinRow)]) -> Option<PinGridDef> {
                 name: row.name.clone(),
                 reserved: row.reserved,
                 functions: parse_functions(&row.functions),
+                af: row.af.clone(),
             },
         })
         .collect();
     Some(PinGridDef { rows, cols, cells })
+}
+
+// ── Alternate-function numbers (the GPIO IP file) ────────────────────────────
+// The `mcu/*.xml` file says WHICH signals a pin can carry; it never says under
+// which alternate-function INDEX. That lives in a second vendor file, one per
+// GPIO IP version, referenced from the MCU file:
+//
+//     <IP Name="GPIO" Version="STM32F303_gpio_v1_0" .../>
+//     -> mcu/IP/GPIO-STM32F303_gpio_v1_0_Modes.xml
+//
+//     <GPIO_Pin Name="PC13">
+//         <PinSignal Name="TIM1_CH1N">
+//             <SpecificParameter Name="GPIO_AF">
+//                 <PossibleValue>GPIO_AF4_TIM1</PossibleValue>   <- AF4
+//
+// Checked against the whole corpus: all 2240 MCU files resolve to one of the 98
+// IP files. Note the key is `Version`, NOT `ConfigFile` - the latter is a
+// coarser label ("GPIO-STM32F3xx") that matches no file at all.
+
+/// The `Version` of the MCU file's GPIO IP block - the key to its modes file.
+pub fn gpio_ip_version(mcu_xml: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(mcu_xml).ok()?;
+    doc.root_element()
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "IP")
+        .find(|n| n.attribute("Name") == Some("GPIO"))
+        .and_then(|n| n.attribute("Version"))
+        .map(|v| v.trim().to_owned())
+}
+
+/// The file name `version` maps to inside the vendor repo's `mcu/IP/` folder.
+pub fn gpio_ip_file_name(version: &str) -> String {
+    format!("GPIO-{version}_Modes.xml")
+}
+
+/// Alternate-function indices for one GPIO IP version: `(pin, signal) -> AF`.
+#[derive(Default)]
+pub struct GpioAf {
+    map: std::collections::HashMap<(String, String), u8>,
+}
+
+impl GpioAf {
+    /// Parse a `GPIO-*_Modes.xml`. Pure; an unparseable file yields an EMPTY
+    /// table, which simply means "no AF numbers known" - never an import error.
+    pub fn parse(xml: &str) -> Self {
+        let mut map = std::collections::HashMap::new();
+        let Ok(doc) = roxmltree::Document::parse(xml) else {
+            return Self { map };
+        };
+        for pin in doc
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "GPIO_Pin")
+        {
+            let Some(pin_name) = pin.attribute("Name") else {
+                continue;
+            };
+            // The IP file spells a pin the way the MCU file does, suffix included
+            // ("PC14-OSC32_IN"), so both sides go through `clean_pin_name`.
+            let pin_key = clean_pin_name(pin_name);
+            for sig in pin
+                .children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "PinSignal")
+            {
+                let Some(sig_name) = sig.attribute("Name") else {
+                    continue;
+                };
+                if let Some(af) = af_index_of(sig) {
+                    map.insert((pin_key.clone(), sig_name.trim().to_owned()), af);
+                }
+            }
+        }
+        Self { map }
+    }
+
+    /// The AF index of one signal on one pin, if the vendor publishes one.
+    pub fn af(&self, pin: &str, signal: &str) -> Option<u8> {
+        self.map.get(&(pin.to_owned(), signal.to_owned())).copied()
+    }
+
+    /// How many `(pin, signal)` pairs carry an index. The import reports it, and
+    /// ZERO is the honest answer for STM32F1: it has no per-pin AF mux, it
+    /// remaps whole peripherals through AFIO.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// The `GPIO_AF` parameter of one `<PinSignal>`, as a number.
+///
+/// Values look like `GPIO_AF4_TIM1`: the digits between `GPIO_AF` and the next
+/// `_` are the index. Anything else - STM32F1's `__HAL_AFIO_REMAP_*`, or a speed
+/// / pull value belonging to a different parameter - yields `None`.
+fn af_index_of(pin_signal: roxmltree::Node<'_, '_>) -> Option<u8> {
+    let param = pin_signal
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "SpecificParameter")
+        .find(|n| n.attribute("Name") == Some("GPIO_AF"))?;
+    let value = param
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "PossibleValue")?
+        .text()?
+        .trim();
+    let digits = value.strip_prefix("GPIO_AF")?;
+    let end = digits.find('_').unwrap_or(digits.len());
+    digits[..end].parse().ok()
 }
 
 /// `true` for the exposed thermal / ground pad under QFN-style packages —
@@ -797,6 +948,106 @@ mod tests {
         // wins over the generic fallback.
         let pa13 = find(form, "PA13");
         assert_eq!(pa13.functions, "swdio in out analog", "{}", pa13.functions);
+    }
+
+    /// The GPIO IP file for PC13, verbatim from
+    /// `mcu/IP/GPIO-STM32F303_gpio_v1_0_Modes.xml`.
+    const F358_GPIO_IP: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<IP xmlns="http://dummy.com" Name="GPIO" Version="STM32F303_gpio_v1_0">
+    <GPIO_Pin PortName="PC" Name="PC13">
+        <SpecificParameter Name="GPIO_Pin">
+            <PossibleValue>GPIO_PIN_13</PossibleValue>
+        </SpecificParameter>
+        <SpecificParameter Name="GPIO_Speed">
+            <PossibleValue>GPIO_SPEED_FREQ_LOW</PossibleValue>
+        </SpecificParameter>
+        <PinSignal Name="TIM1_CH1N">
+            <SpecificParameter Name="GPIO_AF">
+                <PossibleValue>GPIO_AF4_TIM1</PossibleValue>
+            </SpecificParameter>
+        </PinSignal>
+    </GPIO_Pin>
+    <GPIO_Pin PortName="PA" Name="PA13">
+        <PinSignal Name="USART3_CTS">
+            <SpecificParameter Name="GPIO_AF">
+                <PossibleValue>GPIO_AF7_USART3</PossibleValue>
+            </SpecificParameter>
+        </PinSignal>
+    </GPIO_Pin>
+    <GPIO_Pin PortName="PC" Name="PC14-OSC32_IN">
+        <SpecificParameter Name="GPIO_Speed">
+            <PossibleValue>GPIO_SPEED_FREQ_LOW</PossibleValue>
+        </SpecificParameter>
+    </GPIO_Pin>
+</IP>"#;
+
+    /// The MCU file points at its GPIO IP file by `Version` — NOT by
+    /// `ConfigFile`, which is a coarser label matching no file on disk.
+    #[test]
+    fn the_gpio_ip_file_is_found_by_version() {
+        let xml = F358_PC13.replace(
+            "<Core>",
+            "<IP ConfigFile=\"GPIO-STM32F3xx\" InstanceName=\"GPIO\" Name=\"GPIO\"              Version=\"STM32F303_gpio_v1_0\"/>
+    <Core>",
+        );
+        assert_eq!(
+            gpio_ip_version(&xml).as_deref(),
+            Some("STM32F303_gpio_v1_0")
+        );
+        assert_eq!(
+            gpio_ip_file_name("STM32F303_gpio_v1_0"),
+            "GPIO-STM32F303_gpio_v1_0_Modes.xml"
+        );
+        // A file with no GPIO IP block is not an error.
+        assert_eq!(gpio_ip_version(F358_PC13), None);
+        assert_eq!(gpio_ip_version("not xml at all"), None);
+    }
+
+    /// `GPIO_AF4_TIM1` is AF **4**, and a pin spelled with its suffix in the IP
+    /// file must still match the cleaned name the pin list uses.
+    #[test]
+    fn af_indices_are_read_per_pin_and_signal() {
+        let af = GpioAf::parse(F358_GPIO_IP);
+        assert_eq!(af.af("PC13", "TIM1_CH1N"), Some(4));
+        assert_eq!(af.af("PA13", "USART3_CTS"), Some(7));
+        assert_eq!(af.len(), 2);
+        // Unknown pairs, and a pin whose only parameters are speed/pin-number.
+        assert_eq!(af.af("PC13", "RTC_TS"), None);
+        assert_eq!(af.af("PC14", "GPIO"), None);
+        // Junk is an empty table, never a failure — the import goes on without.
+        assert!(GpioAf::parse("<not-xml").is_empty());
+    }
+
+    /// End to end: the indices reach `PinDef::af`, keyed by the vendor signal
+    /// name, so a later step can configure the pin without re-importing.
+    #[test]
+    fn af_indices_are_stored_on_the_imported_pin() {
+        let af = GpioAf::parse(F358_GPIO_IP);
+        let chips = convert_xml_with_af(F358_PC13, Some(&af)).expect("parses");
+        let def = chips[0].form.clone().to_definition();
+        let pc13 = def
+            .pins
+            .top
+            .iter()
+            .chain(&def.pins.bottom)
+            .chain(&def.pins.left)
+            .chain(&def.pins.right)
+            .find(|p| p.name == "PC13")
+            .expect("PC13 imported");
+        assert_eq!(pc13.af, vec![("TIM1_CH1N".to_string(), 4)]);
+
+        // Without the table the import still works and records nothing.
+        let plain = convert_xml(F358_PC13).expect("parses");
+        let def = plain[0].form.clone().to_definition();
+        assert!(
+            def.pins
+                .top
+                .iter()
+                .chain(&def.pins.bottom)
+                .chain(&def.pins.left)
+                .chain(&def.pins.right)
+                .all(|p| p.af.is_empty())
+        );
     }
 
     /// A WLCSP fixture in the shape ST publishes: `Position` is a package

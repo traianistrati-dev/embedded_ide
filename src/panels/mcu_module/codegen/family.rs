@@ -383,6 +383,19 @@ impl FamilyBackend for StmEmbassyBackend {
         match func {
             PinFunction::GpioInput => &[GpioMode::Floating, GpioMode::PullUp, GpioMode::PullDown],
             PinFunction::GpioOutput => &[GpioMode::PushPull],
+            // A generic alternate function: the mode is how the user states the
+            // DIRECTION, which is what turns the vendor's AF index into a real
+            // `set_as_af_unchecked` line (see `embassy_common::pin_binding_line`).
+            // Both directions are offered because an AF signal can be either —
+            // `SAI1_SD_A` is an input in one configuration and an output in
+            // another — and guessing would silently mis-wire the pad.
+            PinFunction::Other(_) => &[
+                GpioMode::Floating,
+                GpioMode::PullUp,
+                GpioMode::PullDown,
+                GpioMode::PushPull,
+                GpioMode::OpenDrain,
+            ],
             _ => &[],
         }
     }

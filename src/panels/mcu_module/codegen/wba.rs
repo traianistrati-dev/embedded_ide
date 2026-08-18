@@ -61,6 +61,7 @@ mod tests {
             custom_label: String::new(),
             irq: None,
             io_mode: None,
+            af: Vec::new(),
         }
     }
 

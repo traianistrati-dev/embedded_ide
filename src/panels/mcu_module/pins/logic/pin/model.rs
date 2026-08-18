@@ -157,12 +157,41 @@ pub struct Pin {
     /// function in the chip, persisted in `mcu.config` (`@iomode`), and rendered
     /// by each backend in its own syntax. See [`GpioMode`].
     pub io_mode: Option<GpioMode>,
+    /// `(vendor signal, alternate-function index)` for this pin, from the chip
+    /// definition ([`crate::panels::mcu_module::mcu_def::PinDef::af`]).
+    ///
+    /// Per (pin, SIGNAL) rather than per function: the same signal sits on a
+    /// different AF number on a different pin, so the index cannot live inside
+    /// `PinFunction` — a value that is shared across the whole chip. Empty on
+    /// STM32F1 (no per-pin AF mux; it remaps whole peripherals through AFIO) and
+    /// for definitions imported before the indices were captured.
+    pub af: Vec<(String, u8)>,
 }
 
 impl Pin {
     /// `true` when any available function is a serial communication bus
     /// (USART / SPI / I2C / USB / CAN). Such pins get an orange number on the
     /// chip so they stand out from plain GPIO / analog / power pins.
+    /// The alternate-function index this pin uses for `signal`, if the vendor
+    /// published one. `signal` is the datasheet name (`TIM1_CH1N`), which is what
+    /// [`PinFunction::Other`] carries.
+    pub fn af_of(&self, signal: &str) -> Option<u8> {
+        self.af
+            .iter()
+            .find(|(s, _)| s.eq_ignore_ascii_case(signal))
+            .map(|(_, n)| *n)
+    }
+
+    /// The AF index of the function currently selected on this pin, when that
+    /// function is a generic alternate one. `None` for GPIO / modelled
+    /// peripherals (whose driver sets the AF itself) and on STM32F1.
+    pub fn selected_af(&self) -> Option<u8> {
+        match &self.selected_function {
+            PinFunction::Other(signal) => self.af_of(signal),
+            _ => None,
+        }
+    }
+
     pub fn has_bus_function(&self) -> bool {
         self.available_functions.iter().any(PinFunction::is_bus)
     }

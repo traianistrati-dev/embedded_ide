@@ -43,6 +43,10 @@ pub struct PinRow {
     /// created, so the pin editor can tag it as "review me". Never persisted
     /// (dropped by [`McuForm::to_definition`]).
     pub imported: bool,
+    /// `(signal, alternate-function index)` captured from the vendor GPIO IP
+    /// file. Carried through the form untouched — it is data ABOUT the chip, not
+    /// something to author by hand — and written to `PinDef::af`.
+    pub af: Vec<(String, u8)>,
 }
 
 /// The clock model offered by the form. A full graph editor is out of scope,
@@ -327,6 +331,7 @@ impl McuForm {
                     reserved: d.reserved,
                     functions: functions_to_string(&d.functions),
                     imported: false,
+                    af: d.af.clone(),
                 })
                 .collect()
         };
@@ -506,6 +511,7 @@ impl McuForm {
                     name: r.name.trim().to_string(),
                     reserved: r.reserved,
                     functions: parse_functions(&r.functions),
+                    af: r.af.clone(),
                 })
                 .collect()
         };
@@ -601,6 +607,7 @@ pub fn gpio_bank(prefix: &str, start_number: usize, count: usize) -> Vec<PinRow>
             reserved: false,
             functions: "in out".to_string(),
             imported: false,
+            af: Vec::new(),
         })
         .collect()
 }
@@ -872,6 +879,7 @@ mod tests {
             reserved: false,
             functions: "in wat".into(),
             imported: false,
+            af: Vec::new(),
         }];
         assert!(
             f.errors()

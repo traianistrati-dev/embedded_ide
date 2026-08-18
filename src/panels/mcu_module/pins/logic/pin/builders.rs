@@ -15,6 +15,7 @@ impl Pin {
             custom_label: String::new(),
             irq: None,
             io_mode: None,
+            af: Vec::new(),
         }
     }
 
@@ -33,6 +34,7 @@ impl Pin {
             custom_label: String::new(),
             irq: None,
             io_mode: None,
+            af: Vec::new(),
         }
     }
 
@@ -47,6 +49,7 @@ impl Pin {
             custom_label: String::new(),
             irq: None,
             io_mode: None,
+            af: Vec::new(),
         }
     }
 

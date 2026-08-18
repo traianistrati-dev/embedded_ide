@@ -29,6 +29,21 @@ pub struct PinDef {
     /// Empty for reserved pins (VDD, VSS, …).
     #[serde(default)]
     pub functions: Vec<PinFunction>,
+    /// `(vendor signal name, alternate-function index)` for the signals whose AF
+    /// number the vendor publishes — `[("TIM1_CH1N", 4), ("USART1_TX", 7)]`.
+    ///
+    /// Captured at import from the GPIO IP file (see
+    /// [`crate::panels::mcu_module::stm32_pin_data::GpioAf`]) and stored so the
+    /// data is in the project rather than in a folder the user may not keep. It
+    /// is not consumed yet: configuring a pin to an arbitrary alternate function
+    /// needs it, and that is the next step — capturing it now means the chips
+    /// imported today will not have to be imported again then.
+    ///
+    /// Absent for STM32F1, which has no per-pin AF mux at all (it remaps whole
+    /// peripherals through AFIO), and for any pin whose signals are "additional
+    /// functions" (ADC inputs, RTC tamper, …) rather than alternate ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub af: Vec<(String, u8)>,
 }
 
 impl PinDef {
@@ -40,6 +55,9 @@ impl PinDef {
             name: p.name.clone(),
             reserved: p.reserved,
             functions: p.available_functions.clone(),
+            // The runtime `Pin` does not carry it (nothing reads it yet); a
+            // round-trip through a live chip therefore drops it.
+            af: Vec::new(),
         }
     }
 
@@ -54,6 +72,7 @@ impl PinDef {
             custom_label: String::new(),
             irq: None,
             io_mode: None,
+            af: self.af.clone(),
         }
     }
 }
