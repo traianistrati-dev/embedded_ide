@@ -235,19 +235,6 @@ pub fn draw_graph_clock(
         }
         ui.separator();
 
-        // The fields list sits BESIDE the diagram rather than replacing it, so
-        // the toggle is a visibility switch, not a view switch.
-        if ui
-            .add(
-                egui::Button::new(format!("{} Fields", ph::LIST_BULLETS)).selected(*fields),
-            )
-            .on_hover_text("Show every selectable value as a list beside the diagram")
-            .clicked()
-        {
-            *fields = !*fields;
-        }
-        ui.separator();
-
 
         // One "Tools" menu for the two things that CHANGE the tree, rather
         // than two toggles competing with the view controls beside them.
