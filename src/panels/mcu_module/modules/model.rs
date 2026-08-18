@@ -245,6 +245,29 @@ pub enum AsyncBusMode {
     AsyncDma,
 }
 
+/// How an async USART moves its bytes.
+///
+/// Deliberately NOT [`AsyncBusMode`]: that enum's `Blocking` arm makes no sense
+/// here, because an async USART is never blocking — the choice is only about
+/// which non-blocking mechanism carries the data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UsartMode {
+    /// `BufferedUart` — interrupt per byte into a software ring buffer. Needs no
+    /// DMA channel, so it compiles for any chip out of the box. The default.
+    #[default]
+    Buffered,
+    /// `UartTx` + `RingBufferedUartRx` — the peripheral talks to DMA directly.
+    ///
+    /// Split on purpose rather than a plain `Uart<Async>`: that type implements
+    /// `embedded_io_async::Write` but **not `Read`**, so a bare DMA `Uart` would
+    /// quietly drop half of the portable API. `RingBufferedUartRx` restores it
+    /// AND is the reason to want DMA on a UART at all — continuous reception
+    /// that cannot drop bytes between reads.
+    ///
+    /// Needs DMA channels; `main.rs` gets a `TODO` where they go.
+    Dma,
+}
+
 /// USART communication settings + the user's RX/TX data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsartModuleConfig {
@@ -265,6 +288,11 @@ pub struct UsartModuleConfig {
     /// → old configs load as `Portable`.
     #[serde(default)]
     pub api_style: ApiStyle,
+    /// Buffered (interrupt) vs DMA transport, on the Async runtime only. The
+    /// other runtimes ignore it. `#[serde(default)]` → old configs load as
+    /// `Buffered`, which is what they generated.
+    #[serde(default)]
+    pub mode: UsartMode,
 }
 
 impl UsartModuleConfig {
@@ -280,6 +308,7 @@ impl UsartModuleConfig {
             tx_model: String::new(),
             custom_label: String::new(),
             api_style: ApiStyle::default(),
+            mode: UsartMode::default(),
         }
     }
 }

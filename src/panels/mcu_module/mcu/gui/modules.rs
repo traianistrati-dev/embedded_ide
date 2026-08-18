@@ -7,7 +7,8 @@ use super::rotate::Rot;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, VirtualModule,
+    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, UsartMode,
+    VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -1017,6 +1018,29 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
+    // Async runtime only (USART): interrupt ring buffer vs DMA. A separate
+    // enum from `AsyncBusMode` because "blocking" is not one of the options —
+    // an async USART is never blocking, only differently non-blocking.
+    let usart_mode_row = |ui: &mut egui::Ui, mode: &mut UsartMode| {
+        ui.label("Async transport");
+        egui::ComboBox::from_id_salt("usart_mode")
+            .selected_text(match mode {
+                UsartMode::Buffered => "Buffered (interrupt)",
+                UsartMode::Dma => "DMA (ring buffer)",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(mode, UsartMode::Buffered, "Buffered (interrupt)")
+                    .on_hover_text(
+                        "embassy BufferedUart -> embedded-io-async Read + Write, one interrupt                          per byte into a software ring buffer. Needs no DMA channel, so it                          compiles out of the box.",
+                    );
+                ui.selectable_value(mode, UsartMode::Dma, "DMA (ring buffer)")
+                    .on_hover_text(
+                        "UartTx + RingBufferedUartRx -> the same embedded-io-async traits, but                          the peripheral talks to DMA directly and RX keeps filling a circular                          buffer between your reads, so bytes are not dropped in the gaps.                          Needs DMA channels: main.rs gets a TODO (won't compile until filled).",
+                    );
+            });
+        ui.end_row();
+    };
+
     egui::Grid::new("module_cfg")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -1064,7 +1088,11 @@ pub fn module_config_ui(
                     // embedded-io-async BufferedUart bridge, no choice).
                     if is_native {
                         api_row_locked(ui);
-                    } else if !is_async {
+                    } else if is_async {
+                        // The API style is fixed on async (embedded-io-async
+                        // either way); what IS a choice is the transport.
+                        usart_mode_row(ui, &mut cfg.mode);
+                    } else {
                         api_row(ui, &mut pending.0);
                     }
                 }

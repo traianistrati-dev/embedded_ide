@@ -8,6 +8,7 @@
 //! - unknown families (e.g. STM8) → no generated code yet.
 
 pub mod common;
+pub mod dma_map;
 pub mod embassy_async;
 pub mod embassy_common;
 pub mod family;
@@ -1618,7 +1619,7 @@ mod tests {
         assert!(blocking.contains("Custom modules"));
 
         // Async embassy.
-        let async_ = embassy_async::make_generated_section("X", &pins, "", "", line);
+        let async_ = embassy_async::make_generated_section("X", &pins, "", "", "", line);
         assert!(
             async_.contains(line),
             "embassy async:

@@ -3219,11 +3219,9 @@ mod tests {
         assert!(r.raw_notes.iter().any(|n| n.contains("RCC_OSC32_IN")));
         // …but not the ones the grammar covers natively, and not true noise.
         assert!(
-            !r.raw_notes
-                .iter()
-                .any(|n| n.contains("LPUART1_TX")
-                    || n.contains("SPI1_RDY")
-                    || n.contains("EVENTOUT")),
+            !r.raw_notes.iter().any(|n| n.contains("LPUART1_TX")
+                || n.contains("SPI1_RDY")
+                || n.contains("EVENTOUT")),
             "natively mapped signals and noise must not be reported: {:?}",
             r.raw_notes
         );

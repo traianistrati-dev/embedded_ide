@@ -495,7 +495,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
-    embassy_async::async_peripherals(&all, &usart, &spi, &i2c)
+    embassy_async::async_peripherals(&mcu.family, &all, &usart, &spi, &i2c)
 }
 
 /// The async generated section for `mcu`: the GPIO/raw pin bindings (minus the
@@ -514,6 +514,7 @@ fn async_section(mcu: &Mcu) -> String {
         &gpio_pins,
         &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
         &periphs.init_calls,
+        &periphs.dma_irqs,
         &mcu.custom_module_inits(),
     )
 }
@@ -1610,9 +1611,23 @@ mod tests {
             connections: vec![],
         });
         let code = mcu.fresh_main_rs();
+        // This used to assert the DMA TODO. On a family WITH a channel table
+        // there is none left to assert: the chip is an F4, so SPI1's channels
+        // and their interrupt binding are filled in for the user.
         assert!(
-            code.contains("DMA_TX_TODO"),
-            "async-DMA call has the DMA TODO:\n{code}"
+            code.contains("p.DMA2_CH3, p.DMA2_CH0, Irqs"),
+            "SPI1 gets its F4 channels:
+{code}"
+        );
+        assert!(
+            code.contains("DMA2_STREAM3 => embassy_stm32::dma::InterruptHandler"),
+            "and the matching interrupt binding:
+{code}"
+        );
+        assert!(
+            !code.contains("DMA_TX_TODO"),
+            "no TODO left on F4:
+{code}"
         );
         let cfgs = mcu.config_files();
         let spi1 = &cfgs.iter().find(|(n, _)| n == "spi1.rs").unwrap().1;

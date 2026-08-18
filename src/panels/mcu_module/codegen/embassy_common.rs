@@ -67,9 +67,9 @@ pub(super) fn gpio_bindings(pins: &[&Pin]) -> (String, String) {
             Some(GpioMode::Floating | GpioMode::PullUp | GpioMode::PullDown)
         )
     });
-    let af_output = af_pins.iter().any(|p| {
-        matches!(p.io_mode, Some(GpioMode::PushPull | GpioMode::OpenDrain))
-    });
+    let af_output = af_pins
+        .iter()
+        .any(|p| matches!(p.io_mode, Some(GpioMode::PushPull | GpioMode::OpenDrain)));
 
     let mut imports = Vec::new();
     if any_input || af_input {
@@ -203,9 +203,7 @@ fn pin_binding_line(p: &Pin) -> String {
                     GpioMode::PullUp => "AfType::input(Pull::Up)",
                     GpioMode::PullDown => "AfType::input(Pull::Down)",
                     GpioMode::Floating => "AfType::input(Pull::None)",
-                    GpioMode::OpenDrain => {
-                        "AfType::output(OutputType::OpenDrain, Speed::Low)"
-                    }
+                    GpioMode::OpenDrain => "AfType::output(OutputType::OpenDrain, Speed::Low)",
                     GpioMode::PushPull => "AfType::output(OutputType::PushPull, Speed::Low)",
                 };
                 // Two lines, one binding: `Flex::new` then the AF call. The
@@ -215,9 +213,8 @@ fn pin_binding_line(p: &Pin) -> String {
                 // Built separately so the indentation of the second line is not
                 // at the mercy of how this source file happens to be wrapped.
                 let bind = format!("    let mut {var} = Flex::new(p.{singleton});");
-                let wire = format!(
-                    "    {var}.set_as_af_unchecked({af}, {af_type}); // {label} (AF{af})"
-                );
+                let wire =
+                    format!("    {var}.set_as_af_unchecked({af}, {af_type}); // {label} (AF{af})");
                 format!("{bind}\n{wire}")
             }
             (Some(af), None) => format!(
@@ -409,6 +406,151 @@ mod emit_for_manual_compile {
             .expect("write usart project");
         println!("wrote {}", udir.display());
 
+        // ── Async + SPI/I2C on DMA ────────────────────────────────────
+        // The path that had NEVER been compiled: every assertion on it was a
+        // substring check, and both templates were in fact calling embassy 0.6
+        // with the wrong arity (SPI) and the wrong argument order (I2C).
+        //
+        // The generated code deliberately does not compile as-is -- the DMA
+        // channels are a TODO the IDE cannot fill (see `DMA_TODO`). Pass real
+        // ones for this chip to get a project that should build end to end:
+        //
+        //   EIDE_DMA_TX=DMA2_CH3 EIDE_DMA_RX=DMA2_CH2         //   EIDE_DMA_TX_IRQ=DMA2_STREAM3 EIDE_DMA_RX_IRQ=DMA2_STREAM2         //   cargo test -- --ignored --nocapture emit_embassy_project
+        for (name, func) in [
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            // I2C too: its template had the OTHER defect (irq argument in the
+            // wrong position), so both need a real compile.
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        mcu.reconcile_modules();
+        // Flip every SPI module the reconcile created to async-DMA.
+        for m in &mut mcu.modules {
+            use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig};
+            match &mut m.config {
+                ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                // The USART too: its DMA form is a different template again
+                // (UartTx + RingBufferedUartRx), so it needs its own compile.
+                ModuleConfig::Usart(c) => {
+                    c.mode = crate::panels::mcu_module::modules::UsartMode::Dma
+                }
+                _ => {}
+            }
+        }
+        let mut main_rs = mcu.fresh_main_rs();
+        let configs = mcu.config_files();
+        // Substitute real channels when the caller supplied them, so the
+        // TEMPLATE can be compiled without the product pretending to know a
+        // chip's DMA map (that is the next stage).
+        let ev = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_owned());
+        let (tx, rx) = (
+            ev("EIDE_DMA_TX", "DMA_TX_TODO"),
+            ev("EIDE_DMA_RX", "DMA_RX_TODO"),
+        );
+        // Per-peripheral: a DMA channel is valid for ONE peripheral, so a single
+        // pair for the whole file only ever proves the first of them.
+        let (itx, irx) = (ev("EIDE_I2C_DMA_TX", &tx), ev("EIDE_I2C_DMA_RX", &rx));
+        let (utx, urx) = (ev("EIDE_USART_DMA_TX", &tx), ev("EIDE_USART_DMA_RX", &rx));
+        main_rs = main_rs
+            .lines()
+            .map(|l| {
+                let (t, r) = if l.contains("i2c") {
+                    (&itx, &irx)
+                } else if l.contains("usart") {
+                    (&utx, &urx)
+                } else {
+                    (&tx, &rx)
+                };
+                format!(
+                    "{}
+",
+                    l.replace("DMA_TX_TODO", t).replace("DMA_RX_TODO", r)
+                )
+            })
+            .collect();
+        if let (Ok(ti), Ok(ri)) = (
+            std::env::var("EIDE_DMA_TX_IRQ"),
+            std::env::var("EIDE_DMA_RX_IRQ"),
+        ) {
+            let (i_ti, i_ri) = (
+                ev("EIDE_I2C_DMA_TX_IRQ", &ti),
+                ev("EIDE_I2C_DMA_RX_IRQ", &ri),
+            );
+            let (u_ti, u_ri) = (
+                ev("EIDE_USART_DMA_TX_IRQ", &ti),
+                ev("EIDE_USART_DMA_RX_IRQ", &ri),
+            );
+            let binds = format!(
+                "    {ti} => embassy_stm32::dma::InterruptHandler<peripherals::{tx}>;
+                     {ri} => embassy_stm32::dma::InterruptHandler<peripherals::{rx}>;
+                     {i_ti} => embassy_stm32::dma::InterruptHandler<peripherals::{itx}>;
+                     {i_ri} => embassy_stm32::dma::InterruptHandler<peripherals::{irx}>;
+                     {u_ti} => embassy_stm32::dma::InterruptHandler<peripherals::{utx}>;
+                     {u_ri} => embassy_stm32::dma::InterruptHandler<peripherals::{urx}>;
+"
+            );
+            main_rs = main_rs.replace(
+                "bind_interrupts!(struct Irqs {
+",
+                &format!(
+                    "bind_interrupts!(struct Irqs {{
+{binds}"
+                ),
+            );
+        }
+        let mut files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+        files.cargo_toml = project_gen::ensure_async_deps(
+            &files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            !configs.is_empty(),
+            true,
+            true,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let ddir = std::env::temp_dir().join("eide_embassy_check_dma");
+        let _ = std::fs::remove_dir_all(&ddir);
+        project_gen::write_project(&ddir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write dma project");
+        println!("wrote {}", ddir.display());
+
         // ── The F1 blocking USART, unchanged by this migration ───────────────
         // `embedded-io` is shared by both seams, so bumping it for embassy has
         // to be proved harmless for the stm32f1xx-hal bridge too.
@@ -483,7 +625,9 @@ mod af_binding_tests {
     fn af_pin(name: &str, signal: &str, af: Option<u8>, mode: Option<GpioMode>) -> Pin {
         let mut p = Pin::new(1, name);
         p.selected_function = PinFunction::Other(signal.into());
-        p.af = af.map(|n| vec![(signal.to_string(), n)]).unwrap_or_default();
+        p.af = af
+            .map(|n| vec![(signal.to_string(), n)])
+            .unwrap_or_default();
         p.io_mode = mode;
         p
     }
@@ -494,7 +638,9 @@ mod af_binding_tests {
         let p = af_pin("PB6", "SAI1_SD_A", Some(6), Some(GpioMode::PushPull));
         let (uses, body) = gpio_bindings(&[&p]);
         assert!(
-            body.contains("set_as_af_unchecked(6, AfType::output(OutputType::PushPull, Speed::Low))"),
+            body.contains(
+                "set_as_af_unchecked(6, AfType::output(OutputType::PushPull, Speed::Low))"
+            ),
             "{body}"
         );
         assert!(body.contains("Flex::new(p.PB6)"), "{body}");

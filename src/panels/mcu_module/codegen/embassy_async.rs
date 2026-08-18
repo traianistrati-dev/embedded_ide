@@ -16,10 +16,11 @@
 //! [`Runtime::Async`]: crate::panels::mcu_module::mcu::Runtime
 
 use super::common::sanitize_label;
+use super::dma_map;
 use super::embassy_common::{NO_PINS_PLACEHOLDER, gpio_bindings};
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::modules::{
-    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartMode, UsartModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -62,6 +63,9 @@ pub fn make_generated_section(
     pins: &[&Pin],
     clock_block: &str,
     periph_calls: &str,
+    // Module-level `bind_interrupts!` for DMA-backed buses ("" when none). Goes
+    // ABOVE the entry point - it is an item, not a statement.
+    dma_irqs: &str,
     // Custom-module `let x = Foo::new(…);` lines — last, after every binding
     // and peripheral init they consume (see `Mcu::custom_module_inits`).
     custom_inits: &str,
@@ -85,7 +89,7 @@ pub fn make_generated_section(
     format!(
         "{GEN_BEGIN}\n\
          {use_line}\n\
-         #[embassy_executor::main]\n\
+         {dma_irqs}\n#[embassy_executor::main]\n\
          async fn main(_spawner: Spawner) {{\n\
          \x20   // {mcu_name}\n\
          {clock_block}\
@@ -318,6 +322,9 @@ pub struct AsyncPeriphs {
     pub config_files: Vec<(String, String)>,
     /// True if any SPI/I2C uses async-DMA (drives the `embedded-hal-async` dep).
     pub any_async_dma: bool,
+    /// The module-level `bind_interrupts!` the DMA inits need, or "" when no bus
+    /// runs on DMA. Emitted OUTSIDE `async fn main` - see [`dma_irqs_block`].
+    pub dma_irqs: String,
     /// True if any SPI/I2C exists at all (drives the `embedded-hal` 1.0 dep).
     pub any_spi_i2c: bool,
 }
@@ -331,9 +338,112 @@ fn is_dma(mode: AsyncBusMode) -> bool {
 /// undefined fields (`p.DMA_TX_TODO`) so the project fails to compile at exactly
 /// this line until the user supplies channels valid for the peripheral on their
 /// chip — the IDE can't know them (it doesn't model DMA).
-const DMA_TODO: &str = "p.DMA_TX_TODO, p.DMA_RX_TODO";
+///
+/// `Irqs` is the LAST argument: embassy 0.6 makes the caller bind the DMA
+/// channels' interrupts, and only this file knows which channels those are (see
+/// `dma_irqs_block`).
+const DMA_TODO: &str = "p.DMA_TX_TODO, p.DMA_RX_TODO, Irqs";
+
+/// The DMA arguments for one peripheral: real channels when the family has a
+/// table (see [`dma_map`]), the `TODO` placeholder otherwise.
+///
+/// Pushes the matching `bind_interrupts!` lines into `binds`, because the two
+/// have to agree and deriving them apart is how they drift.
+fn dma_args(
+    alloc: &mut dma_map::DmaAllocator,
+    binds: &mut Vec<String>,
+    bus: dma_map::Bus,
+    n: u8,
+    label: &str,
+) -> (String, String) {
+    // Both or neither: a TX reserved next to a failed RX would take a channel
+    // out of circulation for a peripheral that still ends up on the TODO path.
+    let (Some(tx), Some(rx)) = (
+        alloc.take(bus, n, dma_map::Dir::Tx),
+        alloc.take(bus, n, dma_map::Dir::Rx),
+    ) else {
+        // No table for this family (or nothing free): say exactly what is
+        // missing, at the line that needs it.
+        return (
+            DMA_TODO.to_owned(),
+            format!(
+                "    // TODO(async DMA): pass DMA channels valid for {label} on this chip,
+                     //   and bind their interrupts in the `Irqs` block above.
+"
+            ),
+        );
+    };
+    for c in [&tx, &rx] {
+        binds.push(format!(
+            "    {} => embassy_stm32::dma::InterruptHandler<peripherals::{}>;
+",
+            c.irq, c.peri
+        ));
+    }
+    // Resolved — no note. A TODO telling the user to do work already done is
+    // worse than none: it makes correct output look unfinished.
+    (format!("p.{}, p.{}, Irqs", tx.peri, rx.peri), String::new())
+}
+
+/// The `bind_interrupts!` block `main.rs` needs when any bus runs on DMA.
+///
+/// It has to live here rather than in each `configs/*.rs`, because embassy takes
+/// ONE value that must satisfy every binding at once — the peripheral's own
+/// interrupts and both DMA channels' — and the channels are chosen at this call
+/// site. `i2c_instances` are the I2C peripherals whose event/error interrupts
+/// belong in the same struct.
+fn dma_irqs_block(i2c_instances: &[u8], usart_instances: &[u8], binds: &[String]) -> String {
+    // The header only asks for work when there IS work: with every channel
+    // resolved (see `dma_map`) the block is complete as generated.
+    let head = if binds.is_empty() {
+        r#"use embassy_stm32::{bind_interrupts, peripherals};
+
+// Interrupt bindings for the DMA-backed peripherals below.
+// TODO(async DMA): add one line per DMA channel you pass to an `init`, e.g.
+//     DMA2_STREAM3 => embassy_stm32::dma::InterruptHandler<peripherals::DMA2_CH3>;
+// The INTERRUPT name (left) and the CHANNEL name (right) differ on most
+// families - check your chip's `embassy_stm32::interrupt` list.
+bind_interrupts!(struct Irqs {
+"#
+    } else {
+        r#"use embassy_stm32::{bind_interrupts, peripherals};
+
+// Interrupt bindings for the DMA-backed peripherals below.
+bind_interrupts!(struct Irqs {
+"#
+    };
+    let mut b = String::from(head);
+    for n in i2c_instances {
+        b.push_str(&format!(
+            "    I2C{n}_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C{n}>;
+"
+        ));
+        b.push_str(&format!(
+            "    I2C{n}_ER => embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C{n}>;
+"
+        ));
+    }
+    for line in binds {
+        b.push_str(line);
+    }
+    for n in usart_instances {
+        // On DMA the USART's own interrupt joins the channels' in one struct,
+        // for the same reason the I2C ones do: `Uart::new` takes a single value.
+        b.push_str(&format!(
+            "    USART{n} => embassy_stm32::usart::InterruptHandler<peripherals::USART{n}>;
+"
+        ));
+    }
+    b.push_str(
+        "});
+
+",
+    );
+    b
+}
 
 pub fn async_peripherals(
+    family: &str,
     pins: &[&Pin],
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
@@ -344,6 +454,12 @@ pub fn async_peripherals(
     let mut files = Vec::new();
     let mut any_async_dma = false;
     let mut any_spi_i2c = false;
+    // I2C peripherals on DMA: their event/error interrupts go in the SAME
+    // `Irqs` struct as the channels', because `I2c::new` takes one value.
+    let mut dma_i2c_instances: Vec<u8> = Vec::new();
+    let mut dma_usart_instances: Vec<u8> = Vec::new();
+    let mut dma_binds: Vec<String> = Vec::new();
+    let mut alloc = dma_map::DmaAllocator::new(family);
 
     for (n, tx, rx) in usart_wires(pins) {
         consumed.push(tx.clone());
@@ -353,10 +469,27 @@ pub fn async_peripherals(
             .map(|c| label_sfx(&c.custom_label))
             .unwrap_or_default();
         // BufferedUart::new takes (peri, rx, tx, …); the config's `init` mirrors it.
-        calls.push_str(&format!(
-            "    let mut _serial{n}{sfx} = \
-             pins::configs::usart{n}::init(p.USART{n}, p.{rx}, p.{tx});\n"
-        ));
+        if usart.get(&n).map(|c| c.mode) == Some(UsartMode::Dma) {
+            any_async_dma = true;
+            dma_usart_instances.push(n);
+            let (args, note) = dma_args(
+                &mut alloc,
+                &mut dma_binds,
+                dma_map::Bus::Usart,
+                n,
+                &format!("USART{n}"),
+            );
+            calls.push_str(&note);
+            calls.push_str(&format!(
+                "    let (mut _serial{n}{sfx}_tx, mut _serial{n}{sfx}_rx) = pins::configs::usart{n}::init(p.USART{n}, p.{rx}, p.{tx}, {args});
+"
+            ));
+        } else {
+            calls.push_str(&format!(
+                "    let mut _serial{n}{sfx} =                  pins::configs::usart{n}::init(p.USART{n}, p.{rx}, p.{tx});
+"
+            ));
+        }
         files.push((format!("usart{n}.rs"), usart_config_file(n, usart.get(&n))));
     }
 
@@ -370,13 +503,17 @@ pub fn async_peripherals(
         let dma = cfg.map(|c| is_dma(c.async_mode)).unwrap_or(false);
         any_async_dma |= dma;
         if dma {
-            calls.push_str(&format!(
-                "    // TODO(async DMA): pass DMA channels valid for SPI{n} on this chip,\n\
-                 \x20   //   e.g. p.DMA2_CH3 (tx) + p.DMA2_CH2 (rx). Replace the TODO fields below.\n"
-            ));
+            let (args, note) = dma_args(
+                &mut alloc,
+                &mut dma_binds,
+                dma_map::Bus::Spi,
+                n,
+                &format!("SPI{n}"),
+            );
+            calls.push_str(&note);
             calls.push_str(&format!(
                 "    let mut _spi{n}{sfx} = \
-                 pins::configs::spi{n}::init(p.SPI{n}, p.{sck}, p.{mosi}, p.{miso}, {DMA_TODO});\n"
+                 pins::configs::spi{n}::init(p.SPI{n}, p.{sck}, p.{mosi}, p.{miso}, {args});\n"
             ));
         } else {
             calls.push_str(&format!(
@@ -396,13 +533,18 @@ pub fn async_peripherals(
         let dma = cfg.map(|c| is_dma(c.async_mode)).unwrap_or(false);
         any_async_dma |= dma;
         if dma {
-            calls.push_str(&format!(
-                "    // TODO(async DMA): pass DMA channels valid for I2C{n} on this chip,\n\
-                 \x20   //   e.g. p.DMA1_CH6 (tx) + p.DMA1_CH0 (rx). Replace the TODO fields below.\n"
-            ));
+            dma_i2c_instances.push(n);
+            let (args, note) = dma_args(
+                &mut alloc,
+                &mut dma_binds,
+                dma_map::Bus::I2c,
+                n,
+                &format!("I2C{n}"),
+            );
+            calls.push_str(&note);
             calls.push_str(&format!(
                 "    let mut _i2c{n}{sfx} = \
-                 pins::configs::i2c{n}::init(p.I2C{n}, p.{scl}, p.{sda}, {DMA_TODO});\n"
+                 pins::configs::i2c{n}::init(p.I2C{n}, p.{scl}, p.{sda}, {args});\n"
             ));
         } else {
             calls.push_str(&format!(
@@ -413,6 +555,11 @@ pub fn async_peripherals(
         files.push((format!("i2c{n}.rs"), i2c_config_file(n, cfg)));
     }
 
+    let dma_irqs = if any_async_dma {
+        dma_irqs_block(&dma_i2c_instances, &dma_usart_instances, &dma_binds)
+    } else {
+        String::new()
+    };
     let init_calls = if calls.is_empty() {
         String::new()
     } else {
@@ -423,12 +570,111 @@ pub fn async_peripherals(
         init_calls,
         config_files: files,
         any_async_dma,
+        dma_irqs,
         any_spi_i2c,
     }
 }
 
 /// Render [`ASYNC_USART_TMPL`] for instance `n` with the Virtual Module's config
 /// (baud / data bits / parity / stop bits), or embassy defaults when unset.
+/// `src/pins/configs/usart{N}.rs` for the async runtime on DMA.
+///
+/// Returns the two HALVES rather than a `Uart`, because embassy's DMA `Uart`
+/// implements `embedded_io_async::Write` but NOT `Read` — handing one back whole
+/// would silently lose half the portable API. `RingBufferedUartRx` restores
+/// `Read`, and is the actual reason to put a UART on DMA: it keeps receiving
+/// into a circular DMA buffer between your reads, so bytes are not dropped in
+/// the gaps.
+///
+/// Concrete embassy types, not `impl Trait`: a tuple return cannot carry
+/// `impl Trait`, and both types implement the standard traits anyway.
+const ASYNC_USART_TMPL_DMA: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const BAUDRATE: u32 = {BAUD};
+const DATA_BITS: u8 = {DATA}; // 7, 8, 9
+const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+const STOP_BITS: u8 = {STOP}; // 1, 2
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+//
+// `init` returns (TX, RX). Both implement the STANDARD `embedded-io-async`
+// traits, so your application code stays portable:
+//
+//     async fn send<W: embedded_io_async::Write>(w: &mut W) { /* … */ }
+//     async fn recv<R: embedded_io_async::Read>(r: &mut R) { /* … */ }
+use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
+use embassy_stm32::interrupt::typelevel::Binding;
+use embassy_stm32::mode::Async;
+use embassy_stm32::usart::{
+    Config, DataBits, Instance, InterruptHandler, Parity, RingBufferedUartRx, RxDma, RxPin,
+    StopBits, TxDma, TxPin, Uart, UartTx,
+};
+use embassy_stm32::{peripherals, Peri};
+use static_cell::StaticCell;
+
+/// Bytes the DMA controller can receive without the CPU touching them. Reception
+/// never stops, so this only has to cover the longest gap between your reads.
+const RX_DMA_BUF: usize = 256;
+
+fn get_config() -> Config {
+    let mut config = Config::default();
+    config.baudrate = BAUDRATE;
+    config.data_bits = match DATA_BITS {
+        7 => DataBits::DataBits7,
+        9 => DataBits::DataBits9,
+        _ => DataBits::DataBits8,
+    };
+    config.parity = match PARITY {
+        'O' => Parity::ParityOdd,
+        'E' => Parity::ParityEven,
+        _ => Parity::ParityNone,
+    };
+    config.stop_bits = match STOP_BITS {
+        2 => StopBits::STOP2,
+        _ => StopBits::STOP1,
+    };
+    config
+}
+
+/// Initialise USART{N} on DMA, as (TX, RX).
+///
+/// No `bind_interrupts!` here: embassy takes ONE value that must bind this
+/// peripheral's interrupt AND both DMA channels', and only `main.rs` knows which
+/// channels those are — so the whole `Irqs` lives there.
+pub fn init<'d, TxD: TxDma<peripherals::USART{N}>, RxD: RxDma<peripherals::USART{N}>>(
+    usart: Peri<'d, peripherals::USART{N}>,
+    rx: Peri<'d, impl RxPin<peripherals::USART{N}>>,
+    tx: Peri<'d, impl TxPin<peripherals::USART{N}>>,
+    tx_dma: Peri<'d, TxD>,
+    rx_dma: Peri<'d, RxD>,
+    irqs: impl Binding<
+            <peripherals::USART{N} as Instance>::Interrupt,
+            InterruptHandler<peripherals::USART{N}>,
+        > + Binding<TxD::Interrupt, DmaInterruptHandler<TxD>>
+        + Binding<RxD::Interrupt, DmaInterruptHandler<RxD>>
+        + 'd,
+) -> (UartTx<'d, Async>, RingBufferedUartRx<'d>) {
+    let uart = Uart::new(usart, rx, tx, tx_dma, rx_dma, irqs, get_config()).unwrap();
+    let (tx, rx) = uart.split();
+    // `'static` so the DMA controller can own it for the program's lifetime.
+    static RX_BUF: StaticCell<[u8; RX_DMA_BUF]> = StaticCell::new();
+    (tx, rx.into_ring_buffered(RX_BUF.init([0; RX_DMA_BUF])))
+}
+
+// ── Using USART{N} ──
+// `init` gives you (tx, rx). Reception runs in the background from the moment
+// it returns, so a slow reader loses nothing as long as RX_DMA_BUF holds.
+//
+//     use embedded_io_async::{Read, Write};
+//
+//     let (mut tx, mut rx) = ({HANDLE}_tx, {HANDLE}_rx);
+//     tx.write_all(b"hello\r\n").await.ok();
+//
+//     let mut buf = [0u8; 32];
+//     let n = rx.read(&mut buf).await.unwrap(); // as much as has arrived
+"#;
+
 pub fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
     let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
     let data = cfg.map(|c| c.data_bits).unwrap_or(8);
@@ -446,8 +692,11 @@ pub fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| format!("_{s}"))
         .unwrap_or_default();
-    ASYNC_USART_TMPL
-        .replace("{HANDLE}", &format!("_serial{n}{sfx}"))
+    let tmpl = match cfg.map(|c| c.mode).unwrap_or_default() {
+        UsartMode::Dma => ASYNC_USART_TMPL_DMA,
+        UsartMode::Buffered => ASYNC_USART_TMPL,
+    };
+    tmpl.replace("{HANDLE}", &format!("_serial{n}{sfx}"))
         .replace("{N}", &n.to_string())
         .replace("{BAUD}", &baud.to_string())
         .replace("{DATA}", &data.to_string())
@@ -525,6 +774,8 @@ const CLOCK_HZ: u32 = {CLK};
 // backed by DMA. The DMA channels are passed in from `main.rs`.
 //
 //     async fn app<S: embedded_hal_async::spi::SpiBus<u8>>(spi: &mut S) { /* … */ }
+use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
+use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::spi::{
     Config, MisoPin, MosiPin, RxDma, SckPin, Spi, TxDma, MODE_0, MODE_1, MODE_2, MODE_3,
 };
@@ -544,15 +795,21 @@ fn get_config() -> Config {
 }
 
 /// Initialise SPI{N} as an async `embedded-hal-async` SpiBus value (DMA-backed).
-pub fn init<'d>(
+pub fn init<'d, TxD: TxDma<peripherals::SPI{N}>, RxD: RxDma<peripherals::SPI{N}>>(
     spi: Peri<'d, peripherals::SPI{N}>,
     sck: Peri<'d, impl SckPin<peripherals::SPI{N}>>,
     mosi: Peri<'d, impl MosiPin<peripherals::SPI{N}>>,
     miso: Peri<'d, impl MisoPin<peripherals::SPI{N}>>,
-    tx_dma: Peri<'d, impl TxDma<peripherals::SPI{N}>>,
-    rx_dma: Peri<'d, impl RxDma<peripherals::SPI{N}>>,
+    tx_dma: Peri<'d, TxD>,
+    rx_dma: Peri<'d, RxD>,
+    // embassy 0.6 requires the DMA channels' interrupts to be bound, and only
+    // `main.rs` knows WHICH channels those are — hence the named type params
+    // above instead of `impl TxDma<..>`: the bound below has to name them.
+    irqs: impl Binding<TxD::Interrupt, DmaInterruptHandler<TxD>>
+        + Binding<RxD::Interrupt, DmaInterruptHandler<RxD>>
+        + 'd,
 ) -> impl embedded_hal_async::spi::SpiBus<u8> + 'd {
-    Spi::new(spi, sck, mosi, miso, tx_dma, rx_dma, get_config())
+    Spi::new(spi, sck, mosi, miso, tx_dma, rx_dma, irqs, get_config())
 }
 
 // ── Using SPI{N} ──
@@ -653,16 +910,18 @@ const CLOCK_HZ: u32 = {CLK};
 // DMA. The DMA channels are passed in from `main.rs`.
 //
 //     async fn app<I: embedded_hal_async::i2c::I2c>(i2c: &mut I) { /* … */ }
+use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
 use embassy_stm32::i2c::{
-    Config, ErrorInterruptHandler, EventInterruptHandler, I2c, RxDma, SclPin, SdaPin, TxDma,
+    Config, ErrorInterruptHandler, EventInterruptHandler, I2c, Instance, RxDma, SclPin, SdaPin,
+    TxDma,
 };
+use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::time::Hertz;
-use embassy_stm32::{bind_interrupts, peripherals, Peri};
+use embassy_stm32::{peripherals, Peri};
 
-bind_interrupts!(struct Irqs {
-    I2C{N}_EV => EventInterruptHandler<peripherals::I2C{N}>;
-    I2C{N}_ER => ErrorInterruptHandler<peripherals::I2C{N}>;
-});
+// No `bind_interrupts!` here, unlike the non-DMA configs: `I2c::new` takes ONE
+// value that must bind the peripheral's two interrupts AND both DMA channels',
+// and the channels are only known in `main.rs`. So the whole `Irqs` lives there.
 
 fn get_config() -> Config {
     let mut config = Config::default();
@@ -671,14 +930,25 @@ fn get_config() -> Config {
 }
 
 /// Initialise I2C{N} as an async `embedded-hal-async` I2c value (DMA-backed).
-pub fn init<'d>(
+pub fn init<'d, TxD: TxDma<peripherals::I2C{N}>, RxD: RxDma<peripherals::I2C{N}>>(
     i2c: Peri<'d, peripherals::I2C{N}>,
     scl: Peri<'d, impl SclPin<peripherals::I2C{N}>>,
     sda: Peri<'d, impl SdaPin<peripherals::I2C{N}>>,
-    tx_dma: Peri<'d, impl TxDma<peripherals::I2C{N}>>,
-    rx_dma: Peri<'d, impl RxDma<peripherals::I2C{N}>>,
+    tx_dma: Peri<'d, TxD>,
+    rx_dma: Peri<'d, RxD>,
+    irqs: impl Binding<
+            <peripherals::I2C{N} as Instance>::EventInterrupt,
+            EventInterruptHandler<peripherals::I2C{N}>,
+        > + Binding<
+            <peripherals::I2C{N} as Instance>::ErrorInterrupt,
+            ErrorInterruptHandler<peripherals::I2C{N}>,
+        > + Binding<TxD::Interrupt, DmaInterruptHandler<TxD>>
+        + Binding<RxD::Interrupt, DmaInterruptHandler<RxD>>
+        + 'd,
 ) -> impl embedded_hal_async::i2c::I2c + 'd {
-    I2c::new(i2c, scl, sda, Irqs, tx_dma, rx_dma, get_config())
+    // Argument order matters and changed in embassy 0.6: the irq binding comes
+    // AFTER both DMA channels, not before them.
+    I2c::new(i2c, scl, sda, tx_dma, rx_dma, irqs, get_config())
 }
 
 // ── Using I2C{N} ──
@@ -712,4 +982,131 @@ pub fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
     tmpl.replace("{HANDLE}", &format!("_i2c{n}{sfx}"))
         .replace("{N}", &n.to_string())
         .replace("{CLK}", &clk.to_string())
+}
+
+#[cfg(test)]
+mod usart_mode_tests {
+    use super::*;
+    use crate::panels::mcu_module::modules::UsartModuleConfig;
+
+    fn cfg(mode: UsartMode) -> UsartModuleConfig {
+        UsartModuleConfig {
+            mode,
+            ..UsartModuleConfig::new(1)
+        }
+    }
+
+    #[test]
+    fn buffered_is_the_default_and_keeps_the_old_output() {
+        assert_eq!(UsartMode::default(), UsartMode::Buffered);
+        let f = usart_config_file(1, Some(&cfg(UsartMode::Buffered)));
+        assert!(f.contains("BufferedUart::new("), "{f}");
+        // The interrupt binding stays LOCAL here — only the DMA form has to
+        // hand it over to main.rs.
+        assert!(f.contains("bind_interrupts!(struct Irqs {"), "{f}");
+        assert!(!f.contains("RingBufferedUartRx"), "{f}");
+    }
+
+    #[test]
+    fn dma_splits_the_uart_so_read_survives() {
+        let f = usart_config_file(1, Some(&cfg(UsartMode::Dma)));
+        // The whole point: a bare `Uart<Async>` has `embedded_io_async::Write`
+        // but NOT `Read`, so the RX half must become a ring-buffered receiver.
+        assert!(
+            f.contains("-> (UartTx<'d, Async>, RingBufferedUartRx<'d>)"),
+            "{f}"
+        );
+        assert!(f.contains("rx.into_ring_buffered("), "{f}");
+        assert!(
+            f.contains("Uart::new(usart, rx, tx, tx_dma, rx_dma, irqs, get_config())"),
+            "{f}"
+        );
+        // No local `Irqs`: embassy wants one value binding the peripheral AND
+        // both channels, and only main.rs knows the channels. Matched on the
+        // INVOCATION, not the word - the doc comment above `init` explains why
+        // the macro is absent, and naming it there must not fail this.
+        assert!(!f.contains("bind_interrupts!(struct"), "{f}");
+        assert!(f.contains("irqs: impl Binding<"), "{f}");
+    }
+
+    #[test]
+    fn dma_mode_reaches_main_rs_as_a_pair_plus_bindings() {
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+        let mk = |name: &str, f: PinFunction| {
+            let mut p = Pin::new(1, name);
+            p.selected_function = f;
+            p
+        };
+        let pins = [
+            mk("PA9", PinFunction::UsartTx(1)),
+            mk("PA10", PinFunction::UsartRx(1)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let usart: BTreeMap<u8, UsartModuleConfig> =
+            [(1u8, cfg(UsartMode::Dma))].into_iter().collect();
+        let out = async_peripherals(
+            "stm32f4",
+            &refs,
+            &usart,
+            &Default::default(),
+            &Default::default(),
+        );
+        // A PAIR, not a single handle - the two halves have different types.
+        assert!(
+            out.init_calls
+                .contains("let (mut _serial1_tx, mut _serial1_rx) ="),
+            "{}",
+            out.init_calls
+        );
+        // On a family with a channel table the TODO is already resolved.
+        assert!(
+            out.init_calls.contains("p.DMA2_CH7, p.DMA2_CH5, Irqs"),
+            "{}",
+            out.init_calls
+        );
+        // A family WITHOUT one keeps the placeholder rather than guessing.
+        let bare = async_peripherals(
+            "stm32f2",
+            &refs,
+            &usart,
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(
+            bare.init_calls.contains("DMA_TX_TODO"),
+            "{}",
+            bare.init_calls
+        );
+        // The USART's own interrupt moved into main.rs's Irqs alongside the
+        // channels'; without this the project cannot build at all.
+        assert!(
+            out.dma_irqs
+                .contains("USART1 => embassy_stm32::usart::InterruptHandler"),
+            "{}",
+            out.dma_irqs
+        );
+        assert!(
+            out.any_async_dma,
+            "the DMA USART must pull in the async deps"
+        );
+
+        // Buffered takes none of that.
+        let usart: BTreeMap<u8, UsartModuleConfig> =
+            [(1u8, cfg(UsartMode::Buffered))].into_iter().collect();
+        let out = async_peripherals(
+            "stm32f4",
+            &refs,
+            &usart,
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(
+            out.init_calls.contains("let mut _serial1 ="),
+            "{}",
+            out.init_calls
+        );
+        assert!(out.dma_irqs.is_empty());
+        assert!(!out.any_async_dma);
+    }
 }

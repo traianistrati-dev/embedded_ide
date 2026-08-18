@@ -43,10 +43,7 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
 /// (which already has the MCU file's path) resolves the sibling IP file. `None`
 /// simply means no AF numbers are recorded, which is also the right answer for
 /// STM32F1 and for a lone XML copied out of the vendor repo.
-pub fn convert_xml_with_af(
-    xml: &str,
-    af: Option<&GpioAf>,
-) -> Result<Vec<ConvertedChip>, String> {
+pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<ConvertedChip>, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|e| format!("XML parse error: {e}"))?;
     let mcu = doc.root_element();
     // The document uses a default namespace (`xmlns="http://dummy.com"`), so we
@@ -1306,7 +1303,10 @@ mod tests {
         assert_eq!(map_signal("ADC1_EXTI11"), None);
         assert_eq!(map_signal("DAC1_EXTI9"), None);
         // …and "contains EXTI" is not the rule: only `_EXTI<digits>`.
-        assert_eq!(map_signal("SYS_EXTI_MUX").as_deref(), Some("af:sys_exti_mux"));
+        assert_eq!(
+            map_signal("SYS_EXTI_MUX").as_deref(),
+            Some("af:sys_exti_mux")
+        );
         // Everything a datasheet lists as a pin function SURVIVES. These were
         // dropped by the old prefix filter, which is why a pin showed three
         // functions where CubeMX showed eleven.

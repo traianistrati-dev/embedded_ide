@@ -13,7 +13,7 @@ pub mod persist;
 
 pub use model::{
     ApiStyle, AsyncBusMode, CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind,
-    ModuleSignal, Parity, SpiModuleConfig, StopBits, UsartModuleConfig, UsbModuleConfig,
+    ModuleSignal, Parity, SpiModuleConfig, StopBits, UsartMode, UsartModuleConfig, UsbModuleConfig,
     VirtualModule, module_signal_of,
 };
 
