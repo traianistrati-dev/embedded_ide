@@ -88,6 +88,79 @@ enum Action {
     },
 }
 
+/// Where to GET chip data, for a machine that does not have it yet.
+///
+/// The three links are not interchangeable, and the difference is the whole
+/// reason this is spelled out rather than being one "download" link: ST
+/// publishes the per-chip files openly, but the clock trees
+/// (`db/plugins/clock`) ship only inside CubeMX. Someone who clones the open
+/// repo expecting a Clock tab gets pins and a blank diagram.
+///
+/// Collapsed once a source with clock trees is present, because at that point
+/// this is answered — and open otherwise, because at that point it is the most
+/// useful thing on the screen.
+fn source_links(ui: &mut egui::Ui, have_clock: bool) {
+    if !have_clock {
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  Nothing here can supply a clock tree — chips will import with pins only.",
+                ph::WARNING
+            ))
+            .size(10.5)
+            .color(egui::Color32::from_rgb(225, 185, 60)),
+        );
+    }
+    egui::CollapsingHeader::new(
+        egui::RichText::new("Where to get chip data")
+            .size(10.5)
+            .color(egui::Color32::GRAY),
+    )
+    .id_salt("chip_data_links")
+    .default_open(!have_clock)
+    .show(ui, |ui| {
+        let note = |ui: &mut egui::Ui, text: &str| {
+            ui.label(
+                egui::RichText::new(text)
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(140)),
+            );
+        };
+
+        ui.hyperlink_to(
+            egui::RichText::new(format!("{} STM32CubeMX", ph::CPU)).size(11.0),
+            "https://www.st.com/en/development-tools/stm32cubemx.html",
+        );
+        note(
+            ui,
+            "The only official source of clock trees. Install it, then add its `db` folder \
+             above — nothing else needs to be run.",
+        );
+        ui.add_space(3.0);
+
+        ui.hyperlink_to(
+            egui::RichText::new(format!("{} STM32_open_pin_data", ph::GIT_BRANCH)).size(11.0),
+            "https://github.com/STMicroelectronics/STM32_open_pin_data",
+        );
+        note(
+            ui,
+            "ST's open chip data — pins, packages and memory, no clock trees. A git clone; \
+             add its `mcu` folder above.",
+        );
+        ui.add_space(3.0);
+
+        ui.hyperlink_to(
+            egui::RichText::new(format!("{} esden/stm32cube-database", ph::GIT_BRANCH)).size(11.0),
+            "https://github.com/esden/stm32cube-database",
+        );
+        note(
+            ui,
+            "A community mirror of the CubeMX database, clock trees included — for a machine \
+             with no CubeMX. It is an OLDER snapshot: the newest parts and RCC revisions are \
+             missing, so prefer a real installation where you have one.",
+        );
+    });
+}
+
 impl super::AppIde {
     /// Draw the search field, its results and the source list.
     pub(super) fn show_chip_search(&mut self, ui: &mut egui::Ui) {
@@ -302,6 +375,8 @@ impl super::AppIde {
                 .truncate(),
             );
         }
+        source_links(ui, cat.sources.iter().any(|s| s.has_clock()));
+
         for (ix, err) in &cat.errors {
             let where_ = cat
                 .sources
