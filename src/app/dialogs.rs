@@ -703,7 +703,7 @@ impl AppIde {
     /// the user `mcus/` folder (Phase 3). A range file (`STM32F103C(8-B)Tx`)
     /// expands into several chips; only variants whose form validates are
     /// saved. Result summary lands in `mcu_import_status`.
-    fn import_stm32_pin_data(&mut self, paths: &[std::path::PathBuf]) {
+    pub(super) fn import_stm32_pin_data(&mut self, paths: &[std::path::PathBuf]) {
         let mut saved = 0usize;
         let mut skipped = 0usize;
         let mut last_id: Option<String> = None;
@@ -1055,6 +1055,15 @@ impl AppIde {
                         }
                     }
                 });
+
+                // ── Search the vendor data on this machine ────────────
+                // The row above picks from what the IDE already knows; this
+                // reaches the ~2800 parts ST ships data for, by part number
+                // rather than by hunting for the file that happens to hold it.
+                ui.add_space(6.0);
+                ui.separator();
+                self.show_chip_search(ui);
+                ui.separator();
 
                 // Last import result (persists until the popup closes).
                 if let Some(msg) = &self.mcu_import_status {

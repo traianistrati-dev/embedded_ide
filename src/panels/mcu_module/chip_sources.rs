@@ -117,6 +117,63 @@ pub fn detect() -> Vec<ChipSource> {
         .collect()
 }
 
+/// Where the folders the user pointed at are remembered.
+///
+/// Beside the MCU registry, under the same per-user config dir — a source is
+/// machine-level, like the chip definitions it feeds, and has no business in a
+/// project's files.
+fn saved_paths_file() -> Option<PathBuf> {
+    super::registry::user_config_dir().map(|d| d.join("chip_sources.ron"))
+}
+
+/// Folders the user added by hand, in the order they were added.
+///
+/// Paths that have since gone (an unmounted drive, a deleted checkout) are kept
+/// in the file but simply fail to classify in [`all_sources`] — dropping them
+/// silently would lose a source the moment a drive was offline once.
+pub fn saved_paths() -> Vec<PathBuf> {
+    let Some(file) = saved_paths_file() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return Vec::new();
+    };
+    ron::from_str::<Vec<String>>(&text)
+        .map(|v| v.into_iter().map(PathBuf::from).collect())
+        .unwrap_or_default()
+}
+
+/// Replace the remembered folders.
+pub fn save_paths(paths: &[PathBuf]) -> Result<(), String> {
+    let file = saved_paths_file().ok_or("no user config directory")?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let list: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let text = ron::to_string(&list).map_err(|e| e.to_string())?;
+    std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Every source to search: the ones found automatically, then the ones the user
+/// added.
+///
+/// De-duplicated by chip directory, so pointing at a CubeMX install that was
+/// already detected adds nothing rather than doubling every part in it.
+pub fn all_sources() -> Vec<ChipSource> {
+    let mut out = detect();
+    for path in saved_paths() {
+        if let Some(src) = from_path(&path)
+            && !out.iter().any(|s| s.chips == src.chips)
+        {
+            out.push(src);
+        }
+    }
+    out
+}
+
 /// Classify a folder the user picked, if it is a usable source.
 ///
 /// Deliberately forgiving about WHICH folder: people point at the CubeMX

@@ -26,6 +26,7 @@ use helpers::apply_dark_theme;
 mod clock_import_dialog;
 mod clone_project_dialog;
 mod datasheet_import_dialog;
+mod chip_search_ui;
 mod dialogs;
 mod extract_crate_dialog;
 mod mcu_form_dialog;
@@ -1379,6 +1380,9 @@ pub struct AppIde {
     /// Chip `id` staged inside the "New Project" popup.
     /// `None` = "Empty" (no chip change on confirm).
     pending_mcu_id: Option<String>,
+    /// The New Project chip-search field: its query, the catalogue of vendor
+    /// chips on this machine, and the worker indexing it.
+    chip_search: chip_search_ui::ChipSearchState,
     /// Last "Import MCU…" result message shown in the New Project popup
     /// (`✔ …` on success, `✗ …` on failure). Cleared when the popup closes.
     mcu_import_status: Option<String>,
@@ -1886,6 +1890,7 @@ impl AppIde {
             renaming_folder: None,
             confirm_new_project: false,
             pending_mcu_id: None,
+            chip_search: Default::default(),
             mcu_import_status: None,
             mcu_form: None,
             mcu_form_clock_note: None,
