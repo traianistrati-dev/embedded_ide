@@ -269,26 +269,43 @@ pub fn draw_graph_clock(
             }
             // Re-space a figure that was imported before, or arranged into a
             // mess. Works off the CURRENT positions, so it keeps the ordering
-            // (which column is left of which, which nodes share a row) and only
-            // fixes the spacing — the same thing an import now does on arrival.
-            if !gc.layout.nodes.is_empty()
-                && ui
-                    .button(format!("{} Tidy up the layout", ph::ARROWS_IN))
-                    .on_hover_text(
-                        "Re-space the diagram so nothing overlaps, keeping the arrangement.                          Discards positions you dragged.",
-                    )
-                    .clicked()
-            {
-                let boxes = std::mem::take(&mut gc.layout.nodes);
-                gc.layout = super::graph::derive(
-                    &gc.graph,
-                    super::graph::auto_layout::respace(&gc.graph, boxes),
-                );
-                positions.clear();
-                view.pos_sig = positions_signature(positions);
-                view.adjusted = false;
-                (*note) = "Layout re-spaced.".to_owned();
-                ui.close();
+            // (which column is left of which) and only fixes the spacing.
+            //
+            // Three settings because there is a real trade-off and no right
+            // answer: merging vendor rows packs the figure down hard — a U5 goes
+            // from 45 rows to a handful — but rows that merge are rows that no
+            // longer align, and alignment is what keeps wires straight.
+            if !gc.layout.nodes.is_empty() {
+                ui.menu_button(format!("{} Tidy up the layout", ph::ARROWS_IN), |ui| {
+                    for spread in super::graph::auto_layout::Spread::ALL {
+                        if ui
+                            .button(spread.label())
+                            .on_hover_text(match spread {
+                                super::graph::auto_layout::Spread::Min => {
+                                    "Densest - rows merge freely, so the whole tree fits on                                      screen sooner"
+                                }
+                                super::graph::auto_layout::Spread::Mid => {
+                                    "A middle ground between size and alignment"
+                                }
+                                super::graph::auto_layout::Spread::Max => {
+                                    "Loosest - one row per row the vendor drew, best aligned,                                      largest canvas"
+                                }
+                            })
+                            .clicked()
+                        {
+                            let boxes = std::mem::take(&mut gc.layout.nodes);
+                            gc.layout = super::graph::derive(
+                                &gc.graph,
+                                super::graph::auto_layout::respace(&gc.graph, boxes, spread),
+                            );
+                            positions.clear();
+                            view.pos_sig = positions_signature(positions);
+                            view.adjusted = false;
+                            (*note) = format!("Layout re-spaced ({}).", spread.label());
+                            ui.close();
+                        }
+                    }
+                });
             }
             ui.separator();
             if let Some(ClockConfig::Graph(new_gc)) = tree_sources(ui, family, limits, note) {

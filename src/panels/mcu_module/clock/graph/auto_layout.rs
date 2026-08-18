@@ -256,11 +256,67 @@ pub fn options_for(graph: &ClockGraph, node: &Node) -> Option<Vec<(String, NodeS
 
 // ── Re-spacing an imported figure ─────────────────────────────────────────────
 
-/// Two vendor coordinates this close mean the same column (or row) — CubeMX
-/// jitters them by a pixel or two.
+/// How tightly a re-spaced figure is packed.
+///
+/// The lever is the ROW COUNT, because that is what dominates: a U5 tree at the
+/// finest setting is 45 rows by 27 columns — 1215 cells holding 124 nodes, so
+/// nine cells in ten are air. Merging vendor rows that are near each other packs
+/// the figure down without touching the left-to-right order, which is the part a
+/// reader actually navigates by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Spread {
+    /// Densest: rows merge freely, gaps are tight.
+    Min,
+    /// The middle ground, and the default.
+    #[default]
+    Mid,
+    /// Loosest: one row per vendor row, generous gaps. Closest to ST's own
+    /// drawing, and the most aligned — at the cost of a very large canvas.
+    Max,
+}
+
+impl Spread {
+    pub const ALL: [Spread; 3] = [Spread::Min, Spread::Mid, Spread::Max];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Spread::Min => "Min",
+            Spread::Mid => "Mid",
+            Spread::Max => "Max",
+        }
+    }
+
+    /// How far apart two vendor rows can be and still merge into one.
+    fn row_tol(self) -> f32 {
+        match self {
+            Spread::Min => 150.0,
+            Spread::Mid => 60.0,
+            Spread::Max => 12.0,
+        }
+    }
+
+    /// Blank space between one node's frequency tag and the next node's label.
+    fn row_gap(self) -> f32 {
+        match self {
+            Spread::Min => 6.0,
+            Spread::Mid => 12.0,
+            Spread::Max => 22.0,
+        }
+    }
+
+    fn col_gap(self) -> f32 {
+        match self {
+            Spread::Min => 14.0,
+            Spread::Mid => 26.0,
+            Spread::Max => 40.0,
+        }
+    }
+}
+
+/// Two vendor coordinates this close mean the same COLUMN — CubeMX jitters them
+/// by a pixel or two. Columns are never merged beyond that: which node is left
+/// of which is the one thing the vendor arrangement is worth keeping for.
 const CLUSTER_TOL: f32 = 12.0;
-/// Blank space between two columns, after the widest box in the left one.
-const COL_GAP: f32 = 26.0;
 const MIN_NODE_W: f32 = 64.0;
 const MAX_NODE_W: f32 = 168.0;
 
@@ -285,8 +341,6 @@ const INPUT_PITCH: f32 = 13.0;
 const LABEL_H: f32 = 15.0;
 /// …and BELOW it: the frequency tag (9 px mono, centred at `y + h + 12`).
 const TAG_H: f32 = 20.0;
-/// Blank space between one node's tag and the next node's label.
-const ROW_GAP: f32 = 14.0;
 
 /// Roughly how wide a node needs to be, from the text it has to hold.
 ///
@@ -299,7 +353,7 @@ fn node_width(id: &str) -> f32 {
 }
 
 /// Group sorted coordinates into clusters, returning each value's cluster index.
-fn cluster(values: &[f32]) -> Vec<usize> {
+fn cluster(values: &[f32], tol: f32) -> Vec<usize> {
     let mut order: Vec<usize> = (0..values.len()).collect();
     order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
     let mut ix = vec![0usize; values.len()];
@@ -308,7 +362,7 @@ fn cluster(values: &[f32]) -> Vec<usize> {
     for &i in &order {
         if anchor == f32::NEG_INFINITY {
             anchor = values[i];
-        } else if values[i] - anchor > CLUSTER_TOL {
+        } else if values[i] - anchor > tol {
             current += 1;
             anchor = values[i];
         }
@@ -339,12 +393,15 @@ fn cluster(values: &[f32]) -> Vec<usize> {
 ///
 /// Import-only, deliberately: running this over a layout the user has dragged
 /// would throw their arrangement away.
-pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
+pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>, spread: Spread) -> Vec<NodeBox> {
     if boxes.is_empty() {
         return boxes;
     }
-    let cols = cluster(&boxes.iter().map(|b| b.x).collect::<Vec<_>>());
-    let rows = cluster(&boxes.iter().map(|b| b.y).collect::<Vec<_>>());
+    let cols = cluster(&boxes.iter().map(|b| b.x).collect::<Vec<_>>(), CLUSTER_TOL);
+    let rows = cluster(
+        &boxes.iter().map(|b| b.y).collect::<Vec<_>>(),
+        spread.row_tol(),
+    );
 
     // Column x is cumulative, so a column of long names widens only itself.
     let n_cols = cols.iter().copied().max().unwrap_or(0) + 1;
@@ -356,7 +413,7 @@ pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
     let mut x = MARGIN;
     for w in &col_w {
         col_x.push(x);
-        x += w + COL_GAP;
+        x += w + spread.col_gap();
     }
 
     // Two nodes can share a cell (the vendor stacked them within the tolerance);
@@ -414,7 +471,7 @@ pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>) -> Vec<NodeBox> {
     let mut y = MARGIN;
     for h in &row_h {
         row_y.push(y);
-        y += LABEL_H + h + TAG_H + ROW_GAP;
+        y += LABEL_H + h + TAG_H + spread.row_gap();
     }
 
     boxes

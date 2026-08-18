@@ -649,7 +649,10 @@ pub fn bind_graph(
     // The vendor's coordinates are read as ORDER, not position — see
     // `auto_layout::respace`. Import is the only place this may run: it would
     // otherwise throw away an arrangement the user had dragged.
-    let layout = super::derive(&graph, super::auto_layout::respace(&graph, boxes));
+    let layout = super::derive(
+        &graph,
+        super::auto_layout::respace(&graph, boxes, super::auto_layout::Spread::default()),
+    );
     (
         super::GraphClock {
             graph,
@@ -790,9 +793,47 @@ mod chip_import_tests {
 
         // What the vendor coordinates gave us, for comparison.
         let before = overlaps(&raw);
-        let spaced = super::super::auto_layout::respace(&graph, raw);
+        // Every setting must be overlap-free; the report is what each costs.
+        use super::super::auto_layout::Spread;
+        for s in Spread::ALL {
+            let b = super::super::auto_layout::respace(&graph, raw.clone(), s);
+            let w = b.iter().map(|x| x.x + x.w).fold(0.0f32, f32::max);
+            let h = b.iter().map(|x| x.y + x.h).fold(0.0f32, f32::max);
+            let mut ys: Vec<i32> = b.iter().map(|x| x.y as i32).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            let lay = super::super::derive(&graph, b.clone());
+            println!(
+                "{:>3}: {w:.0}x{h:.0} · {} rows · {} straight of {} wires · {} overlaps",
+                s.label(),
+                ys.len(),
+                lay.wires.iter().filter(|w| w.len() == 2).count(),
+                lay.wires.len(),
+                overlaps(&b)
+            );
+            assert_eq!(overlaps(&b), 0, "{:?} overlaps", s);
+        }
+        let spaced = super::super::auto_layout::respace(&graph, raw, Spread::default());
         let after = overlaps(&spaced);
         println!("{} nodes · overlaps {before} -> {after}", spaced.len());
+        {
+            let w = spaced.iter().map(|b| b.x + b.w).fold(0.0f32, f32::max);
+            let h = spaced.iter().map(|b| b.y + b.h).fold(0.0f32, f32::max);
+            let mut ys: Vec<i32> = spaced.iter().map(|b| b.y as i32).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            let mut xs: Vec<i32> = spaced.iter().map(|b| b.x as i32).collect();
+            xs.sort_unstable();
+            xs.dedup();
+            // How much of the height is air a column does not need: each row is
+            // as tall as its tallest member, across every column.
+            let own: f32 = spaced.iter().map(|b| b.h).sum::<f32>() / xs.len() as f32;
+            println!(
+                "canvas {w:.0}x{h:.0} · {} columns x {} rows · mean column content {own:.0} px",
+                xs.len(),
+                ys.len()
+            );
+        }
         assert_eq!(after, 0, "nothing may sit on top of anything else");
         assert!(before > 0, "the bug was real, or this test proves nothing");
 
