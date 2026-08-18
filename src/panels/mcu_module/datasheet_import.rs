@@ -3211,13 +3211,17 @@ mod tests {
         );
         // Signals with no native model are listed once, deduped, in the report…
         assert!(r.raw_notes.iter().any(|n| n.contains("SAI1_SD_A")));
-        // …not the ones the grammar now covers, and not noise.
+        // An oscillator pin is one of those now: it is a real pin function
+        // carried generically, not noise, so it is reported like SAI is.
+        assert!(r.raw_notes.iter().any(|n| n.contains("RCC_OSC32_IN")));
+        // …but not the ones the grammar covers natively, and not true noise.
         assert!(
-            !r.raw_notes.iter().any(|n| n.contains("LPUART1_TX")
-                || n.contains("SPI1_RDY")
-                || n.contains("EVENTOUT")
-                || n.contains("RCC_OSC32_IN")),
-            "mapped signals and noise must not be reported: {:?}",
+            !r.raw_notes
+                .iter()
+                .any(|n| n.contains("LPUART1_TX")
+                    || n.contains("SPI1_RDY")
+                    || n.contains("EVENTOUT")),
+            "natively mapped signals and noise must not be reported: {:?}",
             r.raw_notes
         );
         // The model can no longer produce invalid tokens, so no token warnings.

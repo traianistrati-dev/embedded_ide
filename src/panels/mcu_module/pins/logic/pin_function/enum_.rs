@@ -17,6 +17,12 @@ pub enum PinFunction {
     // ── GPIO ────────────────────────────────────────────────────────────────
     GpioInput,
     GpioOutput,
+    /// Analog mode — the digital buffer is off and the pin is left to an
+    /// on-chip analog block. NOT the same as [`PinFunction::AdcChannel`]: that
+    /// one names a specific ADC input, this is the pin state a datasheet calls
+    /// "additional function / analog" and CubeMX calls `GPIO_Analog`. Every
+    /// GPIO whose vendor `IOModes` lists `Analog` offers it.
+    GpioAnalog,
 
     // ── ADC ─────────────────────────────────────────────────────────────────
     /// Analog input — ADC{adc} channel {channel}

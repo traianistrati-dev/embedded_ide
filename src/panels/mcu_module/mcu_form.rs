@@ -645,6 +645,7 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
     let simple = match t.as_str() {
         "in" | "gpioinput" => Some(PinFunction::GpioInput),
         "out" | "gpiooutput" => Some(PinFunction::GpioOutput),
+        "analog" | "gpioanalog" => Some(PinFunction::GpioAnalog),
         "swdio" => Some(PinFunction::SwdIo),
         "swclk" => Some(PinFunction::SwdClk),
         "usb_dm" => Some(PinFunction::UsbDm),
@@ -715,6 +716,7 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::Unset => return None,
         PinFunction::GpioInput => "in".into(),
         PinFunction::GpioOutput => "out".into(),
+        PinFunction::GpioAnalog => "analog".into(),
         PinFunction::SwdIo => "swdio".into(),
         PinFunction::SwdClk => "swclk".into(),
         PinFunction::UsbDm => "usb_dm".into(),

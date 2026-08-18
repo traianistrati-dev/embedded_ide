@@ -8,6 +8,9 @@ impl PinFunction {
             PinFunction::Unset => egui::Color32::LIGHT_BLUE,
             PinFunction::GpioInput => egui::Color32::from_rgb(70, 160, 70),
             PinFunction::GpioOutput => egui::Color32::from_rgb(200, 120, 50),
+            // Analog mode shares the ADC purple: what it does is hand the pin
+            // to an analog block, it just doesn't name which one.
+            PinFunction::GpioAnalog => egui::Color32::from_rgb(150, 70, 200),
             PinFunction::AdcChannel { .. } => egui::Color32::from_rgb(150, 70, 200),
             PinFunction::TimerPwm { .. } => egui::Color32::from_rgb(190, 170, 30),
             PinFunction::UsartTx(_)

@@ -1964,7 +1964,11 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
             let m = mode.unwrap_or(GpioMode::PushPull).into_method();
             format!("{m}(&mut {pv}.{crx})")
         }
-        PinFunction::AdcChannel { .. } => format!("into_analog(&mut {pv}.{crx})"),
+        // Same call as an ADC channel: analog mode IS `into_analog`, it just
+        // doesn't name which analog block reads the pin.
+        PinFunction::GpioAnalog | PinFunction::AdcChannel { .. } => {
+            format!("into_analog(&mut {pv}.{crx})")
+        }
         PinFunction::TimerPwm { .. } => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
         // LPUART / SPI-RDY don't exist on STM32F1; they're grouped with their
         // closest USART/SPI analogue so the mode stays sane if ever selected.

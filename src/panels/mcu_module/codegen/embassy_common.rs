@@ -204,13 +204,21 @@ mod emit_for_manual_compile {
             .iter_all_pins()
             .filter(|p| !p.reserved)
             .map(|p| p.number)
-            .take(2)
+            .take(3)
             .collect();
         if let Some(p) = mcu.find_pin_mut(nums[0]) {
             p.selected_function = PinFunction::GpioOutput;
         }
         if let Some(p) = mcu.find_pin_mut(nums[1]) {
             p.selected_function = PinFunction::GpioInput;
+        }
+        // Analog mode too — a pin state with no embassy type of its own, so the
+        // backend binds the raw singleton. Included here because "it compiles"
+        // is the only real check for that.
+        if let Some(n) = nums.get(2).copied() {
+            if let Some(p) = mcu.find_pin_mut(n) {
+                p.selected_function = PinFunction::GpioAnalog;
+            }
         }
         let main_rs = mcu.fresh_main_rs();
         let files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);

@@ -12,10 +12,11 @@
 //! token grammar, validation and clock model); the caller saves the ones whose
 //! [`McuForm::errors`] is empty as `.ron`, exactly like the New MCU form.
 //!
-//! Signals that don't map to the IDE's function-token grammar (SDMMC, FMC,
-//! `TIMx_CHyN`, `ADCx_EXTI…`, oscillator/JTAG, …) are simply dropped — every
-//! I/O pin still carries `in out` from its `GPIO` signal, which is what the
-//! Pins canvas needs.
+//! Signals the IDE has no dedicated `PinFunction` for (SDMMC, FMC, `TIMx_CHyN`,
+//! RTC tamper/timestamp, the trace pins, oscillator pins, …) are NOT dropped:
+//! they are carried as generic `af:<name>` tokens and shown on the pin with
+//! their datasheet name. The only exclusions are the `ADCx_EXTIn` / `DACx_EXTIn`
+//! trigger lines and `EVENTOUT` — see `is_noise_signal`.
 
 use super::mcu_catalog::ToolchainKind;
 use super::mcu_def::{GridCellDef, PinDef, PinGridDef};
@@ -86,7 +87,22 @@ pub fn convert_xml(xml: &str) -> Result<Vec<ConvertedChip>, String> {
                         .children()
                         .filter(|n| n.is_element() && n.tag_name().name() == "Signal")
                     {
-                        if let Some(tok) = sig.attribute("Name").and_then(map_signal) {
+                        let name = sig.attribute("Name").unwrap_or("");
+                        // The GPIO signal carries the pin's I/O MODES in an
+                        // attribute — `IOModes="Input,Output,Analog,EXTI"`. It is
+                        // where CubeMX's `GPIO_Analog` row comes from, and it was
+                        // ignored: `GPIO` mapped to a flat "in out" for every pin,
+                        // analog-capable or not.
+                        let mut mapped = sig.attribute("Name").and_then(map_signal);
+                        if name == "GPIO" {
+                            if let Some(extra) = gpio_mode_tokens(sig.attribute("IOModes")) {
+                                mapped = Some(match mapped {
+                                    Some(m) => format!("{m} {extra}"),
+                                    None => extra,
+                                });
+                            }
+                        }
+                        if let Some(tok) = mapped {
                             for t in tok.split_whitespace() {
                                 if !tokens.iter().any(|x| x == t) {
                                     tokens.push(t.to_string());
@@ -250,20 +266,34 @@ pub(crate) fn is_exposed_pad(name: &str) -> bool {
         || squashed == "PAD"
 }
 
-/// Signals with no pin function worth modelling: the per-pin interrupt/event
-/// lines every I/O carries, plus debug/JTAG, oscillator + clock-control and RTC
-/// housekeeping. These are the ONLY signals dropped. `pub(crate)` — shared with
-/// the AI datasheet import.
+/// Signals that are not a pin FUNCTION at all. These are the only ones dropped;
+/// everything else survives, natively or as a generic `af:` token.
+///
+/// It used to drop by prefix — `RCC_`, `RTC_`, `SYS_`, `DEBUG`, anything with
+/// `EXTI` or `WKUP` — which swallowed whole peripherals: `RTC_TS`, `RTC_TAMP1`,
+/// `RTC_OUT_ALARM`, `SYS_WKUP2`, `RCC_OSC_IN`, `SYS_PVD_IN`, the trace pins…
+/// all real functions a datasheet lists, and all things CubeMX offers on the
+/// pin. Across the vendor corpus those prefixes cover 2237 distinct signal
+/// names, of which only the EXTI trigger lines are genuinely not pin functions.
+///
+/// `pub(crate)` — shared with the AI datasheet import, so both paths agree.
 pub(crate) fn is_noise_signal(sig: &str) -> bool {
     let s = sig.trim();
-    s.is_empty()
-        || s == "EVENTOUT"
-        || s.contains("EXTI")
-        || s.contains("WKUP")
-        || s.starts_with("RCC_")
-        || s.starts_with("RTC_")
-        || s.starts_with("SYS_")
-        || s.starts_with("DEBUG")
+    s.is_empty() || s == "EVENTOUT" || is_exti_trigger(s)
+}
+
+/// `ADC1_EXTI15`, `DAC1_EXTI9` — the EXTI line a peripheral can be TRIGGERED
+/// from. It says something about the peripheral's wiring, not about what this
+/// pin can be configured as, and the IDE models a pin's interrupt as an EDGE on
+/// a GPIO input (`Pin.irq`) rather than as a function.
+///
+/// Matched by SHAPE (`_EXTI` + digits, nothing after) rather than by
+/// `contains("EXTI")`: in the vendor corpus that shape is exclusively
+/// `ADCx_EXTIn` / `DACx_EXTIn`.
+fn is_exti_trigger(s: &str) -> bool {
+    s.split_once("_EXTI").is_some_and(|(head, n)| {
+        !head.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+    })
 }
 
 /// Map one STM32 signal name to the IDE's function token(s).
@@ -282,6 +312,20 @@ pub(crate) fn map_signal(sig: &str) -> Option<String> {
         return None;
     }
     Some(format!("af:{}", sig.trim().to_ascii_lowercase()))
+}
+
+/// Extra tokens implied by the GPIO signal's `IOModes` attribute.
+///
+/// `Input` / `Output` are already covered by mapping `GPIO` itself, and `EXTI` is
+/// modelled as an edge on a GPIO input (`Pin.irq`), not as a function — so the
+/// only mode that adds anything here is **Analog**, which is exactly the
+/// `GPIO_Analog` entry CubeMX shows and the IDE used to lack.
+fn gpio_mode_tokens(io_modes: Option<&str>) -> Option<String> {
+    let modes = io_modes?;
+    modes
+        .split(',')
+        .any(|m| m.trim().eq_ignore_ascii_case("Analog"))
+        .then(|| "analog".to_owned())
 }
 
 /// The natively-modelled subset — `None` when the IDE has no dedicated
@@ -684,6 +728,77 @@ mod tests {
     </Pin>
 </Mcu>"#;
 
+    /// PC13 of the STM32F358CCTx, copied verbatim from the vendor XML — the pin
+    /// from the report: CubeMX offered eleven entries, the IDE showed three.
+    ///
+    /// Seven of the eleven come from these `<Signal>`s; the rest CubeMX derives
+    /// (Reset_State, and Analog/EXTI from the GPIO `IOModes` attribute, which
+    /// this importer still does not read).
+    const F358_PC13: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Mcu Family="STM32F3" Line="STM32F358" Package="LQFP48" RefName="STM32F358CCTx" xmlns="http://dummy.com">
+    <Core>Arm Cortex-M4</Core>
+    <Ram>40</Ram>
+    <Flash>256</Flash>
+    <Pin Name="PC13" Position="2" Type="I/O">
+        <Signal Name="RTC_OUT_ALARM"/>
+        <Signal Name="RTC_OUT_CALIB"/>
+        <Signal Name="RTC_TAMP1"/>
+        <Signal Name="RTC_TS"/>
+        <Signal Name="SYS_WKUP2"/>
+        <Signal Name="TIM1_CH1N"/>
+        <Signal IOModes="Input,Output,Analog,EXTI" Name="GPIO"/>
+    </Pin>
+    <Pin Name="PA13" Position="34" Type="I/O">
+        <Signal Name="SYS_JTMS-SWDIO"/>
+        <Signal Name="ADC1_EXTI11"/>
+        <Signal IOModes="Input,Output,Analog,EVENTOUT,EXTI" Name="GPIO"/>
+    </Pin>
+</Mcu>"#;
+
+    /// Every signal the datasheet lists for a pin reaches the pin. The old
+    /// prefix filter dropped `RTC_*` and `SYS_WKUP*` wholesale, which is why
+    /// PC13 showed 3 functions against CubeMX's 11.
+    #[test]
+    fn a_pins_datasheet_functions_are_not_dropped_by_prefix() {
+        let chips = convert_xml(F358_PC13).expect("parses");
+        let form = &chips[0].form;
+        let pc13 = find(form, "PC13");
+
+        for expected in [
+            "af:rtc_out_alarm",
+            "af:rtc_out_calib",
+            "af:rtc_tamp1",
+            "af:rtc_ts",
+            "af:sys_wkup2",
+            "af:tim1_ch1n",
+            "in",
+            "out",
+            // From the GPIO signal's `IOModes="…,Analog,…"` attribute — CubeMX's
+            // `GPIO_Analog` row, which the importer used to ignore entirely.
+            "analog",
+        ] {
+            assert!(
+                pc13.functions.split_whitespace().any(|t| t == expected),
+                "PC13 must keep {expected}, got: {}",
+                pc13.functions
+            );
+        }
+        assert_eq!(
+            pc13.functions.split_whitespace().count(),
+            9,
+            "six af tokens + in + out + analog: {}",
+            pc13.functions
+        );
+        // CubeMX lists ELEVEN rows for this pin. The two we do not produce are
+        // deliberate: `Reset_State` is our `Unset`, and `GPIO_EXTI13` is an EDGE
+        // on a GPIO input (`Pin.irq`), not a function.
+
+        // The EXTI TRIGGER line is still dropped, and the native mapping still
+        // wins over the generic fallback.
+        let pa13 = find(form, "PA13");
+        assert_eq!(pa13.functions, "swdio in out analog", "{}", pa13.functions);
+    }
+
     /// A WLCSP fixture in the shape ST publishes: `Position` is a package
     /// DESIGNATOR, not a number. Six of the twelve balls of the C011 part, which
     /// is enough to pin down the staggered pattern and the grid extent.
@@ -935,12 +1050,29 @@ mod tests {
         assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("af:quadspi_clk"));
         assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("af:tim1_ch1n"));
         assert_eq!(map_signal("I2C1_SMBA").as_deref(), Some("af:i2c1_smba"));
-        // Only true noise is dropped — and natives still win over it.
+        // Only the EXTI TRIGGER lines and EVENTOUT are dropped…
         assert_eq!(map_signal("EVENTOUT"), None);
         assert_eq!(map_signal("ADC1_EXTI11"), None);
-        assert_eq!(map_signal("RCC_OSC_IN"), None);
-        assert_eq!(map_signal("SYS_JTDI"), None);
+        assert_eq!(map_signal("DAC1_EXTI9"), None);
+        // …and "contains EXTI" is not the rule: only `_EXTI<digits>`.
+        assert_eq!(map_signal("SYS_EXTI_MUX").as_deref(), Some("af:sys_exti_mux"));
+        // Everything a datasheet lists as a pin function SURVIVES. These were
+        // dropped by the old prefix filter, which is why a pin showed three
+        // functions where CubeMX showed eleven.
+        assert_eq!(map_signal("RTC_TS").as_deref(), Some("af:rtc_ts"));
+        assert_eq!(map_signal("RTC_TAMP1").as_deref(), Some("af:rtc_tamp1"));
+        assert_eq!(
+            map_signal("RTC_OUT_ALARM").as_deref(),
+            Some("af:rtc_out_alarm")
+        );
+        assert_eq!(map_signal("SYS_WKUP2").as_deref(), Some("af:sys_wkup2"));
+        assert_eq!(map_signal("SYS_PVD_IN").as_deref(), Some("af:sys_pvd_in"));
+        assert_eq!(map_signal("SYS_TRACED0").as_deref(), Some("af:sys_traced0"));
+        assert_eq!(map_signal("RCC_OSC_IN").as_deref(), Some("af:rcc_osc_in"));
+        assert_eq!(map_signal("SYS_JTDI").as_deref(), Some("af:sys_jtdi"));
+        // Natives still win over the fallback.
         assert_eq!(map_signal("SYS_JTMS-SWDIO").as_deref(), Some("swdio"));
+        assert_eq!(map_signal("DEBUG_JTCK-SWCLK").as_deref(), Some("swclk"));
         assert_eq!(map_signal("RCC_MCO").as_deref(), Some("mco"));
         // Grammar extension: LPUART / RTS_DE / SPI_RDY are no longer dropped.
         assert_eq!(map_signal("LPUART1_TX").as_deref(), Some("lpuart1_tx"));
@@ -1000,5 +1132,33 @@ mod tests {
     fn rejects_non_mcu_xml() {
         assert!(convert_xml("<Root/>").is_err());
         assert!(convert_xml("not xml at all <<<").is_err());
+    }
+}
+
+#[cfg(test)]
+mod gpio_mode_tests {
+    use super::gpio_mode_tokens;
+
+    /// Only `Analog` adds a token: Input/Output already come from mapping the
+    /// `GPIO` signal itself, and EXTI/EVENTOUT are not functions here.
+    #[test]
+    fn only_analog_becomes_a_token() {
+        assert_eq!(
+            gpio_mode_tokens(Some("Input,Output,Analog,EXTI")).as_deref(),
+            Some("analog")
+        );
+        assert_eq!(
+            gpio_mode_tokens(Some("Input,Output,Analog,EVENTOUT,EXTI")).as_deref(),
+            Some("analog")
+        );
+        // A pin that is not analog-capable gains nothing.
+        assert_eq!(gpio_mode_tokens(Some("Input,Output,EXTI")), None);
+        // Absent attribute (older files, other signals) is not an error.
+        assert_eq!(gpio_mode_tokens(None), None);
+        // Spacing and case as they might appear in a hand-edited file.
+        assert_eq!(
+            gpio_mode_tokens(Some("Input, output , ANALOG")).as_deref(),
+            Some("analog")
+        );
     }
 }

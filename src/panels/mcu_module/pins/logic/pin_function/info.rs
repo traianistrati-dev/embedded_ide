@@ -9,6 +9,21 @@ impl PinFunction {
                 specs: vec![],
             },
 
+            PinFunction::GpioAnalog => FunctionInfo {
+                description: "Analog mode. The digital input buffer and the pull resistors are disabled and the pad is left to an on-chip analog block (ADC, DAC, comparator, op-amp). Use it when the datasheet lists an analog additional function on this pin but the IDE has no dedicated entry for it — an ADC input that IS listed is better selected as such, since that one also names the channel."
+                    .into(),
+                specs: vec![
+                    (
+                        "Consumption".into(),
+                        "Lowest-leakage pin state — the recommended setting for unused pins".into(),
+                    ),
+                    (
+                        "Digital read".into(),
+                        "None: the input buffer is off, so the pin always reads 0".into(),
+                    ),
+                ],
+            },
+
             PinFunction::GpioInput => FunctionInfo {
                 description: "Digital input. Reads the logic level on the pin (HIGH / LOW).".into(),
                 specs: vec![

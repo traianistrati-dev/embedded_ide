@@ -233,6 +233,7 @@ pub fn var_suffix(func: &PinFunction) -> String {
     match func {
         PinFunction::GpioOutput => "out".into(),
         PinFunction::GpioInput => "in".into(),
+        PinFunction::GpioAnalog => "analog".into(),
         PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_in{channel}"),
         PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_ch{channel}"),
         PinFunction::UsartTx(n) => format!("usart{n}_tx"),

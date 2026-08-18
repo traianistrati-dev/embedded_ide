@@ -117,7 +117,9 @@ fn io_dir(func: &PinFunction) -> Option<IoDir> {
             Some(IoDir::Out)
         }
         PinFunction::GpioInput | PinFunction::AdcChannel { .. } => Some(IoDir::In),
-        PinFunction::Other(_) => Some(IoDir::Plain),
+        // Analog mode binds its own variable but has no direction — the pad is
+        // handed to an analog block. Same shape as a generic alternate function.
+        PinFunction::GpioAnalog | PinFunction::Other(_) => Some(IoDir::Plain),
         // Unset has no binding; SWD/JTAG generate a comment, not a variable.
         PinFunction::Unset | PinFunction::SwdIo | PinFunction::SwdClk => None,
         // Every remaining variant is a bus pin, already returned above.
@@ -503,6 +505,7 @@ mod tests {
             ),
             (Mco, Some(IoDir::Out)),
             (GpioInput, Some(IoDir::In)),
+            (GpioAnalog, Some(IoDir::Plain)),
             (AdcChannel { adc: 1, channel: 4 }, Some(IoDir::In)),
             (Other("SAI1_SD_A".into()), Some(IoDir::Plain)),
             // No binding to name: SWD is a comment, Unset is nothing.
