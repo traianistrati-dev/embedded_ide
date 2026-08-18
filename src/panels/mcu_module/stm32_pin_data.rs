@@ -410,7 +410,7 @@ fn clean_pin_name(raw: &str) -> String {
 /// Expand a (possibly range) `RefName` into `(concrete name, flash index)`
 /// pairs. `STM32F103C(8-B)Tx` → `[(…C8Tx, 0), (…CBTx, 1)]`; a plain name →
 /// one entry at index 0.
-fn expand_variants(ref_name: &str) -> Vec<(String, usize)> {
+pub fn expand_variants(ref_name: &str) -> Vec<(String, usize)> {
     if let (Some(open), Some(close)) = (ref_name.find('('), ref_name.find(')')) {
         if open < close {
             let prefix = &ref_name[..open];

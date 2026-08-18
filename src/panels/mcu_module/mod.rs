@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod chip_sources;
 pub mod clock;
 pub mod codegen;
 pub mod codegen_esp;
