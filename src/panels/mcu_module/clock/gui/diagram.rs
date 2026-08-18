@@ -35,6 +35,16 @@ const EDIT_STROKE: Color32 = Color32::from_rgb(225, 175, 75);
 /// The selected node, and the wire being drawn — brighter than the rest so the
 /// current subject of the properties panel is unmistakable.
 const SELECT_STROKE: Color32 = Color32::from_rgb(255, 232, 150);
+/// A mux's selected source, and the caption naming the choice. Muxes are where a
+/// clock tree is actually DECIDED, so they get picked out of the dozens of other
+/// captions on a datasheet-sized figure.
+const MUX_VALUE_C: Color32 = Color32::from_rgb(240, 150, 60);
+const MUX_TITLE_C: Color32 = Color32::from_rgb(235, 210, 90);
+/// Every wire in and out of the node under the pointer.
+const TRACE_C: Color32 = Color32::from_rgb(226, 178, 62);
+/// The single wire under the pointer — brightest thing on the canvas, because
+/// following one line across a 3000 px figure is what this is for.
+const TRACE_ONE_C: Color32 = Color32::from_rgb(245, 248, 255);
 
 /// Places the layout's virtual coordinates at the allocated canvas origin.
 ///
@@ -59,11 +69,12 @@ impl Tf {
 /// the canvas `Rect` + transform. `resolve` supplies each box/tag's frequency —
 /// `value_of` for the F103 typed path, `value_from_graph` for imported graph
 /// clocks. No interactivity (callers add their own).
-pub(crate) fn draw_static_diagram<R: Fn(&ValueSrc) -> u32>(
+pub(crate) fn draw_static_diagram<R: Fn(&ValueSrc) -> u32, M: Fn(&str) -> bool>(
     ui: &mut egui::Ui,
     lay: &ClockLayout,
     l: &ClockLimits,
     resolve: R,
+    is_mux: M,
 ) -> (Rect, Tf) {
     let (w, h) = lay.bounds();
     let (rect, _resp) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::hover());
@@ -73,34 +84,103 @@ pub(crate) fn draw_static_diagram<R: Fn(&ValueSrc) -> u32>(
     let painter = ui.painter().with_clip_rect(clip);
     painter.rect_filled(rect, 4.0, BG);
 
-    draw_wires(&painter, &tf, lay);
-    draw_static(&painter, &tf, lay, l, &resolve);
+    let hover = hovered(ui, &tf, lay);
+    draw_wires(&painter, &tf, lay, &hover);
+    draw_static(&painter, &tf, lay, l, &resolve, &is_mux);
     (rect, tf)
+}
+
+/// What the pointer is over: a node's body, or a single wire.
+///
+/// Both are answered geometrically rather than from stored ids. A wire's ends
+/// lie ON the boxes it joins by construction — it leaves the source's right edge
+/// and enters the target's left — so "which wires touch this node" needs no
+/// bookkeeping, and stays right when a node is dragged.
+#[derive(Default)]
+struct Hover {
+    /// Screen rect of the node body under the pointer.
+    node: Option<Rect>,
+    /// Index into `lay.wires`.
+    wire: Option<usize>,
+}
+
+fn hovered(ui: &egui::Ui, tf: &Tf, lay: &ClockLayout) -> Hover {
+    let mut out = Hover::default();
+    if !ui.rect_contains_pointer(ui.clip_rect()) {
+        return out;
+    }
+    // A node body wins over the wires under it: it is the bigger target and the
+    // one the pointer is most likely aimed at.
+    for b in &lay.nodes {
+        let r = tf.r(b.x, b.y, b.w, b.h);
+        if ui.rect_contains_pointer(r) {
+            out.node = Some(r);
+            return out;
+        }
+    }
+    for (i, poly) in lay.wires.iter().enumerate() {
+        if poly.windows(2).any(|s| {
+            let (a, b) = (tf.p(s[0].0, s[0].1), tf.p(s[1].0, s[1].1));
+            // A segment is axis-aligned, so its hit area is the rectangle it
+            // spans, fattened to something a mouse can actually land on.
+            ui.rect_contains_pointer(Rect::from_two_pos(a, b).expand(3.0))
+        }) {
+            out.wire = Some(i);
+            return out;
+        }
+    }
+    out
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Wires (drawn first, under the blocks)
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn draw_wires(p: &egui::Painter, tf: &Tf, lay: &ClockLayout) {
+fn draw_wires(p: &egui::Painter, tf: &Tf, lay: &ClockLayout, hover: &Hover) {
     // CubeMX style: muxes show their sources as labelled stubs (drawn inside
     // `mux_radios`), so the routed wires are short, local links only. The
     // polyline geometry is data ([`ClockLayout::wires`]).
-    for poly in &lay.wires {
-        wire(p, tf, poly);
+    //
+    // Highlighted wires are drawn in a SECOND pass, so a traced line is never
+    // hidden under the plain ones it crosses.
+    let mut lit: Vec<(&Vec<(f32, f32)>, Color32)> = Vec::new();
+    for (i, poly) in lay.wires.iter().enumerate() {
+        let colour = if hover.wire == Some(i) {
+            Some(TRACE_ONE_C)
+        } else if hover.node.is_some_and(|r| touches(tf, poly, r)) {
+            Some(TRACE_C)
+        } else {
+            None
+        };
+        match colour {
+            Some(c) => lit.push((poly, c)),
+            None => wire(p, tf, poly),
+        }
     }
+    for (poly, c) in lit {
+        wire_in(p, tf, poly, c, 2.0);
+    }
+}
+
+/// Does this wire start or end on `rect`? Its ends sit exactly on the node
+/// edges, so a pixel of slack is enough.
+fn touches(tf: &Tf, poly: &[(f32, f32)], rect: Rect) -> bool {
+    let r = rect.expand(2.0);
+    poly.first().is_some_and(|&(x, y)| r.contains(tf.p(x, y)))
+        || poly.last().is_some_and(|&(x, y)| r.contains(tf.p(x, y)))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Static blocks + labels + frequency tags — all driven by `ClockLayout` data
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn draw_static<R: Fn(&ValueSrc) -> u32>(
+fn draw_static<R: Fn(&ValueSrc) -> u32, M: Fn(&str) -> bool>(
     p: &egui::Painter,
     tf: &Tf,
     lay: &ClockLayout,
     l: &ClockLimits,
     resolve: &R,
+    is_mux: &M,
 ) {
     for b in &lay.blocks {
         block(p, tf, b.x, b.y, b.w, b.h, &b.label);
@@ -122,7 +202,10 @@ fn draw_static<R: Fn(&ValueSrc) -> u32>(
     }
 
     for lb in &lay.labels_above {
-        label_above(p, tf, lb.x, lb.y, &lb.text);
+        // A caption belongs to a mux when the node it names is one — asked of
+        // the graph rather than stored, so no saved layout has to carry it.
+        let mux = lb.node.as_deref().is_some_and(is_mux);
+        label_above(p, tf, lb.x, lb.y, &lb.text, mux);
     }
 
     for mt in &lay.mux_titles {
@@ -295,10 +378,18 @@ pub(crate) fn interactive_graph(
                 w: cw,
                 options,
             } => {
-                let Some(cur) = graph.node(node).map(|n| n.state.clone()) else {
+                let Some(n) = graph.node(node) else {
                     continue;
                 };
-                if let Some(state) = graph_combo(ui, tf, *x, *y, *cw, node, &cur, options) {
+                let cur = n.state.clone();
+                // A mux's value is WHICH SOURCE feeds this branch — the one
+                // choice on a clock tree that changes its shape rather than its
+                // arithmetic, so it reads in its own colour.
+                let mux = matches!(
+                    n.kind,
+                    crate::panels::mcu_module::clock::graph::model::NodeKind::Mux { .. }
+                );
+                if let Some(state) = graph_combo(ui, tf, *x, *y, *cw, node, &cur, options, mux) {
                     pending = Some((node.clone(), state));
                 }
             }
@@ -388,6 +479,7 @@ fn graph_combo(
     id: &str,
     current: &NodeState,
     options: &[(String, NodeState)],
+    mux: bool,
 ) -> Option<NodeState> {
     let rect = tf.r(x, y, w, 26.0);
     let cur_label = options
@@ -398,7 +490,10 @@ fn graph_combo(
     let mut picked = None;
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
         egui::ComboBox::from_id_salt(("graph_combo", id))
-            .selected_text(egui::RichText::new(cur_label).size(9.0))
+            .selected_text({
+                let txt = egui::RichText::new(cur_label).size(9.0);
+                if mux { txt.color(MUX_VALUE_C) } else { txt }
+            })
             .width(rect.width())
             .show_ui(ui, |ui| {
                 for (label, state) in options {
@@ -553,18 +648,22 @@ fn out_box(
     );
 }
 
-fn label_above(p: &egui::Painter, tf: &Tf, x: f32, y: f32, text: &str) {
+fn label_above(p: &egui::Painter, tf: &Tf, x: f32, y: f32, text: &str, mux: bool) {
     p.text(
         tf.p(x, y),
         Align2::LEFT_BOTTOM,
         text,
-        FontId::proportional(8.5),
-        DIM_C,
+        FontId::proportional(if mux { 9.0 } else { 8.5 }),
+        if mux { MUX_TITLE_C } else { DIM_C },
     );
 }
 
 fn wire(p: &egui::Painter, tf: &Tf, pts: &[(f32, f32)]) {
-    let stroke = Stroke::new(1.3, WIRE_C);
+    wire_in(p, tf, pts, WIRE_C, 1.3);
+}
+
+fn wire_in(p: &egui::Painter, tf: &Tf, pts: &[(f32, f32)], colour: Color32, width: f32) {
+    let stroke = Stroke::new(width, colour);
     for w in pts.windows(2) {
         p.line_segment([tf.p(w[0].0, w[0].1), tf.p(w[1].0, w[1].1)], stroke);
     }

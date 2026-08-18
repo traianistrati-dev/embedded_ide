@@ -569,7 +569,13 @@ pub fn draw_graph_clock(
         .show(ui, &mut scene_rect, |ui| {
             let (rect, tf) = {
                 let resolve = |src: &ValueSrc| value_from_graph(src, &freqs);
-                diagram::draw_static_diagram(ui, &gc.layout, limits, resolve)
+                let is_mux = |id: &str| {
+                    matches!(
+                        gc.graph.node(id).map(|n| &n.kind),
+                        Some(super::graph::model::NodeKind::Mux { .. })
+                    )
+                };
+                diagram::draw_static_diagram(ui, &gc.layout, limits, resolve, is_mux)
             };
             content_bounds = ui.min_rect();
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {

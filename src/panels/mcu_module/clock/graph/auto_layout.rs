@@ -37,7 +37,9 @@ const NODE_H: f32 = 26.0;
 /// Distance between adjacent columns / rows. A fixed pitch, so the diagram grows
 /// with the graph instead of being compressed into a fixed canvas — the Scene in
 /// `gui/mod.rs` supplies zoom and pan.
-const COL_PITCH: f32 = 190.0;
+// Wide enough that even a `MAX_NODE_W` box leaves a gap before the next
+// column — nodes are sized from their text now, not a flat 96.
+const COL_PITCH: f32 = 200.0;
 const ROW_PITCH: f32 = 74.0;
 /// Where a wire turns down before entering its target, and how far apart the
 /// lanes of several wires into the SAME node are kept.
@@ -134,8 +136,14 @@ pub fn place(graph: &ClockGraph) -> Vec<NodeBox> {
     // allocates whatever the layout measures and the pan/zoom Scene handles the
     // viewport. Compressing a large tree into 1000×790 only made every node
     // smaller and its labels unreadable.
+    let tallest = graph
+        .nodes
+        .iter()
+        .map(|nd| node_height(graph, &nd.id))
+        .fold(NODE_H, f32::max);
+    let row_pitch = ROW_PITCH.max(LABEL_H + tallest + TAG_H + 12.0);
     let max_rows = by_layer.iter().map(|c| c.len()).max().unwrap_or(1);
-    let full_h = ROW_PITCH * max_rows.saturating_sub(1) as f32 + NODE_H;
+    let full_h = row_pitch * max_rows.saturating_sub(1) as f32 + tallest;
 
     let mut boxes: Vec<NodeBox> = graph
         .nodes
@@ -144,19 +152,21 @@ pub fn place(graph: &ClockGraph) -> Vec<NodeBox> {
             node: nd.id.clone(),
             x: 0.0,
             y: 0.0,
-            w: NODE_W,
-            h: NODE_H,
+            // Sized like an imported figure's: wide enough for the longest
+            // value the control can show, tall enough for the wires that enter.
+            w: node_width(graph, &nd.id),
+            h: node_height(graph, &nd.id),
         })
         .collect();
     for (l, col) in by_layer.iter().enumerate() {
         let x = MARGIN + COL_PITCH * l as f32;
         // Centre each column against the tallest one, so the tree reads as a
         // spine rather than a top-aligned staircase.
-        let col_h = ROW_PITCH * col.len().saturating_sub(1) as f32;
+        let col_h = row_pitch * col.len().saturating_sub(1) as f32;
         let y0 = MARGIN + (full_h - col_h - NODE_H).max(0.0) / 2.0;
         for (r, &i) in col.iter().enumerate() {
             boxes[i].x = x;
-            boxes[i].y = y0 + ROW_PITCH * r as f32;
+            boxes[i].y = y0 + row_pitch * r as f32;
         }
     }
     boxes
@@ -328,10 +338,11 @@ const MAX_NODE_W: f32 = 168.0;
 /// the control is centred in it.
 pub fn node_height(graph: &ClockGraph, id: &str) -> f32 {
     let fan = graph.edges.iter().filter(|e| e.to == id).count();
+    let body = NODE_H + 2.0 * INSET;
     if fan < 3 {
-        return NODE_H;
+        return body;
     }
-    (fan as f32 * INPUT_PITCH + 10.0).max(NODE_H)
+    (fan as f32 * INPUT_PITCH + 10.0).max(body)
 }
 
 /// Vertical distance between two wires entering the same node.
@@ -342,14 +353,32 @@ const LABEL_H: f32 = 15.0;
 /// …and BELOW it: the frequency tag (9 px mono, centred at `y + h + 12`).
 const TAG_H: f32 = 20.0;
 
+/// Blank margin between a node's frame and the control inside it.
+pub const INSET: f32 = 5.0;
+
 /// Roughly how wide a node needs to be, from the text it has to hold.
 ///
-/// The id sits ABOVE the control and is usually the longer of the two —
-/// `HSEPLLsourceDevisor` is 19 characters — so it, not the control, decides the
-/// footprint. Approximated rather than measured: laying out needs a width before
-/// there is a font to ask, and being 10% out only costs a little air.
-fn node_width(id: &str) -> f32 {
-    (id.chars().count() as f32 * 6.4 + 14.0).clamp(MIN_NODE_W, MAX_NODE_W)
+/// Two texts compete: the id ABOVE it (`HSEPLLsourceDevisor`, 19 characters) and
+/// the SELECTED VALUE inside it — and it was the second that overflowed, because
+/// this only ever measured the first. A mux showing `SysCLKOutput` needs room
+/// for `SysCLKOutput`, not for the eight letters of `MCOMult`.
+///
+/// Approximated rather than measured: laying out needs a width before there is a
+/// font to ask, and being 10% out only costs a little air.
+pub fn node_width(graph: &ClockGraph, id: &str) -> f32 {
+    let chars = |s: &str| s.chars().count() as f32;
+    let mut widest = chars(id) * 6.4;
+    if let Some(node) = graph.node(id)
+        && let Some(options) = options_for(graph, node)
+    {
+        // The value sits inside the frame, and the dropdown adds its arrow.
+        let longest = options
+            .iter()
+            .map(|(label, _)| chars(label))
+            .fold(0.0_f32, f32::max);
+        widest = widest.max(longest * 6.0 + 22.0 + 2.0 * INSET);
+    }
+    (widest + 14.0).clamp(MIN_NODE_W, MAX_NODE_W)
 }
 
 /// Group sorted coordinates into clusters, returning each value's cluster index.
@@ -407,7 +436,7 @@ pub fn respace(graph: &ClockGraph, boxes: Vec<NodeBox>, spread: Spread) -> Vec<N
     let n_cols = cols.iter().copied().max().unwrap_or(0) + 1;
     let mut col_w = vec![MIN_NODE_W; n_cols];
     for (b, &c) in boxes.iter().zip(&cols) {
-        col_w[c] = col_w[c].max(node_width(&b.node));
+        col_w[c] = col_w[c].max(node_width(graph, &b.node));
     }
     let mut col_x = Vec::with_capacity(n_cols);
     let mut x = MARGIN;
@@ -539,27 +568,25 @@ pub fn derive(graph: &ClockGraph, boxes: Vec<NodeBox>) -> ClockLayout {
             | NodeKind::Multiplier { .. }
             | NodeKind::Gate => {
                 if let Some(options) = options_for(graph, node) {
-                    // A node tall enough to hold its inputs needs a body to
-                    // hold them IN: the dropdown is 26 px whatever the box is,
-                    // so without a frame the wires would arrive at empty space
-                    // above and below it. Drawn first, so the control sits on
-                    // top of it.
-                    if h > NODE_H + 1.0 {
-                        lay.blocks.push(BlockDef {
-                            x,
-                            y,
-                            w,
-                            h,
-                            label: String::new(),
-                            node: Some(node.id.clone()),
-                        });
-                    }
+                    // The node is a BODY with the control inside it, not the
+                    // control itself. That is what the wires arrive at — a tall
+                    // mux spreads its inputs over the whole body, and even a
+                    // short node needs an edge for them to land on rather than
+                    // the dropdown's own border.
+                    lay.blocks.push(BlockDef {
+                        x,
+                        y,
+                        w,
+                        h,
+                        label: String::new(),
+                        node: Some(node.id.clone()),
+                    });
                     lay.widgets.push(Widget::Combo {
                         node: node.id.clone(),
-                        x,
+                        x: x + INSET,
                         // Centred, so the inputs spread symmetrically around it.
                         y: y + (h - NODE_H).max(0.0) / 2.0,
-                        w,
+                        w: w - 2.0 * INSET,
                         options,
                     });
                 }
@@ -701,10 +728,12 @@ mod tests {
         };
         let lay = auto_layout(&g);
         assert!(!lay.is_empty());
-        // One control per editable node (source drag + divider combo), one
-        // static box for the output, a label + freq tag per node, a wire per edge.
+        // One control per editable node (source drag + divider combo), a label
+        // + freq tag per node, a wire per edge. TWO static boxes: the output,
+        // and the body the divider's dropdown sits inside — a selectable node is
+        // a frame with a control in it, so its wires land on the frame.
         assert_eq!(lay.widgets.len(), 2);
-        assert_eq!(lay.blocks.len(), 1);
+        assert_eq!(lay.blocks.len(), 2);
         assert_eq!(lay.labels_above.len(), 3);
         assert_eq!(lay.tags.len(), 3);
         assert_eq!(lay.wires.len(), 2);
@@ -868,8 +897,12 @@ mod tests {
             Some(Widget::Combo { x, y, .. }) => (*x, *y),
             other => panic!("expected the divider's dropdown, got {other:?}"),
         };
-        assert_eq!(control(&before), (ox, oy));
-        assert_eq!(control(&after), (ox + 40.0, oy + 25.0));
+        // The control is INSET inside its node body rather than filling it, so
+        // it is offset from the box origin — by a constant, which is why the
+        // deltas below are what this test is really about.
+        let (cx, cy) = control(&before);
+        assert!(cx > ox && cy >= oy, "the dropdown sits inside the frame");
+        assert_eq!(control(&after), (cx + 40.0, cy + 25.0));
         assert_eq!(label(&after).0 - label(&before).0, 40.0);
         assert_eq!(label(&after).1 - label(&before).1, 25.0);
         // The frequency tag rides along too.
