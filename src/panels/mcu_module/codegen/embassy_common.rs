@@ -551,6 +551,92 @@ mod emit_for_manual_compile {
             .expect("write dma project");
         println!("wrote {}", ddir.display());
 
+        // -- The same, on an F2 --------------------------------------------
+        // Its DMA request map is its OWN (six entries differ from F4 despite
+        // the families looking interchangeable), so the table is only as good
+        // as a compile of the family it claims to describe.
+        let mut f2def = def.clone();
+        f2def.id = "stm32f217ze".into();
+        f2def.display_name = "STM32F217ZETx".into();
+        f2def.family = "stm32f2".into();
+        f2def.project.pkg_name = "stm32f217ze".into();
+        f2def.project.target = "thumbv7m-none-eabi".into();
+        f2def.project.probe_chip = "STM32F217ZETx".into();
+        f2def.project.hal_dep = stm32_pin_data::hal_dep_for_name("stm32f2", "STM32F217ZETx");
+        let mut f2mcu = f2def.build_mcu();
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+        ] {
+            let num = f2mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| f2mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        f2mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
+        f2mcu.reconcile_modules();
+        for m in &mut f2mcu.modules {
+            use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig, UsartMode};
+            match &mut m.config {
+                ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::Usart(c) => c.mode = UsartMode::Dma,
+                _ => {}
+            }
+        }
+        let f2_main = f2mcu.fresh_main_rs();
+        let f2cfgs = f2mcu.config_files();
+        let mut f2files =
+            project_gen::build_project_files(&f2def.project, &f2def.toolchain, &f2_main);
+        f2files.cargo_toml = project_gen::ensure_async_deps(
+            &f2files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            !f2cfgs.is_empty(),
+            true,
+            true,
+            &[],
+        );
+        let mut f2user: Vec<(String, String)> = vec![
+            (
+                "src/pins/mod.rs".into(),
+                "pub mod configs;
+"
+                .into(),
+            ),
+            (
+                "src/pins/configs/mod.rs".into(),
+                f2cfgs
+                    .iter()
+                    .map(|(n, _)| {
+                        format!(
+                            "pub mod {};
+",
+                            n.trim_end_matches(".rs")
+                        )
+                    })
+                    .collect(),
+            ),
+        ];
+        f2user.extend(
+            f2cfgs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let f2dir = std::env::temp_dir().join("eide_embassy_check_dma_f2");
+        let _ = std::fs::remove_dir_all(&f2dir);
+        project_gen::write_project(&f2dir, &f2files, &f2user, &f2mcu.mcu_config_text(), "")
+            .expect("write f2 dma project");
+        println!("wrote {}", f2dir.display());
+
         // ── The F1 blocking USART, unchanged by this migration ───────────────
         // `embedded-io` is shared by both seams, so bumping it for embassy has
         // to be proved harmless for the stm32f1xx-hal bridge too.

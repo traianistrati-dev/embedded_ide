@@ -80,6 +80,37 @@ const F4: &[(Bus, u8, Dir, &[&str])] = &[
     (Bus::I2c, 3, Dir::Rx, &["DMA1_CH1", "DMA1_CH2"]),
 ];
 
+/// The F2 request map, harvested the same way from an STM32F217ZE build and
+/// **verified by a real cross-compile**.
+///
+/// Close to [`F4`] but NOT the same, which is why it is its own table rather
+/// than a shared one: USART2's RX has a single channel here where F4 offers two,
+/// SPI1's TX drops F4's third option, I2C1's TX drops one and I2C3 is down to a
+/// single channel each way. F2 also has USART3, which the F411 the F4 table came
+/// from does not.
+const F2: &[(Bus, u8, Dir, &[&str])] = &[
+    (Bus::Usart, 1, Dir::Tx, &["DMA2_CH7"]),
+    (Bus::Usart, 1, Dir::Rx, &["DMA2_CH5", "DMA2_CH2"]),
+    (Bus::Usart, 2, Dir::Tx, &["DMA1_CH6"]),
+    (Bus::Usart, 2, Dir::Rx, &["DMA1_CH5"]),
+    (Bus::Usart, 3, Dir::Tx, &["DMA1_CH3", "DMA1_CH4"]),
+    (Bus::Usart, 3, Dir::Rx, &["DMA1_CH1"]),
+    (Bus::Usart, 6, Dir::Tx, &["DMA2_CH6", "DMA2_CH7"]),
+    (Bus::Usart, 6, Dir::Rx, &["DMA2_CH1", "DMA2_CH2"]),
+    (Bus::Spi, 1, Dir::Tx, &["DMA2_CH3", "DMA2_CH5"]),
+    (Bus::Spi, 1, Dir::Rx, &["DMA2_CH0", "DMA2_CH2"]),
+    (Bus::Spi, 2, Dir::Tx, &["DMA1_CH4"]),
+    (Bus::Spi, 2, Dir::Rx, &["DMA1_CH3"]),
+    (Bus::Spi, 3, Dir::Tx, &["DMA1_CH5", "DMA1_CH7"]),
+    (Bus::Spi, 3, Dir::Rx, &["DMA1_CH0", "DMA1_CH2"]),
+    (Bus::I2c, 1, Dir::Tx, &["DMA1_CH6", "DMA1_CH7"]),
+    (Bus::I2c, 1, Dir::Rx, &["DMA1_CH0", "DMA1_CH5"]),
+    (Bus::I2c, 2, Dir::Tx, &["DMA1_CH7"]),
+    (Bus::I2c, 2, Dir::Rx, &["DMA1_CH2", "DMA1_CH3"]),
+    (Bus::I2c, 3, Dir::Tx, &["DMA1_CH4"]),
+    (Bus::I2c, 3, Dir::Rx, &["DMA1_CH2"]),
+];
+
 /// The candidate channels for one peripheral direction, best first.
 ///
 /// `None` for a family with no table yet - the caller then leaves its `TODO` in
@@ -87,10 +118,12 @@ const F4: &[(Bus, u8, Dir, &[&str])] = &[
 /// produce code that compiles and moves the wrong bytes.
 fn candidates(family: &str, bus: Bus, instance: u8, dir: Dir) -> Option<&'static [&'static str]> {
     let table = match family {
-        // F2/F7 share the DMA controller design and much of the request map,
-        // but "much" is not "all" and neither has been cross-compiled here.
-        // They stay on the TODO path until one is.
         "stm32f4" => F4,
+        "stm32f2" => F2,
+        // F7 shares the controller design and much of the request map with
+        // these two, but "much" is not "all" - F2 and F4 differ in six entries
+        // despite looking interchangeable. It stays on the TODO path until it
+        // is harvested and cross-compiled like the others.
         _ => return None,
     };
     table
@@ -106,7 +139,10 @@ fn candidates(family: &str, bus: Bus, instance: u8, dir: Dir) -> Option<&'static
 /// singleton). Verified against embassy's `dma_channel_impl!` output.
 fn irq_for(family: &str, channel: &str) -> Option<String> {
     match family {
-        "stm32f4" => Some(channel.replace("_CH", "_STREAM")),
+        // Both use ST's "stream" naming for the vector while embassy keeps
+        // "channel" for the singleton. Verified against `dma_channel_impl!`
+        // output for an F411 and an F217ZE.
+        "stm32f4" | "stm32f2" => Some(channel.replace("_CH", "_STREAM")),
         _ => None,
     }
 }
@@ -152,8 +188,38 @@ mod tests {
     fn a_family_without_a_table_picks_nothing() {
         // Silence is the contract: the caller keeps its TODO rather than
         // receiving a plausible-looking guess.
-        let mut a = DmaAllocator::new("stm32f2");
+        let mut a = DmaAllocator::new("stm32f7");
         assert_eq!(a.take(Bus::Usart, 1, Dir::Tx), None);
+    }
+
+    /// F2 and F4 look interchangeable and are not. Sharing one table would have
+    /// handed an F2 project channels its hardware does not route.
+    #[test]
+    fn f2_is_not_f4() {
+        let pick = |fam: &str, bus, n, dir| DmaAllocator::new(fam).take(bus, n, dir);
+        // USART2 RX: F4 falls back to DMA1_CH7, F2 has no second choice.
+        let mut f4 = DmaAllocator::new("stm32f4");
+        let mut f2 = DmaAllocator::new("stm32f2");
+        f4.take(Bus::Usart, 2, Dir::Rx);
+        f2.take(Bus::Usart, 2, Dir::Rx);
+        assert!(
+            f4.take(Bus::Usart, 2, Dir::Rx).is_some(),
+            "F4 falls back to DMA1_CH7"
+        );
+        assert!(
+            f2.take(Bus::Usart, 2, Dir::Rx).is_none(),
+            "F2 has no second channel"
+        );
+        // USART3 exists on F2 and not on the F411 the F4 table came from.
+        assert!(pick("stm32f2", Bus::Usart, 3, Dir::Rx).is_some());
+        assert!(pick("stm32f4", Bus::Usart, 3, Dir::Rx).is_none());
+        // I2C3 TX: two candidates on F4, one on F2.
+        let mut f4 = DmaAllocator::new("stm32f4");
+        let mut f2 = DmaAllocator::new("stm32f2");
+        f4.take(Bus::I2c, 3, Dir::Tx);
+        f2.take(Bus::I2c, 3, Dir::Tx);
+        assert!(f4.take(Bus::I2c, 3, Dir::Tx).is_some(), "F4 has a spare");
+        assert!(f2.take(Bus::I2c, 3, Dir::Tx).is_none(), "F2 does not");
     }
 
     #[test]
