@@ -237,6 +237,7 @@ fn signal_color(sig: ModuleSignal, instance: u8) -> egui::Color32 {
 pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
     let f = match kind {
         ModuleKind::GenericInterfaceUsart => PinFunction::UsartTx(instance),
+        ModuleKind::GenericInterfaceLpuart => PinFunction::LpuartTx(instance),
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceCan => PinFunction::CanTx,
@@ -376,6 +377,9 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
                 format!("_serial{n}{sfx}")
             }
         }
+        // `_lpserial`, NOT `_serial`: a chip with both USART1 and LPUART1 would
+        // otherwise generate the same binding name twice.
+        ModuleKind::GenericInterfaceLpuart => format!("_lpserial{n}{sfx}"),
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
@@ -942,6 +946,13 @@ pub fn module_config_ui(
 ) {
     // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
     let is_custom = m.kind.is_custom();
+    // Which DMA request table the serial arm below asks. Read from the KIND here,
+    // because inside the match the two share one binding (`UsartModuleConfig`).
+    let uart_bus = if m.kind == ModuleKind::GenericInterfaceLpuart {
+        dma_map::Bus::Lpuart
+    } else {
+        dma_map::Bus::Usart
+    };
     let m_id = m.id.clone();
     // Connection rows (generic over kind), computed before borrowing config.
     let conn_rows: Vec<(&'static str, String)> = m
@@ -1144,7 +1155,9 @@ pub fn module_config_ui(
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             match &mut m.config {
-                ModuleConfig::Usart(cfg) => {
+                // LPUART reuses the USART settings struct, so it reuses this
+                // whole arm — only the DMA request table differs (`uart_bus`).
+                ModuleConfig::Usart(cfg) | ModuleConfig::Lpuart(cfg) => {
                     ui.label("Baud rate");
                     egui::ComboBox::from_id_salt("baud")
                         .selected_text(cfg.baud_rate.to_string())
@@ -1192,19 +1205,11 @@ pub fn module_config_ui(
                         usart_mode_row(ui, &mut cfg.mode);
                         if cfg.mode == UsartMode::Dma {
                             let inst = cfg.instance;
-                            dma_row(
-                                ui,
-                                dma_map::Bus::Usart,
-                                inst,
-                                &mut cfg.dma_tx,
-                                &mut cfg.dma_rx,
-                            );
+                            dma_row(ui, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);
                         }
-                    } else if let Some(chans) = codegen::stm32::blocking_dma_channels(
-                        family,
-                        dma_map::Bus::Usart,
-                        cfg.instance,
-                    ) {
+                    } else if let Some(chans) =
+                        codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
+                    {
                         transport_row(ui, &mut cfg.blocking_dma, &chans);
                         if cfg.blocking_dma {
                             api_row_locked_dma(ui);

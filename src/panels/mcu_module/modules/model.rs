@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 pub enum ModuleKind {
     /// Generic device speaking over USART (TX/RX) — "USART".
     GenericInterfaceUsart,
+    /// Generic device speaking over LPUART (TX/RX) — "LPUART".
+    ///
+    /// A peripheral of its own, NOT a USART instance: an STM32G0 has both
+    /// USART1 and LPUART1, so the two must be able to coexist on instance 1.
+    GenericInterfaceLpuart,
     /// Generic device on an SPI bus (SCK/MOSI/MISO/NSS) — "SPI".
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
@@ -31,8 +36,9 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 6] = [
+    pub const ALL: [ModuleKind; 7] = [
         ModuleKind::GenericInterfaceUsart,
+        ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
         ModuleKind::GenericInterfaceCan,
@@ -54,6 +60,10 @@ impl ModuleKind {
         use ModuleSignal::*;
         match self {
             ModuleKind::GenericInterfaceUsart => (&[Tx, Rx], &[]),
+            // Deliberately TX/RX only, like the USART: CTS/RTS as "optional"
+            // would make the module eat four pins whenever flow-control pads
+            // happen to be free, which is not what adding a serial device means.
+            ModuleKind::GenericInterfaceLpuart => (&[LpTx, LpRx], &[]),
             ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso], &[Nss]),
             ModuleKind::GenericInterfaceI2c => (&[Scl, Sda], &[]),
             ModuleKind::GenericInterfaceCan => (&[CanRx, CanTx], &[]),
@@ -77,6 +87,7 @@ impl ModuleKind {
     pub fn short(self) -> &'static str {
         match self {
             ModuleKind::GenericInterfaceUsart => "USART",
+            ModuleKind::GenericInterfaceLpuart => "LPUART",
             ModuleKind::GenericInterfaceSpi => "SPI",
             ModuleKind::GenericInterfaceI2c => "I2C",
             ModuleKind::GenericInterfaceCan => "CAN",
@@ -90,6 +101,12 @@ impl ModuleKind {
         match self {
             ModuleKind::GenericInterfaceUsart => {
                 ModuleConfig::Usart(UsartModuleConfig::new(instance))
+            }
+            // Same settings struct as the USART — baud / parity / stop bits /
+            // DMA all mean exactly the same thing on an LPUART, and the variant
+            // is what keeps the two peripherals apart.
+            ModuleKind::GenericInterfaceLpuart => {
+                ModuleConfig::Lpuart(UsartModuleConfig::new(instance))
             }
             ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
@@ -109,6 +126,8 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
     Some(match func {
         PinFunction::UsartTx(n) => (GenericInterfaceUsart, *n, Tx),
         PinFunction::UsartRx(n) => (GenericInterfaceUsart, *n, Rx),
+        PinFunction::LpuartTx(n) => (GenericInterfaceLpuart, *n, LpTx),
+        PinFunction::LpuartRx(n) => (GenericInterfaceLpuart, *n, LpRx),
         PinFunction::SpiSck(n) => (GenericInterfaceSpi, *n, Sck),
         PinFunction::SpiMosi(n) => (GenericInterfaceSpi, *n, Mosi),
         PinFunction::SpiMiso(n) => (GenericInterfaceSpi, *n, Miso),
@@ -132,6 +151,10 @@ pub enum ModuleSignal {
     // USART
     Tx,
     Rx,
+    // LPUART — its own peripheral, so its own signals: a chip can carry both
+    // USART1 and LPUART1 and they must never share a wire.
+    LpTx,
+    LpRx,
     // SPI
     Sck,
     Mosi,
@@ -156,6 +179,8 @@ impl ModuleSignal {
         match self {
             ModuleSignal::Tx => "TX",
             ModuleSignal::Rx => "RX",
+            ModuleSignal::LpTx => "TX",
+            ModuleSignal::LpRx => "RX",
             ModuleSignal::Sck => "SCK",
             ModuleSignal::Mosi => "MOSI",
             ModuleSignal::Miso => "MISO",
@@ -175,6 +200,8 @@ impl ModuleSignal {
         match self {
             ModuleSignal::Tx => PinFunction::UsartTx(instance),
             ModuleSignal::Rx => PinFunction::UsartRx(instance),
+            ModuleSignal::LpTx => PinFunction::LpuartTx(instance),
+            ModuleSignal::LpRx => PinFunction::LpuartRx(instance),
             ModuleSignal::Sck => PinFunction::SpiSck(instance),
             ModuleSignal::Mosi => PinFunction::SpiMosi(instance),
             ModuleSignal::Miso => PinFunction::SpiMiso(instance),
@@ -591,6 +618,10 @@ impl CustomModuleConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleConfig {
     Usart(UsartModuleConfig),
+    /// LPUART shares the USART's settings struct — every field (baud, parity,
+    /// stop bits, buffered/DMA, DMA channels) means the same thing on it. The
+    /// VARIANT is what keeps LPUART1 and USART1 from colliding on instance 1.
+    Lpuart(UsartModuleConfig),
     Spi(SpiModuleConfig),
     I2c(I2cModuleConfig),
     Can(CanModuleConfig),
@@ -602,7 +633,7 @@ impl ModuleConfig {
     /// The peripheral instance this module targets.
     pub fn instance(&self) -> u8 {
         match self {
-            ModuleConfig::Usart(c) => c.instance,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => c.instance,
             ModuleConfig::Spi(c) => c.instance,
             ModuleConfig::I2c(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
@@ -613,7 +644,7 @@ impl ModuleConfig {
 
     pub fn rx_model(&self) -> &str {
         match self {
-            ModuleConfig::Usart(c) => &c.rx_model,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.rx_model,
             ModuleConfig::Spi(c) => &c.rx_model,
             ModuleConfig::I2c(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
@@ -624,7 +655,7 @@ impl ModuleConfig {
 
     pub fn tx_model(&self) -> &str {
         match self {
-            ModuleConfig::Usart(c) => &c.tx_model,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.tx_model,
             ModuleConfig::Spi(c) => &c.tx_model,
             ModuleConfig::I2c(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
@@ -635,7 +666,7 @@ impl ModuleConfig {
 
     pub fn rx_model_mut(&mut self) -> &mut String {
         match self {
-            ModuleConfig::Usart(c) => &mut c.rx_model,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.rx_model,
             ModuleConfig::Spi(c) => &mut c.rx_model,
             ModuleConfig::I2c(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
@@ -646,7 +677,7 @@ impl ModuleConfig {
 
     pub fn tx_model_mut(&mut self) -> &mut String {
         match self {
-            ModuleConfig::Usart(c) => &mut c.tx_model,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.tx_model,
             ModuleConfig::Spi(c) => &mut c.tx_model,
             ModuleConfig::I2c(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
@@ -658,7 +689,7 @@ impl ModuleConfig {
     /// User label appended to the module's generated handle variable(s).
     pub fn custom_label(&self) -> &str {
         match self {
-            ModuleConfig::Usart(c) => &c.custom_label,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.custom_label,
             ModuleConfig::Spi(c) => &c.custom_label,
             ModuleConfig::I2c(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
@@ -669,7 +700,7 @@ impl ModuleConfig {
 
     pub fn custom_label_mut(&mut self) -> &mut String {
         match self {
-            ModuleConfig::Usart(c) => &mut c.custom_label,
+            ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.custom_label,
             ModuleConfig::Spi(c) => &mut c.custom_label,
             ModuleConfig::I2c(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
@@ -682,6 +713,7 @@ impl ModuleConfig {
     pub fn summary(&self) -> String {
         match self {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
+            ModuleConfig::Lpuart(c) => format!("LPUART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Spi(c) => {
                 format!(
                     "SPI{}  ·  mode {}  ·  {}",

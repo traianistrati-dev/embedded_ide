@@ -60,6 +60,9 @@ pub struct DmaUse {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bus {
     Usart,
+    /// A peripheral of its own, not a USART instance — its DMA requests are
+    /// named `LPUART1_TX/RX`, so it cannot share [`Bus::Usart`]'s lookup.
+    Lpuart,
     Spi,
     I2c,
 }
@@ -69,6 +72,7 @@ impl Bus {
     pub fn label(self) -> &'static str {
         match self {
             Bus::Usart => "USART",
+            Bus::Lpuart => "LPUART",
             Bus::Spi => "SPI",
             Bus::I2c => "I2C",
         }
@@ -396,6 +400,7 @@ fn request_names(bus: Bus, instance: u8, dir: Dir) -> Vec<String> {
             format!("USART{instance}_{d}"),
             format!("UART{instance}_{d}"),
         ],
+        Bus::Lpuart => vec![format!("LPUART{instance}_{d}")],
         Bus::Spi => vec![format!("SPI{instance}_{d}")],
         Bus::I2c => vec![format!("I2C{instance}_{d}")],
     }

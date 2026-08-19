@@ -324,6 +324,7 @@ impl AppIde {
                                     let can_add = mcu.can_add_module(kind);
                                     let hover = match kind {
                                         ModuleKind::GenericInterfaceUsart => "Add a virtual USART device and auto-wire it to a free USART TX/RX pin pair",
+                                        ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
                                         ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
                                         ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
                                         ModuleKind::GenericInterfaceCan => "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",

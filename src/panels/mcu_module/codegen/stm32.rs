@@ -1415,6 +1415,9 @@ pub fn blocking_dma_channels(
             spi_dma_channels(instance).map(|(rx, tx)| format!("{tx} TX / {rx} RX"))
         }
         super::dma_map::Bus::I2c => None,
+        // STM32F1 has no LPUART at all, so this is unreachable in practice —
+        // `None` keeps it harmless if a future family reuses this helper.
+        super::dma_map::Bus::Lpuart => None,
     }
 }
 

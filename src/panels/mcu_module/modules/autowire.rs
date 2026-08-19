@@ -332,6 +332,44 @@ mod tests {
         v
     }
 
+    /// LPUART is a peripheral of its OWN: on a chip carrying both, adding an
+    /// LPUART module must not touch the USART pins, and the two coexist on
+    /// instance 1. (The F103 has no LPUART, so the pins are grafted on here —
+    /// which is also the smallest possible proof that support is pin-derived.)
+    #[test]
+    fn lpuart_wires_to_its_own_pins_beside_a_usart() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(
+            !mcu.supports_module(ModuleKind::GenericInterfaceLpuart),
+            "no LPUART pins yet"
+        );
+        // PB10/PB11 gain LPUART1 TX/RX, the way an imported G0 would have them.
+        for (num, f) in [
+            (21usize, PinFunction::LpuartTx(1)),
+            (22usize, PinFunction::LpuartRx(1)),
+        ] {
+            mcu.find_pin_mut(num).unwrap().available_functions.push(f);
+        }
+        assert!(mcu.supports_module(ModuleKind::GenericInterfaceLpuart));
+
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceLpuart));
+        assert_eq!(mcu.modules[1].kind, ModuleKind::GenericInterfaceLpuart);
+        // Same instance number as USART1, different peripheral, different pins.
+        assert_eq!(mcu.modules[0].instance(), 1);
+        assert_eq!(mcu.modules[1].instance(), 1);
+        assert_eq!(wired(&mcu, 1), vec![21, 22]);
+        assert!(
+            wired(&mcu, 0).iter().all(|n| ![21, 22].contains(n)),
+            "the USART kept its own pins: {:?}",
+            wired(&mcu, 0)
+        );
+        assert_eq!(
+            mcu.find_pin(21).unwrap().selected_function,
+            PinFunction::LpuartTx(1)
+        );
+    }
+
     /// On a clean chip the first SPI takes SPI1 on its DEFAULT pins — one port,
     /// one side, and the lowest instance breaks the tie with SPI2.
     #[test]

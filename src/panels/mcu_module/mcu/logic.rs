@@ -18,6 +18,12 @@ pub fn partner_functions(func: &PinFunction) -> Vec<PinFunction> {
         // USART — hardware flow-control pair (optional, separate from TX/RX)
         PinFunction::UsartCts(n) => vec![PinFunction::UsartRts(*n)],
         PinFunction::UsartRts(n) => vec![PinFunction::UsartCts(*n)],
+        // LPUART — a peripheral of its own, paired exactly like the USART, so
+        // assigning one half by hand completes the module the same way.
+        PinFunction::LpuartTx(n) => vec![PinFunction::LpuartRx(*n)],
+        PinFunction::LpuartRx(n) => vec![PinFunction::LpuartTx(*n)],
+        PinFunction::LpuartCts(n) => vec![PinFunction::LpuartRts(*n)],
+        PinFunction::LpuartRts(n) => vec![PinFunction::LpuartCts(*n)],
         // SPI — three-wire bus (NSS is optional, not auto-assigned)
         PinFunction::SpiSck(n) => vec![PinFunction::SpiMiso(*n), PinFunction::SpiMosi(*n)],
         PinFunction::SpiMiso(n) => vec![PinFunction::SpiSck(*n), PinFunction::SpiMosi(*n)],
@@ -1207,12 +1213,19 @@ mod module_support_tests {
     /// Both bundled chips genuinely expose all five interfaces, so a fresh
     /// palette offers everything.
     #[test]
-    fn bundled_chips_support_every_kind() {
+    fn bundled_chips_support_every_kind_they_have_pins_for() {
         for mcu in [create_stm32f103c8tx(), create_esp32c3()] {
             for kind in ModuleKind::ALL {
-                assert!(
+                // LPUART is the exception, and it is the RULE working: neither
+                // built-in has an LPUART (the F103 predates the peripheral, the
+                // ESP32-C3 has no such thing), so the pin-derived palette must
+                // not offer it. It shows up on the G0/L4/U5-class chips imported
+                // from ST's XML.
+                let want = kind != ModuleKind::GenericInterfaceLpuart;
+                assert_eq!(
                     mcu.supports_module(kind),
-                    "{} should host {}",
+                    want,
+                    "{} vs {}",
                     mcu.name,
                     kind.short()
                 );

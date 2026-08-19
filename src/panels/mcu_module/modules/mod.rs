@@ -31,6 +31,21 @@ pub fn usart_configs(modules: &[VirtualModule]) -> BTreeMap<u8, UsartModuleConfi
     map
 }
 
+/// LPUART module configs keyed by peripheral instance.
+///
+/// Deliberately a SEPARATE map from [`usart_configs`] even though both hold a
+/// `UsartModuleConfig`: LPUART1 and USART1 are different peripherals that share
+/// the instance number 1, so merging them would silently drop one.
+pub fn lpuart_configs(modules: &[VirtualModule]) -> BTreeMap<u8, UsartModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Lpuart(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
 /// SPI module configs keyed by peripheral instance (mode + clock for codegen).
 pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();

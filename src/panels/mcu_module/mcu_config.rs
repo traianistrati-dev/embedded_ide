@@ -851,3 +851,45 @@ mod comp_section_tests {
         assert!(parse_comp(mixed).contains_key(&7));
     }
 }
+
+#[cfg(test)]
+mod lpuart_persist_tests {
+    use super::*;
+    use crate::panels::mcu_module::modules::{
+        Connection, ModuleConfig, ModuleKind, ModuleSignal, UsartModuleConfig, VirtualModule,
+    };
+
+    /// The LPUART variant survives `@modules` — it shares the USART's settings
+    /// struct, so the only thing that can go wrong is the variant itself being
+    /// read back as a USART, which would silently move the module to the wrong
+    /// peripheral.
+    #[test]
+    fn an_lpuart_module_round_trips() {
+        let mut cfg = UsartModuleConfig::new(1);
+        cfg.baud_rate = 9600;
+        let m = VirtualModule {
+            id: "lpuart_1".into(),
+            kind: ModuleKind::GenericInterfaceLpuart,
+            name: "LPUART1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Lpuart(cfg),
+            connections: vec![
+                Connection {
+                    signal: ModuleSignal::LpTx,
+                    mcu_pin: 21,
+                },
+                Connection {
+                    signal: ModuleSignal::LpRx,
+                    mcu_pin: 22,
+                },
+            ],
+        };
+        let text = serialize(&[m], None, Runtime::Blocking, ApiStyle::Portable);
+        let (back, _) = parse(&text);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].kind, ModuleKind::GenericInterfaceLpuart);
+        assert!(matches!(back[0].config, ModuleConfig::Lpuart(_)));
+        assert_eq!(back[0].instance(), 1);
+        assert_eq!(back[0].pin_for(ModuleSignal::LpTx), Some(21));
+    }
+}
