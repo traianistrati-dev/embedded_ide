@@ -22,7 +22,8 @@ use super::nvic;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::modules::{
-    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartMode, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, TimerModuleConfig, UsartMode,
+    UsartModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -769,6 +770,8 @@ pub fn async_peripherals(
     // LPUART is its OWN map, not folded into `usart`: LPUART1 and USART1 are
     // different peripherals that share the instance number.
     lpuart: &BTreeMap<u8, UsartModuleConfig>,
+    // PWM, keyed by TIMER — one module per timer, whatever its channel count.
+    timer: &BTreeMap<u8, TimerModuleConfig>,
 ) -> AsyncPeriphs {
     let mut consumed = Vec::new();
     let mut calls = String::new();
@@ -860,6 +863,33 @@ pub fn async_peripherals(
                 ),
             ));
         }
+    }
+
+    // ── PWM ──────────────────────────────────────────────────────────────
+    // One config module per TIMER, taking exactly the channels wired on the
+    // canvas. No interrupts and no DMA: `SimplePwm` writes the compare
+    // registers directly, so there is nothing to bind.
+    for (n, chans) in pwm_wires(pins) {
+        let cfg = timer.get(&n);
+        let sfx = cfg.map(|c| label_sfx(&c.custom_label)).unwrap_or_default();
+        let handle = format!("_pwm{n}{sfx}");
+        let freq = cfg.map(|c| c.freq_hz).unwrap_or(1_000);
+        let with_duty: Vec<(u8, u8)> = chans
+            .iter()
+            .map(|(ch, _)| (*ch, cfg.map(|c| c.duty_of(*ch)).unwrap_or(0)))
+            .collect();
+        let args: String = chans.iter().map(|(_, pin)| format!(", p.{pin}")).collect();
+        for (_, pin) in &chans {
+            consumed.push(pin.clone());
+        }
+        calls.push_str(&format!(
+            "    let mut {handle} = pins::configs::pwm{n}::init(p.TIM{n}{args});
+"
+        ));
+        files.push((
+            format!("pwm{n}.rs"),
+            pwm_config_file(n, freq, &with_duty, &handle),
+        ));
     }
 
     for (n, sck, mosi, miso) in spi_wires(pins) {
@@ -1120,6 +1150,125 @@ pub fn serial_config_file(peri: &str, n: u8, cfg: Option<&UsartModuleConfig>, ir
         .replace("{DATA}", &data.to_string())
         .replace("{PARITY}", &parity.to_string())
         .replace("{STOP}", &stop.to_string())
+}
+
+// ── Async PWM config file (embassy SimplePwm) ─────────────────────────────────
+
+/// `src/pins/configs/pwm{N}.rs`: embassy's `SimplePwm` over ONE timer.
+///
+/// The whole file is built per timer rather than per channel because the timer
+/// is what owns the frequency — one prescaler and one reload value serve all
+/// four channels, so a per-channel frequency could not be honoured. Only the
+/// channels actually wired on the canvas become parameters; the rest are `None`.
+const ASYNC_PWM_TMPL: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const FREQ_HZ: u32 = {FREQ};
+{DUTY_CONSTS}// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+//
+// `init` returns embassy's `SimplePwm` for TIM{N}. Every channel of a timer
+// shares its frequency (one prescaler, one reload value) — the duty cycle is
+// what each channel owns.
+use embassy_stm32::gpio::OutputType;
+use embassy_stm32::time::Hertz;
+use embassy_stm32::timer::low_level::CountingMode;
+use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
+use embassy_stm32::timer::{{CHANNEL_TYPES}TimerPin};
+use embassy_stm32::{peripherals, Peri};
+
+/// Initialise TIM{N} as PWM on the wired channel(s), enabled at the configured
+/// duty.
+pub fn init<'d>(
+    tim: Peri<'d, peripherals::TIM{N}>,
+{PARAMS}) -> SimplePwm<'d, peripherals::TIM{N}> {
+    let mut pwm = SimplePwm::new(
+        tim,
+{CH_ARGS}        Hertz(FREQ_HZ),
+        CountingMode::EdgeAlignedUp,
+    );
+{ENABLES}    pwm
+}
+
+// ── Using TIM{N} ──
+// The handle owns every channel; each one is reached by name:
+//
+//     {HANDLE}.ch1().set_duty_cycle_percent(75);
+//     {HANDLE}.ch1().disable();
+//
+// Duty as a fraction avoids the rounding of whole percents:
+//
+//     {HANDLE}.ch1().set_duty_cycle_fraction(1, 3);
+"#;
+
+/// Render [`ASYNC_PWM_TMPL`] for timer `n` with the channels `chans`
+/// (`(channel number, duty %)`, ascending) and the module's frequency.
+pub fn pwm_config_file(n: u8, freq_hz: u32, chans: &[(u8, u8)], handle: &str) -> String {
+    let mut duty_consts = String::new();
+    let mut channel_types = String::new();
+    let mut params = String::new();
+    let mut ch_args = String::new();
+    let mut enables = String::new();
+    for ch in 1..=4u8 {
+        match chans.iter().find(|(c, _)| *c == ch) {
+            Some((_, duty)) => {
+                duty_consts.push_str(&format!(
+                    "const DUTY_CH{ch}: u8 = {duty}; // 0..=100
+"
+                ));
+                channel_types.push_str(&format!("Ch{ch}, "));
+                params.push_str(&format!(
+                    "    ch{ch}: Peri<'d, impl TimerPin<peripherals::TIM{n}, Ch{ch}>>,
+"
+                ));
+                ch_args.push_str(&format!(
+                    "        Some(PwmPin::new(ch{ch}, OutputType::PushPull)),
+"
+                ));
+                enables.push_str(&format!(
+                    "    pwm.ch{ch}().enable();
+    pwm.ch{ch}().set_duty_cycle_percent(DUTY_CH{ch});
+"
+                ));
+            }
+            // A channel with no pin is still a slot in `SimplePwm::new`.
+            None => ch_args.push_str(
+                "        None,
+",
+            ),
+        }
+    }
+    ASYNC_PWM_TMPL
+        .replace("{FREQ}", &freq_hz.to_string())
+        .replace("{DUTY_CONSTS}", &duty_consts)
+        .replace("{CHANNEL_TYPES}", &channel_types)
+        .replace("{PARAMS}", &params)
+        .replace("{CH_ARGS}", &ch_args)
+        .replace("{ENABLES}", &enables)
+        .replace("{HANDLE}", handle)
+        .replace("{N}", &n.to_string())
+}
+
+/// The timers with at least one PWM channel wired, as
+/// `(timer, [(channel, pin name), …])` — the shape `pwm_config_file` and the
+/// `main.rs` call both need.
+fn pwm_wires(pins: &[&Pin]) -> Vec<(u8, Vec<(u8, String)>)> {
+    let mut by_timer: BTreeMap<u8, Vec<(u8, String)>> = BTreeMap::new();
+    for p in pins.iter().filter(|p| !p.reserved) {
+        if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
+            by_timer
+                .entry(timer)
+                .or_default()
+                .push((channel, p.gpio().to_owned()));
+        }
+    }
+    for chans in by_timer.values_mut() {
+        chans.sort_unstable();
+        // One pin per channel: a second pad claiming the same channel would
+        // become a duplicate argument.
+        chans.dedup_by_key(|(c, _)| *c);
+    }
+    by_timer.into_iter().collect()
 }
 
 // ── Async SPI config file (blocking | async-DMA) ──────────────────────────────
@@ -1617,6 +1766,7 @@ mod usart_mode_tests {
             &spi,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert!(
             out.init_calls.contains("p.DMA1_CH1, p.DMA1_CH4, Irqs"),
@@ -1716,6 +1866,7 @@ mod usart_mode_tests {
             &spi,
             &i2c,
             &Default::default(),
+            &Default::default(),
         );
 
         // Every channel the code takes, straight out of the emitted text.
@@ -1784,6 +1935,7 @@ mod usart_mode_tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         // A PAIR, not a single handle - the two halves have different types.
         assert!(
@@ -1815,6 +1967,7 @@ mod usart_mode_tests {
             },
             &refs,
             &usart,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1853,6 +2006,7 @@ mod usart_mode_tests {
             },
             &refs,
             &usart,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -2001,6 +2155,7 @@ mod comp_tests {
                 &Default::default(),
                 &Default::default(),
                 &Default::default(),
+                &Default::default(),
             )
         };
 
@@ -2086,6 +2241,7 @@ mod lpuart_tests {
             &Default::default(),
             &Default::default(),
             &[(1u8, UsartModuleConfig::new(1))].into_iter().collect(),
+            &Default::default(),
         )
     }
 
@@ -2145,6 +2301,7 @@ mod lpuart_tests {
             &Default::default(),
             &Default::default(),
             &[(1u8, UsartModuleConfig::new(1))].into_iter().collect(),
+            &Default::default(),
         );
         assert!(
             out.init_calls.contains("let mut _serial1 ="),
@@ -2182,5 +2339,124 @@ mod lpuart_tests {
             "{}",
             out.dma_irqs
         );
+    }
+}
+
+#[cfg(test)]
+mod pwm_tests {
+    use super::*;
+    use crate::panels::mcu_module::pins::logic::pin::Pin;
+
+    fn mk(name: &str, timer: u8, channel: u8) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = PinFunction::TimerPwm { timer, channel };
+        p
+    }
+
+    fn run(pins: &[Pin], timer: BTreeMap<u8, TimerModuleConfig>) -> AsyncPeriphs {
+        let refs: Vec<&Pin> = pins.iter().collect();
+        async_peripherals(
+            "stm32g0",
+            ChipData {
+                dma: None,
+                irq_vectors: &[],
+            },
+            CompInputs {
+                settings: &Default::default(),
+                instances: &[],
+                pins: &[],
+            },
+            &refs,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &timer,
+        )
+    }
+
+    /// Two channels of ONE timer are one module, one config file and one `init`
+    /// — the whole reason the module is the timer rather than the channel.
+    #[test]
+    fn channels_of_one_timer_share_a_single_init() {
+        let pins = [mk("PA6", 3, 1), mk("PA7", 3, 2)];
+        let mut cfg = TimerModuleConfig::new(3);
+        cfg.freq_hz = 20_000;
+        cfg.duty.insert(1, 75);
+        let out = run(&pins, [(3u8, cfg)].into_iter().collect());
+
+        assert_eq!(
+            out.config_files.len(),
+            1,
+            "one file per timer: {:?}",
+            out.config_files.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        let (name, body) = &out.config_files[0];
+        assert_eq!(name, "pwm3.rs");
+        assert!(
+            out.init_calls
+                .contains("let mut _pwm3 = pins::configs::pwm3::init(p.TIM3, p.PA6, p.PA7);"),
+            "{}",
+            out.init_calls
+        );
+        // The frequency is the module's, shared; the duty is per channel, and a
+        // channel the user never touched starts at 0 %.
+        assert!(body.contains("const FREQ_HZ: u32 = 20000;"), "{body}");
+        assert!(body.contains("const DUTY_CH1: u8 = 75;"), "{body}");
+        assert!(body.contains("const DUTY_CH2: u8 = 0;"), "{body}");
+        // Wired channels become parameters; the rest stay `None` slots.
+        assert!(
+            body.contains("ch1: Peri<'d, impl TimerPin<peripherals::TIM3, Ch1>>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("Some(PwmPin::new(ch2, OutputType::PushPull)),"),
+            "{body}"
+        );
+        assert_eq!(
+            body.matches("        None,").count(),
+            2,
+            "CH3 + CH4: {body}"
+        );
+        assert!(
+            body.contains("pwm.ch1().set_duty_cycle_percent(DUTY_CH1);"),
+            "{body}"
+        );
+    }
+
+    /// Two DIFFERENT timers are two modules, and a timer with no module config
+    /// still generates at the defaults rather than being skipped.
+    #[test]
+    fn each_timer_gets_its_own_module() {
+        let pins = [mk("PA6", 3, 1), mk("PA8", 1, 1)];
+        let out = run(&pins, Default::default());
+        let names: Vec<&str> = out.config_files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"pwm1.rs") && names.contains(&"pwm3.rs"),
+            "{names:?}"
+        );
+        assert!(
+            out.init_calls.contains("init(p.TIM1, p.PA8)"),
+            "{}",
+            out.init_calls
+        );
+        // Defaults when the module carries no config yet.
+        let body = &out
+            .config_files
+            .iter()
+            .find(|(n, _)| n == "pwm1.rs")
+            .unwrap()
+            .1;
+        assert!(body.contains("const FREQ_HZ: u32 = 1000;"), "{body}");
+    }
+
+    /// PWM needs no interrupt and no DMA — `SimplePwm` writes the compare
+    /// registers directly, so nothing may be bound for it.
+    #[test]
+    fn pwm_binds_no_interrupts() {
+        let out = run(&[mk("PA6", 3, 1)], Default::default());
+        assert!(!out.any_async_dma);
+        assert!(out.dma_irqs.is_empty(), "{}", out.dma_irqs);
+        assert!(out.dma_uses.is_empty());
     }
 }

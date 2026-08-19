@@ -1295,6 +1295,17 @@ mod emit_for_manual_compile {
             // for that vector would show up.
             PinFunction::LpuartTx(1),
             PinFunction::LpuartRx(1),
+            // Two channels of ONE timer: the PWM module's whole premise is that
+            // they share a frequency, and only a compiler can confirm the
+            // `SimplePwm::new` slot order and the per-channel handles.
+            PinFunction::TimerPwm {
+                timer: 3,
+                channel: 1,
+            },
+            PinFunction::TimerPwm {
+                timer: 3,
+                channel: 2,
+            },
             PinFunction::SpiSck(1),
             PinFunction::SpiMosi(1),
             PinFunction::SpiMiso(1),
@@ -1319,6 +1330,12 @@ mod emit_for_manual_compile {
                 ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
                 ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
                 ModuleConfig::Usart(c) => c.mode = UsartMode::Dma,
+                // A non-default frequency and duty, so the generated consts are
+                // exercised rather than agreeing with the template by accident.
+                ModuleConfig::Timer(c) => {
+                    c.freq_hz = 20_000;
+                    c.duty.insert(1, 75);
+                }
                 _ => {}
             }
         }

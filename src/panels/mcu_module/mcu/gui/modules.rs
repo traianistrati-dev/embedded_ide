@@ -240,6 +240,10 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceLpuart => PinFunction::LpuartTx(instance),
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
+        ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
+            timer: instance,
+            channel: 1,
+        },
         ModuleKind::GenericInterfaceCan => PinFunction::CanTx,
         ModuleKind::GenericInterfaceUsb => PinFunction::UsbDp,
         // A custom module has no peripheral colour of its own — a neutral slate
@@ -382,6 +386,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceLpuart => format!("_lpserial{n}{sfx}"),
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
+        ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
         // The generated struct is named after the module, so the preview shows
@@ -1270,6 +1275,63 @@ pub fn module_config_ui(
                     } else {
                         api_row(ui, &mut pending.0);
                     }
+                }
+                // One TIMER: the frequency it shares, then a duty slider per
+                // channel actually wired — the channel list comes from the
+                // module's own connections, so it mirrors the canvas.
+                ModuleConfig::Timer(cfg) => {
+                    ui.label("Frequency");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.freq_hz)
+                                .range(1..=1_000_000)
+                                .suffix(" Hz")
+                                .speed(10.0),
+                        );
+                        for (label, hz) in [("50 Hz", 50u32), ("1 kHz", 1_000), ("20 kHz", 20_000)]
+                        {
+                            if ui.small_button(label).clicked() {
+                                cfg.freq_hz = hz;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    if conn_rows.is_empty() {
+                        ui.label("Channels");
+                        ui.label(
+                            egui::RichText::new("none wired yet")
+                                .size(11.0)
+                                .italics()
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                    for (sig, pin) in &conn_rows {
+                        // "CH2" -> 2. The label is the signal's own, so the two
+                        // cannot drift apart.
+                        let Some(ch) = sig.strip_prefix("CH").and_then(|n| n.parse::<u8>().ok())
+                        else {
+                            continue;
+                        };
+                        ui.label(format!("{sig} duty  ({pin})"));
+                        let mut duty = cfg.duty_of(ch);
+                        if ui
+                            .add(egui::Slider::new(&mut duty, 0..=100).suffix(" %"))
+                            .changed()
+                        {
+                            cfg.duty.insert(ch, duty);
+                        }
+                        ui.end_row();
+                    }
+                    ui.label("");
+                    ui.label(
+                        egui::RichText::new(
+                            "add a channel by assigning TIM CH2/3/4 of this timer on the canvas",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.end_row();
                 }
                 ModuleConfig::I2c(cfg) => {
                     ui.label("Clock");

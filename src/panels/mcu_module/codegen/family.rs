@@ -518,6 +518,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
     let lpuart = modules::lpuart_configs(&mcu.modules);
+    let timer = modules::timer_configs(&mcu.modules);
     let comp_instances = comparator::instances(mcu);
     let comp_pins: Vec<(u8, String, Option<String>)> = mcu
         .comp
@@ -543,6 +544,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
         &spi,
         &i2c,
         &lpuart,
+        &timer,
     )
 }
 

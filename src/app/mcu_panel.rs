@@ -327,6 +327,7 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
                                         ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
                                         ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                        ModuleKind::GenericInterfaceTimer => "Add a PWM module for one TIMER: it takes a free channel now, and any other channel of the SAME timer you assign on the canvas joins it (they share the frequency)",
                                         ModuleKind::GenericInterfaceCan => "Add a virtual CAN device and auto-wire it to the CAN RX/TX pins (needs the bxcan crate)",
                                         ModuleKind::GenericInterfaceUsb => "Add a virtual USB device and auto-wire it to the USB D-/D+ pins",
                                         ModuleKind::Custom => "Add a CUSTOM module — nothing is auto-wired: name it, add the pins you want, and a `configs/custom_<name>.rs` struct is generated for them",

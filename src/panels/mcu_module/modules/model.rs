@@ -21,6 +21,13 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// PWM outputs driven by ONE timer — "PWM".
+    ///
+    /// The module is the TIMER, not the channel: every channel of a timer shares
+    /// its prescaler and reload value, so they physically share a frequency. One
+    /// module per timer is what lets the UI state that once instead of inviting
+    /// four contradictory answers.
+    GenericInterfaceTimer,
     /// Generic device on a CAN bus (RX/TX) — "CAN".
     GenericInterfaceCan,
     /// USB full-speed device (D-/D+) — "USB".
@@ -36,11 +43,12 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 7] = [
+    pub const ALL: [ModuleKind; 8] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
+        ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
         ModuleKind::GenericInterfaceUsb,
         ModuleKind::Custom,
@@ -66,6 +74,12 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceLpuart => (&[LpTx, LpRx], &[]),
             ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso], &[Nss]),
             ModuleKind::GenericInterfaceI2c => (&[Scl, Sda], &[]),
+            // ONE channel, and no optional ones: "optional" here means "take it
+            // if the pad is free", which would spend all four of a timer's
+            // channels on a module the user added to blink one LED. The other
+            // channels join by assigning them on the canvas — `reconcile_modules`
+            // folds them into this same module, since it keys on (kind, timer).
+            ModuleKind::GenericInterfaceTimer => (&[PwmCh1], &[]),
             ModuleKind::GenericInterfaceCan => (&[CanRx, CanTx], &[]),
             ModuleKind::GenericInterfaceUsb => (&[UsbDm, UsbDp], &[]),
             // Nothing is auto-wired: the user picks the pins by hand.
@@ -90,6 +104,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceLpuart => "LPUART",
             ModuleKind::GenericInterfaceSpi => "SPI",
             ModuleKind::GenericInterfaceI2c => "I2C",
+            ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
             ModuleKind::Custom => "Custom",
@@ -110,6 +125,9 @@ impl ModuleKind {
             }
             ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceTimer => {
+                ModuleConfig::Timer(TimerModuleConfig::new(instance))
+            }
             ModuleKind::GenericInterfaceCan => ModuleConfig::Can(CanModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceUsb => ModuleConfig::Usb(UsbModuleConfig::new(instance)),
             ModuleKind::Custom => ModuleConfig::Custom(CustomModuleConfig::new(instance)),
@@ -132,6 +150,18 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::SpiMosi(n) => (GenericInterfaceSpi, *n, Mosi),
         PinFunction::SpiMiso(n) => (GenericInterfaceSpi, *n, Miso),
         PinFunction::SpiNss(n) => (GenericInterfaceSpi, *n, Nss),
+        // A PWM pin names its timer AND its channel, so the module it belongs to
+        // is the timer and the wire is the channel.
+        PinFunction::TimerPwm { timer, channel } => (
+            GenericInterfaceTimer,
+            *timer,
+            match channel {
+                1 => PwmCh1,
+                2 => PwmCh2,
+                3 => PwmCh3,
+                _ => PwmCh4,
+            },
+        ),
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
         // CAN has a single instance on STM32F1 (CAN1) and pin functions without
@@ -163,6 +193,11 @@ pub enum ModuleSignal {
     // I2C
     Scl,
     Sda,
+    // PWM — one per timer channel.
+    PwmCh1,
+    PwmCh2,
+    PwmCh3,
+    PwmCh4,
     // CAN
     CanRx,
     CanTx,
@@ -187,6 +222,10 @@ impl ModuleSignal {
             ModuleSignal::Nss => "NSS",
             ModuleSignal::Scl => "SCL",
             ModuleSignal::Sda => "SDA",
+            ModuleSignal::PwmCh1 => "CH1",
+            ModuleSignal::PwmCh2 => "CH2",
+            ModuleSignal::PwmCh3 => "CH3",
+            ModuleSignal::PwmCh4 => "CH4",
             ModuleSignal::CanRx => "RX",
             ModuleSignal::CanTx => "TX",
             ModuleSignal::UsbDm => "D-",
@@ -208,6 +247,23 @@ impl ModuleSignal {
             ModuleSignal::Nss => PinFunction::SpiNss(instance),
             ModuleSignal::Scl => PinFunction::I2cScl(instance),
             ModuleSignal::Sda => PinFunction::I2cSda(instance),
+            // `instance` is the TIMER for these, and the variant is the channel.
+            ModuleSignal::PwmCh1 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 1,
+            },
+            ModuleSignal::PwmCh2 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 2,
+            },
+            ModuleSignal::PwmCh3 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 3,
+            },
+            ModuleSignal::PwmCh4 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 4,
+            },
             // CAN pin functions carry no instance (single CAN on STM32F1).
             ModuleSignal::CanRx => PinFunction::CanRx,
             ModuleSignal::CanTx => PinFunction::CanTx,
@@ -485,6 +541,48 @@ impl I2cModuleConfig {
     }
 }
 
+/// PWM settings for one TIMER: the frequency its channels share, and a duty
+/// cycle per channel.
+///
+/// Frequency is per-MODULE because it is per-timer in silicon (one prescaler,
+/// one reload value); duty is per-channel because that is the only thing a
+/// channel owns. A channel with no entry in `duty` starts at 0 % — output
+/// enabled, pin low — which is the safe state for a motor driver or a LED.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerModuleConfig {
+    /// The TIMER this module drives (TIM1, TIM3, …).
+    pub instance: u8,
+    /// Shared output frequency in Hz.
+    pub freq_hz: u32,
+    /// Channel number (1..=4) → duty cycle in percent.
+    #[serde(default)]
+    pub duty: std::collections::BTreeMap<u8, u8>,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_pwmN` handle (e.g. `_pwm3_servo`).
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl TimerModuleConfig {
+    /// Defaults: 1 kHz, every channel at 0 %.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            freq_hz: 1_000,
+            duty: std::collections::BTreeMap::new(),
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    /// This channel's duty cycle, 0 % when the user has not set one.
+    pub fn duty_of(&self, channel: u8) -> u8 {
+        self.duty.get(&channel).copied().unwrap_or(0)
+    }
+}
+
 /// CAN device settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanModuleConfig {
@@ -624,6 +722,7 @@ pub enum ModuleConfig {
     Lpuart(UsartModuleConfig),
     Spi(SpiModuleConfig),
     I2c(I2cModuleConfig),
+    Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
     Custom(CustomModuleConfig),
@@ -636,6 +735,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => c.instance,
             ModuleConfig::Spi(c) => c.instance,
             ModuleConfig::I2c(c) => c.instance,
+            ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
             ModuleConfig::Custom(c) => c.instance,
@@ -647,6 +747,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.rx_model,
             ModuleConfig::Spi(c) => &c.rx_model,
             ModuleConfig::I2c(c) => &c.rx_model,
+            ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
             ModuleConfig::Custom(c) => &c.rx_model,
@@ -658,6 +759,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.tx_model,
             ModuleConfig::Spi(c) => &c.tx_model,
             ModuleConfig::I2c(c) => &c.tx_model,
+            ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
             ModuleConfig::Custom(c) => &c.tx_model,
@@ -669,6 +771,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.rx_model,
             ModuleConfig::Spi(c) => &mut c.rx_model,
             ModuleConfig::I2c(c) => &mut c.rx_model,
+            ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
             ModuleConfig::Custom(c) => &mut c.rx_model,
@@ -680,6 +783,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.tx_model,
             ModuleConfig::Spi(c) => &mut c.tx_model,
             ModuleConfig::I2c(c) => &mut c.tx_model,
+            ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
             ModuleConfig::Custom(c) => &mut c.tx_model,
@@ -692,6 +796,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.custom_label,
             ModuleConfig::Spi(c) => &c.custom_label,
             ModuleConfig::I2c(c) => &c.custom_label,
+            ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
             ModuleConfig::Custom(c) => &c.custom_label,
@@ -703,6 +808,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.custom_label,
             ModuleConfig::Spi(c) => &mut c.custom_label,
             ModuleConfig::I2c(c) => &mut c.custom_label,
+            ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
             ModuleConfig::Custom(c) => &mut c.custom_label,
@@ -714,6 +820,7 @@ impl ModuleConfig {
         match self {
             ModuleConfig::Usart(c) => format!("USART{}  ·  {} baud", c.instance, c.baud_rate),
             ModuleConfig::Lpuart(c) => format!("LPUART{}  ·  {} baud", c.instance, c.baud_rate),
+            ModuleConfig::Timer(c) => format!("TIM{}  ·  {}", c.instance, hz_label(c.freq_hz)),
             ModuleConfig::Spi(c) => {
                 format!(
                     "SPI{}  ·  mode {}  ·  {}",

@@ -26,6 +26,12 @@ use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 const MAX_PER_SIGNAL: usize = 8;
 /// Upper bound on the wirings explored per instance.
 const MAX_COMBOS: usize = 512;
+/// Highest peripheral instance number tried.
+///
+/// Buses stop at 3-6, but a TIMER module's "instance" is the timer number and
+/// STM32s go up to TIM17. Scanning the gaps is free: an instance the chip does
+/// not have yields an empty candidate list and is skipped before any work.
+const MAX_INSTANCE: u8 = 17;
 
 /// How good one candidate wiring is — **lower is better on every field**, and
 /// the fields are compared in declaration order (that is what `derive(Ord)`
@@ -195,7 +201,7 @@ pub fn pick_pins(
     let sides = side_map(mcu);
     let mut best: Option<(Score, u8, Vec<(ModuleSignal, usize)>)> = None;
 
-    for inst in 0u8..=3 {
+    for inst in 0u8..=MAX_INSTANCE {
         if used_instances.contains(&inst) {
             continue;
         }
@@ -368,6 +374,38 @@ mod tests {
             mcu.find_pin(21).unwrap().selected_function,
             PinFunction::LpuartTx(1)
         );
+    }
+
+    /// The PWM module is the TIMER: adding one takes a single channel, and a
+    /// channel of the SAME timer assigned by hand later JOINS that module rather
+    /// than making a second one. That fold-in is how channels 2..4 are added, so
+    /// it is the design's load-bearing part.
+    #[test]
+    fn extra_channels_join_the_timers_module() {
+        let mut mcu = create_stm32f103c8tx();
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceTimer));
+        let timer = mcu.modules[0].instance();
+        assert_eq!(mcu.modules[0].connections.len(), 1, "one channel to start");
+
+        // A second channel of the SAME timer, assigned on the canvas.
+        let ch2 = PinFunction::TimerPwm { timer, channel: 2 };
+        let pin = mcu
+            .iter_all_pins()
+            .find(|p| {
+                p.selected_function == PinFunction::Unset && p.available_functions.contains(&ch2)
+            })
+            .map(|p| p.number)
+            .expect("the mock has a second channel for this timer");
+        mcu.apply_pin_function(pin, ch2);
+
+        assert_eq!(
+            mcu.modules.len(),
+            1,
+            "still ONE module: {:?}",
+            mcu.modules.len()
+        );
+        assert_eq!(mcu.modules[0].connections.len(), 2, "both channels wired");
+        assert!(mcu.modules[0].connections.iter().any(|c| c.mcu_pin == pin));
     }
 
     /// On a clean chip the first SPI takes SPI1 on its DEFAULT pins — one port,

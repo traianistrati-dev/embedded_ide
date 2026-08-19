@@ -13,8 +13,8 @@ pub mod persist;
 
 pub use model::{
     ApiStyle, AsyncBusMode, CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind,
-    ModuleSignal, Parity, SpiModuleConfig, StopBits, UsartMode, UsartModuleConfig, UsbModuleConfig,
-    VirtualModule, module_signal_of,
+    ModuleSignal, Parity, SpiModuleConfig, StopBits, TimerModuleConfig, UsartMode,
+    UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -40,6 +40,18 @@ pub fn lpuart_configs(modules: &[VirtualModule]) -> BTreeMap<u8, UsartModuleConf
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Lpuart(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// PWM module configs keyed by TIMER — one module per timer, however many of
+/// its channels are wired.
+pub fn timer_configs(modules: &[VirtualModule]) -> BTreeMap<u8, TimerModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Timer(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }
