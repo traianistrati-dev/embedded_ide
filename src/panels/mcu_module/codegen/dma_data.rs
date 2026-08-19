@@ -60,7 +60,7 @@ pub fn channels_from_nvic(nvic_xml: &str) -> Vec<DmaChannel> {
 /// what `bind_interrupts!` wants.
 fn parse_vector(vector: &str) -> Option<(String, Vec<u8>)> {
     let (ctrl, rest) = vector.split_once('_')?;
-    if !(ctrl.starts_with("DMA") || ctrl.starts_with("GPDMA") || ctrl.starts_with("BDMA")) {
+    if !is_controller(ctrl) {
         return None;
     }
     let rest = rest
@@ -169,12 +169,23 @@ fn channel_peri(name: &str) -> String {
     name.replace("_Stream", "_CH").replace("_Channel", "_CH")
 }
 
+/// Is `name` a DMA controller instance — `DMA1`, `GPDMA2`, `HPDMA3`, `BDMA`?
+///
+/// Every generation ST has shipped ends its name in `DMA`: the original, the
+/// muxed `GPDMA`/`HPDMA`/`LPDMA` of the DMAv3 parts (H5, H7RS, U5, N6, WBA) and
+/// the basic `BDMA` an H7 carries alongside. `DMAMUX1` does not — it is the mux
+/// itself and owns no channels — and neither does `DMA2D`, the graphics engine.
+fn is_controller(name: &str) -> bool {
+    name.trim_end_matches(|c: char| c.is_ascii_digit())
+        .ends_with("DMA")
+}
+
 /// `DMA1_Channel4` / `DMA2_Stream7` — a channel, as the request table names it.
 fn is_channel_name(name: &str) -> bool {
     let Some((ctrl, rest)) = name.split_once('_') else {
         return false;
     };
-    (ctrl.starts_with("DMA") || ctrl.starts_with("GPDMA") || ctrl.starts_with("BDMA"))
+    is_controller(ctrl)
         && rest
             .strip_prefix("Channel")
             .or_else(|| rest.strip_prefix("Stream"))
@@ -379,6 +390,22 @@ mod tests {
         let ch = channels_from_nvic(xml);
         assert_eq!(ch[0].peri, "GPDMA1_CH0");
         assert_eq!(ch[0].irq, "GPDMA1_CHANNEL0");
+    }
+
+    /// The DMAv3 controllers an H7RS / N6 / U5 carries alongside (or instead of)
+    /// GPDMA. Rejected outright until this, which cost ~100 parts their
+    /// channels even though `dma_rank` and `mux_by_name` already knew them.
+    #[test]
+    fn every_dma_generation_counts_as_a_controller() {
+        let xml = concat!(
+            r#"<x Value="HPDMA1_Channel3_IRQn:Y"/><x Value="LPDMA1_Channel0_IRQn:Y"/>"#,
+            r#"<x Value="BDMA_Channel1_IRQn:Y"/><x Value="DMA2D_IRQn:Y"/>"#
+        );
+        let peris: Vec<String> = channels_from_nvic(xml)
+            .into_iter()
+            .map(|c| c.peri)
+            .collect();
+        assert_eq!(peris, ["HPDMA1_CH3", "LPDMA1_CH0", "BDMA_CH1"]);
     }
 
     /// Non-DMA vectors are ignored, whatever they look like.
