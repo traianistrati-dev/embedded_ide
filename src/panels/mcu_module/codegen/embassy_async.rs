@@ -144,18 +144,16 @@ const STOP_BITS: u8 = {STOP}; // 1, 2
 // (`Read` + `Write`), so your application code stays portable across chips/HALs:
 //
 //     async fn app<S: embedded_io_async::Read + embedded_io_async::Write>(s: &mut S) { /* … */ }
+use embassy_stm32::interrupt::typelevel::Binding;
 use embassy_stm32::usart::{
-    BufferedInterruptHandler, BufferedUart, Config, DataBits, Parity, RxPin, StopBits, TxPin,
+    BufferedInterruptHandler, BufferedUart, Config, DataBits, Instance, Parity, RxPin, StopBits,
+    TxPin,
 };
-use embassy_stm32::{bind_interrupts, peripherals, Peri};
+use embassy_stm32::{peripherals, Peri};
 use static_cell::StaticCell;
 
 /// Byte capacity of the interrupt-driven TX/RX ring buffers.
 const BUF_LEN: usize = 256;
-
-bind_interrupts!(struct Irqs {
-    {UIRQ} => BufferedInterruptHandler<peripherals::{PERI}>;
-});
 
 fn get_config() -> Config {
     let mut config = Config::default();
@@ -178,16 +176,25 @@ fn get_config() -> Config {
 }
 
 /// Initialise {PERI} as an async `embedded-io-async` Read + Write value.
+///
+/// No `bind_interrupts!` here: on some families several peripherals SHARE one
+/// NVIC vector (an STM32G0 routes USART3, USART4 and LPUART1 through
+/// `USART3_4_LPUART1`), and a vector may only be bound ONCE in the whole
+/// program. `main.rs` owns the single `Irqs` and passes it in.
 pub fn init<'d>(
     usart: Peri<'d, peripherals::{PERI}>,
     rx: Peri<'d, impl RxPin<peripherals::{PERI}>>,
     tx: Peri<'d, impl TxPin<peripherals::{PERI}>>,
+    irqs: impl Binding<
+        <peripherals::{PERI} as Instance>::Interrupt,
+        BufferedInterruptHandler<peripherals::{PERI}>,
+    > + 'd,
 ) -> impl embedded_io_async::Read + embedded_io_async::Write + 'd {
     static TX_BUF: StaticCell<[u8; BUF_LEN]> = StaticCell::new();
     static RX_BUF: StaticCell<[u8; BUF_LEN]> = StaticCell::new();
     let tx_buf = TX_BUF.init([0; BUF_LEN]);
     let rx_buf = RX_BUF.init([0; BUF_LEN]);
-    BufferedUart::new(usart, rx, tx, tx_buf, rx_buf, Irqs, get_config()).unwrap()
+    BufferedUart::new(usart, rx, tx, tx_buf, rx_buf, irqs, get_config()).unwrap()
 }
 
 // ── Using {PERI} ──
@@ -642,8 +649,9 @@ fn serial_irq(irqs: &[String], peri: &str, n: u8) -> String {
 /// belong in the same struct.
 fn dma_irqs_block(
     i2c_instances: &[u8],
-    // `(peripheral word, instance)` — "USART"/"LPUART" with its number.
-    usart_instances: &[(&str, u8)],
+    // `(peripheral word, instance, buffered)` — "USART"/"LPUART", its number,
+    // and which of the two interrupt handlers its `init` takes.
+    usart_instances: &[(&str, u8, bool)],
     binds: &[(String, String)],
     irqs: &[String],
     comp_binds: &[(String, u8)],
@@ -716,14 +724,21 @@ bind_interrupts!(struct Irqs {
             format!("embassy_stm32::comp::InterruptHandler<peripherals::COMP{n}>"),
         );
     }
-    for (peri, n) in usart_instances {
-        // On DMA the USART's own interrupt joins the channels' in one struct,
-        // for the same reason the I2C ones do: `Uart::new` takes a single value.
-        // `peri` is "USART" or "LPUART" — embassy drives both through
-        // `usart::InterruptHandler`, only the peripheral type differs.
+    for (peri, n, buffered) in usart_instances {
+        // EVERY async serial binds here, buffered or DMA — a vector may be bound
+        // only once in the program, and on an STM32G0 USART3, USART4 and LPUART1
+        // share `USART3_4_LPUART1`, so the grouping above is the only thing that
+        // lets two of them coexist. The handler type is the one its `init` asks
+        // for: `BufferedInterruptHandler` for the ring-buffer driver,
+        // `InterruptHandler` for the DMA one.
+        let handler = if *buffered {
+            "BufferedInterruptHandler"
+        } else {
+            "InterruptHandler"
+        };
         bind(
             serial_irq(irqs, peri, *n),
-            format!("embassy_stm32::usart::InterruptHandler<peripherals::{peri}{n}>"),
+            format!("embassy_stm32::usart::{handler}<peripherals::{peri}{n}>"),
         );
     }
 
@@ -763,7 +778,9 @@ pub fn async_peripherals(
     // I2C peripherals on DMA: their event/error interrupts go in the SAME
     // `Irqs` struct as the channels', because `I2c::new` takes one value.
     let mut dma_i2c_instances: Vec<u8> = Vec::new();
-    let mut dma_usart_instances: Vec<(&str, u8)> = Vec::new();
+    // Every async serial, DMA-backed or buffered: they all need their vector
+    // bound in main.rs's single `Irqs`.
+    let mut serial_instances: Vec<(&str, u8, bool)> = Vec::new();
     let mut dma_binds: Vec<(String, String)> = Vec::new();
     let mut dma_uses: Vec<dma_map::DmaUse> = Vec::new();
     let mut alloc = dma_map::DmaAllocator::for_chip(family, chip.dma);
@@ -811,7 +828,7 @@ pub fn async_peripherals(
             // BufferedUart::new takes (peri, rx, tx, …); the config's `init` mirrors it.
             if cfgs.get(&n).map(|c| c.mode) == Some(UsartMode::Dma) {
                 any_async_dma = true;
-                dma_usart_instances.push((peri, n));
+                serial_instances.push((peri, n, false));
                 let (args, note) = dma_args(
                     &mut alloc,
                     &mut dma_binds,
@@ -827,8 +844,9 @@ pub fn async_peripherals(
 "
                 ));
             } else {
+                serial_instances.push((peri, n, true));
                 calls.push_str(&format!(
-                    "    let mut {handle} =                  pins::configs::{stem}{n}::init(p.{peri}{n}, p.{rx}, p.{tx});
+                    "    let mut {handle} =                  pins::configs::{stem}{n}::init(p.{peri}{n}, p.{rx}, p.{tx}, Irqs);
 "
                 ));
             }
@@ -942,10 +960,10 @@ pub fn async_peripherals(
 
     // The struct is needed as soon as ANYTHING binds an interrupt, which is no
     // longer only the DMA path.
-    let dma_irqs = if any_async_dma || !comp_binds.is_empty() {
+    let dma_irqs = if any_async_dma || !comp_binds.is_empty() || !serial_instances.is_empty() {
         dma_irqs_block(
             &dma_i2c_instances,
-            &dma_usart_instances,
+            &serial_instances,
             &dma_binds,
             chip.irq_vectors,
             &comp_binds,
@@ -1402,7 +1420,7 @@ mod irq_key_tests {
             ("DMA1_CHANNEL2_3".to_owned(), "DMA1_CH2".to_owned()),
             ("DMA1_CHANNEL2_3".to_owned(), "DMA1_CH3".to_owned()),
         ];
-        let out = dma_irqs_block(&[1], &[("USART", 3)], &binds, &irqs, &[]);
+        let out = dma_irqs_block(&[1], &[("USART", 3, false)], &binds, &irqs, &[]);
         assert!(
             out.contains(
                 "    I2C1 => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C1>, embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C1>;"
@@ -1443,7 +1461,7 @@ mod irq_key_tests {
     #[test]
     fn a_chip_with_split_vectors_or_no_list_keeps_ev_and_er() {
         for irqs in [v(&["I2C1_EV", "I2C1_ER", "USART1"]), Vec::new()] {
-            let out = dma_irqs_block(&[1], &[("USART", 1)], &[], &irqs, &[]);
+            let out = dma_irqs_block(&[1], &[("USART", 1, false)], &[], &irqs, &[]);
             assert!(
                 out.contains(
                     "    I2C1_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C1>;"
@@ -1468,11 +1486,25 @@ mod irq_key_tests {
     /// The buffered-USART config file has its OWN `bind_interrupts!`, keyed the
     /// same way.
     #[test]
-    fn the_buffered_usart_config_binds_the_chips_vector() {
+    fn the_buffered_usart_binds_the_chips_vector_in_main() {
+        // The config file no longer binds anything: a vector can be bound ONCE
+        // per program, and on this chip USART3 shares one with USART4/LPUART1.
         let f = serial_config_file("USART", 3, None, "USART3_4_LPUART1");
+        assert!(!f.contains("bind_interrupts!(struct Irqs"), "{f}");
+        assert!(f.contains("irqs: impl Binding<"), "{f}");
+        // main.rs binds it, under the chip's own vector name.
+        let out = dma_irqs_block(
+            &[],
+            &[("USART", 3, true)],
+            &[],
+            &["USART3_4_LPUART1".into()],
+            &[],
+        );
         assert!(
-            f.contains("    USART3_4_LPUART1 => BufferedInterruptHandler<peripherals::USART3>;"),
-            "{f}"
+            out.contains(
+                "    USART3_4_LPUART1 => embassy_stm32::usart::BufferedInterruptHandler<peripherals::USART3>;"
+            ),
+            "{out}"
         );
     }
 }
@@ -1494,9 +1526,9 @@ mod usart_mode_tests {
         assert_eq!(UsartMode::default(), UsartMode::Buffered);
         let f = serial_config_file("USART", 1, Some(&cfg(UsartMode::Buffered)), "USART1");
         assert!(f.contains("BufferedUart::new("), "{f}");
-        // The interrupt binding stays LOCAL here — only the DMA form has to
-        // hand it over to main.rs.
-        assert!(f.contains("bind_interrupts!(struct Irqs {"), "{f}");
+        // The interrupt binding is main.rs's, for both forms — see
+        // `the_buffered_usart_binds_the_chips_vector_in_main`.
+        assert!(!f.contains("bind_interrupts!(struct Irqs"), "{f}");
         assert!(!f.contains("RingBufferedUartRx"), "{f}");
     }
 
@@ -1826,12 +1858,19 @@ mod usart_mode_tests {
             &Default::default(),
         );
         assert!(
-            out.init_calls.contains("let mut _serial1 ="),
+            out.init_calls.contains("let mut _serial1 = "),
             "{}",
             out.init_calls
         );
-        assert!(out.dma_irqs.is_empty());
+        // Buffered pulls in no DMA — but it DOES need its vector bound, and the
+        // handler is the buffered one.
         assert!(!out.any_async_dma);
+        assert!(
+            out.dma_irqs
+                .contains("USART1 => embassy_stm32::usart::BufferedInterruptHandler"),
+            "{}",
+            out.dma_irqs
+        );
     }
 }
 
@@ -2073,7 +2112,7 @@ mod lpuart_tests {
         assert!(!body.contains("USART1"), "{body}");
         assert!(
             out.init_calls
-                .contains("pins::configs::lpuart1::init(p.LPUART1, p.PA3, p.PA2)"),
+                .contains("pins::configs::lpuart1::init(p.LPUART1, p.PA3, p.PA2, Irqs)"),
             "{}",
             out.init_calls
         );
@@ -2135,15 +2174,13 @@ mod lpuart_tests {
             mk("PA3", PinFunction::LpuartRx(1)),
         ];
         let out = run(&pins, &irqs);
-        let body = &out
-            .config_files
-            .iter()
-            .find(|(n, _)| n == "lpuart1.rs")
-            .unwrap()
-            .1;
+        // ONE binding site, in main.rs, under the shared vector name.
         assert!(
-            body.contains("USART3_4_LPUART1 => BufferedInterruptHandler<peripherals::LPUART1>;"),
-            "{body}"
+            out.dma_irqs.contains(
+                "USART3_4_LPUART1 => embassy_stm32::usart::BufferedInterruptHandler<peripherals::LPUART1>;"
+            ),
+            "{}",
+            out.dma_irqs
         );
     }
 }

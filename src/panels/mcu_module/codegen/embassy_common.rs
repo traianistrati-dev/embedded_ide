@@ -1289,6 +1289,12 @@ mod emit_for_manual_compile {
         for want in [
             PinFunction::UsartTx(un),
             PinFunction::UsartRx(un),
+            // The LPUART, left BUFFERED: a peripheral of its own driven through
+            // embassy's `usart` API, and on a G0 it shares one NVIC vector with
+            // USART3/4 — so this is also where a duplicate `bind_interrupts!`
+            // for that vector would show up.
+            PinFunction::LpuartTx(1),
+            PinFunction::LpuartRx(1),
             PinFunction::SpiSck(1),
             PinFunction::SpiMosi(1),
             PinFunction::SpiMiso(1),
