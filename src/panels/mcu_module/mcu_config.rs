@@ -36,6 +36,7 @@ const IOPINS_HEADER: &str = "@iopins";
 const IRQ_HEADER: &str = "@irq";
 const IOMODE_HEADER: &str = "@iomode";
 const WATCHDOG_HEADER: &str = "@watchdog";
+const COMP_HEADER: &str = "@comp";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -130,6 +131,95 @@ pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::Watchd
                 }
             }
             _ => {}
+        }
+    }
+    out
+}
+
+/// The `@comp` section — one line per ENABLED comparator:
+///
+/// ```text
+/// @comp
+/// 3 HighSpeed Mv20 NotInverted HalfVref None
+/// ```
+///
+/// Positional rather than `key=value`: five fields that always appear in the
+/// same order, and a line that lost one is dropped whole (below) rather than
+/// half-applied.
+pub fn comp_section(c: &crate::panels::mcu_module::comparator::CompSettings) -> String {
+    let mut body = String::new();
+    for (n, cfg) in c {
+        body.push_str(&format!(
+            "{n} {} {} {} {} {}\n",
+            cfg.power_mode.token(),
+            cfg.hysteresis.token(),
+            cfg.output_polarity.token(),
+            cfg.inverting_input.token(),
+            cfg.blanking_source.token(),
+        ));
+    }
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("{COMP_HEADER}\n{body}")
+    }
+}
+
+/// Read `@comp` back. Same policy as `@watchdog`: a line that does not parse
+/// COMPLETELY is dropped, because a comparator the user cannot see in the tab
+/// must not reach the generated firmware, and defaulting a field would quietly
+/// change what it compares against.
+pub fn parse_comp(text: &str) -> crate::panels::mcu_module::comparator::CompSettings {
+    use crate::panels::mcu_module::comparator::{
+        BlankingSource, CompConfig, CompSettings, Hysteresis, InvertingInput, OutputPolarity,
+        PowerMode,
+    };
+    let mut out = CompSettings::new();
+    let Some(body) = section_body(text, COMP_HEADER) else {
+        return out;
+    };
+    // The token spellings are the generator's own, so a round trip cannot drift
+    // from what the templates emit.
+    let by_token = |tok: &str, all: &[&str]| all.iter().position(|t| *t == tok);
+    for line in body.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() != 6 {
+            continue;
+        }
+        let Ok(n) = f[0].parse::<u8>() else { continue };
+        let power = PowerMode::ALL.iter().find(|v| v.token() == f[1]).copied();
+        let hyst = Hysteresis::ALL.iter().find(|v| v.token() == f[2]).copied();
+        let pol = OutputPolarity::ALL
+            .iter()
+            .find(|v| v.token() == f[3])
+            .copied();
+        let inm = InvertingInput::ALL
+            .iter()
+            .find(|v| v.token() == f[4])
+            .copied();
+        let blank = BlankingSource::ALL
+            .iter()
+            .find(|v| v.token() == f[5])
+            .copied();
+        let _ = by_token;
+        if let (
+            Some(power_mode),
+            Some(hysteresis),
+            Some(output_polarity),
+            Some(inverting_input),
+            Some(blanking_source),
+        ) = (power, hyst, pol, inm, blank)
+        {
+            out.insert(
+                n,
+                CompConfig {
+                    power_mode,
+                    hysteresis,
+                    output_polarity,
+                    inverting_input,
+                    blanking_source,
+                },
+            );
         }
     }
     out
@@ -708,5 +798,56 @@ wwdg 500
             .wwdg,
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod comp_section_tests {
+    use super::{comp_section, parse_comp};
+    use crate::panels::mcu_module::comparator::{
+        BlankingSource, CompConfig, CompSettings, Hysteresis, InvertingInput, OutputPolarity,
+        PowerMode,
+    };
+
+    #[test]
+    fn a_comparator_survives_the_round_trip() {
+        let mut c = CompSettings::new();
+        c.insert(
+            2,
+            CompConfig {
+                power_mode: PowerMode::MediumSpeed,
+                hysteresis: Hysteresis::Mv40,
+                output_polarity: OutputPolarity::Inverted,
+                inverting_input: InvertingInput::Dac2,
+                blanking_source: BlankingSource::Blank1,
+            },
+        );
+        c.insert(7, CompConfig::default());
+        let text = comp_section(&c);
+        assert_eq!(parse_comp(&text), c);
+        // Nothing configured writes NO section, so an untouched project's
+        // mcu.config does not grow an empty header.
+        assert!(comp_section(&CompSettings::new()).is_empty());
+        assert!(parse_comp("").is_empty());
+    }
+
+    /// Same policy as `@watchdog`: half a line is no line. A comparator the tab
+    /// cannot show must not reach the firmware, and defaulting a field would
+    /// quietly change what it compares against.
+    #[test]
+    fn an_incomplete_line_is_dropped_whole() {
+        for bad in [
+            "@comp\n2 MediumSpeed Mv40 Inverted Dac2\n",
+            "@comp\n2 MediumSpeed Mv40 Inverted Dac2 Blank1 extra\n",
+            "@comp\nx MediumSpeed Mv40 Inverted Dac2 Blank1\n",
+            "@comp\n2 Turbo Mv40 Inverted Dac2 Blank1\n",
+            "@comp\n2 MediumSpeed Mv999 Inverted Dac2 Blank1\n",
+        ] {
+            assert!(parse_comp(bad).is_empty(), "{bad}");
+        }
+        // ...while a good line right after a bad one still lands.
+        let mixed = "@comp\n2 Turbo Mv40 Inverted Dac2 Blank1\n7 HighSpeed None NotInverted HalfVref None\n";
+        assert_eq!(parse_comp(mixed).len(), 1);
+        assert!(parse_comp(mixed).contains_key(&7));
     }
 }

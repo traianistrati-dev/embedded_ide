@@ -257,3 +257,72 @@ mod tests {
         assert_eq!(defs.len(), baseline);
     }
 }
+
+#[cfg(test)]
+mod one_shot_import {
+    //! A hand-run import, for when a chip is needed on THIS machine and
+    //! clicking through the dialog is not where the work is.
+    //!
+    //! It repeats the dialog's per-chip orchestration (`AppIde::import_stm32_xml`)
+    //! rather than calling it, because that one is wound through `&mut self` and
+    //! the UI's status strings. The building blocks are the same functions, so a
+    //! definition written here is the one the dialog would write — but if the
+    //! dialog grows a step, this has to grow it too.
+
+    /// ```text
+    /// EIDE_IMPORT_XML="…/STM32G474R(B-C-E)Tx.xml" \
+    ///   cargo test --bin embedded_ide_0 import_one_chip -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes a chip definition into the user's config folder"]
+    fn import_one_chip() {
+        use crate::panels::mcu_module::codegen::{dma_data, nvic};
+        use crate::panels::mcu_module::{clock::graph::cubemx, stm32_pin_data};
+
+        let Ok(chip) = std::env::var("EIDE_IMPORT_XML") else {
+            eprintln!("set EIDE_IMPORT_XML to the chip's .xml - nothing imported");
+            return;
+        };
+        let path = std::path::Path::new(&chip);
+        let xml = std::fs::read_to_string(path).expect("read the chip xml");
+        let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|v| {
+            let f = path
+                .parent()?
+                .join("IP")
+                .join(stm32_pin_data::gpio_ip_file_name(&v));
+            Some(stm32_pin_data::GpioAf::parse(
+                &std::fs::read_to_string(f).ok()?,
+            ))
+        });
+        let mut dma_cache = std::collections::HashMap::new();
+        let mut irq_cache = std::collections::HashMap::new();
+        let dma = dma_data::dma_def_for(&xml, path.parent(), &mut dma_cache);
+        let irqs = nvic::vectors_for(&xml, path.parent(), &mut irq_cache);
+        // `db/mcu/<chip>.xml` -> `db`, which is where the clock trees live.
+        let db = path.parent().and_then(|p| p.parent());
+
+        for chip in stm32_pin_data::convert_xml_with_af(&xml, af.as_ref()).expect("converts") {
+            let errs = chip.form.errors();
+            assert!(errs.is_empty(), "{}: {}", chip.form.display_name, errs[0]);
+            let mut def = chip.form.to_definition();
+            def.dma = dma.clone();
+            def.irq_vectors = irqs.clone();
+            if let Some(db) = db {
+                match cubemx::graph_for_chip_xml(db, &xml, &def.family) {
+                    Ok((gc, _missing)) => {
+                        def.clock = crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc)
+                    }
+                    Err(e) => eprintln!("{}: no clock tree ({e})", def.display_name),
+                }
+            }
+            let where_ = super::save_definition(&def).expect("save");
+            println!(
+                "imported {} -> {}  (dma {}, {} vectors)",
+                def.display_name,
+                where_.display(),
+                def.dma.as_ref().map_or(0, |d| d.channels.len()),
+                def.irq_vectors.len()
+            );
+        }
+    }
+}

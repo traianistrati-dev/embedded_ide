@@ -368,6 +368,13 @@ pub struct Mcu {
     /// Persisted in `mcu.config` `@watchdog`; feeds `calculate_mcu_state_hash`
     /// because it is codegen input.
     pub watchdog: crate::panels::mcu_module::watchdog::WatchdogSettings,
+    /// Comparator settings from the Configuration tab, keyed by instance —
+    /// present only for the ones switched on, so the KEYS are the enabled
+    /// comparators. Half pin-less: the `COMP{n}_INP` pin is chosen on the Pins
+    /// canvas, everything here is a register with no pin. Persisted in
+    /// `mcu.config` `@comp`; feeds `calculate_mcu_state_hash` because it is
+    /// codegen input.
+    pub comp: crate::panels::mcu_module::comparator::CompSettings,
 }
 
 /// One Virtual-module undo snapshot (see [`Mcu::module_undo`]): the modules and

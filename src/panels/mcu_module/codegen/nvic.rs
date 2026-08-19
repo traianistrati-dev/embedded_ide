@@ -73,8 +73,15 @@ fn covered(vector: &str) -> Vec<(&str, u8)> {
 }
 
 /// Does `vector` serve `periph` instance `n`?
+///
+/// A vector named EXACTLY after the peripheral, with no number at all, serves
+/// every instance of it: STM32U5 and WBA route both comparators through one
+/// vector called `COMP`. Whole-name only, not a segment — `ADC1_COMP` on an L0
+/// is the ADC's vector that the comparators happen to share, and treating it as
+/// "the COMP vector" would be a different claim.
 fn serves(vector: &str, periph: &str, n: u8) -> bool {
-    covered(vector).iter().any(|(p, i)| *p == periph && *i == n)
+    let _ = n;
+    vector == periph || covered(vector).iter().any(|(p, i)| *p == periph && *i == n)
 }
 
 /// The vector serving `periph{n}`, e.g. `usart_style("USART", 3)` on an STM32G0
@@ -86,6 +93,36 @@ pub fn vector_for<'a>(vectors: &'a [String], periph: &str, n: u8) -> Option<&'a 
     vectors
         .iter()
         .find(|v| serves(v, periph, n))
+        .map(String::as_str)
+}
+
+/// The vector serving `periph{n}` on a chip that has exactly `existing`.
+///
+/// Needed where a family's NVIC table lists SEVERAL vectors for one instance
+/// and the chip decides between them by how many instances it has. The STM32G4
+/// table carries both `COMP4` and `COMP4_5_6`, gated in the database on
+/// `COMP5_Exist`: a G431 (COMP1..4) routes COMP4 alone, a G474 (COMP1..7)
+/// routes it with 5 and 6. Binding the wrong one is a compile error in the
+/// user's project, because embassy names only the one its metapac knows.
+///
+/// The rule, from data already in hand: among the vectors serving `n`, keep the
+/// ones whose whole covered set exists on this chip, and take the WIDEST. A
+/// vector naming an instance the part does not have cannot be its vector.
+pub fn vector_for_within<'a>(
+    vectors: &'a [String],
+    periph: &str,
+    n: u8,
+    existing: &[u8],
+) -> Option<&'a str> {
+    vectors
+        .iter()
+        .filter(|v| serves(v, periph, n))
+        .filter(|v| {
+            covered(v)
+                .iter()
+                .all(|(p, i)| *p != periph || existing.contains(i))
+        })
+        .max_by_key(|v| covered(v).iter().filter(|(p, _)| *p == periph).count())
         .map(String::as_str)
 }
 
@@ -207,6 +244,41 @@ mod tests {
     }
 
     /// `USART1` must not be answered by `USART10`, nor the other way round.
+    /// STM32U5 and WBA give both comparators ONE vector, named `COMP`.
+    #[test]
+    fn a_vector_named_after_the_peripheral_serves_every_instance() {
+        let u5 = v(&["COMP", "ADC1_2", "USART1"]);
+        assert_eq!(vector_for_within(&u5, "COMP", 1, &[1, 2]), Some("COMP"));
+        assert_eq!(vector_for_within(&u5, "COMP", 2, &[1, 2]), Some("COMP"));
+        // A vector that merely CONTAINS the name is not it: on an STM32L0 the
+        // comparators share the ADC's vector, which is a different fact.
+        let l0 = v(&["ADC1_COMP", "COMP_ACQ"]);
+        assert_eq!(vector_for_within(&l0, "COMP", 1, &[1, 2]), None);
+    }
+
+    /// STM32G4's comparators: the same table serves a G431 (COMP1..4) and a
+    /// G474 (COMP1..7), and only the instance list tells them apart.
+    #[test]
+    fn the_widest_vector_that_fits_the_chip_wins() {
+        let g4 = v(&["COMP1_2_3", "COMP4", "COMP4_5_6", "COMP7"]);
+        let g474 = [1u8, 2, 3, 4, 5, 6, 7];
+        let g431 = [1u8, 2, 3, 4];
+        assert_eq!(
+            vector_for_within(&g4, "COMP", 4, &g474),
+            Some("COMP4_5_6"),
+            "5 and 6 exist, so the shared vector is the real one"
+        );
+        assert_eq!(
+            vector_for_within(&g4, "COMP", 4, &g431),
+            Some("COMP4"),
+            "no COMP5 on this part, so the shared vector cannot be its vector"
+        );
+        assert_eq!(vector_for_within(&g4, "COMP", 1, &g474), Some("COMP1_2_3"));
+        assert_eq!(vector_for_within(&g4, "COMP", 7, &g474), Some("COMP7"));
+        assert_eq!(vector_for_within(&g4, "COMP", 7, &g431), None, "no COMP7");
+        assert_eq!(vector_for_within(&[], "COMP", 1, &g474), None);
+    }
+
     #[test]
     fn instance_numbers_match_whole() {
         let h7 = v(&["USART10", "USART1"]);

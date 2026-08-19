@@ -5,6 +5,7 @@ pub mod clock;
 pub mod codegen;
 pub mod codegen_esp;
 pub mod codegen_esp_configs;
+pub mod comparator;
 pub mod datasheet_import;
 pub mod mcu;
 pub mod mcu_catalog;

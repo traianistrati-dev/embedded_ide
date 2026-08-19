@@ -139,6 +139,7 @@ impl Mcu {
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
             watchdog: Default::default(),
+            comp: Default::default(),
         }
     }
 
@@ -480,11 +481,19 @@ impl Mcu {
         // Watchdogs (`@watchdog`) — codegen input, like `@clockmanual`: it
         // decides whether the watchdog config files exist at all.
         let wdg = mcu_config::watchdog_section(&self.watchdog);
+        let comp = mcu_config::comp_section(&self.comp);
         if !wdg.is_empty() {
             if !s.is_empty() {
                 s.push('\n');
             }
             s.push_str(&wdg);
+        }
+        // Comparators (`@comp`) — codegen input for the same reason.
+        if !comp.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&comp);
         }
         // Diagram rotation (`@rotation`) — view preference, same append pattern.
         let rotation = mcu_config::rotation_section(self.rotated);
@@ -565,6 +574,7 @@ impl Mcu {
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
         self.io_pin_pos = mcu_config::parse_iopins(text);
         self.watchdog = mcu_config::parse_watchdog(text);
+        self.comp = mcu_config::parse_comp(text);
         // Interrupt edges (`@irq`) — a missing section means every input is
         // polled, which is the pre-RTIC behaviour of every existing project.
         let irqs = mcu_config::parse_irq(text);

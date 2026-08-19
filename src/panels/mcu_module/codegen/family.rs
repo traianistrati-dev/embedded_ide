@@ -14,6 +14,7 @@
 use super::common::USER_TAIL;
 use super::{embassy_async, embassy_common, rcc, rtic, stm32, wba};
 use crate::panels::mcu_module::codegen_esp::{self, EspRuntime};
+use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::mcu::{Mcu, Runtime};
 use crate::panels::mcu_module::modules::{
     self, ApiStyle, I2cModuleConfig, SpiModuleConfig, UsartModuleConfig,
@@ -516,10 +517,26 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
+    let comp_instances = comparator::instances(mcu);
+    let comp_pins: Vec<(u8, String, Option<String>)> = mcu
+        .comp
+        .keys()
+        .filter_map(|n| {
+            comparator::wired_pin(mcu, *n, "INP")
+                .map(|inp| (*n, inp, comparator::wired_pin(mcu, *n, "INM")))
+        })
+        .collect();
     embassy_async::async_peripherals(
         &mcu.family,
-        mcu.dma.as_ref(),
-        &mcu.irq_vectors,
+        embassy_async::ChipData {
+            dma: mcu.dma.as_ref(),
+            irq_vectors: &mcu.irq_vectors,
+        },
+        embassy_async::CompInputs {
+            settings: &mcu.comp,
+            instances: &comp_instances,
+            pins: &comp_pins,
+        },
         &all,
         &usart,
         &spi,

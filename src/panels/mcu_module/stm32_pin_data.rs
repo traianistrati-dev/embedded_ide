@@ -758,18 +758,28 @@ fn hal_dep_for(family: &str, line: &str, name: &str) -> String {
 /// > Chip supports single and dual bank configuration. No Cargo feature to
 /// > select one is enabled.
 ///
-/// So the project failed before compiling a single line of generated code. The
-/// affected set is exactly 69 parts, derived by counting memory configurations
-/// across every chip in `stm32-metapac` 21 and checked part by part:
+/// So the project fails before compiling a single line of generated code. The
+/// affected set is 194 parts, derived by counting memory configurations across
+/// every chip in `stm32-metapac` 21 - the same data embassy's build script
+/// reads. Six families, and within a family it is per-PART, not per-line:
 ///
 /// * **F42x/43x/46x/47x, 1 MB only** (`…g`). The 512 KB parts are single-bank
 ///   and the 2 MB parts are always dual, so only the middle size is a choice.
-/// * **F76x/77x, every size**.
+/// * **F76x/77x**, every size.
+/// * **G0B1 / G0C1, 512 KB only** (`…c`); the 128 KB and 256 KB parts are not.
+/// * **G471 / G473 / G474 / G483 / G484**, every size.
+/// * **L4+ (L4P5/Q5/R5/R7/R9, L4S5/S7/S9)**, every size.
+/// * **L552 512 KB only** (`…e`), **L562** every size.
 ///
-/// `single-bank` rather than `dual-bank` because that is the factory option-byte
-/// state on both families - the generated project should match a board as it
-/// comes out of the box, and a user who flips the option bytes can flip the
-/// feature next to it in the editable `Cargo.toml`.
+/// This started as F4 + F7 alone, which is why an STM32G474 project would not
+/// build at all until the other four families were added.
+///
+/// `single-bank` rather than `dual-bank` on all of them: it is the factory
+/// option-byte state on F4 and F7, and on the rest it is the choice that
+/// matches the `memory.x` this IDE writes, which describes flash as ONE
+/// contiguous region of the full size. The feature only steers embassy's own
+/// flash driver, so a user who flips the option bytes flips the feature next to
+/// it in the editable `Cargo.toml`.
 fn needs_bank_feature(name: &str) -> bool {
     let slug = slugify(name);
     let Some(line) = slug.get(..9) else {
@@ -779,11 +789,20 @@ fn needs_bank_feature(name: &str) -> bool {
     // `stm32f429zg…`; absent on a truncated name, which then needs nothing.
     let size = slug.as_bytes().get(10).copied().map(char::from);
     match line {
+        // One size per line is the configurable one; the others are fixed.
         "stm32f427" | "stm32f429" | "stm32f437" | "stm32f439" | "stm32f469" | "stm32f479" => {
             size == Some('g')
         }
+        "stm32g0b1" | "stm32g0c1" => size == Some('c'),
+        "stm32l552" => size == Some('e'),
+        // Whole lines, every size: metapac gives all of their parts two memory
+        // configurations.
         "stm32f765" | "stm32f767" | "stm32f768" | "stm32f769" | "stm32f777" | "stm32f778"
         | "stm32f779" => true,
+        "stm32g471" | "stm32g473" | "stm32g474" | "stm32g483" | "stm32g484" => true,
+        "stm32l4p5" | "stm32l4q5" | "stm32l4r5" | "stm32l4r7" | "stm32l4r9" | "stm32l4s5"
+        | "stm32l4s7" | "stm32l4s9" => true,
+        "stm32l562" => true,
         _ => false,
     }
 }
@@ -1530,6 +1549,49 @@ mod bank_feature_tests {
         // A truncated or odd name must not panic or guess.
         assert!(!needs_bank_feature("STM32F4"));
         assert!(!needs_bank_feature(""));
+    }
+
+    /// The four families the rule missed until an STM32G474 project turned out
+    /// not to build at all. Same three shapes, same source: memory
+    /// configurations counted across `stm32-metapac` 21.
+    #[test]
+    fn the_g0_g4_l4_and_l5_parts_ask_for_one_too() {
+        // G4: whole lines, every size — including the 128 KB G474RB that
+        // exposed this.
+        for part in [
+            "STM32G474RBTx",
+            "STM32G474RETx",
+            "STM32G473CBTx",
+            "STM32G484QETx",
+        ] {
+            assert!(needs_bank_feature(part), "{part}");
+        }
+        // …but not the G4 lines that are single-bank throughout.
+        for part in ["STM32G431CBTx", "STM32G441CBTx", "STM32G491RETx"] {
+            assert!(!needs_bank_feature(part), "{part}");
+        }
+        // G0: only the 512 KB size of two lines.
+        assert!(needs_bank_feature("STM32G0B1RCTx"));
+        assert!(needs_bank_feature("STM32G0C1RCTx"));
+        assert!(!needs_bank_feature("STM32G0B1RETx"), "256 KB is fixed");
+        assert!(!needs_bank_feature("STM32G0B1RBTx"), "128 KB is fixed");
+        assert!(!needs_bank_feature("STM32G071RBTx"));
+        // L4+: whole lines. Plain L4 is untouched.
+        assert!(needs_bank_feature("STM32L4R5ZITx"));
+        assert!(needs_bank_feature("STM32L4S9ZITx"));
+        assert!(!needs_bank_feature("STM32L476RGTx"));
+        assert!(!needs_bank_feature("STM32L432KCUx"));
+        // L5: L552 only at 512 KB, L562 always.
+        assert!(needs_bank_feature("STM32L552ZETx"));
+        assert!(!needs_bank_feature("STM32L552CCTx"), "256 KB is fixed");
+        assert!(needs_bank_feature("STM32L562QEIx"));
+    }
+
+    /// The line an STM32G474 gets — the exact string that was missing it.
+    #[test]
+    fn the_g474_line_carries_the_feature() {
+        let g474 = hal_dep_for_name("stm32g4", "STM32G474RBTx");
+        assert!(g474.contains("\"stm32g474rb\", \"single-bank\""), "{g474}");
     }
 
     #[test]

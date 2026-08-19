@@ -1,0 +1,92 @@
+diff --git a/embassy-stm32/build.rs b/embassy-stm32/build.rs
+index 05245c1..9c976e1 100644
+--- a/embassy-stm32/build.rs
++++ b/embassy-stm32/build.rs
+@@ -2063,7 +2063,10 @@ fn main() {
+                 }
+             }
+ 
+-            if regs.kind == "comp" && (regs.version == "u5" || regs.version == "v1" || regs.version == "v2") {
++            // `u0` belongs here too: the driver has `comp_u0` arms, but without
++            // these impls no pin satisfies `NonInvertingPin`, so `Comp::new`
++            // cannot be called on a U0 at all.
++            if regs.kind == "comp" && matches!(regs.version, "u5" | "v1" | "v2" | "u0") {
+                 let peri = format_ident!("{}", p.name);
+                 let pin_name = format_ident!("{}", pin.pin);
+                 // Check if this peripheral has numbered signals (e.g. INP0/INP1 from extra YAML).
+diff --git a/examples/stm32u0/src/bin/comp.rs b/examples/stm32u0/src/bin/comp.rs
+new file mode 100644
+index 0000000..ae56376
+--- /dev/null
++++ b/examples/stm32u0/src/bin/comp.rs
+@@ -0,0 +1,70 @@
++// Analog comparators.
++//
++// COMP1 compares PB2 against an internal fraction of VREFINT, so it needs a
++// single pin. COMP2 compares PB4 against PB7, i.e. two external signals.
++//
++// The comparators share their interrupt with the ADC here (`ADC_COMP1_2`), so
++// every handler for the three of them goes on that one key. If this program
++// also used `adc::InterruptHandler`, it would be listed on the same line.
++
++#![no_std]
++#![no_main]
++
++use defmt::*;
++use defmt_rtt as _;
++use embassy_executor::Spawner;
++use embassy_stm32::bind_interrupts;
++use embassy_stm32::comp::{self, Comp, Config, Hysteresis, InvertingInput, OutputPolarity, PowerMode};
++use embassy_stm32::peripherals;
++use panic_probe as _;
++
++bind_interrupts!(
++    pub struct Irqs {
++        ADC_COMP1_2 => comp::InterruptHandler<peripherals::COMP1>,
++                       comp::InterruptHandler<peripherals::COMP2>;
++});
++
++#[embassy_executor::main]
++async fn main(_spawner: Spawner) {
++    let p = embassy_stm32::init(Default::default());
++    info!("Hello World!");
++
++    // COMP1: PB2 against 3/4 of VREFINT.
++    //
++    // This generation offers two power modes rather than three - there is no
++    // `PowerMode::UltraLowPower` to select here.
++    //
++    // Hysteresis keeps a slowly moving input from chattering across the
++    // threshold; without it a signal that creeps through the reference produces
++    // a burst of edges instead of one.
++    let mut config = Config::default();
++    config.inverting_input = InvertingInput::ThreeQuarterVref;
++    config.hysteresis = Hysteresis::Medium;
++    config.power_mode = PowerMode::MediumSpeed;
++    config.output_polarity = OutputPolarity::NotInverted;
++
++    let mut comp1 = Comp::new(p.COMP1, p.PB2, Irqs, config);
++    comp1.enable();
++
++    // COMP2: PB4 against PB7. The inverting input is a pin here, so
++    // `config.inverting_input` does not apply and this constructor ignores it.
++    //
++    // A U0 routes up to five pins to the inverting input, which is why
++    // `InvertingInput` reaches `InputPin5` on this family and stops earlier on
++    // the others.
++    let mut comp2 = Comp::new_with_input_minus_pin(p.COMP2, p.PB4, p.PB7, Irqs, Config::default());
++    comp2.enable();
++
++    info!(
++        "start: COMP1 is {}, COMP2 is {}",
++        comp1.output_level(),
++        comp2.output_level()
++    );
++
++    loop {
++        // Nothing runs on the CPU while this waits: the comparator drives an
++        // EXTI line, and the interrupt wakes the task.
++        comp1.wait_for_any_edge().await;
++        info!("COMP1 crossed, now {}", comp1.output_level());
++    }
++}

@@ -942,6 +942,183 @@ mod emit_for_manual_compile {
         println!("wrote {}", f1dir.display());
     }
 
+    /// Comparators on a real STM32G474, both constructors.
+    ///
+    /// COMP1 against an internal reference (`Comp::new`) and COMP4 against a
+    /// pin (`new_with_input_minus_pin`), which are different call shapes AND
+    /// different `Irqs` keys — `COMP1_2_3` and `COMP4_5_6` on this part, where
+    /// a G431 would use plain `COMP4`. Only a compiler can confirm any of that.
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_comp_project -- --ignored --nocapture
+    /// cd %TEMP%\eide_comp_check && cargo check --target thumbv7em-none-eabihf
+    /// ```
+    #[test]
+    #[ignore = "needs the STM32Cube database, writes a project for a manual cross-compile"]
+    fn emit_comp_project() {
+        use crate::panels::mcu_module::codegen::{dma_data, nvic};
+        use crate::panels::mcu_module::comparator::{
+            self, CompConfig, Hysteresis, InvertingInput, PowerMode,
+        };
+
+        let chip = std::env::var("EIDE_COMP_XML").unwrap_or_else(|_| {
+            "H:/stm32cube-database-master/stm32cube-database-master/db/mcu/STM32G474R(B-C-E)Tx.xml"
+                .into()
+        });
+        let path = std::path::Path::new(&chip);
+        let Ok(xml) = std::fs::read_to_string(path) else {
+            eprintln!("no chip xml at {chip} - nothing emitted");
+            return;
+        };
+        let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|v| {
+            let f = path
+                .parent()?
+                .join("IP")
+                .join(stm32_pin_data::gpio_ip_file_name(&v));
+            Some(stm32_pin_data::GpioAf::parse(
+                &std::fs::read_to_string(f).ok()?,
+            ))
+        });
+        let mut def = stm32_pin_data::convert_xml_with_af(&xml, af.as_ref())
+            .expect("converts")
+            .remove(0)
+            .form
+            .to_definition();
+        let mut c1 = std::collections::HashMap::new();
+        def.dma = dma_data::dma_def_for(&xml, path.parent(), &mut c1);
+        let mut c2 = std::collections::HashMap::new();
+        def.irq_vectors = nvic::vectors_for(&xml, path.parent(), &mut c2);
+
+        let mut mcu = def.build_mcu();
+        mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
+        let instances = comparator::instances(&mcu);
+        let generation = comparator::Generation::of(&def.family)
+            .unwrap_or_else(|| panic!("{} has no comparator driver", def.family));
+        println!(
+            "comparators on {}: {instances:?} ({generation:?})",
+            def.display_name
+        );
+        // The first two the chip has: 1 and 4 on a G4 (different vectors), 1
+        // and 2 on a U5/WBA (which share one).
+        let (a, b) = match generation {
+            comparator::Generation::V2 => (1u8, 4u8),
+            comparator::Generation::U5 => (1u8, 2u8),
+        };
+        assert!(
+            instances.contains(&a) && instances.contains(&b),
+            "{instances:?}"
+        );
+
+        // Wire A's INP, and B's INP + INM.
+        for want in [
+            format!("COMP{a}_INP"),
+            format!("COMP{b}_INP"),
+            format!("COMP{b}_INM"),
+        ] {
+            let want = want.as_str();
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset
+                        && p.available_functions
+                            .iter()
+                            .any(|f| matches!(f, PinFunction::Other(s) if s == want))
+                })
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => p.selected_function = PinFunction::Other(want.into()),
+                None => panic!("no pin offers {want}"),
+            }
+        }
+        // A hysteresis level this generation can actually express.
+        let hyst = match generation {
+            comparator::Generation::V2 => Hysteresis::Mv30,
+            comparator::Generation::U5 => Hysteresis::Medium,
+        };
+        mcu.comp.insert(
+            a,
+            CompConfig {
+                power_mode: PowerMode::MediumSpeed,
+                hysteresis: hyst,
+                inverting_input: InvertingInput::ThreeQuarterVref,
+                ..CompConfig::default()
+            },
+        );
+        mcu.comp.insert(
+            b,
+            CompConfig {
+                inverting_input: InvertingInput::InputPin,
+                ..CompConfig::default()
+            },
+        );
+
+        let main_rs = mcu.fresh_main_rs();
+        // Whatever the vectors are called on this part, both comparators must
+        // be initialised AND bound. Derived, not hardcoded: a G474 uses
+        // `COMP1_2_3` and `COMP4_5_6`, a U5 puts both on one vector named
+        // `COMP`, and the point is that the emitter agrees with the chip.
+        for n in [a, b] {
+            assert!(
+                main_rs.contains(&format!("pins::configs::comp{n}::init(p.COMP{n},")),
+                "COMP{n} not initialised:
+{main_rs}"
+            );
+            assert!(
+                main_rs.contains(&format!(
+                    "embassy_stm32::comp::InterruptHandler<peripherals::COMP{n}>"
+                )),
+                "COMP{n} not bound:
+{main_rs}"
+            );
+        }
+        for line in main_rs
+            .lines()
+            .filter(|l| l.contains("comp::InterruptHandler"))
+        {
+            println!("  bind: {}", line.trim());
+        }
+
+        let mut files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        println!(
+            "config files: {:?}",
+            configs.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+        files.cargo_toml = project_gen::ensure_async_deps(
+            &files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            !configs.is_empty(),
+            false,
+            false,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_comp_check");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write comp project");
+        println!("wrote {} ({})", dir.display(), def.display_name);
+        println!(
+            "target: {}  hal: {}",
+            def.project.target, def.project.hal_dep
+        );
+    }
+
     /// The F1's BLOCKING DMA transport — `stm32f1xx-hal`'s own, not embassy's.
     ///
     /// Every assertion about it is a substring check until a compiler sees it,

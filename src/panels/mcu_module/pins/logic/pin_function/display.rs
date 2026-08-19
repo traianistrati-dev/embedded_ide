@@ -222,6 +222,38 @@ impl PinFunction {
     }
 
     /// Short badge shown on the pin in the diagram
+    /// The label for the function list inside the chip: the full name, with
+    /// the short tag in front ONLY when it says something the full name does
+    /// not.
+    ///
+    /// The list used to read `OUT  —  GPIO Output`, `SDA  —  I2C3 SDA`,
+    /// `DCMIPP_D8  —  DCMIPP_D8`. The tag is the same word twice in almost
+    /// every row, which costs a third of the width and buys nothing.
+    ///
+    /// "Says something new" is decided by SUBSEQUENCE, not equality: the tag
+    /// is redundant when each of its letters and digits appears in the full
+    /// name in the same order. Substring would have been the obvious test but
+    /// it keeps `LPTX  —  LPUART1 TX`, where the tag is plainly redundant -
+    /// its letters are all there, just not adjacent.
+    ///
+    /// With today's table every tag turns out redundant, so the list shows
+    /// full names only. The rule stays anyway: it is what a NEW function is
+    /// measured against, and a tag that does earn its place will show up
+    /// without anyone having to notice.
+    ///
+    /// The subsequence test is loose — `OUT` is a subsequence of
+    /// `GPIO Input` — and that is safe only because the two strings always
+    /// come from the SAME variant, read off `self` here. Do not reuse
+    /// [`tag_is_redundant`] to compare a tag with somebody else's name.
+    pub fn list_label(&self) -> String {
+        let long = self.label();
+        if tag_is_redundant(self.short_label(), &long) {
+            long
+        } else {
+            format!("{}  —  {}", self.short_label(), long)
+        }
+    }
+
     pub fn short_label(&self) -> &str {
         match self {
             PinFunction::Unset => "—",
@@ -255,5 +287,126 @@ impl PinFunction {
             PinFunction::Mco => "MCO",
             PinFunction::Other(name) => name,
         }
+    }
+}
+
+/// Is `tag` already spelled out inside `long`?
+///
+/// Letters and digits only, case-insensitive, in order but not necessarily
+/// adjacent. Punctuation and spacing are ignored on both sides, so `D−`
+/// against `USB  D−` and `PWM` against `TIM4  CH3  (PWM)` both count.
+/// An empty tag (the placeholder for an unset pin) is redundant by
+/// definition.
+fn tag_is_redundant(tag: &str, long: &str) -> bool {
+    let keep = |s: &str| -> Vec<char> {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    };
+    let (tag, long) = (keep(tag), keep(long));
+    let mut it = long.into_iter();
+    tag.into_iter().all(|c| it.any(|l| l == c))
+}
+
+#[cfg(test)]
+mod list_label_tests {
+    use super::super::enum_::PinFunction;
+    use super::tag_is_redundant;
+
+    /// The rows from the report, each losing a tag that repeated the name.
+    #[test]
+    fn the_redundant_tags_are_gone() {
+        let cases = [
+            (PinFunction::GpioOutput, "GPIO Output"),
+            (PinFunction::GpioInput, "GPIO Input"),
+            (PinFunction::GpioAnalog, "GPIO Analog"),
+            (PinFunction::I2cSda(3), "I2C3  SDA"),
+            (PinFunction::UsartRx(1), "USART1  RX"),
+            (PinFunction::UsartCts(8), "USART8  CTS"),
+            (PinFunction::Other("DCMIPP_D8".into()), "DCMIPP_D8"),
+        ];
+        for (f, want) in cases {
+            assert_eq!(f.list_label(), want, "{f:?}");
+        }
+    }
+
+    /// Two the substring rule would have kept: the tag is spelled out, just
+    /// not contiguously.
+    #[test]
+    fn a_split_tag_counts_as_redundant_too() {
+        assert_eq!(
+            PinFunction::TimerPwm {
+                timer: 4,
+                channel: 3
+            }
+            .list_label(),
+            "TIM4  CH3  (PWM)"
+        );
+        assert_eq!(PinFunction::LpuartTx(1).list_label(), "LPUART1  TX");
+    }
+
+    /// Every variant the enum has today is redundant, so nothing in the list
+    /// carries a tag. Pinned so that adding a function with a tag that DOES
+    /// earn its place shows up here as a deliberate change rather than a
+    /// surprise in the UI.
+    #[test]
+    fn nothing_in_the_current_table_needs_its_tag() {
+        let all = [
+            PinFunction::Unset,
+            PinFunction::GpioInput,
+            PinFunction::GpioOutput,
+            PinFunction::GpioAnalog,
+            PinFunction::AdcChannel { adc: 1, channel: 0 },
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 1,
+            },
+            PinFunction::UsartTx(1),
+            PinFunction::UsartRx(1),
+            PinFunction::UsartCts(1),
+            PinFunction::UsartRts(1),
+            PinFunction::UsartCk(1),
+            PinFunction::LpuartTx(1),
+            PinFunction::LpuartRx(1),
+            PinFunction::LpuartCts(1),
+            PinFunction::LpuartRts(1),
+            PinFunction::SpiNss(1),
+            PinFunction::SpiSck(1),
+            PinFunction::SpiMiso(1),
+            PinFunction::SpiMosi(1),
+            PinFunction::SpiRdy(1),
+            PinFunction::I2cScl(1),
+            PinFunction::I2cSda(1),
+            PinFunction::UsbDm,
+            PinFunction::UsbDp,
+            PinFunction::CanRx,
+            PinFunction::CanTx,
+            PinFunction::SwdIo,
+            PinFunction::SwdClk,
+            PinFunction::Mco,
+        ];
+        for f in all {
+            assert_eq!(f.list_label(), f.label(), "{f:?} still carries a tag");
+        }
+    }
+
+    /// …and the predicate itself refuses a tag that is genuinely new.
+    #[test]
+    fn a_tag_that_adds_something_survives() {
+        assert!(!tag_is_redundant("QSPI", "OCTOSPI1  IO0"));
+        // Order matters: the same letters the wrong way round is not a match.
+        assert!(!tag_is_redundant("XT", "USART1  TX"));
+    }
+
+    /// The rule is LOOSE, and knowing where is the point of this test.
+    #[test]
+    fn scattered_letters_can_match_by_accident() {
+        // "OUT" is a subsequence of "GPIO Input" - o, u, t all appear in
+        // order. A mismatched pair like this would be judged redundant.
+        assert!(tag_is_redundant("OUT", "GPIO Input"));
+        // It never bites, because a tag is only ever compared with the name
+        // of the SAME function: `list_label` reads both off `self`. Recording
+        // it so nobody reuses the predicate somewhere it could.
     }
 }

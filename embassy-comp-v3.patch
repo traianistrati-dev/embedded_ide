@@ -1,0 +1,560 @@
+diff --git a/embassy-stm32/build.rs b/embassy-stm32/build.rs
+index 05245c1..dc82457 100644
+--- a/embassy-stm32/build.rs
++++ b/embassy-stm32/build.rs
+@@ -2063,7 +2063,9 @@ fn main() {
+                 }
+             }
+ 
+-            if regs.kind == "comp" && (regs.version == "u5" || regs.version == "v1" || regs.version == "v2") {
++            if regs.kind == "comp"
++                && matches!(regs.version, "u5" | "v1" | "v2" | "v3")
++            {
+                 let peri = format_ident!("{}", p.name);
+                 let pin_name = format_ident!("{}", pin.pin);
+                 // Check if this peripheral has numbered signals (e.g. INP0/INP1 from extra YAML).
+diff --git a/embassy-stm32/src/comp.rs b/embassy-stm32/src/comp.rs
+index 9c71fa2..4e6ba8b 100644
+--- a/embassy-stm32/src/comp.rs
++++ b/embassy-stm32/src/comp.rs
+@@ -1,8 +1,8 @@
+ //! Analog Comparator (COMP)
+ //!
+ //! This driver supports chips with the comp_u5 peripheral version
+-//! (STM32WBA and STM32U5 series), comp_v1 (STM32G0 series) and
+-//! comp_v2 (STM32G4 series).
++//! (STM32WBA and STM32U5 series), comp_v1 (STM32G0 series),
++//! comp_v2 (STM32G4 series) and comp_v3 (STM32L4, L4+ and L5 series).
+ #![macro_use]
+ 
+ use core::future::poll_fn;
+@@ -28,14 +28,14 @@ pub enum PowerMode {
+     /// Medium speed / medium power.
+     MediumSpeed,
+     /// Ultra-low power / very low speed.
+-    #[cfg(any(comp_u5, comp_v2))]
++    #[cfg(any(comp_u5, comp_v2, comp_v3))]
+     UltraLowPower,
+ }
+ 
+ /// Hysteresis level.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+-#[cfg(any(comp_u5, comp_v1, comp_u0))]
++#[cfg(any(comp_u5, comp_v1, comp_v3, comp_u0))]
+ pub enum Hysteresis {
+     /// No hysteresis.
+     None,
+@@ -95,12 +95,12 @@ pub enum InvertingInput {
+     /// DAC channel 1 output.
+     Dac1,
+     /// DAC channel 2 output.
+-    #[cfg(any(comp_u5, comp_v2))]
++    #[cfg(any(comp_u5, comp_v2, comp_v3))]
+     Dac2,
+     /// External IO pin (INM1).
+     InputPin,
+     /// External IO pin (INM2).
+-    #[cfg(any(comp_v1, comp_v2, comp_u0))]
++    #[cfg(any(comp_v1, comp_v2, comp_v3, comp_u0))]
+     InputPin2,
+     /// Extern IO pin (INM3).
+     #[cfg(any(comp_v1, comp_u0))]
+@@ -128,6 +128,7 @@ pub enum BlankingSource {
+     /// Timer blanking source 2 (check datasheet for specific timer mapping).
+     Blank2,
+     /// Timer blanking source 3 (check datasheet for specific timer mapping).
++    #[cfg(not(comp_v3))]
+     Blank3,
+     /// Timer blanking source 4 (check datasheet for specific timer mapping).
+     #[cfg(any(comp_v1, comp_v2, comp_u0))]
+@@ -500,7 +501,7 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+     fn configure_raw(
+         inp_channel: u8,
+         #[cfg(any(comp_u5, comp_v2, comp_v1))] inmsel: vals::Inm,
+-        #[cfg(comp_u0)] inmsel: u8,
++        #[cfg(any(comp_u0, comp_v3))] inmsel: u8,
+         config: Config,
+     ) {
+         #[cfg(comp_u5)]
+@@ -522,6 +523,15 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+             PowerMode::MediumSpeed => vals::PowerMode::MediumSpeed,
+         };
+ 
++        // L4/L5 have four power modes; the fourth (LowSpeed) has no
++        // `PowerMode` variant, so `UltraLowPower` maps to the lowest one.
++        #[cfg(comp_v3)]
++        let pwrmode = match config.power_mode {
++            PowerMode::HighSpeed => vals::Pwrmode::HighSpeed,
++            PowerMode::MediumSpeed => vals::Pwrmode::MediumSpeed,
++            PowerMode::UltraLowPower => vals::Pwrmode::VeryLowSpeed,
++        };
++
+         #[cfg(comp_v2)]
+         let hyst = match config.hysteresis {
+             Hysteresis::None => vals::Hysteresis::None,
+@@ -542,7 +552,7 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+             Hysteresis::High => vals::Hysteresis::High,
+         };
+ 
+-        #[cfg(comp_u0)]
++        #[cfg(any(comp_u0, comp_v3))]
+         let hyst = match config.hysteresis {
+             Hysteresis::None => vals::Hyst::None,
+             Hysteresis::Low => vals::Hyst::Low,
+@@ -581,6 +591,13 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+             BlankingSource::Blank5 => vals::Blanking::Tim15oc2,
+         };
+ 
++        #[cfg(comp_v3)]
++        let blanksel = match config.blanking_source {
++            BlankingSource::None => vals::Blanking::NoBlanking,
++            BlankingSource::Blank1 => vals::Blanking::Tim1oc5,
++            BlankingSource::Blank2 => vals::Blanking::Tim2oc3,
++        };
++
+         #[cfg(any(comp_u5, comp_u0, comp_v1))]
+         let winmode = match config.window_mode {
+             WindowMode::Disabled => vals::WindowMode::ThisInpsel,
+@@ -604,13 +621,16 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+ 
+         T::regs().csr().modify(|w| {
+             w.set_inpsel(inp_channel);
+-            #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1))]
++            #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1, comp_v3))]
+             w.set_inmsel(inmsel);
+-            #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1))]
++            #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1, comp_v3))]
+             w.set_hyst(hyst);
+             w.set_polarity(polarity);
+             #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1))]
+             w.set_blanksel(blanksel);
++            // L4/L5 spell the same field `blanking`.
++            #[cfg(comp_v3)]
++            w.set_blanking(blanksel);
+ 
+             // G4 COMP needs SCALEN/BRGEN bits to enable internal voltage references.
+             // SCALEN enables the Vrefint scaler, BRGEN enables the bridge resistor divider.
+@@ -626,6 +646,14 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+                 ));
+             }
+ 
++            // Same scaler and bridge as the G4, with INMSEL as a raw field:
++            // 0..=3 are the VREFINT taps, and only 0..=2 divide it.
++            #[cfg(comp_v3)]
++            {
++                w.set_scalen(inmsel <= 3);
++                w.set_brgen(inmsel <= 2);
++            }
++
+             w.set_en(true);
+             #[cfg(any(comp_u5, comp_u0, comp_v1))]
+             {
+@@ -633,6 +661,9 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+                 w.set_winmode(winmode);
+                 w.set_winout(winout);
+             }
++            // L4/L5 have the power mode but no window mode.
++            #[cfg(comp_v3)]
++            w.set_pwrmode(pwrmode);
+         });
+     }
+ 
+@@ -673,7 +704,22 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+             InvertingInput::InputPin5 => 9,
+         };
+ 
+-        #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1))]
++        // RM0351 / RM0438 COMP_CSR.INMSEL, which is the same order the G4
++        // encodes in `vals::Inm` - metapac leaves it a raw field here because
++        // stm32-data has no enumeration for this version.
++        #[cfg(comp_v3)]
++        let inmsel: u8 = match config.inverting_input {
++            InvertingInput::OneQuarterVref => 0,
++            InvertingInput::HalfVref => 1,
++            InvertingInput::ThreeQuarterVref => 2,
++            InvertingInput::Vref => 3,
++            InvertingInput::Dac1 => 4,
++            InvertingInput::Dac2 => 5,
++            InvertingInput::InputPin => 6,
++            InvertingInput::InputPin2 => 7,
++        };
++
++        #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1, comp_v3))]
+         Self::configure_raw(inp_channel, inmsel, config);
+     }
+ 
+@@ -684,7 +730,9 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+         let inmsel = vals::Inm::from_bits(0x06 + inm_channel);
+         #[cfg(comp_u0)]
+         let inmsel = inm_channel;
+-        #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1))]
++        #[cfg(comp_v3)]
++        let inmsel: u8 = 0x06 + inm_channel;
++        #[cfg(any(comp_u5, comp_v2, comp_u0, comp_v1, comp_v3))]
+         Self::configure_raw(inp_channel, inmsel, config)
+     }
+ 
+@@ -757,8 +805,18 @@ impl<'d, T: Instance, M: Mode> Comp<'d, T, M> {
+             BlankingSource::Blank5 => vals::Blanking::Tim15oc2,
+         };
+ 
++        #[cfg(comp_v3)]
++        let blanksel = match source {
++            BlankingSource::None => vals::Blanking::NoBlanking,
++            BlankingSource::Blank1 => vals::Blanking::Tim1oc5,
++            BlankingSource::Blank2 => vals::Blanking::Tim2oc3,
++        };
++
+         T::regs().csr().modify(|w| {
++            #[cfg(not(comp_v3))]
+             w.set_blanksel(blanksel);
++            #[cfg(comp_v3)]
++            w.set_blanking(blanksel);
+         });
+     }
+ }
+@@ -803,6 +861,14 @@ macro_rules! impl_comp {
+         impl SealedInstance for crate::peripherals::$inst {
+             fn info() -> &'static Info {
+                 use crate::rcc::SealedRccPeripheral;
++                // L4/L5 comparators carry no RCC entry in stm32-data, but their
++                // registers sit behind the same SYSCFG clock gate the G4's COMP
++                // metadata names (APB2ENR.SYSCFGEN), so borrow SYSCFG's.
++                #[cfg(comp_v3)]
++                static INFO: Info = Info {
++                    rcc: crate::peripherals::SYSCFG::RCC_INFO,
++                };
++                #[cfg(not(comp_v3))]
+                 static INFO: Info = Info {
+                     rcc: crate::peripherals::$inst::RCC_INFO,
+                 };
+@@ -915,6 +981,18 @@ foreach_peripheral! {
+     };
+ }
+ 
++// STM32L4, L4+ and L5. Both comparators are on the same NVIC vector (`COMP`),
++// and their EXTI lines are 21 and 22, as on the G4.
++#[cfg(comp_v3)]
++foreach_peripheral! {
++    (comp, COMP1) => {
++        impl_comp!(COMP1, 21);
++    };
++    (comp, COMP2) => {
++        impl_comp!(COMP2, 22);
++    };
++}
++
+ #[cfg(comp_v2)]
+ foreach_peripheral! {
+     (comp, COMP1) => {
+diff --git a/embassy-stm32/src/lib.rs b/embassy-stm32/src/lib.rs
+index e432777..9608ca1 100644
+--- a/embassy-stm32/src/lib.rs
++++ b/embassy-stm32/src/lib.rs
+@@ -88,14 +88,14 @@ pub mod aes;
+ pub mod backup_sram;
+ #[cfg(can)]
+ pub mod can;
+-#[cfg(any(comp_u5, comp_v1, comp_v2, comp_u0))]
++#[cfg(any(comp_u5, comp_v1, comp_v2, comp_v3, comp_u0))]
+ pub mod comp;
+ #[cfg(all(cordic, not(stm32c5)))]
+ pub mod cordic;
+ #[cfg(any(aes_v2, aes_v3b, saes_n6))]
+ mod crypto;
+ 
+-#[cfg(not(any(comp_u5, comp_v1, comp_v2, comp_u0)))]
++#[cfg(not(any(comp_u5, comp_v1, comp_v2, comp_v3, comp_u0)))]
+ pub mod comp {
+     //! Comp stub module to provide consistent API
+ 
+diff --git a/examples/stm32g4/src/bin/comp.rs b/examples/stm32g4/src/bin/comp.rs
+new file mode 100644
+index 0000000..7214187
+--- /dev/null
++++ b/examples/stm32g4/src/bin/comp.rs
+@@ -0,0 +1,66 @@
++// Analog comparators.
++//
++// COMP1 compares PA1 against an internal fraction of VREFINT, so it needs a
++// single pin. COMP4 compares PB0 against PB2, i.e. two external signals.
++//
++// Unlike the L4/L5 family, where every comparator shares one vector, the G4
++// spreads them out: COMP1..3 sit on `COMP1_2_3`, and COMP4 has `COMP4` to
++// itself on a part with no COMP5. Both go in the same `bind_interrupts!`.
++
++#![no_std]
++#![no_main]
++
++use defmt::*;
++use defmt_rtt as _;
++use embassy_executor::Spawner;
++use embassy_stm32::bind_interrupts;
++use embassy_stm32::comp::{self, Comp, Config, Hysteresis, InvertingInput, OutputPolarity};
++use embassy_stm32::peripherals;
++use panic_probe as _;
++
++bind_interrupts!(
++    pub struct Irqs {
++        COMP1_2_3 => comp::InterruptHandler<peripherals::COMP1>;
++        COMP4 => comp::InterruptHandler<peripherals::COMP4>;
++});
++
++#[embassy_executor::main]
++async fn main(_spawner: Spawner) {
++    let p = embassy_stm32::init(Default::default());
++    info!("Hello World!");
++
++    // COMP1: PA1 against 1/2 of VREFINT, so roughly 0.6 V on this family.
++    //
++    // Hysteresis is in millivolts here; the L4/L5 and U5 comparators name four
++    // levels instead. It keeps a slowly moving input from chattering across the
++    // threshold: without it a signal that creeps through 0.6 V produces a burst
++    // of edges instead of one.
++    //
++    // `Config::power_mode` is deliberately left alone: this driver only writes
++    // it on the comp_u5 generation, so setting it here would change nothing.
++    let mut config = Config::default();
++    config.inverting_input = InvertingInput::HalfVref;
++    config.hysteresis = Hysteresis::Hyst20M;
++    config.output_polarity = OutputPolarity::NotInverted;
++
++    let mut comp1 = Comp::new(p.COMP1, p.PA1, Irqs, config);
++    comp1.enable();
++
++    // COMP4: PB0 against PB2. The inverting input is a pin here, so
++    // `config.inverting_input` does not apply and this constructor ignores it.
++    let mut comp4 = Comp::new_with_input_minus_pin(p.COMP4, p.PB0, p.PB2, Irqs, Config::default());
++    comp4.enable();
++
++    info!(
++        "start: COMP1 is {}, COMP4 is {}",
++        comp1.output_level(),
++        comp4.output_level()
++    );
++
++    loop {
++        // Nothing runs on the CPU while this waits: the comparator drives an
++        // EXTI line, and the interrupt wakes the task.
++        comp1.wait_for_any_edge().await;
++        info!("COMP1 crossed, now {}", comp1.output_level());
++    }
++}
+diff --git a/examples/stm32l4/src/bin/comp.rs b/examples/stm32l4/src/bin/comp.rs
+new file mode 100644
+index 0000000..b2a8fe1
+--- /dev/null
++++ b/examples/stm32l4/src/bin/comp.rs
+@@ -0,0 +1,62 @@
++// Analog comparators.
++//
++// COMP1 compares PB2 against an internal fraction of VREFINT, so it needs a
++// single pin. COMP2 compares PB4 against PB7, i.e. two external signals.
++//
++// Both comparators share one interrupt (`COMP`) on this family, so both
++// handlers go in the same `bind_interrupts!`.
++
++#![no_std]
++#![no_main]
++
++use defmt::*;
++use defmt_rtt as _;
++use embassy_executor::Spawner;
++use embassy_stm32::bind_interrupts;
++use embassy_stm32::comp::{self, Comp, Config, Hysteresis, InvertingInput, OutputPolarity, PowerMode};
++use embassy_stm32::peripherals;
++use panic_probe as _;
++
++bind_interrupts!(
++    pub struct Irqs {
++        COMP => comp::InterruptHandler<peripherals::COMP1>,
++                comp::InterruptHandler<peripherals::COMP2>;
++});
++
++#[embassy_executor::main]
++async fn main(_spawner: Spawner) {
++    let p = embassy_stm32::init(Default::default());
++    info!("Hello World!");
++
++    // COMP1: PB2 against 3/4 of VREFINT, so roughly 0.9 V on this family.
++    //
++    // Hysteresis keeps a slowly moving input from chattering across the
++    // threshold; without it a signal that creeps through 0.9 V produces a burst
++    // of edges instead of one.
++    let mut config = Config::default();
++    config.inverting_input = InvertingInput::ThreeQuarterVref;
++    config.hysteresis = Hysteresis::Medium;
++    config.power_mode = PowerMode::HighSpeed;
++    config.output_polarity = OutputPolarity::NotInverted;
++
++    let mut comp1 = Comp::new(p.COMP1, p.PB2, Irqs, config);
++    comp1.enable();
++
++    // COMP2: PB4 against PB7. The inverting input is a pin here, so
++    // `config.inverting_input` does not apply and this constructor ignores it.
++    let mut comp2 = Comp::new_with_input_minus_pin(p.COMP2, p.PB4, p.PB7, Irqs, Config::default());
++    comp2.enable();
++
++    info!(
++        "start: COMP1 is {}, COMP2 is {}",
++        comp1.output_level(),
++        comp2.output_level()
++    );
++
++    loop {
++        // Nothing runs on the CPU while this waits: the comparator drives an
++        // EXTI line, and the interrupt wakes the task.
++        comp1.wait_for_any_edge().await;
++        info!("COMP1 crossed, now {}", comp1.output_level());
++    }
++}
+diff --git a/examples/stm32u5/src/bin/comp.rs b/examples/stm32u5/src/bin/comp.rs
+new file mode 100644
+index 0000000..6c12aa5
+--- /dev/null
++++ b/examples/stm32u5/src/bin/comp.rs
+@@ -0,0 +1,70 @@
++// Analog comparators.
++//
++// COMP1 compares PA2 against an internal fraction of VREFINT, so it needs a
++// single pin. COMP2 compares PB4 against PB7, i.e. two external signals.
++//
++// Both comparators share one interrupt (`COMP`) on this family, so both
++// handlers go in the same `bind_interrupts!`.
++
++#![no_std]
++#![no_main]
++
++use defmt::*;
++use defmt_rtt as _;
++use embassy_executor::Spawner;
++use embassy_stm32::bind_interrupts;
++use embassy_stm32::comp::{self, Comp, Config, Hysteresis, InvertingInput, OutputPolarity, PowerMode};
++use embassy_stm32::peripherals;
++use panic_probe as _;
++
++bind_interrupts!(
++    pub struct Irqs {
++        COMP => comp::InterruptHandler<peripherals::COMP1>,
++                comp::InterruptHandler<peripherals::COMP2>;
++});
++
++#[embassy_executor::main]
++async fn main(_spawner: Spawner) {
++    let p = embassy_stm32::init(Default::default());
++    info!("Hello World!");
++
++    // COMP1: PA2 against 3/4 of VREFINT.
++    //
++    // `power_mode` is worth setting on this generation: the comparator can run
++    // slower for less current, which is usually the point on a U5. The G4
++    // driver ignores the field, so an example ported from there will not have
++    // touched it.
++    //
++    // Hysteresis keeps a slowly moving input from chattering across the
++    // threshold; without it a signal that creeps through the reference produces
++    // a burst of edges instead of one.
++    let mut config = Config::default();
++    config.inverting_input = InvertingInput::ThreeQuarterVref;
++    config.hysteresis = Hysteresis::Medium;
++    config.power_mode = PowerMode::UltraLowPower;
++    config.output_polarity = OutputPolarity::NotInverted;
++
++    // `Config` also carries `window_mode` / `window_output` here, which pair
++    // COMP1 and COMP2 to report whether a signal sits between two thresholds.
++    // This example keeps them independent.
++    let mut comp1 = Comp::new(p.COMP1, p.PA2, Irqs, config);
++    comp1.enable();
++
++    // COMP2: PB4 against PB7. The inverting input is a pin here, so
++    // `config.inverting_input` does not apply and this constructor ignores it.
++    let mut comp2 = Comp::new_with_input_minus_pin(p.COMP2, p.PB4, p.PB7, Irqs, Config::default());
++    comp2.enable();
++
++    info!(
++        "start: COMP1 is {}, COMP2 is {}",
++        comp1.output_level(),
++        comp2.output_level()
++    );
++
++    loop {
++        // Nothing runs on the CPU while this waits: the comparator drives an
++        // EXTI line, and the interrupt wakes the task.
++        comp1.wait_for_any_edge().await;
++        info!("COMP1 crossed, now {}", comp1.output_level());
++    }
++}
+diff --git a/examples/stm32wba/src/bin/comp.rs b/examples/stm32wba/src/bin/comp.rs
+new file mode 100644
+index 0000000..511a240
+--- /dev/null
++++ b/examples/stm32wba/src/bin/comp.rs
+@@ -0,0 +1,67 @@
++// Analog comparators.
++//
++// COMP1 compares PA2 against an internal fraction of VREFINT, so it needs a
++// single pin. COMP2 compares PA0 against PB9, i.e. two external signals.
++//
++// Both comparators share one interrupt (`COMP`) on this family, so both
++// handlers go in the same `bind_interrupts!`.
++
++#![no_std]
++#![no_main]
++
++use defmt::*;
++use defmt_rtt as _;
++use embassy_executor::Spawner;
++use embassy_stm32::bind_interrupts;
++use embassy_stm32::comp::{self, Comp, Config, Hysteresis, InvertingInput, OutputPolarity, PowerMode};
++use embassy_stm32::peripherals;
++use panic_probe as _;
++
++bind_interrupts!(
++    pub struct Irqs {
++        COMP => comp::InterruptHandler<peripherals::COMP1>,
++                comp::InterruptHandler<peripherals::COMP2>;
++});
++
++#[embassy_executor::main]
++async fn main(_spawner: Spawner) {
++    let p = embassy_stm32::init(Default::default());
++    info!("Hello World!");
++
++    // COMP1: PA2 against 3/4 of VREFINT.
++    //
++    // A comparator is one of the few things that can watch an analog signal
++    // while the CPU is asleep, which is usually why it is here on a radio part:
++    // `UltraLowPower` trades response time for current, and this generation of
++    // the peripheral does apply the setting.
++    //
++    // Hysteresis keeps a slowly moving input from chattering across the
++    // threshold; without it a signal that creeps through the reference produces
++    // a burst of edges instead of one.
++    let mut config = Config::default();
++    config.inverting_input = InvertingInput::ThreeQuarterVref;
++    config.hysteresis = Hysteresis::Medium;
++    config.power_mode = PowerMode::UltraLowPower;
++    config.output_polarity = OutputPolarity::NotInverted;
++
++    let mut comp1 = Comp::new(p.COMP1, p.PA2, Irqs, config);
++    comp1.enable();
++
++    // COMP2: PA0 against PB9. The inverting input is a pin here, so
++    // `config.inverting_input` does not apply and this constructor ignores it.
++    let mut comp2 = Comp::new_with_input_minus_pin(p.COMP2, p.PA0, p.PB9, Irqs, Config::default());
++    comp2.enable();
++
++    info!(
++        "start: COMP1 is {}, COMP2 is {}",
++        comp1.output_level(),
++        comp2.output_level()
++    );
++
++    loop {
++        // Nothing runs on the CPU while this waits: the comparator drives an
++        // EXTI line, and the interrupt wakes the task.
++        comp1.wait_for_any_edge().await;
++        info!("COMP1 crossed, now {}", comp1.output_level());
++    }
++}

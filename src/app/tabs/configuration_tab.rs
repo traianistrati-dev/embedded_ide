@@ -14,6 +14,7 @@
 //! [`crate::panels::mcu_module::watchdog`].
 
 use crate::app::AppIde;
+use crate::panels::mcu_module::comparator::{self, CompConfig, CompSettings};
 use crate::panels::mcu_module::watchdog::{self as wdg, IwdgConfig, WatchdogLimits, WwdgConfig};
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -67,11 +68,29 @@ impl AppIde {
         let uses = crate::panels::mcu_module::codegen::family::dma_uses(mcu);
         // Whether DMA is even reachable from here, which is what an empty list
         // means most of the time.
+        let is_async = matches!(
+            mcu.runtime,
+            crate::panels::mcu_module::mcu::model::Runtime::Async
+        );
         let on_dma_runtime = match mcu.runtime {
             crate::panels::mcu_module::mcu::model::Runtime::Async => true,
             crate::panels::mcu_module::mcu::model::Runtime::Blocking => family == "stm32f1",
             _ => false,
         };
+
+        // The comparators the CHIP has, each with whatever pins are wired for
+        // it. Collected before the closure borrows `mcu.comp` mutably.
+        let comps: Vec<(u8, Option<String>, Option<String>)> = comparator::instances(mcu)
+            .into_iter()
+            .map(|n| {
+                (
+                    n,
+                    comparator::wired_pin(mcu, n, "INP"),
+                    comparator::wired_pin(mcu, n, "INM"),
+                )
+            })
+            .collect();
+        let comp_gen = comparator::Generation::of(&family);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
@@ -82,6 +101,9 @@ impl AppIde {
             ui.add_space(10.0);
 
             dma_card(ui, &uses, mcu.dma.as_ref(), &family, on_dma_runtime);
+            ui.add_space(12.0);
+
+            comp_cards(ui, &mut mcu.comp, &comps, comp_gen, &family, is_async);
             ui.add_space(12.0);
 
             ui.label(dim(
@@ -372,5 +394,203 @@ fn dma_card(
                 format!("Free: {}", free.join(", "))
             }));
         }
+    });
+}
+
+/// One card per comparator the chip has — CubeMX's COMP panel, minus the
+/// fields embassy has no way to apply.
+///
+/// Left out on purpose, rather than shown and ignored:
+/// * **Interrupt Trigger Mode** — embassy arms EXTI inside `wait_for_*`, so the
+///   edge is chosen where you await, not here.
+/// * **Output Internal Selection** (routing to a timer) and **Deglitcher** —
+///   absent from `comp::Config` entirely.
+/// * **External Output** — `COMP{n}_OUT` is an ordinary pin function on the
+///   Pins tab; `Comp::new` takes no output pin.
+fn comp_cards(
+    ui: &mut egui::Ui,
+    settings: &mut CompSettings,
+    comps: &[(u8, Option<String>, Option<String>)],
+    generation: Option<comparator::Generation>,
+    family: &str,
+    is_async: bool,
+) {
+    ui.label(
+        egui::RichText::new(format!("{}  Comparators", ph::WAVE_SQUARE))
+            .size(13.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+
+    if comps.is_empty() {
+        ui.label(dim("This chip has no analog comparators."));
+        return;
+    }
+    let Some(generation) = generation else {
+        // The honest reason PER FAMILY: "registers but no driver" and "no
+        // registers at all" are months and never apart, and the card is where
+        // someone finds out which one they are looking at.
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  {}",
+                ph::WARNING,
+                comparator::unsupported_reason(family).unwrap_or_default()
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(235, 150, 90)),
+        );
+        return;
+    };
+    if !is_async {
+        ui.label(
+            egui::RichText::new(format!(
+                "{}  `Comp::new` takes an interrupt binding, so comparators are generated on \
+                 the Async runtime only. Switch it in the System tab.",
+                ph::WARNING
+            ))
+            .size(11.0)
+            .color(egui::Color32::from_rgb(235, 150, 90)),
+        );
+        return;
+    }
+    ui.label(dim(
+        "The [+] input is a pin: configure COMPn_INP on the Pins tab. Everything below \
+         is a register with no pin of its own.",
+    ));
+    ui.add_space(6.0);
+
+    for (n, inp, inm) in comps {
+        comp_card(ui, settings, *n, inp.as_deref(), inm.as_deref(), generation);
+        ui.add_space(6.0);
+    }
+}
+
+/// The card for one comparator.
+fn comp_card(
+    ui: &mut egui::Ui,
+    settings: &mut CompSettings,
+    n: u8,
+    inp: Option<&str>,
+    inm: Option<&str>,
+    generation: comparator::Generation,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        let mut on = settings.contains_key(&n);
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut on, format!("COMP{n}")).changed() {
+                if on {
+                    settings.insert(n, CompConfig::default());
+                } else {
+                    settings.remove(&n);
+                }
+            }
+            match inp {
+                Some(pin) => {
+                    ui.label(dim(format!("[+] {pin}")));
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new(format!("{}  no COMP{n}_INP pin", ph::WARNING))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(235, 150, 90)),
+                    )
+                    .on_hover_text(
+                        "The non-inverting input is a pin, and nothing is generated without \
+                         it. Configure COMPn_INP on the Pins tab.",
+                    );
+                }
+            }
+        });
+
+        let Some(cfg) = settings.get_mut(&n) else {
+            return;
+        };
+        ui.add_space(4.0);
+        egui::Grid::new(format!("comp{n}_grid"))
+            .num_columns(2)
+            .spacing([14.0, 5.0])
+            .show(ui, |ui| {
+                ui.label("Input [-]");
+                egui::ComboBox::from_id_salt(format!("comp{n}_inm"))
+                    .selected_text(cfg.inverting_input.label())
+                    .show_ui(ui, |ui| {
+                        for v in comparator::InvertingInput::options(generation) {
+                            ui.selectable_value(&mut cfg.inverting_input, *v, v.label());
+                        }
+                    });
+                ui.end_row();
+
+                // Only the two pin choices need a second pin; say so exactly
+                // where the choice was made.
+                if cfg.inverting_input.needs_pin() {
+                    ui.label(dim("[-] pin"));
+                    match inm {
+                        Some(pin) => {
+                            ui.label(dim(pin));
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  configure COMP{n}_INM on the Pins tab",
+                                    ph::WARNING
+                                ))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(235, 150, 90)),
+                            );
+                        }
+                    }
+                    ui.end_row();
+                }
+
+                // embassy writes this register field only on the U5/WBA
+                // generation; on a G4 the setting would be inert, so the row is
+                // absent rather than shown and ignored.
+                if generation.has_power_mode() {
+                    ui.label("Speed / power");
+                    egui::ComboBox::from_id_salt(format!("comp{n}_power"))
+                        .selected_text(cfg.power_mode.label())
+                        .show_ui(ui, |ui| {
+                            for v in comparator::PowerMode::ALL {
+                                ui.selectable_value(&mut cfg.power_mode, v, v.label());
+                            }
+                        });
+                    ui.end_row();
+                }
+
+                ui.label("Hysteresis");
+                // Reading `@comp` cannot know the chip; a level from the other
+                // generation is corrected here, where the user can see it.
+                if !cfg.hysteresis.fits(generation) {
+                    cfg.hysteresis = comparator::Hysteresis::None;
+                }
+                egui::ComboBox::from_id_salt(format!("comp{n}_hyst"))
+                    .selected_text(cfg.hysteresis.label())
+                    .show_ui(ui, |ui| {
+                        for v in comparator::Hysteresis::options(generation) {
+                            ui.selectable_value(&mut cfg.hysteresis, *v, v.label());
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Output polarity");
+                egui::ComboBox::from_id_salt(format!("comp{n}_pol"))
+                    .selected_text(cfg.output_polarity.label())
+                    .show_ui(ui, |ui| {
+                        for v in comparator::OutputPolarity::ALL {
+                            ui.selectable_value(&mut cfg.output_polarity, v, v.label());
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Blanking source");
+                egui::ComboBox::from_id_salt(format!("comp{n}_blank"))
+                    .selected_text(cfg.blanking_source.label())
+                    .show_ui(ui, |ui| {
+                        for v in comparator::BlankingSource::ALL {
+                            ui.selectable_value(&mut cfg.blanking_source, v, v.label());
+                        }
+                    });
+                ui.end_row();
+            });
     });
 }

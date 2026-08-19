@@ -208,7 +208,7 @@ pub fn draw_pin_functions(
         list_painter.text(
             btn_rect.center(),
             egui::Align2::CENTER_CENTER,
-            format!("{}  —  {}", func.short_label(), func.label()),
+            func.list_label(),
             egui::FontId::proportional(11.0),
             egui::Color32::WHITE,
         );

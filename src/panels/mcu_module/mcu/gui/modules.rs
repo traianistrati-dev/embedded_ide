@@ -1406,13 +1406,13 @@ pub fn module_config_ui(
                                         if ui
                                             .selectable_label(
                                                 selected,
-                                                egui::RichText::new(format!(
-                                                    "{}  -  {}",
-                                                    f.short_label(),
-                                                    f.label()
-                                                ))
-                                                .size(10.5)
-                                                .color(f.color()),
+                                                // Same rule as the in-chip
+                                                // function list, so the two
+                                                // cannot disagree about how
+                                                // a signal is named.
+                                                egui::RichText::new(f.list_label())
+                                                    .size(10.5)
+                                                    .color(f.color()),
                                             )
                                             .clicked()
                                         {
