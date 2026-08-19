@@ -138,6 +138,7 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
                     functions: tokens.join(" "),
                     imported: false,
                     af: af_pairs,
+                    fn_owner: Vec::new(),
                 };
                 // A package position is either a NUMBER (QFP, DIP: pins along
                 // the edges) or a DESIGNATOR like "A2" (WLCSP, BGA: balls under
@@ -159,6 +160,9 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
         }
     }
 
+    // Small packages bond two die pads to one package pin, and ST's XML says so
+    // by giving two <Pin> elements the same Position. One pin, so one row.
+    let merged_positions = merge_bonded_pins(&mut pin_rows);
     pin_rows.sort_by_key(|r| r.number.parse::<usize>().unwrap_or(usize::MAX));
     // Dual-in-line packages (SO8N, TSSOP, …) lay out on LEFT+RIGHT only.
     let sides = if is_two_row_package(&package) {
@@ -176,6 +180,11 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
     let grid = build_grid(&ball_rows);
 
     let mut base_warnings = Vec::new();
+    if merged_positions > 0 {
+        base_warnings.push(format!(
+            "{merged_positions} package pin(s) carry two GPIOs bonded together              (common on G0/C0 in small packages). Each is one pin here, offering              both GPIOs' functions; the generated code names whichever one the              function you pick belongs to."
+        ));
+    }
     if skipped_positions > 0 {
         base_warnings.push(format!(
             "{skipped_positions} pin(s) had a position that is neither a number nor a \
@@ -284,6 +293,7 @@ fn build_grid(balls: &[(usize, usize, PinRow)]) -> Option<PinGridDef> {
                 reserved: row.reserved,
                 functions: parse_functions(&row.functions),
                 af: row.af.clone(),
+                fn_owner: crate::panels::mcu_module::mcu_form::owners_to_functions(&row.fn_owner),
             },
         })
         .collect();
@@ -724,6 +734,67 @@ pub fn f4_limits_for_chip(id: &str) -> crate::panels::mcu_module::clock::model::
     } else {
         stm32f4_limits(sysclk, sysclk / 2, sysclk) // PCLK1 = HCLK/2, PCLK2 = HCLK
     }
+}
+
+/// Fold rows that share a package position into one, returning how many
+/// positions were folded.
+///
+/// STM32G0 and C0 in small packages bond two GPIO pads to a single package pin:
+/// an STM32G030F6Px's pin 1 is PB7 *and* PB8, each `<Pin>` carrying its own
+/// signals. Left as two rows they collide on the pin number, which the form
+/// rejects ("Pin number 1 is used more than once") - 171 of the 2240 published
+/// chips could not be imported at all.
+///
+/// The **richer** GPIO keeps the name, because that is the one most projects
+/// will use and the one whose bindings read naturally. Everything the other one
+/// adds is kept, tagged with its owner in [`PinRow::fn_owner`] so codegen can
+/// name the right singleton later. A function BOTH provide (plain input/output)
+/// gets no tag: either GPIO drives the same package pin, so the primary is as
+/// correct as its sibling and needs no override.
+fn merge_bonded_pins(rows: &mut Vec<PinRow>) -> usize {
+    use std::collections::BTreeMap;
+    let mut by_pos: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        by_pos.entry(r.number.clone()).or_default().push(i);
+    }
+    let groups: Vec<Vec<usize>> = by_pos.into_values().filter(|g| g.len() > 1).collect();
+    if groups.is_empty() {
+        return 0;
+    }
+    let merged = groups.len();
+    let mut drop: Vec<usize> = Vec::new();
+    for g in groups {
+        // Richest first; ties keep the order ST published, so the result is
+        // stable across runs rather than depending on a sort's tie-breaking.
+        let mut order = g.clone();
+        order.sort_by_key(|&i| std::cmp::Reverse(rows[i].functions.split_whitespace().count()));
+        let (&primary, rest) = order.split_first().expect("group is non-empty");
+        for &other in rest {
+            let sibling = rows[other].clone();
+            let base = &mut rows[primary];
+            for tok in sibling.functions.split_whitespace() {
+                if base.functions.split_whitespace().any(|t| t == tok) {
+                    continue; // both GPIOs offer it - the primary answers for it
+                }
+                base.functions.push(' ');
+                base.functions.push_str(tok);
+                base.fn_owner.push((tok.to_string(), sibling.name.clone()));
+            }
+            for pair in sibling.af {
+                if !base.af.iter().any(|(sig, _)| *sig == pair.0) {
+                    base.af.push(pair);
+                }
+            }
+            // A package pin is only reserved if NEITHER pad is usable.
+            base.reserved = base.reserved && sibling.reserved;
+            drop.push(other);
+        }
+    }
+    drop.sort_unstable();
+    for i in drop.into_iter().rev() {
+        rows.remove(i);
+    }
+    merged
 }
 
 /// The HAL dependency line. STM32F1 keeps its dedicated `stm32f1xx-hal`; every
@@ -1603,5 +1674,197 @@ mod bank_feature_tests {
         let f746 = hal_dep_for_name("stm32f7", "STM32F746ZGTx");
         assert!(f746.contains("features = [\"stm32f746zg\"]"), "{f746}");
         assert!(!f746.contains("bank"), "{f746}");
+    }
+}
+
+#[cfg(test)]
+mod bonded_pin_tests {
+    use super::*;
+
+    /// The exact shape ST publishes for an STM32G030F6Px (TSSOP20): pin 1 is
+    /// PB7 *and* PB8, pin 2 is PC14 *and* PB9. Two `<Pin>` elements, one
+    /// package pin each time.
+    const G030: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Mcu Family="STM32G0" Line="STM32G0x0 Value line" Package="TSSOP20" RefName="STM32G030F6Px" xmlns="http://dummy.com">
+    <Core>ARM Cortex-M0+</Core>
+    <Ram>8</Ram>
+    <Flash>32</Flash>
+    <Pin Name="PB7" Position="1" Type="I/O">
+        <Signal Name="I2C1_SDA"/>
+        <Signal Name="USART1_RX"/>
+        <Signal Name="GPIO"/>
+    </Pin>
+    <Pin Name="PB8" Position="1" Type="I/O">
+        <Signal Name="I2C1_SCL"/>
+        <Signal Name="GPIO"/>
+    </Pin>
+    <Pin Name="VDD" Position="4" Type="Power"/>
+</Mcu>"#;
+
+    fn g030() -> ConvertedChip {
+        convert_xml(G030)
+            .expect("the G030 XML must parse")
+            .into_iter()
+            .next()
+            .expect("one variant")
+    }
+
+    /// The bug: two rows shared position 1, and the form rejected the chip with
+    /// "Pin number 1 is used more than once". 171 of 2240 published chips -
+    /// most of the small-package G0 and C0 range - could not be imported.
+    #[test]
+    fn a_bonded_package_pin_imports_as_one_pin() {
+        let chip = g030();
+        assert!(
+            chip.form.errors().is_empty(),
+            "must validate: {:?}",
+            chip.form.errors()
+        );
+        let ones: Vec<_> = chip
+            .form
+            .pins
+            .iter()
+            .flatten()
+            .filter(|r| r.number == "1")
+            .collect();
+        assert_eq!(ones.len(), 1, "one package pin, one row");
+    }
+
+    /// Nothing is lost in the fold: the pin offers what BOTH pads offer.
+    #[test]
+    fn it_keeps_every_function_from_both_pads() {
+        let chip = g030();
+        let row = chip
+            .form
+            .pins
+            .iter()
+            .flatten()
+            .find(|r| r.number == "1")
+            .expect("pin 1");
+        // The richer pad keeps the name.
+        assert_eq!(row.name, "PB7");
+        for want in ["i2c1_sda", "usart1_rx", "i2c1_scl"] {
+            assert!(
+                row.functions.split_whitespace().any(|t| t == want),
+                "missing {want} in {:?}",
+                row.functions
+            );
+        }
+    }
+
+    /// …and the sibling's functions carry their owner, which is the whole point:
+    /// picking I2C1_SCL on this pin has to generate `p.PB8`, not `p.PB7`.
+    #[test]
+    fn a_siblings_function_records_which_gpio_provides_it() {
+        let chip = g030();
+        let row = chip
+            .form
+            .pins
+            .iter()
+            .flatten()
+            .find(|r| r.number == "1")
+            .expect("pin 1");
+        assert_eq!(
+            row.fn_owner
+                .iter()
+                .find(|(tok, _): &&(String, String)| tok == "i2c1_scl")
+                .map(|(_, g)| g.as_str()),
+            Some("PB8")
+        );
+        // Functions the primary already had are NOT tagged: either pad drives
+        // the same package pin, so the primary answers for them.
+        assert!(
+            !row.fn_owner
+                .iter()
+                .any(|(tok, _): &(String, String)| tok == "usart1_rx"),
+            "the primary's own function must not be overridden: {:?}",
+            row.fn_owner
+        );
+        assert!(
+            !row.fn_owner
+                .iter()
+                .any(|(tok, _): &(String, String)| tok.starts_with("in")),
+            "GPIO in/out is on both pads: {:?}",
+            row.fn_owner
+        );
+    }
+
+    /// The user is told, rather than left to wonder why one pin lists two
+    /// GPIOs' worth of functions.
+    #[test]
+    fn the_import_report_mentions_the_bonded_pins() {
+        assert!(
+            g030()
+                .warnings
+                .iter()
+                .any(|w| w.contains("bonded together")),
+            "{:?}",
+            g030().warnings
+        );
+    }
+}
+
+#[cfg(test)]
+mod bonded_pin_corpus {
+    use super::*;
+
+    /// Sweep the real vendor corpus: every chip must import, and no package
+    /// position may appear twice. Ignored because it needs the STM32
+    /// open-pin-data checkout; point `EIDE_PIN_DATA` at its `mcu/` folder.
+    #[test]
+    #[ignore = "needs the STM32_open_pin_data checkout"]
+    fn every_published_chip_imports() {
+        let Ok(dir) = std::env::var("EIDE_PIN_DATA") else {
+            eprintln!("set EIDE_PIN_DATA to the open-pin-data mcu/ folder");
+            return;
+        };
+        let (mut ok, mut bad, mut bonded) = (0usize, Vec::new(), 0usize);
+        for e in std::fs::read_dir(&dir)
+            .expect("read the pin-data folder")
+            .flatten()
+        {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("xml") {
+                continue;
+            }
+            let Ok(xml) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(chips) = convert_xml(&xml) else {
+                continue;
+            };
+            for c in chips {
+                let errs = c.form.errors();
+                if errs.is_empty() {
+                    ok += 1;
+                } else {
+                    bad.push(format!("{}: {}", c.form.display_name, errs[0]));
+                }
+                if c.warnings.iter().any(|w| w.contains("bonded together")) {
+                    bonded += 1;
+                }
+            }
+        }
+        println!(
+            "imported {ok}, {bonded} with bonded pins, {} rejected",
+            bad.len()
+        );
+        for b in bad.iter().take(20) {
+            println!("  {b}");
+        }
+        // This test is about bonded pins, so that is what it asserts. The rest
+        // of the corpus is printed, not enforced: at the time of writing 11
+        // STM32H5E4/H5E5 parts are rejected for an EMPTY <Flash> element in
+        // ST's own XML - a different defect, and turning it into a failure here
+        // would make this test go red for a reason it does not describe.
+        let dupes: Vec<_> = bad
+            .iter()
+            .filter(|b| b.contains("used more than once"))
+            .collect();
+        assert!(
+            dupes.is_empty(),
+            "{} chip(s) still rejected for a duplicate pin position: {dupes:?}",
+            dupes.len()
+        );
     }
 }

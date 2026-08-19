@@ -16,6 +16,7 @@ impl Pin {
             irq: None,
             io_mode: None,
             af: Vec::new(),
+            fn_owner: Vec::new(),
         }
     }
 
@@ -35,6 +36,7 @@ impl Pin {
             irq: None,
             io_mode: None,
             af: Vec::new(),
+            fn_owner: Vec::new(),
         }
     }
 
@@ -50,6 +52,7 @@ impl Pin {
             irq: None,
             io_mode: None,
             af: Vec::new(),
+            fn_owner: Vec::new(),
         }
     }
 

@@ -363,6 +363,7 @@ mod tests {
                         irq: None,
                         io_mode: None,
                         af: Vec::new(),
+                        fn_owner: Vec::new(),
                     },
                 })
                 .collect(),

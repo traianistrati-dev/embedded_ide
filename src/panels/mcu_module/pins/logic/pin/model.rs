@@ -166,9 +166,47 @@ pub struct Pin {
     /// STM32F1 (no per-pin AF mux; it remaps whole peripherals through AFIO) and
     /// for definitions imported before the indices were captured.
     pub af: Vec<(String, u8)>,
+    /// `(function, GPIO)` for functions this package pin gets from a GPIO other
+    /// than [`name`](Self::name) - see
+    /// [`PinDef::fn_owner`](crate::panels::mcu_module::mcu_def::PinDef::fn_owner).
+    /// Read through [`Pin::gpio_for`]; never index it directly.
+    pub fn_owner: Vec<(PinFunction, String)>,
 }
 
 impl Pin {
+    /// The GPIO singleton that actually provides `f` on this package pin.
+    ///
+    /// Normally the pin's own name. It differs only where a small package bonds
+    /// two die pads together: an STM32G030F6P's pin 1 answers to `PB7` for
+    /// `USART1_RX` and to `PB8` for `I2C1_SCL`. Generated code must name the one
+    /// that carries the chosen signal, or it addresses the wrong peripheral -
+    /// so every place that emits `p.<PIN>` goes through here rather than
+    /// reaching for `name`.
+    pub fn gpio_for(&self, f: &PinFunction) -> &str {
+        self.fn_owner
+            .iter()
+            .find(|(func, _)| func == f)
+            .map(|(_, gpio)| gpio.as_str())
+            .unwrap_or(&self.name)
+    }
+
+    /// The GPIO for the function currently selected on this pin.
+    pub fn gpio(&self) -> &str {
+        self.gpio_for(&self.selected_function)
+    }
+
+    /// Every GPIO bonded to this package pin, primary first - what the canvas
+    /// shows as `PB7/PB8`. One entry for an ordinary pin.
+    pub fn gpio_names(&self) -> Vec<&str> {
+        let mut out = vec![self.name.as_str()];
+        for (_, g) in &self.fn_owner {
+            if !out.contains(&g.as_str()) {
+                out.push(g.as_str());
+            }
+        }
+        out
+    }
+
     /// `true` when any available function is a serial communication bus
     /// (USART / SPI / I2C / USB / CAN). Such pins get an orange number on the
     /// chip so they stand out from plain GPIO / analog / power pins.

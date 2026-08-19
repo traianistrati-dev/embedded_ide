@@ -225,7 +225,7 @@ fn usart_wires(pins: &[&Pin]) -> Vec<(u8, String, String)> {
     let find = |want: PinFunction| -> Option<String> {
         pins.iter()
             .find(|p| !p.reserved && p.selected_function == want)
-            .map(|p| p.name.clone())
+            .map(|p| p.gpio().to_owned())
     };
     // Instances present on the wired pins (embassy chips have USART1/2/3/6/…).
     let mut instances: Vec<u8> = pins
@@ -254,7 +254,7 @@ fn spi_wires(pins: &[&Pin]) -> Vec<(u8, String, String, String)> {
     let find = |want: PinFunction| -> Option<String> {
         pins.iter()
             .find(|p| !p.reserved && p.selected_function == want)
-            .map(|p| p.name.clone())
+            .map(|p| p.gpio().to_owned())
     };
     let mut instances: Vec<u8> = pins
         .iter()
@@ -281,7 +281,7 @@ fn i2c_wires(pins: &[&Pin]) -> Vec<(u8, String, String)> {
     let find = |want: PinFunction| -> Option<String> {
         pins.iter()
             .find(|p| !p.reserved && p.selected_function == want)
-            .map(|p| p.name.clone())
+            .map(|p| p.gpio().to_owned())
     };
     let mut instances: Vec<u8> = pins
         .iter()

@@ -170,9 +170,12 @@ pub fn splice_section(existing: &str, new_section: &str, mcu_name: &str, mcu_id:
 /// [`super::parse_main_rs`] reads back.
 fn pin_binding_line(p: &Pin) -> String {
     let func = &p.selected_function;
-    let base = p.name.to_ascii_lowercase(); // "PB5" → "pb5"
+    // The GPIO that actually provides the chosen function - normally the pin's
+    // own name, but a package pin with two pads bonded together answers to a
+    // different one depending on what you picked (see `Pin::gpio_for`).
+    let singleton = p.gpio(); // embassy singleton = "PB5"
+    let base = singleton.to_ascii_lowercase(); // "PB5" → "pb5"
     let var = pin_binding(&base, func, &p.custom_label);
-    let singleton = &p.name; // embassy singleton = "PB5"
     let label = func.label();
     match func {
         PinFunction::GpioOutput => format!(

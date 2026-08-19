@@ -47,6 +47,12 @@ pub struct PinRow {
     /// file. Carried through the form untouched — it is data ABOUT the chip, not
     /// something to author by hand — and written to `PinDef::af`.
     pub af: Vec<(String, u8)>,
+    /// `(function token, GPIO)` for tokens contributed by a GPIO bonded to the
+    /// same package pin - see
+    /// [`PinDef::fn_owner`](crate::panels::mcu_module::mcu_def::PinDef::fn_owner).
+    /// Carried through the form untouched, like [`af`](Self::af): it is data
+    /// about the package, not something to author by hand.
+    pub fn_owner: Vec<(String, String)>,
 }
 
 /// The clock model offered by the form. A full graph editor is out of scope,
@@ -340,6 +346,7 @@ impl McuForm {
                     functions: functions_to_string(&d.functions),
                     imported: false,
                     af: d.af.clone(),
+                    fn_owner: Vec::new(),
                 })
                 .collect()
         };
@@ -522,6 +529,7 @@ impl McuForm {
                     reserved: r.reserved,
                     functions: parse_functions(&r.functions),
                     af: r.af.clone(),
+                    fn_owner: owners_to_functions(&r.fn_owner),
                 })
                 .collect()
         };
@@ -620,6 +628,7 @@ pub fn gpio_bank(prefix: &str, start_number: usize, count: usize) -> Vec<PinRow>
             functions: "in out".to_string(),
             imported: false,
             af: Vec::new(),
+            fn_owner: Vec::new(),
         })
         .collect()
 }
@@ -629,6 +638,24 @@ pub const FUNCTION_TOKEN_HELP: &str = "in out · usart{n}_tx/rx/cts/rts/ck · \
     lpuart{n}_tx/rx/cts/rts · spi{n}_nss/sck/miso/mosi/rdy · i2c{n}_scl/sda · \
     adc{a}_{ch} · tim{t}_{ch} · swdio swclk · usb_dm usb_dp · can_rx can_tx · mco · \
     af:{signal} for anything else (e.g. af:sai1_sd_a, af:fmc_a0)";
+
+/// Resolve `(token, gpio)` pairs into `(function, gpio)`.
+///
+/// A token the parser does not recognise is DROPPED rather than defaulted: an
+/// owner attached to the wrong function would send generated code at the wrong
+/// GPIO, which is worse than losing the override and falling back to the pin's
+/// own name.
+pub fn owners_to_functions(owners: &[(String, String)]) -> Vec<(PinFunction, String)> {
+    owners
+        .iter()
+        .filter_map(|(tok, gpio)| {
+            parse_functions(tok)
+                .into_iter()
+                .next()
+                .map(|f| (f, gpio.clone()))
+        })
+        .collect()
+}
 
 /// Parse a space/comma-separated function token list into [`PinFunction`]s.
 /// Unrecognised tokens are skipped here (validation lists them separately).
@@ -892,6 +919,7 @@ mod tests {
             functions: "in wat".into(),
             imported: false,
             af: Vec::new(),
+            fn_owner: Vec::new(),
         }];
         assert!(
             f.errors()

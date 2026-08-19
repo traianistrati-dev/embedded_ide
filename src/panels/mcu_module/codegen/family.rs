@@ -550,10 +550,13 @@ fn async_section(mcu: &Mcu) -> String {
     let all = pins_of(mcu);
     let periphs = async_periphs(mcu);
     // Pins a bus driver moves into its peripheral must NOT also be bound raw.
+    // Compared on `gpio()`, not `name`: that list holds the singletons the
+    // drivers took, and on a package pin with two bonded pads the singleton is
+    // whichever GPIO the chosen function belongs to.
     let gpio_pins: Vec<&Pin> = all
         .iter()
         .copied()
-        .filter(|p| !periphs.consumed_pins.contains(&p.name))
+        .filter(|p| !periphs.consumed_pins.iter().any(|c| c == p.gpio()))
         .collect();
     embassy_async::make_generated_section(
         &mcu.name,

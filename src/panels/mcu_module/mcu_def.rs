@@ -44,6 +44,20 @@ pub struct PinDef {
     /// functions" (ADC inputs, RTC tamper, …) rather than alternate ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub af: Vec<(String, u8)>,
+    /// `(function, GPIO)` for the functions this package pin gets from a GPIO
+    /// OTHER than [`name`](Self::name).
+    ///
+    /// Small packages bond two die pads to one package pin - an STM32G030F6P's
+    /// pin 1 is both PB7 and PB8, each with its own signals. The pin is one pin
+    /// (one position, one thing you can solder to), so it is one `PinDef`; but
+    /// picking `I2C1_SCL` there means `p.PB8` while `USART1_RX` means `p.PB7`,
+    /// and only this says which.
+    ///
+    /// SPARSE by design: a function both GPIOs provide - plain input/output -
+    /// is absent, and resolves to `name`. Absent entirely on the overwhelming
+    /// majority of pins, so no existing definition changes on disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fn_owner: Vec<(PinFunction, String)>,
 }
 
 impl PinDef {
@@ -58,6 +72,7 @@ impl PinDef {
             // The runtime `Pin` does not carry it (nothing reads it yet); a
             // round-trip through a live chip therefore drops it.
             af: Vec::new(),
+            fn_owner: p.fn_owner.clone(),
         }
     }
 
@@ -73,6 +88,7 @@ impl PinDef {
             irq: None,
             io_mode: None,
             af: self.af.clone(),
+            fn_owner: self.fn_owner.clone(),
         }
     }
 }
