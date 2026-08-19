@@ -223,6 +223,9 @@ pub struct Mcu {
     /// hand-written table. `None` for a built-in chip or one imported before
     /// this existed; see [`crate::panels::mcu_module::mcu_def::DmaDef`].
     pub dma: Option<crate::panels::mcu_module::mcu_def::DmaDef>,
+    /// The chip's interrupt vector names — see
+    /// [`crate::panels::mcu_module::mcu_def::McuDefinition::irq_vectors`].
+    pub irq_vectors: Vec<String>,
     /// Currently selected pin number (None = no pin selected)
     pub selected_pin: Option<usize>,
     /// Pins-toolbar search box (next to "Rotate"). Pins that match stay bright,

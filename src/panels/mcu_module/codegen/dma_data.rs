@@ -31,7 +31,7 @@ pub struct DmaChannel {
 /// the channels out one at a time.
 pub fn channels_from_nvic(nvic_xml: &str) -> Vec<DmaChannel> {
     let mut out: Vec<DmaChannel> = Vec::new();
-    for vector in nvic_vectors(nvic_xml) {
+    for vector in super::nvic::vectors(nvic_xml) {
         let Some((ctrl, indices)) = parse_vector(&vector) else {
             continue;
         };
@@ -47,19 +47,6 @@ pub fn channels_from_nvic(nvic_xml: &str) -> Vec<DmaChannel> {
         }
     }
     out
-}
-
-/// The interrupt names in an NVIC modes file: `Value="NAME_IRQn:…"`.
-fn nvic_vectors(xml: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    for chunk in xml.split("Value=\"").skip(1) {
-        if let Some(name) = chunk.split("_IRQn").next() {
-            if !name.is_empty() && !name.contains('"') {
-                v.push(name.to_owned());
-            }
-        }
-    }
-    v
 }
 
 /// `("DMA1", [2, 3])` for `DMA1_Channel2_3`; `None` when the vector is not a
@@ -116,6 +103,70 @@ pub fn is_mux(dma_modes_xml: &str) -> bool {
         })
         .count();
     blocks < 2
+}
+
+/// Which channels each DMA request can use, on a chip whose mapping is FIXED.
+///
+/// The modes file nests the requests inside the channel that carries them:
+///
+/// ```xml
+/// <Mode Name="DMA2_Stream7">
+///   <ModeLogicOperator Name="XOR">
+///     <Mode Name="MEMTOMEM"/>
+///     <Mode Name="USART1_TX"/>
+///     <Mode Name="USART6_TX"/>
+/// ```
+///
+/// so this inverts it into `USART1_TX -> [DMA2_CH7, …]`, in embassy's spelling
+/// (`Stream7` and `Channel7` are both `_CH7` there — only the interrupt keeps
+/// ST's word, and that comes from the NVIC list instead).
+///
+/// Empty for a muxed chip, which has no such nesting: the requests sit flat at
+/// the top of the file precisely because any channel can carry any of them.
+pub fn requests_from_modes(dma_modes_xml: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(doc) = roxmltree::Document::parse(dma_modes_xml) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    walk_modes(doc.root_element(), None, &mut out);
+    out
+}
+
+/// Depth-first over the `<Mode>` tree, carrying the channel currently in scope.
+fn walk_modes(node: roxmltree::Node, channel: Option<&str>, out: &mut Vec<(String, Vec<String>)>) {
+    for child in node.children().filter(roxmltree::Node::is_element) {
+        if child.tag_name().name() != "Mode" {
+            walk_modes(child, channel, out);
+            continue;
+        }
+        let name = child.attribute("Name").unwrap_or_default();
+        if is_channel_name(name) {
+            walk_modes(child, Some(name), out);
+            continue;
+        }
+        if let Some(chan) = channel {
+            // `I2C1_TX:DMA_CHANNEL_1` is the same request reached through
+            // another request-selector value - the same channel either way.
+            let request = name.split(':').next().unwrap_or(name);
+            if !request.is_empty() && request != "MEMTOMEM" {
+                let peri = channel_peri(chan);
+                match out.iter_mut().find(|(r, _)| r == request) {
+                    Some((_, cs)) => {
+                        if !cs.contains(&peri) {
+                            cs.push(peri);
+                        }
+                    }
+                    None => out.push((request.to_owned(), vec![peri])),
+                }
+            }
+        }
+        walk_modes(child, channel, out);
+    }
+}
+
+/// `DMA2_Stream7` / `DMA1_Channel4` -> the embassy singleton `DMA2_CH7`.
+fn channel_peri(name: &str) -> String {
+    name.replace("_Stream", "_CH").replace("_Channel", "_CH")
 }
 
 /// `DMA1_Channel4` / `DMA2_Stream7` — a channel, as the request table names it.
@@ -266,7 +317,18 @@ pub fn dma_def_for(
             Some(m) => m,
             None => is_mux(&read(&dma_name, &dma_ver)?),
         };
-        Some(crate::panels::mcu_module::mcu_def::DmaDef { mux, channels })
+        // A muxed chip needs no table (that is what muxed MEANS), and storing
+        // one would put a few hundred useless lines in every `.ron`.
+        let requests = if mux {
+            Vec::new()
+        } else {
+            requests_from_modes(&read(&dma_name, &dma_ver)?)
+        };
+        Some(crate::panels::mcu_module::mcu_def::DmaDef {
+            mux,
+            channels,
+            requests,
+        })
     })();
     cache.insert(key, def.clone());
     def

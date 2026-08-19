@@ -18,6 +18,7 @@
 use super::common::sanitize_label;
 use super::dma_map;
 use super::embassy_common::{NO_PINS_PLACEHOLDER, gpio_bindings};
+use super::nvic;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::modules::{
     AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartMode, UsartModuleConfig,
@@ -152,7 +153,7 @@ use static_cell::StaticCell;
 const BUF_LEN: usize = 256;
 
 bind_interrupts!(struct Irqs {
-    USART{N} => BufferedInterruptHandler<peripherals::USART{N}>;
+    {UIRQ} => BufferedInterruptHandler<peripherals::USART{N}>;
 });
 
 fn get_config() -> Config {
@@ -385,6 +386,18 @@ fn dma_args(
     (format!("p.{}, p.{}, Irqs", tx.peri, rx.peri), String::new())
 }
 
+/// The `bind_interrupts!` key for `USART{n}` on this chip.
+///
+/// Usually `USART{n}`, but an STM32G0 routes USART3, USART4 and LPUART1 through
+/// one `USART3_4_LPUART1` vector and has no `USART3` at all. Falls back to the
+/// plain name when the chip carries no vector list — which is what every chip
+/// imported before the list existed does, and what its family really uses.
+fn usart_irq(irqs: &[String], n: u8) -> String {
+    nvic::vector_for(irqs, "USART", n)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("USART{n}"))
+}
+
 /// The `bind_interrupts!` block `main.rs` needs when any bus runs on DMA.
 ///
 /// It has to live here rather than in each `configs/*.rs`, because embassy takes
@@ -396,6 +409,7 @@ fn dma_irqs_block(
     i2c_instances: &[u8],
     usart_instances: &[u8],
     binds: &[(String, String)],
+    irqs: &[String],
 ) -> String {
     // The header only asks for work when there IS work: with every channel
     // resolved (see `dma_map`) the block is complete as generated.
@@ -416,49 +430,62 @@ bind_interrupts!(struct Irqs {
 bind_interrupts!(struct Irqs {
 "#
     };
-    let mut b = String::from(head);
-    for n in i2c_instances {
-        b.push_str(&format!(
-            "    I2C{n}_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C{n}>;
-"
-        ));
-        b.push_str(&format!(
-            "    I2C{n}_ER => embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C{n}>;
-"
-        ));
-    }
-    // One line per INTERRUPT, listing every channel it serves. On a chip with
-    // a vector per channel this is the same output as before; on STM32G0 and
-    // friends, where `DMA1_Channel2_3` covers two, it is the difference between
-    // valid code and a duplicate key the macro rejects.
-    let mut by_irq: Vec<(&str, Vec<&str>)> = Vec::new();
-    for (irq, peri) in binds {
-        match by_irq.iter_mut().find(|(k, _)| *k == irq.as_str()) {
-            Some((_, ps)) => {
-                if !ps.contains(&peri.as_str()) {
-                    ps.push(peri);
-                }
+
+    // One entry per INTERRUPT, listing every handler it carries. Grouping is
+    // not a nicety: `bind_interrupts!` rejects a repeated key, and repeats are
+    // normal — an STM32G0's `DMA1_Channel2_3` covers two channels, its `I2C1`
+    // carries both I2C halves, its `USART3_4_LPUART1` two USARTs.
+    let mut by_irq: Vec<(String, Vec<String>)> = Vec::new();
+    let mut bind = |irq: String, handler: String| match by_irq.iter_mut().find(|(k, _)| *k == irq) {
+        Some((_, hs)) => {
+            if !hs.contains(&handler) {
+                hs.push(handler);
             }
-            None => by_irq.push((irq, vec![peri])),
+        }
+        None => by_irq.push((irq, vec![handler])),
+    };
+
+    for n in i2c_instances {
+        let ev = format!("embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C{n}>");
+        let er = format!("embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C{n}>");
+        // Two vectors on most families, ONE on G0/C0/L0/U0 - where the split
+        // names do not exist and the macro cannot compile them.
+        match nvic::i2c_irqs(irqs, *n) {
+            Some(nvic::I2cIrqs::Combined(v)) => {
+                bind(v.clone(), ev);
+                bind(v, er);
+            }
+            Some(nvic::I2cIrqs::Split { ev: e, er: r }) => {
+                bind(e, ev);
+                bind(r, er);
+            }
+            None => {
+                bind(format!("I2C{n}_EV"), ev);
+                bind(format!("I2C{n}_ER"), er);
+            }
         }
     }
-    for (irq, peris) in &by_irq {
-        let handlers: Vec<String> = peris
-            .iter()
-            .map(|p| format!("embassy_stm32::dma::InterruptHandler<peripherals::{p}>"))
-            .collect();
-        b.push_str(&format!(
-            "    {irq} => {};
-",
-            handlers.join(", ")
-        ));
+    for (irq, peri) in binds {
+        bind(
+            irq.clone(),
+            format!("embassy_stm32::dma::InterruptHandler<peripherals::{peri}>"),
+        );
     }
     for n in usart_instances {
         // On DMA the USART's own interrupt joins the channels' in one struct,
         // for the same reason the I2C ones do: `Uart::new` takes a single value.
+        bind(
+            usart_irq(irqs, *n),
+            format!("embassy_stm32::usart::InterruptHandler<peripherals::USART{n}>"),
+        );
+    }
+
+    let mut b = String::from(head);
+    for (irq, handlers) in &by_irq {
         b.push_str(&format!(
-            "    USART{n} => embassy_stm32::usart::InterruptHandler<peripherals::USART{n}>;
-"
+            "    {irq} => {};
+",
+            handlers.join(", ")
         ));
     }
     b.push_str(
@@ -472,6 +499,7 @@ bind_interrupts!(struct Irqs {
 pub fn async_peripherals(
     family: &str,
     dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+    irqs: &[String],
     pins: &[&Pin],
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
@@ -518,7 +546,10 @@ pub fn async_peripherals(
 "
             ));
         }
-        files.push((format!("usart{n}.rs"), usart_config_file(n, usart.get(&n))));
+        files.push((
+            format!("usart{n}.rs"),
+            usart_config_file(n, usart.get(&n), &usart_irq(irqs, n)),
+        ));
     }
 
     for (n, sck, mosi, miso) in spi_wires(pins) {
@@ -584,7 +615,7 @@ pub fn async_peripherals(
     }
 
     let dma_irqs = if any_async_dma {
-        dma_irqs_block(&dma_i2c_instances, &dma_usart_instances, &dma_binds)
+        dma_irqs_block(&dma_i2c_instances, &dma_usart_instances, &dma_binds, irqs)
     } else {
         String::new()
     };
@@ -703,7 +734,7 @@ pub fn init<'d, TxD: TxDma<peripherals::USART{N}>, RxD: RxDma<peripherals::USART
 //     let n = rx.read(&mut buf).await.unwrap(); // as much as has arrived
 "#;
 
-pub fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
+pub fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>, irq: &str) -> String {
     let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
     let data = cfg.map(|c| c.data_bits).unwrap_or(8);
     let parity = match cfg.map(|c| c.parity) {
@@ -725,6 +756,7 @@ pub fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         UsartMode::Buffered => ASYNC_USART_TMPL,
     };
     tmpl.replace("{HANDLE}", &format!("_serial{n}{sfx}"))
+        .replace("{UIRQ}", irq)
         .replace("{N}", &n.to_string())
         .replace("{BAUD}", &baud.to_string())
         .replace("{DATA}", &data.to_string())
@@ -1013,6 +1045,99 @@ pub fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
 }
 
 #[cfg(test)]
+mod irq_key_tests {
+    use super::*;
+
+    fn v(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// STM32G0: one I2C vector, one shared USART vector, and DMA channels that
+    /// share vectors too - every key in the struct has to be unique, because
+    /// `bind_interrupts!` rejects a repeat.
+    #[test]
+    fn a_chip_that_shares_vectors_gets_one_line_per_vector() {
+        let irqs = v(&["I2C1", "USART1", "USART3_4_LPUART1", "DMA1_Channel2_3"]);
+        let binds = [
+            ("DMA1_CHANNEL2_3".to_owned(), "DMA1_CH2".to_owned()),
+            ("DMA1_CHANNEL2_3".to_owned(), "DMA1_CH3".to_owned()),
+        ];
+        let out = dma_irqs_block(&[1], &[3], &binds, &irqs);
+        assert!(
+            out.contains(
+                "    I2C1 => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C1>, embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C1>;"
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("I2C1_EV"),
+            "the split names do not exist here:
+{out}"
+        );
+        assert!(
+            out.contains("    USART3_4_LPUART1 => embassy_stm32::usart::InterruptHandler<peripherals::USART3>;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("DMA1_CHANNEL2_3 => embassy_stm32::dma::InterruptHandler<peripherals::DMA1_CH2>, embassy_stm32::dma::InterruptHandler<peripherals::DMA1_CH3>;"),
+            "{out}"
+        );
+        // No key twice, whatever the source.
+        let keys: Vec<&str> = out
+            .lines()
+            .filter_map(|l| l.split_once(" => ").map(|(k, _)| k.trim()))
+            .collect();
+        let mut uniq = keys.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(
+            keys.len(),
+            uniq.len(),
+            "duplicate key in:
+{out}"
+        );
+    }
+
+    /// The overwhelming majority of families, and every chip imported before the
+    /// vector list existed: the split names stay.
+    #[test]
+    fn a_chip_with_split_vectors_or_no_list_keeps_ev_and_er() {
+        for irqs in [v(&["I2C1_EV", "I2C1_ER", "USART1"]), Vec::new()] {
+            let out = dma_irqs_block(&[1], &[1], &[], &irqs);
+            assert!(
+                out.contains(
+                    "    I2C1_EV => embassy_stm32::i2c::EventInterruptHandler<peripherals::I2C1>;"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains(
+                    "    I2C1_ER => embassy_stm32::i2c::ErrorInterruptHandler<peripherals::I2C1>;"
+                ),
+                "{out}"
+            );
+            assert!(
+                out.contains(
+                    "    USART1 => embassy_stm32::usart::InterruptHandler<peripherals::USART1>;"
+                ),
+                "{out}"
+            );
+        }
+    }
+
+    /// The buffered-USART config file has its OWN `bind_interrupts!`, keyed the
+    /// same way.
+    #[test]
+    fn the_buffered_usart_config_binds_the_chips_vector() {
+        let f = usart_config_file(3, None, "USART3_4_LPUART1");
+        assert!(
+            f.contains("    USART3_4_LPUART1 => BufferedInterruptHandler<peripherals::USART3>;"),
+            "{f}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod usart_mode_tests {
     use super::*;
     use crate::panels::mcu_module::modules::UsartModuleConfig;
@@ -1027,7 +1152,7 @@ mod usart_mode_tests {
     #[test]
     fn buffered_is_the_default_and_keeps_the_old_output() {
         assert_eq!(UsartMode::default(), UsartMode::Buffered);
-        let f = usart_config_file(1, Some(&cfg(UsartMode::Buffered)));
+        let f = usart_config_file(1, Some(&cfg(UsartMode::Buffered)), "USART1");
         assert!(f.contains("BufferedUart::new("), "{f}");
         // The interrupt binding stays LOCAL here — only the DMA form has to
         // hand it over to main.rs.
@@ -1037,7 +1162,7 @@ mod usart_mode_tests {
 
     #[test]
     fn dma_splits_the_uart_so_read_survives() {
-        let f = usart_config_file(1, Some(&cfg(UsartMode::Dma)));
+        let f = usart_config_file(1, Some(&cfg(UsartMode::Dma)), "USART1");
         // The whole point: a bare `Uart<Async>` has `embedded_io_async::Write`
         // but NOT `Read`, so the RX half must become a ring-buffered receiver.
         assert!(
@@ -1076,6 +1201,7 @@ mod usart_mode_tests {
         let out = async_peripherals(
             "stm32f4",
             None,
+            &[],
             &refs,
             &usart,
             &Default::default(),
@@ -1101,6 +1227,7 @@ mod usart_mode_tests {
         let bare = async_peripherals(
             "stm32l4",
             None,
+            &[],
             &refs,
             &usart,
             &Default::default(),
@@ -1130,6 +1257,7 @@ mod usart_mode_tests {
         let out = async_peripherals(
             "stm32f4",
             None,
+            &[],
             &refs,
             &usart,
             &Default::default(),

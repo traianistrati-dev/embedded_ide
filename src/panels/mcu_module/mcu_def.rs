@@ -91,6 +91,12 @@ pub struct DmaDef {
     pub mux: bool,
     /// Every channel the chip has, with the interrupt each is served by.
     pub channels: Vec<crate::panels::mcu_module::codegen::dma_data::DmaChannel>,
+    /// `("USART1_TX", ["DMA2_CH7"])` — which channels each request may use, on
+    /// a chip where that is FIXED in silicon. Empty when `mux` (any channel
+    /// serves any request) and when the chip predates this field, in which case
+    /// codegen falls back to the hand-written family tables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<(String, Vec<String>)>,
 }
 
 /// One pad of a ball grid: where it sits, and the pin itself.
@@ -240,6 +246,13 @@ pub struct McuDefinition {
     /// DMA channels + whether they are muxed. See [`DmaDef`].
     #[serde(default)]
     pub dma: Option<DmaDef>,
+    /// The chip's interrupt vector names, as the vendor's NVIC table lists them
+    /// (`I2C1_EV`, `I2C1`, `USART3_4_LPUART1`). `bind_interrupts!` is keyed by
+    /// vector, and which peripherals share one is per-chip — see
+    /// [`crate::panels::mcu_module::codegen::nvic`]. Empty when the chip was not
+    /// imported from the vendor database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub irq_vectors: Vec<String>,
     #[serde(default)]
     pub cpu: String,
     pub toolchain: ToolchainKind,
@@ -296,6 +309,7 @@ impl McuDefinition {
         );
         mcu.id = self.id.clone();
         mcu.dma = self.dma.clone();
+        mcu.irq_vectors = self.irq_vectors.clone();
         mcu.grid = self.pins.grid.as_ref().map(|g| PinGrid {
             rows: g.rows,
             cols: g.cols,

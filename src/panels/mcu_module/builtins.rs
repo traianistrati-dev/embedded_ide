@@ -81,6 +81,7 @@ mod tests {
             // Built-in chips keep using the hand-written family tables in
             // `codegen::dma_map`; only imported ones carry vendor DMA data.
             dma: None,
+            irq_vectors: Vec::new(),
             cpu: cpu.into(),
             toolchain: m.toolchain.clone(),
             project,

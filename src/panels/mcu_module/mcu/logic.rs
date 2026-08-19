@@ -91,6 +91,7 @@ impl Mcu {
             // afterwards (see `McuDefinition::build_mcu`).
             grid: None,
             dma: None,
+            irq_vectors: Vec::new(),
             selected_pin: None,
             pin_search: String::new(),
             show_info: None,

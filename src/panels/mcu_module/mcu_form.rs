@@ -200,6 +200,8 @@ pub struct McuForm {
     /// vendor database, not authorable here (see [`super::mcu_def::DmaDef`]).
     /// Editing a chip in this form must not silently drop them.
     pub dma: Option<super::mcu_def::DmaDef>,
+    /// The chip's interrupt vectors, carried through untouched like `dma`.
+    pub irq_vectors: Vec<String>,
     // Toolchain + target
     pub toolchain: ToolchainKind,
     pub target: String,
@@ -246,6 +248,7 @@ impl McuForm {
             cpu: "Cortex-M3".into(),
             package: String::new(),
             dma: None,
+            irq_vectors: Vec::new(),
             toolchain: ToolchainKind::RustEmbedded,
             target: "thumbv7m-none-eabi".into(),
             flash_origin: "0x08000000".into(),
@@ -348,6 +351,7 @@ impl McuForm {
             cpu: def.cpu.clone(),
             package: def.package.clone(),
             dma: def.dma.clone(),
+            irq_vectors: def.irq_vectors.clone(),
             toolchain: def.toolchain.clone(),
             target: def.project.target.clone(),
             flash_origin: def.project.flash_origin.clone(),
@@ -527,6 +531,7 @@ impl McuForm {
             family: self.family.trim().to_string(),
             package: self.package.trim().to_string(),
             dma: self.dma.clone(),
+            irq_vectors: self.irq_vectors.clone(),
             cpu: self.cpu.trim().to_string(),
             toolchain: self.toolchain.clone(),
             project: ProjectDef {

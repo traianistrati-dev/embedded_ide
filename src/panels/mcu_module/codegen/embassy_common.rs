@@ -827,6 +827,13 @@ mod emit_for_manual_compile {
         });
         let mut cache = std::collections::HashMap::new();
         let dma = dma_data::dma_def_for(&xml, path.parent(), &mut cache);
+        let mut icache = std::collections::HashMap::new();
+        let irqs =
+            crate::panels::mcu_module::codegen::nvic::vectors_for(&xml, path.parent(), &mut icache);
+        println!(
+            "i2c1 vectors: {:?}",
+            crate::panels::mcu_module::codegen::nvic::i2c_irqs(&irqs, 1)
+        );
         println!(
             "dma: mux={:?} channels={}",
             dma.as_ref().map(|d| d.mux),
@@ -839,14 +846,22 @@ mod emit_for_manual_compile {
             .form
             .to_definition();
         def.dma = dma;
+        def.irq_vectors = irqs;
         let mut mcu = def.build_mcu();
         mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
 
         // Take the first pin the chip itself offers for each bus signal, so this
         // works for whatever part `EIDE_CHIP_XML` names.
+        // `EIDE_USART_N=3` on an STM32G0 exercises the SHARED vector
+        // (`USART3_4_LPUART1`), which is a different emission path from USART1's
+        // dedicated one.
+        let un: u8 = std::env::var("EIDE_USART_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
         for want in [
-            PinFunction::UsartTx(1),
-            PinFunction::UsartRx(1),
+            PinFunction::UsartTx(un),
+            PinFunction::UsartRx(un),
             PinFunction::SpiSck(1),
             PinFunction::SpiMosi(1),
             PinFunction::SpiMiso(1),

@@ -750,6 +750,9 @@ impl AppIde {
             String,
             Option<crate::panels::mcu_module::mcu_def::DmaDef>,
         > = std::collections::HashMap::new();
+        // NVIC version -> the chip's interrupt vector names.
+        let mut irq_tables: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
 
         for path in paths {
             let xml = match std::fs::read_to_string(path) {
@@ -800,6 +803,11 @@ impl AppIde {
             // folder. Only the STM32Cube database ships them — importing from
             // the public open-pin-data repo leaves this `None`, and codegen
             // falls back to the hand-written family tables.
+            let irq_vectors = crate::panels::mcu_module::codegen::nvic::vectors_for(
+                &xml,
+                path.parent(),
+                &mut irq_tables,
+            );
             let dma = crate::panels::mcu_module::codegen::dma_data::dma_def_for(
                 &xml,
                 path.parent(),
@@ -817,6 +825,7 @@ impl AppIde {
                         }
                         let mut def = chip.form.to_definition();
                         def.dma = dma.clone();
+                        def.irq_vectors = irq_vectors.clone();
                         // F4's real ceiling is per-chip (F401 84 … F429 180) —
                         // override the form's F411-class default.
                         if def.family == "stm32f4" {
