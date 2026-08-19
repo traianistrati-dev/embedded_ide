@@ -35,6 +35,7 @@ const CLOCK_MANUAL_HEADER: &str = "@clockmanual";
 const IOPINS_HEADER: &str = "@iopins";
 const IRQ_HEADER: &str = "@irq";
 const IOMODE_HEADER: &str = "@iomode";
+const WATCHDOG_HEADER: &str = "@watchdog";
 
 /// The `@autobuild` section text (or "" for the default `Check`) — appended by
 /// `Mcu::mcu_config_text` after [`serialize`]. Kept separate so `serialize`'s
@@ -64,6 +65,74 @@ pub fn strict_section(strict: bool) -> String {
     } else {
         String::new()
     }
+}
+
+/// The `@watchdog` section — the Configuration tab's IWDG/WWDG settings.
+///
+/// Durations in microseconds, one line per watchdog, absent when not enabled:
+///
+/// ```text
+/// @watchdog
+/// iwdg 32768000
+/// wwdg 41472 0
+/// ```
+///
+/// These are CODEGEN input, not a view preference: they decide whether
+/// `pins/configs/{iwdg,wwdg}.rs` exist at all, so they travel with the project.
+pub fn watchdog_section(w: &crate::panels::mcu_module::watchdog::WatchdogSettings) -> String {
+    let mut body = String::new();
+    if let Some(i) = w.iwdg {
+        body.push_str(&format!(
+            "iwdg {}
+",
+            i.timeout_us
+        ));
+    }
+    if let Some(x) = w.wwdg {
+        body.push_str(&format!(
+            "wwdg {} {}
+",
+            x.timeout_us, x.window_us
+        ));
+    }
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{WATCHDOG_HEADER}
+{body}"
+        )
+    }
+}
+
+/// Read `@watchdog` back. A malformed or partial line is DROPPED rather than
+/// defaulted: a watchdog the user cannot see in the tab must not end up in the
+/// generated firmware, and silently substituting a number would do exactly that.
+pub fn parse_watchdog(text: &str) -> crate::panels::mcu_module::watchdog::WatchdogSettings {
+    use crate::panels::mcu_module::watchdog::{IwdgConfig, WatchdogSettings, WwdgConfig};
+    let mut out = WatchdogSettings::default();
+    let Some(body) = section_body(text, WATCHDOG_HEADER) else {
+        return out;
+    };
+    for line in body.lines() {
+        let mut it = line.split_whitespace();
+        match (it.next(), it.next().and_then(|v| v.parse().ok())) {
+            (Some("iwdg"), Some(timeout_us)) => out.iwdg = Some(IwdgConfig { timeout_us }),
+            (Some("wwdg"), Some(timeout_us)) => {
+                // The window is required: without it the pair is meaningless,
+                // and defaulting it to 0 would quietly change the behaviour the
+                // user configured.
+                if let Some(window_us) = it.next().and_then(|v| v.parse().ok()) {
+                    out.wwdg = Some(WwdgConfig {
+                        timeout_us,
+                        window_us,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The strict-lints preference recorded in `@strict`; missing / anything but
@@ -568,5 +637,76 @@ mod tests {
         assert!(c.is_some(), "clock unaffected by the extra sections");
         // And the migration reader still finds the positions in there.
         assert_eq!(structure_config::parse_layout(&text), pos);
+    }
+}
+
+#[cfg(test)]
+mod watchdog_section_tests {
+    use super::*;
+    use crate::panels::mcu_module::watchdog::{IwdgConfig, WatchdogSettings, WwdgConfig};
+
+    #[test]
+    fn both_watchdogs_round_trip() {
+        let w = WatchdogSettings {
+            iwdg: Some(IwdgConfig {
+                timeout_us: 32_768_000,
+            }),
+            wwdg: Some(WwdgConfig {
+                timeout_us: 41_472,
+                window_us: 5_000,
+            }),
+        };
+        assert_eq!(parse_watchdog(&watchdog_section(&w)), w);
+    }
+
+    #[test]
+    fn each_one_alone_round_trips_too() {
+        for w in [
+            WatchdogSettings {
+                iwdg: Some(IwdgConfig { timeout_us: 1_000 }),
+                wwdg: None,
+            },
+            WatchdogSettings {
+                iwdg: None,
+                wwdg: Some(WwdgConfig {
+                    timeout_us: 900,
+                    window_us: 0,
+                }),
+            },
+        ] {
+            assert_eq!(parse_watchdog(&watchdog_section(&w)), w);
+        }
+    }
+
+    #[test]
+    fn nothing_enabled_writes_no_section() {
+        // An empty section would leave `@watchdog` in every project file
+        // that never touched the tab.
+        assert_eq!(watchdog_section(&WatchdogSettings::default()), "");
+        assert_eq!(parse_watchdog(""), WatchdogSettings::default());
+    }
+
+    #[test]
+    fn a_malformed_line_is_dropped_not_defaulted() {
+        // Substituting a number would put a watchdog in the firmware that
+        // the user cannot see in the tab - the worst possible outcome for a
+        // peripheral whose whole job is resetting the board.
+        let w = parse_watchdog(
+            "@watchdog
+iwdg
+wwdg 500
+",
+        );
+        assert_eq!(w, WatchdogSettings::default(), "partial lines must vanish");
+        // …and a WWDG without its window is partial, not a 0-window one.
+        assert_eq!(
+            parse_watchdog(
+                "@watchdog
+wwdg 500
+"
+            )
+            .wwdg,
+            None
+        );
     }
 }

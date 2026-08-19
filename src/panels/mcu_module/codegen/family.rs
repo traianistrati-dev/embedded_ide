@@ -417,7 +417,7 @@ impl FamilyBackend for StmEmbassyBackend {
                 &mcu.name,
                 &all,
                 &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
-                &mcu.custom_module_inits(),
+                &mcu.watchdog_and_custom_inits(),
             ),
             tail = USER_TAIL,
         )
@@ -429,13 +429,19 @@ impl FamilyBackend for StmEmbassyBackend {
             &mcu.name,
             &all,
             &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
-            &mcu.custom_module_inits(),
+            &mcu.watchdog_and_custom_inits(),
         );
         let section = super::common::keep_manual_clock(existing, section, mcu.clock_manual);
         embassy_common::splice_section(existing, &section, &mcu.name, &mcu.id)
     }
-}
 
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        // Only the watchdogs: this backend keeps every bus init inline in
+        // main.rs, so `pins/configs/` exists here purely for the tab-driven,
+        // pin-less peripherals.
+        super::watchdog_gen::config_files(&mcu.watchdog, &mcu.family)
+    }
+}
 // ── Async STM32 (embassy-stm32 + embassy-executor) ──────────────────────────
 // The [`Runtime::Async`] counterpart of [`StmEmbassyBackend`]: the SAME
 // embassy-stm32 GPIO codegen, but the entry point is `#[embassy_executor::main]
@@ -523,7 +529,7 @@ fn async_section(mcu: &Mcu) -> String {
         &rcc::graph_clock_block(&mcu.family, &mcu.clock, mcu.clock_manual),
         &periphs.init_calls,
         &periphs.dma_irqs,
-        &mcu.custom_module_inits(),
+        &mcu.watchdog_and_custom_inits(),
     )
 }
 

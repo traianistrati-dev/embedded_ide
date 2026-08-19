@@ -218,6 +218,7 @@ impl AppIde {
                     vec![
                         McuTab::Pins,
                         McuTab::Peripherals,
+                        McuTab::Configuration,
                         McuTab::Clock,
                         McuTab::System,
                     ]
@@ -1017,6 +1018,10 @@ impl AppIde {
                     }
                     None => no_mcu = Some("Clock configuration"),
                 },
+                McuTab::Configuration if self.mcu.is_none() => {
+                    no_mcu = Some("Peripheral configuration");
+                }
+                McuTab::Configuration => self.show_configuration_tab(ui),
                 McuTab::System => match &mut self.mcu {
                     Some(mcu) => Self::show_system_tab(ui, mcu),
                     None => no_mcu = Some("System configuration"),

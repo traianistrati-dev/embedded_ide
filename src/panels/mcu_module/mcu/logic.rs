@@ -42,6 +42,23 @@ pub fn partner_functions(func: &PinFunction) -> Vec<PinFunction> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 impl Mcu {
+    /// The watchdog `init(...)` lines followed by the Custom-module ones.
+    ///
+    /// One string because every backend already threads a single "extra
+    /// inits" slot through `make_generated_section`; adding a parameter to
+    /// each of the nine call sites would have been churn for no gain.
+    /// Watchdogs come FIRST - one that is meant to catch a hang during
+    /// start-up is worth arming before the code that might hang.
+    pub fn watchdog_and_custom_inits(&self) -> String {
+        format!(
+            "{}{}",
+            crate::panels::mcu_module::codegen::watchdog_gen::init_lines(
+                &self.watchdog,
+                &self.family,
+            ),
+            self.custom_module_inits(),
+        )
+    }
     /// Create a new MCU with the given configuration.
     ///
     /// `family` is the codegen backend key (e.g. "stm32f1", "esp32c3"); see
@@ -121,6 +138,7 @@ impl Mcu {
             collapse_modules: false,
             rotated: false,
             io_pin_pos: std::collections::BTreeMap::new(),
+            watchdog: Default::default(),
         }
     }
 
@@ -459,6 +477,15 @@ impl Mcu {
             }
             s.push_str(&clock_manual);
         }
+        // Watchdogs (`@watchdog`) — codegen input, like `@clockmanual`: it
+        // decides whether the watchdog config files exist at all.
+        let wdg = mcu_config::watchdog_section(&self.watchdog);
+        if !wdg.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&wdg);
+        }
         // Diagram rotation (`@rotation`) — view preference, same append pattern.
         let rotation = mcu_config::rotation_section(self.rotated);
         if !rotation.is_empty() {
@@ -537,6 +564,7 @@ impl Mcu {
         }
         // Manual in/out field positions (`@iopins`) — missing = all auto-placed.
         self.io_pin_pos = mcu_config::parse_iopins(text);
+        self.watchdog = mcu_config::parse_watchdog(text);
         // Interrupt edges (`@irq`) — a missing section means every input is
         // polled, which is the pre-RTIC behaviour of every existing project.
         let irqs = mcu_config::parse_irq(text);

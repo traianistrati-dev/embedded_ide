@@ -341,6 +341,9 @@ pub fn apply_edits_to_buffer(
 enum McuTab {
     Pins,
     Peripherals,
+    /// Pin-less peripherals (IWDG / WWDG): configured from a tab because they
+    /// have no pin to click on the Pins canvas.
+    Configuration,
     Clock,
     System,
     /// Module-relationship diagram of the project (parse-based, chip-agnostic).
@@ -358,6 +361,7 @@ impl McuTab {
         match self {
             Self::Pins => "Pins",
             Self::Peripherals => "Peripherals",
+            Self::Configuration => "Configuration",
             Self::Clock => "Clock",
             Self::System => "System",
             Self::Structure => "Structure",
@@ -2352,6 +2356,11 @@ impl AppIde {
         // Debug-friendly build toggle: rewrites `[profile.release]` in the
         // Cargo.toml, so the same regeneration pass has to run.
         mcu.debug_build.hash(&mut hasher);
+
+        // Watchdogs: codegen input, so a change here must regenerate. Without
+        // this the Configuration tab would edit a value that never reaches the
+        // generated project until something else happened to bump the hash.
+        format!("{:?}", mcu.watchdog).hash(&mut hasher);
 
         // Hash modules
         for module in &mcu.modules {

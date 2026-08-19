@@ -3,6 +3,7 @@
 pub mod activity_tab;
 pub mod cargo_tab;
 pub mod clippy_tab;
+pub mod configuration_tab;
 pub mod debug_tab;
 pub mod dfu_tab;
 pub mod git_tab;

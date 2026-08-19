@@ -363,6 +363,11 @@ pub struct Mcu {
     /// auto-placed beside the pin. Draggable like virtual modules; persisted in
     /// `mcu.config` `@iopins`. View-only.
     pub io_pin_pos: std::collections::BTreeMap<usize, (f32, f32)>,
+    /// IWDG / WWDG settings from the Configuration tab. Not a `VirtualModule`:
+    /// those live on the Pins canvas and own pins, and a watchdog has none.
+    /// Persisted in `mcu.config` `@watchdog`; feeds `calculate_mcu_state_hash`
+    /// because it is codegen input.
+    pub watchdog: crate::panels::mcu_module::watchdog::WatchdogSettings,
 }
 
 /// One Virtual-module undo snapshot (see [`Mcu::module_undo`]): the modules and

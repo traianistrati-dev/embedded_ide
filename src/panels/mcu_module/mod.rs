@@ -20,6 +20,7 @@ pub mod project_gen;
 pub mod registry;
 pub mod stm32_pin_data;
 pub mod structure_config;
+pub mod watchdog;
 
 // ── Core types re-exports (convenience imports) ──────────────────
 pub use mcu::{Mcu, PIN_HEIGHT, PIN_SPACING, PIN_WIDTH};

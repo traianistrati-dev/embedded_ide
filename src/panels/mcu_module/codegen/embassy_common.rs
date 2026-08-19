@@ -725,6 +725,77 @@ mod emit_for_manual_compile {
             .expect("write f7 dma project");
         println!("wrote {}", f7dir.display());
 
+        // -- Watchdogs, on the same F4 -------------------------------------
+        // Pin-less, so they exercise a path nothing else does: a config file
+        // and an init line that come from a TAB rather than from the pins.
+        // Both are enabled at once because their lifecycles differ and the
+        // generated code has to be right for each (`unleash` vs already
+        // running).
+        {
+            use crate::panels::mcu_module::watchdog::{
+                IwdgConfig, WatchdogSettings, WwdgConfig, iwdg_range_us, limits_for, wwdg_range_us,
+            };
+            let mut w = def.build_mcu();
+            let l = limits_for(&w.family);
+            // The default the Reset button restores, i.e. the value the tab
+            // hands out unedited - so the harness proves exactly what a user
+            // gets by switching both on and touching nothing.
+            let pclk1 = 100_000_000;
+            w.watchdog = WatchdogSettings {
+                iwdg: Some(IwdgConfig {
+                    timeout_us: iwdg_range_us(&l).1,
+                }),
+                wwdg: Some(WwdgConfig {
+                    timeout_us: wwdg_range_us(&l, pclk1).unwrap().1,
+                    window_us: 0,
+                }),
+            };
+            let w_main = w.fresh_main_rs();
+            let wcfgs = w.config_files();
+            let mut wfiles =
+                project_gen::build_project_files(&def.project, &def.toolchain, &w_main);
+            wfiles.cargo_toml = project_gen::ensure_async_deps(
+                &wfiles.cargo_toml,
+                false,
+                project_gen::AsyncFlavor::Stm32,
+                !wcfgs.is_empty(),
+                false,
+                false,
+                &[],
+            );
+            let mut wuser: Vec<(String, String)> = vec![
+                (
+                    "src/pins/mod.rs".into(),
+                    "pub mod configs;
+"
+                    .into(),
+                ),
+                (
+                    "src/pins/configs/mod.rs".into(),
+                    wcfgs
+                        .iter()
+                        .map(|(n, _)| {
+                            format!(
+                                "pub mod {};
+",
+                                n.trim_end_matches(".rs")
+                            )
+                        })
+                        .collect(),
+                ),
+            ];
+            wuser.extend(
+                wcfgs
+                    .into_iter()
+                    .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+            );
+            let wdir = std::env::temp_dir().join("eide_embassy_check_wdg");
+            let _ = std::fs::remove_dir_all(&wdir);
+            project_gen::write_project(&wdir, &wfiles, &wuser, &w.mcu_config_text(), "")
+                .expect("write watchdog project");
+            println!("wrote {}", wdir.display());
+        }
+
         // ── The F1 blocking USART, unchanged by this migration ───────────────
         // `embedded-io` is shared by both seams, so bumping it for embassy has
         // to be proved harmless for the stm32f1xx-hal bridge too.
