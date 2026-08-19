@@ -23,6 +23,7 @@ use crate::panels::mcu_module::Pin;
 use crate::panels::mcu_module::PinFunction;
 use eframe::egui;
 use egui_phosphor::regular as ph;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Outline of a pin that carries no peripheral beyond GPIO — the one to spend.
@@ -47,11 +48,14 @@ enum Complexity {
 
 /// One row of the ordered category table.
 struct CategoryDef {
-    name: &'static str,
+    /// Owned, not `&'static str`: the peripherals derived from the chip's own
+    /// signals (see [`other_categories`]) have names nobody could hardcode.
+    name: String,
     rgb: (u8, u8, u8),
     complexity: Complexity,
-    /// "Is this function mine?"
-    pred: fn(&PinFunction) -> bool,
+    /// "Is this function mine?" Boxed for the same reason - a derived
+    /// category's predicate closes over the prefix it was built from.
+    pred: Box<dyn Fn(&PinFunction) -> bool>,
 }
 
 impl CategoryDef {
@@ -91,12 +95,72 @@ impl PinEntry {
 
 /// A peripheral category and the pins that can serve it on this chip.
 struct CategoryView {
-    name: &'static str,
+    name: String,
     color: egui::Color32,
     complexity: Complexity,
     pins: Vec<PinEntry>,
 }
 
+/// The peripheral a raw signal name belongs to: everything before the first
+/// underscore.
+///
+/// `COMP1_INP` -> `COMP1`, `FMC_D0` -> `FMC`, `SAI1_SD_A` -> `SAI1`. Per
+/// INSTANCE, not per family, because that is the choice being made: a chip
+/// with seven comparators offers seven of them, exactly as CubeMX lists them.
+/// A name with no underscore is its own peripheral (`RTC`).
+fn signal_peripheral(signal: &str) -> &str {
+    signal.split('_').next().unwrap_or(signal)
+}
+
+/// One derived category per peripheral found among the chip's `Other`
+/// signals, with how many distinct signals it has.
+///
+/// The Peripherals tab is a fixed table of thirteen categories, each keyed on
+/// a `PinFunction` variant. Everything the XML importer does not recognise
+/// becomes `PinFunction::Other`, which no category matches - so COMP, OPAMP,
+/// DAC, RTC, FMC, LTDC and DCMIPP were visible on the pins and nowhere in the
+/// tab. These fill that hole without inventing an enum variant per peripheral.
+///
+/// **They are visible, not generatable.** Codegen still knows nothing about
+/// them beyond binding the pin raw; assigning one here configures the pin and
+/// nothing more.
+fn other_peripherals(pins: &[&Pin]) -> Vec<(String, usize)> {
+    let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for pin in pins {
+        for f in &pin.available_functions {
+            if let PinFunction::Other(sig) = f {
+                by_name
+                    .entry(signal_peripheral(sig).to_owned())
+                    .or_default()
+                    .insert(sig.clone());
+            }
+        }
+    }
+    by_name.into_iter().map(|(k, v)| (k, v.len())).collect()
+}
+
+/// A stable colour for a derived category.
+///
+/// Hashed from the name rather than allocated in order: the set of
+/// peripherals changes with the chip, and a positional palette would repaint
+/// every row whenever a different part was loaded. Kept dark and desaturated
+/// so the thirteen hand-picked colours stay the loudest thing on screen -
+/// these are the peripherals the IDE understands least.
+fn derived_color(name: &str) -> (u8, u8, u8) {
+    let mut h: u32 = 2166136261;
+    for b in name.bytes() {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    // Six hues, evenly spaced, at a fixed muted lightness.
+    match h % 6 {
+        0 => (120, 100, 150),
+        1 => (100, 130, 150),
+        2 => (150, 120, 95),
+        3 => (110, 140, 110),
+        4 => (150, 105, 125),
+        _ => (105, 115, 135),
+    }
+}
 /// Keep only what matches `query`, or everything when it is blank.
 ///
 /// A row can match three different ways, because there are three different
@@ -303,47 +367,49 @@ fn legend(ui: &mut egui::Ui) {
 /// The ordered category table. Built per call (fn-pointer predicates), then
 /// shared by [`build_categories`] and [`pin_cost`] so the cost metric and the
 /// grouping can never drift apart.
-fn category_defs() -> Vec<CategoryDef> {
+/// The ordered category table: thirteen hand-written rows, then one per
+/// peripheral derived from this chip's unrecognised signals.
+fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
     use Complexity::{Complex, Simple};
     // Rule of thumb for `complexity`: it mirrors `PinFunction::is_bus()` — a
     // protocol whose pins must be chosen as a set — plus SWD, which is equally
     // multi-pin but isn't a data bus.
-    vec![
+    let mut defs: Vec<CategoryDef> = vec![
         CategoryDef {
-            name: "GPIO Output",
+            name: "GPIO Output".into(),
             rgb: (200, 120, 50),
             complexity: Simple,
-            pred: |f| matches!(f, PinFunction::GpioOutput),
+            pred: Box::new(|f| matches!(f, PinFunction::GpioOutput)),
         },
         CategoryDef {
-            name: "GPIO Input",
+            name: "GPIO Input".into(),
             rgb: (70, 160, 70),
             complexity: Simple,
-            pred: |f| matches!(f, PinFunction::GpioInput),
+            pred: Box::new(|f| matches!(f, PinFunction::GpioInput)),
         },
         CategoryDef {
-            name: "ADC",
+            name: "ADC".into(),
             rgb: (150, 70, 200),
             complexity: Simple,
-            pred: |f| matches!(f, PinFunction::AdcChannel { .. }),
+            pred: Box::new(|f| matches!(f, PinFunction::AdcChannel { .. })),
         },
         CategoryDef {
-            name: "Timers / PWM",
+            name: "Timers / PWM".into(),
             rgb: (190, 170, 30),
             complexity: Simple,
-            pred: |f| matches!(f, PinFunction::TimerPwm { .. }),
+            pred: Box::new(|f| matches!(f, PinFunction::TimerPwm { .. })),
         },
         CategoryDef {
-            name: "MCO / Clock",
+            name: "MCO / Clock".into(),
             rgb: (150, 150, 160),
             complexity: Simple,
-            pred: |f| matches!(f, PinFunction::Mco),
+            pred: Box::new(|f| matches!(f, PinFunction::Mco)),
         },
         CategoryDef {
-            name: "USART",
+            name: "USART".into(),
             rgb: (50, 110, 200),
             complexity: Complex,
-            pred: |f| {
+            pred: Box::new(|f| {
                 matches!(
                     f,
                     PinFunction::UsartTx(_)
@@ -352,13 +418,13 @@ fn category_defs() -> Vec<CategoryDef> {
                         | PinFunction::UsartRts(_)
                         | PinFunction::UsartCk(_)
                 )
-            },
+            }),
         },
         CategoryDef {
-            name: "SPI",
+            name: "SPI".into(),
             rgb: (30, 170, 170),
             complexity: Complex,
-            pred: |f| {
+            pred: Box::new(|f| {
                 matches!(
                     f,
                     PinFunction::SpiNss(_)
@@ -366,33 +432,51 @@ fn category_defs() -> Vec<CategoryDef> {
                         | PinFunction::SpiMiso(_)
                         | PinFunction::SpiMosi(_)
                 )
-            },
+            }),
         },
         CategoryDef {
-            name: "I2C",
+            name: "I2C".into(),
             rgb: (60, 180, 100),
             complexity: Complex,
-            pred: |f| matches!(f, PinFunction::I2cScl(_) | PinFunction::I2cSda(_)),
+            pred: Box::new(|f| matches!(f, PinFunction::I2cScl(_) | PinFunction::I2cSda(_))),
         },
         CategoryDef {
-            name: "USB",
+            name: "USB".into(),
             rgb: (190, 50, 160),
             complexity: Complex,
-            pred: |f| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp),
+            pred: Box::new(|f| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp)),
         },
         CategoryDef {
-            name: "CAN",
+            name: "CAN".into(),
             rgb: (200, 130, 20),
             complexity: Complex,
-            pred: |f| matches!(f, PinFunction::CanRx | PinFunction::CanTx),
+            pred: Box::new(|f| matches!(f, PinFunction::CanRx | PinFunction::CanTx)),
         },
         CategoryDef {
-            name: "SWD / Debug",
+            name: "SWD / Debug".into(),
             rgb: (190, 50, 50),
             complexity: Complex,
-            pred: |f| matches!(f, PinFunction::SwdIo | PinFunction::SwdClk),
+            pred: Box::new(|f| matches!(f, PinFunction::SwdIo | PinFunction::SwdClk)),
         },
-    ]
+    ];
+    // Then the peripherals only this chip knows about. Appended, so the
+    // hand-written thirteen keep their order and their place at the top.
+    for (name, signals) in other_peripherals(pins) {
+        let prefix = name.clone();
+        defs.push(CategoryDef {
+            rgb: derived_color(&name),
+            // A peripheral whose pins must be chosen as a set belongs on the
+            // Complex side, and "more than one signal on this chip" is the only
+            // evidence available for that: COMP1 has INP and INM, DAC1 has one
+            // output. Derived rather than guessed, and stable for a given part.
+            complexity: if signals > 1 { Complex } else { Simple },
+            pred: Box::new(
+                move |f| matches!(f, PinFunction::Other(s) if signal_peripheral(s) == prefix),
+            ),
+            name,
+        });
+    }
+    defs
 }
 
 /// How many peripheral categories *other than GPIO* this pin is able to serve.
@@ -410,9 +494,9 @@ fn pin_cost(pin: &Pin, defs: &[CategoryDef]) -> usize {
 /// Build the per-category view from the chip's pins (available functions),
 /// grouping each pin's matching signals into a single [`PinEntry`].
 fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
-    let defs = category_defs();
-
     let pins: Vec<&Pin> = mcu.iter_all_pins().filter(|p| !p.reserved).collect();
+
+    let defs = category_defs(&pins);
 
     // Mirror the Pins panel's visibility rule (mcu/gui/mod.rs): a function that
     // is already selected on a *different* pin is hidden everywhere else, so an
@@ -429,7 +513,7 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
 
     defs.iter()
         .filter_map(|def| {
-            let (name, (r, g, b), pred) = (def.name, def.rgb, def.pred);
+            let (name, (r, g, b), pred) = (def.name.clone(), def.rgb, &def.pred);
             let mut pin_entries = Vec::new();
             for pin in &pins {
                 // A pin already configured for a function belongs to a single
@@ -505,7 +589,7 @@ fn category_row(
     let total = cat.pins.len();
 
     ui.add_space(4.0);
-    let id = ui.make_persistent_id(("periph_cat", cat.name));
+    let id = ui.make_persistent_id(("periph_cat", cat.name.as_str()));
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
     if collapse {
@@ -516,7 +600,7 @@ fn category_row(
             let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 2.0, cat.color);
             ui.label(
-                egui::RichText::new(cat.name)
+                egui::RichText::new(cat.name.clone())
                     .size(13.0)
                     .strong()
                     .color(cat.color),
@@ -688,7 +772,7 @@ mod tests {
     fn categories_cover_expected_peripherals() {
         let mcu = create_stm32f103c8tx();
         let cats = build_categories(&mcu);
-        let names: Vec<_> = cats.iter().map(|c| c.name).collect();
+        let names: Vec<&str> = cats.iter().map(|c| c.name.as_str()).collect();
 
         for expected in ["GPIO Output", "GPIO Input", "ADC", "USART", "SPI", "I2C"] {
             assert!(names.contains(&expected), "missing category {expected}");
@@ -831,8 +915,10 @@ mod tests {
     /// tab promises: single-pin functions left, multi-pin protocols right.
     #[test]
     fn every_category_has_a_column() {
-        for def in category_defs() {
-            let expected = match def.name {
+        // No pins, so only the thirteen hand-written rows: the derived ones
+        // are per-chip and have their own test.
+        for def in category_defs(&[]) {
+            let expected = match def.name.as_str() {
                 "GPIO Output" | "GPIO Input" | "ADC" | "Timers / PWM" | "MCO / Clock" => {
                     Complexity::Simple
                 }
@@ -841,22 +927,111 @@ mod tests {
             assert_eq!(def.complexity, expected, "wrong column for {}", def.name);
         }
         // The complex column is exactly the buses plus SWD.
-        let complex: Vec<_> = category_defs()
+        let complex: Vec<String> = category_defs(&[])
             .into_iter()
             .filter(|d| d.complexity == Complexity::Complex)
             .map(|d| d.name)
             .collect();
+        let complex: Vec<&str> = complex.iter().map(String::as_str).collect();
         assert_eq!(
             complex,
             ["USART", "SPI", "I2C", "USB", "CAN", "SWD / Debug"]
         );
     }
 
+    fn other(sig: &str) -> PinFunction {
+        PinFunction::Other(sig.to_owned())
+    }
+
+    /// The peripherals from the report: visible on the pins, absent from the
+    /// tab because nothing matched `PinFunction::Other`.
+    #[test]
+    fn unrecognised_signals_become_one_category_per_peripheral() {
+        let p1 = Pin::new(1, "PA0").with_functions(vec![other("COMP1_INP"), other("DAC1_OUT1")]);
+        let p2 = Pin::new(2, "PA1").with_functions(vec![other("COMP1_INM"), other("FMC_D0")]);
+        let p3 = Pin::new(3, "PA2").with_functions(vec![other("COMP2_INP")]);
+        let pins: Vec<&Pin> = vec![&p1, &p2, &p3];
+
+        let derived: Vec<(String, usize)> = other_peripherals(&pins);
+        assert_eq!(
+            derived,
+            vec![
+                ("COMP1".to_owned(), 2),
+                ("COMP2".to_owned(), 1),
+                ("DAC1".to_owned(), 1),
+                ("FMC".to_owned(), 1),
+            ],
+            "one row per INSTANCE, with its distinct signal count"
+        );
+    }
+
+    /// A peripheral whose pins must be chosen together belongs on the right;
+    /// a single-output one does not. Derived from the chip, not a list.
+    #[test]
+    fn multi_signal_peripherals_land_in_the_complex_column() {
+        let p1 = Pin::new(1, "PA0").with_functions(vec![other("COMP1_INP"), other("DAC1_OUT1")]);
+        let p2 = Pin::new(2, "PA1").with_functions(vec![other("COMP1_INM")]);
+        let pins: Vec<&Pin> = vec![&p1, &p2];
+        let defs = category_defs(&pins);
+        let col = |n: &str| {
+            defs.iter()
+                .find(|d| d.name == n)
+                .unwrap_or_else(|| panic!("no category {n}"))
+                .complexity
+        };
+        assert_eq!(col("COMP1"), Complexity::Complex, "INP + INM go together");
+        assert_eq!(col("DAC1"), Complexity::Simple, "one output, one pin");
+        // …and the hand-written thirteen keep their place at the top.
+        assert_eq!(defs[0].name, "GPIO Output");
+    }
+
+    /// The predicate has to catch its own signals and nobody else's - the
+    /// prefix is compared whole, so COMP1 must not swallow COMP10.
+    #[test]
+    fn a_derived_predicate_matches_only_its_own_peripheral() {
+        let p = Pin::new(1, "PA0").with_functions(vec![other("COMP1_INP"), other("COMP10_INP")]);
+        let pins: Vec<&Pin> = vec![&p];
+        let defs = category_defs(&pins);
+        let comp1 = defs.iter().find(|d| d.name == "COMP1").unwrap();
+        assert!((comp1.pred)(&other("COMP1_INP")));
+        assert!(!(comp1.pred)(&other("COMP10_INP")), "COMP1 is not COMP10");
+        assert!(!(comp1.pred)(&PinFunction::GpioInput));
+    }
+
+    /// A chip with nothing unrecognised gets nothing extra, so the common
+    /// case is untouched.
+    #[test]
+    fn a_fully_recognised_chip_grows_no_categories() {
+        let p = Pin::new(1, "PA9").with_functions(vec![PinFunction::UsartTx(1)]);
+        assert!(other_peripherals(&[&p]).is_empty());
+        assert_eq!(category_defs(&[&p]).len(), category_defs(&[]).len());
+    }
+
+    /// Colours follow the NAME, so loading a different part does not repaint
+    /// the rows that survived.
+    ///
+    /// Stability is the guarantee; distinctness is NOT. Six buckets over
+    /// arbitrary names collide by design, and an assertion that two chosen
+    /// names differ would be a coin flip dressed as a test - the first pair I
+    /// picked, COMP1 and FMC, happens to collide. What is worth pinning is
+    /// that the palette is actually spread rather than constant.
+    #[test]
+    fn derived_colours_are_stable_per_name() {
+        assert_eq!(derived_color("COMP1"), derived_color("COMP1"));
+        assert_eq!(derived_color("FMC"), derived_color("FMC"));
+        let names = [
+            "COMP1", "COMP2", "COMP3", "DAC1", "DAC2", "FMC", "LTDC", "DCMIPP", "RTC", "OPAMP1",
+            "OPAMP2", "SAI1", "QUADSPI", "SDMMC1",
+        ];
+        let used: std::collections::BTreeSet<_> = names.iter().map(|n| derived_color(n)).collect();
+        assert!(used.len() >= 4, "palette barely used: {used:?}");
+    }
+
     /// Cost counts *categories*, not signals: a pad routable to four SPI signals
     /// gives up one peripheral, not four. GPIO never counts.
     #[test]
     fn pin_cost_counts_categories_not_signals() {
-        let defs = category_defs();
+        let defs = category_defs(&[]);
 
         let gpio_only = Pin::new(1, "PC13")
             .with_functions(vec![PinFunction::GpioInput, PinFunction::GpioOutput]);
@@ -977,7 +1152,7 @@ mod filter_tests {
     fn cats() -> Vec<CategoryView> {
         vec![
             CategoryView {
-                name: "USART",
+                name: "USART".into(),
                 color: egui::Color32::WHITE,
                 complexity: Complexity::Complex,
                 pins: vec![
@@ -986,7 +1161,7 @@ mod filter_tests {
                 ],
             },
             CategoryView {
-                name: "SPI",
+                name: "SPI".into(),
                 color: egui::Color32::WHITE,
                 complexity: Complexity::Complex,
                 pins: vec![pin(7, "PA7", &["SPI1  MOSI"])],
