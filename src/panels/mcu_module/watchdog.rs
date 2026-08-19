@@ -85,12 +85,14 @@ pub fn wwdg_supported(family: &str) -> bool {
 /// Is watchdog code actually GENERATED for this family yet?
 ///
 /// Separate from [`wwdg_supported`], which is about the HAL. This is about
-/// the IDE: the two embassy STM32 backends and the F1 one call `watchdog_gen`,
-/// but WBA does not, so there the tab would accept a setting and produce
-/// nothing. A control that silently does nothing is worse than one
-/// that says it is not wired yet, so the tab asks this first.
+/// the IDE: every STM32 backend now calls `watchdog_gen`, so this is `true`
+/// across the board and only non-STM32 targets (the ESP32-C3) are left out.
+///
+/// Kept as a function rather than folded away because it is what stops the
+/// tab offering controls that reach no generated file, and the next family
+/// added to the IDE starts out on the wrong side of it.
 pub fn codegen_supported(family: &str) -> bool {
-    family.starts_with("stm32") && family != "stm32wba"
+    family.starts_with("stm32")
 }
 
 /// The watchdog limits for an IDE family key (`stm32f4`, `stm32g0`, …).
@@ -428,10 +430,10 @@ mod tests {
         ] {
             assert!(codegen_supported(fam), "{fam}");
         }
-        // F1 joined once its own HAL template existed.
+        // F1 and WBA joined once their backends called the generator.
         assert!(codegen_supported("stm32f1"));
-        for fam in ["stm32wba", "esp32c3"] {
-            assert!(!codegen_supported(fam), "{fam}");
-        }
+        assert!(codegen_supported("stm32wba"));
+        // Non-STM32 targets have no watchdog codegen at all.
+        assert!(!codegen_supported("esp32c3"));
     }
 }

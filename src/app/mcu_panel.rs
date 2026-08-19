@@ -1169,7 +1169,8 @@ impl AppIde {
             // esp-rtos (same embassy executor, ESP scheduler) on the ESP32-C3.
             let esp_async = family::async_is_esp(&mcu.family);
             let async_sel = mcu.pending_runtime == Runtime::Async;
-            let async_resp = runtime_card(
+            let async_why = family::async_unavailable_reason(&mcu.family);
+            let mut async_resp = runtime_card(
                 ui,
                 async_sel,
                 async_ok,
@@ -1186,9 +1187,15 @@ impl AppIde {
                      .await-able drivers on embassy-stm32"
                 },
             );
+            if let Some(why) = &async_why {
+                async_resp = async_resp.on_hover_text(why);
+            }
             if async_resp.clicked() && async_ok {
                 mcu.pending_runtime = Runtime::Async;
             }
+            // Same rule as the Native and RTIC cards: the reason a card is
+            // greyed belongs beside it, not in "Details" the user cannot open.
+            disabled_reason(ui, async_why.as_deref());
             let esp_async_details: &[(&str, &str)] = &[
                 ("On Apply:", "Regenerates main.rs with the esp-rtos entry + Spawner and adds the async \
                                Cargo.toml deps — then builds. The pin bindings themselves do NOT change: \

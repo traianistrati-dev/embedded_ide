@@ -796,6 +796,71 @@ mod emit_for_manual_compile {
             println!("wrote {}", wdir.display());
         }
 
+        // -- Watchdogs on the WBA ------------------------------------------
+        // Its own backend and its own limits: `iwdg_v3` prescales to /1024
+        // (four times further than the F4) and `wwdg_v2` to /128, so the
+        // defaults here are numbers no other family produces - worth
+        // compiling rather than assuming the embassy templates carry over.
+        {
+            use crate::panels::mcu_module::watchdog::{
+                IwdgConfig, WatchdogSettings, WwdgConfig, iwdg_range_us, limits_for, wwdg_range_us,
+            };
+            let mut wdef = def.clone();
+            wdef.id = "stm32wba55cg".into();
+            wdef.display_name = "STM32WBA55CGUx".into();
+            wdef.family = "stm32wba".into();
+            wdef.project.pkg_name = "stm32wba55cg".into();
+            wdef.project.target = "thumbv8m.main-none-eabihf".into();
+            wdef.project.probe_chip = "STM32WBA55CGUx".into();
+            wdef.project.hal_dep = stm32_pin_data::hal_dep_for_name("stm32wba", "STM32WBA55CGUx");
+            let mut w = wdef.build_mcu();
+            let l = limits_for(&w.family);
+            let pclk1 = 100_000_000;
+            w.watchdog = WatchdogSettings {
+                iwdg: Some(IwdgConfig {
+                    timeout_us: iwdg_range_us(&l).1,
+                }),
+                wwdg: Some(WwdgConfig {
+                    timeout_us: wwdg_range_us(&l, pclk1).unwrap().1,
+                    window_us: 0,
+                }),
+            };
+            let w_main = w.fresh_main_rs();
+            let wcfgs = w.config_files();
+            let wfiles = project_gen::build_project_files(&wdef.project, &wdef.toolchain, &w_main);
+            let mut wuser: Vec<(String, String)> = vec![
+                (
+                    "src/pins/mod.rs".into(),
+                    "pub mod configs;
+"
+                    .into(),
+                ),
+                (
+                    "src/pins/configs/mod.rs".into(),
+                    wcfgs
+                        .iter()
+                        .map(|(n, _)| {
+                            format!(
+                                "pub mod {};
+",
+                                n.trim_end_matches(".rs")
+                            )
+                        })
+                        .collect(),
+                ),
+            ];
+            wuser.extend(
+                wcfgs
+                    .into_iter()
+                    .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+            );
+            let bdir = std::env::temp_dir().join("eide_wba_check_wdg");
+            let _ = std::fs::remove_dir_all(&bdir);
+            project_gen::write_project(&bdir, &wfiles, &wuser, &w.mcu_config_text(), "")
+                .expect("write wba watchdog project");
+            println!("wrote {}", bdir.display());
+        }
+
         // ── The F1 blocking USART, unchanged by this migration ───────────────
         // `embedded-io` is shared by both seams, so bumping it for embassy has
         // to be proved harmless for the stm32f1xx-hal bridge too.

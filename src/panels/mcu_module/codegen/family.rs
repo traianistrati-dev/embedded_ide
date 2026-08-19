@@ -348,7 +348,7 @@ impl FamilyBackend for WbaBackend {
                 &mcu.name,
                 &all,
                 &mcu.clock,
-                &mcu.custom_module_inits(),
+                &mcu.watchdog_and_custom_inits(),
                 mcu.clock_manual,
             ),
             tail = USER_TAIL,
@@ -361,11 +361,18 @@ impl FamilyBackend for WbaBackend {
             &mcu.name,
             &all,
             &mcu.clock,
-            &mcu.custom_module_inits(),
+            &mcu.watchdog_and_custom_inits(),
             mcu.clock_manual,
         );
         let section = super::common::keep_manual_clock(existing, section, mcu.clock_manual);
         wba::splice_section(existing, &section, &mcu.name, &mcu.id)
+    }
+
+    fn config_files(&self, mcu: &Mcu) -> Vec<(String, String)> {
+        // Like the generic embassy backend: bus inits stay inline in
+        // main.rs, so `pins/configs/` here holds only the pin-less
+        // peripherals the Configuration tab owns.
+        super::watchdog_gen::config_files(&mcu.watchdog, &mcu.family)
     }
     // No per-peripheral config files yet — bus init is documented inline (v1).
 }
@@ -730,6 +737,34 @@ pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
     })
 }
 
+/// Why the **Async** runtime is unavailable on `family`, or `None` when it is
+/// available. Phrased for the System tab, next to the card it explains.
+///
+/// Like [`rtic_unavailable_reason`] and unlike [`native_unavailable_reason`],
+/// this is missing WORK rather than a choice with no object: `embassy-stm32`
+/// does publish chip features for the F1 (`stm32f103c8` among 95 of them), so
+/// the family is eligible. What is in the way is that F1 is the one STM32 this
+/// IDE routes to `stm32f1xx-hal` — the backend that gives it USB, the GPIO
+/// Portable/Native bridge and RTIC, none of which the embassy path emits.
+///
+/// Worth saying out loud in the UI, because the consequence is not obvious: the
+/// DMA choices (a USART's Buffered/DMA transport, a SPI/I2C bus' Async-DMA mode,
+/// and the per-module channel pickers) all live on the Async runtime, so an F1
+/// shows none of them.
+pub fn async_unavailable_reason(family: &str) -> Option<String> {
+    if async_supported(family) {
+        return None;
+    }
+    Some(if family == "stm32f1" {
+        "Not written for `stm32f1` yet: it is the one STM32 family this IDE builds on          stm32f1xx-hal (which is what gives it USB, the GPIO bridge and RTIC), while the          async runtime is embassy-stm32 throughout — and embassy-stm32 does support the          F1, so this is work, not a limit of the chip. The DMA transport and channel          pickers live on this runtime, so they are hidden here too."
+            .to_owned()
+    } else {
+        format!(
+            "No async backend for `{family}`: the runtime is embassy-stm32 on ARM and esp-rtos on the ESP parts."
+        )
+    })
+}
+
 /// Does a USB virtual module DO anything on this family?
 ///
 /// - **stm32f1** — yes: the backend emits the whole CDC-ACM device
@@ -821,6 +856,44 @@ mod blocking_note_tests {
         // RISC-V is a different answer again.
         let esp = rtic_unavailable_reason("esp32c3").expect("greyed means it must explain itself");
         assert!(esp.contains("RISC-V"), "{esp}");
+    }
+
+    /// Async is greyed on exactly one family, and that card has to say why —
+    /// the DMA choices hang off this runtime, so "no DMA option" is the visible
+    /// symptom of a card the user cannot click.
+    #[test]
+    fn the_async_card_explains_the_one_family_it_is_greyed_on() {
+        use super::async_unavailable_reason;
+        // Every family with a backend: nothing to explain.
+        for family in [
+            "stm32f2", "stm32f4", "stm32g0", "stm32h5", "stm32wba", "esp32c3",
+        ] {
+            assert!(
+                async_unavailable_reason(family).is_none(),
+                "{family} has an async backend"
+            );
+        }
+        let f1 = async_unavailable_reason("stm32f1").expect("greyed means it must explain itself");
+        // Missing work, not a limit of the chip - the same category as RTIC,
+        // and it must not read as impossible.
+        assert!(
+            f1.contains("yet"),
+            "say it is not done, not that it cannot be: {f1}"
+        );
+        assert!(
+            f1.contains("stm32f1xx-hal") && f1.contains("embassy-stm32"),
+            "name both HALs, because the trade-off IS the reason: {f1}"
+        );
+        assert!(
+            f1.contains("DMA"),
+            "the user arrives here asking why DMA is missing: {f1}"
+        );
+        // A family with no backend at all gets the generic answer, not the F1 one.
+        let other = async_unavailable_reason("stm8").expect("no backend, no async");
+        assert!(
+            other.contains("stm8") && !other.contains("stm32f1xx-hal"),
+            "{other}"
+        );
     }
 
     /// USB follows what the BACKEND writes, not what the pins allow.
