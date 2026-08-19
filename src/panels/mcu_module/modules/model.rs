@@ -293,6 +293,19 @@ pub struct UsartModuleConfig {
     /// `Buffered`, which is what they generated.
     #[serde(default)]
     pub mode: UsartMode,
+    /// DMA channels chosen BY HAND, empty = let the IDE allocate (the normal
+    /// case). Named as the embassy singleton, `DMA1_CH4` / `GPDMA1_CH0`.
+    ///
+    /// The automatic allocation is correct but arbitrary among the channels the
+    /// chip allows: it takes the first free one. A board can need a specific
+    /// channel anyway - to leave a high-priority one for an ADC, to match an
+    /// existing driver, or to work around an erratum - and that is not
+    /// something the IDE can infer. Reserved before anything is allocated, so a
+    /// hand-picked channel is never handed to another peripheral too.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dma_tx: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dma_rx: String,
 }
 
 impl UsartModuleConfig {
@@ -309,6 +322,8 @@ impl UsartModuleConfig {
             custom_label: String::new(),
             api_style: ApiStyle::default(),
             mode: UsartMode::default(),
+            dma_tx: String::new(),
+            dma_rx: String::new(),
         }
     }
 }
@@ -333,6 +348,19 @@ pub struct SpiModuleConfig {
     /// blocking runtime (`api_style` applies there).
     #[serde(default)]
     pub async_mode: AsyncBusMode,
+    /// DMA channels chosen BY HAND, empty = let the IDE allocate (the normal
+    /// case). Named as the embassy singleton, `DMA1_CH4` / `GPDMA1_CH0`.
+    ///
+    /// The automatic allocation is correct but arbitrary among the channels the
+    /// chip allows: it takes the first free one. A board can need a specific
+    /// channel anyway - to leave a high-priority one for an ADC, to match an
+    /// existing driver, or to work around an erratum - and that is not
+    /// something the IDE can infer. Reserved before anything is allocated, so a
+    /// hand-picked channel is never handed to another peripheral too.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dma_tx: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dma_rx: String,
 }
 
 impl SpiModuleConfig {
@@ -347,6 +375,8 @@ impl SpiModuleConfig {
             custom_label: String::new(),
             api_style: ApiStyle::default(),
             async_mode: AsyncBusMode::default(),
+            dma_tx: String::new(),
+            dma_rx: String::new(),
         }
     }
 }
@@ -371,6 +401,19 @@ pub struct I2cModuleConfig {
     /// blocking runtime (`api_style` applies there).
     #[serde(default)]
     pub async_mode: AsyncBusMode,
+    /// DMA channels chosen BY HAND, empty = let the IDE allocate (the normal
+    /// case). Named as the embassy singleton, `DMA1_CH4` / `GPDMA1_CH0`.
+    ///
+    /// The automatic allocation is correct but arbitrary among the channels the
+    /// chip allows: it takes the first free one. A board can need a specific
+    /// channel anyway - to leave a high-priority one for an ADC, to match an
+    /// existing driver, or to work around an erratum - and that is not
+    /// something the IDE can infer. Reserved before anything is allocated, so a
+    /// hand-picked channel is never handed to another peripheral too.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dma_tx: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dma_rx: String,
 }
 
 impl I2cModuleConfig {
@@ -385,6 +428,8 @@ impl I2cModuleConfig {
             custom_label: String::new(),
             api_style: ApiStyle::default(),
             async_mode: AsyncBusMode::default(),
+            dma_tx: String::new(),
+            dma_rx: String::new(),
         }
     }
 }

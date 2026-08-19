@@ -239,6 +239,41 @@ impl DmaAllocator {
         Some(pick)
     }
 
+    /// Take a channel the USER named, rather than allocating one.
+    ///
+    /// The name comes from a Virtual Module's `dma_tx` / `dma_rx`, which the UI
+    /// fills from [`channels_for`] — so it is normally one of the channels this
+    /// peripheral can actually use. It is honoured even when it is not: the
+    /// point of the field is to override the IDE, and a hand-edited
+    /// `mcu.config` is the user's business. What CANNOT be honoured is a
+    /// channel whose interrupt is unknown, because the binding would not
+    /// compile.
+    pub fn take_named(&mut self, peri: &str) -> Option<DmaPick> {
+        let irq = self
+            .chip
+            .as_ref()
+            .and_then(|c| c.channels.iter().find(|c| c.peri == peri))
+            .map(|c| c.irq.clone())
+            .or_else(|| irq_for(&self.family, peri))?;
+        self.used.insert(peri.to_owned());
+        Some(DmaPick {
+            peri: peri.to_owned(),
+            irq,
+        })
+    }
+
+    /// Put a channel out of circulation without emitting anything for it.
+    ///
+    /// Every hand-picked channel in the project is reserved BEFORE the first
+    /// automatic allocation, so an earlier peripheral cannot take the channel a
+    /// later one was pinned to. Order of appearance would otherwise decide it,
+    /// which is exactly the arbitrariness the manual field exists to remove.
+    pub fn reserve(&mut self, peri: &str) {
+        if !peri.is_empty() {
+            self.used.insert(peri.to_owned());
+        }
+    }
+
     /// The vendor's own answer for this chip.
     fn take_from_chip(&self, bus: Bus, instance: u8, dir: Dir) -> Option<DmaPick> {
         let chip = self.chip.as_ref()?;
@@ -279,6 +314,32 @@ impl DmaAllocator {
             irq: irq_for(&self.family, chan)?,
         })
     }
+}
+
+/// Every channel `bus{instance}`'s `dir` may use on this chip, for the picker.
+///
+/// Muxed chip: all of them, in vendor order. Fixed mapping: only what the
+/// request table routes. Empty when the chip carries no vendor data at all —
+/// the picker then offers nothing to choose, which is honest: without the data
+/// the IDE cannot say which channels are valid, and a free-text field would
+/// invite a name that silently moves the wrong bytes.
+pub fn channels_for(
+    dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+    bus: Bus,
+    instance: u8,
+    dir: Dir,
+) -> Vec<String> {
+    let Some(chip) = dma else {
+        return Vec::new();
+    };
+    if chip.mux {
+        return chip.channels.iter().map(|c| c.peri.clone()).collect();
+    }
+    request_names(bus, instance, dir)
+        .into_iter()
+        .find_map(|r| chip.requests.iter().find(|(n, _)| *n == r))
+        .map(|(_, cs)| cs.clone())
+        .unwrap_or_default()
 }
 
 /// What the vendor calls this request, best guess first.
@@ -443,6 +504,66 @@ mod tests {
                 .unwrap()
                 .peri,
             "DMA1_CH2"
+        );
+    }
+
+    /// A channel pinned by hand in a Virtual Module: honoured, and taken out
+    /// of circulation BEFORE anything is allocated, so whichever peripheral
+    /// happens to be emitted first cannot claim it.
+    #[test]
+    fn a_reserved_channel_is_kept_for_whoever_pinned_it() {
+        let def = DmaDef {
+            mux: true,
+            channels: vec![
+                chan("DMA1_CH1", "DMA1_CHANNEL1"),
+                chan("DMA1_CH2", "DMA1_CHANNEL2"),
+                chan("DMA1_CH3", "DMA1_CHANNEL3"),
+            ],
+            requests: Vec::new(),
+        };
+        let mut a = DmaAllocator::for_chip("stm32g4", Some(&def));
+        // SPI1 RX is pinned to CH1 - the very channel automatic allocation
+        // would otherwise hand to the USART emitted before it.
+        a.reserve("DMA1_CH1");
+        assert_eq!(a.take(Bus::Usart, 1, Dir::Tx).unwrap().peri, "DMA1_CH2");
+        assert_eq!(a.take(Bus::Usart, 1, Dir::Rx).unwrap().peri, "DMA1_CH3");
+        let pinned = a.take_named("DMA1_CH1").expect("the pinned channel");
+        assert_eq!(
+            (pinned.peri.as_str(), pinned.irq.as_str()),
+            ("DMA1_CH1", "DMA1_CHANNEL1"),
+            "the interrupt comes from the chip's list, not from the name"
+        );
+    }
+
+    /// The picker only ever offers channels the chip can really use.
+    #[test]
+    fn the_picker_offers_what_the_chip_allows() {
+        let mux = DmaDef {
+            mux: true,
+            channels: vec![chan("DMA1_CH1", "i1"), chan("DMA1_CH2", "i2")],
+            requests: Vec::new(),
+        };
+        assert_eq!(
+            channels_for(Some(&mux), Bus::I2c, 1, Dir::Tx),
+            ["DMA1_CH1", "DMA1_CH2"],
+            "muxed: every channel, whatever the peripheral"
+        );
+        let classic = DmaDef {
+            mux: false,
+            channels: vec![chan("DMA1_CH4", "i4")],
+            requests: vec![("USART1_TX".into(), vec!["DMA1_CH4".into()])],
+        };
+        assert_eq!(
+            channels_for(Some(&classic), Bus::Usart, 1, Dir::Tx),
+            ["DMA1_CH4"]
+        );
+        assert!(
+            channels_for(Some(&classic), Bus::Spi, 1, Dir::Tx).is_empty(),
+            "a request the silicon does not route offers nothing"
+        );
+        assert!(
+            channels_for(None, Bus::Usart, 1, Dir::Tx).is_empty(),
+            "no chip data, nothing to choose from"
         );
     }
 

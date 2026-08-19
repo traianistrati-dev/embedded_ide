@@ -4,6 +4,7 @@
 
 use super::super::model::{Mcu, PIN_HEIGHT};
 use super::rotate::Rot;
+use crate::panels::mcu_module::codegen::dma_map;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
@@ -931,6 +932,9 @@ pub fn module_config_ui(
     // The STAGED `(api_style, async_mode)` for this module — the api/async row
     // edit THIS, not `m.config`, so nothing regenerates until "Apply".
     pending: &mut (ApiStyle, AsyncBusMode),
+    // The chip's DMA facts, for the channel picker. Cloned by the caller rather
+    // than borrowed, because `m` is a mutable borrow out of the same `Mcu`.
+    dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
 ) {
     // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
     let is_custom = m.kind.is_custom();
@@ -1041,6 +1045,61 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
+    // Which DMA channels this peripheral gets. Automatic is right almost
+    // always — the row exists for the board that needs a SPECIFIC channel (to
+    // leave a high-priority one free, to match an existing driver, to dodge an
+    // erratum), which is not something the IDE can infer.
+    let dma_row = |ui: &mut egui::Ui,
+                   bus: dma_map::Bus,
+                   inst: u8,
+                   tx: &mut String,
+                   rx: &mut String| {
+        for (dir, label, chosen) in [
+            (dma_map::Dir::Tx, "DMA TX", tx),
+            (dma_map::Dir::Rx, "DMA RX", rx),
+        ] {
+            let options = dma_map::channels_for(dma, bus, inst, dir);
+            ui.label(label);
+            if options.is_empty() {
+                // No vendor data for this chip: the IDE cannot say which
+                // channels are valid, so it offers none rather than a free-text
+                // box that invites a name which moves the wrong bytes.
+                ui.add_enabled_ui(false, |ui| {
+                    egui::ComboBox::from_id_salt(format!("dma_{label}_none"))
+                        .selected_text("Automatic")
+                        .show_ui(ui, |_ui| {});
+                })
+                .response
+                .on_hover_text(
+                    "This chip carries no DMA channel data - re-import it from the                      STM32Cube database to choose a channel by hand.",
+                );
+                ui.end_row();
+                continue;
+            }
+            egui::ComboBox::from_id_salt(format!("dma_{label}"))
+                .selected_text(if chosen.is_empty() {
+                    "Automatic".to_owned()
+                } else {
+                    chosen.clone()
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(chosen.is_empty(), "Automatic")
+                        .on_hover_text("The IDE takes the first channel this peripheral can use and nothing else has taken.")
+                        .clicked()
+                    {
+                        chosen.clear();
+                    }
+                    for c in &options {
+                        if ui.selectable_label(chosen == c, c).clicked() {
+                            *chosen = c.clone();
+                        }
+                    }
+                });
+            ui.end_row();
+        }
+    };
+
     egui::Grid::new("module_cfg")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -1092,6 +1151,16 @@ pub fn module_config_ui(
                         // The API style is fixed on async (embedded-io-async
                         // either way); what IS a choice is the transport.
                         usart_mode_row(ui, &mut cfg.mode);
+                        if cfg.mode == UsartMode::Dma {
+                            let inst = cfg.instance;
+                            dma_row(
+                                ui,
+                                dma_map::Bus::Usart,
+                                inst,
+                                &mut cfg.dma_tx,
+                                &mut cfg.dma_rx,
+                            );
+                        }
                     } else {
                         api_row(ui, &mut pending.0);
                     }
@@ -1120,6 +1189,16 @@ pub fn module_config_ui(
                     ui.end_row();
                     if is_async {
                         async_row(ui, &mut pending.1);
+                        if pending.1 == AsyncBusMode::AsyncDma {
+                            let inst = cfg.instance;
+                            dma_row(
+                                ui,
+                                dma_map::Bus::Spi,
+                                inst,
+                                &mut cfg.dma_tx,
+                                &mut cfg.dma_rx,
+                            );
+                        }
                     } else if is_native {
                         api_row_locked(ui);
                     } else {
@@ -1144,6 +1223,16 @@ pub fn module_config_ui(
                     ui.end_row();
                     if is_async {
                         async_row(ui, &mut pending.1);
+                        if pending.1 == AsyncBusMode::AsyncDma {
+                            let inst = cfg.instance;
+                            dma_row(
+                                ui,
+                                dma_map::Bus::I2c,
+                                inst,
+                                &mut cfg.dma_tx,
+                                &mut cfg.dma_rx,
+                            );
+                        }
                     } else if is_native {
                         api_row_locked(ui);
                     } else {

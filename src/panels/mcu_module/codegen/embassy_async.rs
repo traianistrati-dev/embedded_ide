@@ -356,12 +356,22 @@ fn dma_args(
     bus: dma_map::Bus,
     n: u8,
     label: &str,
+    manual: (&str, &str),
 ) -> (String, String) {
+    // A channel the user pinned in the Virtual Module wins over allocation; it
+    // was already reserved, so `take_named` only has to resolve its interrupt.
+    let pick = |alloc: &mut dma_map::DmaAllocator, named: &str, dir| {
+        if named.is_empty() {
+            alloc.take(bus, n, dir)
+        } else {
+            alloc.take_named(named)
+        }
+    };
     // Both or neither: a TX reserved next to a failed RX would take a channel
     // out of circulation for a peripheral that still ends up on the TODO path.
     let (Some(tx), Some(rx)) = (
-        alloc.take(bus, n, dma_map::Dir::Tx),
-        alloc.take(bus, n, dma_map::Dir::Rx),
+        pick(alloc, manual.0, dma_map::Dir::Tx),
+        pick(alloc, manual.1, dma_map::Dir::Rx),
     ) else {
         // No table for this family (or nothing free): say exactly what is
         // missing, at the line that needs it.
@@ -384,6 +394,15 @@ fn dma_args(
     // Resolved — no note. A TODO telling the user to do work already done is
     // worse than none: it makes correct output look unfinished.
     (format!("p.{}, p.{}, Irqs", tx.peri, rx.peri), String::new())
+}
+
+/// The channels a module pinned by hand, as `(tx, rx)`; `("", "")` when it
+/// pinned none, which is the normal case.
+fn manual_channels<'a, C>(
+    cfg: Option<&'a C>,
+    get: impl Fn(&'a C) -> (&'a str, &'a str),
+) -> (&'a str, &'a str) {
+    cfg.map(get).unwrap_or(("", ""))
 }
 
 /// The `bind_interrupts!` key for `USART{n}` on this chip.
@@ -516,6 +535,17 @@ pub fn async_peripherals(
     let mut dma_usart_instances: Vec<u8> = Vec::new();
     let mut dma_binds: Vec<(String, String)> = Vec::new();
     let mut alloc = dma_map::DmaAllocator::for_chip(family, dma);
+    // Hand-picked channels come out of circulation FIRST, so that whichever
+    // peripheral happens to be emitted earlier cannot take one.
+    for (tx, rx) in usart
+        .values()
+        .map(|c| (&c.dma_tx, &c.dma_rx))
+        .chain(spi.values().map(|c| (&c.dma_tx, &c.dma_rx)))
+        .chain(i2c.values().map(|c| (&c.dma_tx, &c.dma_rx)))
+    {
+        alloc.reserve(tx);
+        alloc.reserve(rx);
+    }
 
     for (n, tx, rx) in usart_wires(pins) {
         consumed.push(tx.clone());
@@ -534,6 +564,7 @@ pub fn async_peripherals(
                 dma_map::Bus::Usart,
                 n,
                 &format!("USART{n}"),
+                manual_channels(usart.get(&n), |c| (&c.dma_tx, &c.dma_rx)),
             );
             calls.push_str(&note);
             calls.push_str(&format!(
@@ -568,6 +599,7 @@ pub fn async_peripherals(
                 dma_map::Bus::Spi,
                 n,
                 &format!("SPI{n}"),
+                manual_channels(cfg, |c| (&c.dma_tx, &c.dma_rx)),
             );
             calls.push_str(&note);
             calls.push_str(&format!(
@@ -599,6 +631,7 @@ pub fn async_peripherals(
                 dma_map::Bus::I2c,
                 n,
                 &format!("I2C{n}"),
+                manual_channels(cfg, |c| (&c.dma_tx, &c.dma_rx)),
             );
             calls.push_str(&note);
             calls.push_str(&format!(
@@ -1180,6 +1213,84 @@ mod usart_mode_tests {
         // the macro is absent, and naming it there must not fail this.
         assert!(!f.contains("bind_interrupts!(struct"), "{f}");
         assert!(f.contains("irqs: impl Binding<"), "{f}");
+    }
+
+    /// A channel pinned by hand in the Virtual Module reaches BOTH the `init`
+    /// call and the interrupt binding, and does not get handed to anyone else.
+    #[test]
+    fn a_pinned_channel_beats_the_automatic_one() {
+        use crate::panels::mcu_module::codegen::dma_data::DmaChannel;
+        use crate::panels::mcu_module::mcu_def::DmaDef;
+        use crate::panels::mcu_module::modules::{AsyncBusMode, SpiModuleConfig};
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        let mk = |name: &str, f: PinFunction| {
+            let mut p = Pin::new(1, name);
+            p.selected_function = f;
+            p
+        };
+        let pins = [
+            mk("PA9", PinFunction::UsartTx(1)),
+            mk("PA10", PinFunction::UsartRx(1)),
+            mk("PA5", PinFunction::SpiSck(1)),
+            mk("PA7", PinFunction::SpiMosi(1)),
+            mk("PA6", PinFunction::SpiMiso(1)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        // A muxed chip, so automatic allocation would take CH1 and CH2 first.
+        let chip = DmaDef {
+            mux: true,
+            channels: (1..=6)
+                .map(|i| DmaChannel {
+                    peri: format!("DMA1_CH{i}"),
+                    irq: format!("DMA1_CHANNEL{i}"),
+                })
+                .collect(),
+            requests: Vec::new(),
+        };
+        // The SPI - emitted AFTER the USART - claims CH1 by hand.
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(
+            1u8,
+            SpiModuleConfig {
+                async_mode: AsyncBusMode::AsyncDma,
+                dma_tx: "DMA1_CH1".into(),
+                ..SpiModuleConfig::new(1)
+            },
+        )]
+        .into_iter()
+        .collect();
+        let usart: BTreeMap<u8, UsartModuleConfig> =
+            [(1u8, cfg(UsartMode::Dma))].into_iter().collect();
+        let out = async_peripherals(
+            "stm32g4",
+            Some(&chip),
+            &[],
+            &refs,
+            &usart,
+            &spi,
+            &Default::default(),
+        );
+        assert!(
+            out.init_calls.contains("p.DMA1_CH1, p.DMA1_CH4, Irqs"),
+            "the SPI keeps its pinned TX and gets the next free RX:
+{}",
+            out.init_calls
+        );
+        assert!(
+            out.init_calls.contains("p.DMA1_CH2, p.DMA1_CH3, Irqs"),
+            "the USART skipped the reserved CH1:
+{}",
+            out.init_calls
+        );
+        assert!(
+            out.dma_irqs.contains(
+                "DMA1_CHANNEL1 => embassy_stm32::dma::InterruptHandler<peripherals::DMA1_CH1>;"
+            ),
+            "the pinned channel still gets its binding:
+{}",
+            out.dma_irqs
+        );
     }
 
     #[test]

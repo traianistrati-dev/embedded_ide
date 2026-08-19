@@ -272,6 +272,63 @@ pub fn modes_file_names(ip_name: &str, version: &str) -> Vec<String> {
     v
 }
 
+/// The chip's die id — `DIE468` for an STM32G431, `DIE469` for a G474.
+///
+/// Members of a family share every IP file, so a family-wide list (the NVIC
+/// vectors, above) is a CEILING, not the part's truth: the NVIC table for the
+/// G4 lists `DMA1_Channel8`, which a G431 does not have. Where the difference
+/// matters the database gates a block on the die, and this is the key.
+pub fn die(mcu_xml: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(mcu_xml).ok()?;
+    doc.root_element()
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "Die")
+        .and_then(|n| n.text())
+        .map(|t| t.trim().to_owned())
+}
+
+/// The channels this DIE really has, in embassy's spelling.
+///
+/// The modes file's `<RefParameter Name="Instance">` is the list CubeMX offers
+/// the user. There can be several, each gated on a die; the one for this die
+/// wins, and an ungated one is the fallback for every other member. Empty when
+/// the file names none, which means "no opinion" — the caller then keeps the
+/// family-wide list rather than throwing every channel away.
+pub fn channels_of_die(dma_modes_xml: &str, die: &str) -> Vec<String> {
+    let Ok(doc) = roxmltree::Document::parse(dma_modes_xml) else {
+        return Vec::new();
+    };
+    let mut fallback: Vec<String> = Vec::new();
+    for block in doc
+        .root_element()
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "RefParameter")
+        .filter(|n| n.attribute("Name") == Some("Instance"))
+    {
+        let values: Vec<String> = block
+            .children()
+            .filter(|n| n.is_element() && n.tag_name().name() == "PossibleValue")
+            .filter_map(|n| n.attribute("Value"))
+            .filter(|v| is_channel_name(v))
+            .map(channel_peri)
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        match block
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "Condition")
+            .and_then(|n| n.attribute("Expression"))
+        {
+            Some(expr) if expr == die => return values,
+            Some(_) => {}
+            // Ungated: right for every die the file does not single out.
+            None => fallback = values,
+        }
+    }
+    fallback
+}
+
 /// Whether a controller is muxed, judged by its NAME alone.
 ///
 /// Only a fallback for when the modes file is missing — as it is for every
@@ -317,23 +374,41 @@ pub fn dma_def_for(
             .find_map(|f| std::fs::read_to_string(dir.join(f)).ok())
     };
     let def = (|| {
-        let channels = channels_from_nvic(&read(&nvic_name, &nvic_ver)?);
+        let mut channels = channels_from_nvic(&read(&nvic_name, &nvic_ver)?);
         if channels.is_empty() {
             return None;
         }
-        // The modes file is missing for every GPDMA part (its name carries an
-        // instance digit the file does not), but those are muxed by
-        // construction, so the name settles it.
+        let modes = read(&dma_name, &dma_ver);
+        // A DMAv3 controller is muxed by construction, so its name settles the
+        // question even when the modes file cannot be found.
         let mux = match mux_by_name(&dma_name) {
             Some(m) => m,
-            None => is_mux(&read(&dma_name, &dma_ver)?),
+            None => is_mux(modes.as_deref()?),
         };
+        if let Some(m) = &modes {
+            // The NVIC list is family-wide. Trim it to what this DIE has, or a
+            // G431 comes out with the G474's two extra channels per controller
+            // - names embassy rejects, because the part does not have them.
+            let real = channels_of_die(m, die(mcu_xml).unwrap_or_default().as_str());
+            if !real.is_empty() {
+                channels.retain(|c| real.iter().any(|r| *r == c.peri));
+            }
+        }
         // A muxed chip needs no table (that is what muxed MEANS), and storing
         // one would put a few hundred useless lines in every `.ron`.
         let requests = if mux {
             Vec::new()
         } else {
-            requests_from_modes(&read(&dma_name, &dma_ver)?)
+            let mut r = requests_from_modes(modes.as_deref()?);
+            // Same trim as the channel list, for the same reason: a request
+            // routed to a channel this die does not have is not an option, and
+            // offering it in the picker would produce a binding that cannot
+            // resolve. A request left with nothing goes too.
+            for (_, cs) in &mut r {
+                cs.retain(|c| channels.iter().any(|ch| ch.peri == *c));
+            }
+            r.retain(|(_, cs)| !cs.is_empty());
+            r
         };
         Some(crate::panels::mcu_module::mcu_def::DmaDef {
             mux,
@@ -535,6 +610,44 @@ mod tests {
             with * 2 > total,
             "most parts should resolve, got {with}/{total}"
         );
+    }
+
+    /// A family's IP files are shared, so the die decides how many channels
+    /// the part in hand really has.
+    #[test]
+    fn the_die_trims_the_family_wide_channel_list() {
+        let modes = r#"<IP>
+            <RefParameter Name="Instance" Type="list">
+                <PossibleValue Value="DMA1_Channel1"/><PossibleValue Value="DMA1_Channel2"/>
+                <Condition Expression="DIE468"/>
+            </RefParameter>
+            <RefParameter Name="Instance" Type="list">
+                <PossibleValue Value="DMA1_Channel1"/><PossibleValue Value="DMA1_Channel2"/>
+                <PossibleValue Value="DMA1_Channel3"/>
+            </RefParameter>
+        </IP>"#;
+        // The gated block wins for its own die...
+        assert_eq!(
+            channels_of_die(modes, "DIE468"),
+            ["DMA1_CH1", "DMA1_CH2"],
+            "the G431-shaped die"
+        );
+        // ...and every other member falls back to the ungated one.
+        assert_eq!(
+            channels_of_die(modes, "DIE469"),
+            ["DMA1_CH1", "DMA1_CH2", "DMA1_CH3"]
+        );
+        // No opinion at all means no trimming, not "no channels".
+        assert!(channels_of_die("<IP/>", "DIE468").is_empty());
+    }
+
+    #[test]
+    fn the_die_is_read_from_the_chip() {
+        assert_eq!(
+            die("<Mcu><Die>DIE468</Die></Mcu>").as_deref(),
+            Some("DIE468")
+        );
+        assert_eq!(die("<Mcu/>"), None);
     }
 
     /// The classic / mux split, decided by file shape.

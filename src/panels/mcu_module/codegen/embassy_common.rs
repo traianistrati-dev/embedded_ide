@@ -889,6 +889,17 @@ mod emit_for_manual_compile {
                 _ => {}
             }
         }
+        // `EIDE_PIN_SPI_TX=DMA1_CH9` pins the SPI's TX channel by hand, the way
+        // the Virtual Module's picker does - deliberately a channel automatic
+        // allocation would not have reached, so the compile proves the override
+        // rather than agreeing with it by accident.
+        if let Ok(chan) = std::env::var("EIDE_PIN_SPI_TX") {
+            for m in &mut mcu.modules {
+                if let ModuleConfig::Spi(c) = &mut m.config {
+                    c.dma_tx = chan.clone();
+                }
+            }
+        }
 
         let main_rs = mcu.fresh_main_rs();
         assert!(
