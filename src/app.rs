@@ -1456,6 +1456,11 @@ pub struct AppIde {
     /// its two toggles behave — and read — as a radio pair rather than two
     /// independent checkboxes.
     layout_narrow: bool,
+
+    /// The Peripherals tab's search box. Transient: a filter is a lens on the
+    /// question you are asking now, not a property of the project, and one
+    /// restored from disk would hide half the chip for no visible reason.
+    peripheral_query: String,
     /// Width the project tree had last frame, `0.0` while it is collapsed. The
     /// editor's width cap needs it, and the editor is built BEFORE the tree —
     /// so it reads the previous frame's value. One frame of lag while dragging
@@ -1921,6 +1926,7 @@ impl AppIde {
             tree_collapsed: persisted.tree_collapsed,
             wide_layout: None,
             layout_narrow: false,
+            peripheral_query: String::new(),
             tree_width: 0.0,
             diag_collapsed: persisted.diag_collapsed,
             diff_line_bg: !persisted.hide_diff_line_bg,

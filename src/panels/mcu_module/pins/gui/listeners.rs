@@ -10,9 +10,10 @@ pub fn listen_on_rect(
     rect: egui::Rect,
     is_selected: bool,
 ) -> bool {
-    if pin.reserved {
-        return false;
-    }
+    // Reserved pins used to return here, unclickable. They still cannot be
+    // RECONFIGURED - that is what reserved means - but they can be selected,
+    // so the in-chip panel can explain what the pin is for. A power rail you
+    // cannot even ask about is a worse answer than one that says "Ground".
 
     let response = ui.interact(rect, ui.id().with(&pin.number), egui::Sense::click());
 

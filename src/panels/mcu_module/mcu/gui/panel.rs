@@ -101,6 +101,18 @@ fn selectable_functions(mcu: &Mcu, num: usize) -> Option<(String, Vec<PinFunctio
 /// Returns the `(number, name, function)` change when the user picks one, plus
 /// the list's rect in SCREEN coordinates — [`egui::Rect::NOTHING`] when no pin is
 /// selected, i.e. when nothing was drawn.
+/// The panel body rect, for the wheel routing that the caller installs.
+///
+/// The reserved branch returns early, before the list geometry exists, but
+/// the caller still needs a rect or the mouse wheel over the panel would zoom
+/// the canvas underneath it.
+fn list_rect_of(content_rect: egui::Rect, sep_y: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(content_rect.left() + 8.0, sep_y + 12.0),
+        egui::pos2(content_rect.right() - 8.0, content_rect.bottom() - 8.0),
+    )
+}
+
 pub fn draw_pin_functions(
     mcu: &mut Mcu,
     painter: &egui::Painter,
@@ -142,6 +154,37 @@ pub fn draw_pin_functions(
         ],
         egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 120)),
     );
+
+    // ── Reserved pins: a description, not a list ─────────────────────────
+    // They have no selectable functions, so the list machinery below would
+    // draw an empty box under the header. Say what the pin IS instead - which
+    // is the only question a power rail can answer.
+    if mcu.find_pin(num).is_some_and(|p| p.reserved) {
+        let role = crate::panels::mcu_module::pins::logic::pin::colors::reserved_role(&pin_name);
+        let mut y = sep_y + 18.0;
+        let left = content_rect.left() + 12.0;
+        let wrap = content_rect.width() - 24.0;
+        let galley = painter.layout(
+            role.to_owned(),
+            egui::FontId::proportional(11.5),
+            egui::Color32::from_rgb(210, 214, 226),
+            wrap,
+        );
+        painter.galley(egui::pos2(left, y), galley.clone(), egui::Color32::WHITE);
+        y += galley.size().y + 10.0;
+        painter.text(
+            egui::pos2(left, y),
+            egui::Align2::LEFT_TOP,
+            "Fixed by the package - nothing to configure.",
+            egui::FontId::proportional(10.5),
+            egui::Color32::from_rgb(140, 144, 158),
+        );
+        if close_clicked {
+            mcu.selected_pin = None;
+            mcu.show_info = None;
+        }
+        return (None, list_rect_of(content_rect, sep_y));
+    }
 
     // The drive / pull modes this backend can generate for the pin's CURRENT
     // function — the row of chips under it. Empty for a peripheral pin (its mode

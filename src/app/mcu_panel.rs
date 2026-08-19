@@ -998,7 +998,7 @@ impl AppIde {
                 McuTab::Peripherals => {
                     // Assigning a function here mutates the MCU just like the
                     // Pins tab, so re-sync the generated pins/ files on change.
-                    let changed = show_peripherals_tab(ui, &mut self.mcu);
+                    let changed = show_peripherals_tab(ui, &mut self.mcu, &mut self.peripheral_query);
                     if changed.is_some() {
                         if let Some(mcu) = &self.mcu {
                             let all_pins = mcu.all_pin_functions();

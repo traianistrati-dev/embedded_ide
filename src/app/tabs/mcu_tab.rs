@@ -97,11 +97,60 @@ struct CategoryView {
     pins: Vec<PinEntry>,
 }
 
+/// Keep only what matches `query`, or everything when it is blank.
+///
+/// A row can match three different ways, because there are three different
+/// things a person is holding when they come here: the peripheral ("usart"),
+/// the signal ("mosi", "usart1 tx"), or the pin ("pa9"). Matching all three
+/// with one box means never having to know which kind of question the box
+/// wanted.
+///
+/// When the CATEGORY name matches, its pins are kept whole - "usart" means
+/// "show me the USART", not "show me the pins whose label contains usart".
+/// When it does not, only the pins that matched survive, so a search for a
+/// pin lands on the one row that mentions it.
+fn filter_categories(cats: Vec<CategoryView>, query: &str) -> Vec<CategoryView> {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return cats;
+    }
+    // Space-separated terms, all of which must match somewhere in the row:
+    // "usart 1" and "spi mosi" are the natural way to narrow a long list.
+    let terms: Vec<&str> = q.split_whitespace().collect();
+    cats.into_iter()
+        .filter_map(|mut c| {
+            let name = c.name.to_ascii_lowercase();
+            let hits_name = terms.iter().all(|t| name.contains(t));
+            if !hits_name {
+                c.pins.retain(|p| {
+                    let hay = format!(
+                        "{} {} {}",
+                        name,
+                        p.pin_name.to_ascii_lowercase(),
+                        p.options
+                            .iter()
+                            .map(|o| o.label.to_ascii_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    terms.iter().all(|t| hay.contains(t))
+                });
+                if c.pins.is_empty() {
+                    return None;
+                }
+            }
+            Some(c)
+        })
+        .collect()
+}
+
 /// Render the Peripherals tab. Returns the `(num, name, func)` change when the
 /// user assigns or clears a function, so the caller can re-sync `pins/` files.
 pub fn show_peripherals_tab(
     ui: &mut egui::Ui,
     mcu_opt: &mut Option<Mcu>,
+    // The search box's text, owned by the caller so it survives a repaint.
+    query: &mut String,
 ) -> Option<(usize, String, PinFunction)> {
     let Some(mcu) = mcu_opt.as_mut() else {
         ui.centered_and_justified(|ui| {
@@ -123,6 +172,11 @@ pub fn show_peripherals_tab(
         });
         return None;
     }
+
+    // Filtered once, before the UI pass: the count in the search row and
+    // the columns below have to agree, and re-filtering per column would
+    // be two chances to disagree.
+    let filtered = filter_categories(categories, query);
 
     // (pin_num, func) to apply after the UI pass (Unset = clear the pin).
     let mut pending: Option<(usize, PinFunction)> = None;
@@ -149,6 +203,35 @@ pub fn show_peripherals_tab(
         ui.add_space(3.0);
         legend(ui);
         ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} Find:", ph::MAGNIFYING_GLASS))
+                    .size(11.0)
+                    .color(egui::Color32::GRAY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(query)
+                    .desired_width(220.0)
+                    .hint_text("usart, mosi, pa9 …"),
+            );
+            if !query.is_empty() && ui.small_button(ph::X).clicked() {
+                query.clear();
+            }
+            if !query.is_empty() {
+                let shown: usize = filtered.iter().map(|c| c.pins.len()).sum();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} peripheral{}, {shown} pin{}",
+                        filtered.len(),
+                        if filtered.len() == 1 { "" } else { "s" },
+                        if shown == 1 { "" } else { "s" }
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(130, 130, 145)),
+                );
+            }
+        });
+        ui.add_space(6.0);
 
         // Simple functions left, protocols right. Each column is its own
         // vertical stack, so expanding a group grows only that side instead of
@@ -159,7 +242,7 @@ pub fn show_peripherals_tab(
                 .zip([Complexity::Simple, Complexity::Complex])
             {
                 column_title(col, kind);
-                for cat in categories.iter().filter(|c| c.complexity == kind) {
+                for cat in filtered.iter().filter(|c| c.complexity == kind) {
                     category_row(col, cat, collapse_all, &mut pending);
                 }
             }
@@ -867,5 +950,94 @@ mod tests {
             ..unset
         };
         assert_eq!(click_action(2, &set), (2, PinFunction::Unset));
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn opt(label: &str) -> PinOption {
+        PinOption {
+            func: PinFunction::Unset,
+            label: label.to_owned(),
+            assigned: false,
+        }
+    }
+
+    fn pin(num: usize, name: &str, labels: &[&str]) -> PinEntry {
+        PinEntry {
+            pin_num: num,
+            pin_name: name.to_owned(),
+            cost: 0,
+            options: labels.iter().map(|l| opt(l)).collect(),
+        }
+    }
+
+    fn cats() -> Vec<CategoryView> {
+        vec![
+            CategoryView {
+                name: "USART",
+                color: egui::Color32::WHITE,
+                complexity: Complexity::Complex,
+                pins: vec![
+                    pin(9, "PA9", &["USART1  TX"]),
+                    pin(10, "PA10", &["USART1  RX"]),
+                ],
+            },
+            CategoryView {
+                name: "SPI",
+                color: egui::Color32::WHITE,
+                complexity: Complexity::Complex,
+                pins: vec![pin(7, "PA7", &["SPI1  MOSI"])],
+            },
+        ]
+    }
+
+    #[test]
+    fn a_blank_query_changes_nothing() {
+        let out = filter_categories(cats(), "   ");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].pins.len(), 2);
+    }
+
+    /// Naming the PERIPHERAL keeps all of its pins: "usart" means show me the
+    /// USART, not the pins whose text happens to contain the word.
+    #[test]
+    fn a_peripheral_name_keeps_the_whole_row() {
+        let out = filter_categories(cats(), "usart");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pins.len(), 2, "both pins survive");
+    }
+
+    /// Naming a PIN narrows to it, so the answer is one row and one pin.
+    #[test]
+    fn a_pin_name_narrows_to_that_pin() {
+        let out = filter_categories(cats(), "pa10");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].pins.len(), 1);
+        assert_eq!(out[0].pins[0].pin_name, "PA10");
+    }
+
+    #[test]
+    fn a_signal_name_works_too() {
+        let out = filter_categories(cats(), "mosi");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "SPI");
+    }
+
+    /// Several terms all have to match, which is how a long list gets narrowed
+    /// without knowing the exact label.
+    #[test]
+    fn every_term_must_match() {
+        assert_eq!(filter_categories(cats(), "usart rx")[0].pins.len(), 1);
+        // …and a term that matches nothing removes the row entirely.
+        assert!(filter_categories(cats(), "usart i2c").is_empty());
+    }
+
+    #[test]
+    fn case_and_spacing_do_not_matter() {
+        assert_eq!(filter_categories(cats(), "  Pa9 ").len(), 1);
+        assert_eq!(filter_categories(cats(), "SpI").len(), 1);
     }
 }
