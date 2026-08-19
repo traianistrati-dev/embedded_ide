@@ -146,6 +146,12 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         PinFunction::UsartRx(n) => (GenericInterfaceUsart, *n, Rx),
         PinFunction::LpuartTx(n) => (GenericInterfaceLpuart, *n, LpTx),
         PinFunction::LpuartRx(n) => (GenericInterfaceLpuart, *n, LpRx),
+        // Flow control joins the module that owns the instance. Before this,
+        // a CTS/RTS pin assigned by hand belonged to nothing on the diagram.
+        PinFunction::UsartCts(n) => (GenericInterfaceUsart, *n, Cts),
+        PinFunction::UsartRts(n) => (GenericInterfaceUsart, *n, Rts),
+        PinFunction::LpuartCts(n) => (GenericInterfaceLpuart, *n, LpCts),
+        PinFunction::LpuartRts(n) => (GenericInterfaceLpuart, *n, LpRts),
         PinFunction::SpiSck(n) => (GenericInterfaceSpi, *n, Sck),
         PinFunction::SpiMosi(n) => (GenericInterfaceSpi, *n, Mosi),
         PinFunction::SpiMiso(n) => (GenericInterfaceSpi, *n, Miso),
@@ -181,10 +187,18 @@ pub enum ModuleSignal {
     // USART
     Tx,
     Rx,
+    /// Flow control. NOT in `ModuleKind::signals()`: they are never auto-wired,
+    /// because a serial device does not imply flow control. Assigning the pad on
+    /// the canvas is what adds them, and `reconcile_modules` folds them into the
+    /// module that owns the instance — the same route a PWM channel takes.
+    Cts,
+    Rts,
     // LPUART — its own peripheral, so its own signals: a chip can carry both
     // USART1 and LPUART1 and they must never share a wire.
     LpTx,
     LpRx,
+    LpCts,
+    LpRts,
     // SPI
     Sck,
     Mosi,
@@ -214,8 +228,12 @@ impl ModuleSignal {
         match self {
             ModuleSignal::Tx => "TX",
             ModuleSignal::Rx => "RX",
+            ModuleSignal::Cts => "CTS",
+            ModuleSignal::Rts => "RTS",
             ModuleSignal::LpTx => "TX",
             ModuleSignal::LpRx => "RX",
+            ModuleSignal::LpCts => "CTS",
+            ModuleSignal::LpRts => "RTS",
             ModuleSignal::Sck => "SCK",
             ModuleSignal::Mosi => "MOSI",
             ModuleSignal::Miso => "MISO",
@@ -239,8 +257,12 @@ impl ModuleSignal {
         match self {
             ModuleSignal::Tx => PinFunction::UsartTx(instance),
             ModuleSignal::Rx => PinFunction::UsartRx(instance),
+            ModuleSignal::Cts => PinFunction::UsartCts(instance),
+            ModuleSignal::Rts => PinFunction::UsartRts(instance),
             ModuleSignal::LpTx => PinFunction::LpuartTx(instance),
             ModuleSignal::LpRx => PinFunction::LpuartRx(instance),
+            ModuleSignal::LpCts => PinFunction::LpuartCts(instance),
+            ModuleSignal::LpRts => PinFunction::LpuartRts(instance),
             ModuleSignal::Sck => PinFunction::SpiSck(instance),
             ModuleSignal::Mosi => PinFunction::SpiMosi(instance),
             ModuleSignal::Miso => PinFunction::SpiMiso(instance),
@@ -351,6 +373,180 @@ pub enum UsartMode {
     Dma,
 }
 
+/// Which halves of a USART are built — CubeMX calls it "Data Direction".
+///
+/// It is not cosmetic: a one-way UART frees the other pin. Which options are
+/// CONSTRUCTIBLE depends on the transport, see [`UsartDirection::options`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UsartDirection {
+    /// Receive and transmit — the default, and the only thing the buffered
+    /// transport can build.
+    #[default]
+    TxRx,
+    /// Transmit only; the RX pin is not needed at all.
+    TxOnly,
+    /// Receive only; the TX pin is not needed at all.
+    RxOnly,
+    /// Single wire (half duplex) on the TX pad — CubeMX's "Single Wire
+    /// (Half-Duplex)". One open-drain line carries both directions, which is how
+    /// a servo bus, a DMX driver or a 1-wire-style sensor is wired.
+    HalfDuplexOnTx,
+    /// The same, on the RX pad instead (embassy swaps RX/TX internally).
+    HalfDuplexOnRx,
+}
+
+impl UsartDirection {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::TxRx => "TxRx",
+            Self::TxOnly => "TxOnly",
+            Self::RxOnly => "RxOnly",
+            Self::HalfDuplexOnTx => "HalfDuplexOnTx",
+            Self::HalfDuplexOnRx => "HalfDuplexOnRx",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TxRx => "Receive and transmit",
+            Self::TxOnly => "Transmit only",
+            Self::RxOnly => "Receive only",
+            Self::HalfDuplexOnTx => "Single wire (half-duplex), on TX pad",
+            Self::HalfDuplexOnRx => "Single wire (half-duplex), on RX pad",
+        }
+    }
+
+    /// One pad carries both directions.
+    pub fn is_half_duplex(self) -> bool {
+        matches!(self, Self::HalfDuplexOnTx | Self::HalfDuplexOnRx)
+    }
+
+    /// `true` when this direction needs the TX pin wired.
+    pub fn needs_tx(self) -> bool {
+        matches!(self, Self::TxRx | Self::TxOnly | Self::HalfDuplexOnTx)
+    }
+
+    /// `true` when this direction needs the RX pin wired.
+    pub fn needs_rx(self) -> bool {
+        matches!(self, Self::TxRx | Self::RxOnly | Self::HalfDuplexOnRx)
+    }
+
+    /// Which DMA channels the constructor takes, as `(tx, rx)`.
+    ///
+    /// NOT the same question as which PADS it takes: half duplex has one pad but
+    /// builds a whole `Uart`, so embassy asks for both channels. Conflating the
+    /// two hands `new_half_duplex` one argument too few.
+    pub fn dma_halves(self) -> (bool, bool) {
+        match self {
+            Self::TxOnly => (true, false),
+            Self::RxOnly => (false, true),
+            _ => (true, true),
+        }
+    }
+
+    /// The directions `transport` can actually build.
+    ///
+    /// The buffered driver has NO half of its own — `BufferedUartTx` and
+    /// `BufferedUartRx` exist only as the result of `BufferedUart::split()`, so
+    /// both pins are consumed either way and "TX only" would be a lie. On DMA,
+    /// `UartTx::new` / `UartRx::new` are real constructors that take one pin.
+    pub fn options(transport: UsartMode) -> &'static [UsartDirection] {
+        match transport {
+            // Half duplex IS available buffered — it is `BufferedUart` with one
+            // pad, not a half of one, which is exactly why TX-only is not.
+            UsartMode::Buffered => &[
+                UsartDirection::TxRx,
+                UsartDirection::HalfDuplexOnTx,
+                UsartDirection::HalfDuplexOnRx,
+            ],
+            UsartMode::Dma => &[
+                UsartDirection::TxRx,
+                UsartDirection::TxOnly,
+                UsartDirection::RxOnly,
+                UsartDirection::HalfDuplexOnTx,
+                UsartDirection::HalfDuplexOnRx,
+            ],
+        }
+    }
+}
+
+/// Hardware flow control — CubeMX's "Hardware Flow Control (RS232)" plus the
+/// RS485 driver-enable line, which is the same pad on an STM32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UsartFlow {
+    #[default]
+    None,
+    /// CTS only — the far end tells us when to pause.
+    Cts,
+    /// RTS only — we tell the far end when to pause.
+    Rts,
+    CtsRts,
+    /// RS485 driver enable, asserted around each frame. On STM32 this is the
+    /// RTS pad (ST names the signal `RTS_DE`), so it wires like RTS.
+    De,
+}
+
+impl UsartFlow {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Cts => "Cts",
+            Self::Rts => "Rts",
+            Self::CtsRts => "CtsRts",
+            Self::De => "De",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "Disable",
+            Self::Cts => "CTS only",
+            Self::Rts => "RTS only",
+            Self::CtsRts => "CTS/RTS",
+            Self::De => "RS485 driver enable (DE)",
+        }
+    }
+
+    /// Whether this option needs the CTS / RTS pin wired.
+    pub fn needs_cts(self) -> bool {
+        matches!(self, Self::Cts | Self::CtsRts)
+    }
+
+    /// DE shares the RTS pad, so it counts as needing it.
+    pub fn needs_rts(self) -> bool {
+        matches!(self, Self::Rts | Self::CtsRts | Self::De)
+    }
+
+    /// What embassy can build for this `(transport, direction)` pair — the
+    /// constructor list, not the hardware's.
+    ///
+    /// The irregularity is embassy's: `BufferedUart` has `new_with_rts` but no
+    /// `new_with_cts`, while the DMA `Uart` has neither on its own and offers
+    /// CTS-only / RTS-only through the one-way `UartTx` / `UartRx` instead.
+    /// Offering a combination with no constructor would be a UI that lies.
+    pub fn options(transport: UsartMode, direction: UsartDirection) -> &'static [UsartFlow] {
+        // No half-duplex constructor takes a flow pad — one wire, no side band.
+        if direction.is_half_duplex() {
+            return &[UsartFlow::None];
+        }
+        match (transport, direction) {
+            (UsartMode::Buffered, _) => &[
+                UsartFlow::None,
+                UsartFlow::Rts,
+                UsartFlow::CtsRts,
+                UsartFlow::De,
+            ],
+            (UsartMode::Dma, UsartDirection::TxRx) => {
+                &[UsartFlow::None, UsartFlow::CtsRts, UsartFlow::De]
+            }
+            (UsartMode::Dma, UsartDirection::TxOnly) => &[UsartFlow::None, UsartFlow::Cts],
+            (UsartMode::Dma, UsartDirection::RxOnly) => &[UsartFlow::None, UsartFlow::Rts],
+            // Unreachable: the half-duplex directions returned above.
+            (UsartMode::Dma, _) => &[UsartFlow::None],
+        }
+    }
+}
+
 /// USART communication settings + the user's RX/TX data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsartModuleConfig {
@@ -371,6 +567,18 @@ pub struct UsartModuleConfig {
     /// → old configs load as `Portable`.
     #[serde(default)]
     pub api_style: ApiStyle,
+    /// Which halves to build (CubeMX's "Data Direction"). Default `TxRx`, which
+    /// is what every project generated before this existed.
+    #[serde(default)]
+    pub direction: UsartDirection,
+    /// Hardware flow control. Default `None`, as before.
+    #[serde(default)]
+    pub flow: UsartFlow,
+    /// Half duplex only: keep the receiver enabled while transmitting, so what
+    /// this node sends is read back. Default OFF, which is what a bus with other
+    /// talkers wants — the echo would otherwise land in the RX buffer.
+    #[serde(default)]
+    pub half_duplex_readback: bool,
     /// Buffered (interrupt) vs DMA transport, on the Async runtime only. The
     /// other runtimes ignore it. `#[serde(default)]` → old configs load as
     /// `Buffered`, which is what they generated.
@@ -415,6 +623,9 @@ impl UsartModuleConfig {
             tx_model: String::new(),
             custom_label: String::new(),
             api_style: ApiStyle::default(),
+            direction: UsartDirection::default(),
+            flow: UsartFlow::default(),
+            half_duplex_readback: false,
             mode: UsartMode::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),

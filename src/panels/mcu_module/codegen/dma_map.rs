@@ -29,7 +29,10 @@
 use std::collections::BTreeSet;
 
 /// A DMA channel, under both the names the generated code needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Default` (both names empty) is the "this half is not used" placeholder a
+/// one-way peripheral passes around — see `dma_args`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DmaPick {
     /// The `embassy_stm32::peripherals` singleton, e.g. `DMA2_CH7`.
     pub peri: String,

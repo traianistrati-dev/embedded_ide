@@ -1295,6 +1295,12 @@ mod emit_for_manual_compile {
             // for that vector would show up.
             PinFunction::LpuartTx(1),
             PinFunction::LpuartRx(1),
+            // Flow control on the LPUART: the pads join the module by being
+            // assigned, and only a compile proves the constructor's argument
+            // order (embassy moves the interrupt binding around between the
+            // `new` and `new_with_*` forms).
+            PinFunction::LpuartCts(1),
+            PinFunction::LpuartRts(1),
             // Two channels of ONE timer: the PWM module's whole premise is that
             // they share a frequency, and only a compiler can confirm the
             // `SimplePwm::new` slot order and the per-channel handles.
@@ -1329,7 +1335,40 @@ mod emit_for_manual_compile {
             match &mut m.config {
                 ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
                 ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
-                ModuleConfig::Usart(c) => c.mode = UsartMode::Dma,
+                // `EIDE_USART_DIR=tx` / `=rx` builds the ONE-WAY DMA UART
+                // instead of the full-duplex pair — a different template and a
+                // different return type, so it needs its own compile.
+                ModuleConfig::Usart(c) => {
+                    c.mode = UsartMode::Dma;
+                    c.direction = match std::env::var("EIDE_USART_DIR").as_deref() {
+                        Ok("tx") => crate::panels::mcu_module::modules::UsartDirection::TxOnly,
+                        Ok("rx") => crate::panels::mcu_module::modules::UsartDirection::RxOnly,
+                        // `half` / `halfrx`: ONE pad, both directions — a whole
+                        // `Uart` from a single pin, and the readback argument.
+                        Ok("half") => {
+                            c.half_duplex_readback = true;
+                            crate::panels::mcu_module::modules::UsartDirection::HalfDuplexOnTx
+                        }
+                        Ok("halfrx") => {
+                            crate::panels::mcu_module::modules::UsartDirection::HalfDuplexOnRx
+                        }
+                        _ => crate::panels::mcu_module::modules::UsartDirection::TxRx,
+                    };
+                }
+                // The LPUART stays buffered, with hardware flow control — the
+                // combination whose constructor takes the pads AND reorders the
+                // interrupt binding.
+                ModuleConfig::Lpuart(c) => {
+                    // `EIDE_LPUART_HALF=1` swaps the flow-control case for the
+                    // BUFFERED half-duplex one — the other constructor whose
+                    // argument order embassy shuffles.
+                    if std::env::var("EIDE_LPUART_HALF").is_ok() {
+                        c.direction =
+                            crate::panels::mcu_module::modules::UsartDirection::HalfDuplexOnTx;
+                    } else {
+                        c.flow = crate::panels::mcu_module::modules::UsartFlow::CtsRts;
+                    }
+                }
                 // A non-default frequency and duty, so the generated consts are
                 // exercised rather than agreeing with the template by accident.
                 ModuleConfig::Timer(c) => {

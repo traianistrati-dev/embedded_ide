@@ -9,8 +9,8 @@ use crate::panels::mcu_module::codegen::dma_map;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits, UsartMode,
-    VirtualModule,
+    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -971,6 +971,16 @@ pub fn module_config_ui(
             (c.signal.label(), pin)
         })
         .collect();
+    // Which flow-control pads this module actually has, read from its own
+    // wiring — the flow selector warns against THIS, not against a guess.
+    let wired_flow = (
+        m.connections
+            .iter()
+            .any(|c| matches!(c.signal, ModuleSignal::Cts | ModuleSignal::LpCts)),
+        m.connections
+            .iter()
+            .any(|c| matches!(c.signal, ModuleSignal::Rts | ModuleSignal::LpRts)),
+    );
 
     // Portable (embedded-io/hal) vs native (concrete HAL) init — shown for the
     // bus modules (USART/SPI/I2C) that generate a `pins/configs/*.rs` init.
@@ -1100,6 +1110,81 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
+    // Data direction + hardware flow control. Both lists come from
+    // `UsartDirection::options` / `UsartFlow::options`, i.e. from what embassy
+    // has a CONSTRUCTOR for — never from what the silicon could in principle do.
+    // `wired` says which of CTS/RTS the module actually has a pin for, so a
+    // choice that needs one it hasn't got is called out instead of silently
+    // generating code that won't build.
+    let direction_row = |ui: &mut egui::Ui, cfg: &mut UsartModuleConfig| {
+        let opts = UsartDirection::options(cfg.mode);
+        ui.label("Data direction");
+        if opts.len() == 1 {
+            // Locked rather than hidden: the reason is the useful part.
+            ui.add_enabled_ui(false, |ui| {
+                egui::ComboBox::from_id_salt("usart_dir_locked")
+                    .selected_text(UsartDirection::TxRx.label())
+                    .show_ui(ui, |_ui| {});
+            })
+            .response
+            .on_hover_text(
+                "embassy has no buffered TX-only / RX-only: BufferedUartTx and                  BufferedUartRx come only from splitting a BufferedUart, so both                  pins are used either way. Switch the transport to DMA for a                  one-way UART that frees the other pin.",
+            );
+        } else {
+            egui::ComboBox::from_id_salt("usart_dir")
+                .selected_text(cfg.direction.label())
+                .show_ui(ui, |ui| {
+                    for d in opts {
+                        ui.selectable_value(&mut cfg.direction, *d, d.label());
+                    }
+                });
+        }
+        ui.end_row();
+        // Readback is a half-duplex-only argument, so it appears only there.
+        if cfg.direction.is_half_duplex() {
+            ui.label("Read back own TX");
+            ui.checkbox(&mut cfg.half_duplex_readback, "")
+                .on_hover_text(
+                    "One wire carries both directions, so everything this node                      sends is also on its receiver. OFF (the default) disables the                      receiver while transmitting, which is what a bus with other                      talkers wants; ON keeps the echo, which is how you verify a                      driver that can be shouted down.",
+                );
+            ui.end_row();
+        }
+    };
+
+    let flow_row = |ui: &mut egui::Ui, cfg: &mut UsartModuleConfig, wired: (bool, bool)| {
+        ui.label("Hardware flow control");
+        ui.vertical(|ui| {
+            egui::ComboBox::from_id_salt("usart_flow")
+                .selected_text(cfg.flow.label())
+                .show_ui(ui, |ui| {
+                    for f in UsartFlow::options(cfg.mode, cfg.direction) {
+                        ui.selectable_value(&mut cfg.flow, *f, f.label());
+                    }
+                });
+            let (has_cts, has_rts) = wired;
+            let missing = match (
+                cfg.flow.needs_cts() && !has_cts,
+                cfg.flow.needs_rts() && !has_rts,
+            ) {
+                (true, true) => "CTS and RTS pins",
+                (true, false) => "a CTS pin",
+                (false, true) => "an RTS pin",
+                (false, false) => "",
+            };
+            if !missing.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} needs {missing} — assign it on the canvas",
+                        cfg.flow.label()
+                    ))
+                    .size(10.5)
+                    .color(egui::Color32::from_rgb(220, 160, 70)),
+                );
+            }
+        });
+        ui.end_row();
+    };
+
     // Which DMA channels this peripheral gets. Automatic is right almost
     // always — the row exists for the board that needs a SPECIFIC channel (to
     // leave a high-priority one free, to match an existing driver, to dodge an
@@ -1208,6 +1293,20 @@ pub fn module_config_ui(
                         // The API style is fixed on async (embedded-io-async
                         // either way); what IS a choice is the transport.
                         usart_mode_row(ui, &mut cfg.mode);
+                        // The transport decides which directions exist, and the
+                        // pair decides which flow options do — so this order is
+                        // load-bearing, not cosmetic.
+                        direction_row(ui, cfg);
+                        flow_row(ui, cfg, wired_flow);
+                        // A direction the new transport cannot build, or a flow
+                        // option the new pair cannot, would otherwise sit there
+                        // as a stale choice that generates nothing.
+                        if !UsartDirection::options(cfg.mode).contains(&cfg.direction) {
+                            cfg.direction = UsartDirection::TxRx;
+                        }
+                        if !UsartFlow::options(cfg.mode, cfg.direction).contains(&cfg.flow) {
+                            cfg.flow = UsartFlow::None;
+                        }
                         if cfg.mode == UsartMode::Dma {
                             let inst = cfg.instance;
                             dma_row(ui, uart_bus, inst, &mut cfg.dma_tx, &mut cfg.dma_rx);

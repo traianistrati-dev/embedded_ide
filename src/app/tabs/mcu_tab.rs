@@ -463,6 +463,23 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
     // hand-written thirteen keep their order and their place at the top.
     for (name, signals) in other_peripherals(pins) {
         let prefix = name.clone();
+        let derived: Box<dyn Fn(&PinFunction) -> bool> =
+            Box::new(move |f| matches!(f, PinFunction::Other(s) if signal_peripheral(s) == prefix));
+
+        // A leftover signal group can carry the name of a hand-written row: an
+        // STM32 whose USB_OTG_* signals the importer left alone derives "USB",
+        // and "USB" is already the UsbDm/UsbDp row. Two rows sharing a name
+        // share their CollapsingHeader id, and egui answers that by painting an
+        // "ID clash" banner across the tab. Fold the leftovers into the row that
+        // already owns the name instead of adding a second one - one peripheral
+        // is one row, whether or not the importer recognised each of its
+        // signals.
+        if let Some(row) = defs.iter_mut().find(|d| d.name == name) {
+            let known = std::mem::replace(&mut row.pred, Box::new(|_| false));
+            row.pred = Box::new(move |f| known(f) || derived(f));
+            continue;
+        }
+
         defs.push(CategoryDef {
             rgb: derived_color(&name),
             // A peripheral whose pins must be chosen as a set belongs on the
@@ -470,9 +487,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             // evidence available for that: COMP1 has INP and INM, DAC1 has one
             // output. Derived rather than guessed, and stable for a given part.
             complexity: if signals > 1 { Complex } else { Simple },
-            pred: Box::new(
-                move |f| matches!(f, PinFunction::Other(s) if signal_peripheral(s) == prefix),
-            ),
+            pred: derived,
             name,
         });
     }
@@ -983,6 +998,59 @@ mod tests {
         assert_eq!(col("DAC1"), Complexity::Simple, "one output, one pin");
         // …and the hand-written thirteen keep their place at the top.
         assert_eq!(defs[0].name, "GPIO Output");
+    }
+
+    /// A derived peripheral whose name is already taken by a hand-written row
+    /// must not become a second row: two categories with one name hash to one
+    /// CollapsingHeader id, and egui paints an "ID clash" banner over the tab.
+    /// The leftover signals join the row that owns the name.
+    #[test]
+    fn derived_peripheral_never_duplicates_a_hand_written_row() {
+        // An STM32 whose OTG signals the importer left as `Other` derives the
+        // name "USB", which the UsbDm/UsbDp row already holds.
+        let p1 =
+            Pin::new(1, "PA11").with_functions(vec![PinFunction::UsbDm, other("USB_OTG_FS_ID")]);
+        let p2 =
+            Pin::new(2, "PA12").with_functions(vec![PinFunction::UsbDp, other("USB_OTG_FS_SOF")]);
+        let pins: Vec<&Pin> = vec![&p1, &p2];
+
+        let defs = category_defs(&pins);
+        let usb: Vec<&CategoryDef> = defs.iter().filter(|d| d.name == "USB").collect();
+        assert_eq!(usb.len(), 1, "one USB row, not one per source of signals");
+
+        // …and the merged row answers for both halves of the peripheral.
+        let pred = &usb[0].pred;
+        assert!(pred(&PinFunction::UsbDm), "keeps the recognised signals");
+        assert!(pred(&other("USB_OTG_FS_ID")), "adopts the leftovers");
+        assert!(!pred(&other("FMC_D0")), "and nothing else");
+        assert_eq!(
+            usb[0].complexity,
+            Complexity::Complex,
+            "row keeps its column"
+        );
+    }
+
+    /// The header id is hashed from the category name, so a duplicate name is
+    /// an id clash. Guard the invariant for every row the tab can build.
+    #[test]
+    fn category_names_are_unique() {
+        let p1 =
+            Pin::new(1, "PA11").with_functions(vec![PinFunction::UsbDm, other("USB_OTG_FS_ID")]);
+        let p2 = Pin::new(2, "PA0").with_functions(vec![
+            other("COMP1_INP"),
+            other("ADC_IN0"),
+            other("RTC"),
+        ]);
+        let p3 = Pin::new(3, "PB8").with_functions(vec![PinFunction::CanRx, other("CAN_RX1")]);
+        let pins: Vec<&Pin> = vec![&p1, &p2, &p3];
+
+        let names: Vec<String> = category_defs(&pins).into_iter().map(|d| d.name).collect();
+        let unique: std::collections::BTreeSet<&String> = names.iter().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "duplicate category name in {names:?}"
+        );
     }
 
     /// The predicate has to catch its own signals and nobody else's - the

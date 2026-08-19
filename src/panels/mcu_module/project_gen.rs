@@ -1439,12 +1439,6 @@ fn cargo_toml_embedded(c: &ProjectDef) -> String {
          test  = false\n\
          bench = false\n\
          \n\
-         [dependencies]\n\
-         cortex-m    = {{ version = \"0.7\", features = [\"critical-section-single-core\"] }}\n\
-         cortex-m-rt = \"0.7\"\n\
-         panic-halt  = \"0.2\"\n\
-         {hal}\n\
-         \n\
          # Flash with:  cargo flash --chip {chip} --release\n\
          # Debug with:  cargo run   --release   (requires probe-rs in PATH)\n\
          \n\
@@ -1457,7 +1451,16 @@ fn cargo_toml_embedded(c: &ProjectDef) -> String {
          \n\
          [profile.dev]\n\
          panic     = \"abort\"\n\
-         opt-level = 1\n",
+         opt-level = 1\n\
+         \n\
+         [dependencies]\n\
+         cortex-m    = {{ version = \"0.7\", features = [\"critical-section-single-core\"] }}\n\
+         cortex-m-rt = \"0.7\"\n\
+         panic-halt  = \"0.2\"\n\
+         {hal}\n\
+         \n\
+         # Your own dependencies go BELOW the end marker: they continue this\n\
+         # table, and anything written inside the block is replaced on refresh.\n",
         name = c.pkg_name,
         hal = c.hal_dep,
         chip = c.probe_chip,
@@ -1532,12 +1535,6 @@ fn cargo_toml_esp(c: &ProjectDef) -> String {
          test  = false\n\
          bench = false\n\
          \n\
-         [dependencies]\n\
-         esp-hal       = {{ version = \"{ESP_HAL_REQ}\", features = [\"{chip}\", \"unstable\"] }}\n\
-         esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
-         esp-bootloader-esp-idf = {{ version = \"0.5.0\", features = [\"{chip}\"] }}\n\
-         critical-section = \"1.2.0\"\n\
-         \n\
          # Flash with: espflash flash --chip {chip} --release\n\
          # Install:    cargo install espflash\n\
          \n\
@@ -1548,7 +1545,16 @@ fn cargo_toml_esp(c: &ProjectDef) -> String {
          opt-level     = \"s\"\n\
          \n\
          [profile.dev]\n\
-         opt-level     = \"s\"\n",
+         opt-level     = \"s\"\n\n\
+         \n\
+         [dependencies]\n\
+         esp-hal       = {{ version = \"{ESP_HAL_REQ}\", features = [\"{chip}\", \"unstable\"] }}\n\
+         esp-println   = {{ version = \"0.13\", features = [\"{chip}\", \"log\"] }}\n\
+         esp-bootloader-esp-idf = {{ version = \"0.5.0\", features = [\"{chip}\"] }}\n\
+         critical-section = \"1.2.0\"\n\
+         \n\
+         # Your own dependencies go BELOW the end marker: they continue this\n\
+         # table, and anything written inside the block is replaced on refresh.\n",
         name = c.pkg_name,
         chip = c.probe_chip, // "esp32c3"
     )
@@ -2826,5 +2832,86 @@ fn f() {}
 
         prune_foreign_crates(root, &["crates/foo".to_string()]);
         assert!(root.join("crates").is_dir());
+    }
+}
+
+#[cfg(test)]
+mod user_dependency_tests {
+    use super::*;
+
+    fn def() -> ProjectDef {
+        let b = crate::panels::mcu_module::builtins::builtin_for("stm32f103c8t6").unwrap();
+        b.project.clone()
+    }
+
+    /// `[dependencies]` has to be the LAST table in the generated block.
+    ///
+    /// It used to sit in the middle, with `[profile.release]` and
+    /// `[profile.dev]` after it, which left nowhere to add a crate: inside the
+    /// block it is overwritten on the next refresh, and below the end marker a
+    /// bare `foo = "1"` lands inside `[profile.dev]`. Writing `[dependencies]`
+    /// a second time is a duplicate-table error, so the file had no correct
+    /// answer at all.
+    #[test]
+    fn dependencies_is_the_last_table_so_the_tail_continues_it() {
+        for body in [cargo_toml_embedded(&def()), cargo_toml_esp(&def())] {
+            let tables: Vec<&str> = body
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with('[') && l.ends_with(']'))
+                .collect();
+            assert_eq!(
+                tables.last(),
+                Some(&"[dependencies]"),
+                "tables were: {tables:?}"
+            );
+        }
+    }
+
+    /// And the file says so, at the end of the block where someone about to
+    /// type is looking.
+    #[test]
+    fn the_block_says_where_to_put_them() {
+        let body = cargo_toml_embedded(&def());
+        assert!(body.trim_end().ends_with("replaced on refresh."), "{body}");
+    }
+
+    /// The whole point: a crate added under the marker survives a refresh and
+    /// is still in `[dependencies]` afterwards.
+    #[test]
+    fn a_hand_added_crate_survives_regeneration() {
+        let files = build_project_files(&def(), &ToolchainKind::RustEmbedded, "fn main() {}");
+        let user = format!("{}heapless = \"0.8\"\n", files.cargo_toml);
+        // Regenerate exactly as a chip or runtime change would: the same body,
+        // spliced back over the file the user has been editing.
+        let refreshed = splice_block(&user, Cmt::Hash, &cargo_toml_embedded(&def()));
+        assert!(
+            refreshed.contains("heapless"),
+            "lost the crate:\n{refreshed}"
+        );
+        // Still inside `[dependencies]`, not stranded in a profile table.
+        let after_deps = refreshed
+            .split("[dependencies]")
+            .nth(1)
+            .expect("the table is there");
+        assert!(
+            after_deps.contains("heapless"),
+            "it landed outside the table:\n{refreshed}"
+        );
+        // No other TABLE may open between the header and the crate - checked on
+        // whole lines, because `features = ["…"]` carries a bracket too and the
+        // first version of this test tripped over it.
+        let opened_a_table = after_deps
+            .lines()
+            .take_while(|l| !l.contains("heapless"))
+            .any(|l| {
+                let t = l.trim();
+                t.starts_with('[') && t.ends_with(']')
+            });
+        assert!(
+            !opened_a_table,
+            "another table opened first:
+{refreshed}"
+        );
     }
 }
