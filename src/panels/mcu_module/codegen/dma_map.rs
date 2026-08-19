@@ -37,12 +37,42 @@ pub struct DmaPick {
     pub irq: String,
 }
 
+/// One DMA channel a project actually uses, as REPORTED BY CODEGEN.
+///
+/// Not re-derived for the UI: the Configuration tab's list is filled from the
+/// same pass that writes `main.rs`, so it cannot describe an allocation the
+/// project does not have. A list that drifts from the code is worse than no
+/// list — it is a wrong answer with a confident face.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DmaUse {
+    /// The channel singleton — `DMA1_CH4`, `GPDMA1_CH0`.
+    pub peri: String,
+    /// The `bind_interrupts!` key. Empty on the STM32F1 blocking path, where
+    /// the HAL owns the interrupt and generated code never names it.
+    pub irq: String,
+    /// Who has it: `USART1 TX`, `SPI2 RX`.
+    pub user: String,
+    /// Pinned by hand in the Virtual Module rather than allocated.
+    pub manual: bool,
+}
+
 /// Bus kinds that can run on DMA.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bus {
     Usart,
     Spi,
     I2c,
+}
+
+impl Bus {
+    /// How the bus is named in a channel's "used by" line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Bus::Usart => "USART",
+            Bus::Spi => "SPI",
+            Bus::I2c => "I2C",
+        }
+    }
 }
 
 /// Transfer direction - a peripheral's TX and RX channels are different.
@@ -142,6 +172,15 @@ const F7: &[(Bus, u8, Dir, &[&str])] = &[
     (Bus::I2c, 3, Dir::Tx, &["DMA1_CH4", "DMA1_CH0"]),
     (Bus::I2c, 3, Dir::Rx, &["DMA1_CH2", "DMA1_CH1"]),
 ];
+
+impl Dir {
+    pub fn label(self) -> &'static str {
+        match self {
+            Dir::Tx => "TX",
+            Dir::Rx => "RX",
+        }
+    }
+}
 
 /// The candidate channels for one peripheral direction, best first.
 ///

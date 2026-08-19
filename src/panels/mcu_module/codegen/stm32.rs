@@ -1349,6 +1349,50 @@ fn usart_dma_channels(n: u8) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Every channel the STM32F1 BLOCKING path uses, for the Configuration tab.
+///
+/// Reads the same two tables the templates do, so it cannot report a channel
+/// the generated code does not take. The interrupt is left empty on purpose:
+/// on this path the HAL owns it and no generated line names it, unlike the
+/// embassy one where `bind_interrupts!` spells it out.
+pub fn blocking_dma_uses(mcu: &crate::panels::mcu_module::Mcu) -> Vec<super::dma_map::DmaUse> {
+    use super::dma_map::{Bus, DmaUse};
+    use crate::panels::mcu_module::modules::ModuleConfig;
+
+    let mut out = Vec::new();
+    let mut push = |peri: &str, bus: Bus, n: u8, dir: &str| {
+        out.push(DmaUse {
+            // `dma1::C4` is how the config's `init` declares it; the card
+            // shows the singleton spelling every other family uses.
+            peri: match peri.split_once("::C") {
+                Some((bank, n)) => format!("{}_CH{n}", bank.to_uppercase()),
+                None => peri.to_owned(),
+            },
+            irq: String::new(),
+            user: format!("{}{n} {dir}", bus.label()),
+            manual: false,
+        });
+    };
+    for m in &mcu.modules {
+        match &m.config {
+            ModuleConfig::Usart(c) if c.blocking_dma => {
+                if let Some((tx, rx)) = usart_dma_channels(c.instance) {
+                    push(tx, Bus::Usart, c.instance, "TX");
+                    push(rx, Bus::Usart, c.instance, "RX");
+                }
+            }
+            ModuleConfig::Spi(c) if c.blocking_dma => {
+                if let Some((rx, tx)) = spi_dma_channels(c.instance) {
+                    push(tx, Bus::Spi, c.instance, "TX");
+                    push(rx, Bus::Spi, c.instance, "RX");
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The DMA channels this bus instance would get, as a label for the UI — or
 /// `None` when it cannot run on DMA at all.
 ///
@@ -2454,5 +2498,70 @@ mod blocking_dma_tests {
             spi.contains("rx_ch: dma1::C4,") && spi.contains("tx_ch: dma1::C5,"),
             "{spi}"
         );
+    }
+
+    /// The Configuration tab's list, on the F1 blocking path: the same two
+    /// tables the templates read, spelled the way every other family spells a
+    /// channel. The interrupt column is empty because nothing generated names
+    /// one here - the HAL owns it.
+    #[test]
+    fn the_blocking_path_reports_what_it_takes() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let mut mcu = builtin_for("stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        mcu.reconcile_modules();
+        // Nothing on DMA yet: an empty list, not a wrong one.
+        assert!(blocking_dma_uses(&mcu).is_empty());
+
+        for m in &mut mcu.modules {
+            match &mut m.config {
+                ModuleConfig::Usart(c) => c.blocking_dma = true,
+                ModuleConfig::Spi(c) => c.blocking_dma = true,
+                _ => {}
+            }
+        }
+        let uses = blocking_dma_uses(&mcu);
+        let rows: Vec<(&str, &str)> = uses
+            .iter()
+            .map(|u| (u.peri.as_str(), u.user.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("DMA1_CH4", "USART1 TX"),
+                ("DMA1_CH5", "USART1 RX"),
+                ("DMA1_CH3", "SPI1 TX"),
+                ("DMA1_CH2", "SPI1 RX"),
+            ]
+        );
+        assert!(uses.iter().all(|u| u.irq.is_empty() && !u.manual));
+
+        // And they are the channels main.rs really passes.
+        let main_rs = mcu.fresh_main_rs();
+        for (peri, _) in &rows {
+            let value = peri.replace("DMA", "dma").replace("_CH", ".");
+            assert!(
+                main_rs.contains(&value),
+                "{value} missing from:\\n{main_rs}"
+            );
+        }
     }
 }

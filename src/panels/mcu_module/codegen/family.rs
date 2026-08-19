@@ -737,6 +737,24 @@ pub fn rtic_unavailable_reason(family: &str) -> Option<String> {
     })
 }
 
+/// Every DMA channel this project uses, and who has it.
+///
+/// The Configuration tab's list. Comes from the code generators themselves —
+/// the async pass records what it allocated, the F1 blocking path reads the
+/// tables its templates read — so the list cannot describe an allocation the
+/// project does not have. Empty when nothing is on DMA, which is the normal
+/// case and reads as "nothing to see" rather than as an error.
+pub fn dma_uses(mcu: &Mcu) -> Vec<super::dma_map::DmaUse> {
+    use crate::panels::mcu_module::mcu::model::Runtime;
+    match mcu.runtime {
+        Runtime::Async if async_supported(&mcu.family) => async_periphs(mcu).dma_uses,
+        // Only the F1 backend has a blocking DMA transport; every other family
+        // reaches DMA through embassy, i.e. through the async runtime.
+        Runtime::Blocking if mcu.family == "stm32f1" => super::stm32::blocking_dma_uses(mcu),
+        _ => Vec::new(),
+    }
+}
+
 /// Why the **Async** runtime is unavailable on `family`, or `None` when it is
 /// available. Phrased for the System tab, next to the card it explains.
 ///

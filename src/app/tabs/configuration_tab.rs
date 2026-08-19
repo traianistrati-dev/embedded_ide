@@ -60,12 +60,34 @@ impl AppIde {
             _ => 0,
         };
 
+        // Straight from the code generator - see `family::dma_uses`. Re-run per
+        // frame rather than cached: it is a few string formats, and a cache is
+        // exactly how a list starts describing an allocation the project no
+        // longer has.
+        let uses = crate::panels::mcu_module::codegen::family::dma_uses(mcu);
+        // Whether DMA is even reachable from here, which is what an empty list
+        // means most of the time.
+        let on_dma_runtime = match mcu.runtime {
+            crate::panels::mcu_module::mcu::model::Runtime::Async => true,
+            crate::panels::mcu_module::mcu::model::Runtime::Blocking => family == "stm32f1",
+            _ => false,
+        };
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             ui.label(dim(
-                "Peripherals with no pins of their own. Values are durations - the HAL \
-                 derives the prescaler and counter from them, so what matters here is \
-                 whether the chip can reach the time you ask for.",
+                "Peripherals with no pin of their own: which DMA channels the project \
+                 uses, and the watchdogs.",
+            ));
+            ui.add_space(10.0);
+
+            dma_card(ui, &uses, mcu.dma.as_ref(), &family, on_dma_runtime);
+            ui.add_space(12.0);
+
+            ui.label(dim(
+                "Watchdog values are durations - the HAL derives the prescaler and \
+                 counter from them, so what matters here is whether the chip can reach \
+                 the time you ask for.",
             ));
             ui.add_space(10.0);
 
@@ -238,6 +260,117 @@ fn problem_and_reset(ui: &mut egui::Ui, problem: Option<String>, mut reset: impl
                     .size(11.0)
                     .color(egui::Color32::from_rgb(235, 150, 90)),
             );
+        }
+    });
+}
+
+/// The DMA card: every channel the project takes, and who has it.
+///
+/// Read-only on purpose. The channel a peripheral gets is chosen in its Virtual
+/// Module (Automatic, or pinned by hand); this is the place that shows the
+/// RESULT, which no single module can — a channel is only "taken" relative to
+/// every other peripheral in the project.
+fn dma_card(
+    ui: &mut egui::Ui,
+    uses: &[crate::panels::mcu_module::codegen::dma_map::DmaUse],
+    dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+    family: &str,
+    on_dma_runtime: bool,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{}  DMA", ph::ARROWS_LEFT_RIGHT))
+                    .size(13.0)
+                    .strong(),
+            );
+            if let Some(d) = dma {
+                let total = d.channels.len();
+                ui.label(dim(format!(
+                    "{} of {total} channel{} used{}",
+                    uses.len(),
+                    if total == 1 { "" } else { "s" },
+                    if d.mux {
+                        " - any channel serves any peripheral on this chip"
+                    } else {
+                        ""
+                    }
+                )));
+            }
+        });
+        ui.add_space(6.0);
+
+        if uses.is_empty() {
+            // Three different silences, and the difference is the whole point:
+            // "nothing asked for it" is not the same as "it could not be given".
+            let why = if !on_dma_runtime {
+                format!(
+                    "No DMA on this runtime for {family}. Switch a bus to the Async runtime \
+                     (System tab) - or, on the STM32F1, turn on the Blocking DMA transport \
+                     in a USART or SPI module."
+                )
+            } else if dma.is_none() && family != "stm32f1" {
+                "This chip carries no DMA channel data - re-import it from the STM32Cube \
+                 database so the IDE can allocate channels instead of leaving a TODO."
+                    .to_owned()
+            } else {
+                "No bus is on DMA yet. Turn it on in a USART, SPI or I2C module and the \
+                 channels it takes appear here."
+                    .to_owned()
+            };
+            ui.label(dim(why));
+            return;
+        }
+
+        egui::Grid::new("dma_uses")
+            .num_columns(3)
+            .spacing([18.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label(dim("Channel"));
+                ui.label(dim("Used by"));
+                ui.label(dim("Interrupt"));
+                ui.end_row();
+                for u in uses {
+                    ui.label(egui::RichText::new(&u.peri).size(11.5).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&u.user).size(11.5));
+                        if u.manual {
+                            // The one row a reader must not mistake for the
+                            // allocator's doing: someone pinned this by hand.
+                            ui.label(
+                                egui::RichText::new("pinned")
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(200, 170, 100)),
+                            )
+                            .on_hover_text(
+                                "Chosen by hand in the Virtual Module, not allocated. \
+                                 Reserved before anything else is handed out.",
+                            );
+                        }
+                    });
+                    // Empty on the F1 blocking path: the HAL owns the interrupt
+                    // and no generated line names it.
+                    ui.label(dim(if u.irq.is_empty() { "-" } else { &u.irq }));
+                    ui.end_row();
+                }
+            });
+
+        // What is still free, which is the question asked right before adding
+        // one more peripheral.
+        if let Some(d) = dma {
+            let free: Vec<&str> = d
+                .channels
+                .iter()
+                .map(|c| c.peri.as_str())
+                .filter(|p| !uses.iter().any(|u| u.peri == *p))
+                .collect();
+            ui.add_space(6.0);
+            ui.label(dim(if free.is_empty() {
+                "No channel left - another peripheral on DMA would keep its TODO.".to_owned()
+            } else {
+                format!("Free: {}", free.join(", "))
+            }));
         }
     });
 }

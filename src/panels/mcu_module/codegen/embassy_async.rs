@@ -328,6 +328,10 @@ pub struct AsyncPeriphs {
     pub dma_irqs: String,
     /// True if any SPI/I2C exists at all (drives the `embedded-hal` 1.0 dep).
     pub any_spi_i2c: bool,
+    /// Every channel this project uses, in allocation order — the Configuration
+    /// tab's list. Recorded here rather than recomputed there, so the two can
+    /// never disagree.
+    pub dma_uses: Vec<dma_map::DmaUse>,
 }
 
 /// Whether a SPI/I2C module runs in async-DMA mode (else blocking).
@@ -353,6 +357,7 @@ const DMA_TODO: &str = "p.DMA_TX_TODO, p.DMA_RX_TODO, Irqs";
 fn dma_args(
     alloc: &mut dma_map::DmaAllocator,
     binds: &mut Vec<(String, String)>,
+    uses: &mut Vec<dma_map::DmaUse>,
     bus: dma_map::Bus,
     n: u8,
     label: &str,
@@ -390,6 +395,17 @@ fn dma_args(
     // `dma_irqs_block` sees them all, so only it can group them.
     for c in [&tx, &rx] {
         binds.push((c.irq.clone(), c.peri.clone()));
+    }
+    for (c, dir, pinned) in [
+        (&tx, dma_map::Dir::Tx, manual.0),
+        (&rx, dma_map::Dir::Rx, manual.1),
+    ] {
+        uses.push(dma_map::DmaUse {
+            peri: c.peri.clone(),
+            irq: c.irq.clone(),
+            user: format!("{label} {}", dir.label()),
+            manual: !pinned.is_empty(),
+        });
     }
     // Resolved — no note. A TODO telling the user to do work already done is
     // worse than none: it makes correct output look unfinished.
@@ -534,6 +550,7 @@ pub fn async_peripherals(
     let mut dma_i2c_instances: Vec<u8> = Vec::new();
     let mut dma_usart_instances: Vec<u8> = Vec::new();
     let mut dma_binds: Vec<(String, String)> = Vec::new();
+    let mut dma_uses: Vec<dma_map::DmaUse> = Vec::new();
     let mut alloc = dma_map::DmaAllocator::for_chip(family, dma);
     // Hand-picked channels come out of circulation FIRST, so that whichever
     // peripheral happens to be emitted earlier cannot take one.
@@ -561,6 +578,7 @@ pub fn async_peripherals(
             let (args, note) = dma_args(
                 &mut alloc,
                 &mut dma_binds,
+                &mut dma_uses,
                 dma_map::Bus::Usart,
                 n,
                 &format!("USART{n}"),
@@ -596,6 +614,7 @@ pub fn async_peripherals(
             let (args, note) = dma_args(
                 &mut alloc,
                 &mut dma_binds,
+                &mut dma_uses,
                 dma_map::Bus::Spi,
                 n,
                 &format!("SPI{n}"),
@@ -628,6 +647,7 @@ pub fn async_peripherals(
             let (args, note) = dma_args(
                 &mut alloc,
                 &mut dma_binds,
+                &mut dma_uses,
                 dma_map::Bus::I2c,
                 n,
                 &format!("I2C{n}"),
@@ -664,6 +684,7 @@ pub fn async_peripherals(
         any_async_dma,
         dma_irqs,
         any_spi_i2c,
+        dma_uses,
     }
 }
 
@@ -1290,6 +1311,102 @@ mod usart_mode_tests {
             "the pinned channel still gets its binding:
 {}",
             out.dma_irqs
+        );
+    }
+
+    /// The Configuration tab's list must name EXACTLY the channels `main.rs`
+    /// takes - no more, no fewer. This is the property the whole design rests
+    /// on: the list is the generator's own record, so a change to allocation
+    /// that forgot the record would show up here rather than as a confident
+    /// wrong answer on screen.
+    #[test]
+    fn the_reported_uses_are_the_channels_main_rs_takes() {
+        use crate::panels::mcu_module::codegen::dma_data::DmaChannel;
+        use crate::panels::mcu_module::mcu_def::DmaDef;
+        use crate::panels::mcu_module::modules::{AsyncBusMode, I2cModuleConfig, SpiModuleConfig};
+        use crate::panels::mcu_module::pins::logic::pin::Pin;
+        use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+        let mk = |name: &str, f: PinFunction| {
+            let mut p = Pin::new(1, name);
+            p.selected_function = f;
+            p
+        };
+        let pins = [
+            mk("PA9", PinFunction::UsartTx(1)),
+            mk("PA10", PinFunction::UsartRx(1)),
+            mk("PA5", PinFunction::SpiSck(1)),
+            mk("PA7", PinFunction::SpiMosi(1)),
+            mk("PA6", PinFunction::SpiMiso(1)),
+            mk("PB6", PinFunction::I2cScl(1)),
+            mk("PB7", PinFunction::I2cSda(1)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let chip = DmaDef {
+            mux: true,
+            channels: (1..=8)
+                .map(|i| DmaChannel {
+                    peri: format!("DMA1_CH{i}"),
+                    irq: format!("DMA1_CHANNEL{i}"),
+                })
+                .collect(),
+            requests: Vec::new(),
+        };
+        let usart: BTreeMap<u8, UsartModuleConfig> =
+            [(1u8, cfg(UsartMode::Dma))].into_iter().collect();
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(
+            1u8,
+            SpiModuleConfig {
+                async_mode: AsyncBusMode::AsyncDma,
+                dma_tx: "DMA1_CH8".into(),
+                ..SpiModuleConfig::new(1)
+            },
+        )]
+        .into_iter()
+        .collect();
+        let i2c: BTreeMap<u8, I2cModuleConfig> = [(
+            1u8,
+            I2cModuleConfig {
+                async_mode: AsyncBusMode::AsyncDma,
+                ..I2cModuleConfig::new(1)
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let out = async_peripherals("stm32g4", Some(&chip), &[], &refs, &usart, &spi, &i2c);
+
+        // Every channel the code takes, straight out of the emitted text.
+        let mut in_code: Vec<String> = out
+            .init_calls
+            .split("p.DMA")
+            .skip(1)
+            .filter_map(|t| t.split(&[',', ')'][..]).next())
+            .map(|t| format!("DMA{t}"))
+            .collect();
+        let mut reported: Vec<String> = out.dma_uses.iter().map(|u| u.peri.clone()).collect();
+        assert_eq!(
+            reported.len(),
+            6,
+            "three buses, two channels each: {reported:?}"
+        );
+        in_code.sort();
+        reported.sort();
+        assert_eq!(reported, in_code, "the list and the code disagree");
+
+        // The pinned one is reported AS pinned, and it really is the SPI's.
+        let pinned: Vec<&str> = out
+            .dma_uses
+            .iter()
+            .filter(|u| u.manual)
+            .map(|u| u.user.as_str())
+            .collect();
+        assert_eq!(pinned, ["SPI1 TX"], "{:?}", out.dma_uses);
+        let spi_tx = out.dma_uses.iter().find(|u| u.user == "SPI1 TX").unwrap();
+        assert_eq!(spi_tx.peri, "DMA1_CH8");
+        assert_eq!(
+            spi_tx.irq, "DMA1_CHANNEL8",
+            "the card shows the binding key"
         );
     }
 
