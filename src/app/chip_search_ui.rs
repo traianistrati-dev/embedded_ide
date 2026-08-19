@@ -318,6 +318,27 @@ impl super::AppIde {
                                     ),
                                 };
                                 ui.label(egui::RichText::new(tag).size(10.0).color(color));
+                                // A chip already in the registry can still be
+                                // refreshed from its vendor file: the data may have
+                                // moved on (a newer CubeMX) or the import itself may
+                                // have been fixed since. Secondary, never the primary
+                                // action - the row's job is still "pick this chip".
+                                if let Some(Origin::Disk { source, file, .. }) = &hit.reimport {
+                                    if ui
+                                        .small_button(ph::ARROW_CLOCKWISE)
+                                        .on_hover_text(
+                                            "Re-import from the vendor file, overwriting the stored definition",
+                                        )
+                                        .clicked()
+                                    {
+                                        let src = &cat.sources[*source];
+                                        action = Some(Action::Import {
+                                            path: src.chips.join(format!("{file}.xml")),
+                                            source: src.clone(),
+                                            part: hit.name.clone(),
+                                        });
+                                    }
+                                }
                             });
                         }
                     });
@@ -325,63 +346,77 @@ impl super::AppIde {
         }
 
         // ── Sources ───────────────────────────────────────────────────────────
+        // Collapsed by default: this is reference material (which vendor
+        // folders are indexed, and where to get more), not something you
+        // touch while picking a chip. It was three lines of paths between
+        // the search results and the buttons under them.
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{} Sources:", ph::DATABASE))
-                    .size(10.5)
-                    .color(egui::Color32::GRAY),
-            );
-            if ui
-                .small_button("Add a folder…")
-                .on_hover_text(
-                    "A STM32CubeMX installation (chips + clock trees) or an \
-                     STM32_open_pin_data checkout (chips only)",
-                )
-                .clicked()
-            {
-                add_folder = true;
-            }
-        });
-        if cat.sources.is_empty() {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{}  No STM32CubeMX installation found — add a folder to search vendor data.",
-                    ph::WARNING
-                ))
-                .size(10.0)
-                .color(egui::Color32::from_rgb(225, 185, 60)),
-            );
-        }
-        for (ix, src) in cat.sources.iter().enumerate() {
-            let (what, color) = if src.has_clock() {
-                ("pins + clock trees", egui::Color32::from_rgb(120, 190, 200))
-            } else {
-                ("pins only", egui::Color32::from_rgb(225, 185, 60))
-            };
+        egui::CollapsingHeader::new(
+            egui::RichText::new(format!("{} Sources", ph::DATABASE))
+                .size(10.5)
+                .color(egui::Color32::GRAY),
+        )
+        .id_salt("new_project_sources")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(
+                    egui::RichText::new(format!("{} Sources:", ph::DATABASE))
+                        .size(10.5)
+                        .color(egui::Color32::GRAY),
+                );
+                if ui
+                    .small_button("Add a folder…")
+                    .on_hover_text(
+                        "A STM32CubeMX installation (chips + clock trees) or an \
+                         STM32_open_pin_data checkout (chips only)",
+                    )
+                    .clicked()
+                {
+                    add_folder = true;
+                }
+            });
+            if cat.sources.is_empty() {
+                ui.label(
                     egui::RichText::new(format!(
-                        "{} — {} parts,",
-                        src.kind.label(),
-                        cat.count_of(ix)
+                        "{}  No STM32CubeMX installation found — add a folder to search vendor data.",
+                        ph::WARNING
                     ))
                     .size(10.0)
-                    .color(egui::Color32::from_gray(140)),
+                    .color(egui::Color32::from_rgb(225, 185, 60)),
                 );
-                ui.label(egui::RichText::new(what).size(10.0).color(color));
-            });
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(src.chips.display().to_string())
-                        .size(9.5)
-                        .monospace()
-                        .color(egui::Color32::from_gray(110)),
-                )
-                .truncate(),
-            );
-        }
-        source_links(ui, cat.sources.iter().any(|s| s.has_clock()));
+            }
+            for (ix, src) in cat.sources.iter().enumerate() {
+                let (what, color) = if src.has_clock() {
+                    ("pins + clock trees", egui::Color32::from_rgb(120, 190, 200))
+                } else {
+                    ("pins only", egui::Color32::from_rgb(225, 185, 60))
+                };
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} — {} parts,",
+                            src.kind.label(),
+                            cat.count_of(ix)
+                        ))
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.label(egui::RichText::new(what).size(10.0).color(color));
+                });
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(src.chips.display().to_string())
+                            .size(9.5)
+                            .monospace()
+                            .color(egui::Color32::from_gray(110)),
+                    )
+                    .truncate(),
+                );
+            }
+            source_links(ui, cat.sources.iter().any(|s| s.has_clock()));
+        });
 
         for (ix, err) in &cat.errors {
             let where_ = cat

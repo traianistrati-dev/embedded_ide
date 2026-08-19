@@ -639,8 +639,18 @@ pub(crate) fn distribute_sides(rows: &[PinRow]) -> [Vec<PinRow>; 4] {
     let mut it = rows.iter().cloned();
     let left: Vec<_> = it.by_ref().take(sizes[0]).collect();
     let bottom: Vec<_> = it.by_ref().take(sizes[1]).collect();
-    let right: Vec<_> = it.by_ref().take(sizes[2]).collect();
+    let mut right: Vec<_> = it.by_ref().take(sizes[2]).collect();
     let mut top: Vec<_> = it.by_ref().take(sizes[3]).collect();
+    // Both of the "return" edges are numbered against the drawing order.
+    // A QFP is numbered counter-clockwise from pin 1 at the top left: DOWN
+    // the left edge, RIGHT along the bottom, then UP the right edge and LEFT
+    // along the top. Each side is drawn top-to-bottom (or left-to-right), so
+    // the two that run backwards have to be reversed.
+    //
+    // `top` always was. `right` was not, which put pin 25 at the top of an
+    // LQFP48 where the datasheet and CubeMX both put pin 36 - the whole edge
+    // upside down.
+    right.reverse();
     top.reverse();
     [top, bottom, left, right]
 }
@@ -1275,7 +1285,9 @@ mod tests {
 
     #[test]
     fn qfp_side_distribution_matches_the_bundled_layout() {
-        // 8 pins → 2 per side: left 1-2, bottom 3-4, right 5-6, top 8-7.
+        // 8 pins → 2 per side: left 1-2, bottom 3-4, right 6-5, top 8-7.
+        // The two reversed edges are the ones the package numbers against
+        // the drawing direction - see `distribute_sides`.
         let rows: Vec<PinRow> = (1..=8)
             .map(|i| PinRow {
                 number: i.to_string(),
@@ -1286,8 +1298,35 @@ mod tests {
         let nums = |s: &[PinRow]| s.iter().map(|r| r.number.clone()).collect::<Vec<_>>();
         assert_eq!(nums(&left), ["1", "2"]);
         assert_eq!(nums(&bottom), ["3", "4"]);
-        assert_eq!(nums(&right), ["5", "6"]);
-        assert_eq!(nums(&top), ["8", "7"]); // top is reversed
+        // Right counts UP the edge, so top-to-bottom is 6 then 5. This
+        // used to assert ["5", "6"] and matched an import that drew the
+        // edge upside down.
+        assert_eq!(nums(&right), ["6", "5"]);
+        assert_eq!(nums(&top), ["8", "7"]);
+    }
+
+    /// The reported case, at its real size: an LQFP48 must read like the
+    /// datasheet drawing, not like the pin table.
+    #[test]
+    fn an_lqfp48_right_edge_runs_from_36_down_to_25() {
+        let rows: Vec<PinRow> = (1..=48)
+            .map(|i| PinRow {
+                number: i.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let [top, bottom, left, right] = distribute_sides(&rows);
+        let first = |s: &[PinRow]| s.first().unwrap().number.clone();
+        let last = |s: &[PinRow]| s.last().unwrap().number.clone();
+        // Pin 1 top-left, counting down.
+        assert_eq!((first(&left), last(&left)), ("1".into(), "12".into()));
+        // Along the bottom, left to right.
+        assert_eq!((first(&bottom), last(&bottom)), ("13".into(), "24".into()));
+        // UP the right edge - so drawn top-to-bottom it is 36 first, 25 last.
+        // This is the bug: it used to read 25 at the top.
+        assert_eq!((first(&right), last(&right)), ("36".into(), "25".into()));
+        // And LEFT along the top, so 48 is the leftmost.
+        assert_eq!((first(&top), last(&top)), ("48".into(), "37".into()));
     }
 
     #[test]

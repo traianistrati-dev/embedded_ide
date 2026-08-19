@@ -61,6 +61,15 @@ pub struct Hit {
     pub origin: Origin,
     /// Lower is better — see [`rank`].
     pub rank: u8,
+    /// The vendor file this part could be re-imported from, when it is
+    /// ALREADY in the registry and still on disk.
+    ///
+    /// A registry hit shadows the disk one - re-offering an import as the
+    /// primary action would be a worse answer to "which chip do I want".
+    /// But the vendor data can have changed (a newer CubeMX, a fixed import),
+    /// so the row keeps the location for a secondary "re-import" that
+    /// overwrites the stored `.ron`.
+    pub reimport: Option<Origin>,
 }
 
 /// A registry entry, as the search needs to see it: `(id, display name, family)`.
@@ -161,6 +170,7 @@ impl Catalogue {
                         id: (*id).to_owned(),
                     },
                     rank,
+                    reimport: None,
                 });
             }
         }
@@ -176,8 +186,22 @@ impl Catalogue {
                 .find(|h| h.name.eq_ignore_ascii_case(&row.entry.ref_name))
             {
                 let better = match &seen.origin {
-                    // Nothing beats a chip that is already here.
-                    Origin::Registry { .. } => false,
+                    // Nothing beats a chip that is already here - but keep
+                    // WHERE it came from, so the row can offer to refresh it.
+                    Origin::Registry { .. } => {
+                        let keep = match &seen.reimport {
+                            // Same rule as between two disk rows: more data wins.
+                            Some(Origin::Disk {
+                                has_clock: seen_clock,
+                                ..
+                            }) => has_clock && !seen_clock,
+                            _ => true,
+                        };
+                        if keep {
+                            seen.reimport = Some(disk_hit(row, rank, has_clock).origin);
+                        }
+                        false
+                    }
                     Origin::Disk {
                         has_clock: seen_clock,
                         ..
@@ -211,6 +235,7 @@ fn disk_hit(row: &Indexed, rank: u8, has_clock: bool) -> Hit {
             has_clock,
         },
         rank,
+        reimport: None,
     }
 }
 
@@ -485,5 +510,42 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(detail_of(&bare), "");
+    }
+
+    /// A part that is BOTH in the registry and on disk keeps its disk
+    /// location, so the row can offer to overwrite the stored definition.
+    /// Before this it was thrown away and the only way to refresh a chip was
+    /// to delete its `.ron` by hand.
+    #[test]
+    fn an_already_added_chip_remembers_where_to_re_import_from() {
+        let cat = catalogue(
+            vec![source(SourceKind::CubeMxDb, true)],
+            vec![(0, entry("STM32F358CCTx", "stm32f3"))],
+        );
+        let registry = [("stm32f358cc", "STM32F358CCTx", "stm32f3")];
+        let (hits, _) = cat.search("358cc", &registry, 10);
+        let hit = hits
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("STM32F358CCTx"))
+            .expect("the part is in both");
+        // The registry still wins the row itself - selecting must not import.
+        assert!(hit.origin.is_registry());
+        // …but the vendor file is remembered.
+        assert!(
+            matches!(hit.reimport, Some(Origin::Disk { .. })),
+            "no re-import offered: {:?}",
+            hit.reimport
+        );
+    }
+
+    /// A registry chip with no vendor file behind it offers nothing, rather
+    /// than a button that would fail.
+    #[test]
+    fn a_registry_only_chip_offers_no_re_import() {
+        let cat = catalogue(vec![source(SourceKind::CubeMxDb, true)], vec![]);
+        let registry = [("mystery1", "MYSTERYCHIP1", "custom")];
+        let (hits, _) = cat.search("mystery", &registry, 10);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].reimport.is_none());
     }
 }

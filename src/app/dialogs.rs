@@ -1095,84 +1095,6 @@ impl AppIde {
                                 .size(11.0),
                         );
                     }
-
-                    // ── Import MCU… (runtime .ron import) ──────────────
-                    if ui
-                        .button(egui::RichText::new(format!("{} Import…", ph::PLUS)).size(12.0))
-                        .on_hover_text("Import an MCU definition from a .ron file")
-                        .clicked()
-                    {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("MCU definition", &["ron"])
-                            .set_title("Import MCU definition (.ron)")
-                            .pick_file()
-                        {
-                            match registry::import_file(&path) {
-                                Ok(def) => {
-                                    let id = def.id.clone();
-                                    let name = def.display_name.clone();
-                                    let fam = def.family.clone();
-                                    registry::merge_def(&mut self.mcu_registry, def);
-                                    self.pending_mcu_id = Some(id);
-                                    let note = if codegen::family::backend_for(&fam).is_none() {
-                                        format!(" — no codegen backend for '{fam}'")
-                                    } else {
-                                        String::new()
-                                    };
-                                    self.mcu_import_status =
-                                        Some(format!("{}  Imported {name}{note}", ph::CHECK));
-                                }
-                                Err(e) => {
-                                    self.mcu_import_status = Some(format!("{}  {e}", ph::WARNING));
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Import STM32 open-pin-data XML (bulk vendor data) ──
-                    if ui
-                        .button(
-                            egui::RichText::new(format!("{} STM32 XML…", ph::FILE_CODE)).size(12.0),
-                        )
-                        .on_hover_text(
-                            "Bulk-import chips from STMicroelectronics STM32_open_pin_data \
-                             XML (mcu/*.xml). One file may add several flash variants.",
-                        )
-                        .clicked()
-                    {
-                        if let Some(paths) = rfd::FileDialog::new()
-                            .add_filter("STM32 pin-data XML", &["xml"])
-                            .set_title("Import STM32 open-pin-data XML")
-                            .pick_files()
-                        {
-                            self.import_stm32_pin_data(&paths);
-                        }
-                    }
-
-                    // ── New / Edit MCU definition (visual form) ────────────
-                    // Deferred to after the window closure — `open_mcu_form`
-                    // borrows `self`, already borrowed here.
-                    if ui
-                        .button(egui::RichText::new(format!("{} New MCU…", ph::WRENCH)).size(12.0))
-                        .on_hover_text("Author a new chip definition in a form")
-                        .clicked()
-                    {
-                        open_form_blank = true;
-                    }
-                    if let Some(id) = &self.pending_mcu_id {
-                        if self.mcu_registry.iter().any(|d| &d.id == id) {
-                            if ui
-                                .button(
-                                    egui::RichText::new(format!("{} Edit…", ph::PENCIL_SIMPLE))
-                                        .size(12.0),
-                                )
-                                .on_hover_text("Edit / clone the selected chip's definition")
-                                .clicked()
-                            {
-                                open_form_edit = Some(id.clone());
-                            }
-                        }
-                    }
                 });
 
                 // ── Search the vendor data on this machine ────────────
@@ -1183,6 +1105,133 @@ impl AppIde {
                 ui.separator();
                 self.show_chip_search(ui);
                 ui.separator();
+                // ── Imports ───────────────────────────────────────────────
+                // Collapsed by default: these four are how chip data GETS
+                // here, which is a rarer job than picking a chip that is
+                // already here. Keeping them on the Chip row made that row
+                // read as four actions with a dropdown attached.
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(format!("{} Imports", ph::PLUS))
+                        .size(10.5)
+                        .color(egui::Color32::GRAY),
+                )
+                .id_salt("new_project_imports")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // ── Import MCU… (runtime .ron import) ──────────────
+                        if ui
+                            .button(egui::RichText::new(format!("{} Import…", ph::PLUS)).size(12.0))
+                            .on_hover_text("Import an MCU definition from a .ron file")
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("MCU definition", &["ron"])
+                                .set_title("Import MCU definition (.ron)")
+                                .pick_file()
+                            {
+                                match registry::import_file(&path) {
+                                    Ok(def) => {
+                                        let id = def.id.clone();
+                                        let name = def.display_name.clone();
+                                        let fam = def.family.clone();
+                                        registry::merge_def(&mut self.mcu_registry, def);
+                                        self.pending_mcu_id = Some(id);
+                                        let note = if codegen::family::backend_for(&fam).is_none() {
+                                            format!(" — no codegen backend for '{fam}'")
+                                        } else {
+                                            String::new()
+                                        };
+                                        self.mcu_import_status =
+                                            Some(format!("{}  Imported {name}{note}", ph::CHECK));
+                                    }
+                                    Err(e) => {
+                                        self.mcu_import_status =
+                                            Some(format!("{}  {e}", ph::WARNING));
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Import STM32 open-pin-data XML (bulk vendor data) ──
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} STM32 XML…", ph::FILE_CODE))
+                                    .size(12.0),
+                            )
+                            .on_hover_text(
+                                "Bulk-import chips from STMicroelectronics STM32_open_pin_data \
+                                 XML (mcu/*.xml). One file may add several flash variants.",
+                            )
+                            .clicked()
+                        {
+                            if let Some(paths) = rfd::FileDialog::new()
+                                .add_filter("STM32 pin-data XML", &["xml"])
+                                .set_title("Import STM32 open-pin-data XML")
+                                .pick_files()
+                            {
+                                self.import_stm32_pin_data(&paths);
+                            }
+                        }
+
+                        // ── New / Edit MCU definition (visual form) ────────────
+                        // Deferred to after the window closure — `open_mcu_form`
+                        // borrows `self`, already borrowed here.
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{} New MCU…", ph::WRENCH)).size(12.0),
+                            )
+                            .on_hover_text("Author a new chip definition in a form")
+                            .clicked()
+                        {
+                            open_form_blank = true;
+                        }
+                        if let Some(id) = &self.pending_mcu_id {
+                            if self.mcu_registry.iter().any(|d| &d.id == id) {
+                                if ui
+                                    .button(
+                                        egui::RichText::new(format!("{} Edit…", ph::PENCIL_SIMPLE))
+                                            .size(12.0),
+                                    )
+                                    .on_hover_text("Edit / clone the selected chip's definition")
+                                    .clicked()
+                                {
+                                    open_form_edit = Some(id.clone());
+                                }
+                            }
+                        }
+                    });
+                    // ── Import-folder discoverability ──────────────────────────
+                    // Show where user .ron definitions live + a one-click "Open".
+                    if let Some(dir) = registry::user_mcus_dir() {
+                        let path_str = dir.display().to_string();
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} Import folder:", ph::FOLDER))
+                                    .size(10.5)
+                                    .color(egui::Color32::GRAY),
+                            );
+                            if ui
+                                .button(egui::RichText::new("Open").size(10.5))
+                                .on_hover_text(format!("Open {path_str}\n(drop .ron files here)"))
+                                .clicked()
+                            {
+                                registry::open_user_mcus_dir();
+                            }
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(path_str)
+                                    .size(9.5)
+                                    .monospace()
+                                    .color(egui::Color32::from_gray(120)),
+                            )
+                            .truncate(),
+                        );
+                    }
+                });
 
                 // Last import result (persists until the popup closes).
                 if let Some(msg) = &self.mcu_import_status {
@@ -1194,36 +1243,6 @@ impl AppIde {
                     };
                     ui.add_space(2.0);
                     ui.label(egui::RichText::new(msg).size(11.0).color(col));
-                }
-
-                // ── Import-folder discoverability ──────────────────────────
-                // Show where user .ron definitions live + a one-click "Open".
-                if let Some(dir) = registry::user_mcus_dir() {
-                    let path_str = dir.display().to_string();
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{} Import folder:", ph::FOLDER))
-                                .size(10.5)
-                                .color(egui::Color32::GRAY),
-                        );
-                        if ui
-                            .button(egui::RichText::new("Open").size(10.5))
-                            .on_hover_text(format!("Open {path_str}\n(drop .ron files here)"))
-                            .clicked()
-                        {
-                            registry::open_user_mcus_dir();
-                        }
-                    });
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(path_str)
-                                .size(9.5)
-                                .monospace()
-                                .color(egui::Color32::from_gray(120)),
-                        )
-                        .truncate(),
-                    );
                 }
 
                 ui.add_space(8.0);
