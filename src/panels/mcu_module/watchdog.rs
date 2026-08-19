@@ -36,6 +36,24 @@ const MAX_RL: u32 = 0xFFF;
 /// The WWDG counter divides PCLK1 by 4096 before the prescaler.
 const WWDG_DIV: u64 = 4096;
 
+/// Which HAL computes the IWDG timing.
+///
+/// NOT a cosmetic distinction: the two truncate in different places and
+/// disagree about the maximum by 42 ms. embassy divides the LSI by the
+/// prescaler first (`40000/256 = 156 Hz`) and reaches 26.256 s;
+/// `stm32f1xx-hal` multiplies before dividing (`4096 * 256 / 40 kHz`) and
+/// stops at 26.214 s - and asking it for more is not a clamp but a
+/// **panic**, because its prescaler search runs one step past the table it
+/// then indexes. Offering the embassy range on an F1 would hand the user
+/// 42 ms of values that crash at boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IwdgHal {
+    /// `embassy-stm32`: microseconds.
+    Embassy,
+    /// `stm32f1xx-hal`: MILLISECONDS, and its own arithmetic.
+    Stm32f1,
+}
+
 /// What one chip family's watchdog hardware can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WatchdogLimits {
@@ -49,6 +67,8 @@ pub struct WatchdogLimits {
     /// `false` on families whose HAL has no window watchdog at all — see
     /// [`wwdg_supported`].
     pub wwdg_available: bool,
+    /// Whose arithmetic decides the IWDG range — see [`IwdgHal`].
+    pub iwdg_hal: IwdgHal,
 }
 
 /// Does this family's HAL expose a WWDG driver?
@@ -65,12 +85,12 @@ pub fn wwdg_supported(family: &str) -> bool {
 /// Is watchdog code actually GENERATED for this family yet?
 ///
 /// Separate from [`wwdg_supported`], which is about the HAL. This is about
-/// the IDE: only the two embassy STM32 backends (blocking and async) call
-/// `watchdog_gen`, so on F1, WBA and RTIC the tab would accept a setting and
-/// produce nothing. A control that silently does nothing is worse than one
+/// the IDE: the two embassy STM32 backends and the F1 one call `watchdog_gen`,
+/// but WBA does not, so there the tab would accept a setting and produce
+/// nothing. A control that silently does nothing is worse than one
 /// that says it is not wired yet, so the tab asks this first.
 pub fn codegen_supported(family: &str) -> bool {
-    family.starts_with("stm32") && family != "stm32f1" && family != "stm32wba"
+    family.starts_with("stm32") && family != "stm32wba"
 }
 
 /// The watchdog limits for an IDE family key (`stm32f4`, `stm32g0`, …).
@@ -96,6 +116,11 @@ pub fn limits_for(family: &str) -> WatchdogLimits {
             _ => 8,
         },
         wwdg_available: wwdg_supported(family),
+        iwdg_hal: if family == "stm32f1" {
+            IwdgHal::Stm32f1
+        } else {
+            IwdgHal::Embassy
+        },
     }
 }
 
@@ -116,10 +141,20 @@ fn iwdg_timeout_us(lsi_hz: u32, prescaler: u32, reload: u32) -> u32 {
 /// `reload_value` computes `0 - 1` on a `u16` and panics. The ceiling is a full
 /// 12-bit counter at the largest prescaler.
 pub fn iwdg_range_us(l: &WatchdogLimits) -> (u32, u32) {
-    (
-        iwdg_timeout_us(l.lsi_hz, 4, 0),
-        iwdg_timeout_us(l.lsi_hz, l.iwdg_max_prescaler, MAX_RL),
-    )
+    match l.iwdg_hal {
+        IwdgHal::Embassy => (
+            iwdg_timeout_us(l.lsi_hz, 4, 0),
+            iwdg_timeout_us(l.lsi_hz, l.iwdg_max_prescaler, MAX_RL),
+        ),
+        // `(rl + 1) * divider / LSI_kHz`, in MILLISECONDS - so the floor
+        // is one whole millisecond, not one LSI tick, and the ceiling is
+        // the largest divider the HAL will actually index (256).
+        IwdgHal::Stm32f1 => {
+            let lsi_khz = (l.lsi_hz / 1000).max(1);
+            let max_ms = (MAX_RL + 1) * 256 / lsi_khz;
+            (1_000, max_ms.saturating_mul(1_000))
+        }
+    }
 }
 
 /// The WWDG timeouts this chip can express at the given PCLK1, in microseconds.
@@ -266,13 +301,25 @@ mod tests {
         // 32 kHz LSI, /256, full 12-bit reload: 1e6 * 4096 / (32000/256) = 32.768 s.
         let l = limits_for("stm32f4");
         assert_eq!(iwdg_range_us(&l), (125, 32_768_000));
-        // F1 runs its LSI at 40 kHz, so the same hardware reaches less time --
-        // and 40000/256 truncates to 156, not 156.25, so the answer is not the
-        // 26_214_400 exact arithmetic gives. Mirroring the driver's integer
-        // division is the whole point; a range one step too wide would hand the
-        // `unwrap!` a value we had just called valid.
+    }
+
+    /// The F1 does NOT use this formula, and assuming it did was a real
+    /// mistake caught only by reading `stm32f1xx-hal`.
+    #[test]
+    fn f1_uses_its_own_hals_arithmetic_not_embassys() {
         let f1 = limits_for("stm32f1");
-        assert_eq!(iwdg_range_us(&f1).1, 26_256_410);
+        assert_eq!(f1.iwdg_hal, IwdgHal::Stm32f1);
+        // `4096 * 256 / 40 kHz` = 26_214 ms. Applying embassy's formula to
+        // the same chip gives 26_256_410 us - 42 ms MORE, every one of
+        // which panics, because the HAL's prescaler search steps past the
+        // table it then indexes rather than clamping.
+        assert_eq!(iwdg_range_us(&f1).1, 26_214_000);
+        assert!(
+            iwdg_timeout_us(f1.lsi_hz, f1.iwdg_max_prescaler, MAX_RL) > iwdg_range_us(&f1).1,
+            "the embassy formula must be the WIDER one - that is the trap",
+        );
+        // Milliseconds are the unit, so the floor is 1 ms and not a tick.
+        assert_eq!(iwdg_range_us(&f1).0, 1_000);
     }
 
     #[test]
@@ -381,7 +428,9 @@ mod tests {
         ] {
             assert!(codegen_supported(fam), "{fam}");
         }
-        for fam in ["stm32f1", "stm32wba", "esp32c3"] {
+        // F1 joined once its own HAL template existed.
+        assert!(codegen_supported("stm32f1"));
+        for fam in ["stm32wba", "esp32c3"] {
             assert!(!codegen_supported(fam), "{fam}");
         }
     }

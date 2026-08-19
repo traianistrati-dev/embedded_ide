@@ -814,6 +814,23 @@ mod emit_for_manual_compile {
             }
         }
         m1.reconcile_modules();
+        // The IWDG too: the F1 takes a DIFFERENT HAL, unit and method names
+        // from every embassy family, so its template only counts as working
+        // once stm32f1xx-hal has actually compiled it.
+        {
+            use crate::panels::mcu_module::watchdog::{
+                IwdgConfig, WatchdogSettings, iwdg_range_us, limits_for,
+            };
+            m1.watchdog = WatchdogSettings {
+                iwdg: Some(IwdgConfig {
+                    // The Reset default: the longest period this HAL accepts.
+                    // Its own arithmetic, not embassy's - 42 ms shorter, and
+                    // every millisecond of that gap panics.
+                    timeout_us: iwdg_range_us(&limits_for(&m1.family)).1,
+                }),
+                wwdg: None,
+            };
+        }
         let main_rs = m1.fresh_main_rs();
         let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
         let configs = m1.config_files();

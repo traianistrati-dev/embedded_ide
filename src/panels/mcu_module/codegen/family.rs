@@ -130,7 +130,7 @@ impl FamilyBackend for Stm32f1Backend {
             &can,
             &usb,
             mcu.gpio_native(),
-            &mcu.custom_module_inits(),
+            &mcu.watchdog_and_custom_inits(),
         );
         let base = format!(
             "{header}{gen_}\n{tail}",
@@ -157,7 +157,7 @@ impl FamilyBackend for Stm32f1Backend {
             &can,
             &usb,
             mcu.gpio_native(),
-            &mcu.custom_module_inits(),
+            &mcu.watchdog_and_custom_inits(),
         );
         let spliced = stm32::splice_section(existing, &new_section, &mcu.name, &mcu.id);
         // Clean up the init helpers older versions appended after `fn main`.
@@ -168,7 +168,7 @@ impl FamilyBackend for Stm32f1Backend {
         let all = pins_of(mcu);
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
-        stm32::config_files(
+        let mut files = stm32::config_files(
             &all,
             &usart,
             &spi,
@@ -176,7 +176,15 @@ impl FamilyBackend for Stm32f1Backend {
             &can,
             &mcu.clock,
             mcu.gpio_native(),
-        )
+        );
+        // Pin-less, from the Configuration tab rather than the pins. The F1
+        // gets only the IWDG - `stm32f1xx-hal` has no window watchdog - and
+        // `watchdog_gen` enforces that itself.
+        files.extend(super::watchdog_gen::config_files(
+            &mcu.watchdog,
+            &mcu.family,
+        ));
+        files
     }
 }
 

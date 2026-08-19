@@ -15,6 +15,49 @@
 
 use super::super::watchdog::WatchdogSettings;
 
+/// `src/pins/configs/iwdg.rs` — the STM32F1, whose HAL is not embassy.
+///
+/// Three differences from [`IWDG_TMPL`], all visible at the call site: it takes
+/// the raw PAC peripheral, its period is in MILLISECONDS, and the reload method
+/// is `feed` rather than `pet`.
+const IWDG_TMPL_F1: &str = r#"// <<< GENERATED>>>
+// Watchdog config (from the Configuration tab) - auto-updated; edit it there.
+// MILLISECONDS: stm32f1xx-hal takes `MilliSeconds`, not microseconds.
+const TIMEOUT_MS: u32 = {TIMEOUT_MS};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+//
+// The INDEPENDENT watchdog runs off the LSI (40 kHz on this family), so its
+// period does not move when you change the system clock. `new` only wraps the
+// peripheral: nothing resets the chip until `start()` is called.
+use stm32f1xx_hal::pac::IWDG;
+use stm32f1xx_hal::time::MilliSeconds;
+use stm32f1xx_hal::watchdog::IndependentWatchdog;
+
+/// Handle type, so it can be stored in a struct or an RTIC resource.
+pub type Handle = IndependentWatchdog;
+
+/// Wrap the IWDG. It is NOT running yet - call `start(period())` when your
+/// start-up is far enough along that you can keep feeding it.
+pub fn init(iwdg: IWDG) -> Handle {
+    IndependentWatchdog::new(iwdg)
+}
+
+/// The configured period, in the unit this HAL wants.
+pub fn period() -> MilliSeconds {
+    MilliSeconds::from_ticks(TIMEOUT_MS)
+}
+
+// -- Using the IWDG --
+//
+//     let mut wdg = pins::configs::iwdg::init(dp.IWDG);
+//     wdg.start(pins::configs::iwdg::period());  // starts biting here
+//     loop {
+//         wdg.feed();                            // at least every TIMEOUT_MS
+//     }
+"#;
+
 /// `src/pins/configs/iwdg.rs` — embassy families.
 const IWDG_TMPL: &str = r#"// <<< GENERATED>>>
 // Watchdog config (from the Configuration tab) - auto-updated; edit it there.
@@ -95,10 +138,16 @@ pub fn init(wwdg: Peri<'static, WWDG>) -> Handle {
 pub fn config_files(w: &WatchdogSettings, family: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Some(i) = w.iwdg {
-        out.push((
-            "iwdg.rs".to_owned(),
-            IWDG_TMPL.replace("{TIMEOUT}", &i.timeout_us.to_string()),
-        ));
+        // The F1 HAL takes milliseconds, so the stored microseconds are
+        // converted HERE rather than in the model: the tab keeps one unit for
+        // both families, and only the generator knows what each HAL wants.
+        // Truncating is right - rounding up could step past the range.
+        let body = if family == "stm32f1" {
+            IWDG_TMPL_F1.replace("{TIMEOUT_MS}", &(i.timeout_us / 1_000).to_string())
+        } else {
+            IWDG_TMPL.replace("{TIMEOUT}", &i.timeout_us.to_string())
+        };
+        out.push(("iwdg.rs".to_owned(), body));
     }
     if let Some(x) = w.wwdg {
         if super::super::watchdog::wwdg_supported(family) {
@@ -120,8 +169,13 @@ pub fn config_files(w: &WatchdogSettings, family: &str) -> Vec<(String, String)>
 pub fn init_lines(w: &WatchdogSettings, family: &str) -> String {
     let mut s = String::new();
     if w.iwdg.is_some() {
-        s.push_str("    // Configured, NOT started - call unleash() when ready.\n");
-        s.push_str("    let mut _iwdg = pins::configs::iwdg::init(p.IWDG);\n");
+        if family == "stm32f1" {
+            s.push_str("    // Wrapped, NOT started - call start(period()) when ready.\n");
+            s.push_str("    let mut _iwdg = pins::configs::iwdg::init(dp.IWDG);\n");
+        } else {
+            s.push_str("    // Configured, NOT started - call unleash() when ready.\n");
+            s.push_str("    let mut _iwdg = pins::configs::iwdg::init(p.IWDG);\n");
+        }
     }
     if w.wwdg.is_some() && super::super::watchdog::wwdg_supported(family) {
         s.push_str("    // Running from this line on; pet() too early also resets.\n");
@@ -171,6 +225,29 @@ mod tests {
         let calls = init_lines(&both(), "stm32f1");
         assert!(calls.contains("iwdg::init"), "{calls}");
         assert!(!calls.contains("wwdg"), "{calls}");
+    }
+
+    #[test]
+    fn the_f1_gets_its_own_hal_unit_and_names() {
+        // One stored value, two different generated files: the F1 HAL wants
+        // MILLISECONDS and the PAC singleton off `dp`; embassy wants
+        // microseconds and a `Peri` off `p`. Getting the unit wrong here is a
+        // factor of a thousand, silently.
+        let w = WatchdogSettings {
+            iwdg: Some(IwdgConfig {
+                timeout_us: 26_214_000,
+            }),
+            wwdg: None,
+        };
+        let f1 = &config_files(&w, "stm32f1")[0].1;
+        assert!(f1.contains("const TIMEOUT_MS: u32 = 26214;"), "{f1}");
+        assert!(f1.contains("stm32f1xx_hal::watchdog"), "{f1}");
+        assert!(!f1.contains("embassy"), "{f1}");
+        assert!(init_lines(&w, "stm32f1").contains("init(dp.IWDG)"));
+
+        let f4 = &config_files(&w, "stm32f4")[0].1;
+        assert!(f4.contains("const TIMEOUT_US: u32 = 26214000;"), "{f4}");
+        assert!(init_lines(&w, "stm32f4").contains("init(p.IWDG)"));
     }
 
     #[test]
