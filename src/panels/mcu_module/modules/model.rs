@@ -306,6 +306,17 @@ pub struct UsartModuleConfig {
     pub dma_tx: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dma_rx: String,
+    /// Blocking runtime on STM32F1: run this bus on DMA instead of polling.
+    ///
+    /// A separate flag from the async `mode` / `async_mode`, because it is a
+    /// different HAL: `stm32f1xx-hal`'s `Rx::with_dma` / `Spi::with_rx_tx_dma`,
+    /// not embassy's. There is no channel to choose here — the F1 HAL fixes it
+    /// per peripheral in its TYPES (USART1 is dma1::C4/C5, SPI1 dma1::C2/C3),
+    /// which is why this is a bool and not [`Self::dma_tx`].
+    ///
+    /// Ignored on every other family and on the Async/Native/RTIC runtimes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocking_dma: bool,
 }
 
 impl UsartModuleConfig {
@@ -324,6 +335,7 @@ impl UsartModuleConfig {
             mode: UsartMode::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),
+            blocking_dma: false,
         }
     }
 }
@@ -361,6 +373,17 @@ pub struct SpiModuleConfig {
     pub dma_tx: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dma_rx: String,
+    /// Blocking runtime on STM32F1: run this bus on DMA instead of polling.
+    ///
+    /// A separate flag from the async `mode` / `async_mode`, because it is a
+    /// different HAL: `stm32f1xx-hal`'s `Rx::with_dma` / `Spi::with_rx_tx_dma`,
+    /// not embassy's. There is no channel to choose here — the F1 HAL fixes it
+    /// per peripheral in its TYPES (USART1 is dma1::C4/C5, SPI1 dma1::C2/C3),
+    /// which is why this is a bool and not [`Self::dma_tx`].
+    ///
+    /// Ignored on every other family and on the Async/Native/RTIC runtimes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocking_dma: bool,
 }
 
 impl SpiModuleConfig {
@@ -377,6 +400,7 @@ impl SpiModuleConfig {
             async_mode: AsyncBusMode::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),
+            blocking_dma: false,
         }
     }
 }

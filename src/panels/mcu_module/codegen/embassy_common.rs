@@ -942,6 +942,100 @@ mod emit_for_manual_compile {
         println!("wrote {}", f1dir.display());
     }
 
+    /// The F1's BLOCKING DMA transport — `stm32f1xx-hal`'s own, not embassy's.
+    ///
+    /// Every assertion about it is a substring check until a compiler sees it,
+    /// and the shapes are unusual enough to deserve one: a transfer consumes the
+    /// handle, the channels are fixed in the TYPE (so `init`'s signature has to
+    /// name the same ones `main.rs` passes), and the SPI handle carries the pins
+    /// and the remap state as generic parameters.
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_f1_dma_project -- --ignored --nocapture
+    /// cd %TEMP%\eide_f1_check_dma && cargo check --target thumbv7m-none-eabi
+    /// ```
+    #[test]
+    #[ignore = "writes a project to disk for a manual cross-compile"]
+    fn emit_f1_dma_project() {
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
+        let mut mcu = f1.build_mcu();
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            match &mut m.config {
+                ModuleConfig::Usart(c) => c.blocking_dma = true,
+                ModuleConfig::Spi(c) => c.blocking_dma = true,
+                _ => {}
+            }
+        }
+        let main_rs = mcu.fresh_main_rs();
+        // One split for both peripherals, and the channels the HAL fixes.
+        assert_eq!(
+            main_rs.matches("dp.DMA1.split()").count(),
+            1,
+            "the channels are moved out one at a time - a second split would be a \
+             second owner:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("&clocks, dma1.4, dma1.5)"),
+            "USART1 is fixed to C4 TX / C5 RX:\n{main_rs}"
+        );
+        assert!(
+            main_rs.contains("&clocks, dma1.2, dma1.3)"),
+            "SPI1 is fixed to C2 RX / C3 TX:\n{main_rs}"
+        );
+
+        let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        files.cargo_toml = project_gen::ensure_peripheral_deps(
+            &files.cargo_toml,
+            false,
+            true,
+            false,
+            false,
+            false,
+            true,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_f1_check_dma");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write f1 dma project");
+        println!("wrote {}", dir.display());
+        println!("target: {}", f1.project.target);
+    }
+
     /// A REAL chip imported from the vendor database, with USART/SPI/I2C all on
     /// async DMA — the point of the mux rule.
     ///

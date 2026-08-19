@@ -4,6 +4,7 @@
 
 use super::super::model::{Mcu, PIN_HEIGHT};
 use super::rotate::Rot;
+use crate::panels::mcu_module::codegen;
 use crate::panels::mcu_module::codegen::dma_map;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::hz_label;
@@ -929,6 +930,9 @@ pub fn module_config_ui(
     pin_fn_choice: &mut Option<(usize, PinFunction)>,
     is_async: bool,
     is_native: bool,
+    // The chip's family key — the blocking DMA transport is stm32f1xx-hal's,
+    // so only the F1 backend can emit it.
+    family: &str,
     // The STAGED `(api_style, async_mode)` for this module — the api/async row
     // edit THIS, not `m.config`, so nothing regenerates until "Apply".
     pending: &mut (ApiStyle, AsyncBusMode),
@@ -990,6 +994,41 @@ pub fn module_config_ui(
         resp.response.on_hover_text(
             "Locked by the Native runtime — every peripheral uses the concrete HAL type. \
              Switch the Runtime (System tab) to choose per module.",
+        );
+        ui.end_row();
+    };
+
+    // Blocking runtime on the F1: poll each byte, or hand the bus to DMA.
+    //
+    // A checkbox rather than a channel picker, because there is nothing to pick
+    // — stm32f1xx-hal fixes the channel per peripheral in its types. The label
+    // names them anyway, so the choice is not a black box.
+    let transport_row = |ui: &mut egui::Ui, on: &mut bool, chans: &str| {
+        ui.label("Transport");
+        ui.checkbox(on, "DMA (stm32f1xx-hal)")
+            .on_hover_text(format!(
+                "Off: the CPU moves every byte. On: the peripheral talks to DMA on {chans} - \
+             fixed on this chip, so there is nothing to choose. `init` then returns the \
+             HAL's DMA handles, whose transfers consume the handle and give it back from \
+             `wait()`; the generated config file shows the shape."
+            ));
+        ui.end_row();
+    };
+
+    // With DMA on, the Init API choice has no object: the handles are the HAL's
+    // own DMA types either way. Shown locked rather than hidden, same as under
+    // the Native runtime.
+    let api_row_locked_dma = |ui: &mut egui::Ui| {
+        ui.label("Init API");
+        let resp = ui.add_enabled_ui(false, |ui| {
+            egui::ComboBox::from_id_salt("api_style_locked_dma")
+                .selected_text("DMA handles (HAL type)")
+                .show_ui(ui, |_ui| {});
+        });
+        resp.response.on_hover_text(
+            "Locked by the DMA transport - `init` returns TxDma/RxDma (USART) or \
+             SpiRxTxDma (SPI), which are stm32f1xx-hal's own types. There is no portable \
+             bus to bridge them to; turn DMA off to choose again.",
         );
         ui.end_row();
     };
@@ -1161,6 +1200,17 @@ pub fn module_config_ui(
                                 &mut cfg.dma_rx,
                             );
                         }
+                    } else if let Some(chans) = codegen::stm32::blocking_dma_channels(
+                        family,
+                        dma_map::Bus::Usart,
+                        cfg.instance,
+                    ) {
+                        transport_row(ui, &mut cfg.blocking_dma, &chans);
+                        if cfg.blocking_dma {
+                            api_row_locked_dma(ui);
+                        } else {
+                            api_row(ui, &mut pending.0);
+                        }
                     } else {
                         api_row(ui, &mut pending.0);
                     }
@@ -1201,6 +1251,17 @@ pub fn module_config_ui(
                         }
                     } else if is_native {
                         api_row_locked(ui);
+                    } else if let Some(chans) = codegen::stm32::blocking_dma_channels(
+                        family,
+                        dma_map::Bus::Spi,
+                        cfg.instance,
+                    ) {
+                        transport_row(ui, &mut cfg.blocking_dma, &chans);
+                        if cfg.blocking_dma {
+                            api_row_locked_dma(ui);
+                        } else {
+                            api_row(ui, &mut pending.0);
+                        }
                     } else {
                         api_row(ui, &mut pending.0);
                     }

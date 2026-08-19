@@ -596,6 +596,7 @@ impl AppIde {
                                 // chip's channels while `mcu.modules` is
                                 // borrowed mutably below.
                                 let chip_dma = mcu.dma.clone();
+                                let family = mcu.family.clone();
                                 let mut local_pending: std::collections::BTreeMap<
                                     String,
                                     (ApiStyle, AsyncBusMode),
@@ -692,7 +693,8 @@ impl AppIde {
                                                     ui, m, &pin_names, &pin_sigs, &pin_blocked,
                                                     &mut pin_labels, &pin_funcs_current,
                                                     &pin_funcs, &mut pin_fn_choice, is_async,
-                                                    is_native, pending, chip_dma.as_ref(),
+                                                    is_native, &family, pending,
+                                                    chip_dma.as_ref(),
                                                 );
                                                 ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {

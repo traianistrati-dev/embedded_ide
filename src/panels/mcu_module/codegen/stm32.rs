@@ -419,6 +419,19 @@ pub(super) fn gen_parts(
             }
         };
     }
+    // `DMA1.split()` hands out the channel singletons the DMA inits take. Once
+    // per project, before the first of them: the channels are moved out of the
+    // returned struct one field at a time, so a second split would be a second
+    // owner of hardware that is already spoken for.
+    let mut dma1_split = false;
+    macro_rules! dma1 {
+        () => {
+            if !dma1_split {
+                fn_calls.push_str("    let dma1 = dp.DMA1.split();\n");
+                dma1_split = true;
+            }
+        };
+    }
 
     for n in 1u8..=3 {
         let tx = configured
@@ -445,14 +458,28 @@ pub(super) fn gen_parts(
         //  · Native  → the split `(Tx, Rx)` handles     → `let (mut _txN, mut _rxN)`
         //  · Portable → one `embedded_io::{Read,Write}`  → `let mut _serialN`
         let native = matches!(usart.get(&n).map(|c| c.api_style), Some(ApiStyle::Native));
-        let binding = if native {
+        // DMA also returns a PAIR, but of DMA halves rather than `nb` ones, and
+        // it takes two more arguments: the channels the HAL fixes to this
+        // instance (see `usart_dma_channels`).
+        let dma = usart
+            .get(&n)
+            .filter(|c| c.blocking_dma)
+            .and(usart_dma_channels(n));
+        let binding = if native || dma.is_some() {
             format!("let (mut _tx{n}{sfx}, mut _rx{n}{sfx})")
         } else {
             format!("let mut _serial{n}{sfx}")
         };
+        let chans = match dma {
+            Some((tx, rx)) => {
+                dma1!();
+                format!(", {}, {}", channel_field(tx), channel_field(rx))
+            }
+            None => String::new(),
+        };
         fn_calls.push_str(&format!(
             "    {binding} = \
-             pins::configs::usart{n}::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks);\n"
+             pins::configs::usart{n}::init(dp.USART{n}, ({tx_v}, {rx_v}), &mut afio, &clocks{chans});\n"
         ));
     }
 
@@ -486,9 +513,20 @@ pub(super) fn gen_parts(
             .get(&n)
             .map(|c| module_label_sfx(&c.custom_label))
             .unwrap_or_default();
+        let chans = match spi
+            .get(&n)
+            .filter(|c| c.blocking_dma)
+            .and(spi_dma_channels(n))
+        {
+            Some((rx, tx)) => {
+                dma1!();
+                format!(", {}, {}", channel_field(rx), channel_field(tx))
+            }
+            None => String::new(),
+        };
         fn_calls.push_str(&format!(
             "    let _spi{n}{sfx} = \
-             pins::configs::spi{n}::init(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks);\n"
+             pins::configs::spi{n}::init(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks{chans});\n"
         ));
     }
 
@@ -1266,16 +1304,26 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         Some(StopBits::Two) => 2,
         _ => 1,
     };
-    let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
-        ApiStyle::Portable => USART_TMPL,
-        ApiStyle::Native => USART_TMPL_NATIVE,
+    // DMA is a third shape, not a third API style: the handles it returns are
+    // the HAL's own DMA types, so `api_style` has nothing left to choose.
+    let channels = usart_dma_channels(n);
+    let tmpl = if cfg.is_some_and(|c| c.blocking_dma) && channels.is_some() {
+        USART_TMPL_DMA
+    } else {
+        match cfg.map(|c| c.api_style).unwrap_or_default() {
+            ApiStyle::Portable => USART_TMPL,
+            ApiStyle::Native => USART_TMPL_NATIVE,
+        }
     };
+    let (txch, rxch) = channels.unwrap_or(("dma1::C4", "dma1::C5"));
     // The handle the example names is the one `main.rs` actually binds —
     // module label included (`_serial1_mw_radar`), or the split pair on Native.
     let sfx = cfg
         .map(|c| module_label_sfx(&c.custom_label))
         .unwrap_or_default();
     tmpl.replace("{HANDLE}", &format!("_serial{n}{sfx}"))
+        .replace("{TXCH}", txch)
+        .replace("{RXCH}", rxch)
         .replace("{TX}", &format!("_tx{n}{sfx}"))
         .replace("{RX}", &format!("_rx{n}{sfx}"))
         .replace("{N}", &n.to_string())
@@ -1284,6 +1332,234 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         .replace("{PARITY}", &parity.to_string())
         .replace("{STOP}", &stop.to_string())
 }
+
+/// The `(tx, rx)` DMA channels `stm32f1xx-hal` binds to `USART{n}`.
+///
+/// Not a choice: the HAL puts the channel in the TYPE (`serial::TxDma1` is
+/// `TxDma<Tx<USART1>, dma1::C4>` and nothing else), so `init` has to name the
+/// same one. Taken from `serialdma!` in the HAL, which matches RM0008's fixed
+/// request map. `None` for an instance the HAL gives no DMA — only USART1..3
+/// have it, UART4/5 do not.
+fn usart_dma_channels(n: u8) -> Option<(&'static str, &'static str)> {
+    match n {
+        1 => Some(("dma1::C4", "dma1::C5")),
+        2 => Some(("dma1::C7", "dma1::C6")),
+        3 => Some(("dma1::C2", "dma1::C3")),
+        _ => None,
+    }
+}
+
+/// The DMA channels this bus instance would get, as a label for the UI — or
+/// `None` when it cannot run on DMA at all.
+///
+/// Answers from the SAME tables codegen uses, so the checkbox can never offer a
+/// transport the templates would then decline to emit. I2C is always `None`:
+/// `stm32f1xx-hal` has no DMA for it, unlike USART and SPI.
+pub fn blocking_dma_channels(
+    family: &str,
+    bus: super::dma_map::Bus,
+    instance: u8,
+) -> Option<String> {
+    if family != "stm32f1" {
+        return None;
+    }
+    match bus {
+        super::dma_map::Bus::Usart => {
+            usart_dma_channels(instance).map(|(tx, rx)| format!("{tx} TX / {rx} RX"))
+        }
+        super::dma_map::Bus::Spi => {
+            spi_dma_channels(instance).map(|(rx, tx)| format!("{tx} TX / {rx} RX"))
+        }
+        super::dma_map::Bus::I2c => None,
+    }
+}
+
+/// `dma1::C4` (the TYPE, as a config's `init` names it) -> `dma1.4` (the VALUE
+/// main.rs passes). `DmaExt::split` returns a tuple struct whose fields ARE the
+/// channels, so the index is the channel number.
+fn channel_field(ty: &str) -> String {
+    match ty.rsplit_once("::C") {
+        Some((bank, n)) => format!("{bank}.{n}"),
+        None => ty.to_owned(),
+    }
+}
+
+/// The `(rx, tx)` DMA channels for `SPI{n}` — same story, from `spi_dma!`.
+///
+/// SPI3 is deliberately absent: its channels live on DMA2, which only the
+/// connectivity-line parts have, and the HAL gates them behind a feature the
+/// generated manifest does not set.
+fn spi_dma_channels(n: u8) -> Option<(&'static str, &'static str)> {
+    match n {
+        1 => Some(("dma1::C2", "dma1::C3")),
+        2 => Some(("dma1::C4", "dma1::C5")),
+        _ => None,
+    }
+}
+
+/// Blocking `stm32f1xx-hal` USART on DMA. Returns the two DMA halves.
+///
+/// Neither the portable nor the native template can be reused: the DMA handles
+/// are `TxDma`/`RxDma`, whose transfer methods CONSUME the handle and hand it
+/// back from `wait()`. That is a different shape from both `embedded-io` and
+/// the `nb` halves, so it gets its own file and its own worked example.
+const USART_TMPL_DMA: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) - auto-updated; edit in the module.
+const BAUDRATE: u32 = {BAUD};
+const DATA_BITS: u8 = {DATA}; // 8, 9
+const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
+const STOP_BITS: u8 = {STOP}; // 1, 2
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+// DMA transport (chosen in the Virtual Module): the peripheral moves bytes
+// without the CPU polling for each one. `init` returns the two DMA halves.
+//
+// The channels are NOT a choice on this chip: stm32f1xx-hal puts them in the
+// type, fixing USART{N} to {TXCH} for TX and {RXCH} for RX, so main.rs passes
+// exactly those.
+use stm32f1xx_hal::{
+    afio,
+    dma::dma1,
+    pac,
+    prelude::*,
+    rcc::Clocks,
+    serial::{self, Config, Serial, StopBits},
+};
+
+/// The handles [`init`] hands back. Named so they can be struct fields.
+pub type TxHandle = serial::TxDma{N};
+pub type RxHandle = serial::RxDma{N};
+
+fn get_config() -> serial::Config {
+    let mut config = Config::default().baudrate(BAUDRATE.bps());
+    if DATA_BITS == 8 {
+        config = config.wordlength_8bits();
+    } else if DATA_BITS == 9 {
+        config = config.wordlength_9bits();
+    }
+    if PARITY == 'N' {
+        config = config.parity_none();
+    } else if PARITY == 'O' {
+        config = config.parity_odd();
+    } else if PARITY == 'E' {
+        config = config.parity_even();
+    }
+    if STOP_BITS == 1 {
+        config = config.stopbits(StopBits::STOP1);
+    } else if STOP_BITS == 2 {
+        config = config.stopbits(StopBits::STOP2);
+    }
+    config
+}
+
+pub fn init<PINS: serial::Pins<pac::USART{N}>>(
+    usart: pac::USART{N},
+    pins: PINS,
+    afio: &mut afio::Parts,
+    clocks: &Clocks,
+    tx_ch: {TXCH},
+    rx_ch: {RXCH},
+) -> (TxHandle, RxHandle) {
+    let (tx, rx) = Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split();
+    (tx.with_dma(tx_ch), rx.with_dma(rx_ch))
+}
+
+// -- Using USART{N} on DMA --
+// A transfer CONSUMES the handle and gives it back from `wait()`, so rebind it
+// every time. The buffer must outlive the transfer: `&'static` data for TX, a
+// `'static` buffer for RX. In main.rs, after the init above:
+//
+//     use stm32f1xx_hal::dma::{ReadDma, WriteDma};
+//
+//     // Send - the DMA reads straight out of the slice.
+//     let (_, tx) = {TX}.write(&b"hello"[..]).wait();
+//     {TX} = tx;
+//
+//     // Receive 8 bytes into a 'static buffer.
+//     static mut RXBUF: [u8; 8] = [0; 8];
+//     let buf: &'static mut [u8; 8] = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
+//     let (buf, rx) = {RX}.read(buf).wait();
+//     {RX} = rx;
+//
+// For a receiver that never misses bytes between reads, use the circular form
+// instead: `let mut circ = {RX}.circ_read(two_buffers);` then `circ.peek(...)`.
+
+"#;
+
+/// Blocking `stm32f1xx-hal` SPI on DMA. Returns the combined RX+TX handle.
+const SPI_TMPL_DMA: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) - auto-updated; edit in the module.
+const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+const CLOCK_KHZ: u32 = {KHZ};
+
+// The wired pins, straight from the MCU Configurator's pin map. They live in
+// this block because re-wiring the peripheral has to update them; the `use` is
+// here too, so the aliases hold whatever you do to the `use` block below.
+use stm32f1xx_hal::{gpio as hal_gpio, spi as hal_spi};
+
+/// The pins SPI{N} is wired to, in HAL order: (SCK, MISO, MOSI). A signal you
+/// left unwired is the HAL's `No...` placeholder.
+#[allow(dead_code)]
+pub type SpiPins = ({PINS});
+
+/// Whether those are the peripheral's default pins or its remapped set.
+#[allow(dead_code)]
+pub type SpiRemap = {REMAP};
+// <<< GENERATED END >>>
+
+// Everything below is editable - your changes are preserved on regeneration.
+// DMA transport (chosen in the Virtual Module). The channels are NOT a choice
+// on this chip: stm32f1xx-hal fixes SPI{N} to {RXCH} for RX and {TXCH} for TX.
+use stm32f1xx_hal::{
+    afio,
+    dma::dma1,
+    pac,
+    prelude::*,
+    rcc::Clocks,
+    spi::{Mode, Phase, Polarity, Spi},
+};
+
+fn get_mode() -> Mode {
+    match SPI_MODE {
+        1 => Mode { polarity: Polarity::IdleLow, phase: Phase::CaptureOnSecondTransition },
+        2 => Mode { polarity: Polarity::IdleHigh, phase: Phase::CaptureOnFirstTransition },
+        3 => Mode { polarity: Polarity::IdleHigh, phase: Phase::CaptureOnSecondTransition },
+        _ => Mode { polarity: Polarity::IdleLow, phase: Phase::CaptureOnFirstTransition },
+    }
+}
+
+/// The combined RX+TX DMA handle [`init`] hands back.
+pub type Handle = hal_spi::Spi{N}RxTxDma<SpiRemap, SpiPins, hal_spi::Master>;
+
+pub fn init(
+    spi: pac::SPI{N},
+    pins: SpiPins,
+    {AFIO_PARAM}: &mut afio::Parts,
+    clocks: &Clocks,
+    rx_ch: {RXCH},
+    tx_ch: {TXCH},
+) -> Handle {
+    Spi::spi{N}(spi, pins, {AFIO_ARG}get_mode(), CLOCK_KHZ.kHz(), *clocks)
+        .with_rx_tx_dma(rx_ch, tx_ch)
+}
+
+// -- Using SPI{N} on DMA --
+// A transfer CONSUMES the handle and gives it back from `wait()`, so rebind it
+// every time. Both buffers must be 'static, and they come back from `wait()`
+// with the handle. In main.rs, after the init above:
+//
+//     use stm32f1xx_hal::dma::ReadWriteDma;
+//
+//     static mut RXBUF: [u8; 4] = [0; 4];
+//     static mut TXBUF: [u8; 4] = [0x9F, 0, 0, 0];
+//     let rxb: &'static mut [u8; 4] = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
+//     let txb: &'static mut [u8; 4] = unsafe { &mut *core::ptr::addr_of_mut!(TXBUF) };
+//     let ((rxb, _txb), spi) = {HANDLE}.read_write(rxb, txb).wait();
+//     {HANDLE} = spi;
+//     // rxb now holds the reply.
+
+"#;
 
 /// Native `stm32f1xx-hal` USART init (no embedded-io bridge). Returns the split
 /// `(Tx, Rx)` halves — the idiomatic stm32f1xx-hal handles (TX for `writeln!`, RX
@@ -1510,10 +1786,16 @@ pub fn init(
 fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, String)) -> String {
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
-    let tmpl = match cfg.map(|c| c.api_style).unwrap_or_default() {
-        ApiStyle::Portable => SPI_TMPL,
-        ApiStyle::Native => SPI_TMPL_NATIVE,
+    let channels = spi_dma_channels(n);
+    let tmpl = if cfg.is_some_and(|c| c.blocking_dma) && channels.is_some() {
+        SPI_TMPL_DMA
+    } else {
+        match cfg.map(|c| c.api_style).unwrap_or_default() {
+            ApiStyle::Portable => SPI_TMPL,
+            ApiStyle::Native => SPI_TMPL_NATIVE,
+        }
     };
+    let (rxch, txch) = channels.unwrap_or(("dma1::C2", "dma1::C3"));
     let (pins, remap) = pin_tys;
     // Only SPI1 can be remapped, so only `Spi::spi1` takes the AFIO register.
     let (afio_param, afio_arg) = afio_subst(n == 1);
@@ -1528,6 +1810,8 @@ fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, Stri
         .replace("{REMAP}", remap)
         .replace("{AFIO_PARAM}", afio_param)
         .replace("{AFIO_ARG}", afio_arg)
+        .replace("{RXCH}", rxch)
+        .replace("{TXCH}", txch)
 }
 
 /// `({AFIO_PARAM}, {AFIO_ARG})` for a config template.
@@ -2071,4 +2355,104 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
             | PinFunction::Mco
             | PinFunction::CanTx
     )
+}
+
+#[cfg(test)]
+mod blocking_dma_tests {
+    use super::*;
+    use crate::panels::mcu_module::codegen::dma_map::Bus;
+
+    /// The channel tables are transcribed from `serialdma!` / `spi_dma!` in
+    /// stm32f1xx-hal, which puts the channel in the TYPE. Get one wrong and the
+    /// generated `init` signature stops matching the alias it returns, so pin
+    /// them: this is the fact the feature rests on, and it is not derivable.
+    #[test]
+    fn the_channels_are_the_ones_the_hal_fixes() {
+        assert_eq!(usart_dma_channels(1), Some(("dma1::C4", "dma1::C5")));
+        assert_eq!(usart_dma_channels(2), Some(("dma1::C7", "dma1::C6")));
+        assert_eq!(usart_dma_channels(3), Some(("dma1::C2", "dma1::C3")));
+        assert_eq!(usart_dma_channels(4), None, "UART4 has no DMA in this HAL");
+        assert_eq!(spi_dma_channels(1), Some(("dma1::C2", "dma1::C3")));
+        assert_eq!(spi_dma_channels(2), Some(("dma1::C4", "dma1::C5")));
+        assert_eq!(
+            spi_dma_channels(3),
+            None,
+            "SPI3 is on DMA2, connectivity only"
+        );
+    }
+
+    /// `dma1::C4` is what `init` declares; `dma1.4` is what main.rs passes.
+    #[test]
+    fn the_type_and_the_value_are_spelled_differently() {
+        assert_eq!(channel_field("dma1::C4"), "dma1.4");
+        assert_eq!(channel_field("dma2::C1"), "dma2.1");
+    }
+
+    /// The picker answers from the same tables, so it can never offer a
+    /// transport the templates would decline to emit.
+    #[test]
+    fn only_f1_usart_and_spi_offer_the_transport() {
+        assert!(blocking_dma_channels("stm32f1", Bus::Usart, 1).is_some());
+        assert!(blocking_dma_channels("stm32f1", Bus::Spi, 2).is_some());
+        // stm32f1xx-hal has no I2C DMA at all.
+        assert!(blocking_dma_channels("stm32f1", Bus::I2c, 1).is_none());
+        // Instances the HAL leaves out.
+        assert!(blocking_dma_channels("stm32f1", Bus::Usart, 4).is_none());
+        assert!(blocking_dma_channels("stm32f1", Bus::Spi, 3).is_none());
+        // Other families run on embassy - a different DMA story entirely.
+        for family in ["stm32f4", "stm32g0", "esp32c3"] {
+            assert!(
+                blocking_dma_channels(family, Bus::Usart, 1).is_none(),
+                "{family}"
+            );
+        }
+        // And the label names the channels, so the checkbox is not a black box.
+        assert_eq!(
+            blocking_dma_channels("stm32f1", Bus::Usart, 1).unwrap(),
+            "dma1::C4 TX / dma1::C5 RX"
+        );
+    }
+
+    /// The flag selects a THIRD template, not a third API style: the handles
+    /// are the HAL's own DMA types, so Portable/Native has nothing to choose.
+    #[test]
+    fn the_flag_switches_the_template_whatever_the_api_style() {
+        let dma_cfg = |style| UsartModuleConfig {
+            blocking_dma: true,
+            api_style: style,
+            ..UsartModuleConfig::new(1)
+        };
+        for style in [ApiStyle::Portable, ApiStyle::Native] {
+            let f = usart_config_file(1, Some(&dma_cfg(style)));
+            assert!(f.contains("pub type TxHandle = serial::TxDma1;"), "{f}");
+            assert!(
+                f.contains("tx_ch: dma1::C4,") && f.contains("rx_ch: dma1::C5,"),
+                "{f}"
+            );
+            assert!(f.contains("tx.with_dma(tx_ch)"), "{f}");
+            // Neither of the two non-DMA shapes leaks in.
+            assert!(!f.contains("embedded_io"), "{f}");
+        }
+        // Off: exactly what it generated before.
+        let off = usart_config_file(1, Some(&UsartModuleConfig::new(1)));
+        assert!(!off.contains("with_dma"), "{off}");
+
+        let spi = spi_config_file(
+            2,
+            Some(&SpiModuleConfig {
+                blocking_dma: true,
+                ..SpiModuleConfig::new(2)
+            }),
+            &("()".into(), "Remap".into()),
+        );
+        assert!(
+            spi.contains("Spi2RxTxDma<SpiRemap, SpiPins, hal_spi::Master>"),
+            "{spi}"
+        );
+        assert!(spi.contains("with_rx_tx_dma(rx_ch, tx_ch)"), "{spi}");
+        assert!(
+            spi.contains("rx_ch: dma1::C4,") && spi.contains("tx_ch: dma1::C5,"),
+            "{spi}"
+        );
+    }
 }
