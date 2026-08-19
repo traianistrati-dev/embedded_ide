@@ -181,10 +181,27 @@ fn irq_for(family: &str, channel: &str) -> Option<String> {
 }
 
 /// Hands out DMA channels for one project, never the same one twice.
+///
+/// Two ways to answer, in order:
+///
+/// 1. **The chip's own channel list**, when it was imported from the vendor
+///    database AND its controller is muxed (DMAMUX / GPDMA — 1085 of the 1839
+///    parts the database describes). Then there is no request table to consult:
+///    any channel can serve any peripheral, so the first free one wins.
+/// 2. **The family table** above, for the fixed-mapping families.
+///
+/// A chip that is neither — a classic part imported from a source with no DMA
+/// data, or one from a family nobody has harvested — still answers `None`, and
+/// the caller keeps its `TODO`.
 #[derive(Debug, Default)]
 pub struct DmaAllocator {
     family: String,
     used: BTreeSet<String>,
+    /// The chip's channels, in the order the vendor lists them. Non-empty only
+    /// for a muxed chip: on a fixed-mapping part the list is real but useless
+    /// without the request table, and handing out a free channel there would
+    /// produce code that compiles and moves nothing.
+    pool: Vec<super::dma_data::DmaChannel>,
 }
 
 impl DmaAllocator {
@@ -192,6 +209,24 @@ impl DmaAllocator {
         Self {
             family: family.to_owned(),
             used: BTreeSet::new(),
+            pool: Vec::new(),
+        }
+    }
+
+    /// The allocator for a specific chip — the same family tables, plus the
+    /// chip's own channels when they can be used without a request table.
+    pub fn for_chip(
+        family: &str,
+        dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+    ) -> Self {
+        let pool = match dma {
+            Some(d) if d.mux => d.channels.clone(),
+            _ => Vec::new(),
+        };
+        Self {
+            family: family.to_owned(),
+            used: BTreeSet::new(),
+            pool,
         }
     }
 
@@ -202,6 +237,16 @@ impl DmaAllocator {
     /// `TODO` placeholder, so a project with more DMA buses than channels still
     /// generates - it just asks the user to finish it.
     pub fn take(&mut self, bus: Bus, instance: u8, dir: Dir) -> Option<DmaPick> {
+        // A muxed chip does not care WHICH channel a peripheral gets, so the
+        // bus/instance/direction never enter into it - only "is it free".
+        if let Some(c) = self.pool.iter().find(|c| !self.used.contains(&c.peri)) {
+            let pick = DmaPick {
+                peri: c.peri.clone(),
+                irq: c.irq.clone(),
+            };
+            self.used.insert(pick.peri.clone());
+            return Some(pick);
+        }
         let cands = candidates(&self.family, bus, instance, dir)?;
         let chan = cands.iter().find(|c| !self.used.contains(**c))?;
         let irq = irq_for(&self.family, chan)?;
@@ -216,6 +261,58 @@ impl DmaAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::panels::mcu_module::codegen::dma_data::DmaChannel;
+    use crate::panels::mcu_module::mcu_def::DmaDef;
+
+    fn chan(peri: &str, irq: &str) -> DmaChannel {
+        DmaChannel {
+            peri: peri.into(),
+            irq: irq.into(),
+        }
+    }
+
+    /// The whole point of the mux rule: a family with no table at all - here
+    /// STM32G4 - now generates real channels, taken in order and never reused.
+    #[test]
+    fn a_muxed_chip_hands_out_its_own_channels_in_order() {
+        let def = DmaDef {
+            mux: true,
+            channels: vec![
+                chan("DMA1_CH1", "DMA1_CHANNEL1"),
+                chan("DMA1_CH2", "DMA1_CHANNEL2"),
+                chan("DMA1_CH3", "DMA1_CHANNEL3"),
+            ],
+        };
+        let mut a = DmaAllocator::for_chip("stm32g4", Some(&def));
+        let tx = a.take(Bus::Usart, 1, Dir::Tx).expect("USART1 TX");
+        let rx = a.take(Bus::Usart, 1, Dir::Rx).expect("USART1 RX");
+        assert_eq!(
+            (tx.peri.as_str(), tx.irq.as_str()),
+            ("DMA1_CH1", "DMA1_CHANNEL1")
+        );
+        assert_eq!(rx.peri, "DMA1_CH2");
+        // A different peripheral keeps taking from the same pool.
+        assert_eq!(a.take(Bus::Spi, 1, Dir::Tx).unwrap().peri, "DMA1_CH3");
+        // Exhausted: back to the TODO rather than a channel already in use.
+        assert_eq!(a.take(Bus::Spi, 1, Dir::Rx), None);
+    }
+
+    /// A chip with a FIXED request map must not be served from its channel
+    /// list, even though the list is perfectly real - which channel carries
+    /// which request is exactly what the hardware decides there.
+    #[test]
+    fn a_classic_chip_still_needs_its_request_table() {
+        let def = DmaDef {
+            mux: false,
+            channels: vec![chan("DMA1_CH1", "DMA1_CHANNEL1")],
+        };
+        let mut a = DmaAllocator::for_chip("stm32l1", Some(&def));
+        assert_eq!(a.take(Bus::Usart, 1, Dir::Tx), None);
+        // ... and where a table DOES exist, it is the one that answers.
+        let mut f4 = DmaAllocator::for_chip("stm32f4", Some(&def));
+        assert_eq!(f4.take(Bus::Usart, 1, Dir::Tx).unwrap().peri, "DMA2_CH7");
+    }
 
     #[test]
     fn a_family_without_a_table_picks_nothing() {

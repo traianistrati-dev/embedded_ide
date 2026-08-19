@@ -2606,6 +2606,13 @@ impl AppIde {
                 needs_eh_async,
                 &sources,
             );
+            // Cortex-M0 async: `static_cell` needs CAS the core does not have.
+            let async_target = self
+                .selected_build_cfg()
+                .map(|(p, _)| p.target)
+                .unwrap_or_default();
+            let new_toml =
+                project_gen::ensure_m0_atomics(&new_toml, is_async, &async_target, &sources);
             // RTIC runtime: the framework + its SysTick monotonic. The backend
             // feature follows the chip's Rust target, which only `ProjectDef`
             // knows — hence reading it here rather than in the codegen backend.

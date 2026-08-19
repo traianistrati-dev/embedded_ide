@@ -788,6 +788,141 @@ mod emit_for_manual_compile {
             .expect("write f1 project");
         println!("wrote {}", f1dir.display());
     }
+
+    /// A REAL chip imported from the vendor database, with USART/SPI/I2C all on
+    /// async DMA — the point of the mux rule.
+    ///
+    /// STM32G4 has no hand-written request table and never will need one: its
+    /// controller is muxed, so any free channel serves any peripheral. Whether
+    /// the channel names, the interrupt names and the `bind_interrupts!`
+    /// grouping this produces are the ones embassy accepts is a question only a
+    /// compiler can answer:
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_imported_dma_project -- --ignored --nocapture
+    /// cd %TEMP%\eide_dma_check && cargo check --target thumbv7em-none-eabihf
+    /// ```
+    #[test]
+    #[ignore = "needs the STM32Cube database, writes a project for a manual cross-compile"]
+    fn emit_imported_dma_project() {
+        use crate::panels::mcu_module::codegen::dma_data;
+        use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig, UsartMode};
+
+        let chip = std::env::var("EIDE_CHIP_XML").unwrap_or_else(|_| {
+            "H:/stm32cube-database-master/stm32cube-database-master/db/mcu/STM32G431C(6-8-B)Tx.xml".into()
+        });
+        let path = std::path::Path::new(&chip);
+        let Ok(xml) = std::fs::read_to_string(path) else {
+            eprintln!("no chip xml at {chip} - nothing emitted");
+            return;
+        };
+        let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|v| {
+            let f = path
+                .parent()?
+                .join("IP")
+                .join(stm32_pin_data::gpio_ip_file_name(&v));
+            Some(stm32_pin_data::GpioAf::parse(
+                &std::fs::read_to_string(f).ok()?,
+            ))
+        });
+        let mut cache = std::collections::HashMap::new();
+        let dma = dma_data::dma_def_for(&xml, path.parent(), &mut cache);
+        println!(
+            "dma: mux={:?} channels={}",
+            dma.as_ref().map(|d| d.mux),
+            dma.as_ref().map_or(0, |d| d.channels.len())
+        );
+
+        let mut def = stm32_pin_data::convert_xml_with_af(&xml, af.as_ref())
+            .expect("converts")
+            .remove(0)
+            .form
+            .to_definition();
+        def.dma = dma;
+        let mut mcu = def.build_mcu();
+        mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
+
+        // Take the first pin the chip itself offers for each bus signal, so this
+        // works for whatever part `EIDE_CHIP_XML` names.
+        for want in [
+            PinFunction::UsartTx(1),
+            PinFunction::UsartRx(1),
+            PinFunction::SpiSck(1),
+            PinFunction::SpiMosi(1),
+            PinFunction::SpiMiso(1),
+            PinFunction::I2cScl(1),
+            PinFunction::I2cSda(1),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| {
+                    p.selected_function == PinFunction::Unset
+                        && p.available_functions.contains(&want)
+                })
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => p.selected_function = want,
+                None => println!("chip has no pin for {want:?}"),
+            }
+        }
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            match &mut m.config {
+                ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::Usart(c) => c.mode = UsartMode::Dma,
+                _ => {}
+            }
+        }
+
+        let main_rs = mcu.fresh_main_rs();
+        assert!(
+            !main_rs.contains("DMA_TX_TODO"),
+            "a muxed chip should need no TODO:\n{main_rs}"
+        );
+        let mut files = project_gen::build_project_files(&def.project, &def.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        // The app adds these when it saves an async project; the harness has to
+        // do the same or it compiles a manifest the IDE never writes.
+        files.cargo_toml = project_gen::ensure_async_deps(
+            &files.cargo_toml,
+            true,
+            project_gen::AsyncFlavor::Stm32,
+            !configs.is_empty(),
+            // SPI/I2C on async DMA return `embedded_hal_async` traits, so
+            // both `embedded-hal` and its async half are needed - the same
+            // two flags `AppIde::save` derives from the modules.
+            true,
+            true,
+            &[],
+        );
+        files.cargo_toml =
+            project_gen::ensure_m0_atomics(&files.cargo_toml, true, &def.project.target, &[]);
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_dma_check");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write dma project");
+        println!("wrote {} ({})", dir.display(), def.display_name);
+        println!(
+            "target: {}  hal: {}",
+            def.project.target, def.project.hal_dep
+        );
+    }
 }
 
 #[cfg(test)]

@@ -77,6 +77,22 @@ impl PinDef {
     }
 }
 
+/// What a chip's DMA controller can do, as captured from the vendor database.
+///
+/// `None` for a definition imported before this existed, or from a source that
+/// carries no DMA data (the public open-pin-data repo has none) - codegen then
+/// falls back to the hand-harvested family tables in
+/// [`crate::panels::mcu_module::codegen::dma_map`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DmaDef {
+    /// `true` when any channel can serve any peripheral (DMAMUX / GPDMA), which
+    /// is 1107 of the database's 1964 parts. Then no request table is needed at
+    /// all: the allocator just hands out free channels.
+    pub mux: bool,
+    /// Every channel the chip has, with the interrupt each is served by.
+    pub channels: Vec<crate::panels::mcu_module::codegen::dma_data::DmaChannel>,
+}
+
 /// One pad of a ball grid: where it sits, and the pin itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GridCellDef {
@@ -221,6 +237,9 @@ pub struct McuDefinition {
     pub family: String,
     #[serde(default)]
     pub package: String,
+    /// DMA channels + whether they are muxed. See [`DmaDef`].
+    #[serde(default)]
+    pub dma: Option<DmaDef>,
     #[serde(default)]
     pub cpu: String,
     pub toolchain: ToolchainKind,
@@ -276,6 +295,7 @@ impl McuDefinition {
             map(&self.pins.right),
         );
         mcu.id = self.id.clone();
+        mcu.dma = self.dma.clone();
         mcu.grid = self.pins.grid.as_ref().map(|g| PinGrid {
             rows: g.rows,
             cols: g.cols,

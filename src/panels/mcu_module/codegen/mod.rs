@@ -8,6 +8,7 @@
 //! - unknown families (e.g. STM8) → no generated code yet.
 
 pub mod common;
+pub mod dma_data;
 pub mod dma_map;
 pub mod embassy_async;
 pub mod embassy_common;

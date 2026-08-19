@@ -495,7 +495,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
-    embassy_async::async_peripherals(&mcu.family, &all, &usart, &spi, &i2c)
+    embassy_async::async_peripherals(&mcu.family, mcu.dma.as_ref(), &all, &usart, &spi, &i2c)
 }
 
 /// The async generated section for `mcu`: the GPIO/raw pin bindings (minus the

@@ -744,6 +744,12 @@ impl AppIde {
             Option<std::sync::Arc<stm32_pin_data::GpioAf>>,
         > = std::collections::HashMap::new();
         let mut embassy_features: Option<Option<Vec<String>>> = None;
+        // DMA controller + NVIC version -> the chip's channels. Same idea as the
+        // AF cache: a whole family shares one pair of files.
+        let mut dma_tables: std::collections::HashMap<
+            String,
+            Option<crate::panels::mcu_module::mcu_def::DmaDef>,
+        > = std::collections::HashMap::new();
 
         for path in paths {
             let xml = match std::fs::read_to_string(path) {
@@ -790,6 +796,15 @@ impl AppIde {
                 af_tables.insert(ver, table.clone());
                 table
             });
+            // The DMA channels come from two more files in that same `IP/`
+            // folder. Only the STM32Cube database ships them — importing from
+            // the public open-pin-data repo leaves this `None`, and codegen
+            // falls back to the hand-written family tables.
+            let dma = crate::panels::mcu_module::codegen::dma_data::dma_def_for(
+                &xml,
+                path.parent(),
+                &mut dma_tables,
+            );
             match stm32_pin_data::convert_xml_with_af(&xml, af.as_deref()) {
                 Ok(chips) => {
                     for chip in chips {
@@ -801,6 +816,7 @@ impl AppIde {
                             continue;
                         }
                         let mut def = chip.form.to_definition();
+                        def.dma = dma.clone();
                         // F4's real ceiling is per-chip (F401 84 … F429 180) —
                         // override the form's F411-class default.
                         if def.family == "stm32f4" {

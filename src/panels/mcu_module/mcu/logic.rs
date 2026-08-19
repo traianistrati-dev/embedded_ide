@@ -90,6 +90,7 @@ impl Mcu {
             // Edge-packaged by default; a ball-grid chip fills this in
             // afterwards (see `McuDefinition::build_mcu`).
             grid: None,
+            dma: None,
             selected_pin: None,
             pin_search: String::new(),
             show_info: None,

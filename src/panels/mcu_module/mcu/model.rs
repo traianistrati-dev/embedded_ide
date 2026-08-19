@@ -218,6 +218,11 @@ pub struct Mcu {
     /// in. So autowire, codegen, `mcu.config` persistence and jump-to-code work
     /// on a ball-grid chip without knowing it exists — only the LAYOUT differs.
     pub grid: Option<PinGrid>,
+    /// The chip's DMA channels, as the vendor database describes them — the
+    /// only way async codegen can name a channel on a family without a
+    /// hand-written table. `None` for a built-in chip or one imported before
+    /// this existed; see [`crate::panels::mcu_module::mcu_def::DmaDef`].
+    pub dma: Option<crate::panels::mcu_module::mcu_def::DmaDef>,
     /// Currently selected pin number (None = no pin selected)
     pub selected_pin: Option<usize>,
     /// Pins-toolbar search box (next to "Rotate"). Pins that match stay bright,

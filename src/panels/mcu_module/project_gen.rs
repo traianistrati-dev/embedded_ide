@@ -623,6 +623,36 @@ pub fn ensure_rtic_deps(
     )
 }
 
+/// `portable-atomic` with a critical-section backend, for the Cortex-M0 / M0+
+/// parts that have no atomic compare-and-swap instruction.
+///
+/// Without it an async project for an STM32C0/G0/L0/WL — anything on
+/// `thumbv6m-none-eabi` — fails to build in a DEPENDENCY, `static_cell`, with
+/// "compare_exchange requires atomic CAS but not available on this target":
+/// nothing in the generated code is wrong, and nothing in the generated code
+/// can be edited to fix it. The chip does have a critical section (the
+/// generated manifest already asks `cortex-m` for
+/// `critical-section-single-core`); `portable-atomic` just has to be told to
+/// use it, and it can only be told by a direct dependency.
+///
+/// M3 and up (`thumbv7m`, `thumbv7em`, `thumbv8m`) have CAS in hardware and
+/// must NOT get this — the feature would replace working instructions with
+/// interrupt masking.
+pub fn ensure_m0_atomics(
+    cargo_toml: &str,
+    needs_async: bool,
+    target: &str,
+    sources: &[&str],
+) -> String {
+    ensure_dep(
+        cargo_toml,
+        "portable-atomic",
+        needs_async && target.starts_with("thumbv6m"),
+        "portable-atomic = { version = \"1\", features = [\"critical-section\"] }",
+        sources,
+    )
+}
+
 pub fn ensure_async_deps(
     cargo_toml: &str,
     needs_async: bool,
@@ -2339,6 +2369,27 @@ fn f() {}
         // A [dependencies.foo] sub-table is included.
         let sub = format!("{base}\n[dependencies.serde]\nversion = \"1\"\n");
         assert_ne!(deps_fingerprint(&sub), f0, "sub-table lib detected");
+    }
+
+    /// An M0 async project needs `portable-atomic`; an M4 one must not have it.
+    #[test]
+    fn only_cortex_m0_gets_the_atomics_shim() {
+        let base = "[dependencies]
+";
+        let m0 = ensure_m0_atomics(base, true, "thumbv6m-none-eabi", &[]);
+        assert!(m0.contains("portable-atomic"), "{m0}");
+        assert!(m0.contains("critical-section"), "{m0}");
+        for t in [
+            "thumbv7m-none-eabi",
+            "thumbv7em-none-eabihf",
+            "riscv32imc-unknown-none-elf",
+        ] {
+            let other = ensure_m0_atomics(base, true, t, &[]);
+            assert!(!other.contains("portable-atomic"), "{t}: {other}");
+        }
+        // Not an async project: nothing added, and an earlier one is removed.
+        let off = ensure_m0_atomics(&m0, false, "thumbv6m-none-eabi", &[]);
+        assert!(!off.contains("portable-atomic"), "{off}");
     }
 
     #[test]

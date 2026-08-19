@@ -78,6 +78,9 @@ mod tests {
             display_name: m.name.clone(),
             family: family.into(),
             package: package.into(),
+            // Built-in chips keep using the hand-written family tables in
+            // `codegen::dma_map`; only imported ones carry vendor DMA data.
+            dma: None,
             cpu: cpu.into(),
             toolchain: m.toolchain.clone(),
             project,

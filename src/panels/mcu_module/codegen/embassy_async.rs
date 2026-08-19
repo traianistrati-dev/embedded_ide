@@ -351,7 +351,7 @@ const DMA_TODO: &str = "p.DMA_TX_TODO, p.DMA_RX_TODO, Irqs";
 /// have to agree and deriving them apart is how they drift.
 fn dma_args(
     alloc: &mut dma_map::DmaAllocator,
-    binds: &mut Vec<String>,
+    binds: &mut Vec<(String, String)>,
     bus: dma_map::Bus,
     n: u8,
     label: &str,
@@ -373,12 +373,12 @@ fn dma_args(
             ),
         );
     };
+    // Kept as a PAIR, not a finished line: two channels can share one
+    // interrupt (STM32G0's `DMA1_Channel2_3`), and `bind_interrupts!` wants
+    // those as two handlers on one key, not the key twice. Only
+    // `dma_irqs_block` sees them all, so only it can group them.
     for c in [&tx, &rx] {
-        binds.push(format!(
-            "    {} => embassy_stm32::dma::InterruptHandler<peripherals::{}>;
-",
-            c.irq, c.peri
-        ));
+        binds.push((c.irq.clone(), c.peri.clone()));
     }
     // Resolved — no note. A TODO telling the user to do work already done is
     // worse than none: it makes correct output look unfinished.
@@ -392,7 +392,11 @@ fn dma_args(
 /// interrupts and both DMA channels' — and the channels are chosen at this call
 /// site. `i2c_instances` are the I2C peripherals whose event/error interrupts
 /// belong in the same struct.
-fn dma_irqs_block(i2c_instances: &[u8], usart_instances: &[u8], binds: &[String]) -> String {
+fn dma_irqs_block(
+    i2c_instances: &[u8],
+    usart_instances: &[u8],
+    binds: &[(String, String)],
+) -> String {
     // The header only asks for work when there IS work: with every channel
     // resolved (see `dma_map`) the block is complete as generated.
     let head = if binds.is_empty() {
@@ -423,8 +427,31 @@ bind_interrupts!(struct Irqs {
 "
         ));
     }
-    for line in binds {
-        b.push_str(line);
+    // One line per INTERRUPT, listing every channel it serves. On a chip with
+    // a vector per channel this is the same output as before; on STM32G0 and
+    // friends, where `DMA1_Channel2_3` covers two, it is the difference between
+    // valid code and a duplicate key the macro rejects.
+    let mut by_irq: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (irq, peri) in binds {
+        match by_irq.iter_mut().find(|(k, _)| *k == irq.as_str()) {
+            Some((_, ps)) => {
+                if !ps.contains(&peri.as_str()) {
+                    ps.push(peri);
+                }
+            }
+            None => by_irq.push((irq, vec![peri])),
+        }
+    }
+    for (irq, peris) in &by_irq {
+        let handlers: Vec<String> = peris
+            .iter()
+            .map(|p| format!("embassy_stm32::dma::InterruptHandler<peripherals::{p}>"))
+            .collect();
+        b.push_str(&format!(
+            "    {irq} => {};
+",
+            handlers.join(", ")
+        ));
     }
     for n in usart_instances {
         // On DMA the USART's own interrupt joins the channels' in one struct,
@@ -444,6 +471,7 @@ bind_interrupts!(struct Irqs {
 
 pub fn async_peripherals(
     family: &str,
+    dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
     pins: &[&Pin],
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
@@ -458,8 +486,8 @@ pub fn async_peripherals(
     // `Irqs` struct as the channels', because `I2c::new` takes one value.
     let mut dma_i2c_instances: Vec<u8> = Vec::new();
     let mut dma_usart_instances: Vec<u8> = Vec::new();
-    let mut dma_binds: Vec<String> = Vec::new();
-    let mut alloc = dma_map::DmaAllocator::new(family);
+    let mut dma_binds: Vec<(String, String)> = Vec::new();
+    let mut alloc = dma_map::DmaAllocator::for_chip(family, dma);
 
     for (n, tx, rx) in usart_wires(pins) {
         consumed.push(tx.clone());
@@ -1047,6 +1075,7 @@ mod usart_mode_tests {
             [(1u8, cfg(UsartMode::Dma))].into_iter().collect();
         let out = async_peripherals(
             "stm32f4",
+            None,
             &refs,
             &usart,
             &Default::default(),
@@ -1071,6 +1100,7 @@ mod usart_mode_tests {
         // harvesting.
         let bare = async_peripherals(
             "stm32l4",
+            None,
             &refs,
             &usart,
             &Default::default(),
@@ -1099,6 +1129,7 @@ mod usart_mode_tests {
             [(1u8, cfg(UsartMode::Buffered))].into_iter().collect();
         let out = async_peripherals(
             "stm32f4",
+            None,
             &refs,
             &usart,
             &Default::default(),
