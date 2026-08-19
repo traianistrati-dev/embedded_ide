@@ -456,7 +456,7 @@ mod tests {
             return;
         }
         let mut cache = std::collections::HashMap::new();
-        let (mut total, mut with, mut mux, mut classic) = (0, 0, 0, 0);
+        let (mut total, mut with, mut mux, mut classic, mut routed) = (0, 0, 0, 0, 0);
         let mut example: Option<(String, crate::panels::mcu_module::mcu_def::DmaDef)> = None;
         for entry in std::fs::read_dir(db).expect("read db").flatten() {
             let path = entry.path();
@@ -480,14 +480,22 @@ mod tests {
                 if d.mux {
                     mux += 1
                 } else {
-                    classic += 1
+                    classic += 1;
+                    // A fixed-mapping part is only unblocked if its table
+                    // actually names the buses codegen can put on DMA.
+                    let has = |r: &str| d.requests.iter().any(|(n, _)| n == r);
+                    if has("USART1_TX") && has("SPI1_TX") && has("I2C1_TX") {
+                        routed += 1;
+                    }
                 }
                 if name.starts_with("STM32G4") && example.is_none() {
                     example = Some((name, d));
                 }
             }
         }
-        println!("{with}/{total} parts carry DMA data - {mux} muxed, {classic} classic");
+        println!(
+            "{with}/{total} parts carry DMA data - {mux} muxed, {classic} classic ({routed} of the classic ones route USART1+SPI1+I2C1)"
+        );
         if let Some((name, d)) = example {
             println!(
                 "{name}: mux={} {} channels, first {:?}",

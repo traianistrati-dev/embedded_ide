@@ -584,9 +584,14 @@ fn native_token(sig: &str) -> Option<String> {
 }
 
 /// Strip the extra tags STM32 pin names carry (`PC13-TAMPER-RTC` → `PC13`,
-/// `PA0-WKUP` → `PA0`), but leave non-port names (`VBAT`, `NRST`) untouched.
+/// `PA0-WKUP` → `PA0`, `PB3 (JTDO-TRACESWO)` → `PB3`), but leave non-port names
+/// (`VBAT`, `NRST`) untouched.
+///
+/// The parenthesised form is the STM32Cube database's; the dashed one is the
+/// open-pin-data repo's. A pin whose tag survived became `p.PB3 (JTDO-TRACESWO)`
+/// in the generated `main.rs` — code no compiler will accept.
 fn clean_pin_name(raw: &str) -> String {
-    let head = raw.split('-').next().unwrap_or(raw);
+    let head = raw.split(['-', ' ', '(']).next().unwrap_or(raw);
     let b = head.as_bytes();
     let looks_like_port = b.len() >= 3
         && b[0] == b'P'
@@ -1317,6 +1322,10 @@ mod tests {
     #[test]
     fn helpers_behave() {
         assert_eq!(clean_pin_name("PC13-TAMPER-RTC"), "PC13");
+        // The STM32Cube database's spelling of the same idea.
+        assert_eq!(clean_pin_name("PB3 (JTDO-TRACESWO)"), "PB3");
+        assert_eq!(clean_pin_name("PB4 (NJTRST)"), "PB4");
+        assert_eq!(clean_pin_name("PA13 (JTMS-SWDIO)"), "PA13");
         assert_eq!(clean_pin_name("PA0-WKUP"), "PA0");
         assert_eq!(clean_pin_name("VBAT"), "VBAT");
         assert_eq!(clean_pin_name("NRST"), "NRST");
