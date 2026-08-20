@@ -321,9 +321,10 @@ pub(super) fn gen_parts(
     if has_adc {
         use_items.push("adc".into());
     }
-    if has_timer {
-        use_items.push("timer::Timer".into());
-    }
+    // NOT `timer::Timer`: the PWM block below is a worked example in comments,
+    // so nothing in the generated code uses it and the import would be the one
+    // warning a fresh PWM project always had. The example spells out its own
+    // `use`, remap type-state included.
     if has_usb {
         use_items.push("usb::{Peripheral, UsbBus}".into());
     }
@@ -411,7 +412,10 @@ pub(super) fn gen_parts(
                 PinFunction::GpioInput
                 | PinFunction::GpioOutput
                 | PinFunction::GpioAnalog
-                | PinFunction::AdcChannel { .. } => {
+                | PinFunction::AdcChannel { .. }
+                // A PWM pad waits for the `pwm_hz` call the block below shows
+                // commented out — the same "waiting for your code" case.
+                | PinFunction::TimerPwm { .. } => {
                     "    #[allow(unused_mut, unused_variables)]\n"
                 }
                 _ => "",
@@ -670,9 +674,102 @@ pub(super) fn gen_parts(
     if has_timer {
         header!();
         fn_calls.push_str("    // ── Timers / PWM ──\n");
-        fn_calls.push_str("    // let pwm = Timer::tim2(dp.TIM2, &clocks)\n");
+        // One block per timer actually wired. The old code printed ONE fixed
+        // line — `Timer::tim2(...).pwm_hz::<Tim2NoRemap, _, _>((pa0, pa1), …)`
+        // — whatever the user had wired, so it named a timer they might not be
+        // using and two bindings that need not exist. Copying it did not
+        // compile; every part of it is derivable, so now it is derived.
+        let mut timers: BTreeMap<u8, Vec<(u8, String)>> = BTreeMap::new();
+        for (p, meta) in &configured {
+            if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
+                timers
+                    .entry(timer)
+                    .or_default()
+                    .push((channel, binding_of(p, meta)));
+            }
+        }
+        for (tim, mut chans) in timers {
+            chans.sort_by_key(|(c, _)| *c);
+            let pads: Vec<(u8, &str)> = configured
+                .iter()
+                .filter_map(|(p, _)| match p.selected_function {
+                    PinFunction::TimerPwm { timer, channel } if timer == tim => {
+                        Some((channel, p.name.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let list = chans
+                .iter()
+                .map(|(c, _)| format!("CH{c}"))
+                .collect::<Vec<_>>()
+                .join("+");
+            let Some(remap) = pwm_remap(tim, &pads) else {
+                fn_calls.push_str(&format!(
+                    "    // TIM{tim} {list}: no PWM example — these pads are not one of the\n    \
+                     // remap sets stm32f1xx-hal implements for this timer.\n"
+                ));
+                continue;
+            };
+            // A single channel is NOT a 1-tuple: the HAL's `Pins` impl for one
+            // pin is `(P1)`, i.e. the pin itself.
+            let (pins_expr, handles) = if chans.len() == 1 {
+                (
+                    chans[0].1.clone(),
+                    format!("mut ch{}", chans[0].0),
+                )
+            } else {
+                (
+                    format!(
+                        "({})",
+                        chans
+                            .iter()
+                            .map(|(_, b)| b.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    format!(
+                        "({})",
+                        chans
+                            .iter()
+                            .map(|(c, _)| format!("mut ch{c}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            };
+            // Built line by line: a `\`-continued literal keeps its source
+            // indentation once rustfmt joins it, and that indentation would
+            // land in the user's file.
+            let mut l: Vec<String> = vec![
+                format!("    // TIM{tim} {list}. `pwm_hz` takes the pins BY VALUE, and the remap"),
+                "    // type-state is what decides which pads the timer drives:".into(),
+                "    //".into(),
+                format!("    //     use stm32f1xx_hal::timer::{{{remap}, Timer}};"),
+                "    //".into(),
+                format!("    //     let {handles} = Timer::new(dp.TIM{tim}, &clocks)"),
+                format!(
+                    "    //         .pwm_hz::<{remap}, _, _>({pins_expr}, &mut afio.mapr, 1.kHz())"
+                ),
+                "    //         .split();".into(),
+            ];
+            // Every channel, not just the first: a reader who pastes this
+            // should get a clean build, and half a demonstrated timer would
+            // leave the other handles unused.
+            for (i, (c, _)) in chans.iter().enumerate() {
+                l.push(format!("    //     ch{c}.set_duty(ch{c}.get_max_duty() / 2);"));
+                l.push(if i == 0 {
+                    format!("    //     ch{c}.enable(); // channels start disabled")
+                } else {
+                    format!("    //     ch{c}.enable();")
+                });
+            }
+            fn_calls.push_str(&l.join("\n"));
+            fn_calls.push('\n');
+        }
         fn_calls.push_str(
-            "    //     .pwm_hz::<Tim2NoRemap, _, _>((pa0, pa1), &mut afio.mapr, 1.kHz());\n",
+            "    // NOTE: the Virtual Module's frequency and per-channel duty are not\n    \
+             // applied here — the F1 backend does not generate the PWM itself yet.\n",
         );
     }
 
@@ -2698,6 +2795,56 @@ fn is_comment_expr(expr: &str) -> bool {
     expr.trim_start().starts_with("//")
 }
 
+/// The remap type-state `pwm_hz` needs for TIM`timer` driving `pads`, or `None`
+/// when that pin set is not one the HAL implements.
+///
+/// Transcribed from `remap!` in `stm32f1xx-hal`'s `timer/pins.rs`: each row is
+/// `(type-state, [CH1, CH2, CH3, CH4])`. The remap is a TYPE, and it is what
+/// programs the AFIO bits, so naming the wrong one drives the wrong pads — the
+/// same trap `spi_remap_ty` documents for SPI1.
+///
+/// TIM4's rows exist only behind the HAL's `medium` feature; they are listed
+/// here because a chip that has TIM4 is a chip built with that feature.
+fn pwm_remap(timer: u8, pads: &[(u8, &str)]) -> Option<&'static str> {
+    let rows: &[(&str, [&str; 4])] = match timer {
+        1 => &[
+            ("Tim1NoRemap", ["PA8", "PA9", "PA10", "PA11"]),
+            ("Tim1FullRemap", ["PE9", "PE11", "PE13", "PE14"]),
+        ],
+        2 => &[
+            ("Tim2NoRemap", ["PA0", "PA1", "PA2", "PA3"]),
+            ("Tim2PartialRemap1", ["PA15", "PB3", "PA2", "PA3"]),
+            ("Tim2PartialRemap2", ["PA0", "PA1", "PB10", "PB11"]),
+            ("Tim2FullRemap", ["PA15", "PB3", "PB10", "PB11"]),
+        ],
+        3 => &[
+            ("Tim3NoRemap", ["PA6", "PA7", "PB0", "PB1"]),
+            ("Tim3PartialRemap", ["PB4", "PB5", "PB0", "PB1"]),
+            ("Tim3FullRemap", ["PC6", "PC7", "PC8", "PC9"]),
+        ],
+        4 => &[
+            ("Tim4NoRemap", ["PB6", "PB7", "PB8", "PB9"]),
+            ("Tim4Remap", ["PD12", "PD13", "PD14", "PD15"]),
+        ],
+        _ => return None,
+    };
+    if pads.is_empty() {
+        return None;
+    }
+    // The FIRST row every wired pad agrees with. Several can match when the
+    // wiring only uses channels the rows share (TIM2 CH3/CH4 are the same pads
+    // in NoRemap and PartialRemap1), and then the difference is invisible to
+    // the timer — the AFIO bits still differ, so the earliest row wins for
+    // being the one that leaves the other channels on their default pads.
+    rows.iter()
+        .find(|(_, pins)| {
+            pads.iter().all(|(ch, name)| {
+                (1..=4).contains(ch) && pins[usize::from(*ch) - 1].eq_ignore_ascii_case(name)
+            })
+        })
+        .map(|(ty, _)| *ty)
+}
+
 /// Returns `true` for pins that are driven (output / alternate-output).
 /// These get a `&mut` prefix so the binding is immediately usable as a
 /// mutable reference without a later `&mut var` at each call site.
@@ -2755,7 +2902,6 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
     matches!(
         func,
         PinFunction::GpioOutput
-            | PinFunction::TimerPwm { .. }
           //  | PinFunction::UsartTx(_)
             | PinFunction::UsartCk(_)
             | PinFunction::UsartRts(_)
@@ -2766,6 +2912,7 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
            // | PinFunction::I2cSda(_)
             | PinFunction::Mco
           //cd  | PinFunction::CanTx
+          //cd  | PinFunction::TimerPwm { .. }
     )
 }
 
@@ -3162,6 +3309,41 @@ mod blocking_dma_tests {
             2,
             "{main_rs}"
         );
+    }
+
+    /// The remap table is transcribed from `remap!` in the HAL's
+    /// `timer/pins.rs`, and it is what the generated example turns on: the
+    /// type-state programs the AFIO bits, so the wrong one drives the wrong
+    /// pads. Not derivable — pin it.
+    #[test]
+    fn the_pwm_remap_is_the_one_the_hal_implements() {
+        // The default sets.
+        assert_eq!(pwm_remap(2, &[(1, "PA0")]), Some("Tim2NoRemap"));
+        assert_eq!(pwm_remap(3, &[(1, "PA6"), (2, "PA7")]), Some("Tim3NoRemap"));
+        assert_eq!(pwm_remap(1, &[(4, "PA11")]), Some("Tim1NoRemap"));
+        assert_eq!(pwm_remap(4, &[(3, "PB8")]), Some("Tim4NoRemap"));
+
+        // A remapped set is a DIFFERENT type-state, chosen by the pads.
+        assert_eq!(pwm_remap(3, &[(1, "PB4")]), Some("Tim3PartialRemap"));
+        assert_eq!(pwm_remap(3, &[(1, "PC6"), (4, "PC9")]), Some("Tim3FullRemap"));
+        assert_eq!(pwm_remap(2, &[(1, "PA15"), (3, "PB10")]), Some("Tim2FullRemap"));
+        // CH3/CH4 alone are the same pads in NoRemap and PartialRemap1, and the
+        // earliest row wins — it leaves CH1/CH2 on their default pads.
+        assert_eq!(pwm_remap(2, &[(3, "PA2"), (4, "PA3")]), Some("Tim2NoRemap"));
+
+        // CH1 on its default pad with CH3 remapped is a row of its own — the
+        // four TIM2 rows are combinations, not a NoRemap/FullRemap pair.
+        assert_eq!(
+            pwm_remap(2, &[(1, "PA0"), (3, "PB10")]),
+            Some("Tim2PartialRemap2")
+        );
+
+        // A wiring that mixes two sets has no answer — PA0 is CH1 only in
+        // NoRemap/PartialRemap2, PB3 is CH2 only in PartialRemap1/FullRemap,
+        // and no row holds both. So does a timer the HAL has no remap for.
+        assert_eq!(pwm_remap(2, &[(1, "PA0"), (2, "PB3")]), None);
+        assert_eq!(pwm_remap(5, &[(1, "PA0")]), None);
+        assert_eq!(pwm_remap(2, &[]), None);
     }
 
     /// A GPIO pin is declared for the reader's loop, which a fresh project does

@@ -1187,6 +1187,11 @@ mod emit_for_manual_compile {
             // unused until the reader writes a read, exactly like a GPIO.
             ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
             ("PA1", PinFunction::GpioAnalog),
+            // Two channels of ONE timer — TIM2 CH3/CH4 on their default pads.
+            // PA0/PA1 (CH1/CH2) are taken by the ADC above, which is exactly the
+            // case the hardcoded `(pa0, pa1)` comment used to claim anyway.
+            ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 }),
+            ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 }),
         ] {
             if usb_pads.is_some()
                 && matches!(func, PinFunction::CanTx | PinFunction::CanRx)
