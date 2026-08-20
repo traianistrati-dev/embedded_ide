@@ -13,8 +13,9 @@ pub mod persist;
 
 pub use model::{
     ApiStyle, AsyncBusMode, CanModuleConfig, Connection, I2cModuleConfig, ModuleConfig, ModuleKind,
-    ModuleSignal, Parity, SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow,
-    UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
+    ModuleSignal, Parity, PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+    SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode,
+    UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
 };
 
 use std::collections::BTreeMap;

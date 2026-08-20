@@ -1836,11 +1836,25 @@ mod emit_for_manual_compile {
                         c.flow = crate::panels::mcu_module::modules::UsartFlow::CtsRts;
                     }
                 }
-                // A non-default frequency and duty, so the generated consts are
-                // exercised rather than agreeing with the template by accident.
+                // A non-default frequency, duty and output shape, so the
+                // generated consts and the `low_level` calls are exercised
+                // rather than agreeing with the template by accident. CH2 is
+                // left alone on purpose: the file must carry both shapes.
                 ModuleConfig::Timer(c) => {
+                    use crate::panels::mcu_module::modules::{
+                        PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+                    };
                     c.freq_hz = 20_000;
                     c.set_duty_x100(1, 7_500);
+                    c.counting = PwmCounting::CenterBothInterrupts;
+                    c.set_channel(
+                        1,
+                        PwmChannelConfig {
+                            output: PwmOutput::OpenDrain,
+                            polarity: PwmPolarity::ActiveLow,
+                            mode: PwmMode::Mode2,
+                        },
+                    );
                 }
                 _ => {}
             }

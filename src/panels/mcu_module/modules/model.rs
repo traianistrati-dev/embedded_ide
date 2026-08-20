@@ -921,6 +921,13 @@ pub struct TimerModuleConfig {
     /// Folded into it by [`Self::migrate_duty`] on load and never written back.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub duty: std::collections::BTreeMap<u8, u8>,
+    /// How the counter runs — one setting for the whole timer.
+    #[serde(default)]
+    pub counting: PwmCounting,
+    /// Per-channel output shape. Absent = every default, which is also the
+    /// timer's reset state.
+    #[serde(default)]
+    pub channels: std::collections::BTreeMap<u8, PwmChannelConfig>,
     pub rx_model: String,
     pub tx_model: String,
     /// User label appended to the generated `_pwmN` handle (e.g. `_pwm3_servo`).
@@ -936,6 +943,8 @@ impl TimerModuleConfig {
             freq_hz: 1_000,
             duty_x100: std::collections::BTreeMap::new(),
             duty: std::collections::BTreeMap::new(),
+            counting: PwmCounting::default(),
+            channels: std::collections::BTreeMap::new(),
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
@@ -961,6 +970,18 @@ impl TimerModuleConfig {
         self.duty_x100.insert(channel, x100.min(10_000));
     }
 
+    /// The output shape of `channel`, all defaults when untouched.
+    pub fn channel_of(&self, channel: u8) -> PwmChannelConfig {
+        self.channels.get(&channel).copied().unwrap_or_default()
+    }
+
+    /// Record `channel`'s output shape. Only called when something actually
+    /// changed, so merely opening the panel does not dirty the project with a
+    /// row of defaults.
+    pub fn set_channel(&mut self, channel: u8, shape: PwmChannelConfig) {
+        self.channels.insert(channel, shape);
+    }
+
     /// Fold a pre-hundredths whole-percent map into [`Self::duty_x100`].
     ///
     /// Idempotent, and it never overwrites a value the new field already
@@ -973,6 +994,147 @@ impl TimerModuleConfig {
             }
         }
     }
+}
+
+/// How the timer counts, CubeMX's "Counter Mode" and embassy's `CountingMode`.
+///
+/// One setting for the whole timer, because there is one counter. Center-
+/// aligned is what motor drive wants — the pulse is centred in the period, so
+/// the harmonics of several channels do not line up — and the three centred
+/// variants differ only in when the compare interrupt fires, which is why they
+/// carry the interrupt in their name rather than in a separate field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PwmCounting {
+    #[default]
+    EdgeUp,
+    EdgeDown,
+    CenterUpInterrupts,
+    CenterDownInterrupts,
+    CenterBothInterrupts,
+}
+
+impl PwmCounting {
+    pub const ALL: [Self; 5] = [
+        Self::EdgeUp,
+        Self::EdgeDown,
+        Self::CenterUpInterrupts,
+        Self::CenterDownInterrupts,
+        Self::CenterBothInterrupts,
+    ];
+
+    /// The `embassy_stm32::timer::low_level::CountingMode` variant.
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::EdgeUp => "EdgeAlignedUp",
+            Self::EdgeDown => "EdgeAlignedDown",
+            Self::CenterUpInterrupts => "CenterAlignedUpInterrupts",
+            Self::CenterDownInterrupts => "CenterAlignedDownInterrupts",
+            Self::CenterBothInterrupts => "CenterAlignedBothInterrupts",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EdgeUp => "Edge, up",
+            Self::EdgeDown => "Edge, down",
+            Self::CenterUpInterrupts => "Center, IRQ up",
+            Self::CenterDownInterrupts => "Center, IRQ down",
+            Self::CenterBothInterrupts => "Center, IRQ both",
+        }
+    }
+}
+
+/// How the channel's pad drives the line — `embassy_stm32::gpio::OutputType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PwmOutput {
+    #[default]
+    PushPull,
+    OpenDrain,
+}
+
+impl PwmOutput {
+    pub const ALL: [Self; 2] = [Self::PushPull, Self::OpenDrain];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::PushPull => "PushPull",
+            Self::OpenDrain => "OpenDrain",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PushPull => "Push-pull",
+            Self::OpenDrain => "Open-drain",
+        }
+    }
+}
+
+/// Which level counts as "on" — `OutputPolarity`. The one to flip for a driver
+/// stage that sinks current, where 100 % duty has to hold the pin LOW.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PwmPolarity {
+    #[default]
+    ActiveHigh,
+    ActiveLow,
+}
+
+impl PwmPolarity {
+    pub const ALL: [Self; 2] = [Self::ActiveHigh, Self::ActiveLow];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::ActiveHigh => "ActiveHigh",
+            Self::ActiveLow => "ActiveLow",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ActiveHigh => "Active high",
+            Self::ActiveLow => "Active low",
+        }
+    }
+}
+
+/// PWM mode 1 or 2 — `OutputCompareMode`. Mode 2 is mode 1 with the comparison
+/// reversed, which is a second way to reach the inversion [`PwmPolarity`] also
+/// offers; CubeMX exposes both, and so does this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PwmMode {
+    #[default]
+    Mode1,
+    Mode2,
+}
+
+impl PwmMode {
+    pub const ALL: [Self; 2] = [Self::Mode1, Self::Mode2];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Mode1 => "PwmMode1",
+            Self::Mode2 => "PwmMode2",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mode1 => "PWM mode 1",
+            Self::Mode2 => "PWM mode 2",
+        }
+    }
+}
+
+/// The output shape of ONE channel. All three fields default to the timer's
+/// reset state, so a channel nobody touched generates no extra line at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PwmChannelConfig {
+    #[serde(default)]
+    pub output: PwmOutput,
+    #[serde(default)]
+    pub polarity: PwmPolarity,
+    #[serde(default)]
+    pub mode: PwmMode,
 }
 
 /// CAN device settings + data model.

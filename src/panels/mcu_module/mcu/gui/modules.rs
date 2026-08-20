@@ -10,8 +10,9 @@ use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits,
-    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, PwmCounting, PwmMode,
+    PwmOutput, PwmPolarity, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
+    VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -1564,6 +1565,25 @@ pub fn module_config_ui(
                         }
                     });
                     ui.end_row();
+                    // The counter belongs to the TIMER, like the frequency —
+                    // one counter, one shape. embassy takes it in
+                    // `SimplePwm::new`; the note below says why the other
+                    // runtimes do not show it.
+                    if is_async {
+                        ui.label("Counter");
+                        egui::ComboBox::from_id_salt("pwm_counting")
+                            .selected_text(cfg.counting.label())
+                            .show_ui(ui, |ui| {
+                                for m in PwmCounting::ALL {
+                                    ui.selectable_value(&mut cfg.counting, m, m.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Center-aligned is what motor drive wants: the pulse sits in the                                  middle of the period, so several channels do not all switch at                                  the same instant. The three centred modes differ only in when                                  the compare interrupt fires.",
+                            );
+                        ui.end_row();
+                    }
                     if conn_rows.is_empty() {
                         ui.label("Channels");
                         ui.label(
@@ -1604,6 +1624,53 @@ pub fn module_config_ui(
                             cfg.set_duty_x100(ch, (pct * 100.0).round().max(0.0) as u16);
                         }
                         ui.end_row();
+
+                        if is_async {
+                            // Edited on a COPY and written back only on a real
+                            // change, so opening the panel does not fill the
+                            // config with rows of defaults.
+                            let before = cfg.channel_of(ch);
+                            let mut shape = before;
+                            ui.label(format!("{sig} output"));
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt(("pwm_drive", ch))
+                                    .width(88.0)
+                                    .selected_text(shape.output.label())
+                                    .show_ui(ui, |ui| {
+                                        for v in PwmOutput::ALL {
+                                            ui.selectable_value(&mut shape.output, v, v.label());
+                                        }
+                                    });
+                                egui::ComboBox::from_id_salt(("pwm_pol", ch))
+                                    .width(88.0)
+                                    .selected_text(shape.polarity.label())
+                                    .show_ui(ui, |ui| {
+                                        for v in PwmPolarity::ALL {
+                                            ui.selectable_value(&mut shape.polarity, v, v.label());
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Active low inverts the pin: 100 % duty then HOLDS IT                                          LOW, which is what a current-sinking driver stage wants.",
+                                    );
+                                egui::ComboBox::from_id_salt(("pwm_mode", ch))
+                                    .width(96.0)
+                                    .selected_text(shape.mode.label())
+                                    .show_ui(ui, |ui| {
+                                        for v in PwmMode::ALL {
+                                            ui.selectable_value(&mut shape.mode, v, v.label());
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Mode 2 reverses the comparison — a second route to the                                          same inversion the polarity offers. CubeMX exposes both.",
+                                    );
+                            });
+                            if shape != before {
+                                cfg.set_channel(ch, shape);
+                            }
+                            ui.end_row();
+                        }
                     }
                     // Channels are not added from this panel: the codegen
                     // derives them from the PIN functions, so the only way to
@@ -1628,6 +1695,23 @@ pub fn module_config_ui(
                             ))
                             .size(10.5)
                             .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                    // Say why the output controls are absent instead of just
+                    // dropping them: the reason differs per backend, and the
+                    // second one is worth knowing before wiring a pad.
+                    if !is_async {
+                        ui.label("");
+                        let why = if family == "stm32f1" {
+                            "counter mode, drive, polarity and PWM mode need the Async runtime                              — stm32f1xx-hal's `pwm_hz` cannot set them"
+                        } else {
+                            "this runtime emits no PWM code at all — only Async generates it                              (System tab)"
+                        };
+                        ui.label(
+                            egui::RichText::new(why)
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(140)),
                         );
                         ui.end_row();
                     }

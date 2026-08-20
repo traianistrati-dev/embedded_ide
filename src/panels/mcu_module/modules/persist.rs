@@ -117,6 +117,45 @@ mod tests {
         assert_eq!(cfg.duty_x100_of(3), 7_500);
     }
 
+    /// The per-channel output shape and the counter mode survive the
+    /// `@modules` round-trip — they live in the saved project, not in the UI.
+    #[test]
+    fn output_settings_round_trip() {
+        use crate::panels::mcu_module::modules::{
+            PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+        };
+
+        let mut cfg = TimerModuleConfig::new(1);
+        cfg.counting = PwmCounting::CenterUpInterrupts;
+        cfg.set_channel(
+            2,
+            PwmChannelConfig {
+                output: PwmOutput::OpenDrain,
+                polarity: PwmPolarity::ActiveLow,
+                mode: PwmMode::Mode2,
+            },
+        );
+        let m = VirtualModule {
+            id: "_pwm_1".into(),
+            kind: ModuleKind::GenericInterfaceTimer,
+            name: "PWM1".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Timer(cfg),
+            connections: vec![],
+        };
+
+        let back = parse_from_source(&marker_line(&[m]).unwrap());
+        let ModuleConfig::Timer(cfg) = &back[0].config else {
+            panic!("expected a timer module");
+        };
+        assert_eq!(cfg.counting, PwmCounting::CenterUpInterrupts);
+        assert_eq!(cfg.channel_of(2).output, PwmOutput::OpenDrain);
+        assert_eq!(cfg.channel_of(2).polarity, PwmPolarity::ActiveLow);
+        assert_eq!(cfg.channel_of(2).mode, PwmMode::Mode2);
+        // A channel nobody touched reads as every default.
+        assert_eq!(cfg.channel_of(1), PwmChannelConfig::default());
+    }
+
     /// A value the new field already carries wins: a half-migrated config
     /// cannot be dragged back to the coarser number.
     #[test]

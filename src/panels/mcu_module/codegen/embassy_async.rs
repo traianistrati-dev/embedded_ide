@@ -22,8 +22,8 @@ use super::nvic;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::modules::{
-    AsyncBusMode, I2cModuleConfig, Parity, SpiModuleConfig, StopBits, TimerModuleConfig,
-    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, Parity, PwmMode, PwmPolarity, SpiModuleConfig, StopBits,
+    TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -984,14 +984,14 @@ pub fn async_peripherals(
     // canvas. No interrupts and no DMA: `SimplePwm` writes the compare
     // registers directly, so there is nothing to bind.
     for (n, chans) in pwm_wires(pins) {
-        let cfg = timer.get(&n);
-        let sfx = cfg.map(|c| label_sfx(&c.custom_label)).unwrap_or_default();
-        let handle = format!("_pwm{n}{sfx}");
-        let freq = cfg.map(|c| c.freq_hz).unwrap_or(1_000);
-        let with_duty: Vec<(u8, u16)> = chans
-            .iter()
-            .map(|(ch, _)| (*ch, cfg.map(|c| c.duty_x100_of(*ch)).unwrap_or(0)))
-            .collect();
+        // A timer with pads but no module entry generates at the module's own
+        // defaults, so the defaults live in exactly one place.
+        let cfg = timer
+            .get(&n)
+            .cloned()
+            .unwrap_or_else(|| TimerModuleConfig::new(n));
+        let handle = format!("_pwm{n}{}", label_sfx(&cfg.custom_label));
+        let wired: Vec<u8> = chans.iter().map(|(ch, _)| *ch).collect();
         let args: String = chans.iter().map(|(_, pin)| format!(", p.{pin}")).collect();
         for (_, pin) in &chans {
             consumed.push(pin.clone());
@@ -1002,7 +1002,7 @@ pub fn async_peripherals(
         ));
         files.push((
             format!("pwm{n}.rs"),
-            pwm_config_file(n, freq, &with_duty, &handle),
+            pwm_config_file(n, &cfg, &wired, &handle),
         ));
     }
 
@@ -1636,7 +1636,7 @@ const FREQ_HZ: u32 = {FREQ};
 // what each channel owns.
 use embassy_stm32::gpio::OutputType;
 use embassy_stm32::time::Hertz;
-use embassy_stm32::timer::low_level::CountingMode;
+{LOW_LEVEL_USE}
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::timer::{{CHANNEL_TYPES}TimerPin};
 use embassy_stm32::{peripherals, Peri};
@@ -1649,7 +1649,7 @@ pub fn init<'d>(
     let mut pwm = SimplePwm::new(
         tim,
 {CH_ARGS}        Hertz(FREQ_HZ),
-        CountingMode::EdgeAlignedUp,
+        CountingMode::{COUNTING},
     );
 {ENABLES}    pwm
 }
@@ -1666,47 +1666,83 @@ pub fn init<'d>(
 //     {HANDLE}.ch1().set_duty_cycle_fraction(1, 3);
 "#;
 
-/// Render [`ASYNC_PWM_TMPL`] for timer `n` with the channels `chans`
-/// (`(channel number, duty in hundredths of a percent)`, ascending) and the
-/// module's frequency.
-pub fn pwm_config_file(n: u8, freq_hz: u32, chans: &[(u8, u16)], handle: &str) -> String {
+/// Render [`ASYNC_PWM_TMPL`] for timer `n`: `chans` are the channel numbers
+/// wired on the canvas (ascending); everything else — frequency, duty, counting
+/// mode and each channel's output shape — comes from the module's config.
+pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, chans: &[u8], handle: &str) -> String {
     let mut duty_consts = String::new();
     let mut channel_types = String::new();
     let mut params = String::new();
     let mut ch_args = String::new();
     let mut enables = String::new();
+    // Only the `low_level` items the emitted code actually names — an unused
+    // import in a generated file is a warning the user cannot fix.
+    let mut low_level: Vec<&'static str> = vec!["CountingMode"];
     for ch in 1..=4u8 {
-        match chans.iter().find(|(c, _)| *c == ch) {
-            Some((_, duty)) => {
-                duty_consts.push_str(&format!(
-                    "const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)
-",
-                    duty_percent_str(*duty)
-                ));
-                channel_types.push_str(&format!("Ch{ch}, "));
-                params.push_str(&format!(
-                    "    ch{ch}: Peri<'d, impl TimerPin<peripherals::TIM{n}, Ch{ch}>>,
-"
-                ));
-                ch_args.push_str(&format!(
-                    "        Some(PwmPin::new(ch{ch}, OutputType::PushPull)),
-"
-                ));
-                enables.push_str(&format!(
-                    "    pwm.ch{ch}().enable();
-    pwm.ch{ch}().set_duty_cycle_fraction(DUTY_CH{ch}, 10_000);
-"
-                ));
-            }
+        if !chans.contains(&ch) {
             // A channel with no pin is still a slot in `SimplePwm::new`.
-            None => ch_args.push_str(
+            ch_args.push_str(
                 "        None,
 ",
-            ),
+            );
+            continue;
+        }
+        let duty = cfg.duty_x100_of(ch);
+        let out = cfg.channel_of(ch);
+        duty_consts.push_str(&format!(
+            "const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)
+",
+            duty_percent_str(duty)
+        ));
+        channel_types.push_str(&format!("Ch{ch}, "));
+        params.push_str(&format!(
+            "    ch{ch}: Peri<'d, impl TimerPin<peripherals::TIM{n}, Ch{ch}>>,
+"
+        ));
+        ch_args.push_str(&format!(
+            "        Some(PwmPin::new(ch{ch}, OutputType::{})),
+",
+            out.output.embassy()
+        ));
+        enables.push_str(&format!(
+            "    pwm.ch{ch}().enable();
+    pwm.ch{ch}().set_duty_cycle_fraction(DUTY_CH{ch}, 10_000);
+"
+        ));
+        // Only what DIFFERS from the timer's reset state gets a line, so a
+        // project that never opened these settings generates what it always did.
+        if out.polarity != PwmPolarity::default() {
+            low_level.push("OutputPolarity");
+            enables.push_str(&format!(
+                "    pwm.ch{ch}().set_polarity(OutputPolarity::{});
+",
+                out.polarity.embassy()
+            ));
+        }
+        if out.mode != PwmMode::default() {
+            low_level.push("OutputCompareMode");
+            enables.push_str(&format!(
+                "    pwm.ch{ch}().set_output_compare_mode(OutputCompareMode::{});
+",
+                out.mode.embassy()
+            ));
         }
     }
+    low_level.sort_unstable();
+    low_level.dedup();
+    let low_level_use = if low_level.len() == 1 {
+        format!("use embassy_stm32::timer::low_level::{};", low_level[0])
+    } else {
+        format!(
+            "use embassy_stm32::timer::low_level::{{{}}};",
+            low_level.join(", ")
+        )
+    };
+
     ASYNC_PWM_TMPL
-        .replace("{FREQ}", &freq_hz.to_string())
+        .replace("{FREQ}", &cfg.freq_hz.to_string())
+        .replace("{COUNTING}", cfg.counting.embassy())
+        .replace("{LOW_LEVEL_USE}", &low_level_use)
         .replace("{DUTY_CONSTS}", &duty_consts)
         .replace("{CHANNEL_TYPES}", &channel_types)
         .replace("{PARAMS}", &params)
@@ -3136,6 +3172,78 @@ mod pwm_tests {
             body.contains("pwm.ch1().set_duty_cycle_fraction(DUTY_CH1, 10_000);"),
             "{body}"
         );
+    }
+
+    /// Untouched settings generate exactly what they always did: the reset
+    /// state of the timer, and not one line explaining that it is the reset
+    /// state. Everything below is what a project pays for only if it asks.
+    #[test]
+    fn default_output_settings_add_nothing_to_the_file() {
+        let pins = [mk("PA6", 3, 1)];
+        let out = run(&pins, Default::default());
+        let (_, body) = &out.config_files[0];
+        assert!(body.contains("CountingMode::EdgeAlignedUp,"), "{body}");
+        assert!(
+            body.contains("Some(PwmPin::new(ch1, OutputType::PushPull)),"),
+            "{body}"
+        );
+        assert!(!body.contains("set_polarity"), "{body}");
+        assert!(!body.contains("set_output_compare_mode"), "{body}");
+        // One item, so no braces around the import.
+        assert!(
+            body.contains("use embassy_stm32::timer::low_level::CountingMode;"),
+            "{body}"
+        );
+    }
+
+    /// …and each of the four settings reaches the generated file, with the
+    /// `low_level` import growing to cover exactly what the code names.
+    #[test]
+    fn the_output_settings_reach_the_generated_file() {
+        use crate::panels::mcu_module::modules::{
+            PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity,
+        };
+
+        let pins = [mk("PA6", 3, 1), mk("PA7", 3, 2)];
+        let mut cfg = TimerModuleConfig::new(3);
+        cfg.counting = PwmCounting::CenterBothInterrupts;
+        cfg.set_channel(
+            1,
+            PwmChannelConfig {
+                output: PwmOutput::OpenDrain,
+                polarity: PwmPolarity::ActiveLow,
+                mode: PwmMode::Mode2,
+            },
+        );
+        let out = run(&pins, [(3u8, cfg)].into_iter().collect());
+        let (_, body) = &out.config_files[0];
+
+        assert!(
+            body.contains("CountingMode::CenterAlignedBothInterrupts,"),
+            "{body}"
+        );
+        assert!(
+            body.contains("Some(PwmPin::new(ch1, OutputType::OpenDrain)),"),
+            "{body}"
+        );
+        assert!(
+            body.contains("pwm.ch1().set_polarity(OutputPolarity::ActiveLow);"),
+            "{body}"
+        );
+        assert!(
+            body.contains("pwm.ch1().set_output_compare_mode(OutputCompareMode::PwmMode2);"),
+            "{body}"
+        );
+        assert!(
+            body.contains("low_level::{CountingMode, OutputCompareMode, OutputPolarity};"),
+            "{body}"
+        );
+        // CH2 was never touched, so it keeps the reset state and its silence.
+        assert!(
+            body.contains("Some(PwmPin::new(ch2, OutputType::PushPull)),"),
+            "{body}"
+        );
+        assert!(!body.contains("pwm.ch2().set_polarity"), "{body}");
     }
 
     /// The duty everybody needs first: a hobby servo at 1.5 ms of a 20 ms
