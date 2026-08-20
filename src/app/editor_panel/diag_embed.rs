@@ -137,6 +137,7 @@ impl AppIde {
         let mut flash_scan = false;
         let mut flash_go = false;
         let mut probe_flash_go = false;
+        let mut probe_flash_stop = false;
         // Snapshot of the tools proven missing by the startup self-check — the
         // tabs grey out the buttons that shell out to them. Cheap (a few &str)
         // and taken once per frame so no tab needs the mutex.
@@ -308,6 +309,7 @@ impl AppIde {
                     &mut profile_sample,
                     &self.probe_flash_state,
                     &mut probe_flash_go,
+                    &mut probe_flash_stop,
                     &missing_tools,
                 );
             });
@@ -565,6 +567,9 @@ impl AppIde {
             }
         }
         // Flash tab's probe-rs path (shared probe). `probe_scan` is consumed above.
+        if probe_flash_stop {
+            self.stop_probe_flash();
+        }
         if probe_flash_go {
             self.flash_probe_rs();
         }

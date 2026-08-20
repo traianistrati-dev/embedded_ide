@@ -43,6 +43,9 @@ pub fn show_dfu_tab(
     probe_scan_err: Option<&str>,
     probe_flash_state: &Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
     probe_flash_out: &mut bool,
+    // Set when the Flash button — which becomes "Stop Flash" while one runs —
+    // is clicked to abort it.
+    probe_flash_stop: &mut bool,
     // Which probe-rs session currently OWNS the probe ("Debug", "RTT", …), if
     // any. Only one process can hold it, so every flasher is blocked while one
     // runs — and the button says so instead of failing deep inside the tool.
@@ -150,6 +153,15 @@ pub fn show_dfu_tab(
         .then(|| super::needs_tool_hint("probe-rs"))
         .or_else(|| held("cargo flash"))
         .or_else(no_cfg)
+        // No auto-select on this path: `cargo flash` with an ambiguous probe
+        // doesn't error, it waits — so the choice is made here, up front.
+        .or_else(|| {
+            selected_probe.is_none().then(|| {
+                "pick a probe in the list — flashing does not auto-select, because with \
+                 several probes attached it would sit there waiting instead of failing"
+                    .to_owned()
+            })
+        })
         .or_else(busy_note)
         .or_else(|| {
             pf_state
@@ -253,8 +265,30 @@ pub fn show_dfu_tab(
                     toolchain,
                     SCAN_W,
                     combo_w,
+                    false, // no Auto here — see `allow_auto`
                     |ui| {
-                        if flash_button(
+                        // While it runs, the same button STOPS it. A flash that
+                        // hangs (an ambiguous probe, a target that won't halt)
+                        // otherwise leaves killing the IDE as the only way out.
+                        if pf_state.is_busy() {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} Stop Flash", ph::STOP_CIRCLE))
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(235, 120, 110)),
+                                    )
+                                    .min_size(egui::vec2(FLASH_W, ROW_H)),
+                                )
+                                .on_hover_text(
+                                    "Kill the running `cargo flash` (and its children, so the \
+                                     probe is released).",
+                                )
+                                .clicked()
+                            {
+                                *probe_flash_stop = true;
+                            }
+                        } else if flash_button(
                             ui,
                             "Flash (probe-rs)",
                             format!("{} Flash (probe-rs)", ph::LIGHTNING),

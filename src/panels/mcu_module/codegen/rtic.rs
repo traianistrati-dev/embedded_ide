@@ -25,7 +25,8 @@ use super::common::{GEN_BEGIN, GEN_END, pin_binding};
 use super::stm32::{Binding, GenParts, gen_parts};
 use crate::panels::mcu_module::clock::ClockConfig;
 use crate::panels::mcu_module::modules::{
-    CanModuleConfig, I2cModuleConfig, SpiModuleConfig, UsartModuleConfig, UsbModuleConfig,
+    CanModuleConfig, I2cModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig,
+    UsbModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::{Edge, Pin};
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -347,6 +348,7 @@ pub fn make_generated_section(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    timer: &BTreeMap<u8, TimerModuleConfig>,
     gpio_native: bool,
     custom_inits: &str,
 ) -> String {
@@ -359,6 +361,7 @@ pub fn make_generated_section(
         i2c,
         can,
         usb,
+        timer,
         gpio_native,
         custom_inits,
     ) else {
@@ -705,6 +708,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             true,
             "",
         );
@@ -740,6 +744,7 @@ mod tests {
                 "STM32F103",
                 &pins,
                 &ClockConfig::None,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
@@ -902,6 +907,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             true,
             "",
         );
@@ -940,6 +946,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             true,
             "",
         );
@@ -947,6 +954,7 @@ mod tests {
             "STM32F103",
             &pins,
             &ClockConfig::None,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -973,6 +981,7 @@ mod tests {
             "STM32F103",
             &pins,
             &ClockConfig::None,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),

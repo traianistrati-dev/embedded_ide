@@ -161,6 +161,8 @@ pub(super) fn show_diag_panel(
     // Flash tab's probe-rs path (shared probe): status + "Flash (probe-rs)" signal.
     probe_flash_state: &Arc<Mutex<crate::probe_flash::ProbeFlashState>>,
     probe_flash_go: &mut bool,
+    // Set when the Flash button (in its "Stop Flash" state) aborts a run.
+    probe_flash_stop: &mut bool,
     // Tools confirmed missing (startup self-check) — buttons that shell out to
     // one of them are greyed out with a "install it in Tools" hint. Empty while
     // the check hasn't proven a problem, so the UI stays permissive.
@@ -679,6 +681,7 @@ pub(super) fn show_diag_panel(
                 probe_scan_err,
                 probe_flash_state,
                 probe_flash_go,
+                probe_flash_stop,
                 // A live probe-rs session owns the probe exclusively — the Flash
                 // buttons go red rather than failing with "probe in use".
                 if debugger.is_busy() {

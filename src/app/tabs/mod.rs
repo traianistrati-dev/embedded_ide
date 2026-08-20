@@ -104,6 +104,7 @@ pub(crate) fn probe_selector_ui(
         toolchain,
         0.0,
         0.0,
+        true, // Auto is a fine default for a session you can stop
         |_| {},
     );
 }
@@ -124,6 +125,11 @@ pub(crate) fn probe_selector_ui_with(
     toolchain: &ToolchainKind,
     scan_w: f32,
     combo_w: f32,
+    // Offer "Auto (first found)"? The Flash tab says NO: `cargo flash` with an
+    // ambiguous probe doesn't fail, it SITS there — and a flash that hangs
+    // forever is worse than one that refuses to start. Debug/RTT keep Auto,
+    // which is the right default with a single probe attached.
+    allow_auto: bool,
     trailing: impl FnOnce(&mut egui::Ui),
 ) {
     if !label.is_empty() {
@@ -144,7 +150,13 @@ pub(crate) fn probe_selector_ui_with(
             // the raw selector so the choice is still visible.
             selected.as_ref().map(|s| format!("· {s}"))
         })
-        .unwrap_or_else(|| "Auto (first found)".to_owned());
+        .unwrap_or_else(|| {
+            if allow_auto {
+                "Auto (first found)".to_owned()
+            } else {
+                "— select a probe —".to_owned()
+            }
+        });
 
     // Never wider than what is left: a widget that out-demands its region
     // re-widens the Code Editor side panel every frame (see `debug_tab`'s pane
@@ -162,9 +174,10 @@ pub(crate) fn probe_selector_ui_with(
         )
         .width(width)
         .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(selected.is_none(), "Auto (first found)")
-                .clicked()
+            if allow_auto
+                && ui
+                    .selectable_label(selected.is_none(), "Auto (first found)")
+                    .clicked()
             {
                 *selected = None;
             }

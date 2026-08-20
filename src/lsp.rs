@@ -1490,7 +1490,7 @@ fn spawn_in_own_group(cmd: &mut Command) -> &mut Command {
 /// [`spawn_in_own_group`] made the child a group leader. Falls back to the lone
 /// process for a pid that isn't one (an RA registered by an older build of this
 /// IDE, before the group existed).
-fn kill_process_tree(pid: u32) {
+pub(crate) fn kill_process_tree(pid: u32) {
     #[cfg(windows)]
     {
         let _ = crate::build::no_window(&mut Command::new("taskkill"))

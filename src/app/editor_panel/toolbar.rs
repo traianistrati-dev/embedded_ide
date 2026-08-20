@@ -181,9 +181,15 @@ impl AppIde {
                 self.selected_probe.clone(),
                 Arc::clone(&self.probe_flash_state),
                 Arc::clone(&self.dfu_log),
+                Arc::clone(&self.probe_flash_child),
                 self.egui_ctx.clone(),
             );
         }
+    }
+
+    /// Stop a running `cargo flash` (the Flash button's second state).
+    pub(crate) fn stop_probe_flash(&mut self) {
+        crate::probe_flash::stop_probe_flash(&self.probe_flash_child, &self.dfu_log);
     }
 
     /// Build `--release` and flash an ESP32 via espflash, over the selected

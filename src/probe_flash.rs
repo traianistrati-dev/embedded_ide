@@ -42,6 +42,22 @@ impl ProbeFlashState {
     }
 }
 
+/// Stop a running flash: kill the process TREE and mark the slot taken, so the
+/// waiting thread reports it as stopped rather than as a failure to diagnose.
+///
+/// The tree, not the process: `cargo flash` is cargo, which spawns the build and
+/// then the flashing work — killing only the parent leaves a child holding the
+/// probe, and the next Flash fails to open it.
+pub fn stop_probe_flash(child_slot: &Arc<Mutex<Option<u32>>>, log: &Arc<Mutex<Vec<String>>>) {
+    let Some(pid) = child_slot.lock().unwrap().take() else {
+        return; // already finished, or never started
+    };
+    log.lock()
+        .unwrap()
+        .push("> stopping flash (killing cargo flash)…".to_owned());
+    crate::lsp::kill_process_tree(pid);
+}
+
 /// Spawn `cargo flash --release --chip <chip> --target <target> [--probe <sel>]`
 /// and stream its output into `log`. `probe` is the exact `VID:PID[:Serial]`
 /// selector shared with the other probe-rs tabs (None = let probe-rs pick).
@@ -53,6 +69,10 @@ pub fn start_probe_flash(
     probe: Option<String>,
     state: Arc<Mutex<ProbeFlashState>>,
     log: Arc<Mutex<Vec<String>>>,
+    // The running child, so the UI can stop it. `cargo flash` can sit for
+    // minutes with nothing to show — waiting on an ambiguous probe, on a target
+    // that won't halt — and without this the only way out was killing the IDE.
+    child_slot: Arc<Mutex<Option<u32>>>,
     ctx: Context,
 ) {
     if state.lock().unwrap().is_busy() {
@@ -104,6 +124,11 @@ pub fn start_probe_flash(
             }
         };
 
+        // Publish the pid before reading a single line: a flash that hangs does
+        // so at the very first step (opening the probe), which is exactly when
+        // Stop has to work.
+        *child_slot.lock().unwrap() = Some(child.id());
+
         // Stream stdout on a helper thread so we never block on a full stderr pipe.
         let out_log = Arc::clone(&log);
         let out_ctx = ctx.clone();
@@ -126,8 +151,15 @@ pub fn start_probe_flash(
         }
 
         let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        // Whatever happened, nobody may kill this pid any more — the OS reuses
+        // them, and a stale one aimed at a stranger is the worst kind of bug.
+        let stopped = child_slot.lock().unwrap().take().is_none();
         *state.lock().unwrap() = if ok {
             ProbeFlashState::Success
+        } else if stopped {
+            // The slot was already emptied by `stop_probe_flash`: this is the
+            // user's own doing, not a failure to explain.
+            ProbeFlashState::Error("flash stopped".into())
         } else {
             // A probe that won't open (or a probe-rs crash) has an explanation
             // worth more than "see the log above" — the log is where the raw

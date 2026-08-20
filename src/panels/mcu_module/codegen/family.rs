@@ -121,6 +121,7 @@ impl FamilyBackend for Stm32f1Backend {
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
+        let timer = modules::timer_configs(&mcu.modules);
         let gen_ = stm32::make_generated_section(
             &mcu.name,
             &all,
@@ -130,6 +131,7 @@ impl FamilyBackend for Stm32f1Backend {
             &i2c,
             &can,
             &usb,
+            &timer,
             mcu.gpio_native(),
             &mcu.watchdog_and_custom_inits(),
         );
@@ -148,6 +150,7 @@ impl FamilyBackend for Stm32f1Backend {
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
+        let timer = modules::timer_configs(&mcu.modules);
         let new_section = stm32::make_generated_section(
             &mcu.name,
             &all,
@@ -157,6 +160,7 @@ impl FamilyBackend for Stm32f1Backend {
             &i2c,
             &can,
             &usb,
+            &timer,
             mcu.gpio_native(),
             &mcu.watchdog_and_custom_inits(),
         );
@@ -603,6 +607,7 @@ impl FamilyBackend for RticBackend {
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
+        let timer = modules::timer_configs(&mcu.modules);
         let section = rtic::make_generated_section(
             &mcu.name,
             &all,
@@ -612,6 +617,7 @@ impl FamilyBackend for RticBackend {
             &i2c,
             &can,
             &usb,
+            &timer,
             mcu.gpio_native(),
             &mcu.custom_module_inits(),
         );
@@ -628,6 +634,7 @@ impl FamilyBackend for RticBackend {
         let (usart, spi, i2c) = resolve_bus_configs(mcu);
         let can = modules::can_configs(&mcu.modules);
         let usb = modules::usb_configs(&mcu.modules);
+        let timer = modules::timer_configs(&mcu.modules);
         let section = rtic::make_generated_section(
             &mcu.name,
             &all,
@@ -637,6 +644,7 @@ impl FamilyBackend for RticBackend {
             &i2c,
             &can,
             &usb,
+            &timer,
             mcu.gpio_native(),
             &mcu.custom_module_inits(),
         );

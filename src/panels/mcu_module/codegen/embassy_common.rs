@@ -1264,10 +1264,22 @@ mod emit_for_manual_compile {
             match &mut m.config {
                 ModuleConfig::Usart(c) => c.blocking_dma = halves,
                 ModuleConfig::Spi(c) => c.blocking_dma = halves,
+                // Non-default settings on purpose: 20 kHz and two different
+                // duties, so the generated code cannot pass by accident on the
+                // module's defaults (1 kHz, every channel 0 %).
+                ModuleConfig::Timer(c) => {
+                    c.freq_hz = 20_000;
+                    c.duty.insert(3, 75);
+                    c.duty.insert(4, 10);
+                }
                 _ => {}
             }
         }
         let main_rs = mcu.fresh_main_rs();
+        assert!(
+            main_rs.contains("20000.Hz()") && main_rs.contains("* 75 / 100"),
+            "the module's frequency and duty must reach the code:\n{main_rs}"
+        );
         // What each peripheral is left asking for once its WIRING has had its
         // say, which is not always what its module says:
         //  · `EIDE_USART_HALF=tx|rx` unwires the other pad, and this HAL has no

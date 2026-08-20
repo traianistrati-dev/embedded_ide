@@ -942,6 +942,7 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
+                &BTreeMap::new(),
                 true,
                 "",
             )
@@ -1098,6 +1099,7 @@ mod tests {
             "STM32F103",
             &pins,
             &ClockConfig::None,
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),

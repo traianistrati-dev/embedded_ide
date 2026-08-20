@@ -5,7 +5,7 @@ use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
 use super::super::modules::model::BlockingDma;
 use super::super::modules::{
     ApiStyle, CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits,
-    UsartModuleConfig, UsbModuleConfig,
+    TimerModuleConfig, UsartModuleConfig, UsbModuleConfig,
 };
 use super::super::pins::logic::pin::{GpioMode, Pin};
 use super::super::pins::logic::pin_function::PinFunction;
@@ -188,6 +188,7 @@ pub(super) fn gen_parts(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    timer: &BTreeMap<u8, TimerModuleConfig>,
     gpio_native: bool,
     // `let x = Foo::new(pa0_out, …);` lines for the Custom modules — appended
     // last, after every binding/init they consume (see `Mcu::custom_module_inits`).
@@ -321,19 +322,14 @@ pub(super) fn gen_parts(
     if has_adc {
         use_items.push("adc".into());
     }
-    // NOT `timer::Timer`: the PWM block below is a worked example in comments,
-    // so nothing in the generated code uses it and the import would be the one
-    // warning a fresh PWM project always had. The example spells out its own
-    // `use`, remap type-state included.
     if has_usb {
         use_items.push("usb::{Peripheral, UsbBus}".into());
     }
-
-    let use_block = use_items
-        .iter()
-        .map(|s| format!("    {s},"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The timer import is filled in by the PWM block far below, once it knows
+    // WHICH remap type-states it named — `use_block` is therefore assembled
+    // after it. Importing `Timer` up here unconditionally is what earned every
+    // PWM project an unused-import warning back when the block was a comment.
+    let mut timer_use: Option<String> = None;
 
     // USB needs top-level `use`s from the external usb-device / usbd-serial
     // crates (auto-added to Cargo.toml) — these can't live in the HAL `use {}`.
@@ -412,12 +408,12 @@ pub(super) fn gen_parts(
                 PinFunction::GpioInput
                 | PinFunction::GpioOutput
                 | PinFunction::GpioAnalog
-                | PinFunction::AdcChannel { .. }
-                // A PWM pad waits for the `pwm_hz` call the block below shows
-                // commented out — the same "waiting for your code" case.
-                | PinFunction::TimerPwm { .. } => {
+                | PinFunction::AdcChannel { .. } => {
                     "    #[allow(unused_mut, unused_variables)]\n"
                 }
+                // NOT `TimerPwm`: `pwm_hz` consumes those pads, so one left
+                // unused means its timer did not generate (mixed remap sets) —
+                // the same signal an orphaned bus pad carries.
                 _ => "",
             };
             format!(
@@ -674,11 +670,15 @@ pub(super) fn gen_parts(
     if has_timer {
         header!();
         fn_calls.push_str("    // ── Timers / PWM ──\n");
-        // One block per timer actually wired. The old code printed ONE fixed
-        // line — `Timer::tim2(...).pwm_hz::<Tim2NoRemap, _, _>((pa0, pa1), …)`
-        // — whatever the user had wired, so it named a timer they might not be
-        // using and two bindings that need not exist. Copying it did not
-        // compile; every part of it is derivable, so now it is derived.
+        // One block per timer actually wired. This used to print ONE fixed
+        // COMMENT — `Timer::tim2(...).pwm_hz::<Tim2NoRemap, _, _>((pa0, pa1), …)`
+        // — whatever the user had wired, naming a timer they might not be using
+        // and two bindings that need not exist. Every part of it is derivable
+        // from the wiring and the module, so now it is derived and generated.
+        // Which remap type-states the emitted code names. Collected rather than
+        // assumed: `Tim2NoRemap` was imported unconditionally before, so a
+        // project on TIM3 got an import it never used.
+        let mut remaps: BTreeSet<&'static str> = BTreeSet::new();
         let mut timers: BTreeMap<u8, Vec<(u8, String)>> = BTreeMap::new();
         for (p, meta) in &configured {
             if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
@@ -705,72 +705,71 @@ pub(super) fn gen_parts(
                 .collect::<Vec<_>>()
                 .join("+");
             let Some(remap) = pwm_remap(tim, &pads) else {
+                // Nothing generated rather than something wrong — and the pads
+                // stay bound and unused, so the compiler names them too.
                 fn_calls.push_str(&format!(
-                    "    // TIM{tim} {list}: no PWM example — these pads are not one of the\n    \
-                     // remap sets stm32f1xx-hal implements for this timer.\n"
+                    "    // TIM{tim} {list} is NOT initialised: these pads are not one of the\n    \
+                     // remap sets stm32f1xx-hal implements for this timer, so `pwm_hz` has no\n    \
+                     // type-state to take. Move the channels onto one set on the canvas.\n"
                 ));
                 continue;
             };
             // A single channel is NOT a 1-tuple: the HAL's `Pins` impl for one
             // pin is `(P1)`, i.e. the pin itself.
-            let (pins_expr, handles) = if chans.len() == 1 {
-                (
-                    chans[0].1.clone(),
-                    format!("mut ch{}", chans[0].0),
-                )
+            let pins_expr = if chans.len() == 1 {
+                chans[0].1.clone()
             } else {
-                (
-                    format!(
-                        "({})",
-                        chans
-                            .iter()
-                            .map(|(_, b)| b.clone())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    format!(
-                        "({})",
-                        chans
-                            .iter()
-                            .map(|(c, _)| format!("mut ch{c}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
+                format!(
+                    "({})",
+                    chans
+                        .iter()
+                        .map(|(_, b)| b.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             };
+            let cfg = timer.get(&tim);
+            let hz = cfg.map(|c| c.freq_hz).unwrap_or(1_000);
+            let sfx = cfg
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            let h = format!("_pwm{tim}{sfx}");
+            remaps.insert(remap);
             // Built line by line: a `\`-continued literal keeps its source
             // indentation once rustfmt joins it, and that indentation would
             // land in the user's file.
             let mut l: Vec<String> = vec![
-                format!("    // TIM{tim} {list}. `pwm_hz` takes the pins BY VALUE, and the remap"),
-                "    // type-state is what decides which pads the timer drives:".into(),
-                "    //".into(),
-                format!("    //     use stm32f1xx_hal::timer::{{{remap}, Timer}};"),
-                "    //".into(),
-                format!("    //     let {handles} = Timer::new(dp.TIM{tim}, &clocks)"),
+                format!("    // TIM{tim} {list} at {hz} Hz — one frequency for the timer, one duty"),
+                "    // per channel, both from the Virtual Module. `pwm_hz` takes the pins BY".into(),
+                "    // VALUE, and the remap type-state is what decides which pads it drives.".into(),
+                format!("    let mut {h} = Timer::new(dp.TIM{tim}, &clocks)"),
                 format!(
-                    "    //         .pwm_hz::<{remap}, _, _>({pins_expr}, &mut afio.mapr, 1.kHz())"
+                    "        .pwm_hz::<{remap}, _, _>({pins_expr}, &mut afio.mapr, {hz}.Hz());"
                 ),
-                "    //         .split();".into(),
+                format!("    let {h}_max = {h}.get_max_duty();"),
             ];
-            // Every channel, not just the first: a reader who pastes this
-            // should get a clean build, and half a demonstrated timer would
-            // leave the other handles unused.
-            for (i, (c, _)) in chans.iter().enumerate() {
-                l.push(format!("    //     ch{c}.set_duty(ch{c}.get_max_duty() / 2);"));
-                l.push(if i == 0 {
-                    format!("    //     ch{c}.enable(); // channels start disabled")
-                } else {
-                    format!("    //     ch{c}.enable();")
-                });
+            for (c, _) in &chans {
+                let pct = cfg.map(|t| t.duty_of(*c)).unwrap_or(0);
+                // Percent of `max`, in u32 so 100 % of a 16-bit reload cannot
+                // overflow on the way. A channel the user never touched is 0 %:
+                // enabled, pin low, which is the safe state for a driver stage.
+                l.push(format!(
+                    "    {h}.set_duty(Channel::C{c}, ({h}_max as u32 * {pct} / 100) as u16); // {pct} %"
+                ));
+                l.push(format!("    {h}.enable(Channel::C{c});"));
             }
             fn_calls.push_str(&l.join("\n"));
             fn_calls.push('\n');
         }
-        fn_calls.push_str(
-            "    // NOTE: the Virtual Module's frequency and per-channel duty are not\n    \
-             // applied here — the F1 backend does not generate the PWM itself yet.\n",
-        );
+        // Only what the emitted code actually names. `Channel` rides along with
+        // `Timer` because every generated block uses both.
+        if !remaps.is_empty() {
+            let mut items: Vec<&str> = remaps.iter().copied().collect();
+            items.push("Channel");
+            items.push("Timer");
+            items.sort_unstable();
+            timer_use = Some(format!("timer::{{{}}}", items.join(", ")));
+        }
     }
 
     let can_rx = configured
@@ -862,6 +861,18 @@ pub(super) fn gen_parts(
         fn_calls.push('\n');
     }
 
+    // ── The HAL `use {}` block ───────────────────────────────────────────────
+    // Assembled HERE, not where the items were collected, because the PWM block
+    // above is the one that knows which remap type-states it named.
+    if let Some(t) = timer_use {
+        use_items.push(t);
+    }
+    let use_block = use_items
+        .iter()
+        .map(|s| format!("    {s},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     // ── Custom modules ───────────────────────────────────────────────────────
     // Last, so every pin binding and peripheral init they consume already
     // exists above.
@@ -928,6 +939,7 @@ pub fn make_generated_section(
     i2c: &BTreeMap<u8, I2cModuleConfig>,
     can: &BTreeMap<u8, CanModuleConfig>,
     usb: &BTreeMap<u8, UsbModuleConfig>,
+    timer: &BTreeMap<u8, TimerModuleConfig>,
     gpio_native: bool,
     custom_inits: &str,
 ) -> String {
@@ -940,6 +952,7 @@ pub fn make_generated_section(
         i2c,
         can,
         usb,
+        timer,
         gpio_native,
         custom_inits,
     ) else {
@@ -3344,6 +3357,79 @@ mod blocking_dma_tests {
         assert_eq!(pwm_remap(2, &[(1, "PA0"), (2, "PB3")]), None);
         assert_eq!(pwm_remap(5, &[(1, "PA0")]), None);
         assert_eq!(pwm_remap(2, &[]), None);
+    }
+
+    /// The Virtual Module owns ONE frequency (it is one prescaler in silicon)
+    /// and a duty PER CHANNEL. Both have to reach the code, or the sliders are
+    /// decoration — for a long time on this family they were.
+    #[test]
+    fn the_timer_module_drives_the_generated_pwm() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let build = |pins: &[(&str, PinFunction)], set: bool| {
+            let mut mcu = builtin_for("stm32f103c8t6")
+                .expect("built-in F103")
+                .build_mcu();
+            for (name, func) in pins {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| p.name == *name)
+                    .map(|p| p.number);
+                if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                    p.selected_function = func.clone();
+                }
+            }
+            mcu.reconcile_modules();
+            if set {
+                for m in &mut mcu.modules {
+                    if let ModuleConfig::Timer(c) = &mut m.config {
+                        c.freq_hz = 20_000;
+                        c.duty.insert(3, 75);
+                    }
+                }
+            }
+            mcu.fresh_main_rs()
+        };
+        let ch3 = ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 });
+        let ch4 = ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 });
+
+        let main_rs = build(&[ch3.clone(), ch4.clone()], true);
+        assert!(main_rs.contains("let mut _pwm2 = Timer::new(dp.TIM2, &clocks)"), "{main_rs}");
+        assert!(
+            main_rs.contains(
+                ".pwm_hz::<Tim2NoRemap, _, _>((pa2_tim2_ch3, pa3_tim2_ch4), &mut afio.mapr, 20000.Hz());"
+            ),
+            "{main_rs}"
+        );
+        // A channel the user set, and one they never touched — 0 %, enabled,
+        // pin low, which is the safe state the model documents.
+        assert!(main_rs.contains("_pwm2.set_duty(Channel::C3, (_pwm2_max as u32 * 75 / 100) as u16); // 75 %"), "{main_rs}");
+        assert!(main_rs.contains("_pwm2.set_duty(Channel::C4, (_pwm2_max as u32 * 0 / 100) as u16); // 0 %"), "{main_rs}");
+        assert!(main_rs.contains("_pwm2.enable(Channel::C4);"), "{main_rs}");
+        // Only what it names: `Channel`, `Timer`, and the ONE remap in use.
+        assert!(main_rs.contains("timer::{Channel, Tim2NoRemap, Timer},"), "{main_rs}");
+
+        // Defaults when the module has not been touched: 1 kHz, every duty 0.
+        let main_rs = build(&[ch3.clone()], false);
+        assert!(main_rs.contains("&mut afio.mapr, 1000.Hz());"), "{main_rs}");
+        // ONE channel is not a 1-tuple — the HAL's `Pins` impl for a single pin
+        // is the pin itself.
+        assert!(main_rs.contains(".pwm_hz::<Tim2NoRemap, _, _>(pa2_tim2_ch3,"), "{main_rs}");
+
+        // Pads from two different remap sets have no type-state, so nothing is
+        // generated — and the pads stay bound, so the compiler names them too.
+        let main_rs = build(
+            &[
+                ("PA0", PinFunction::TimerPwm { timer: 2, channel: 1 }),
+                ("PB3", PinFunction::TimerPwm { timer: 2, channel: 2 }),
+            ],
+            false,
+        );
+        // The CALL, not the word — the refusal comment names `pwm_hz` too.
+        assert!(!main_rs.contains(".pwm_hz::<"), "{main_rs}");
+        assert!(main_rs.contains("TIM2 CH1+CH2 is NOT initialised"), "{main_rs}");
+        assert!(!main_rs.contains("timer::{"), "no code, no import:\n{main_rs}");
     }
 
     /// A GPIO pin is declared for the reader's loop, which a fresh project does
