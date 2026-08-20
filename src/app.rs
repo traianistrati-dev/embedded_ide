@@ -3502,8 +3502,14 @@ impl eframe::App for AppIde {
                             let names: Vec<&str> = problems.iter().map(|(n, _, _)| *n).collect();
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(
+                                    // NOT "Missing required dependencies": the
+                                    // banner also carries problems that are the
+                                    // opposite of missing — a stray
+                                    // `CARGO_FEATURE_*` in the environment is
+                                    // reported because it is THERE. The bullets
+                                    // below say what each one actually is.
                                     egui::RichText::new(format!(
-                                        "{} Missing required dependencies: {}",
+                                        "{} Build environment problems: {}",
                                         egui_phosphor::regular::WARNING,
                                         names.join(", ")
                                     ))

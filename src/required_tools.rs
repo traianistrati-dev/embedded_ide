@@ -103,7 +103,11 @@ impl ToolStatus {
 /// reports [`Severity::Blocking`]) and the ordering in the Tools tab.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
-    /// Nothing builds without it.
+    /// Loud enough for the startup banner. Usually "nothing builds without it"
+    /// — but also the rarer case of a problem that breaks only one runtime and
+    /// is undiagnosable from the error it produces (see the `CARGO_FEATURE_*`
+    /// entry). The distinction the variant really draws is how hard it is to
+    /// find, not how much it takes down.
     Blocking,
     /// One feature / tab stops working; the rest of the IDE is fine.
     Feature,
@@ -626,6 +630,50 @@ pub fn make_tools_state() -> Arc<Mutex<ToolsState>> {
         status: ToolStatus::Unknown,
     });
 
+    // Not a tool at all: a property of the ENVIRONMENT the IDE was started in,
+    // which every cargo it launches inherits. It lives in this catalog because
+    // this is the one place that already answers "why does the build fail for a
+    // reason that has nothing to do with my code?" — and because the failure it
+    // causes is otherwise undiagnosable (see `check_cargo_feature_env`).
+    tools.push(RequiredTool {
+        name: "CARGO_FEATURE_* env",
+        description: "Cargo's private feature namespace must be clear in the environment — \
+                      build scripts cannot tell a stray variable from a real feature",
+        toolchain: None,
+        // Blocking, i.e. it reaches the STARTUP BANNER, even though projects
+        // other than RTIC build fine with the variable set. The severity here is
+        // about how loud the warning has to be, not about how much breaks: the
+        // failure it causes names a crate the user did not add, blames a
+        // Cargo.toml that is correct, and gives no hint that the environment is
+        // involved. Finding that unaided costs an afternoon.
+        severity: Severity::Blocking,
+        impact: per_os(
+            "RTIC projects fail to build with \"More than one backend selected\", pointing at a \
+             Cargo.toml that is correct. Other projects are unaffected. Remove the variable: \
+             reg delete \"HKCU\\Environment\" /v <NAME> /f — then restart the IDE so it stops \
+             inheriting it.",
+            "RTIC projects fail to build with \"More than one backend selected\", pointing at a \
+             Cargo.toml that is correct. Other projects are unaffected. Unset the variable in \
+             your shell profile (~/.zprofile or ~/.zshrc), then restart the IDE so it stops \
+             inheriting it.",
+            "RTIC projects fail to build with \"More than one backend selected\", pointing at a \
+             Cargo.toml that is correct. Other projects are unaffected. Unset the variable in \
+             your shell profile (~/.profile or ~/.bashrc), then restart the IDE so it stops \
+             inheriting it.",
+        ),
+        check_cmd: CARGO_FEATURE_ENV_CHECK,
+        check_args: &[],
+        check_pattern: "",
+        min_version: None,
+        // Nothing to install, and nothing this IDE should silently remove: a
+        // persistent environment variable belongs to the user's machine, not to
+        // a project. Naming it and saying what it breaks is the whole job.
+        install_cmd: None,
+        install_args: &[],
+        manual_url: "https://doc.rust-lang.org/cargo/reference/environment-variables.html",
+        status: ToolStatus::Unknown,
+    });
+
     // ── Linux-only: access to the hardware ───────────────────────────────────
     // Neither of these is a program to install — they are PERMISSIONS, and they
     // are the number-one reason flashing "doesn't work" on a Linux box that has
@@ -839,6 +887,43 @@ pub const UDEV_CHECK: &str = "@udev-rules";
 /// PATH, so "run it and see" is impossible; the driver's service key is the
 /// evidence, the same thing its own docs tell you to look for.
 pub const COM0COM_CHECK: &str = "@com0com";
+
+/// Sentinel for the `CARGO_FEATURE_*` environment check. Nothing to spawn: the
+/// evidence is the environment this process was started with, which is the same
+/// one every `cargo` we launch will pass on to its build scripts.
+pub const CARGO_FEATURE_ENV_CHECK: &str = "@cargo-feature-env";
+
+/// Stray `CARGO_FEATURE_*` variables in the inherited environment.
+///
+/// `CARGO_FEATURE_<NAME>` is cargo's own namespace: it sets one per enabled
+/// feature when it runs a build script. A build script cannot tell cargo's from
+/// an inherited one — it just reads `std::env::vars()` — so anything left in the
+/// user's environment is silently counted as an extra enabled feature.
+///
+/// `rtic-macros` is the case that bites, because it counts rather than matches:
+/// one stray variable makes it report "More than one backend selected" and fail
+/// the build, pointing at a `Cargo.toml` that is perfectly correct. That is a
+/// diagnosis nobody makes unaided, which is the whole reason this check exists.
+fn check_cargo_feature_env() -> ToolStatus {
+    let mut leaked: Vec<String> = std::env::vars()
+        .map(|(k, _)| k)
+        .filter(|k| k.starts_with("CARGO_FEATURE_"))
+        .collect();
+    if leaked.is_empty() {
+        return ToolStatus::Ok("no CARGO_FEATURE_* set".to_string());
+    }
+    leaked.sort();
+    // `Failed`, not `Missing`: the check ran and found something wrong. Missing
+    // would read backwards here — the problem is a variable being PRESENT.
+    ToolStatus::Failed(format!(
+        "{} in this environment. Build scripts read {} as enabled features — an \
+         RTIC project fails with \"More than one backend selected\" even though \
+         its Cargo.toml is correct. Remove {} and restart the IDE.",
+        leaked.join(", "),
+        if leaked.len() == 1 { "it" } else { "them" },
+        if leaked.len() == 1 { "it" } else { "them" },
+    ))
+}
 
 #[cfg(windows)]
 fn check_com0com() -> ToolStatus {
@@ -1237,6 +1322,9 @@ fn run_check_blocking(
     if cmd == COM0COM_CHECK {
         return check_com0com();
     }
+    if cmd == CARGO_FEATURE_ENV_CHECK {
+        return check_cargo_feature_env();
+    }
     let mut c = Command::new(cmd);
     c.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -1504,6 +1592,133 @@ mod tests {
         assert_eq!(sev("cargo-bloat"), Some(Severity::Feature));
         assert_eq!(sev("git"), Some(Severity::Feature));
         assert_eq!(sev("probe-rs"), Some(Severity::Feature));
+        // Blocking on purpose, and not because everything stops: see the entry.
+        assert_eq!(sev("CARGO_FEATURE_* env"), Some(Severity::Blocking));
+    }
+
+    /// End to end, the way the startup self-check actually runs it: the entry's
+    /// OWN `check_cmd` through `run_check_blocking`, then into the list the
+    /// banner reads. The two halves were already tested separately, which is
+    /// precisely what would hide a typo in the sentinel — the checker would
+    /// still work, the banner would still render whatever it was given, and the
+    /// entry would spawn `@cargo-feature-env` as a program, come back `Missing`,
+    /// and never say why.
+    #[test]
+    fn the_catalog_entry_is_wired_to_the_check() {
+        const VAR: &str = "CARGO_FEATURE_EIDE_WIRING";
+        const NAME: &str = "CARGO_FEATURE_* env";
+
+        let s = make_tools_state();
+        let mut s = s.lock().unwrap();
+        let idx = s
+            .tools
+            .iter()
+            .position(|t| t.name == NAME)
+            .expect("entry is in the catalog");
+        let (cmd, args, pat, minv) = {
+            let t = &s.tools[idx];
+            (t.check_cmd, t.check_args, t.check_pattern, t.min_version)
+        };
+        assert_eq!(cmd, CARGO_FEATURE_ENV_CHECK, "sentinel must match");
+
+        // SAFETY: restored immediately below.
+        unsafe { std::env::set_var(VAR, "1") };
+        let status = run_check_blocking(cmd, args, pat, minv);
+        unsafe { std::env::remove_var(VAR) };
+
+        match &status {
+            ToolStatus::Failed(msg) => assert!(msg.contains(VAR), "{msg}"),
+            other => panic!("the sentinel did not reach the checker: {other:?}"),
+        }
+
+        // …and that status is what puts it in front of the user at startup.
+        s.tools[idx].status = status;
+        let names: Vec<&str> = s
+            .blocking_problems(None)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        assert!(names.contains(&NAME), "banner would not show it: {names:?}");
+    }
+
+    /// The stray-variable entry has to reach the STARTUP BANNER, on any chip —
+    /// that is the entire point of it being Blocking rather than Feature. It is
+    /// also the only entry whose problem is something being present, so it goes
+    /// in as `Failed`, not `Missing`.
+    #[test]
+    fn a_stray_cargo_feature_variable_reaches_the_startup_banner() {
+        const NAME: &str = "CARGO_FEATURE_* env";
+        let s = make_tools_state();
+        let mut s = s.lock().unwrap();
+        let t = s
+            .tools
+            .iter_mut()
+            .find(|t| t.name == NAME)
+            .expect("entry is in the catalog");
+        assert!(t.toolchain.is_none(), "it breaks builds on every toolchain");
+        t.status = ToolStatus::Failed("CARGO_FEATURE_RT in this environment".into());
+
+        for tc in [
+            None,
+            Some(&ToolchainKind::RustEmbedded),
+            Some(&ToolchainKind::EspRust),
+        ] {
+            let names: Vec<&str> = s
+                .blocking_problems(tc)
+                .into_iter()
+                .map(|(n, _, _)| n)
+                .collect();
+            assert!(names.contains(&NAME), "missing from the banner: {names:?}");
+        }
+    }
+
+    /// The environment check has to fire on a variable being THERE, which is
+    /// the opposite of every other entry in this catalog — so both directions
+    /// are pinned, and the message has to name the variable (that name is the
+    /// entire diagnosis) and the error the user will otherwise be staring at.
+    ///
+    /// Serialised by construction: one test touching the process environment,
+    /// restoring it before it returns.
+    #[test]
+    fn a_stray_cargo_feature_variable_is_reported() {
+        const NAME: &str = "CARGO_FEATURE_EIDE_SELFTEST";
+        let before = std::env::var(NAME).ok();
+        assert!(before.is_none(), "{NAME} is not something anyone sets");
+
+        // SAFETY: single-threaded test, and the variable is restored below.
+        unsafe { std::env::set_var(NAME, "1") };
+        let hit = check_cargo_feature_env();
+        unsafe { std::env::remove_var(NAME) };
+
+        match &hit {
+            ToolStatus::Failed(msg) => {
+                assert!(msg.contains(NAME), "the name IS the diagnosis: {msg}");
+                assert!(
+                    msg.contains("More than one backend selected"),
+                    "must name the error the user actually sees: {msg}"
+                );
+            }
+            other => panic!("a stray variable must be reported, got {other:?}"),
+        }
+
+        // And it must be able to turn green — a check that never passes reads
+        // as broken. Conditional on purpose: this very test exists because a
+        // machine CAN carry a stray one, and a test that fails on the user's
+        // environment rather than on the code is a test nobody trusts.
+        let still_set: Vec<String> = std::env::vars()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("CARGO_FEATURE_"))
+            .collect();
+        if still_set.is_empty() {
+            assert!(
+                matches!(check_cargo_feature_env(), ToolStatus::Ok(_)),
+                "clean environment must pass"
+            );
+        } else {
+            // Not a failure: the detector is doing its job on a real leak.
+            eprintln!("note: this environment really does carry {still_set:?}");
+            assert!(matches!(check_cargo_feature_env(), ToolStatus::Failed(_)));
+        }
     }
 
     /// An UNCHECKED catalog must report no problems — the banner may never fire
