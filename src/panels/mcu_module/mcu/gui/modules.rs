@@ -988,6 +988,7 @@ pub fn module_config_ui(
     );
     let wired_i2c = (has_sig(ModuleSignal::Scl), has_sig(ModuleSignal::Sda));
     let wired_can = (has_sig(ModuleSignal::CanTx), has_sig(ModuleSignal::CanRx));
+    let wired_usb = (has_sig(ModuleSignal::UsbDm), has_sig(ModuleSignal::UsbDp));
     // Which flow-control pads this module actually has, read from its own
     // wiring — the flow selector warns against THIS, not against a guess.
     let wired_flow = (
@@ -1183,12 +1184,13 @@ pub fn module_config_ui(
     // this says so before the user gets there, since a peripheral quietly
     // absent from main.rs is easy to miss.
     //
-    // `pads` is (first, second) in the order the pair is named, and `wired`
-    // says which of them the module actually has.
+    // `pads` is (first, second) in the order the pair is named, `wired` says
+    // which of them the module actually has, and `why` is the reason clause —
+    // three of these are a HAL `Pins` bound, the USB one is not.
     let f1_half_bus_note = |ui: &mut egui::Ui,
                             bus: &str,
                             pads: (&str, &str),
-                            pair: &str,
+                            why: &str,
                             wired: (bool, bool)| {
         let missing = match wired {
             (true, false) => pads.1,
@@ -1199,8 +1201,7 @@ pub fn module_config_ui(
         ui.label(
             egui::RichText::new(format!(
                 "{missing} is not wired, so this {bus} is not initialised at all — \
-                 stm32f1xx-hal takes the {pair} pair. Assign the {missing} pad on \
-                 the canvas."
+                 {why}. Assign the {missing} pad on the canvas."
             ))
             .size(10.5)
             .color(egui::Color32::from_rgb(220, 160, 70)),
@@ -1436,7 +1437,13 @@ pub fn module_config_ui(
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
                     {
                         f1_serial_note(ui);
-                        f1_half_bus_note(ui, "USART", ("TX", "RX"), "TX+RX", wired_serial);
+                        f1_half_bus_note(
+                            ui,
+                            "USART",
+                            ("TX", "RX"),
+                            "stm32f1xx-hal builds a Serial only from the TX+RX pair",
+                            wired_serial,
+                        );
                         transport_row(ui, &mut cfg.blocking_dma, &chans, true);
                         if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);
@@ -1589,7 +1596,13 @@ pub fn module_config_ui(
                         // Same rule as the USART above, and the only backend
                         // whose half-bus behaviour this turn verified.
                         if family == "stm32f1" {
-                            f1_half_bus_note(ui, "I2C", ("SCL", "SDA"), "SCL+SDA", wired_i2c);
+                            f1_half_bus_note(
+                                ui,
+                                "I2C",
+                                ("SCL", "SDA"),
+                                "stm32f1xx-hal takes the SCL+SDA pair",
+                                wired_i2c,
+                            );
                         }
                         api_row(ui, &mut pending.0);
                     }
@@ -1610,7 +1623,13 @@ pub fn module_config_ui(
                     ui.end_row();
                     // Third pair on this family — see the USART and I2C above.
                     if family == "stm32f1" {
-                        f1_half_bus_note(ui, "CAN", ("TX", "RX"), "TX+RX", wired_can);
+                        f1_half_bus_note(
+                            ui,
+                            "CAN",
+                            ("TX", "RX"),
+                            "stm32f1xx-hal assigns the CAN pads as a TX+RX pair",
+                            wired_can,
+                        );
                     }
                 }
                 ModuleConfig::Usb(cfg) => {
@@ -1627,6 +1646,19 @@ pub fn module_config_ui(
                     ui.label("Product ID");
                     ui.add(egui::DragValue::new(&mut cfg.pid).hexadecimal(4, false, true));
                     ui.end_row();
+                    // Not a HAL constraint like the four above — the USB init
+                    // takes PA11/PA12 directly, so one pad would spend the other
+                    // uninvited.
+                    if family == "stm32f1" {
+                        f1_half_bus_note(
+                            ui,
+                            "USB",
+                            ("D-", "D+"),
+                            "the generated init takes PA11/PA12 directly, so one pad \
+                             would spend the other uninvited",
+                            wired_usb,
+                        );
+                    }
                 }
                 // ── Custom: a hand-picked pin list ────────────────────────
                 // No auto-wiring and no peripheral config — just the pins, in

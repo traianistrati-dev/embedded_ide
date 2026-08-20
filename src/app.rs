@@ -2548,10 +2548,11 @@ impl AppIde {
             let needs_gpio = !is_async && has_cfg("io");
             // USB CDC init needs `usb-device`/`usbd-serial` + the `stm32-usbd`
             // HAL feature, keyed on whether the USB D-/D+ pins are configured.
-            let needs_usb = !is_async
-                && all_pins
-                    .iter()
-                    .any(|(_, _, f)| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp));
+            // BOTH pads, matching what `gen_parts` will actually emit: one pad
+            // alone generates no USB init, so the crates would be unused.
+            let usb_pad = |want: PinFunction| all_pins.iter().any(|(_, _, f)| *f == want);
+            let needs_usb =
+                !is_async && usb_pad(PinFunction::UsbDm) && usb_pad(PinFunction::UsbDp);
             // The user's own sources — a dependency referenced by THIS code is
             // never stripped, whatever the feature flags say (a Runtime switch
             // used to silently delete a hand-added `embedded-hal`). See

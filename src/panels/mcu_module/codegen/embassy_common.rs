@@ -1143,6 +1143,27 @@ mod emit_for_manual_compile {
 
         let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
         let mut mcu = f1.build_mcu();
+        // `EIDE_USB` takes PA11/PA12 away from the CAN and gives them to the USB
+        // — the two peripherals share those pads (and the SRAM behind them).
+        //
+        //   both     — D- and D+, the ordinary CDC device
+        //   dm | dp  — only that pad wired, which is the case under test
+        //   dm-gpio  — D- wired and PA12 given to a GPIO output, so the pad the
+        //              USB block takes unasked is one the user spent elsewhere
+        let usb_pads: Option<Vec<(&str, PinFunction)>> =
+            match std::env::var("EIDE_USB").as_deref() {
+                Ok("both") => Some(vec![
+                    ("PA11", PinFunction::UsbDm),
+                    ("PA12", PinFunction::UsbDp),
+                ]),
+                Ok("dm") => Some(vec![("PA11", PinFunction::UsbDm)]),
+                Ok("dp") => Some(vec![("PA12", PinFunction::UsbDp)]),
+                Ok("dm-gpio") => Some(vec![
+                    ("PA11", PinFunction::UsbDm),
+                    ("PA12", PinFunction::GpioOutput),
+                ]),
+                _ => None,
+            };
         for (name, func) in [
             ("PA9", PinFunction::UsartTx(1)),
             ("PA10", PinFunction::UsartRx(1)),
@@ -1157,9 +1178,17 @@ mod emit_for_manual_compile {
             ("PB7", PinFunction::I2cSda(1)),
             // bxCAN's default pads. `can::Pins` is a PAIR too (PA12/PA11, or
             // PB9/PB8 remapped) — `EIDE_CAN_HALF` below wires only one.
+            //
+            // USB lives on the SAME two pads (PA11 = D-, PA12 = D+) and cannot
+            // coexist with the CAN, so `EIDE_USB` re-purposes them instead.
             ("PA12", PinFunction::CanTx),
             ("PA11", PinFunction::CanRx),
         ] {
+            if usb_pads.is_some()
+                && matches!(func, PinFunction::CanTx | PinFunction::CanRx)
+            {
+                continue;
+            }
             if func == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
             }
@@ -1194,6 +1223,15 @@ mod emit_for_manual_compile {
             if Some(&func) == dropped.as_ref() {
                 continue;
             }
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        for (name, func) in usb_pads.clone().unwrap_or_default() {
             let num = mcu
                 .iter_all_pins()
                 .find(|p| p.name == name)
@@ -1281,7 +1319,26 @@ mod emit_for_manual_compile {
             assert!(main_rs.contains("configs::i2c1::init"), "{main_rs}");
         }
         // Same rule again for the CAN, plus the USB token `Can::new` demands.
-        if std::env::var("EIDE_CAN_HALF").is_ok() {
+        // Skipped entirely when `EIDE_USB` took the CAN's pads — and there the
+        // USB gets the same treatment: both data pads, or a reason.
+        if let Some(pads) = &usb_pads {
+            assert!(!main_rs.contains("configs::can1::init"), "{main_rs}");
+            let both = pads.iter().any(|(_, f)| *f == PinFunction::UsbDm)
+                && pads.iter().any(|(_, f)| *f == PinFunction::UsbDp);
+            if both {
+                assert!(main_rs.contains("UsbBus::new(usb_periph)"), "{main_rs}");
+            } else {
+                assert!(
+                    !main_rs.contains("UsbBus::new")
+                        && main_rs.contains("USB is NOT initialised"),
+                    "half a USB must not be initialised, and must say so:\n{main_rs}"
+                );
+                // The whole point: the pad it used to take uninvited. Matched
+                // through the USB block's own binding, because a GPIO module on
+                // PA12 configures that pad legitimately.
+                assert!(!main_rs.contains("let mut usb_dp = gpioa.pa12"), "{main_rs}");
+            }
+        } else if std::env::var("EIDE_CAN_HALF").is_ok() {
             assert!(
                 !main_rs.contains("configs::can1::init")
                     && main_rs.contains("CAN1 is NOT initialised"),
@@ -1298,8 +1355,9 @@ mod emit_for_manual_compile {
         let configs = mcu.config_files();
         files.cargo_toml = project_gen::ensure_peripheral_deps(
             &files.cargo_toml,
-            // CAN is wired below, so `bxcan` is needed.
-            true,
+            // CAN is wired below, so `bxcan` is needed — unless the USB took
+            // its pads, in which case nothing references bxcan at all.
+            usb_pads.is_none(),
             true,
             // The SPI and I2C here are wired, so `embedded-hal` is needed exactly
             // as the app computes it — without DMA the bus is the Portable
@@ -1311,6 +1369,10 @@ mod emit_for_manual_compile {
             true,
             &[],
         );
+        // `usb-device` + `usbd-serial` + the HAL's `stm32-usbd` feature, the
+        // same call `AppIde::save` makes.
+        files.cargo_toml =
+            project_gen::ensure_usb_deps(&files.cargo_toml, usb_pads.is_some(), &[&main_rs]);
         let mut user: Vec<(String, String)> = vec![
             ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
             (

@@ -261,9 +261,20 @@ pub(super) fn gen_parts(
     let has_can = configured
         .iter()
         .any(|(p, _)| matches!(p.selected_function, PinFunction::CanRx | PinFunction::CanTx));
-    let has_usb = configured
+    // USB is the odd one out: its init does not READ the wired pins, it takes
+    // `gpioa.pa11` / `gpioa.pa12` directly, because those are the only USB pads
+    // on this family. So one wired pad used to produce a whole two-pad
+    // peripheral — silently spending a pad the user had not given it, and
+    // failing to compile outright (E0382, moved value) when they had spent it
+    // on something else. Both pads or nothing, like every other bus here.
+    let usb_dm = configured
         .iter()
-        .any(|(p, _)| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp));
+        .any(|(p, _)| p.selected_function == PinFunction::UsbDm);
+    let usb_dp = configured
+        .iter()
+        .any(|(p, _)| p.selected_function == PinFunction::UsbDp);
+    let has_usb = usb_dm && usb_dp;
+    let usb_half = (usb_dm || usb_dp) && !has_usb;
     // CAN's `assign_pins` needs AFIO too (it may remap the pins), and so does
     // `disable_jtag` — it lives on `afio.mapr`.
     let needs_afio = has_serial || has_spi || has_i2c || has_timer || has_can || free_jtag;
@@ -704,11 +715,25 @@ pub(super) fn gen_parts(
                  pin_dp: usb_dp.into_floating_input(&mut gpioa.crh),\n\
              }};\n\
              let usb_bus = UsbBus::new(usb_periph);\n\
+             // These two are the device: they must be `mut` for `poll`, and they\n\
+             // stay unused until you write that poll into your loop. The `allow`\n\
+             // keeps a fresh project warning-free; it goes inert the moment you\n\
+             // do, and it cannot hide anything beyond its own statement.\n\
+             #[allow(unused_mut, unused_variables)]\n\
              let mut serial{sfx} = SerialPort::new(&usb_bus);\n\
+             #[allow(unused_mut, unused_variables)]\n\
              let mut usb_dev{sfx} = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x{vid:04x}, 0x{pid:04x}))\n\
                  .product(\"{product}\")\n\
                  .device_class(USB_CLASS_CDC)\n\
                  .build();\n"
+        ));
+    } else if usb_half {
+        header!();
+        let missing = if usb_dm { "D+ (PA12)" } else { "D- (PA11)" };
+        fn_calls.push_str(&format!(
+            "    // USB is NOT initialised: {missing} is not wired. A USB device needs both\n    \
+             // data pads, and this init takes PA11/PA12 directly - generating it from one\n    \
+             // would spend the other pad without being asked.\n"
         ));
     }
 
@@ -3073,6 +3098,42 @@ mod blocking_dma_tests {
         // pair, so a `&mut` here does not satisfy the bound.
         assert!(!main_rs.contains("&mut gpioa.pa12"), "{main_rs}");
         assert!(mcu.config_files().iter().any(|(f, _)| f == "can1.rs"));
+
+        // USB, on the SAME two pads, is the odd one out: its init never read
+        // the pin map, it took `gpioa.pa11`/`gpioa.pa12` outright. One wired pad
+        // therefore produced a whole two-pad device — and if the user had spent
+        // the other pad, a moved-value error.
+        let dm = ("PA11", PinFunction::UsbDm);
+        let dp = ("PA12", PinFunction::UsbDp);
+        for (wired, missing) in [(vec![dm.clone()], "D+ (PA12)"), (vec![dp.clone()], "D- (PA11)")] {
+            let mcu = build(&wired, BlockingDma::Off);
+            let main_rs = mcu.fresh_main_rs();
+            assert!(!main_rs.contains("UsbBus::new"), "{main_rs}");
+            assert!(
+                main_rs.contains(&format!("USB is NOT initialised: {missing} is not wired")),
+                "{main_rs}"
+            );
+            // Neither pad is touched by a USB block that is not there.
+            assert!(!main_rs.contains("let mut usb_dp = gpioa.pa12"), "{main_rs}");
+            assert!(!main_rs.contains("pin_dm: gpioa.pa11"), "{main_rs}");
+            // …and the `use`s that only the USB block needs stay out too.
+            assert!(!main_rs.contains("usbd_serial"), "{main_rs}");
+        }
+
+        let mcu = build(&[dm, dp], BlockingDma::Off);
+        let main_rs = mcu.fresh_main_rs();
+        assert!(main_rs.contains("UsbBus::new(usb_periph)"), "{main_rs}");
+        assert!(!main_rs.contains("is NOT initialised"), "{main_rs}");
+        assert!(main_rs.contains("usbd_serial"), "{main_rs}");
+        // The device is `mut` for `poll` and unused until the reader writes
+        // that poll — and these two lines are INSIDE the generated block, so a
+        // warning there is one the reader cannot answer. Scoped to the
+        // statement, so it goes inert rather than hiding anything later.
+        assert_eq!(
+            main_rs.matches("#[allow(unused_mut, unused_variables)]").count(),
+            2,
+            "{main_rs}"
+        );
     }
 
     /// The Configuration tab's list must show the halves actually taken -
