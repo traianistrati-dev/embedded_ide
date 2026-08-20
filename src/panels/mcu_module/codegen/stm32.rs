@@ -583,16 +583,28 @@ pub(super) fn gen_parts(
         let sda = configured
             .iter()
             .find(|(p, _)| p.selected_function == PinFunction::I2cSda(n));
-        if scl.is_none() || sda.is_none() {
+        if scl.is_none() && sda.is_none() {
             continue;
         }
         header!();
+        // Both wires or nothing — `i2c::Pins<I2C1>` is implemented for the
+        // (SCL, SDA) pair (PB6/PB7, or PB8/PB9 remapped) and for no single pad.
+        // This arm always DID refuse to build half a bus; what it did not do was
+        // say so, leaving a configured pad and no peripheral to explain it.
+        let (Some(scl), Some(sda)) = (scl, sda) else {
+            let missing = if scl.is_none() { "SCL" } else { "SDA" };
+            fn_calls.push_str(&format!(
+                "    // I2C{n} is NOT initialised: {missing} is not wired, and an I2C bus needs\n    \
+                 // both wires (stm32f1xx-hal takes the SCL+SDA pair, and there is no one-wire I2C).\n"
+            ));
+            continue;
+        };
         let scl_v = {
-            let (p, m) = scl.unwrap();
+            let (p, m) = scl;
             binding_of(p, m)
         };
         let sda_v = {
-            let (p, m) = sda.unwrap();
+            let (p, m) = sda;
             binding_of(p, m)
         };
         let sfx = i2c
@@ -2905,12 +2917,13 @@ mod blocking_dma_tests {
         assert!(!full.contains("MISO is not wired"), "{full}");
     }
 
-    /// Half a USART is not a one-way UART on this HAL: `serial::Pins<USART>` is
-    /// implemented for the (TX, RX) pair alone, so `Serial::new` cannot be
-    /// called at all. It used to be called anyway, naming a `_rx1` binding
-    /// nothing declared — the project did not compile.
+    /// Neither the USART nor the I2C can be built from one pad on this HAL:
+    /// `serial::Pins<USART>` and `i2c::Pins<I2C>` are implemented for their
+    /// PAIRS alone. The USART used to be built anyway, naming a `_rx1` binding
+    /// nothing declared — the project did not compile. The I2C already refused,
+    /// but silently.
     #[test]
-    fn half_a_usart_is_not_initialised_and_says_so() {
+    fn half_a_paired_bus_is_not_initialised_and_says_so() {
         use crate::panels::mcu_module::builtins::builtin_for;
         use crate::panels::mcu_module::modules::ModuleConfig;
 
@@ -2973,6 +2986,31 @@ mod blocking_dma_tests {
         assert!(!main_rs.contains("is NOT initialised"), "{main_rs}");
         assert_eq!(blocking_dma_uses(&mcu).len(), 2);
         assert!(mcu.config_files().iter().any(|(f, _)| f == "usart1.rs"));
+
+        // Half an I2C already refused to build — `i2c::Pins` is the (SCL, SDA)
+        // pair too, and one wire is not a bus in any reading. What it lacked was
+        // the reason: a configured pad and no peripheral to account for it.
+        let scl = ("PB6", PinFunction::I2cScl(1));
+        let sda = ("PB7", PinFunction::I2cSda(1));
+        for (wired, missing) in [(vec![scl.clone()], "SDA"), (vec![sda.clone()], "SCL")] {
+            let mcu = build(&wired, BlockingDma::Off);
+            let main_rs = mcu.fresh_main_rs();
+            assert!(!main_rs.contains("configs::i2c1::init"), "{main_rs}");
+            assert!(
+                main_rs.contains(&format!("I2C1 is NOT initialised: {missing} is not wired")),
+                "{main_rs}"
+            );
+            assert!(
+                !mcu.config_files().iter().any(|(f, _)| f == "i2c1.rs"),
+                "no init to offer, so no file"
+            );
+        }
+
+        let mcu = build(&[scl, sda], BlockingDma::Off);
+        let main_rs = mcu.fresh_main_rs();
+        assert!(main_rs.contains("configs::i2c1::init"), "{main_rs}");
+        assert!(!main_rs.contains("is NOT initialised"), "{main_rs}");
+        assert!(mcu.config_files().iter().any(|(f, _)| f == "i2c1.rs"));
     }
 
     /// The Configuration tab's list must show the halves actually taken -

@@ -1151,6 +1151,10 @@ mod emit_for_manual_compile {
             // `EIDE_SPI_TXONLY=1` leaves MISO unwired. On F1 that is not a different
             // constructor, it is the HAL's `NoMiso` placeholder in `SpiPins`.
             ("PA6", PinFunction::SpiMiso(1)),
+            // I2C1's default (non-remapped) pads, for the `EIDE_I2C_HALF` case
+            // below — `i2c::Pins<I2C1>` exists only for this exact pair.
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
         ] {
             if func == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
@@ -1162,6 +1166,16 @@ mod emit_for_manual_compile {
             let dropped = match std::env::var("EIDE_USART_HALF").as_deref() {
                 Ok("tx") => Some(PinFunction::UsartRx(1)),
                 Ok("rx") => Some(PinFunction::UsartTx(1)),
+                _ => None,
+            };
+            if Some(&func) == dropped.as_ref() {
+                continue;
+            }
+            // `EIDE_I2C_HALF=scl|sda` wires only that wire. Same story as the
+            // USART, and a two-wire bus with one wire is not even arguable.
+            let dropped = match std::env::var("EIDE_I2C_HALF").as_deref() {
+                Ok("scl") => Some(PinFunction::I2cSda(1)),
+                Ok("sda") => Some(PinFunction::I2cScl(1)),
                 _ => None,
             };
             if Some(&func) == dropped.as_ref() {
@@ -1242,6 +1256,17 @@ mod emit_for_manual_compile {
             main_rs.contains(spi_args),
             "SPI1 wants {spi_args}:\n{main_rs}"
         );
+        // The I2C takes no DMA on this HAL, so it only has to be there — or,
+        // with one wire unwired, be absent WITH a reason.
+        if std::env::var("EIDE_I2C_HALF").is_ok() {
+            assert!(
+                !main_rs.contains("configs::i2c1::init")
+                    && main_rs.contains("I2C1 is NOT initialised"),
+                "half an I2C must not be initialised, and must say so:\n{main_rs}"
+            );
+        } else {
+            assert!(main_rs.contains("configs::i2c1::init"), "{main_rs}");
+        }
 
         let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
         let configs = mcu.config_files();
@@ -1249,11 +1274,12 @@ mod emit_for_manual_compile {
             &files.cargo_toml,
             false,
             true,
-            // The SPI here is wired, so `embedded-hal` is needed exactly as the
-            // app computes it — without DMA the bus is the Portable `SpiBusIo`
-            // bridge, and that bridge IS an `embedded_hal::spi::SpiBus` impl.
+            // The SPI and I2C here are wired, so `embedded-hal` is needed exactly
+            // as the app computes it — without DMA the bus is the Portable
+            // `SpiBusIo` bridge, and that bridge IS an `embedded_hal::spi::SpiBus`
+            // impl.
             true,
-            false,
+            true,
             false,
             true,
             &[],

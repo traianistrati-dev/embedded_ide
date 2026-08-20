@@ -979,16 +979,14 @@ pub fn module_config_ui(
     // Whether an SPI module has a receive line at all. Read from its own wiring
     // for the same reason as `wired_flow` below.
     let has_miso = m.connections.iter().any(|c| c.signal == ModuleSignal::Miso);
-    // Which of the serial pads this module actually has. On the F1 both are
-    // required — see `f1_half_usart_note`.
+    // Which pad of each PAIR this module actually has. On the F1 both are
+    // required — see `f1_half_bus_note`.
+    let has_sig = |want: ModuleSignal| m.connections.iter().any(|c| c.signal == want);
     let wired_serial = (
-        m.connections
-            .iter()
-            .any(|c| matches!(c.signal, ModuleSignal::Tx | ModuleSignal::LpTx)),
-        m.connections
-            .iter()
-            .any(|c| matches!(c.signal, ModuleSignal::Rx | ModuleSignal::LpRx)),
+        has_sig(ModuleSignal::Tx) || has_sig(ModuleSignal::LpTx),
+        has_sig(ModuleSignal::Rx) || has_sig(ModuleSignal::LpRx),
     );
+    let wired_i2c = (has_sig(ModuleSignal::Scl), has_sig(ModuleSignal::Sda));
     // Which flow-control pads this module actually has, read from its own
     // wiring — the flow selector warns against THIS, not against a guess.
     let wired_flow = (
@@ -1178,22 +1176,30 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
-    // Half a USART generates NOTHING on the F1, because `Serial::new` takes the
-    // pair and the HAL has no placeholder for the pad that is missing. main.rs
-    // says so where the init would have gone; this says so before the user gets
-    // there, since a peripheral quietly absent from main.rs is easy to miss.
-    let f1_half_usart_note = |ui: &mut egui::Ui, wired: (bool, bool)| {
+    // Half a USART — or half an I2C — generates NOTHING on the F1: both HALs
+    // take the PAIR (`serial::Pins`, `i2c::Pins`) and have no placeholder for
+    // the pad that is missing. main.rs says so where the init would have gone;
+    // this says so before the user gets there, since a peripheral quietly
+    // absent from main.rs is easy to miss.
+    //
+    // `pads` is (first, second) in the order the pair is named, and `wired`
+    // says which of them the module actually has.
+    let f1_half_bus_note = |ui: &mut egui::Ui,
+                            bus: &str,
+                            pads: (&str, &str),
+                            pair: &str,
+                            wired: (bool, bool)| {
         let missing = match wired {
-            (true, false) => "RX",
-            (false, true) => "TX",
+            (true, false) => pads.1,
+            (false, true) => pads.0,
             _ => return,
         };
         ui.label("");
         ui.label(
             egui::RichText::new(format!(
-                "{missing} is not wired, so this USART is not initialised at all — \
-                 stm32f1xx-hal builds a Serial only from the TX+RX pair. Assign the \
-                 {missing} pad on the canvas."
+                "{missing} is not wired, so this {bus} is not initialised at all — \
+                 stm32f1xx-hal takes the {pair} pair. Assign the {missing} pad on \
+                 the canvas."
             ))
             .size(10.5)
             .color(egui::Color32::from_rgb(220, 160, 70)),
@@ -1429,7 +1435,7 @@ pub fn module_config_ui(
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
                     {
                         f1_serial_note(ui);
-                        f1_half_usart_note(ui, wired_serial);
+                        f1_half_bus_note(ui, "USART", ("TX", "RX"), "TX+RX", wired_serial);
                         transport_row(ui, &mut cfg.blocking_dma, &chans, true);
                         if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);
@@ -1579,6 +1585,11 @@ pub fn module_config_ui(
                     } else if is_native {
                         api_row_locked(ui);
                     } else {
+                        // Same rule as the USART above, and the only backend
+                        // whose half-bus behaviour this turn verified.
+                        if family == "stm32f1" {
+                            f1_half_bus_note(ui, "I2C", ("SCL", "SDA"), "SCL+SDA", wired_i2c);
+                        }
                         api_row(ui, &mut pending.0);
                     }
                 }
