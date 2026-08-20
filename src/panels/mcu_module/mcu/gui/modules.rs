@@ -976,6 +976,9 @@ pub fn module_config_ui(
             (c.signal.label(), pin)
         })
         .collect();
+    // Whether an SPI module has a receive line at all. Read from its own wiring
+    // for the same reason as `wired_flow` below.
+    let has_miso = m.connections.iter().any(|c| c.signal == ModuleSignal::Miso);
     // Which flow-control pads this module actually has, read from its own
     // wiring — the flow selector warns against THIS, not against a guess.
     let wired_flow = (
@@ -1034,12 +1037,19 @@ pub fn module_config_ui(
     // A checkbox rather than a channel picker, because there is nothing to pick
     // — stm32f1xx-hal fixes the channel per peripheral in its types. The label
     // names them anyway, so the choice is not a black box.
-    let transport_row = |ui: &mut egui::Ui, on: &mut BlockingDma, chans: &str| {
+    //
+    // `rx_ok` is false for an SPI with no MISO: there is no receive line, so
+    // the two receiving choices are dropped and a stored one is narrowed on
+    // sight — the same clamp codegen applies, done where the user can see it.
+    let transport_row = |ui: &mut egui::Ui, on: &mut BlockingDma, chans: &str, rx_ok: bool| {
+        if !rx_ok {
+            *on = on.without_rx();
+        }
         ui.label("Transport");
         egui::ComboBox::from_id_salt("blocking_dma")
             .selected_text(on.label())
             .show_ui(ui, |ui| {
-                for v in BlockingDma::ALL {
+                for v in BlockingDma::ALL.into_iter().filter(|v| rx_ok || !v.rx()) {
                     ui.selectable_value(on, v, v.label())
                         .on_hover_text(match v {
                             BlockingDma::Off => "The CPU moves every byte, both ways.".to_owned(),
@@ -1386,7 +1396,7 @@ pub fn module_config_ui(
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
                     {
                         f1_serial_note(ui);
-                        transport_row(ui, &mut cfg.blocking_dma, &chans);
+                        transport_row(ui, &mut cfg.blocking_dma, &chans, true);
                         if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);
                         } else {
@@ -1437,7 +1447,7 @@ pub fn module_config_ui(
                         dma_map::Bus::Spi,
                         cfg.instance,
                     ) {
-                        transport_row(ui, &mut cfg.blocking_dma, &chans);
+                        transport_row(ui, &mut cfg.blocking_dma, &chans, has_miso);
                         if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);
                         } else {

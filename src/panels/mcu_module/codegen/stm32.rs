@@ -530,6 +530,8 @@ pub(super) fn gen_parts(
             .get(&n)
             .map(|c| c.blocking_dma)
             .filter(|_| spi_dma_channels(n).is_some())
+            // No MISO, no receive half — see `BlockingDma::without_rx`.
+            .map(|d| if miso.is_some() { d } else { d.without_rx() })
             .unwrap_or_default();
         let chans = match spi_dma_channels(n) {
             Some((rx, tx)) if spi_dma.any() => {
@@ -546,8 +548,17 @@ pub(super) fn gen_parts(
             }
             _ => String::new(),
         };
+        // A DMA handle is CONSUMED by each transfer and handed back from
+        // `wait()`, so it has to be rebindable — the file's own example ends
+        // `_spi1 = spi;`. The polled shapes keep the plain binding, and their
+        // templates say to add `mut` if you call anything.
+        let binding = if spi_dma.any() {
+            format!("let mut _spi{n}{sfx}")
+        } else {
+            format!("let _spi{n}{sfx}")
+        };
         fn_calls.push_str(&format!(
-            "    let _spi{n}{sfx} = \
+            "    {binding} = \
              pins::configs::spi{n}::init(dp.SPI{n}, ({sck_v}, {miso_v}, {mosi_v}), &mut afio, &clocks{chans});\n"
         ));
     }
@@ -839,7 +850,12 @@ pub fn config_files(
         if has(PinFunction::SpiSck(n)) || has(PinFunction::SpiMosi(n)) {
             out.push((
                 format!("spi{n}.rs"),
-                spi_config_file(n, spi.get(&n), &spi_pin_tys(n, all_pins)),
+                spi_config_file(
+                    n,
+                    spi.get(&n),
+                    &spi_pin_tys(n, all_pins),
+                    has(PinFunction::SpiMiso(n)),
+                ),
             ));
         }
     }
@@ -1571,6 +1587,13 @@ pub fn blocking_dma_uses(mcu: &crate::panels::mcu_module::Mcu) -> Vec<super::dma
     use super::dma_map::{Bus, DmaUse};
     use crate::panels::mcu_module::modules::ModuleConfig;
 
+    /// Is SPI`n`'s receive line wired? Asked of the PIN MAP, the same place
+    /// `config_files` asks, not of the module — a module survives losing a pin.
+    fn has_miso(mcu: &crate::panels::mcu_module::Mcu, n: u8) -> bool {
+        mcu.iter_all_pins()
+            .any(|p| !p.reserved && p.selected_function == PinFunction::SpiMiso(n))
+    }
+
     let mut out = Vec::new();
     let mut push = |peri: &str, bus: Bus, n: u8, dir: &str| {
         out.push(DmaUse {
@@ -1599,10 +1622,17 @@ pub fn blocking_dma_uses(mcu: &crate::panels::mcu_module::Mcu) -> Vec<super::dma
             }
             ModuleConfig::Spi(c) if c.blocking_dma.any() => {
                 if let Some((rx, tx)) = spi_dma_channels(c.instance) {
-                    if c.blocking_dma.tx() {
+                    // The same narrowing the templates apply, so the card
+                    // cannot claim a channel `init` never asks for.
+                    let dma = if has_miso(mcu, c.instance) {
+                        c.blocking_dma
+                    } else {
+                        c.blocking_dma.without_rx()
+                    };
+                    if dma.tx() {
                         push(tx, Bus::Spi, c.instance, "TX");
                     }
-                    if c.blocking_dma.rx() {
+                    if dma.rx() {
                         push(rx, Bus::Spi, c.instance, "RX");
                     }
                 }
@@ -2015,13 +2045,22 @@ pub fn init(
 
 "#;
 
-fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, String)) -> String {
+/// `has_miso` is what makes this a transmitter rather than a bus: with the pin
+/// unwired the HAL's `NoMiso` placeholder takes its slot in `SpiPins`, and the
+/// receive half of any DMA choice is dropped — see `BlockingDma::without_rx`.
+fn spi_config_file(
+    n: u8,
+    cfg: Option<&SpiModuleConfig>,
+    pin_tys: &(String, String),
+    has_miso: bool,
+) -> String {
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
     let channels = spi_dma_channels(n);
     let dma = cfg
         .map(|c| c.blocking_dma)
         .filter(|_| channels.is_some())
+        .map(|d| if has_miso { d } else { d.without_rx() })
         .unwrap_or_default();
     let tmpl = if dma.any() {
         SPI_TMPL_DMA
@@ -2030,6 +2069,21 @@ fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, Stri
             ApiStyle::Portable => SPI_TMPL,
             ApiStyle::Native => SPI_TMPL_NATIVE,
         }
+    };
+    // Without MISO the bus can only SEND, and the polled examples are the ones
+    // that would mislead: `read`/`transfer` still COMPILE (the HAL takes
+    // `NoMiso` as a type-state placeholder, not as a narrower type), they just
+    // return whatever the unconfigured pad happens to read. The DMA template
+    // needs no such note — `without_rx` already left it with the send example.
+    let tmpl = if has_miso {
+        tmpl.to_owned()
+    } else {
+        tmpl.replace(
+            "// ── Using SPI{N} ──\n",
+            "// ── Using SPI{N} ──\n\
+             // MISO is not wired: this bus can only SEND. `read` / `transfer` still\n\
+             // compile, but they return whatever the unconnected pad reads.\n",
+        )
     };
     let (rxch, txch) = channels.unwrap_or(("dma1::C2", "dma1::C3"));
     let (pins, remap) = pin_tys;
@@ -2689,6 +2743,7 @@ mod blocking_dma_tests {
                 ..SpiModuleConfig::new(2)
             }),
             &("()".into(), "Remap".into()),
+            true,
         );
         assert!(
             spi.contains("Spi2RxTxDma<SpiRemap, SpiPins, hal_spi::Master>"),
@@ -2768,7 +2823,7 @@ mod blocking_dma_tests {
         };
         let pins = ("()".to_owned(), "Remap".to_owned());
 
-        let both = spi_config_file(1, Some(&cfg(BlockingDma::Both)), &pins);
+        let both = spi_config_file(1, Some(&cfg(BlockingDma::Both)), &pins, true);
         assert!(
             both.contains("Spi1RxTxDma<SpiRemap, SpiPins, hal_spi::Master>"),
             "{both}"
@@ -2776,7 +2831,7 @@ mod blocking_dma_tests {
         assert!(both.contains(".with_rx_tx_dma(rx_ch, tx_ch)"), "{both}");
         assert!(both.contains("read_write(rxbuf, txbuf)"), "{both}");
 
-        let tx = spi_config_file(1, Some(&cfg(BlockingDma::Tx)), &pins);
+        let tx = spi_config_file(1, Some(&cfg(BlockingDma::Tx)), &pins, true);
         assert!(
             tx.contains("Spi1TxDma<SpiRemap, SpiPins, hal_spi::Master>"),
             "{tx}"
@@ -2785,7 +2840,7 @@ mod blocking_dma_tests {
         assert!(!tx.contains("rx_ch"), "{tx}");
         assert!(tx.contains("use stm32f1xx_hal::dma::WriteDma;"), "{tx}");
 
-        let rx = spi_config_file(1, Some(&cfg(BlockingDma::Rx)), &pins);
+        let rx = spi_config_file(1, Some(&cfg(BlockingDma::Rx)), &pins, true);
         assert!(
             rx.contains("Spi1RxDma<SpiRemap, SpiPins, hal_spi::Master>"),
             "{rx}"
@@ -2793,6 +2848,40 @@ mod blocking_dma_tests {
         assert!(rx.contains(".with_rx_dma(rx_ch)"), "{rx}");
         assert!(!rx.contains("tx_ch"), "{rx}");
         assert!(rx.contains("use stm32f1xx_hal::dma::ReadDma;"), "{rx}");
+    }
+
+    /// An SPI wired SCK+MOSI is a TRANSMITTER. `stm32f1xx-hal` would happily
+    /// build `with_rx_dma` on it — `NoMiso` is a type-state placeholder, not a
+    /// narrower type — and burn a channel receiving an unconfigured pad.
+    #[test]
+    fn without_miso_the_receive_half_is_dropped() {
+        let cfg = |dma| SpiModuleConfig {
+            blocking_dma: dma,
+            ..SpiModuleConfig::new(1)
+        };
+        let pins = ("()".to_owned(), "Remap".to_owned());
+
+        // Both narrows to TX: one channel, one method, and the example no
+        // longer promises a reply.
+        let both = spi_config_file(1, Some(&cfg(BlockingDma::Both)), &pins, false);
+        assert!(
+            both.contains("Spi1TxDma<SpiRemap, SpiPins, hal_spi::Master>"),
+            "{both}"
+        );
+        assert!(both.contains(".with_tx_dma(tx_ch)"), "{both}");
+        assert!(!both.contains("rx_ch"), "{both}");
+        assert!(!both.contains("read_write"), "{both}");
+
+        // RX alone has nothing left, so the file is the polled one again —
+        // carrying the note that says why `read` would lie.
+        let rx = spi_config_file(1, Some(&cfg(BlockingDma::Rx)), &pins, false);
+        assert!(!rx.contains("with_rx_dma"), "{rx}");
+        assert!(!rx.contains("dma1::C2"), "{rx}");
+        assert!(rx.contains("MISO is not wired: this bus can only SEND"), "{rx}");
+
+        // With MISO wired, the note stays out of the way.
+        let full = spi_config_file(1, Some(&cfg(BlockingDma::Off)), &pins, true);
+        assert!(!full.contains("MISO is not wired"), "{full}");
     }
 
     /// The Configuration tab's list must show the halves actually taken -
@@ -2910,5 +2999,48 @@ mod blocking_dma_tests {
                 "{value} missing from:\\n{main_rs}"
             );
         }
+        // A DMA handle is rebound after every transfer (`_spi1 = spi;` is the
+        // last line of the file's own example), so the binding must be `mut`.
+        assert!(main_rs.contains("let mut _spi1 ="), "{main_rs}");
+
+        // Unwire MISO and SPI1's receive channel must go with it, in the list
+        // and in main.rs alike — the module keeps its `Both`, but a bus with no
+        // receive line does not get to reserve DMA1_CH2.
+        let miso = mcu
+            .iter_all_pins()
+            .find(|p| p.selected_function == PinFunction::SpiMiso(1))
+            .map(|p| p.number)
+            .expect("PA6 was wired above");
+        if let Some(p) = mcu.find_pin_mut(miso) {
+            p.selected_function = PinFunction::Unset;
+        }
+        let uses = blocking_dma_uses(&mcu);
+        let rows: Vec<(&str, &str)> = uses
+            .iter()
+            .map(|u| (u.peri.as_str(), u.user.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("DMA1_CH4", "USART1 TX"),
+                ("DMA1_CH5", "USART1 RX"),
+                ("DMA1_CH3", "SPI1 TX"),
+            ]
+        );
+        let main_rs = mcu.fresh_main_rs();
+        assert!(!main_rs.contains("dma1.2"), "{main_rs}");
+        assert!(main_rs.contains("stm32f1xx_hal::spi::NoMiso"), "{main_rs}");
+        // Still a transmitter on DMA, so still rebindable.
+        assert!(main_rs.contains("let mut _spi1 ="), "{main_rs}");
+
+        // Turn the transport off and the plain binding comes back — the polled
+        // templates are the ones that tell the user to add `mut` themselves.
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Spi(c) = &mut m.config {
+                c.blocking_dma = BlockingDma::Off;
+            }
+        }
+        let main_rs = mcu.fresh_main_rs();
+        assert!(main_rs.contains("let _spi1 ="), "{main_rs}");
     }
 }

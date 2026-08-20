@@ -1148,8 +1148,13 @@ mod emit_for_manual_compile {
             ("PA10", PinFunction::UsartRx(1)),
             ("PA5", PinFunction::SpiSck(1)),
             ("PA7", PinFunction::SpiMosi(1)),
+            // `EIDE_SPI_TXONLY=1` leaves MISO unwired. On F1 that is not a different
+            // constructor, it is the HAL's `NoMiso` placeholder in `SpiPins`.
             ("PA6", PinFunction::SpiMiso(1)),
         ] {
+            if func == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
+                continue;
+            }
             let num = mcu
                 .iter_all_pins()
                 .find(|p| p.name == name)
@@ -1185,12 +1190,25 @@ mod emit_for_manual_compile {
              second owner:\n{main_rs}"
         );
         // Only the halves in use contribute an argument, in `init`'s order.
-        let (usart_args, spi_args) = match halves {
-            BlockingDma::Both => ("&clocks, dma1.4, dma1.5)", "&clocks, dma1.2, dma1.3)"),
-            BlockingDma::Tx => ("&clocks, dma1.4)", "&clocks, dma1.3)"),
-            BlockingDma::Rx => ("&clocks, dma1.5)", "&clocks, dma1.2)"),
-            BlockingDma::Off => ("&clocks)", "&clocks)"),
+        // With MISO unwired the SPI has no receive half to give one, whatever
+        // the module still says — so it is scored against the NARROWED choice.
+        let spi_halves = if std::env::var("EIDE_SPI_TXONLY").is_ok() {
+            halves.without_rx()
+        } else {
+            halves
         };
+        // `tx_first` is the peripheral's own parameter order: the USART takes
+        // TX then RX, the SPI takes RX then TX (`with_rx_tx_dma`'s order).
+        let args = |h: BlockingDma, tx: &str, rx: &str, tx_first: bool| match h {
+            BlockingDma::Both if tx_first => format!("&clocks, {tx}, {rx})"),
+            BlockingDma::Both => format!("&clocks, {rx}, {tx})"),
+            BlockingDma::Tx => format!("&clocks, {tx})"),
+            BlockingDma::Rx => format!("&clocks, {rx})"),
+            BlockingDma::Off => "&clocks)".to_owned(),
+        };
+        let usart_args = args(halves, "dma1.4", "dma1.5", true);
+        let spi_args = args(spi_halves, "dma1.3", "dma1.2", false);
+        let (usart_args, spi_args) = (usart_args.as_str(), spi_args.as_str());
         assert!(
             main_rs.contains(usart_args),
             "USART1 wants {usart_args}:\n{main_rs}"
@@ -1206,7 +1224,10 @@ mod emit_for_manual_compile {
             &files.cargo_toml,
             false,
             true,
-            false,
+            // The SPI here is wired, so `embedded-hal` is needed exactly as the
+            // app computes it — without DMA the bus is the Portable `SpiBusIo`
+            // bridge, and that bridge IS an `embedded_hal::spi::SpiBus` impl.
+            true,
             false,
             false,
             true,

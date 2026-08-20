@@ -597,6 +597,21 @@ impl BlockingDma {
         self != BlockingDma::Off
     }
 
+    /// The same choice with the receive half dropped: `Both` becomes `Tx`,
+    /// `Rx` becomes `Off`.
+    ///
+    /// For a bus that has no receive LINE — an SPI wired SCK+MOSI without
+    /// MISO. The HAL still builds `with_rx_dma` there (the pin is only a
+    /// type-state placeholder), so nothing complains: the channel is reserved,
+    /// the transfer runs, and it clocks in whatever the unconfigured pad
+    /// happens to read. A channel spent on garbage is worse than no channel.
+    pub fn without_rx(self) -> Self {
+        match self {
+            BlockingDma::Both | BlockingDma::Tx => BlockingDma::Tx,
+            BlockingDma::Rx | BlockingDma::Off => BlockingDma::Off,
+        }
+    }
+
     /// For `skip_serializing_if`: the default never reaches `mcu.config`.
     fn is_off(&self) -> bool {
         *self == BlockingDma::Off
