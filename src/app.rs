@@ -3485,11 +3485,17 @@ impl eframe::App for AppIde {
         }
         if !self.deps_banner_dismissed {
             let tc = self.selected_toolchain();
-            let problems = self
-                .tools_state
-                .lock()
-                .unwrap()
-                .blocking_problems(tc.as_ref());
+            // One lock for everything the banner draws: the problems, the
+            // specific finding under each (which names the thing `impact` can
+            // only call `<NAME>`), and whether the install hint applies at all.
+            let (problems, details, any_missing) = {
+                let s = self.tools_state.lock().unwrap();
+                let p = s.blocking_problems(tc.as_ref());
+                let d: Vec<Option<String>> =
+                    p.iter().map(|(n, _, _)| s.status_detail(n)).collect();
+                let m = s.any_blocking_missing(tc.as_ref());
+                (p, d, m)
+            };
             if !problems.is_empty() {
                 let mut open_tools = false;
                 let mut dismiss = false;
@@ -3517,12 +3523,25 @@ impl eframe::App for AppIde {
                                     .color(egui::Color32::from_rgb(245, 200, 130)),
                                 );
                             });
-                            for (name, _, impact) in &problems {
+                            for ((name, _, impact), detail) in problems.iter().zip(&details) {
                                 ui.label(
                                     egui::RichText::new(format!("• {name} — {impact}"))
                                         .size(10.5)
                                         .color(egui::Color32::from_rgb(225, 195, 155)),
                                 );
+                                // What the check actually found, indented under
+                                // its entry. `impact` is written before anything
+                                // is probed, so it can only say `<NAME>`; this
+                                // line is where the name lands — without it the
+                                // banner tells you to delete a variable and
+                                // never says which one.
+                                if let Some(detail) = detail {
+                                    ui.label(
+                                        egui::RichText::new(format!("     ↳ {detail}"))
+                                            .size(10.5)
+                                            .color(egui::Color32::from_rgb(245, 200, 130)),
+                                    );
+                                }
                             }
                             ui.horizontal_wrapped(|ui| {
                                 if ui
@@ -3541,15 +3560,24 @@ impl eframe::App for AppIde {
                                 if ui.button("Dismiss").clicked() {
                                     dismiss = true;
                                 }
-                                ui.label(
-                                    egui::RichText::new(
-                                        "(installed it just now? re-check in Tools — a tool \
-                                         installed after the IDE started isn't on its PATH)",
-                                    )
-                                    .size(9.5)
-                                    .italics()
-                                    .color(egui::Color32::from_gray(160)),
-                                );
+                                // Only where it is true. This is advice about
+                                // INSTALLING something, and re-checking is the
+                                // action it recommends — neither applies to a
+                                // problem like a stray `CARGO_FEATURE_*`, where
+                                // nothing was installed and a re-check reads the
+                                // same inherited environment. Showing it there
+                                // pointed at the one action that cannot work.
+                                if any_missing {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "(installed it just now? re-check in Tools — a tool \
+                                             installed after the IDE started isn't on its PATH)",
+                                        )
+                                        .size(9.5)
+                                        .italics()
+                                        .color(egui::Color32::from_gray(160)),
+                                    );
+                                }
                             });
                         });
                 });

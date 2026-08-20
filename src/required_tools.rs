@@ -223,6 +223,45 @@ impl ToolsState {
             .collect()
     }
 
+    /// The specific finding behind an entry's status, when its check produced
+    /// one — what `impact` cannot say because it is a fixed string written
+    /// before anything was probed.
+    ///
+    /// `Missing` has none by definition (the tool simply was not there), which
+    /// is why this returns an `Option` rather than a string for every entry.
+    pub fn status_detail(&self, name: &str) -> Option<String> {
+        self.tools
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| match &t.status {
+                ToolStatus::Failed(msg) => Some(msg.clone()),
+                ToolStatus::Outdated { found, min } => {
+                    Some(format!("found {found}, needs {min} or newer"))
+                }
+                _ => None,
+            })
+    }
+
+    /// Is any blocking problem a tool that simply is not installed?
+    ///
+    /// The banner's "installed it just now? re-check in Tools" hint is only
+    /// true for those. An entry that failed for another reason — a stray
+    /// environment variable, an incomplete MSVC toolchain — is not fixed by
+    /// installing anything, and re-checking a variable this process inherited
+    /// at startup cannot clear it either: that needs a restart, which is the
+    /// opposite of what the hint suggests.
+    pub fn any_blocking_missing(&self, toolchain: Option<&ToolchainKind>) -> bool {
+        self.tools
+            .iter()
+            .filter(|t| t.severity == Severity::Blocking)
+            .filter(|t| matches!(t.status, ToolStatus::Missing))
+            .any(|t| match (&t.toolchain, toolchain) {
+                (Some(tc), Some(sel)) => tc == sel,
+                (Some(_), None) => false,
+                (None, _) => true,
+            })
+    }
+
     /// Names of the tools CONFIRMED unusable (`Missing` / `Failed`). Deliberately
     /// excludes `Unknown` and the busy states: a feature must never be greyed out
     /// just because the check hasn't run (or couldn't run) yet — the UI stays
@@ -915,14 +954,13 @@ fn check_cargo_feature_env() -> ToolStatus {
     leaked.sort();
     // `Failed`, not `Missing`: the check ran and found something wrong. Missing
     // would read backwards here — the problem is a variable being PRESENT.
-    ToolStatus::Failed(format!(
-        "{} in this environment. Build scripts read {} as enabled features — an \
-         RTIC project fails with \"More than one backend selected\" even though \
-         its Cargo.toml is correct. Remove {} and restart the IDE.",
-        leaked.join(", "),
-        if leaked.len() == 1 { "it" } else { "them" },
-        if leaked.len() == 1 { "it" } else { "them" },
-    ))
+    //
+    // Short on purpose: the consequence and the fix live in the entry's
+    // `impact`, which the banner and the Tools tab both already print. What
+    // only the CHECK can know is WHICH variable — and that is the one thing
+    // `impact` cannot say, being a `&'static str` with a `<NAME>` placeholder.
+    // So this message carries exactly that, and the banner prints it underneath.
+    ToolStatus::Failed(format!("set in this environment: {}", leaked.join(", ")))
 }
 
 #[cfg(windows)]
@@ -1670,6 +1708,33 @@ mod tests {
                 .collect();
             assert!(names.contains(&NAME), "missing from the banner: {names:?}");
         }
+
+        // The banner prints this under the bullet — it is the only place the
+        // variable's NAME appears, since `impact` is fixed text with a
+        // `<NAME>` placeholder in the command it tells you to run.
+        assert_eq!(
+            s.status_detail(NAME).as_deref(),
+            Some("CARGO_FEATURE_RT in this environment")
+        );
+
+        // And the "installed it just now? re-check in Tools" hint must NOT be
+        // shown for it: nothing was installed, and a re-check reads the same
+        // inherited environment, so it would point at the one action that
+        // cannot clear the problem. Only a genuinely absent tool earns it.
+        assert!(
+            !s.any_blocking_missing(None),
+            "a Failed entry is not a missing tool"
+        );
+        let rustup = s
+            .tools
+            .iter_mut()
+            .find(|t| t.name == "rustup")
+            .expect("rustup is in the catalog");
+        rustup.status = ToolStatus::Missing;
+        assert!(
+            s.any_blocking_missing(None),
+            "a genuinely missing tool must still get the hint"
+        );
     }
 
     /// The environment check has to fire on a variable being THERE, which is
@@ -1690,16 +1755,29 @@ mod tests {
         let hit = check_cargo_feature_env();
         unsafe { std::env::remove_var(NAME) };
 
+        // The two halves live in two places on purpose, and the banner prints
+        // them one under the other: the STATUS carries what only a probe can
+        // know (which variable), the ENTRY's `impact` carries the consequence
+        // and the fix, which are the same whatever the variable is called.
         match &hit {
             ToolStatus::Failed(msg) => {
-                assert!(msg.contains(NAME), "the name IS the diagnosis: {msg}");
-                assert!(
-                    msg.contains("More than one backend selected"),
-                    "must name the error the user actually sees: {msg}"
-                );
+                assert!(msg.contains(NAME), "the name IS the diagnosis: {msg}")
             }
             other => panic!("a stray variable must be reported, got {other:?}"),
         }
+        let s = make_tools_state();
+        let s = s.lock().unwrap();
+        let impact = s
+            .tools
+            .iter()
+            .find(|t| t.name == "CARGO_FEATURE_* env")
+            .map(|t| t.impact)
+            .expect("entry is in the catalog");
+        assert!(
+            impact.contains("More than one backend selected"),
+            "must name the error the user actually sees: {impact}"
+        );
+        drop(s);
 
         // And it must be able to turn green — a check that never passes reads
         // as broken. Conditional on purpose: this very test exists because a
