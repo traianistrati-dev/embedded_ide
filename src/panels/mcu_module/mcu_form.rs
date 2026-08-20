@@ -754,10 +754,18 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             adc: n,
             channel: ch,
         }),
-        "tim" => tail.parse().ok().map(|ch| PinFunction::TimerPwm {
-            timer: n,
-            channel: ch,
-        }),
+        // `tim1_2` → TIM1 CH2; the `n` suffix is the complementary output,
+        // `tim1_2n` → TIM1 CH2N.
+        "tim" => match tail.strip_suffix('n') {
+            Some(ch) => ch.parse().ok().map(|ch| PinFunction::TimerPwmN {
+                timer: n,
+                channel: ch,
+            }),
+            None => tail.parse().ok().map(|ch| PinFunction::TimerPwm {
+                timer: n,
+                channel: ch,
+            }),
+        },
         _ => None,
     }
 }
@@ -794,6 +802,7 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::I2cSda(n) => format!("i2c{n}_sda"),
         PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_{channel}"),
         PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_{channel}"),
+        PinFunction::TimerPwmN { timer, channel } => format!("tim{timer}_{channel}n"),
         PinFunction::Other(name) => format!("af:{}", name.to_ascii_lowercase()),
     })
 }

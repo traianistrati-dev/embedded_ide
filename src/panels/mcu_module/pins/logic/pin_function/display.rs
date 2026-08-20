@@ -16,6 +16,7 @@ impl PinFunction {
             PinFunction::GpioAnalog => "analog",
             PinFunction::AdcChannel { .. } => "adc",
             PinFunction::TimerPwm { .. } => "pwm",
+            PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::UsartTx(_) => "uart_tx",
             PinFunction::UsartRx(_) => "uart_rx",
             PinFunction::UsartCts(_) => "uart_cts",
@@ -54,6 +55,9 @@ impl PinFunction {
             PinFunction::GpioAnalog => "GPIO Analog".into(),
             PinFunction::AdcChannel { adc, channel } => format!("ADC{adc}  IN{channel}"),
             PinFunction::TimerPwm { timer, channel } => format!("TIM{timer}  CH{channel}  (PWM)"),
+            PinFunction::TimerPwmN { timer, channel } => {
+                format!("TIM{timer}  CH{channel}N  (PWM)")
+            }
             PinFunction::UsartTx(n) => format!("USART{n}  TX"),
             PinFunction::UsartRx(n) => format!("USART{n}  RX"),
             PinFunction::UsartCts(n) => format!("USART{n}  CTS"),
@@ -183,10 +187,19 @@ impl PinFunction {
             if let Some((timer_str, ch_rest)) = rest.split_once("  CH") {
                 // ch_rest = "1  (PWM)" — take everything up to the next "  "
                 let ch_num_str = ch_rest.split("  ").next().unwrap_or("");
+                // A trailing N is the complementary output: "CH1N", not CH1.
+                let (ch_num_str, complementary) = match ch_num_str.strip_suffix('N') {
+                    Some(head) => (head, true),
+                    None => (ch_num_str, false),
+                };
                 if let (Ok(timer), Ok(channel)) =
                     (timer_str.parse::<u8>(), ch_num_str.parse::<u8>())
                 {
-                    return Some(PinFunction::TimerPwm { timer, channel });
+                    return Some(if complementary {
+                        PinFunction::TimerPwmN { timer, channel }
+                    } else {
+                        PinFunction::TimerPwm { timer, channel }
+                    });
                 }
             }
         }
@@ -261,7 +274,9 @@ impl PinFunction {
             PinFunction::GpioOutput => "OUT",
             PinFunction::GpioAnalog => "ANA",
             PinFunction::AdcChannel { .. } => "ADC",
-            PinFunction::TimerPwm { .. } => "PWM",
+            // Both PWM shapes share a tag: the label already spells out which
+            // channel, and CH1N reads as complementary on its own.
+            PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::UsartTx(_) => "TX",
             PinFunction::UsartRx(_) => "RX",
             PinFunction::UsartCts(_) => "CTS",
@@ -360,6 +375,10 @@ mod list_label_tests {
             PinFunction::AdcChannel { adc: 1, channel: 0 },
             PinFunction::TimerPwm {
                 timer: 2,
+                channel: 1,
+            },
+            PinFunction::TimerPwmN {
+                timer: 1,
                 channel: 1,
             },
             PinFunction::UsartTx(1),

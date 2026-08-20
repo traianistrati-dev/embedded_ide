@@ -171,6 +171,18 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
                 _ => PwmCh4,
             },
         ),
+        // The complementary pad joins the SAME module as its channel: one
+        // timer, one module, however many pads it drives.
+        PinFunction::TimerPwmN { timer, channel } => (
+            GenericInterfaceTimer,
+            *timer,
+            match channel {
+                1 => PwmCh1N,
+                2 => PwmCh2N,
+                3 => PwmCh3N,
+                _ => PwmCh4N,
+            },
+        ),
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
         // CAN has a single instance on STM32F1 (CAN1) and pin functions without
@@ -215,6 +227,12 @@ pub enum ModuleSignal {
     PwmCh2,
     PwmCh3,
     PwmCh4,
+    // …and their complementary halves. A separate signal rather than a flag on
+    // the channel, because the pad is a different pin with its own wire.
+    PwmCh1N,
+    PwmCh2N,
+    PwmCh3N,
+    PwmCh4N,
     // CAN
     CanRx,
     CanTx,
@@ -247,6 +265,10 @@ impl ModuleSignal {
             ModuleSignal::PwmCh2 => "CH2",
             ModuleSignal::PwmCh3 => "CH3",
             ModuleSignal::PwmCh4 => "CH4",
+            ModuleSignal::PwmCh1N => "CH1N",
+            ModuleSignal::PwmCh2N => "CH2N",
+            ModuleSignal::PwmCh3N => "CH3N",
+            ModuleSignal::PwmCh4N => "CH4N",
             ModuleSignal::CanRx => "RX",
             ModuleSignal::CanTx => "TX",
             ModuleSignal::UsbDm => "D-",
@@ -286,6 +308,22 @@ impl ModuleSignal {
                 channel: 3,
             },
             ModuleSignal::PwmCh4 => PinFunction::TimerPwm {
+                timer: instance,
+                channel: 4,
+            },
+            ModuleSignal::PwmCh1N => PinFunction::TimerPwmN {
+                timer: instance,
+                channel: 1,
+            },
+            ModuleSignal::PwmCh2N => PinFunction::TimerPwmN {
+                timer: instance,
+                channel: 2,
+            },
+            ModuleSignal::PwmCh3N => PinFunction::TimerPwmN {
+                timer: instance,
+                channel: 3,
+            },
+            ModuleSignal::PwmCh4N => PinFunction::TimerPwmN {
                 timer: instance,
                 channel: 4,
             },
@@ -924,6 +962,15 @@ pub struct TimerModuleConfig {
     /// How the counter runs — one setting for the whole timer.
     #[serde(default)]
     pub counting: PwmCounting,
+    /// Dead time between a channel's pad and its complementary one, in timer
+    /// ticks on the same scale as the duty compare value.
+    ///
+    /// One setting for the whole timer, because there is one BDTR register.
+    /// Only reaches the code when a `CHxN` pad is wired — without one there is
+    /// no pair to separate. Zero is no dead time at all, which is fine for a
+    /// pair driving independent loads and fatal for a half-bridge.
+    #[serde(default)]
+    pub dead_time: u16,
     /// Per-channel output shape. Absent = every default, which is also the
     /// timer's reset state.
     #[serde(default)]
@@ -944,6 +991,7 @@ impl TimerModuleConfig {
             duty_x100: std::collections::BTreeMap::new(),
             duty: std::collections::BTreeMap::new(),
             counting: PwmCounting::default(),
+            dead_time: 0,
             channels: std::collections::BTreeMap::new(),
             rx_model: String::new(),
             tx_model: String::new(),

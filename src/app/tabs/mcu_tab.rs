@@ -397,7 +397,12 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             name: "Timers / PWM".into(),
             rgb: (190, 170, 30),
             complexity: Simple,
-            pred: Box::new(|f| matches!(f, PinFunction::TimerPwm { .. })),
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. }
+                )
+            }),
         },
         CategoryDef {
             name: "MCO / Clock".into(),

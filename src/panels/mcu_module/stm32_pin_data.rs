@@ -622,12 +622,17 @@ fn native_token(sig: &str) -> Option<String> {
         }
         "TIM" => {
             let ch = tail.strip_prefix("CH")?;
-            // Plain channels only — skip complementary `CHyN`, `_ETR`, `_BKIN`.
-            if ch.is_empty() || !ch.bytes().all(|b| b.is_ascii_digit()) {
+            // Channels and their complementary outputs; `_ETR`, `_BKIN` and the
+            // rest stay generic AF signals.
+            let (digits, suffix) = match ch.strip_suffix('N') {
+                Some(head) => (head, "n"),
+                None => (ch, ""),
+            };
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
-            let ch: u32 = ch.parse().ok()?;
-            Some(format!("tim{n}_{ch}"))
+            let ch: u32 = digits.parse().ok()?;
+            Some(format!("tim{n}_{ch}{suffix}"))
         }
         _ => None,
     }
@@ -1104,7 +1109,8 @@ mod tests {
             "af:rtc_tamp1",
             "af:rtc_ts",
             "af:sys_wkup2",
-            "af:tim1_ch1n",
+            // Was a generic AF signal until CHxN became a function of its own.
+            "tim1_1n",
             "in",
             "out",
             // From the GPIO signal's `IOModes="…,Analog,…"` attribute — CubeMX's
@@ -1393,7 +1399,7 @@ mod tests {
             find(form, "PB6").functions,
             "i2c1_scl af:i2c1_smba tim4_1 in out"
         );
-        assert_eq!(find(form, "PB13").functions, "spi2_sck af:tim1_ch1n in out");
+        assert_eq!(find(form, "PB13").functions, "spi2_sck tim1_1n in out");
         assert_eq!(find(form, "PA13").functions, "swdio in out");
         assert_eq!(find(form, "PA5").functions, "adc1_5 adc2_5 spi1_sck in out");
         // Power pin: reserved, no functions, name kept verbatim.
@@ -1515,7 +1521,7 @@ mod tests {
         assert_eq!(map_signal("SAI1_SD_A").as_deref(), Some("af:sai1_sd_a"));
         assert_eq!(map_signal("DCMI_D3").as_deref(), Some("af:dcmi_d3"));
         assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("af:quadspi_clk"));
-        assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("af:tim1_ch1n"));
+        assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("tim1_1n"));
         assert_eq!(map_signal("I2C1_SMBA").as_deref(), Some("af:i2c1_smba"));
         // Only the EXTI TRIGGER lines and EVENTOUT are dropped…
         assert_eq!(map_signal("EVENTOUT"), None);

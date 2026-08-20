@@ -126,6 +126,11 @@ fn io_dir(func: &PinFunction) -> Option<IoDir> {
         PinFunction::GpioAnalog | PinFunction::Other(_) => Some(IoDir::Plain),
         // Unset has no binding; SWD/JTAG generate a comment, not a variable.
         PinFunction::Unset | PinFunction::SwdIo | PinFunction::SwdClk => None,
+        // A complementary PWM pad is never its own variable either: it is
+        // handed straight to its timer's `ComplementaryPwm`, which owns the
+        // name. Spelled out rather than left to the catch-all, because it is a
+        // decision and not an oversight.
+        PinFunction::TimerPwmN { .. } => None,
         // Every remaining variant is a bus pin, already returned above.
         _ => None,
     }

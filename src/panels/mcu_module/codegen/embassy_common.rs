@@ -1777,6 +1777,19 @@ mod emit_for_manual_compile {
                 timer: 2,
                 channel: 2,
             },
+            // A SECOND timer, this one advanced and wired as a PAIR: TIM1 CH1
+            // with its complementary CH1N. That is the whole `ComplementaryPwm`
+            // path — a different driver, eight slots instead of four, and a
+            // dead time — so the project carries both shapes at once and only a
+            // compiler can confirm either.
+            PinFunction::TimerPwm {
+                timer: 1,
+                channel: 1,
+            },
+            PinFunction::TimerPwmN {
+                timer: 1,
+                channel: 1,
+            },
         ] {
             if want == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
@@ -1847,6 +1860,8 @@ mod emit_for_manual_compile {
                     c.freq_hz = 20_000;
                     c.set_duty_x100(1, 7_500);
                     c.counting = PwmCounting::CenterBothInterrupts;
+                    // Only reaches the code on the timer that has a pair.
+                    c.dead_time = 40;
                     c.set_channel(
                         1,
                         PwmChannelConfig {

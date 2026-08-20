@@ -127,6 +127,7 @@ mod tests {
 
         let mut cfg = TimerModuleConfig::new(1);
         cfg.counting = PwmCounting::CenterUpInterrupts;
+        cfg.dead_time = 40;
         cfg.set_channel(
             2,
             PwmChannelConfig {
@@ -149,6 +150,7 @@ mod tests {
             panic!("expected a timer module");
         };
         assert_eq!(cfg.counting, PwmCounting::CenterUpInterrupts);
+        assert_eq!(cfg.dead_time, 40);
         assert_eq!(cfg.channel_of(2).output, PwmOutput::OpenDrain);
         assert_eq!(cfg.channel_of(2).polarity, PwmPolarity::ActiveLow);
         assert_eq!(cfg.channel_of(2).mode, PwmMode::Mode2);

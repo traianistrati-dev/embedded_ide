@@ -6,6 +6,7 @@ use super::super::model::{Mcu, PIN_HEIGHT};
 use super::rotate::Rot;
 use crate::panels::mcu_module::codegen;
 use crate::panels::mcu_module::codegen::dma_map;
+use crate::panels::mcu_module::codegen::embassy_async::is_advanced_timer;
 use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
@@ -17,7 +18,7 @@ use crate::panels::mcu_module::modules::{
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 use egui_phosphor::regular as ph;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 const BOX_W: f32 = 170.0;
 /// Tall enough for the name, the config summary, and the rename field at the
@@ -948,18 +949,28 @@ fn stop_label(s: StopBits) -> &'static str {
 /// set from (`pwm_wires`).
 fn free_pwm_channels(
     timer: u8,
-    wired: &BTreeSet<u8>,
+    wired: &BTreeSet<String>,
     pin_funcs: &HashMap<usize, Vec<PinFunction>>,
-) -> Vec<u8> {
-    let on_chip: BTreeSet<u8> = pin_funcs
+) -> Vec<String> {
+    let on_chip: BTreeSet<String> = pin_funcs
         .values()
         .flatten()
         .filter_map(|f| match f {
-            PinFunction::TimerPwm { timer: t, channel } if *t == timer => Some(*channel),
+            PinFunction::TimerPwm { timer: t, channel } if *t == timer => {
+                Some(format!("CH{channel}"))
+            }
+            // A complementary pad is offered the same way — it is one more
+            // signal to assign on the canvas — but only where embassy can
+            // actually drive it.
+            PinFunction::TimerPwmN { timer: t, channel }
+                if *t == timer && is_advanced_timer(*t) =>
+            {
+                Some(format!("CH{channel}N"))
+            }
             _ => None,
         })
         .collect();
-    on_chip.difference(wired).copied().collect()
+    on_chip.difference(wired).cloned().collect()
 }
 
 pub fn module_config_ui(
@@ -1584,7 +1595,21 @@ pub fn module_config_ui(
                             );
                         ui.end_row();
                     }
-                    if conn_rows.is_empty() {
+                    // The pads wired to this module, grouped by CHANNEL: the
+                    // duty is the channel's, and a channel can own two pads —
+                    // CHx and its complementary CHxN. Both come from the
+                    // signals' own labels, so these rows and the hint below
+                    // cannot disagree.
+                    let wired: BTreeSet<String> =
+                        conn_rows.iter().map(|(sig, _)| (*sig).to_owned()).collect();
+                    let mut pads: BTreeMap<u8, Vec<String>> = BTreeMap::new();
+                    for (sig, pin) in &conn_rows {
+                        let digits = sig.strip_prefix("CH").map(|r| r.trim_end_matches('N'));
+                        if let Some(ch) = digits.and_then(|d| d.parse::<u8>().ok()) {
+                            pads.entry(ch).or_default().push(format!("{sig} {pin}"));
+                        }
+                    }
+                    if pads.is_empty() {
                         ui.label("Channels");
                         ui.label(
                             egui::RichText::new("none wired yet")
@@ -1594,17 +1619,9 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
-                    // "CH2" -> 2, from the signals' own labels, so the duty
-                    // rows below and the free-channel hint cannot disagree.
-                    let wired: BTreeSet<u8> = conn_rows
-                        .iter()
-                        .filter_map(|(sig, _)| sig.strip_prefix("CH")?.parse::<u8>().ok())
-                        .collect();
-                    for (sig, pin) in &conn_rows {
-                        let Some(ch) = sig.strip_prefix("CH").and_then(|n| n.parse::<u8>().ok())
-                        else {
-                            continue;
-                        };
+                    for (ch, pins) in &pads {
+                        let (ch, sig) = (*ch, format!("CH{ch}"));
+                        let pin = pins.join(", ");
                         ui.label(format!("{sig} duty  ({pin})"));
                         // Percent with two decimals, stored as hundredths: a
                         // servo's 1.5 ms of a 20 ms frame is 7.5 %, and whole
@@ -1680,13 +1697,37 @@ pub fn module_config_ui(
                     // mentioned a freed CH1, offered channels the timer does
                     // not have, and kept advertising the action after all of
                     // them were wired.
+                    // Dead time only matters once a pair exists, and only the
+                    // async backend can emit it — see the note further down.
+                    let has_comp = wired.iter().any(|s| s.ends_with('N'));
+                    if has_comp && is_async {
+                        if is_advanced_timer(cfg.instance) {
+                            ui.label("Dead time");
+                            ui.add(
+                                egui::DragValue::new(&mut cfg.dead_time)
+                                    .range(0..=u16::MAX)
+                                    .suffix(" ticks"),
+                            )
+                            .on_hover_text(
+                                "Ticks on the same scale as the duty compare value; embassy                                  encodes them into the timer's CKD + DTG fields. 0 means the two                                  pads switch at the same instant — fine for independent loads,                                  fatal for a half-bridge.",
+                            );
+                            ui.end_row();
+                        } else {
+                            ui.label("");
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "TIM{} has complementary pads wired, but embassy drives them                                      through `ComplementaryPwm`, which covers the advanced-control                                      timers (TIM1/8/20) only — they will not be initialised",
+                                    cfg.instance
+                                ))
+                                .size(10.5)
+                                .color(egui::Color32::from_rgb(200, 140, 60)),
+                            );
+                            ui.end_row();
+                        }
+                    }
                     let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
                     if !free.is_empty() {
-                        let list = free
-                            .iter()
-                            .map(|c| format!("CH{c}"))
-                            .collect::<Vec<_>>()
-                            .join(" / ");
+                        let list = free.join(" / ");
                         ui.label("");
                         ui.label(
                             egui::RichText::new(format!(
@@ -2166,19 +2207,38 @@ mod tests {
         out
     }
 
-    /// The hint names the channels actually left on THIS timer.
+    /// A chip whose pins can serve the complementary pads `comp` of `timer`.
+    fn chip_with_comp(timer: u8, channels: &[u8], comp: &[u8]) -> HashMap<usize, Vec<PinFunction>> {
+        let mut out = chip(timer, channels);
+        for (i, ch) in comp.iter().enumerate() {
+            out.insert(
+                1000 + i,
+                vec![PinFunction::TimerPwmN {
+                    timer,
+                    channel: *ch,
+                }],
+            );
+        }
+        out
+    }
+
+    fn wired(labels: &[&str]) -> BTreeSet<String> {
+        labels.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The hint names the pads actually left on THIS timer.
     #[test]
     fn free_channels_are_what_the_chip_has_minus_what_is_wired() {
         let four = chip(2, &[1, 2, 3, 4]);
         assert_eq!(
-            free_pwm_channels(2, &BTreeSet::from([1]), &four),
-            vec![2, 3, 4],
+            free_pwm_channels(2, &wired(&["CH1"]), &four),
+            ["CH2", "CH3", "CH4"],
             "the common case the old fixed text got right"
         );
         // …and the one it got wrong: CH1 freed, CH2 taken.
         assert_eq!(
-            free_pwm_channels(2, &BTreeSet::from([2]), &four),
-            vec![1, 3, 4],
+            free_pwm_channels(2, &wired(&["CH2"]), &four),
+            ["CH1", "CH3", "CH4"],
             "CH1 is free and must be offered"
         );
     }
@@ -2188,7 +2248,7 @@ mod tests {
     #[test]
     fn a_fully_wired_timer_has_no_free_channel() {
         let four = chip(2, &[1, 2, 3, 4]);
-        assert!(free_pwm_channels(2, &BTreeSet::from([1, 2, 3, 4]), &four).is_empty());
+        assert!(free_pwm_channels(2, &wired(&["CH1", "CH2", "CH3", "CH4"]), &four).is_empty());
     }
 
     /// Not every timer has four channels, and not every package bonds the pads
@@ -2197,17 +2257,47 @@ mod tests {
     fn a_one_channel_timer_never_offers_channels_it_lacks() {
         let tim14 = chip(14, &[1]);
         assert!(
-            free_pwm_channels(14, &BTreeSet::from([1]), &tim14).is_empty(),
+            free_pwm_channels(14, &wired(&["CH1"]), &tim14).is_empty(),
             "CH2/3/4 do not exist on TIM14"
         );
-        assert_eq!(free_pwm_channels(14, &BTreeSet::new(), &tim14), vec![1]);
+        assert_eq!(free_pwm_channels(14, &BTreeSet::new(), &tim14), ["CH1"]);
     }
 
     /// Another timer's pads are not this module's business.
     #[test]
     fn other_timers_do_not_leak_into_the_hint() {
         let tim2 = chip(2, &[1]);
-        assert_eq!(free_pwm_channels(2, &BTreeSet::new(), &tim2), vec![1]);
-        assert_eq!(free_pwm_channels(3, &BTreeSet::new(), &tim2), vec![4]);
+        assert_eq!(free_pwm_channels(2, &BTreeSet::new(), &tim2), ["CH1"]);
+        assert_eq!(free_pwm_channels(3, &BTreeSet::new(), &tim2), ["CH4"]);
+    }
+
+    /// A complementary pad is one more thing to assign on the canvas, so the
+    /// hint offers it — on an advanced timer, where embassy can drive it.
+    #[test]
+    fn complementary_pads_are_offered_on_an_advanced_timer() {
+        let tim1 = chip_with_comp(1, &[1, 2], &[1, 2]);
+        assert_eq!(
+            free_pwm_channels(1, &wired(&["CH1"]), &tim1),
+            ["CH1N", "CH2", "CH2N"],
+        );
+        // Already wired ones drop out, exactly like the plain channels.
+        assert_eq!(
+            free_pwm_channels(1, &wired(&["CH1", "CH1N", "CH2", "CH2N"]), &tim1),
+            Vec::<String>::new(),
+        );
+    }
+
+    /// …and never on a timer whose complementary pads embassy cannot drive:
+    /// TIM15/16/17 have a CH1N pad, but `ComplementaryPwm` covers TIM1/8/20.
+    #[test]
+    fn complementary_pads_are_not_offered_where_embassy_cannot_drive_them() {
+        let tim16 = chip_with_comp(16, &[1], &[1]);
+        assert_eq!(
+            free_pwm_channels(16, &BTreeSet::new(), &tim16),
+            ["CH1"],
+            "CH1N exists on the chip but has no driver here"
+        );
+        assert!(is_advanced_timer(1) && is_advanced_timer(8) && is_advanced_timer(20));
+        assert!(!is_advanced_timer(16) && !is_advanced_timer(2));
     }
 }

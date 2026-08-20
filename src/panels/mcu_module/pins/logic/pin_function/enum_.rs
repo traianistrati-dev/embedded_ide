@@ -37,6 +37,16 @@ pub enum PinFunction {
         timer: u8,
         channel: u8,
     },
+    /// Complementary PWM output — TIM{timer} CH{channel}N.
+    ///
+    /// The inverse of its `CH{channel}` sibling, with a dead time between the
+    /// two so a half-bridge is never driven high on both sides at once. Only
+    /// the advanced-control timers have these outputs, and embassy reaches them
+    /// through `ComplementaryPwm` rather than `SimplePwm`.
+    TimerPwmN {
+        timer: u8,
+        channel: u8,
+    },
 
     // ── USART ───────────────────────────────────────────────────────────────
     UsartTx(u8),  // USART{n} TX

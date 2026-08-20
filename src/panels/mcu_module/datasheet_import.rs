@@ -3203,7 +3203,7 @@ mod tests {
         assert_eq!(find("PB6").functions, "i2c1_scl af:i2c1_smba in out");
         assert_eq!(find("PA5").functions, "adc1_5 adc2_5 spi1_sck in out");
         assert_eq!(find("PA13").functions, "swdio in out");
-        assert_eq!(find("PB13").functions, "spi2_sck af:tim1_ch1n in out");
+        assert_eq!(find("PB13").functions, "spi2_sck tim1_1n in out");
         // Reserved pin carries no functions; imported rows are tagged.
         assert!(find("VBAT").reserved && find("VBAT").functions.is_empty());
         assert!(find("PA9").imported);

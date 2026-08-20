@@ -114,6 +114,30 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::TimerPwmN { timer, channel } => FunctionInfo {
+                description: format!(
+                    "Complementary PWM output on TIM{timer} channel CH{channel}N. Carries the                      inverse of CH{channel}, with a dead time between the two edges so the two                      sides of a half-bridge are never driven on at once."
+                ),
+                specs: vec![
+                    (
+                        "Pairs with".into(),
+                        format!("TIM{timer} CH{channel} — same duty, opposite level"),
+                    ),
+                    (
+                        "Dead time".into(),
+                        "Inserted by the timer, one setting for the whole timer".into(),
+                    ),
+                    (
+                        "Available on".into(),
+                        "Advanced-control timers only (TIM1 / TIM8 / TIM20)".into(),
+                    ),
+                    (
+                        "Typical use".into(),
+                        "Motor drive, half/full bridges, SMPS".into(),
+                    ),
+                ],
+            },
+
             PinFunction::UsartTx(n) => FunctionInfo {
                 description: format!(
                     "USART{n} transmit pin (TX). Sends serial data to an external device."

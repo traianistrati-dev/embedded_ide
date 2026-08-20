@@ -983,7 +983,7 @@ pub fn async_peripherals(
     // One config module per TIMER, taking exactly the channels wired on the
     // canvas. No interrupts and no DMA: `SimplePwm` writes the compare
     // registers directly, so there is nothing to bind.
-    for (n, chans) in pwm_wires(pins) {
+    for (n, mut wiring) in pwm_wires(pins) {
         // A timer with pads but no module entry generates at the module's own
         // defaults, so the defaults live in exactly one place.
         let cfg = timer
@@ -991,10 +991,34 @@ pub fn async_peripherals(
             .cloned()
             .unwrap_or_else(|| TimerModuleConfig::new(n));
         let handle = format!("_pwm{n}{}", label_sfx(&cfg.custom_label));
-        let wired: Vec<u8> = chans.iter().map(|(ch, _)| *ch).collect();
-        let args: String = chans.iter().map(|(_, pin)| format!(", p.{pin}")).collect();
-        for (_, pin) in &chans {
-            consumed.push(pin.clone());
+
+        // Complementary outputs reach embassy through `ComplementaryPwm`, whose
+        // bound is `AdvancedInstance4Channel` — the advanced-control timers. A
+        // CHxN pad on TIM15/16/17 is real silicon, but there is no driver for it
+        // here, so say that instead of emitting code that will not compile.
+        if !wiring.comp.is_empty() && !is_advanced_timer(n) {
+            let pads: Vec<String> = wiring
+                .comp
+                .iter()
+                .map(|(c, pin)| format!("CH{c}N ({pin})"))
+                .collect();
+            calls.push_str(&format!(
+                "    // TIM{n} {} left unconfigured: embassy drives complementary outputs
+    // through `ComplementaryPwm`, which covers the advanced-control timers
+    // (TIM1/8/20) only. The plain channels below are unaffected.
+",
+                pads.join(", ")
+            ));
+            wiring.comp.clear();
+        }
+
+        let params = wiring.params();
+        let args: String = params
+            .iter()
+            .map(|(_, _, pin, _)| format!(", p.{pin}"))
+            .collect();
+        for (_, _, pin, _) in &params {
+            consumed.push((*pin).to_owned());
         }
         calls.push_str(&format!(
             "    let mut {handle} = pins::configs::pwm{n}::init(p.TIM{n}{args});
@@ -1002,7 +1026,7 @@ pub fn async_peripherals(
         ));
         files.push((
             format!("pwm{n}.rs"),
-            pwm_config_file(n, &cfg, &wired, &handle),
+            pwm_config_file(n, &cfg, &wiring, &handle),
         ));
     }
 
@@ -1631,22 +1655,19 @@ const FREQ_HZ: u32 = {FREQ};
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
-// `init` returns embassy's `SimplePwm` for TIM{N}. Every channel of a timer
-// shares its frequency (one prescaler, one reload value) — the duty cycle is
-// what each channel owns.
+{INTRO}
 use embassy_stm32::gpio::OutputType;
 use embassy_stm32::time::Hertz;
 {LOW_LEVEL_USE}
-use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::timer::{{CHANNEL_TYPES}TimerPin};
+{DRIVER_USE}
+{TIMER_USE}
 use embassy_stm32::{peripherals, Peri};
 
-/// Initialise TIM{N} as PWM on the wired channel(s), enabled at the configured
-/// duty.
+/// Initialise TIM{N} as PWM on the wired pad(s), enabled at the configured duty.
 pub fn init<'d>(
     tim: Peri<'d, peripherals::TIM{N}>,
-{PARAMS}) -> SimplePwm<'d, peripherals::TIM{N}> {
-    let mut pwm = SimplePwm::new(
+{PARAMS}) -> {DRIVER}<'d, peripherals::TIM{N}> {
+    let mut pwm = {DRIVER}::new(
         tim,
 {CH_ARGS}        Hertz(FREQ_HZ),
         CountingMode::{COUNTING},
@@ -1655,96 +1676,230 @@ pub fn init<'d>(
 }
 
 // ── Using TIM{N} ──
-// The handle owns every channel; each one is reached by name:
-//
-//     {HANDLE}.ch1().set_duty_cycle_percent(75);
-//     {HANDLE}.ch1().disable();
-//
-// The generated duty is a ratio out of 10_000, so a value like 7.5 % lands
-// exactly. Any other ratio works the same way — a third of the period:
-//
-//     {HANDLE}.ch1().set_duty_cycle_fraction(1, 3);
+{USAGE}
 "#;
+/// The advanced-control timers, the only ones embassy's `ComplementaryPwm`
+/// accepts: its bound is `AdvancedInstance4Channel`. TIM15/16/17 carry a CH1N
+/// pad on real silicon but are 1- and 2-channel advanced timers, which that
+/// driver does not cover.
+pub fn is_advanced_timer(n: u8) -> bool {
+    matches!(n, 1 | 8 | 20)
+}
 
-/// Render [`ASYNC_PWM_TMPL`] for timer `n`: `chans` are the channel numbers
-/// wired on the canvas (ascending); everything else — frequency, duty, counting
-/// mode and each channel's output shape — comes from the module's config.
-pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, chans: &[u8], handle: &str) -> String {
+/// Render [`ASYNC_PWM_TMPL`] for timer `n` from its wiring and its module
+/// config.
+///
+/// Two shapes come out of one template. With plain channels only it is
+/// `SimplePwm`, exactly as before. As soon as one CHxN pad is wired it becomes
+/// `ComplementaryPwm`, whose API is NOT the same: duty is a raw compare value
+/// against `get_max_duty()` rather than a ratio, channels are addressed by the
+/// `Channel` enum rather than `.chN()`, and there is no output-compare-mode
+/// setter at all.
+pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handle: &str) -> String {
+    let complementary = !wiring.comp.is_empty();
+    let param_list = wiring.params();
+    let has_plain = !wiring.chans.is_empty();
+
     let mut duty_consts = String::new();
-    let mut channel_types = String::new();
     let mut params = String::new();
     let mut ch_args = String::new();
     let mut enables = String::new();
     // Only the `low_level` items the emitted code actually names — an unused
     // import in a generated file is a warning the user cannot fix.
-    let mut low_level: Vec<&'static str> = vec!["CountingMode"];
-    for ch in 1..=4u8 {
-        if !chans.contains(&ch) {
-            // A channel with no pin is still a slot in `SimplePwm::new`.
-            ch_args.push_str(
-                "        None,
-",
-            );
-            continue;
-        }
-        let duty = cfg.duty_x100_of(ch);
-        let out = cfg.channel_of(ch);
+    let mut low_level: Vec<String> = vec!["CountingMode".to_owned()];
+    let mut timer_items: Vec<String> = Vec::new();
+
+    if complementary {
         duty_consts.push_str(&format!(
-            "const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)
-",
+            "const DEAD_TIME: u16 = {}; // timer ticks, same scale as the duty compare value\n",
+            cfg.dead_time
+        ));
+    }
+    for ch in wiring.active_channels() {
+        let duty = cfg.duty_x100_of(ch);
+        duty_consts.push_str(&format!(
+            "const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)\n",
             duty_percent_str(duty)
         ));
-        channel_types.push_str(&format!("Ch{ch}, "));
+    }
+
+    for (ch, name, _, comp) in &param_list {
+        let bound = if *comp {
+            "TimerComplementaryPin"
+        } else {
+            "TimerPin"
+        };
+        timer_items.push(format!("Ch{ch}"));
+        timer_items.push(bound.to_owned());
         params.push_str(&format!(
-            "    ch{ch}: Peri<'d, impl TimerPin<peripherals::TIM{n}, Ch{ch}>>,
-"
+            "    {name}: Peri<'d, impl {bound}<peripherals::TIM{n}, Ch{ch}>>,\n"
         ));
-        ch_args.push_str(&format!(
-            "        Some(PwmPin::new(ch{ch}, OutputType::{})),
-",
-            out.output.embassy()
-        ));
-        enables.push_str(&format!(
-            "    pwm.ch{ch}().enable();
-    pwm.ch{ch}().set_duty_cycle_fraction(DUTY_CH{ch}, 10_000);
-"
-        ));
-        // Only what DIFFERS from the timer's reset state gets a line, so a
-        // project that never opened these settings generates what it always did.
-        if out.polarity != PwmPolarity::default() {
-            low_level.push("OutputPolarity");
-            enables.push_str(&format!(
-                "    pwm.ch{ch}().set_polarity(OutputPolarity::{});
-",
-                out.polarity.embassy()
+    }
+
+    // The slots, in the order the driver declares them: ch1..ch4 for
+    // `SimplePwm`, ch1/ch1n/ch2/ch2n/… for `ComplementaryPwm`. A pad that is
+    // not wired is still a slot.
+    for ch in 1..=4u8 {
+        let out = cfg.channel_of(ch);
+        if wiring.chans.iter().any(|(c, _)| *c == ch) {
+            ch_args.push_str(&format!(
+                "        Some(PwmPin::new(ch{ch}, OutputType::{})),\n",
+                out.output.embassy()
             ));
+        } else {
+            ch_args.push_str("        None,\n");
         }
-        if out.mode != PwmMode::default() {
-            low_level.push("OutputCompareMode");
-            enables.push_str(&format!(
-                "    pwm.ch{ch}().set_output_compare_mode(OutputCompareMode::{});
-",
-                out.mode.embassy()
-            ));
+        if complementary {
+            if wiring.comp.iter().any(|(c, _)| *c == ch) {
+                ch_args.push_str(&format!(
+                    "        Some(ComplementaryPwmPin::new(ch{ch}n, OutputType::{})),\n",
+                    out.output.embassy()
+                ));
+            } else {
+                ch_args.push_str("        None,\n");
+            }
         }
     }
-    low_level.sort_unstable();
-    low_level.dedup();
-    let low_level_use = if low_level.len() == 1 {
-        format!("use embassy_stm32::timer::low_level::{};", low_level[0])
+
+    if complementary {
+        // Dead time first: it has to be in the register before an output can
+        // turn on, or the first edges go out with both sides live.
+        enables.push_str("    pwm.set_dead_time(DEAD_TIME);\n");
+        enables.push_str("    let max = pwm.get_max_duty();\n");
+        let mut mode_asked = false;
+        for ch in wiring.active_channels() {
+            let out = cfg.channel_of(ch);
+            enables.push_str(&format!(
+                "    pwm.set_duty(Channel::Ch{ch}, max * DUTY_CH{ch} / 10_000);\n"
+            ));
+            if out.polarity != PwmPolarity::default() {
+                low_level.push("OutputPolarity".to_owned());
+                // The MAIN side only: inverting both would undo the pairing the
+                // complementary output exists for.
+                enables.push_str(&format!(
+                    "    pwm.set_main_polarity(Channel::Ch{ch}, OutputPolarity::{});\n",
+                    out.polarity.embassy()
+                ));
+            }
+            mode_asked |= out.mode != PwmMode::default();
+            enables.push_str(&format!("    pwm.enable(Channel::Ch{ch});\n"));
+        }
+        if mode_asked {
+            // Three pushes, not one `\`-continued literal: rustfmt joins those
+            // back into a single source line and the continuation loses its
+            // `//`, which lands as a bare statement in the user's file.
+            enables.push_str("    // PWM mode 2 is not applied: `ComplementaryPwm` has no\n");
+            enables.push_str("    // output-compare-mode setter. The channel polarity above\n");
+            enables.push_str("    // gives the same inversion.\n");
+        }
+        timer_items.push("Channel".to_owned());
+    } else {
+        for ch in wiring.active_channels() {
+            let out = cfg.channel_of(ch);
+            enables.push_str(&format!(
+                "    pwm.ch{ch}().enable();\n    pwm.ch{ch}().set_duty_cycle_fraction(DUTY_CH{ch}, 10_000);\n"
+            ));
+            // Only what DIFFERS from the timer's reset state gets a line, so a
+            // project that never opened these settings generates what it always did.
+            if out.polarity != PwmPolarity::default() {
+                low_level.push("OutputPolarity".to_owned());
+                enables.push_str(&format!(
+                    "    pwm.ch{ch}().set_polarity(OutputPolarity::{});\n",
+                    out.polarity.embassy()
+                ));
+            }
+            if out.mode != PwmMode::default() {
+                low_level.push("OutputCompareMode".to_owned());
+                enables.push_str(&format!(
+                    "    pwm.ch{ch}().set_output_compare_mode(OutputCompareMode::{});\n",
+                    out.mode.embassy()
+                ));
+            }
+        }
+    }
+
+    let use_line = |path: &str, items: &[String]| -> String {
+        if items.len() == 1 {
+            format!("use embassy_stm32::{path}::{};", items[0])
+        } else {
+            format!("use embassy_stm32::{path}::{{{}}};", items.join(", "))
+        }
+    };
+    let dedup = |mut v: Vec<String>| -> Vec<String> {
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    let low_level_use = use_line("timer::low_level", &dedup(low_level));
+    let timer_use = use_line("timer", &dedup(timer_items));
+    let driver = if complementary {
+        "ComplementaryPwm"
+    } else {
+        "SimplePwm"
+    };
+    let driver_use = if complementary {
+        let mut l =
+            "use embassy_stm32::timer::complementary_pwm::{ComplementaryPwm, ComplementaryPwmPin};"
+                .to_owned();
+        if has_plain {
+            l.push_str("\nuse embassy_stm32::timer::simple_pwm::PwmPin;");
+        }
+        l
+    } else {
+        "use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};".to_owned()
+    };
+
+    let intro = if complementary {
+        format!(
+            "// `init` returns embassy's `ComplementaryPwm` for TIM{n}. Each channel drives a\n\
+             // PAIR of pads — CHx and its inverse CHxN — with DEAD_TIME between the edges, so\n\
+             // the two sides of a half-bridge are never on at once. The frequency belongs to\n\
+             // the timer; the duty is what each channel owns."
+        )
     } else {
         format!(
-            "use embassy_stm32::timer::low_level::{{{}}};",
-            low_level.join(", ")
+            "// `init` returns embassy's `SimplePwm` for TIM{n}. Every channel of a timer\n\
+             // shares its frequency (one prescaler, one reload value) — the duty cycle is\n\
+             // what each channel owns."
+        )
+    };
+    let usage = if complementary {
+        format!(
+            "// The handle addresses channels by name, and a channel means BOTH its pads:\n\
+             //\n\
+             //     let max = {handle}.get_max_duty();\n\
+             //     {handle}.set_duty(Channel::Ch1, max / 2); // 50 %\n\
+             //     {handle}.disable(Channel::Ch1);           // both pads idle\n\
+             //\n\
+             // DEAD_TIME is in timer ticks on the same scale as the compare value; embassy\n\
+             // encodes it into the CKD + DTG fields. Zero means no dead time at all, which a\n\
+             // half-bridge will not survive."
+        )
+    } else {
+        format!(
+            "// The handle owns every channel; each one is reached by name:\n\
+             //\n\
+             //     {handle}.ch1().set_duty_cycle_percent(75);\n\
+             //     {handle}.ch1().disable();\n\
+             //\n\
+             // The generated duty is a ratio out of 10_000, so a value like 7.5 % lands\n\
+             // exactly. Any other ratio works the same way — a third of the period:\n\
+             //\n\
+             //     {handle}.ch1().set_duty_cycle_fraction(1, 3);"
         )
     };
 
     ASYNC_PWM_TMPL
         .replace("{FREQ}", &cfg.freq_hz.to_string())
         .replace("{COUNTING}", cfg.counting.embassy())
+        .replace("{INTRO}", &intro)
+        .replace("{USAGE}", &usage)
         .replace("{LOW_LEVEL_USE}", &low_level_use)
+        .replace("{DRIVER_USE}", &driver_use)
+        .replace("{TIMER_USE}", &timer_use)
+        .replace("{DRIVER}", driver)
         .replace("{DUTY_CONSTS}", &duty_consts)
-        .replace("{CHANNEL_TYPES}", &channel_types)
         .replace("{PARAMS}", &params)
         .replace("{CH_ARGS}", &ch_args)
         .replace("{ENABLES}", &enables)
@@ -1753,23 +1908,70 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, chans: &[u8], handle: &st
 }
 
 /// The timers with at least one PWM channel wired, as
-/// `(timer, [(channel, pin name), …])` — the shape `pwm_config_file` and the
-/// `main.rs` call both need.
-fn pwm_wires(pins: &[&Pin]) -> Vec<(u8, Vec<(u8, String)>)> {
-    let mut by_timer: BTreeMap<u8, Vec<(u8, String)>> = BTreeMap::new();
-    for p in pins.iter().filter(|p| !p.reserved) {
-        if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
-            by_timer
-                .entry(timer)
-                .or_default()
-                .push((channel, p.gpio().to_owned()));
+/// the shape `pwm_config_file` and the `main.rs` call both need.
+#[derive(Default)]
+pub struct PwmWiring {
+    /// `(channel, pin name)` for the plain outputs, ascending.
+    pub chans: Vec<(u8, String)>,
+    /// `(channel, pin name)` for the complementary `CHxN` pads, ascending.
+    pub comp: Vec<(u8, String)>,
+}
+
+impl PwmWiring {
+    /// The `init` parameters in call order: channel by channel, the plain pad
+    /// before its complementary one. `(parameter name, pin, complementary)`.
+    ///
+    /// One list drives the signature, the arguments in `main.rs` and the slots
+    /// handed to embassy, so the three cannot fall out of step.
+    fn params(&self) -> Vec<(u8, String, &str, bool)> {
+        let mut out = Vec::new();
+        for ch in 1..=4u8 {
+            if let Some((_, pin)) = self.chans.iter().find(|(c, _)| *c == ch) {
+                out.push((ch, format!("ch{ch}"), pin.as_str(), false));
+            }
+            if let Some((_, pin)) = self.comp.iter().find(|(c, _)| *c == ch) {
+                out.push((ch, format!("ch{ch}n"), pin.as_str(), true));
+            }
         }
+        out
     }
-    for chans in by_timer.values_mut() {
-        chans.sort_unstable();
-        // One pin per channel: a second pad claiming the same channel would
-        // become a duplicate argument.
-        chans.dedup_by_key(|(c, _)| *c);
+
+    /// Channels with at least one pad wired — the ones that need a duty. A
+    /// channel whose only pad is the complementary one still has a compare
+    /// value; it is the channel that carries the duty, not the pin.
+    fn active_channels(&self) -> Vec<u8> {
+        (1..=4u8)
+            .filter(|ch| {
+                self.chans.iter().any(|(c, _)| c == ch) || self.comp.iter().any(|(c, _)| c == ch)
+            })
+            .collect()
+    }
+}
+
+/// The timers with at least one PWM pad wired, plain or complementary.
+fn pwm_wires(pins: &[&Pin]) -> Vec<(u8, PwmWiring)> {
+    let mut by_timer: BTreeMap<u8, PwmWiring> = BTreeMap::new();
+    for p in pins.iter().filter(|p| !p.reserved) {
+        let (timer, channel, complementary) = match p.selected_function {
+            PinFunction::TimerPwm { timer, channel } => (timer, channel, false),
+            PinFunction::TimerPwmN { timer, channel } => (timer, channel, true),
+            _ => continue,
+        };
+        let w = by_timer.entry(timer).or_default();
+        let list = if complementary {
+            &mut w.comp
+        } else {
+            &mut w.chans
+        };
+        list.push((channel, p.gpio().to_owned()));
+    }
+    for w in by_timer.values_mut() {
+        for list in [&mut w.chans, &mut w.comp] {
+            list.sort_unstable();
+            // One pin per channel: a second pad claiming the same channel would
+            // become a duplicate argument.
+            list.dedup_by_key(|(c, _)| *c);
+        }
     }
     by_timer.into_iter().collect()
 }
@@ -3096,6 +3298,13 @@ mod pwm_tests {
         p
     }
 
+    /// The complementary pad of `timer` CH`channel`.
+    fn mkn(name: &str, timer: u8, channel: u8) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = PinFunction::TimerPwmN { timer, channel };
+        p
+    }
+
     fn run(pins: &[Pin], timer: BTreeMap<u8, TimerModuleConfig>) -> AsyncPeriphs {
         let refs: Vec<&Pin> = pins.iter().collect();
         async_peripherals(
@@ -3172,6 +3381,133 @@ mod pwm_tests {
             body.contains("pwm.ch1().set_duty_cycle_fraction(DUTY_CH1, 10_000);"),
             "{body}"
         );
+    }
+
+    /// One CHxN pad changes the whole driver: `ComplementaryPwm` instead of
+    /// `SimplePwm`, eight slots instead of four, and a dead time between the
+    /// two edges — which is the entire reason the pad exists.
+    #[test]
+    fn a_complementary_pad_switches_the_driver() {
+        let pins = [mk("PA8", 1, 1), mkn("PB13", 1, 1)];
+        let mut cfg = TimerModuleConfig::new(1);
+        cfg.freq_hz = 20_000;
+        cfg.set_duty_x100(1, 5_000);
+        cfg.dead_time = 40;
+        cfg.set_channel(
+            1,
+            crate::panels::mcu_module::modules::PwmChannelConfig {
+                polarity: PwmPolarity::ActiveLow,
+                mode: PwmMode::Mode2,
+                ..Default::default()
+            },
+        );
+        let out = run(&pins, [(1u8, cfg)].into_iter().collect());
+        let (name, body) = &out.config_files[0];
+        assert_eq!(name, "pwm1.rs");
+
+        // Both pads are parameters, the plain one before its complement.
+        assert!(
+            out.init_calls
+                .contains("let mut _pwm1 = pins::configs::pwm1::init(p.TIM1, p.PA8, p.PB13);"),
+            "{}",
+            out.init_calls
+        );
+        assert!(
+            body.contains("ch1: Peri<'d, impl TimerPin<peripherals::TIM1, Ch1>>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("ch1n: Peri<'d, impl TimerComplementaryPin<peripherals::TIM1, Ch1>>"),
+            "{body}"
+        );
+
+        assert!(
+            body.contains("ComplementaryPwm<'d, peripherals::TIM1>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("Some(ComplementaryPwmPin::new(ch1n, OutputType::PushPull)),"),
+            "{body}"
+        );
+        // Eight slots: four channels, each with its complement.
+        assert_eq!(body.matches("        None,").count(), 6, "{body}");
+
+        // Dead time is set BEFORE anything is enabled, and the duty is a
+        // compare value here, not a ratio.
+        let dead = body.find("set_dead_time").expect("dead time");
+        let enable = body.find("pwm.enable(").expect("enable");
+        assert!(dead < enable, "dead time must land first:\n{body}");
+        assert!(body.contains("const DEAD_TIME: u16 = 40;"), "{body}");
+        assert!(
+            body.contains("pwm.set_duty(Channel::Ch1, max * DUTY_CH1 / 10_000);"),
+            "{body}"
+        );
+        assert!(!body.contains("set_duty_cycle_fraction"), "{body}");
+
+        // Polarity lands on the MAIN side only — inverting both would undo the
+        // pairing the complementary pad exists for.
+        assert!(
+            body.contains("pwm.set_main_polarity(Channel::Ch1, OutputPolarity::ActiveLow);"),
+            "{body}"
+        );
+        assert!(!body.contains("set_complementary_polarity"), "{body}");
+        // PWM mode 2 has no setter on this driver, and saying so must not spill
+        // a bare line into the user's file: every line of the note is a comment.
+        assert!(
+            body.contains("    // output-compare-mode setter."),
+            "the note must stay commented on every line:
+{body}"
+        );
+        for line in body.lines() {
+            let t = line.trim_start();
+            assert!(
+                !t.starts_with("setter.") && !t.starts_with("gives the same"),
+                "a continuation lost its `//`:
+{body}"
+            );
+        }
+    }
+
+    /// A channel whose ONLY wired pad is the complementary one still owns a
+    /// duty: the compare value belongs to the channel, not to the pin.
+    #[test]
+    fn a_lone_complementary_pad_still_gets_its_duty() {
+        let pins = [mkn("PB13", 1, 1)];
+        let out = run(&pins, Default::default());
+        let (_, body) = &out.config_files[0];
+        assert!(body.contains("const DUTY_CH1: u32 = 0;"), "{body}");
+        assert!(
+            body.contains("pwm.set_duty(Channel::Ch1, max * DUTY_CH1 / 10_000);"),
+            "{body}"
+        );
+        // No plain pad, so nothing imports `PwmPin` or names `TimerPin`.
+        assert!(!body.contains("simple_pwm::PwmPin"), "{body}");
+        assert!(!body.contains("TimerPin<"), "{body}");
+    }
+
+    /// TIM15/16/17 carry a CH1N pad, but embassy's `ComplementaryPwm` is bound
+    /// to the advanced-control timers. Say so and drive the plain channel,
+    /// rather than emitting code that cannot compile.
+    #[test]
+    fn a_complementary_pad_on_a_plain_timer_is_refused_with_a_reason() {
+        let pins = [mk("PA6", 16, 1), mkn("PB6", 16, 1)];
+        let out = run(&pins, Default::default());
+        assert!(
+            out.init_calls
+                .contains("TIM16 CH1N (PB6) left unconfigured"),
+            "{}",
+            out.init_calls
+        );
+        // The plain channel still works, and the refused pad is NOT passed in.
+        assert!(
+            out.init_calls
+                .contains("pins::configs::pwm16::init(p.TIM16, p.PA6);"),
+            "{}",
+            out.init_calls
+        );
+        let (_, body) = &out.config_files[0];
+        assert!(body.contains("SimplePwm<'d, peripherals::TIM16>"), "{body}");
+        assert!(!body.contains("ComplementaryPwm"), "{body}");
     }
 
     /// Untouched settings generate exactly what they always did: the reset

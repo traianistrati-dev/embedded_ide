@@ -12,7 +12,9 @@ impl PinFunction {
             // to an analog block, it just doesn't name which one.
             PinFunction::GpioAnalog => egui::Color32::from_rgb(150, 70, 200),
             PinFunction::AdcChannel { .. } => egui::Color32::from_rgb(150, 70, 200),
-            PinFunction::TimerPwm { .. } => egui::Color32::from_rgb(190, 170, 30),
+            PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
+                egui::Color32::from_rgb(190, 170, 30)
+            }
             PinFunction::UsartTx(_)
             | PinFunction::UsartRx(_)
             | PinFunction::UsartCts(_)
