@@ -1183,6 +1183,10 @@ mod emit_for_manual_compile {
             // coexist with the CAN, so `EIDE_USB` re-purposes them instead.
             ("PA12", PinFunction::CanTx),
             ("PA11", PinFunction::CanRx),
+            // An ADC channel and a bare analog pad: both bind and both sit
+            // unused until the reader writes a read, exactly like a GPIO.
+            ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
+            ("PA1", PinFunction::GpioAnalog),
         ] {
             if usb_pads.is_some()
                 && matches!(func, PinFunction::CanTx | PinFunction::CanRx)

@@ -392,8 +392,32 @@ pub(super) fn gen_parts(
             } else {
                 format!("{}.{}", meta.port_var, meta.var)
             };
+            // A GPIO pin — or an analog one — is declared here and used in the
+            // reader's own loop, which does not exist yet in a fresh project.
+            // So rustc warns about every pin they have not got to
+            // (`unused_variables`, plus `unused_mut` on an output). These lines
+            // live INSIDE the generated block, so that is a warning they cannot
+            // answer by editing the line. The allow is scoped to the one
+            // statement and goes inert the moment the pin is used.
+            //
+            // An analog pad belongs here for the same reason a GPIO does: the
+            // ADC itself IS generated, and the pin is simply waiting for the
+            // `_adc1.read(&mut …)` the block shows commented out below.
+            //
+            // Peripheral pins deliberately get NO allow: they are consumed by
+            // an `init_*` call, so a warning on one means the bus it belongs to
+            // was not generated — which is exactly what the reader should see.
+            let allow = match pin.selected_function {
+                PinFunction::GpioInput
+                | PinFunction::GpioOutput
+                | PinFunction::GpioAnalog
+                | PinFunction::AdcChannel { .. } => {
+                    "    #[allow(unused_mut, unused_variables)]\n"
+                }
+                _ => "",
+            };
             format!(
-                "    let {mut_}{binding} = {prefix}{open}{src}.{expr}{close}; // {comment}",
+                "{allow}    let {mut_}{binding} = {prefix}{open}{src}.{expr}{close}; // {comment}",
                 mut_ = if needs_mut_binding(pin, gpio_native, binding_style, &binding, custom_inits)
                 {
                     "mut "
@@ -2686,6 +2710,9 @@ fn is_comment_expr(expr: &str) -> bool {
 /// * an **input** only on the Portable path — `embedded-hal` 1.0's `InputPin`
 ///   reads through `&mut self`, while the raw `stm32f1xx-hal` (0.2) input reads
 ///   through `&self`, where a `mut` would just earn an unused-mut warning;
+/// * an **ADC channel** always — `OneShot::read` takes `&mut PIN`, and the very
+///   line the ADC block shows commented out (`_adc1.read(&mut pa0_adc1_in0)`)
+///   did not compile without it (E0596, cannot borrow as mutable);
 /// * never when the pin is **moved into a Custom module** below, since the
 ///   binding is then consumed, never written through.
 ///
@@ -2705,6 +2732,7 @@ fn needs_mut_binding(
     let write_through = match pin.selected_function {
         PinFunction::GpioOutput => true,
         PinFunction::GpioInput => !gpio_native,
+        PinFunction::AdcChannel { .. } => true,
         _ => false,
     };
     if !write_through {
@@ -3134,6 +3162,68 @@ mod blocking_dma_tests {
             2,
             "{main_rs}"
         );
+    }
+
+    /// A GPIO pin is declared for the reader's loop, which a fresh project does
+    /// not have yet — so it warns twice, on a line inside the generated block
+    /// that the reader cannot edit. A peripheral pin is NOT given the same
+    /// allow: a warning on one of those means its bus was never generated, and
+    /// that is worth seeing.
+    #[test]
+    fn a_gpio_pin_is_allowed_to_be_unused_but_an_orphaned_bus_pad_is_not() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+
+        let wire = |pins: &[(&str, PinFunction)]| {
+            let mut mcu = builtin_for("stm32f103c8t6")
+                .expect("built-in F103")
+                .build_mcu();
+            for (name, func) in pins {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| p.name == *name)
+                    .map(|p| p.number);
+                if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                    p.selected_function = func.clone();
+                }
+            }
+            mcu.reconcile_modules();
+            mcu.fresh_main_rs()
+        };
+        const ALLOW: &str = "#[allow(unused_mut, unused_variables)]";
+
+        let main_rs = wire(&[
+            ("PC13", PinFunction::GpioOutput),
+            ("PB1", PinFunction::GpioInput),
+        ]);
+        assert_eq!(main_rs.matches(ALLOW).count(), 2, "{main_rs}");
+
+        // Analog pins are the same case: the ADC itself IS generated, and the
+        // pin waits for the read the block shows commented out. That read takes
+        // `&mut PIN`, so the channel binding must be `mut` — without it the
+        // advertised line does not compile (E0596).
+        let main_rs = wire(&[
+            ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
+            ("PA1", PinFunction::GpioAnalog),
+        ]);
+        assert_eq!(main_rs.matches(ALLOW).count(), 2, "{main_rs}");
+        assert!(main_rs.contains("let mut pa0_adc1_in0"), "{main_rs}");
+        assert!(
+            main_rs.contains("_adc1.read(&mut pa0_adc1_in0)"),
+            "{main_rs}"
+        );
+
+        // A half-wired USART leaves its pad bound and unused — and says so
+        // twice over: the generated comment, and the warning the reader gets.
+        let main_rs = wire(&[("PA9", PinFunction::UsartTx(1))]);
+        assert!(main_rs.contains("let pa9_usart1_tx"), "{main_rs}");
+        assert!(!main_rs.contains(ALLOW), "{main_rs}");
+
+        // A COMPLETE bus consumes its pads, so nothing is unused either way.
+        let main_rs = wire(&[
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+        ]);
+        assert!(!main_rs.contains(ALLOW), "{main_rs}");
     }
 
     /// The Configuration tab's list must show the halves actually taken -
