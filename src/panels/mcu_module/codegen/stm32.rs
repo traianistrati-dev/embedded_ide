@@ -160,6 +160,22 @@ pub(super) struct GenParts {
     pub pin_section: String,
     /// Peripheral init calls (`pins::configs::usart1::init(...)`, ADC, CAN...).
     pub fn_calls: String,
+    /// `(binding, concrete type, written through during init)` for the
+    /// peripherals that have NO config module to name a `Handle` for them —
+    /// the ADC and each PWM timer.
+    ///
+    /// The third field decides whether the promoted binding keeps its `mut`:
+    /// the buses lose theirs because init only moves them, but a PWM sets duty
+    /// and enables its channels right there, and the ADC does neither.
+    ///
+    /// The bare-metal path ignores this: `fn main` runs forever, so a value it
+    /// keeps is a value that lives. RTIC's `#[init]` RETURNS, and everything it
+    /// did not hand to the framework is dropped right there — which is what
+    /// `rtic::promote_bus_handles` fixes for the buses, using the `Handle`
+    /// alias their config modules expose. These two have no such module, so the
+    /// type is spelled out here, where the timer, the remap and the pin types
+    /// are all already known.
+    pub inline_handles: Vec<(String, String, bool)>,
 }
 
 /// Build the init pieces. `None` when no pin is configured — the caller decides
@@ -446,6 +462,8 @@ pub(super) fn gen_parts(
     // ── Peripheral init calls (inside fn main) ───────────────────────────────
     let mut fn_calls = String::new();
     let mut any_call = false;
+    // See `GenParts::inline_handles`.
+    let mut inline_handles: Vec<(String, String, bool)> = Vec::new();
 
     macro_rules! header {
         () => {
@@ -656,6 +674,9 @@ pub(super) fn gen_parts(
         header!();
         // Plain one-liner — `Adc::adc1` takes `Clocks` BY VALUE (Clocks is Copy).
         fn_calls.push_str("    let mut _adc1 = adc::Adc::adc1(dp.ADC1, clocks);\n");
+        // The ADC is only MOVED in init - the read the block shows is the
+        // reader's to write, so no `mut` survives the promotion.
+        inline_handles.push(("_adc1".into(), "adc::Adc<pac::ADC1>".into(), false));
         for (p, meta) in configured
             .iter()
             .filter(|(p, _)| matches!(p.selected_function, PinFunction::AdcChannel { .. }))
@@ -735,6 +756,58 @@ pub(super) fn gen_parts(
                 .unwrap_or_default();
             let h = format!("_pwm{tim}{sfx}");
             remaps.insert(remap);
+            // The type `pwm_hz` returns, spelled out so RTIC can keep the
+            // handle alive as a `Local`. `Ch<N>` is the CHANNEL marker (C1 = 0
+            // … C4 = 3) and the last parameter is the pin tuple itself — the
+            // HAL keeps the pins inside the handle's type, exactly as it does
+            // for SPI (see `spi_pin_tys`).
+            // Full crate paths: the `use` block imports the ITEMS this code
+            // calls (`Timer`, `Channel`, the remap), never the `timer` module
+            // itself, so a bare `timer::` here does not resolve.
+            let ch_markers = chans
+                .iter()
+                .map(|(c, _)| format!("stm32f1xx_hal::timer::Ch<{}>", c - 1))
+                .collect::<Vec<_>>();
+            let pin_tys = chans
+                .iter()
+                .filter_map(|(c, _)| {
+                    let p = configured.iter().find(|(p, _)| {
+                        p.selected_function == PinFunction::TimerPwm {
+                            timer: tim,
+                            channel: *c,
+                        }
+                    })?;
+                    let m = parse_pin(&p.0.name)?;
+                    Some(format!(
+                        "gpio::gpio{}::P{}{}<gpio::Alternate>",
+                        m.port.to_ascii_lowercase(),
+                        m.port,
+                        m.pin_num
+                    ))
+                })
+                .collect::<Vec<_>>();
+            // One channel is not a 1-tuple here either — `Pins` is implemented
+            // for the bare pin, so both parameters are bare too.
+            let join = |v: &[String]| {
+                if v.len() == 1 {
+                    v[0].clone()
+                } else {
+                    format!("({})", v.join(", "))
+                }
+            };
+            if pin_tys.len() == chans.len() {
+                inline_handles.push((
+                    h.clone(),
+                    format!(
+                        "stm32f1xx_hal::timer::PwmHz<pac::TIM{tim}, \
+                         stm32f1xx_hal::timer::{remap}, {}, {}>",
+                        join(&ch_markers),
+                        join(&pin_tys)
+                    ),
+                    // Duty and enable are applied in init, through `&mut self`.
+                    true,
+                ));
+            }
             // Built line by line: a `\`-continued literal keeps its source
             // indentation once rustfmt joins it, and that indentation would
             // land in the user's file.
@@ -921,6 +994,7 @@ pub(super) fn gen_parts(
         port_splits,
         pin_section,
         fn_calls,
+        inline_handles,
     })
 }
 
@@ -959,6 +1033,9 @@ pub fn make_generated_section(
         return make_default_gen_section(mcu_name, clock);
     };
     let GenParts {
+        // `inline_handles` is an RTIC concern: `fn main` never returns here, so
+        // a peripheral it keeps in scope simply lives.
+        inline_handles: _,
         use_block,
         extra_uses,
         afio_line,

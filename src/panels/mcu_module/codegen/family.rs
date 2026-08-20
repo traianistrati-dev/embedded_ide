@@ -1084,6 +1084,44 @@ mod tests {
                 .family_id(),
             "stm32f1"
         );
+        // …and "inert" has to mean IDENTICAL, not merely "same backend".
+        // `mcu.config` is a file the user can edit, so `@runtime Async` on an F1
+        // project is reachable without the (disabled) System-tab card. If the
+        // fallback were partial — the blocking sources but the async dependency
+        // set, which `AppIde::save` keys on `Mcu::is_async` — the project would
+        // reference `embedded-io` / `nb` that Cargo.toml no longer carries.
+        {
+            use crate::panels::mcu_module::builtins::builtin_for;
+            use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+            let mut mcu = builtin_for("stm32f103c8t6")
+                .expect("built-in F103")
+                .build_mcu();
+            for (name, func) in [
+                ("PA9", PinFunction::UsartTx(1)),
+                ("PA10", PinFunction::UsartRx(1)),
+                ("PC13", PinFunction::GpioOutput),
+            ] {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| p.name == name)
+                    .map(|p| p.number);
+                if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                    p.selected_function = func;
+                }
+            }
+            mcu.reconcile_modules();
+
+            mcu.runtime = Runtime::Blocking;
+            let (blocking_main, blocking_cfgs) = (mcu.fresh_main_rs(), mcu.config_files());
+            mcu.runtime = Runtime::Async;
+            assert!(!mcu.is_async(), "async is not supported on stm32f1");
+            assert_eq!(mcu.fresh_main_rs(), blocking_main, "main.rs must not differ");
+            assert_eq!(mcu.config_files(), blocking_cfgs, "configs must not differ");
+            // The two flags `AppIde::save` reads to pick the dependency set.
+            assert!(!mcu.is_rtic());
+            assert!(!mcu.is_native());
+        }
         // ESP32-C3 async is a DIFFERENT backend (esp-rtos), not the embassy one.
         assert_eq!(
             backend_for_runtime("esp32c3", Runtime::Async)

@@ -1309,7 +1309,7 @@ impl AppIde {
                     ))
                     .color(egui::Color32::from_rgb(120, 170, 220)),
                 );
-            } else if async_sel {
+            } else if async_sel && async_ok {
                 ui.label(
                     egui::RichText::new(format!(
                         "{}  main.rs now runs on the embassy executor — add \
@@ -1317,6 +1317,22 @@ impl AppIde {
                         ph::INFO,
                     ))
                     .color(egui::Color32::from_rgb(120, 170, 220)),
+                );
+            } else if async_sel {
+                // Async SELECTED on a family that has no async backend. The card
+                // itself cannot be clicked there, but `mcu.config` is a file the
+                // user can edit, and `@runtime Async` on an F1 project lands
+                // here. Codegen falls back to the blocking backend (see
+                // `Mcu::is_async`), so promising the executor would be a lie
+                // about code that does not exist.
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  Async is selected but INERT on this chip — main.rs is still \
+                         the blocking project, and the dependencies with it. Pick a \
+                         runtime above, or see the reason on the card.",
+                        ph::WARNING,
+                    ))
+                    .color(egui::Color32::from_rgb(220, 160, 70)),
                 );
             }
 

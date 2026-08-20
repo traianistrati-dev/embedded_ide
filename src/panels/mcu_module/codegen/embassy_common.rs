@@ -1143,6 +1143,16 @@ mod emit_for_manual_compile {
 
         let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
         let mut mcu = f1.build_mcu();
+        // `EIDE_F1_RUNTIME=async` writes `@runtime Async` on a family that has
+        // no async backend — reachable by hand-editing `mcu.config`, since the
+        // System-tab card cannot be clicked there. Everything below must come
+        // out byte-identical to Blocking: same sources, same dependency set.
+        if std::env::var("EIDE_F1_RUNTIME").as_deref() == Ok("async") {
+            use crate::panels::mcu_module::mcu::model::Runtime;
+            mcu.runtime = Runtime::Async;
+            mcu.pending_runtime = Runtime::Async;
+            assert!(!mcu.is_async(), "stm32f1 has no async backend");
+        }
         // `EIDE_USB` takes PA11/PA12 away from the CAN and gives them to the USB
         // — the two peripherals share those pads (and the SRAM behind them).
         //
@@ -1413,6 +1423,205 @@ mod emit_for_manual_compile {
         let _ = std::fs::remove_dir_all(&dir);
         project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
             .expect("write f1 dma project");
+        println!("wrote {}", dir.display());
+        println!("target: {}", f1.project.target);
+    }
+
+    /// The SAME wiring under the RTIC runtime.
+    ///
+    /// `#[init]` RETURNS, so anything it builds and does not hand to the
+    /// framework is dropped there — which is why `promote_bus_handles` exists.
+    /// Whether every peripheral the blocking path emits survives that trip is a
+    /// question only a compiler answers:
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_f1_rtic_project -- --ignored --nocapture
+    /// cd %TEMP%\eide_f1_check_rtic && cargo check --target thumbv7m-none-eabi
+    /// ```
+    #[test]
+    #[ignore = "writes a project to disk for a manual cross-compile"]
+    fn emit_f1_rtic_project() {
+        use crate::panels::mcu_module::mcu::model::Runtime;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+        use crate::panels::mcu_module::pins::logic::pin::Edge;
+
+        let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
+        let mut mcu = f1.build_mcu();
+        mcu.runtime = Runtime::Rtic;
+        mcu.pending_runtime = Runtime::Rtic;
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+            ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
+            ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 }),
+            ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 }),
+            ("PC13", PinFunction::GpioOutput),
+            // An interrupt-enabled input is what makes this an RTIC project
+            // rather than a blocking one with extra ceremony: it becomes a
+            // `#[task(binds = EXTI1)]`.
+            ("PB1", PinFunction::GpioInput),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+                if p.name == "PB1" {
+                    p.irq = Some(Edge::Rising);
+                }
+            }
+        }
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Timer(c) = &mut m.config {
+                c.freq_hz = 20_000;
+                c.duty.insert(3, 75);
+            }
+        }
+
+        let main_rs = mcu.fresh_main_rs();
+        assert!(main_rs.contains("#[rtic::app"), "not an RTIC project:\n{main_rs}");
+
+        let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        files.cargo_toml = project_gen::ensure_peripheral_deps(
+            &files.cargo_toml,
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            &[],
+        );
+        files.cargo_toml = project_gen::ensure_rtic_deps(
+            &files.cargo_toml,
+            true,
+            &f1.project.target,
+            &[&main_rs],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_f1_check_rtic");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write f1 rtic project");
+        println!("wrote {}", dir.display());
+        println!("target: {}", f1.project.target);
+    }
+
+    /// The same wiring under the NATIVE runtime.
+    ///
+    /// Native forces every peripheral to the concrete `stm32f1xx-hal` type: no
+    /// `embedded-io` USART bridge, no `SpiBusIo`, no `io.rs` GPIO wrapper. That
+    /// is a different set of templates and a different set of dependencies, so
+    /// it is a different compile:
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_f1_native_project -- --ignored --nocapture
+    /// cd %TEMP%\eide_f1_check_native && cargo check --target thumbv7m-none-eabi
+    /// ```
+    #[test]
+    #[ignore = "writes a project to disk for a manual cross-compile"]
+    fn emit_f1_native_project() {
+        use crate::panels::mcu_module::mcu::model::Runtime;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
+        let mut mcu = f1.build_mcu();
+        mcu.runtime = Runtime::Native;
+        mcu.pending_runtime = Runtime::Native;
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+            ("PA5", PinFunction::SpiSck(1)),
+            ("PA7", PinFunction::SpiMosi(1)),
+            ("PA6", PinFunction::SpiMiso(1)),
+            ("PB6", PinFunction::I2cScl(1)),
+            ("PB7", PinFunction::I2cSda(1)),
+            ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
+            ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 }),
+            ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 }),
+            ("PC13", PinFunction::GpioOutput),
+            ("PB1", PinFunction::GpioInput),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Timer(c) = &mut m.config {
+                c.freq_hz = 20_000;
+                c.duty.insert(3, 75);
+            }
+        }
+
+        let main_rs = mcu.fresh_main_rs();
+        // The tell-tale of Native: the USART hands back the split pair, not the
+        // `embedded-io` bridge the Portable path wraps them in.
+        assert!(
+            main_rs.contains("let (mut _tx1, mut _rx1)"),
+            "not a Native project:\n{main_rs}"
+        );
+
+        let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        // What `AppIde::save` computes on this runtime: NO portable trait crates
+        // (that is the whole point of Native), but `nb` stays — the concrete
+        // `Tx`/`Rx` are nb-based.
+        files.cargo_toml = project_gen::ensure_peripheral_deps(
+            &files.cargo_toml,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_f1_check_native");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write f1 native project");
         println!("wrote {}", dir.display());
         println!("target: {}", f1.project.target);
     }

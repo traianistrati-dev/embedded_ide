@@ -135,6 +135,42 @@ pub fn promote_bus_handles(fn_calls: &str) -> (String, Vec<BusHandle>) {
     (out, found)
 }
 
+/// The same promotion as [`promote_bus_handles`], for the peripherals whose
+/// type `gen_parts` had to spell out itself (see `GenParts::inline_handles`).
+///
+/// Only the `let mut _x = ` prefix moves: everything to the right of the `=` is
+/// the init expression and is left exactly as the shared generator wrote it, so
+/// the two runtimes cannot drift on what a peripheral is, only on where it
+/// lives.
+pub fn promote_inline_handles(
+    fn_calls: &str,
+    handles: &[(String, String, bool)],
+) -> (String, Vec<BusHandle>) {
+    let mut out = fn_calls.to_owned();
+    let mut found = Vec::new();
+    for (binding, ty, mutated) in handles {
+        let old = format!("let mut {binding} = ");
+        if !out.contains(&old) {
+            continue;
+        }
+        let name = binding.trim_start_matches('_').to_owned();
+        // The buses drop their `mut` because init only MOVES them, and RTIC
+        // hands tasks a `&mut` anyway. A PWM is different: init sets its duty
+        // and enables its channels, both through `&mut self`.
+        let keep = if *mutated { "let mut " } else { "let " };
+        out = out.replace(&old, &format!("{keep}{name} = "));
+        // Anything the init block said about the old name — `_pwm2_max`, the
+        // `set_duty` / `enable` calls — has to follow it.
+        out = out.replace(&format!("{binding}."), &format!("{name}."));
+        out = out.replace(&format!("{binding}_max"), &format!("{name}_max"));
+        found.push(BusHandle {
+            binding: name,
+            ty: ty.clone(),
+        });
+    }
+    (out, found)
+}
+
 /// One interrupt-enabled input pin, resolved to what the generator needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IrqPin {
@@ -374,12 +410,20 @@ pub fn make_generated_section(
         port_splits,
         pin_section,
         fn_calls,
+        inline_handles,
         ..
     } = parts;
 
     let irqs = irq_pins(all_pins);
     let locals_all = local_pins(all_pins);
     let (fn_calls, buses) = promote_bus_handles(&fn_calls);
+    // The ADC and each PWM timer have no config module to name a `Handle`, so
+    // `gen_parts` hands their concrete types over instead. Without this they
+    // were built in `#[init]` and dropped the moment it returned: the ADC
+    // unusable, and a PWM that keeps whatever duty init programmed but can
+    // never be changed again.
+    let (fn_calls, inline) = promote_inline_handles(&fn_calls, &inline_handles);
+    let buses: Vec<BusHandle> = buses.into_iter().chain(inline).collect();
     // `make_interrupt_source(&mut self)` needs a mutable binding. Rewriting only
     // the armed pins keeps `unused_mut` off the polled ones.
     let pin_section = irqs.iter().fold(pin_section, |acc, p| {
@@ -415,16 +459,19 @@ pub fn make_generated_section(
          systick_monotonic!(Mono, 1_000);\n\
          \n\
          #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true)]\n\
+         // Resources exist for YOUR tasks to use, and a freshly generated\n\
+         // project has not written those yet. The allow sits on the MODULE\n\
+         // because `#[rtic::app]` re-emits `struct Local` itself: one on the\n\
+         // struct is consumed with the source and never reaches the fields the\n\
+         // lint actually reports.\n\
+         #[allow(dead_code)]\n\
          mod app {{\n\
          \x20   use super::*;\n\
          \n\
          \x20   #[shared]\n\
          \x20   struct Shared {{}}\n\
          \n\
-         \x20   // Resources exist for YOUR tasks to use; a freshly generated\n\
-         \x20   // project has not written those yet.\n\
          \x20   #[local]\n\
-         \x20   #[allow(dead_code)]\n\
          \x20   struct Local {{\n\
          {local_fields}\
          \x20   }}\n\
