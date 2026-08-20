@@ -1155,6 +1155,10 @@ mod emit_for_manual_compile {
             // below — `i2c::Pins<I2C1>` exists only for this exact pair.
             ("PB6", PinFunction::I2cScl(1)),
             ("PB7", PinFunction::I2cSda(1)),
+            // bxCAN's default pads. `can::Pins` is a PAIR too (PA12/PA11, or
+            // PB9/PB8 remapped) — `EIDE_CAN_HALF` below wires only one.
+            ("PA12", PinFunction::CanTx),
+            ("PA11", PinFunction::CanRx),
         ] {
             if func == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
@@ -1176,6 +1180,15 @@ mod emit_for_manual_compile {
             let dropped = match std::env::var("EIDE_I2C_HALF").as_deref() {
                 Ok("scl") => Some(PinFunction::I2cSda(1)),
                 Ok("sda") => Some(PinFunction::I2cScl(1)),
+                _ => None,
+            };
+            if Some(&func) == dropped.as_ref() {
+                continue;
+            }
+            // `EIDE_CAN_HALF=tx|rx` wires only that pad of the CAN transceiver.
+            let dropped = match std::env::var("EIDE_CAN_HALF").as_deref() {
+                Ok("tx") => Some(PinFunction::CanRx),
+                Ok("rx") => Some(PinFunction::CanTx),
                 _ => None,
             };
             if Some(&func) == dropped.as_ref() {
@@ -1267,12 +1280,26 @@ mod emit_for_manual_compile {
         } else {
             assert!(main_rs.contains("configs::i2c1::init"), "{main_rs}");
         }
+        // Same rule again for the CAN, plus the USB token `Can::new` demands.
+        if std::env::var("EIDE_CAN_HALF").is_ok() {
+            assert!(
+                !main_rs.contains("configs::can1::init")
+                    && main_rs.contains("CAN1 is NOT initialised"),
+                "half a CAN must not be initialised, and must say so:\n{main_rs}"
+            );
+        } else {
+            assert!(
+                main_rs.contains("configs::can1::init(dp.CAN1, dp.USB,"),
+                "bxCAN shares SRAM with USB, so the HAL takes the USB token:\n{main_rs}"
+            );
+        }
 
         let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
         let configs = mcu.config_files();
         files.cargo_toml = project_gen::ensure_peripheral_deps(
             &files.cargo_toml,
-            false,
+            // CAN is wired below, so `bxcan` is needed.
+            true,
             true,
             // The SPI and I2C here are wired, so `embedded-hal` is needed exactly
             // as the app computes it — without DMA the bus is the Portable

@@ -649,21 +649,30 @@ pub(super) fn gen_parts(
         .find(|(p, _)| p.selected_function == PinFunction::CanTx);
     if can_rx.is_some() || can_tx_pin.is_some() {
         header!();
-        let rx_v = can_rx
-            .map(|(p, m)| binding_of(p, m))
-            .unwrap_or("_can_rx".into());
-        let tx_v = can_tx_pin
-            .map(|(p, m)| binding_of(p, m))
-            .unwrap_or("_can_tx".into());
-        let sfx = can
-            .get(&1)
-            .map(|c| module_label_sfx(&c.custom_label))
-            .unwrap_or_default();
-        // `assign_pins` (and bxcan) expect the pins as `(TX, RX)`.
-        fn_calls.push_str(&format!(
-            "    let mut _can{sfx} = \
-             pins::configs::can1::init(dp.CAN1, ({tx_v}, {rx_v}), &mut afio);\n"
-        ));
+        // The third pair on this family: `can::Pins` is implemented for
+        // (PA12 alternate, PA11 input) and for PB9/PB8 remapped — never for one
+        // pad. The old code filled the gap with `_can_rx` / `_can_tx`, bindings
+        // nothing ever declared, and the project did not compile.
+        if let (Some((tp, tm)), Some((rp, rm))) = (can_tx_pin, can_rx) {
+            let (tx_v, rx_v) = (binding_of(tp, tm), binding_of(rp, rm));
+            let sfx = can
+                .get(&1)
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            // `assign_pins` (and bxcan) expect the pins as `(TX, RX)`. `dp.USB`
+            // goes with them: bxCAN and USB share SRAM, so the HAL takes the USB
+            // token to prove it is free — see the config module's own note.
+            fn_calls.push_str(&format!(
+                "    let mut _can{sfx} = \
+                 pins::configs::can1::init(dp.CAN1, dp.USB, ({tx_v}, {rx_v}), &mut afio);\n"
+            ));
+        } else {
+            let missing = if can_tx_pin.is_none() { "TX" } else { "RX" };
+            fn_calls.push_str(&format!(
+                "    // CAN1 is NOT initialised: {missing} is not wired, and stm32f1xx-hal\n    \
+                 // assigns the CAN pads as a TX+RX pair (there is no one-way CAN).\n"
+            ));
+        }
     }
 
     // ── USB (CDC ACM serial) — full init in main's scope (option A) ───────────
@@ -895,8 +904,9 @@ pub fn config_files(
         }
     }
     // CAN — single instance on STM32F1; the bit-timing register depends on the
-    // APB1 (PCLK1) clock, so the clock config is read here.
-    if has(PinFunction::CanRx) || has(PinFunction::CanTx) {
+    // APB1 (PCLK1) clock, so the clock config is read here. Both pads, like the
+    // USART and the I2C: `can::Pins` is a pair, so half a CAN has no `init`.
+    if has(PinFunction::CanRx) && has(PinFunction::CanTx) {
         out.push((
             "can1.rs".to_string(),
             can_config_file(can.get(&1), pclk1_of(clock)),
@@ -1150,6 +1160,9 @@ fn can_btr(bitrate: u32, pclk1: u32) -> u32 {
 
 const CAN_TMPL: &str = r#"// <<< GENERATED>>>
 // Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+// Kept for the reader (and rewritten when you change the bit rate in the
+// module): `init` programs BTR, which is what the hardware actually takes.
+#[allow(dead_code)]
 const BITRATE: u32 = {BITRATE}; // bits/s
 // CAN_BTR register value, computed from BITRATE and the APB1 clock ({PCLK1} Hz).
 const BTR: u32 = {BTR};
@@ -1160,7 +1173,6 @@ const BTR: u32 = {BTR};
 // CAN module is present). Verify the bit timing / filters for your bus.
 use stm32f1xx_hal::{
     pac,
-    prelude::*,
     afio,
     can::Can,
 };
@@ -1171,15 +1183,20 @@ use stm32f1xx_hal::{
 /// spells its handle the same way, which is what the RTIC generator looks for.
 pub type Handle = bxcan::Can<Can<pac::CAN1>>;
 
+/// `usb` is not a typo: bxCAN and USB share the same 512 bytes of SRAM on this
+/// family, so `Can::new` takes the USB peripheral to prove nothing else holds
+/// it. The two cannot be used together, and on these pads (PA11/PA12) they
+/// cannot even be wired together.
 pub fn init<PINS>(
     can: pac::CAN1,
+    usb: pac::USB,
     pins: PINS,
     afio: &mut afio::Parts,
 ) -> Handle
 where
     PINS: stm32f1xx_hal::can::Pins<Instance = pac::CAN1>,
 {
-    let mut hal_can = Can::new(can);
+    let hal_can = Can::new(can, usb);
     hal_can.assign_pins(pins, &mut afio.mapr);
 
     let mut bx = bxcan::Can::builder(hal_can)
@@ -1187,7 +1204,9 @@ where
         .leave_disabled();
 
     // Accept every frame by default — tighten the filter for your application.
-    bx.modify_filters().enable_bank(0, bxcan::filter::Mask32::accept_all());
+    // The FIFO here is the one `receive()` reads below.
+    bx.modify_filters()
+        .enable_bank(0, bxcan::Fifo::Fifo0, bxcan::filter::Mask32::accept_all());
 
     nb::block!(bx.enable_non_blocking()).ok();
     bx
@@ -1201,12 +1220,12 @@ where
 //     // Send
 //     let id = StandardId::new(0x123).unwrap();
 //     let frame = Frame::new_data(id, [1u8, 2, 3, 4]);
-//     nb::block!(_can1.transmit(&frame)).ok();
+//     nb::block!({HANDLE}.transmit(&frame)).ok();
 //
 //     // Receive (nb: Err(WouldBlock) while the mailboxes are empty)
 //     if let Ok(rx) = {HANDLE}.receive() {
 //         if let Some(data) = rx.data() {
-//             // data[..] holds the payload
+//             let _payload = &data[..]; // the frame's bytes
 //         }
 //     }
 
@@ -2671,6 +2690,14 @@ fn needs_mut_binding(
     !moved
 }
 
+/// Whether main.rs passes this pin as `&mut …` instead of by value.
+///
+/// The bus arms below are commented out on purpose (see the `//cd` marks): every
+/// `pins::configs::*::init` takes its pins BY VALUE, because that is how the
+/// HAL's `Pins` impls are written. `CanTx` used to be the exception and it was
+/// simply wrong — `can::Pins` is implemented for the owned `(PA12<Alternate>,
+/// PA11<Input>)` pair, so the reference did not satisfy the bound and the CAN
+/// project did not compile.
 fn needs_mut_ref(func: &PinFunction) -> bool {
     matches!(
         func,
@@ -2685,7 +2712,7 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
            // | PinFunction::I2cScl(_)
            // | PinFunction::I2cSda(_)
             | PinFunction::Mco
-            | PinFunction::CanTx
+          //cd  | PinFunction::CanTx
     )
 }
 
@@ -3011,6 +3038,41 @@ mod blocking_dma_tests {
         assert!(main_rs.contains("configs::i2c1::init"), "{main_rs}");
         assert!(!main_rs.contains("is NOT initialised"), "{main_rs}");
         assert!(mcu.config_files().iter().any(|(f, _)| f == "i2c1.rs"));
+
+        // And the CAN, the third pair — `can::Pins` is (PA12, PA11) or the
+        // PB9/PB8 remap. This one had the USART's bug: `_can_rx` / `_can_tx`.
+        let can_tx = ("PA12", PinFunction::CanTx);
+        let can_rx = ("PA11", PinFunction::CanRx);
+        for (wired, missing) in [(vec![can_tx.clone()], "RX"), (vec![can_rx.clone()], "TX")] {
+            let mcu = build(&wired, BlockingDma::Off);
+            let main_rs = mcu.fresh_main_rs();
+            assert!(!main_rs.contains("configs::can1::init"), "{main_rs}");
+            assert!(
+                main_rs.contains(&format!("CAN1 is NOT initialised: {missing} is not wired")),
+                "{main_rs}"
+            );
+            // The phantom bindings, as they appeared in the argument list —
+            // `pa11_can_rx` is a REAL binding and ends the same way, so match
+            // the punctuation around them.
+            assert!(
+                !main_rs.contains(", _can_rx)") && !main_rs.contains("(_can_tx,"),
+                "{main_rs}"
+            );
+            assert!(!mcu.config_files().iter().any(|(f, _)| f == "can1.rs"));
+        }
+
+        let mcu = build(&[can_tx, can_rx], BlockingDma::Off);
+        let main_rs = mcu.fresh_main_rs();
+        // The USB token is not optional: bxCAN and USB share SRAM, so
+        // `Can::new` takes it to prove nothing else holds it.
+        assert!(
+            main_rs.contains("configs::can1::init(dp.CAN1, dp.USB, (pa12_can_tx, pa11_can_rx)"),
+            "{main_rs}"
+        );
+        // And the pins go BY VALUE — `can::Pins` is implemented for the owned
+        // pair, so a `&mut` here does not satisfy the bound.
+        assert!(!main_rs.contains("&mut gpioa.pa12"), "{main_rs}");
+        assert!(mcu.config_files().iter().any(|(f, _)| f == "can1.rs"));
     }
 
     /// The Configuration tab's list must show the halves actually taken -

@@ -987,6 +987,7 @@ pub fn module_config_ui(
         has_sig(ModuleSignal::Rx) || has_sig(ModuleSignal::LpRx),
     );
     let wired_i2c = (has_sig(ModuleSignal::Scl), has_sig(ModuleSignal::Sda));
+    let wired_can = (has_sig(ModuleSignal::CanTx), has_sig(ModuleSignal::CanRx));
     // Which flow-control pads this module actually has, read from its own
     // wiring — the flow selector warns against THIS, not against a guess.
     let wired_flow = (
@@ -1607,6 +1608,10 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
+                    // Third pair on this family — see the USART and I2C above.
+                    if family == "stm32f1" {
+                        f1_half_bus_note(ui, "CAN", ("TX", "RX"), "TX+RX", wired_can);
+                    }
                 }
                 ModuleConfig::Usb(cfg) => {
                     ui.label("Product");
