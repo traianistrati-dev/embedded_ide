@@ -4,7 +4,7 @@
 //! marker. RON serialises to a single line (newlines in data models are
 //! escaped), so it fits in a comment.
 
-use super::VirtualModule;
+use super::{ModuleConfig, VirtualModule};
 
 /// Marker prefix for the modules comment line.
 pub const MODULES_TAG: &str = "// @modules";
@@ -25,7 +25,15 @@ pub fn parse_from_source(source: &str) -> Vec<VirtualModule> {
         .lines()
         .find_map(|l| {
             let rest = l.trim_start().strip_prefix(MODULES_TAG)?;
-            ron::from_str::<Vec<VirtualModule>>(rest.trim_start()).ok()
+            let mut modules = ron::from_str::<Vec<VirtualModule>>(rest.trim_start()).ok()?;
+            // The one place a saved project re-enters the model, so the one
+            // place old field shapes are brought forward.
+            for m in &mut modules {
+                if let ModuleConfig::Timer(cfg) = &mut m.config {
+                    cfg.migrate_duty();
+                }
+            }
+            Some(modules)
         })
         .unwrap_or_default()
 }
@@ -65,8 +73,60 @@ fn insert_after_first_line(code: &str, line: &str) -> String {
 mod tests {
     use super::*;
     use crate::panels::mcu_module::modules::{
-        Connection, ModuleConfig, ModuleKind, ModuleSignal, UsartModuleConfig,
+        Connection, ModuleConfig, ModuleKind, ModuleSignal, TimerModuleConfig, UsartModuleConfig,
     };
+
+    /// A project saved before duty was stored in hundredths keeps its duty:
+    /// the whole-percent map is folded in on the way back, so 75 % stays 75 %
+    /// instead of collapsing to 0.75 %.
+    #[test]
+    fn a_pre_hundredths_duty_is_migrated_on_load() {
+        let mut cfg = TimerModuleConfig::new(2);
+        cfg.freq_hz = 20_000;
+        // Exactly what an older version wrote: the legacy field, nothing else.
+        cfg.duty.insert(3, 75);
+        let old = VirtualModule {
+            id: "_pwm_2".into(),
+            kind: ModuleKind::GenericInterfaceTimer,
+            name: "PWM2".into(),
+            pos: (0.0, 0.0),
+            config: ModuleConfig::Timer(cfg),
+            connections: vec![Connection {
+                signal: ModuleSignal::PwmCh3,
+                mcu_pin: 12,
+            }],
+        };
+
+        let back = parse_from_source(&marker_line(&[old]).unwrap());
+        let ModuleConfig::Timer(cfg) = &back[0].config else {
+            panic!("expected a timer module");
+        };
+        assert_eq!(cfg.duty_x100_of(3), 7_500, "75 % is 7500 hundredths");
+        assert_eq!(cfg.duty_percent_of(3), 75.0);
+        assert!(
+            cfg.duty.is_empty(),
+            "the legacy map is consumed, not carried forward"
+        );
+
+        // …and saving it again writes only the new field, so the next load has
+        // nothing left to migrate.
+        let again = parse_from_source(&marker_line(&back).unwrap());
+        let ModuleConfig::Timer(cfg) = &again[0].config else {
+            panic!("expected a timer module");
+        };
+        assert_eq!(cfg.duty_x100_of(3), 7_500);
+    }
+
+    /// A value the new field already carries wins: a half-migrated config
+    /// cannot be dragged back to the coarser number.
+    #[test]
+    fn migration_never_overwrites_a_hundredths_value() {
+        let mut cfg = TimerModuleConfig::new(2);
+        cfg.set_duty_x100(3, 750);
+        cfg.duty.insert(3, 75);
+        cfg.migrate_duty();
+        assert_eq!(cfg.duty_x100_of(3), 750, "7.5 % survives, not 75 %");
+    }
 
     fn sample() -> VirtualModule {
         let mut cfg = UsartModuleConfig::new(1);

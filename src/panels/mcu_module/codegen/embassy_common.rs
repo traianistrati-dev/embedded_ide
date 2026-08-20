@@ -1289,15 +1289,15 @@ mod emit_for_manual_compile {
                 // module's defaults (1 kHz, every channel 0 %).
                 ModuleConfig::Timer(c) => {
                     c.freq_hz = 20_000;
-                    c.duty.insert(3, 75);
-                    c.duty.insert(4, 10);
+                    c.set_duty_x100(3, 7_500);
+                    c.set_duty_x100(4, 1_000);
                 }
                 _ => {}
             }
         }
         let main_rs = mcu.fresh_main_rs();
         assert!(
-            main_rs.contains("20000.Hz()") && main_rs.contains("* 75 / 100"),
+            main_rs.contains("20000.Hz()") && main_rs.contains("* 7500 / 10_000"),
             "the module's frequency and duty must reach the code:\n{main_rs}"
         );
         // What each peripheral is left asking for once its WIRING has had its
@@ -1509,7 +1509,7 @@ mod emit_for_manual_compile {
         for m in &mut mcu.modules {
             if let ModuleConfig::Timer(c) = &mut m.config {
                 c.freq_hz = 20_000;
-                c.duty.insert(3, 75);
+                c.set_duty_x100(3, 7_500);
             }
         }
 
@@ -1615,7 +1615,7 @@ mod emit_for_manual_compile {
         for m in &mut mcu.modules {
             if let ModuleConfig::Timer(c) = &mut m.config {
                 c.freq_hz = 20_000;
-                c.duty.insert(3, 75);
+                c.set_duty_x100(3, 7_500);
             }
         }
 
@@ -1840,7 +1840,7 @@ mod emit_for_manual_compile {
                 // exercised rather than agreeing with the template by accident.
                 ModuleConfig::Timer(c) => {
                     c.freq_hz = 20_000;
-                    c.duty.insert(1, 75);
+                    c.set_duty_x100(1, 7_500);
                 }
                 _ => {}
             }

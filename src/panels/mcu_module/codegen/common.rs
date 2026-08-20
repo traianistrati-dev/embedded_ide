@@ -274,6 +274,20 @@ pub fn var_suffix(func: &PinFunction) -> String {
 /// leading/trailing `_` trimmed. Returns "" when nothing usable remains.
 ///
 /// e.g. `"Status LED"` → `status_led`, `"  D7! "` → `d7`.
+/// A hundredths-of-a-percent duty as a plain percentage: `750` -> `"7.5"`,
+/// `7525` -> `"75.25"`, `10_000` -> `"100"`.
+///
+/// Trailing zeros are trimmed, because a generated comment reading "75.00 %"
+/// only adds noise to the common case.
+pub fn duty_percent_str(x100: u16) -> String {
+    let whole = x100 / 100;
+    match x100 % 100 {
+        0 => format!("{whole}"),
+        r if r % 10 == 0 => format!("{whole}.{}", r / 10),
+        r => format!("{whole}.{r:02}"),
+    }
+}
+
 pub fn sanitize_label(label: &str) -> String {
     let mut out = String::new();
     let mut pending_sep = false;
@@ -659,6 +673,21 @@ pub fn parse_main_rs(source: &str) -> Vec<(String, PinFunction)> {
 
 #[cfg(test)]
 mod tests {
+    /// The comment beside a generated duty reads as a person would write it.
+    #[test]
+    fn a_duty_reads_as_a_plain_percentage() {
+        for (x100, want) in [
+            (0u16, "0"),
+            (750, "7.5"),  // the servo case whole percent could not express
+            (7_500, "75"), // no trailing ".00" on the common case
+            (7_550, "75.5"),
+            (7_505, "75.05"),
+            (10_000, "100"),
+        ] {
+            assert_eq!(duty_percent_str(x100), want, "{x100} hundredths");
+        }
+    }
+
     use super::*;
 
     #[test]

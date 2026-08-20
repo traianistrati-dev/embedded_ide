@@ -9,6 +9,7 @@ use super::super::modules::{
 };
 use super::super::pins::logic::pin::{GpioMode, Pin};
 use super::super::pins::logic::pin_function::PinFunction;
+use super::common::duty_percent_str;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line, pin_binding, sanitize_label};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -825,12 +826,14 @@ pub(super) fn gen_parts(
                 format!("    let {h}_max = {h}.get_max_duty();"),
             ];
             for (c, _) in &chans {
-                let pct = cfg.map(|t| t.duty_of(*c)).unwrap_or(0);
-                // Percent of `max`, in u32 so 100 % of a 16-bit reload cannot
-                // overflow on the way. A channel the user never touched is 0 %:
+                let x100 = cfg.map(|t| t.duty_x100_of(*c)).unwrap_or(0);
+                // Hundredths of `max`, in u32 so the full scale of a 16-bit
+                // reload cannot overflow on the way (65_535 * 10_000 fits with
+                // room to spare). A channel the user never touched is 0 %:
                 // enabled, pin low, which is the safe state for a driver stage.
                 l.push(format!(
-                    "    {h}.set_duty(Channel::C{c}, ({h}_max as u32 * {pct} / 100) as u16); // {pct} %"
+                    "    {h}.set_duty(Channel::C{c}, ({h}_max as u32 * {x100} / 10_000) as u16); // {} %",
+                    duty_percent_str(x100)
                 ));
                 l.push(format!("    {h}.enable(Channel::C{c});"));
             }
@@ -3483,7 +3486,7 @@ mod blocking_dma_tests {
                 for m in &mut mcu.modules {
                     if let ModuleConfig::Timer(c) = &mut m.config {
                         c.freq_hz = 20_000;
-                        c.duty.insert(3, 75);
+                        c.set_duty_x100(3, 7_550);
                     }
                 }
             }
@@ -3516,16 +3519,18 @@ mod blocking_dma_tests {
             "{main_rs}"
         );
         // A channel the user set, and one they never touched — 0 %, enabled,
-        // pin low, which is the safe state the model documents.
+        // pin low, which is the safe state the model documents. The duty is a
+        // ratio out of 10_000, so a fraction of a percent reaches the pin
+        // instead of being rounded to the nearest whole one.
         assert!(
             main_rs.contains(
-                "_pwm2.set_duty(Channel::C3, (_pwm2_max as u32 * 75 / 100) as u16); // 75 %"
+                "_pwm2.set_duty(Channel::C3, (_pwm2_max as u32 * 7550 / 10_000) as u16); // 75.5 %"
             ),
             "{main_rs}"
         );
         assert!(
             main_rs.contains(
-                "_pwm2.set_duty(Channel::C4, (_pwm2_max as u32 * 0 / 100) as u16); // 0 %"
+                "_pwm2.set_duty(Channel::C4, (_pwm2_max as u32 * 0 / 10_000) as u16); // 0 %"
             ),
             "{main_rs}"
         );

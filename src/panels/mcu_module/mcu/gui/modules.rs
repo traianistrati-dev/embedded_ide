@@ -1586,12 +1586,22 @@ pub fn module_config_ui(
                             continue;
                         };
                         ui.label(format!("{sig} duty  ({pin})"));
-                        let mut duty = cfg.duty_of(ch);
+                        // Percent with two decimals, stored as hundredths: a
+                        // servo's 1.5 ms of a 20 ms frame is 7.5 %, and whole
+                        // percent could not say it. Dragging lands on
+                        // hundredths too, so the handle and the typed value
+                        // agree.
+                        let mut pct = cfg.duty_percent_of(ch);
                         if ui
-                            .add(egui::Slider::new(&mut duty, 0..=100).suffix(" %"))
+                            .add(
+                                egui::Slider::new(&mut pct, 0.0..=100.0)
+                                    .suffix(" %")
+                                    .fixed_decimals(2)
+                                    .step_by(0.01),
+                            )
                             .changed()
                         {
-                            cfg.duty.insert(ch, duty);
+                            cfg.set_duty_x100(ch, (pct * 100.0).round().max(0.0) as u16);
                         }
                         ui.end_row();
                     }

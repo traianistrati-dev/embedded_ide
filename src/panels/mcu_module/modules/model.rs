@@ -907,8 +907,19 @@ pub struct TimerModuleConfig {
     pub instance: u8,
     /// Shared output frequency in Hz.
     pub freq_hz: u32,
-    /// Channel number (1..=4) → duty cycle in percent.
+    /// Channel number (1..=4) → duty in HUNDREDTHS of a percent (0..=10_000).
+    ///
+    /// Not whole percent, because whole percent cannot express the first duty
+    /// most people reach for: a hobby servo wants 1.5 ms of a 20 ms frame,
+    /// which is 7.5 %. Both backends can take an exact ratio — embassy's
+    /// `set_duty_cycle_fraction`, and the F1 HAL's `set_duty` over
+    /// `get_max_duty()` — so the resolution missing here was the model's, never
+    /// the hardware's.
     #[serde(default)]
+    pub duty_x100: std::collections::BTreeMap<u8, u16>,
+    /// Whole-percent duty, as written by versions before [`Self::duty_x100`].
+    /// Folded into it by [`Self::migrate_duty`] on load and never written back.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub duty: std::collections::BTreeMap<u8, u8>,
     pub rx_model: String,
     pub tx_model: String,
@@ -923,6 +934,7 @@ impl TimerModuleConfig {
         Self {
             instance,
             freq_hz: 1_000,
+            duty_x100: std::collections::BTreeMap::new(),
             duty: std::collections::BTreeMap::new(),
             rx_model: String::new(),
             tx_model: String::new(),
@@ -931,8 +943,35 @@ impl TimerModuleConfig {
     }
 
     /// This channel's duty cycle, 0 % when the user has not set one.
-    pub fn duty_of(&self, channel: u8) -> u8 {
-        self.duty.get(&channel).copied().unwrap_or(0)
+    /// Duty of `channel` in hundredths of a percent; 0 for a channel nobody
+    /// has touched, which is a pin held low — the safe state for a driver stage.
+    pub fn duty_x100_of(&self, channel: u8) -> u16 {
+        self.duty_x100.get(&channel).copied().unwrap_or(0)
+    }
+
+    /// The same duty as a percentage, for display and for the slider.
+    pub fn duty_percent_of(&self, channel: u8) -> f32 {
+        self.duty_x100_of(channel) as f32 / 100.0
+    }
+
+    /// Set `channel`'s duty, clamped to the full scale. The single door into
+    /// the map, so `set_duty_cycle_fraction`'s `num <= denom` cannot be broken
+    /// by a hand-edited config.
+    pub fn set_duty_x100(&mut self, channel: u8, x100: u16) {
+        self.duty_x100.insert(channel, x100.min(10_000));
+    }
+
+    /// Fold a pre-hundredths whole-percent map into [`Self::duty_x100`].
+    ///
+    /// Idempotent, and it never overwrites a value the new field already
+    /// carries: a config written by this version has an empty legacy map, so
+    /// this is a no-op there.
+    pub fn migrate_duty(&mut self) {
+        for (ch, pct) in std::mem::take(&mut self.duty) {
+            if !self.duty_x100.contains_key(&ch) {
+                self.set_duty_x100(ch, pct as u16 * 100);
+            }
+        }
     }
 }
 

@@ -15,7 +15,7 @@
 //!
 //! [`Runtime::Async`]: crate::panels::mcu_module::mcu::Runtime
 
-use super::common::sanitize_label;
+use super::common::{duty_percent_str, sanitize_label};
 use super::dma_map;
 use super::embassy_common::{NO_PINS_PLACEHOLDER, gpio_bindings};
 use super::nvic;
@@ -988,9 +988,9 @@ pub fn async_peripherals(
         let sfx = cfg.map(|c| label_sfx(&c.custom_label)).unwrap_or_default();
         let handle = format!("_pwm{n}{sfx}");
         let freq = cfg.map(|c| c.freq_hz).unwrap_or(1_000);
-        let with_duty: Vec<(u8, u8)> = chans
+        let with_duty: Vec<(u8, u16)> = chans
             .iter()
-            .map(|(ch, _)| (*ch, cfg.map(|c| c.duty_of(*ch)).unwrap_or(0)))
+            .map(|(ch, _)| (*ch, cfg.map(|c| c.duty_x100_of(*ch)).unwrap_or(0)))
             .collect();
         let args: String = chans.iter().map(|(_, pin)| format!(", p.{pin}")).collect();
         for (_, pin) in &chans {
@@ -1660,14 +1660,16 @@ pub fn init<'d>(
 //     {HANDLE}.ch1().set_duty_cycle_percent(75);
 //     {HANDLE}.ch1().disable();
 //
-// Duty as a fraction avoids the rounding of whole percents:
+// The generated duty is a ratio out of 10_000, so a value like 7.5 % lands
+// exactly. Any other ratio works the same way — a third of the period:
 //
 //     {HANDLE}.ch1().set_duty_cycle_fraction(1, 3);
 "#;
 
 /// Render [`ASYNC_PWM_TMPL`] for timer `n` with the channels `chans`
-/// (`(channel number, duty %)`, ascending) and the module's frequency.
-pub fn pwm_config_file(n: u8, freq_hz: u32, chans: &[(u8, u8)], handle: &str) -> String {
+/// (`(channel number, duty in hundredths of a percent)`, ascending) and the
+/// module's frequency.
+pub fn pwm_config_file(n: u8, freq_hz: u32, chans: &[(u8, u16)], handle: &str) -> String {
     let mut duty_consts = String::new();
     let mut channel_types = String::new();
     let mut params = String::new();
@@ -1677,8 +1679,9 @@ pub fn pwm_config_file(n: u8, freq_hz: u32, chans: &[(u8, u8)], handle: &str) ->
         match chans.iter().find(|(c, _)| *c == ch) {
             Some((_, duty)) => {
                 duty_consts.push_str(&format!(
-                    "const DUTY_CH{ch}: u8 = {duty}; // 0..=100
-"
+                    "const DUTY_CH{ch}: u32 = {duty}; // {} %, in hundredths (0..=10_000)
+",
+                    duty_percent_str(*duty)
                 ));
                 channel_types.push_str(&format!("Ch{ch}, "));
                 params.push_str(&format!(
@@ -1691,7 +1694,7 @@ pub fn pwm_config_file(n: u8, freq_hz: u32, chans: &[(u8, u8)], handle: &str) ->
                 ));
                 enables.push_str(&format!(
                     "    pwm.ch{ch}().enable();
-    pwm.ch{ch}().set_duty_cycle_percent(DUTY_CH{ch});
+    pwm.ch{ch}().set_duty_cycle_fraction(DUTY_CH{ch}, 10_000);
 "
                 ));
             }
@@ -3087,7 +3090,7 @@ mod pwm_tests {
         let pins = [mk("PA6", 3, 1), mk("PA7", 3, 2)];
         let mut cfg = TimerModuleConfig::new(3);
         cfg.freq_hz = 20_000;
-        cfg.duty.insert(1, 75);
+        cfg.set_duty_x100(1, 7_500);
         let out = run(&pins, [(3u8, cfg)].into_iter().collect());
 
         assert_eq!(
@@ -3107,8 +3110,14 @@ mod pwm_tests {
         // The frequency is the module's, shared; the duty is per channel, and a
         // channel the user never touched starts at 0 %.
         assert!(body.contains("const FREQ_HZ: u32 = 20000;"), "{body}");
-        assert!(body.contains("const DUTY_CH1: u8 = 75;"), "{body}");
-        assert!(body.contains("const DUTY_CH2: u8 = 0;"), "{body}");
+        assert!(
+            body.contains("const DUTY_CH1: u32 = 7500; // 75 %, in hundredths"),
+            "{body}"
+        );
+        assert!(
+            body.contains("const DUTY_CH2: u32 = 0; // 0 %, in hundredths"),
+            "{body}"
+        );
         // Wired channels become parameters; the rest stay `None` slots.
         assert!(
             body.contains("ch1: Peri<'d, impl TimerPin<peripherals::TIM3, Ch1>>"),
@@ -3124,7 +3133,28 @@ mod pwm_tests {
             "CH3 + CH4: {body}"
         );
         assert!(
-            body.contains("pwm.ch1().set_duty_cycle_percent(DUTY_CH1);"),
+            body.contains("pwm.ch1().set_duty_cycle_fraction(DUTY_CH1, 10_000);"),
+            "{body}"
+        );
+    }
+
+    /// The duty everybody needs first: a hobby servo at 1.5 ms of a 20 ms
+    /// frame is 7.5 %, which whole percent could only round away. The ratio
+    /// out of 10_000 carries it into the generated file untouched.
+    #[test]
+    fn a_fractional_duty_survives_into_the_generated_file() {
+        let pins = [mk("PA6", 3, 1)];
+        let mut cfg = TimerModuleConfig::new(3);
+        cfg.freq_hz = 50;
+        cfg.set_duty_x100(1, 750);
+        let out = run(&pins, [(3u8, cfg)].into_iter().collect());
+        let (_, body) = &out.config_files[0];
+        assert!(
+            body.contains("const DUTY_CH1: u32 = 750; // 7.5 %, in hundredths"),
+            "{body}"
+        );
+        assert!(
+            body.contains("pwm.ch1().set_duty_cycle_fraction(DUTY_CH1, 10_000);"),
             "{body}"
         );
     }
