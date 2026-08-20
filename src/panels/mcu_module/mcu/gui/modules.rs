@@ -979,6 +979,16 @@ pub fn module_config_ui(
     // Whether an SPI module has a receive line at all. Read from its own wiring
     // for the same reason as `wired_flow` below.
     let has_miso = m.connections.iter().any(|c| c.signal == ModuleSignal::Miso);
+    // Which of the serial pads this module actually has. On the F1 both are
+    // required — see `f1_half_usart_note`.
+    let wired_serial = (
+        m.connections
+            .iter()
+            .any(|c| matches!(c.signal, ModuleSignal::Tx | ModuleSignal::LpTx)),
+        m.connections
+            .iter()
+            .any(|c| matches!(c.signal, ModuleSignal::Rx | ModuleSignal::LpRx)),
+    );
     // Which flow-control pads this module actually has, read from its own
     // wiring — the flow selector warns against THIS, not against a guess.
     let wired_flow = (
@@ -1164,6 +1174,29 @@ pub fn module_config_ui(
             )
             .size(10.5)
             .color(egui::Color32::from_gray(140)),
+        );
+        ui.end_row();
+    };
+
+    // Half a USART generates NOTHING on the F1, because `Serial::new` takes the
+    // pair and the HAL has no placeholder for the pad that is missing. main.rs
+    // says so where the init would have gone; this says so before the user gets
+    // there, since a peripheral quietly absent from main.rs is easy to miss.
+    let f1_half_usart_note = |ui: &mut egui::Ui, wired: (bool, bool)| {
+        let missing = match wired {
+            (true, false) => "RX",
+            (false, true) => "TX",
+            _ => return,
+        };
+        ui.label("");
+        ui.label(
+            egui::RichText::new(format!(
+                "{missing} is not wired, so this USART is not initialised at all — \
+                 stm32f1xx-hal builds a Serial only from the TX+RX pair. Assign the \
+                 {missing} pad on the canvas."
+            ))
+            .size(10.5)
+            .color(egui::Color32::from_rgb(220, 160, 70)),
         );
         ui.end_row();
     };
@@ -1396,6 +1429,7 @@ pub fn module_config_ui(
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
                     {
                         f1_serial_note(ui);
+                        f1_half_usart_note(ui, wired_serial);
                         transport_row(ui, &mut cfg.blocking_dma, &chans, true);
                         if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);

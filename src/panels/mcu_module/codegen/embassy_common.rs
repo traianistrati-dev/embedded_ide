@@ -1155,6 +1155,18 @@ mod emit_for_manual_compile {
             if func == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
             }
+            // `EIDE_USART_HALF=tx|rx` wires only that pad of the USART. The HAL
+            // has no `NoTx`/`NoRx` to stand in for the other — `serial::Pins` is
+            // implemented for the PAIR and nothing else — so both spellings are
+            // cases that must NOT generate an init.
+            let dropped = match std::env::var("EIDE_USART_HALF").as_deref() {
+                Ok("tx") => Some(PinFunction::UsartRx(1)),
+                Ok("rx") => Some(PinFunction::UsartTx(1)),
+                _ => None,
+            };
+            if Some(&func) == dropped.as_ref() {
+                continue;
+            }
             let num = mcu
                 .iter_all_pins()
                 .find(|p| p.name == name)
@@ -1182,21 +1194,26 @@ mod emit_for_manual_compile {
             }
         }
         let main_rs = mcu.fresh_main_rs();
-        // One split for both peripherals, and the channels the HAL fixes.
-        assert_eq!(
-            main_rs.matches("dp.DMA1.split()").count(),
-            usize::from(halves.any()),
-            "the channels are moved out one at a time - a second split would be a \
-             second owner:\n{main_rs}"
-        );
-        // Only the halves in use contribute an argument, in `init`'s order.
-        // With MISO unwired the SPI has no receive half to give one, whatever
-        // the module still says — so it is scored against the NARROWED choice.
+        // What each peripheral is left asking for once its WIRING has had its
+        // say, which is not always what its module says:
+        //  · `EIDE_USART_HALF=tx|rx` unwires the other pad, and this HAL has no
+        //    placeholder for it — USART1 is not built at all.
+        //  · `EIDE_SPI_TXONLY=1` unwires MISO — the SPI keeps its TX half only.
+        let usart_built = std::env::var("EIDE_USART_HALF").is_err();
+        let usart_halves = if usart_built { halves } else { BlockingDma::Off };
         let spi_halves = if std::env::var("EIDE_SPI_TXONLY").is_ok() {
             halves.without_rx()
         } else {
             halves
         };
+        // One split for whichever peripherals are left.
+        assert_eq!(
+            main_rs.matches("dp.DMA1.split()").count(),
+            usize::from(usart_halves.any() || spi_halves.any()),
+            "the channels are moved out one at a time - a second split would be a \
+             second owner:\n{main_rs}"
+        );
+        // Only the halves in use contribute an argument, in `init`'s order.
         // `tx_first` is the peripheral's own parameter order: the USART takes
         // TX then RX, the SPI takes RX then TX (`with_rx_tx_dma`'s order).
         let args = |h: BlockingDma, tx: &str, rx: &str, tx_first: bool| match h {
@@ -1206,13 +1223,21 @@ mod emit_for_manual_compile {
             BlockingDma::Rx => format!("&clocks, {rx})"),
             BlockingDma::Off => "&clocks)".to_owned(),
         };
-        let usart_args = args(halves, "dma1.4", "dma1.5", true);
+        let usart_args = args(usart_halves, "dma1.4", "dma1.5", true);
         let spi_args = args(spi_halves, "dma1.3", "dma1.2", false);
         let (usart_args, spi_args) = (usart_args.as_str(), spi_args.as_str());
-        assert!(
-            main_rs.contains(usart_args),
-            "USART1 wants {usart_args}:\n{main_rs}"
-        );
+        if usart_built {
+            assert!(
+                main_rs.contains(usart_args),
+                "USART1 wants {usart_args}:\n{main_rs}"
+            );
+        } else {
+            assert!(
+                !main_rs.contains("configs::usart1::init")
+                    && main_rs.contains("USART1 is NOT initialised"),
+                "half a USART must not be initialised, and must say so:\n{main_rs}"
+            );
+        }
         assert!(
             main_rs.contains(spi_args),
             "SPI1 wants {spi_args}:\n{main_rs}"

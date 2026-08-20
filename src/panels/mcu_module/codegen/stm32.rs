@@ -445,12 +445,25 @@ pub(super) fn gen_parts(
             continue;
         }
         header!();
-        let tx_v = tx
-            .map(|(p, m)| binding_of(p, m))
-            .unwrap_or_else(|| format!("_tx{n}"));
-        let rx_v = rx
-            .map(|(p, m)| binding_of(p, m))
-            .unwrap_or_else(|| format!("_rx{n}"));
+        // Unlike SPI, this HAL has NO placeholder for a missing serial pad:
+        // `serial::Pins<USART>` is implemented for the (TX alternate, RX input)
+        // PAIR and for nothing else, so a one-way UART cannot be built at all.
+        // Say that where the init would have gone — the old code emitted the
+        // call anyway, naming a `_rx1` binding nothing ever declared, and the
+        // project did not compile.
+        let (Some(tx), Some(rx)) = (tx, rx) else {
+            let missing = if tx.is_none() { "TX" } else { "RX" };
+            fn_calls.push_str(&format!(
+                "    // USART{n} is NOT initialised: {missing} is not wired, and stm32f1xx-hal\n    \
+                 // builds a Serial only from the TX+RX pair (no one-way UART on this HAL).\n"
+            ));
+            continue;
+        };
+        let (tx_v, rx_v) = {
+            let (p, m) = tx;
+            let (q, o) = rx;
+            (binding_of(p, m), binding_of(q, o))
+        };
         let sfx = usart
             .get(&n)
             .map(|c| module_label_sfx(&c.custom_label))
@@ -842,7 +855,9 @@ pub fn config_files(
 
     let mut out: Vec<(String, String)> = Vec::new();
     for n in 1u8..=3 {
-        if has(PinFunction::UsartTx(n)) || has(PinFunction::UsartRx(n)) {
+        // BOTH pads, like I2C and unlike SPI: `Serial::new` takes the pair, so
+        // half a USART has no `init` to offer. main.rs says why in its place.
+        if has(PinFunction::UsartTx(n)) && has(PinFunction::UsartRx(n)) {
             out.push((format!("usart{n}.rs"), usart_config_file(n, usart.get(&n))));
         }
     }
@@ -1587,12 +1602,18 @@ pub fn blocking_dma_uses(mcu: &crate::panels::mcu_module::Mcu) -> Vec<super::dma
     use super::dma_map::{Bus, DmaUse};
     use crate::panels::mcu_module::modules::ModuleConfig;
 
-    /// Is SPI`n`'s receive line wired? Asked of the PIN MAP, the same place
-    /// `config_files` asks, not of the module — a module survives losing a pin.
-    fn has_miso(mcu: &crate::panels::mcu_module::Mcu, n: u8) -> bool {
+    /// Is `want` wired? Asked of the PIN MAP, the same place `config_files`
+    /// asks, not of the module — a module survives losing a pin.
+    fn wired_fn(mcu: &crate::panels::mcu_module::Mcu, want: PinFunction) -> bool {
         mcu.iter_all_pins()
-            .any(|p| !p.reserved && p.selected_function == PinFunction::SpiMiso(n))
+            .any(|p| !p.reserved && p.selected_function == want)
     }
+    let has_miso = |mcu: &_, n| wired_fn(mcu, PinFunction::SpiMiso(n));
+    // A USART missing either pad is never initialised (see `gen_parts`), so it
+    // takes no channel however its module is configured.
+    let usart_built = |mcu: &_, n| {
+        wired_fn(mcu, PinFunction::UsartTx(n)) && wired_fn(mcu, PinFunction::UsartRx(n))
+    };
 
     let mut out = Vec::new();
     let mut push = |peri: &str, bus: Bus, n: u8, dir: &str| {
@@ -1610,7 +1631,7 @@ pub fn blocking_dma_uses(mcu: &crate::panels::mcu_module::Mcu) -> Vec<super::dma
     };
     for m in &mcu.modules {
         match &m.config {
-            ModuleConfig::Usart(c) if c.blocking_dma.any() => {
+            ModuleConfig::Usart(c) if c.blocking_dma.any() && usart_built(mcu, c.instance) => {
                 if let Some((tx, rx)) = usart_dma_channels(c.instance) {
                     if c.blocking_dma.tx() {
                         push(tx, Bus::Usart, c.instance, "TX");
@@ -2882,6 +2903,76 @@ mod blocking_dma_tests {
         // With MISO wired, the note stays out of the way.
         let full = spi_config_file(1, Some(&cfg(BlockingDma::Off)), &pins, true);
         assert!(!full.contains("MISO is not wired"), "{full}");
+    }
+
+    /// Half a USART is not a one-way UART on this HAL: `serial::Pins<USART>` is
+    /// implemented for the (TX, RX) pair alone, so `Serial::new` cannot be
+    /// called at all. It used to be called anyway, naming a `_rx1` binding
+    /// nothing declared — the project did not compile.
+    #[test]
+    fn half_a_usart_is_not_initialised_and_says_so() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        // `wired` names the pads to configure; the other one stays Unset.
+        let build = |wired: &[(&str, PinFunction)], dma| {
+            let mut mcu = builtin_for("stm32f103c8t6")
+                .expect("built-in F103")
+                .build_mcu();
+            for (name, func) in wired {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| p.name == *name)
+                    .map(|p| p.number);
+                if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                    p.selected_function = func.clone();
+                }
+            }
+            mcu.reconcile_modules();
+            for m in &mut mcu.modules {
+                if let ModuleConfig::Usart(c) = &mut m.config {
+                    c.blocking_dma = dma;
+                }
+            }
+            mcu
+        };
+        let tx = ("PA9", PinFunction::UsartTx(1));
+        let rx = ("PA10", PinFunction::UsartRx(1));
+
+        for (wired, missing) in [(vec![tx.clone()], "RX"), (vec![rx.clone()], "TX")] {
+            // Even with both halves asked for, an uninitialised USART takes no
+            // channel and leaves no config file behind.
+            let mcu = build(&wired, BlockingDma::Both);
+            // The module SURVIVES one pad (`reconcile_modules` keeps a module
+            // while its peripheral has any pin), so it really can be sitting
+            // there asking for DMA — the guard is not decoration.
+            assert!(
+                mcu.modules
+                    .iter()
+                    .any(|m| matches!(&m.config, ModuleConfig::Usart(c) if c.blocking_dma.any())),
+                "half a USART still has a module"
+            );
+            let main_rs = mcu.fresh_main_rs();
+            assert!(!main_rs.contains("configs::usart1::init"), "{main_rs}");
+            assert!(
+                main_rs.contains(&format!("USART1 is NOT initialised: {missing} is not wired")),
+                "{main_rs}"
+            );
+            assert!(!main_rs.contains("dp.DMA1.split()"), "{main_rs}");
+            assert!(blocking_dma_uses(&mcu).is_empty());
+            assert!(
+                !mcu.config_files().iter().any(|(f, _)| f == "usart1.rs"),
+                "no init to offer, so no file"
+            );
+        }
+
+        // Both pads: the ordinary USART comes back, file and channels included.
+        let mcu = build(&[tx, rx], BlockingDma::Both);
+        let main_rs = mcu.fresh_main_rs();
+        assert!(main_rs.contains("configs::usart1::init"), "{main_rs}");
+        assert!(!main_rs.contains("is NOT initialised"), "{main_rs}");
+        assert_eq!(blocking_dma_uses(&mcu).len(), 2);
+        assert!(mcu.config_files().iter().any(|(f, _)| f == "usart1.rs"));
     }
 
     /// The Configuration tab's list must show the halves actually taken -
