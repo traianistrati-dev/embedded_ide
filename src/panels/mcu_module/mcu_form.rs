@@ -755,7 +755,12 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             channel: ch,
         }),
         // `tim1_2` → TIM1 CH2; the `n` suffix is the complementary output,
-        // `tim1_2n` → TIM1 CH2N.
+        // `tim1_2n` → TIM1 CH2N; `tim1_bkin1` / `tim1_bkin2` are the break inputs.
+        "tim" if tail.starts_with("bkin") => tail
+            .strip_prefix("bkin")
+            .and_then(|i| i.parse::<u8>().ok())
+            .filter(|i| *i == 1 || *i == 2)
+            .map(|input| PinFunction::TimerBreak { timer: n, input }),
         "tim" => match tail.strip_suffix('n') {
             Some(ch) => ch.parse().ok().map(|ch| PinFunction::TimerPwmN {
                 timer: n,
@@ -803,6 +808,7 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_{channel}"),
         PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_{channel}"),
         PinFunction::TimerPwmN { timer, channel } => format!("tim{timer}_{channel}n"),
+        PinFunction::TimerBreak { timer, input } => format!("tim{timer}_bkin{input}"),
         PinFunction::Other(name) => format!("af:{}", name.to_ascii_lowercase()),
     })
 }

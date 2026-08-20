@@ -128,6 +128,14 @@ mod tests {
         let mut cfg = TimerModuleConfig::new(1);
         cfg.counting = PwmCounting::CenterUpInterrupts;
         cfg.dead_time = 40;
+        cfg.set_break(
+            2,
+            crate::panels::mcu_module::modules::BreakInputConfig {
+                polarity: crate::panels::mcu_module::modules::BreakPolarity::ActiveHigh,
+                filter: 7,
+            },
+        );
+        cfg.auto_output_enable = true;
         cfg.set_channel(
             2,
             PwmChannelConfig {
@@ -151,6 +159,14 @@ mod tests {
         };
         assert_eq!(cfg.counting, PwmCounting::CenterUpInterrupts);
         assert_eq!(cfg.dead_time, 40);
+        assert_eq!(
+            cfg.break_of(2).polarity,
+            crate::panels::mcu_module::modules::BreakPolarity::ActiveHigh
+        );
+        assert_eq!(cfg.break_of(2).filter_embassy(), "FDTS_DIV4_N8");
+        assert!(cfg.auto_output_enable);
+        // An input whose pad was never wired reads as untouched defaults.
+        assert_eq!(cfg.break_of(1), Default::default());
         assert_eq!(cfg.channel_of(2).output, PwmOutput::OpenDrain);
         assert_eq!(cfg.channel_of(2).polarity, PwmPolarity::ActiveLow);
         assert_eq!(cfg.channel_of(2).mode, PwmMode::Mode2);

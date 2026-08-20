@@ -1790,6 +1790,10 @@ mod emit_for_manual_compile {
                 timer: 1,
                 channel: 1,
             },
+            // …and the fault line that switches the pair off in hardware. It
+            // is the only pad whose alternate function the generated `init`
+            // has to set by hand, and the only one it hands back.
+            PinFunction::TimerBreak { timer: 1, input: 1 },
         ] {
             if want == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
@@ -1862,6 +1866,14 @@ mod emit_for_manual_compile {
                     c.counting = PwmCounting::CenterBothInterrupts;
                     // Only reaches the code on the timer that has a pair.
                     c.dead_time = 40;
+                    c.set_break(
+                        1,
+                        crate::panels::mcu_module::modules::BreakInputConfig {
+                            polarity: crate::panels::mcu_module::modules::BreakPolarity::ActiveHigh,
+                            filter: 3,
+                        },
+                    );
+                    c.auto_output_enable = true;
                     c.set_channel(
                         1,
                         PwmChannelConfig {

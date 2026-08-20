@@ -17,6 +17,7 @@ impl PinFunction {
             PinFunction::AdcChannel { .. } => "adc",
             PinFunction::TimerPwm { .. } => "pwm",
             PinFunction::TimerPwmN { .. } => "pwmn",
+            PinFunction::TimerBreak { .. } => "bkin",
             PinFunction::UsartTx(_) => "uart_tx",
             PinFunction::UsartRx(_) => "uart_rx",
             PinFunction::UsartCts(_) => "uart_cts",
@@ -57,6 +58,14 @@ impl PinFunction {
             PinFunction::TimerPwm { timer, channel } => format!("TIM{timer}  CH{channel}  (PWM)"),
             PinFunction::TimerPwmN { timer, channel } => {
                 format!("TIM{timer}  CH{channel}N  (PWM)")
+            }
+            PinFunction::TimerBreak { timer, input } => {
+                let n = if *input == 1 {
+                    String::new()
+                } else {
+                    input.to_string()
+                };
+                format!("TIM{timer}  BKIN{n}  (break)")
             }
             PinFunction::UsartTx(n) => format!("USART{n}  TX"),
             PinFunction::UsartRx(n) => format!("USART{n}  RX"),
@@ -183,6 +192,13 @@ impl PinFunction {
         // ── TIM{timer}  CH{channel}  (PWM) ───────────────────────────────────
         // label() → format!("TIM{timer}  CH{channel}  (PWM)")
         if let Some(rest) = s.strip_prefix("TIM") {
+            // ── TIM{timer}  BKIN[2]  (break) ─────────────────────────────────
+            if let Some((timer_str, tail)) = rest.split_once("  BKIN") {
+                if let Ok(timer) = timer_str.parse::<u8>() {
+                    let input = if tail.starts_with('2') { 2 } else { 1 };
+                    return Some(PinFunction::TimerBreak { timer, input });
+                }
+            }
             // rest = "2  CH1  (PWM)"
             if let Some((timer_str, ch_rest)) = rest.split_once("  CH") {
                 // ch_rest = "1  (PWM)" — take everything up to the next "  "
@@ -277,6 +293,7 @@ impl PinFunction {
             // Both PWM shapes share a tag: the label already spells out which
             // channel, and CH1N reads as complementary on its own.
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
+            PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::UsartTx(_) => "TX",
             PinFunction::UsartRx(_) => "RX",
             PinFunction::UsartCts(_) => "CTS",

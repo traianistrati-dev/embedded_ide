@@ -996,20 +996,29 @@ pub fn async_peripherals(
         // bound is `AdvancedInstance4Channel` — the advanced-control timers. A
         // CHxN pad on TIM15/16/17 is real silicon, but there is no driver for it
         // here, so say that instead of emitting code that will not compile.
-        if !wiring.comp.is_empty() && !is_advanced_timer(n) {
+        if wiring.needs_complementary() && !is_advanced_timer(n) {
             let pads: Vec<String> = wiring
                 .comp
                 .iter()
                 .map(|(c, pin)| format!("CH{c}N ({pin})"))
+                .chain(wiring.breaks.iter().map(|(i, pin)| {
+                    let sfx = if *i == 1 {
+                        String::new()
+                    } else {
+                        i.to_string()
+                    };
+                    format!("BKIN{sfx} ({pin})")
+                }))
                 .collect();
             calls.push_str(&format!(
-                "    // TIM{n} {} left unconfigured: embassy drives complementary outputs
-    // through `ComplementaryPwm`, which covers the advanced-control timers
-    // (TIM1/8/20) only. The plain channels below are unaffected.
+                "    // TIM{n} {} left unconfigured: embassy drives complementary outputs and
+    // break inputs through `ComplementaryPwm`, which covers the advanced-control
+    // timers (TIM1/8/20) only. The plain channels below are unaffected.
 ",
                 pads.join(", ")
             ));
             wiring.comp.clear();
+            wiring.breaks.clear();
         }
 
         let params = wiring.params();
@@ -1020,8 +1029,16 @@ pub fn async_peripherals(
         for (_, _, pin, _) in &params {
             consumed.push((*pin).to_owned());
         }
+        // With a break pad the config module also hands back the pads it put
+        // into alternate-function mode; they have to stay alive, so they get a
+        // binding of their own rather than being dropped on the spot.
+        let lhs = if wiring.breaks.is_empty() {
+            format!("let mut {handle}")
+        } else {
+            format!("let (mut {handle}, {handle}_break_pads)")
+        };
         calls.push_str(&format!(
-            "    let mut {handle} = pins::configs::pwm{n}::init(p.TIM{n}{args});
+            "    {lhs} = pins::configs::pwm{n}::init(p.TIM{n}{args});
 "
         ));
         files.push((
@@ -1656,23 +1673,23 @@ const FREQ_HZ: u32 = {FREQ};
 // Everything below is editable — your changes are preserved on regeneration.
 //
 {INTRO}
-use embassy_stm32::gpio::OutputType;
+{GPIO_USE}
 use embassy_stm32::time::Hertz;
 {LOW_LEVEL_USE}
 {DRIVER_USE}
 {TIMER_USE}
 use embassy_stm32::{peripherals, Peri};
-
+{BREAK_STRUCT}
 /// Initialise TIM{N} as PWM on the wired pad(s), enabled at the configured duty.
 pub fn init<'d>(
     tim: Peri<'d, peripherals::TIM{N}>,
-{PARAMS}) -> {DRIVER}<'d, peripherals::TIM{N}> {
-    let mut pwm = {DRIVER}::new(
+{PARAMS}) -> {RET} {
+{PRELUDE}    let mut pwm = {DRIVER}::new(
         tim,
 {CH_ARGS}        Hertz(FREQ_HZ),
         CountingMode::{COUNTING},
     );
-{ENABLES}    pwm
+{ENABLES}    {RET_EXPR}
 }
 
 // ── Using TIM{N} ──
@@ -1696,7 +1713,7 @@ pub fn is_advanced_timer(n: u8) -> bool {
 /// `Channel` enum rather than `.chN()`, and there is no output-compare-mode
 /// setter at all.
 pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handle: &str) -> String {
-    let complementary = !wiring.comp.is_empty();
+    let complementary = wiring.needs_complementary();
     let param_list = wiring.params();
     let has_plain = !wiring.chans.is_empty();
 
@@ -1708,6 +1725,8 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
     // import in a generated file is a warning the user cannot fix.
     let mut low_level: Vec<String> = vec!["CountingMode".to_owned()];
     let mut timer_items: Vec<String> = Vec::new();
+    let mut gpio_items: Vec<String> = vec!["OutputType".to_owned()];
+    let mut prelude = String::new();
 
     if complementary {
         duty_consts.push_str(&format!(
@@ -1724,6 +1743,16 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
     }
 
     for (ch, name, _, comp) in &param_list {
+        if name.starts_with("bkin") {
+            // The break pad is bounded by `BreakInputPin`, which embassy
+            // declares but no driver consumes — see `prelude` below.
+            timer_items.push("BreakInputPin".to_owned());
+            timer_items.push(format!("BkIn{ch}"));
+            params.push_str(&format!(
+                "    {name}: Peri<'d, impl BreakInputPin<peripherals::TIM{n}, BkIn{ch}>>,\n"
+            ));
+            continue;
+        }
         let bound = if *comp {
             "TimerComplementaryPin"
         } else {
@@ -1784,6 +1813,32 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
             mode_asked |= out.mode != PwmMode::default();
             enables.push_str(&format!("    pwm.enable(Channel::Ch{ch});\n"));
         }
+        for (i, _) in &wiring.breaks {
+            let b = cfg.break_of(*i);
+            let sfx = if *i == 1 {
+                String::new()
+            } else {
+                i.to_string()
+            };
+            low_level.push("BreakInputPolarity".to_owned());
+            low_level.push("FilterValue".to_owned());
+            enables.push_str(&format!(
+                "    pwm.set_break{sfx}_polarity(BreakInputPolarity::{});\n",
+                b.polarity.embassy()
+            ));
+            enables.push_str(&format!(
+                "    pwm.set_break{sfx}_filter(FilterValue::{});\n",
+                b.filter_embassy()
+            ));
+            enables.push_str(&format!("    pwm.set_break{sfx}_input_pin_enable(true);\n"));
+            enables.push_str(&format!("    pwm.set_break{sfx}_enable(true);\n"));
+        }
+        if !wiring.breaks.is_empty() {
+            enables.push_str(&format!(
+                "    pwm.set_automatic_output_enable({});\n",
+                cfg.auto_output_enable
+            ));
+        }
         if mode_asked {
             // Three pushes, not one `\`-continued literal: rustfmt joins those
             // back into a single source line and the continuation loses its
@@ -1818,6 +1873,23 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
         }
     }
 
+    if !wiring.breaks.is_empty() {
+        gpio_items.push("AfType".to_owned());
+        gpio_items.push("Flex".to_owned());
+        gpio_items.push("Pull".to_owned());
+        prelude.push_str("    // The break pads are put into alternate-function mode by hand:\n");
+        prelude.push_str("    // embassy declares `BreakInputPin` but no driver takes one, so\n");
+        prelude.push_str("    // nothing else does it.\n");
+        for (i, _) in &wiring.breaks {
+            prelude.push_str(&format!("    let bkin{i}_af = bkin{i}.af_num();\n"));
+            prelude.push_str(&format!("    let mut bkin{i} = Flex::new(bkin{i});\n"));
+            prelude.push_str(&format!(
+                "    bkin{i}.set_as_af_unchecked(bkin{i}_af, AfType::input(Pull::None));\n"
+            ));
+        }
+        prelude.push('\n');
+    }
+
     let use_line = |path: &str, items: &[String]| -> String {
         if items.len() == 1 {
             format!("use embassy_stm32::{path}::{};", items[0])
@@ -1848,6 +1920,37 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
         l
     } else {
         "use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};".to_owned()
+    };
+
+    // The pads have to outlive `init`: a dropped `Flex` disconnects its pin,
+    // and a disconnected break pad is a fault line nobody is listening to.
+    let (break_struct, ret, ret_expr) = if wiring.breaks.is_empty() {
+        (
+            String::new(),
+            format!("{driver}<'d, peripherals::TIM{n}>"),
+            "pwm".to_owned(),
+        )
+    } else {
+        let fields: String = wiring
+            .breaks
+            .iter()
+            .map(|(i, _)| format!("    pub bkin{i}: Flex<'d>,\n"))
+            .collect();
+        let inits: String = wiring
+            .breaks
+            .iter()
+            .map(|(i, _)| format!("bkin{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        (
+            format!(
+                "\n/// The break pads, handed back so their alternate-function setting outlives\n\
+                 /// `init`. Dropping one disconnects the pin, and the fault line goes deaf.\n\
+                 pub struct BreakPads<'d> {{\n{fields}}}\n"
+            ),
+            format!("({driver}<'d, peripherals::TIM{n}>, BreakPads<'d>)"),
+            format!("(pwm, BreakPads {{ {inits} }})"),
+        )
     };
 
     let intro = if complementary {
@@ -1891,6 +1994,11 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
     };
 
     ASYNC_PWM_TMPL
+        .replace("{GPIO_USE}", &use_line("gpio", &dedup(gpio_items)))
+        .replace("{BREAK_STRUCT}", &break_struct)
+        .replace("{PRELUDE}", &prelude)
+        .replace("{RET_EXPR}", &ret_expr)
+        .replace("{RET}", &ret)
         .replace("{FREQ}", &cfg.freq_hz.to_string())
         .replace("{COUNTING}", cfg.counting.embassy())
         .replace("{INTRO}", &intro)
@@ -1915,6 +2023,8 @@ pub struct PwmWiring {
     pub chans: Vec<(u8, String)>,
     /// `(channel, pin name)` for the complementary `CHxN` pads, ascending.
     pub comp: Vec<(u8, String)>,
+    /// `(input index, pin name)` for the break pads — 1 is BKIN, 2 is BKIN2.
+    pub breaks: Vec<(u8, String)>,
 }
 
 impl PwmWiring {
@@ -1933,7 +2043,17 @@ impl PwmWiring {
                 out.push((ch, format!("ch{ch}n"), pin.as_str(), true));
             }
         }
+        // Break pads last, so adding one never renumbers the channel arguments.
+        for (i, pin) in &self.breaks {
+            out.push((*i, format!("bkin{i}"), pin.as_str(), false));
+        }
         out
+    }
+
+    /// `true` when this timer needs `ComplementaryPwm` rather than `SimplePwm`:
+    /// a complementary pad, or a break input, both of which live only there.
+    fn needs_complementary(&self) -> bool {
+        !self.comp.is_empty() || !self.breaks.is_empty()
     }
 
     /// Channels with at least one pad wired — the ones that need a duty. A
@@ -1952,21 +2072,22 @@ impl PwmWiring {
 fn pwm_wires(pins: &[&Pin]) -> Vec<(u8, PwmWiring)> {
     let mut by_timer: BTreeMap<u8, PwmWiring> = BTreeMap::new();
     for p in pins.iter().filter(|p| !p.reserved) {
-        let (timer, channel, complementary) = match p.selected_function {
-            PinFunction::TimerPwm { timer, channel } => (timer, channel, false),
-            PinFunction::TimerPwmN { timer, channel } => (timer, channel, true),
+        let (timer, channel, which) = match p.selected_function {
+            PinFunction::TimerPwm { timer, channel } => (timer, channel, 0),
+            PinFunction::TimerPwmN { timer, channel } => (timer, channel, 1),
+            PinFunction::TimerBreak { timer, input } => (timer, input, 2),
             _ => continue,
         };
         let w = by_timer.entry(timer).or_default();
-        let list = if complementary {
-            &mut w.comp
-        } else {
-            &mut w.chans
+        let list = match which {
+            0 => &mut w.chans,
+            1 => &mut w.comp,
+            _ => &mut w.breaks,
         };
         list.push((channel, p.gpio().to_owned()));
     }
     for w in by_timer.values_mut() {
-        for list in [&mut w.chans, &mut w.comp] {
+        for list in [&mut w.chans, &mut w.comp, &mut w.breaks] {
             list.sort_unstable();
             // One pin per channel: a second pad claiming the same channel would
             // become a duplicate argument.
@@ -3305,6 +3426,13 @@ mod pwm_tests {
         p
     }
 
+    /// A break pad of `timer` — `input` 1 is BKIN, 2 is BKIN2.
+    fn mkb(name: &str, timer: u8, input: u8) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = PinFunction::TimerBreak { timer, input };
+        p
+    }
+
     fn run(pins: &[Pin], timer: BTreeMap<u8, TimerModuleConfig>) -> AsyncPeriphs {
         let refs: Vec<&Pin> = pins.iter().collect();
         async_peripherals(
@@ -3508,6 +3636,123 @@ mod pwm_tests {
         let (_, body) = &out.config_files[0];
         assert!(body.contains("SimplePwm<'d, peripherals::TIM16>"), "{body}");
         assert!(!body.contains("ComplementaryPwm"), "{body}");
+    }
+
+    /// A break pad alone — no complementary channel in sight — is still enough
+    /// to need `ComplementaryPwm`: that is where every break bit lives.
+    #[test]
+    fn a_break_pad_alone_switches_the_driver() {
+        let pins = [mk("PA8", 1, 1), mkb("PA6", 1, 1)];
+        let out = run(&pins, Default::default());
+        let (_, body) = &out.config_files[0];
+        assert!(
+            body.contains("ComplementaryPwm<'d, peripherals::TIM1>"),
+            "{body}"
+        );
+        // No CHxN pad, so all four complementary slots stay `None`.
+        assert_eq!(body.matches("        None,").count(), 7, "{body}");
+    }
+
+    /// The break pad is the one pin the generated `init` has to put into
+    /// alternate-function mode itself, and it must OUTLIVE `init` — a dropped
+    /// `Flex` disconnects the pin and the fault line goes deaf.
+    #[test]
+    fn a_break_pad_is_configured_by_hand_and_handed_back() {
+        let pins = [mk("PA8", 1, 1), mkb("PA6", 1, 1)];
+        let mut cfg = TimerModuleConfig::new(1);
+        cfg.set_break(
+            1,
+            crate::panels::mcu_module::modules::BreakInputConfig {
+                polarity: crate::panels::mcu_module::modules::BreakPolarity::ActiveHigh,
+                filter: 3,
+            },
+        );
+        cfg.auto_output_enable = true;
+        let out = run(&pins, [(1u8, cfg)].into_iter().collect());
+        let (_, body) = &out.config_files[0];
+
+        // The pad is a parameter, bounded so a pin that cannot be BKIN for this
+        // timer is a compile error rather than a silent no-op.
+        assert!(
+            body.contains("bkin1: Peri<'d, impl BreakInputPin<peripherals::TIM1, BkIn1>>"),
+            "{body}"
+        );
+        // …put into AF mode by hand, because no embassy driver takes one.
+        assert!(body.contains("let bkin1_af = bkin1.af_num();"), "{body}");
+        assert!(
+            body.contains("bkin1.set_as_af_unchecked(bkin1_af, AfType::input(Pull::None));"),
+            "{body}"
+        );
+        // …and handed back, so the caller keeps it alive.
+        assert!(body.contains("pub struct BreakPads<'d> {"), "{body}");
+        assert!(body.contains("pub bkin1: Flex<'d>,"), "{body}");
+        assert!(body.contains("(pwm, BreakPads { bkin1 })"), "{body}");
+        assert!(
+            out.init_calls.contains(
+                "let (mut _pwm1, _pwm1_break_pads) = pins::configs::pwm1::init(p.TIM1, p.PA8, p.PA6);"
+            ),
+            "{}",
+            out.init_calls
+        );
+
+        // Every break setting reaches the file, enable last.
+        assert!(
+            body.contains("pwm.set_break_polarity(BreakInputPolarity::ACTIVE_HIGH);"),
+            "{body}"
+        );
+        assert!(
+            body.contains("pwm.set_break_filter(FilterValue::FCK_INT_N8);"),
+            "{body}"
+        );
+        assert!(
+            body.contains("pwm.set_break_input_pin_enable(true);"),
+            "{body}"
+        );
+        assert!(body.contains("pwm.set_break_enable(true);"), "{body}");
+        assert!(
+            body.contains("pwm.set_automatic_output_enable(true);"),
+            "{body}"
+        );
+        let cfgd = body.find("set_break_polarity").expect("polarity");
+        let enabled = body.find("set_break_enable").expect("enable");
+        assert!(cfgd < enabled, "configure before enabling:\n{body}");
+    }
+
+    /// A break pad is NOT a complementary pad, even though `BKIN` ends in an N.
+    /// They land in different lists, and a break-only timer has an empty one.
+    #[test]
+    fn a_break_pad_is_not_mistaken_for_a_complementary_one() {
+        let pins = [mk("PA8", 1, 1), mkb("PA6", 1, 1)];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let wires = pwm_wires(&refs);
+        assert_eq!(wires.len(), 1);
+        let (timer, w) = &wires[0];
+        assert_eq!(*timer, 1);
+        assert_eq!(w.chans.len(), 1);
+        assert!(w.comp.is_empty(), "BKIN is not half of a pair");
+        assert_eq!(w.breaks, vec![(1u8, "PA6".to_owned())]);
+    }
+
+    /// TIM15/16/17 have a break pad too, and the same driver limit applies.
+    #[test]
+    fn a_break_pad_on_a_plain_timer_is_refused_with_a_reason() {
+        let pins = [mk("PA6", 16, 1), mkb("PB6", 16, 1)];
+        let out = run(&pins, Default::default());
+        assert!(
+            out.init_calls
+                .contains("TIM16 BKIN (PB6) left unconfigured"),
+            "{}",
+            out.init_calls
+        );
+        // …and the refused pad is not passed in, nor held.
+        assert!(
+            out.init_calls
+                .contains("pins::configs::pwm16::init(p.TIM16, p.PA6);"),
+            "{}",
+            out.init_calls
+        );
+        let (_, body) = &out.config_files[0];
+        assert!(!body.contains("BreakPads"), "{body}");
     }
 
     /// Untouched settings generate exactly what they always did: the reset

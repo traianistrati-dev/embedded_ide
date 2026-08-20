@@ -400,7 +400,9 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             pred: Box::new(|f| {
                 matches!(
                     f,
-                    PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. }
+                    PinFunction::TimerPwm { .. }
+                        | PinFunction::TimerPwmN { .. }
+                        | PinFunction::TimerBreak { .. }
                 )
             }),
         },

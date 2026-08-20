@@ -47,6 +47,16 @@ pub enum PinFunction {
         timer: u8,
         channel: u8,
     },
+    /// Break input — TIM{timer} BKIN (`input` 1) or BKIN2 (`input` 2).
+    ///
+    /// A fault line coming in from the board: when it asserts, the timer cuts
+    /// every output in hardware, without waiting for software. Only the
+    /// advanced-control timers have it, and embassy reaches the break bits
+    /// through `ComplementaryPwm`.
+    TimerBreak {
+        timer: u8,
+        input: u8,
+    },
 
     // ── USART ───────────────────────────────────────────────────────────────
     UsartTx(u8),  // USART{n} TX

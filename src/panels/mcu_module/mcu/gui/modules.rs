@@ -11,9 +11,9 @@ use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, PwmCounting, PwmMode,
-    PwmOutput, PwmPolarity, StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
-    VirtualModule,
+    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, ModuleConfig, ModuleKind, ModuleSignal,
+    Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, StopBits, UsartDirection, UsartFlow,
+    UsartMode, UsartModuleConfig, VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -967,6 +967,15 @@ fn free_pwm_channels(
             {
                 Some(format!("CH{channel}N"))
             }
+            // Break lives on the same driver, so it is offered under the same
+            // rule: only where embassy can actually reach it.
+            PinFunction::TimerBreak { timer: t, input } if *t == timer && is_advanced_timer(*t) => {
+                Some(if *input == 1 {
+                    "BKIN".to_owned()
+                } else {
+                    format!("BKIN{input}")
+                })
+            }
             _ => None,
         })
         .collect();
@@ -1699,7 +1708,11 @@ pub fn module_config_ui(
                     // them were wired.
                     // Dead time only matters once a pair exists, and only the
                     // async backend can emit it — see the note further down.
-                    let has_comp = wired.iter().any(|s| s.ends_with('N'));
+                    // `starts_with("CH")` matters: BKIN ends in an N too, and it
+                    // is a fault input, not half of a pair.
+                    let has_comp = wired
+                        .iter()
+                        .any(|s| s.starts_with("CH") && s.ends_with('N'));
                     if has_comp && is_async {
                         if is_advanced_timer(cfg.instance) {
                             ui.label("Dead time");
@@ -1724,6 +1737,73 @@ pub fn module_config_ui(
                             );
                             ui.end_row();
                         }
+                    }
+                    // ── Break inputs ────────────────────────────────────
+                    // A fault line the timer watches by itself: when it asserts,
+                    // every output goes off in hardware. Only shown for a pad
+                    // that is actually wired — break is not something to switch
+                    // on in the abstract.
+                    let breaks: Vec<u8> = wired
+                        .iter()
+                        .filter_map(|s| match s.as_str() {
+                            "BKIN" => Some(1u8),
+                            "BKIN2" => Some(2),
+                            _ => None,
+                        })
+                        .collect();
+                    if !breaks.is_empty() && is_async && is_advanced_timer(cfg.instance) {
+                        for i in &breaks {
+                            let before = cfg.break_of(*i);
+                            let mut b = before;
+                            let name = if *i == 1 { "BKIN" } else { "BKIN2" };
+                            ui.label(format!("{name} fault"));
+                            ui.horizontal(|ui| {
+                                egui::ComboBox::from_id_salt(("brk_pol", i))
+                                    .width(96.0)
+                                    .selected_text(b.polarity.label())
+                                    .show_ui(ui, |ui| {
+                                        for v in BreakPolarity::ALL {
+                                            ui.selectable_value(&mut b.polarity, v, v.label());
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Which level on the pad means fault. Active low is the \
+                                         usual wiring: the line is released when all is well, so \
+                                         a broken wire also reads as a fault.",
+                                    );
+                                egui::ComboBox::from_id_salt(("brk_filt", i))
+                                    .width(110.0)
+                                    .selected_text(b.filter_label())
+                                    .show_ui(ui, |ui| {
+                                        for (code, (_, label)) in BREAK_FILTERS.iter().enumerate() {
+                                            ui.selectable_value(&mut b.filter, code as u8, *label);
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "How many consecutive samples must agree before the fault \
+                                         is believed, and how fast they are taken. No filter \
+                                         reacts fastest and trusts every glitch.",
+                                    );
+                            });
+                            if b != before {
+                                cfg.set_break(*i, b);
+                            }
+                            ui.end_row();
+                        }
+                        ui.label("After a fault");
+                        ui.checkbox(
+                            &mut cfg.auto_output_enable,
+                            "outputs come back on their own",
+                        )
+                        .on_hover_text(
+                            "Off (the reset state, and the safer one): the outputs stay dark \
+                             until software turns them back on, so a fault cannot be ridden out \
+                             unnoticed. On: they resume at the next update event once the line \
+                             releases.",
+                        );
+                        ui.end_row();
                     }
                     let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
                     if !free.is_empty() {

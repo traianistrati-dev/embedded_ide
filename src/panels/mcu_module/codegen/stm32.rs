@@ -2849,6 +2849,9 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
             format!("into_alternate_push_pull(&mut {pv}.{crx})")
         }
+        // A break input is read, not driven — floating input, like any other
+        // signal coming in from the board.
+        PinFunction::TimerBreak { .. } => format!("into_floating_input(&mut {pv}.{crx})"),
         // LPUART / SPI-RDY don't exist on STM32F1; they're grouped with their
         // closest USART/SPI analogue so the mode stays sane if ever selected.
         PinFunction::UsartTx(_) | PinFunction::UsartCk(_) | PinFunction::LpuartTx(_) => {

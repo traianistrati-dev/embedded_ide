@@ -15,6 +15,9 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
                 egui::Color32::from_rgb(190, 170, 30)
             }
+            // A fault input, not an output — read at a glance as the one pin on
+            // the timer that stops everything.
+            PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
             PinFunction::UsartTx(_)
             | PinFunction::UsartRx(_)
             | PinFunction::UsartCts(_)

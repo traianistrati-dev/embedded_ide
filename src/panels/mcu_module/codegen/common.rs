@@ -237,6 +237,7 @@ pub fn var_suffix(func: &PinFunction) -> String {
         PinFunction::AdcChannel { adc, channel } => format!("adc{adc}_in{channel}"),
         PinFunction::TimerPwm { timer, channel } => format!("tim{timer}_ch{channel}"),
         PinFunction::TimerPwmN { timer, channel } => format!("tim{timer}_ch{channel}n"),
+        PinFunction::TimerBreak { timer, input } => format!("tim{timer}_bkin{input}"),
         PinFunction::UsartTx(n) => format!("usart{n}_tx"),
         PinFunction::UsartRx(n) => format!("usart{n}_rx"),
         PinFunction::UsartCts(n) => format!("usart{n}_cts"),

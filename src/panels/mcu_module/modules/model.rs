@@ -171,6 +171,12 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
                 _ => PwmCh4,
             },
         ),
+        // The break pad joins the timer it protects.
+        PinFunction::TimerBreak { timer, input } => (
+            GenericInterfaceTimer,
+            *timer,
+            if *input == 1 { PwmBkin1 } else { PwmBkin2 },
+        ),
         // The complementary pad joins the SAME module as its channel: one
         // timer, one module, however many pads it drives.
         PinFunction::TimerPwmN { timer, channel } => (
@@ -233,6 +239,9 @@ pub enum ModuleSignal {
     PwmCh2N,
     PwmCh3N,
     PwmCh4N,
+    // …and the fault lines that switch every one of them off.
+    PwmBkin1,
+    PwmBkin2,
     // CAN
     CanRx,
     CanTx,
@@ -269,6 +278,8 @@ impl ModuleSignal {
             ModuleSignal::PwmCh2N => "CH2N",
             ModuleSignal::PwmCh3N => "CH3N",
             ModuleSignal::PwmCh4N => "CH4N",
+            ModuleSignal::PwmBkin1 => "BKIN",
+            ModuleSignal::PwmBkin2 => "BKIN2",
             ModuleSignal::CanRx => "RX",
             ModuleSignal::CanTx => "TX",
             ModuleSignal::UsbDm => "D-",
@@ -326,6 +337,14 @@ impl ModuleSignal {
             ModuleSignal::PwmCh4N => PinFunction::TimerPwmN {
                 timer: instance,
                 channel: 4,
+            },
+            ModuleSignal::PwmBkin1 => PinFunction::TimerBreak {
+                timer: instance,
+                input: 1,
+            },
+            ModuleSignal::PwmBkin2 => PinFunction::TimerBreak {
+                timer: instance,
+                input: 2,
             },
             // CAN pin functions carry no instance (single CAN on STM32F1).
             ModuleSignal::CanRx => PinFunction::CanRx,
@@ -975,6 +994,17 @@ pub struct TimerModuleConfig {
     /// timer's reset state.
     #[serde(default)]
     pub channels: std::collections::BTreeMap<u8, PwmChannelConfig>,
+    /// Break inputs by index — 1 is BKIN, 2 is BKIN2. An entry exists only for
+    /// an input whose pad is actually wired; break is not something you enable
+    /// in the abstract, it is a line coming in from the board.
+    #[serde(default)]
+    pub breaks: std::collections::BTreeMap<u8, BreakInputConfig>,
+    /// Automatic output enable: after a fault clears, the outputs come back on
+    /// the next update event by themselves. Off means they stay dark until
+    /// software says otherwise, which is the safer of the two and the reset
+    /// state. One bit for the whole timer, whichever input tripped.
+    #[serde(default)]
+    pub auto_output_enable: bool,
     pub rx_model: String,
     pub tx_model: String,
     /// User label appended to the generated `_pwmN` handle (e.g. `_pwm3_servo`).
@@ -993,6 +1023,8 @@ impl TimerModuleConfig {
             counting: PwmCounting::default(),
             dead_time: 0,
             channels: std::collections::BTreeMap::new(),
+            breaks: std::collections::BTreeMap::new(),
+            auto_output_enable: false,
             rx_model: String::new(),
             tx_model: String::new(),
             custom_label: String::new(),
@@ -1028,6 +1060,19 @@ impl TimerModuleConfig {
     /// row of defaults.
     pub fn set_channel(&mut self, channel: u8, shape: PwmChannelConfig) {
         self.channels.insert(channel, shape);
+    }
+
+    /// The settings of break input `index` (1 = BKIN, 2 = BKIN2), all defaults
+    /// when the pad is wired but nothing was chosen.
+    pub fn break_of(&self, index: u8) -> BreakInputConfig {
+        self.breaks.get(&index).copied().unwrap_or_default()
+    }
+
+    /// Record break input `index`'s settings, with the filter clamped to a code
+    /// [`BREAK_FILTERS`] actually has.
+    pub fn set_break(&mut self, index: u8, mut cfg: BreakInputConfig) {
+        cfg.filter = cfg.filter.min(BREAK_FILTERS.len() as u8 - 1);
+        self.breaks.insert(index, cfg);
     }
 
     /// Fold a pre-hundredths whole-percent map into [`Self::duty_x100`].
@@ -1170,6 +1215,85 @@ impl PwmMode {
             Self::Mode1 => "PWM mode 1",
             Self::Mode2 => "PWM mode 2",
         }
+    }
+}
+
+/// Which level on a break pad means "fault" — `BreakInputPolarity`.
+///
+/// Active low is the default because that is what a fault line usually is: an
+/// open-drain output that is released when everything is fine and pulled down
+/// by whatever went wrong, so a broken wire also reads as a fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BreakPolarity {
+    #[default]
+    ActiveLow,
+    ActiveHigh,
+}
+
+impl BreakPolarity {
+    pub const ALL: [Self; 2] = [Self::ActiveLow, Self::ActiveHigh];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::ActiveLow => "ACTIVE_LOW",
+            Self::ActiveHigh => "ACTIVE_HIGH",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ActiveLow => "Active low",
+            Self::ActiveHigh => "Active high",
+        }
+    }
+}
+
+/// The sixteen digital-filter codes of a break input, as `(embassy constant,
+/// label)`.
+///
+/// The filter is "how many consecutive samples must agree before the fault is
+/// believed", and the sampling clock is either the timer clock or the slower
+/// dead-time clock. Kept as one table so the picker and the generated constant
+/// can never name different things; the index IS the register value.
+pub const BREAK_FILTERS: [(&str, &str); 16] = [
+    ("NO_FILTER", "No filter"),
+    ("FCK_INT_N2", "fCK_INT, N=2"),
+    ("FCK_INT_N4", "fCK_INT, N=4"),
+    ("FCK_INT_N8", "fCK_INT, N=8"),
+    ("FDTS_DIV2_N6", "fDTS/2, N=6"),
+    ("FDTS_DIV2_N8", "fDTS/2, N=8"),
+    ("FDTS_DIV4_N6", "fDTS/4, N=6"),
+    ("FDTS_DIV4_N8", "fDTS/4, N=8"),
+    ("FDTS_DIV8_N6", "fDTS/8, N=6"),
+    ("FDTS_DIV8_N8", "fDTS/8, N=8"),
+    ("FDTS_DIV16_N5", "fDTS/16, N=5"),
+    ("FDTS_DIV16_N6", "fDTS/16, N=6"),
+    ("FDTS_DIV16_N8", "fDTS/16, N=8"),
+    ("FDTS_DIV32_N5", "fDTS/32, N=5"),
+    ("FDTS_DIV32_N6", "fDTS/32, N=6"),
+    ("FDTS_DIV32_N8", "fDTS/32, N=8"),
+];
+
+/// One break input's settings. Per input, because BKIN and BKIN2 have their own
+/// polarity and filter bits; the auto-restart is shared and lives on the module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BreakInputConfig {
+    #[serde(default)]
+    pub polarity: BreakPolarity,
+    /// Index into [`BREAK_FILTERS`], which is also the register value.
+    #[serde(default)]
+    pub filter: u8,
+}
+
+impl BreakInputConfig {
+    /// The embassy `FilterValue` constant this filter names, clamped so a
+    /// hand-edited config cannot produce an identifier that does not exist.
+    pub fn filter_embassy(&self) -> &'static str {
+        BREAK_FILTERS[(self.filter as usize).min(BREAK_FILTERS.len() - 1)].0
+    }
+
+    pub fn filter_label(&self) -> &'static str {
+        BREAK_FILTERS[(self.filter as usize).min(BREAK_FILTERS.len() - 1)].1
     }
 }
 

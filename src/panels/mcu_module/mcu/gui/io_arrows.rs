@@ -131,6 +131,9 @@ fn io_dir(func: &PinFunction) -> Option<IoDir> {
         // name. Spelled out rather than left to the catch-all, because it is a
         // decision and not an oversight.
         PinFunction::TimerPwmN { .. } => None,
+        // A break pad is an INPUT the timer reads by itself; the generated
+        // `init` only puts it in alternate-function mode and holds it.
+        PinFunction::TimerBreak { .. } => None,
         // Every remaining variant is a bus pin, already returned above.
         _ => None,
     }

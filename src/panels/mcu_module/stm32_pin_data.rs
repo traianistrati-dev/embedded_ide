@@ -621,6 +621,16 @@ fn native_token(sig: &str) -> Option<String> {
             Some(format!("adc{inst}_{ch}"))
         }
         "TIM" => {
+            // The break inputs, named per index so BKIN and BKIN2 stay apart.
+            // `BKIN_COMP1` and friends are a DIFFERENT thing — a comparator
+            // routed to break, with its own pin trait — so they fall through to
+            // the generic AF path rather than being folded in here.
+            if tail == "BKIN" {
+                return Some(format!("tim{n}_bkin1"));
+            }
+            if tail == "BKIN2" {
+                return Some(format!("tim{n}_bkin2"));
+            }
             let ch = tail.strip_prefix("CH")?;
             // Channels and their complementary outputs; `_ETR`, `_BKIN` and the
             // rest stay generic AF signals.
@@ -1522,6 +1532,16 @@ mod tests {
         assert_eq!(map_signal("DCMI_D3").as_deref(), Some("af:dcmi_d3"));
         assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("af:quadspi_clk"));
         assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("tim1_1n"));
+        // The break inputs, per index …
+        assert_eq!(map_signal("TIM1_BKIN").as_deref(), Some("tim1_bkin1"));
+        assert_eq!(map_signal("TIM1_BKIN2").as_deref(), Some("tim1_bkin2"));
+        // …but a comparator routed to break is a different peripheral path and
+        // stays a generic AF signal.
+        assert_eq!(
+            map_signal("TIM1_BKIN_COMP1").as_deref(),
+            Some("af:tim1_bkin_comp1")
+        );
+        assert_eq!(map_signal("TIM1_ETR").as_deref(), Some("af:tim1_etr"));
         assert_eq!(map_signal("I2C1_SMBA").as_deref(), Some("af:i2c1_smba"));
         // Only the EXTI TRIGGER lines and EVENTOUT are dropped…
         assert_eq!(map_signal("EVENTOUT"), None);

@@ -138,6 +138,34 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::TimerBreak { timer, input } => FunctionInfo {
+                description: format!(
+                    "Break input {input} of TIM{timer}. A fault line from the board: when it \
+                     asserts, the timer disables every output in hardware — no interrupt, no \
+                     software in the path."
+                ),
+                specs: vec![
+                    (
+                        "Acts on".into(),
+                        format!("every channel of TIM{timer}, main and complementary"),
+                    ),
+                    (
+                        "Polarity".into(),
+                        "Active low by default: a broken wire reads as a fault".into(),
+                    ),
+                    (
+                        "After the fault".into(),
+                        "Outputs stay off until software re-enables them, or automatically \
+                         with AOE"
+                            .into(),
+                    ),
+                    (
+                        "Available on".into(),
+                        "Advanced-control timers only (TIM1 / TIM8 / TIM20)".into(),
+                    ),
+                ],
+            },
+
             PinFunction::UsartTx(n) => FunctionInfo {
                 description: format!(
                     "USART{n} transmit pin (TX). Sends serial data to an external device."
