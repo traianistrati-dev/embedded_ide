@@ -16,7 +16,7 @@ use crate::panels::mcu_module::modules::{
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
 use egui_phosphor::regular as ph;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 const BOX_W: f32 = 170.0;
 /// Tall enough for the name, the config summary, and the rename field at the
@@ -938,6 +938,29 @@ fn stop_label(s: StopBits) -> &'static str {
 
 /// Configuration panel for one module: USART comm settings, the wired TX/RX
 /// pins, and the user's RX/TX data model. `pin_names` maps pin number → name.
+/// The channels of `timer` this chip still has a free pad for: every channel
+/// any pin can serve, minus the ones already wired to the module.
+///
+/// Derived, never a fixed "CH2/3/4": TIM14 has one channel and TIM9 two, and a
+/// package bonds only some of the pads a die carries — the truth is in the
+/// pins' own function lists, which is also where the codegen reads the channel
+/// set from (`pwm_wires`).
+fn free_pwm_channels(
+    timer: u8,
+    wired: &BTreeSet<u8>,
+    pin_funcs: &HashMap<usize, Vec<PinFunction>>,
+) -> Vec<u8> {
+    let on_chip: BTreeSet<u8> = pin_funcs
+        .values()
+        .flatten()
+        .filter_map(|f| match f {
+            PinFunction::TimerPwm { timer: t, channel } if *t == timer => Some(*channel),
+            _ => None,
+        })
+        .collect();
+    on_chip.difference(wired).copied().collect()
+}
+
 pub fn module_config_ui(
     ui: &mut egui::Ui,
     m: &mut VirtualModule,
@@ -1551,9 +1574,13 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    // "CH2" -> 2, from the signals' own labels, so the duty
+                    // rows below and the free-channel hint cannot disagree.
+                    let wired: BTreeSet<u8> = conn_rows
+                        .iter()
+                        .filter_map(|(sig, _)| sig.strip_prefix("CH")?.parse::<u8>().ok())
+                        .collect();
                     for (sig, pin) in &conn_rows {
-                        // "CH2" -> 2. The label is the signal's own, so the two
-                        // cannot drift apart.
                         let Some(ch) = sig.strip_prefix("CH").and_then(|n| n.parse::<u8>().ok())
                         else {
                             continue;
@@ -1568,15 +1595,32 @@ pub fn module_config_ui(
                         }
                         ui.end_row();
                     }
-                    ui.label("");
-                    ui.label(
-                        egui::RichText::new(
-                            "add a channel by assigning TIM CH2/3/4 of this timer on the canvas",
-                        )
-                        .size(10.5)
-                        .color(egui::Color32::from_gray(140)),
-                    );
-                    ui.end_row();
+                    // Channels are not added from this panel: the codegen
+                    // derives them from the PIN functions, so the only way to
+                    // gain one is to assign a pad on the canvas. Name the ones
+                    // actually left — the old line hardcoded "CH2/3/4", which
+                    // pointed at channels that could already be taken, never
+                    // mentioned a freed CH1, offered channels the timer does
+                    // not have, and kept advertising the action after all of
+                    // them were wired.
+                    let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
+                    if !free.is_empty() {
+                        let list = free
+                            .iter()
+                            .map(|c| format!("CH{c}"))
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "add a channel by assigning TIM{} {list} on the canvas",
+                                cfg.instance
+                            ))
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
                 }
                 ModuleConfig::I2c(cfg) => {
                     ui.label("Clock");
@@ -1999,4 +2043,77 @@ pub fn module_config_ui(
     //         .code_editor()
     //         .hint_text("data you send to the device — e.g. command frames"),
     // );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chip whose pins can serve `channels` of `timer`, one pad each, plus a
+    /// decoy pad on another timer.
+    fn chip(timer: u8, channels: &[u8]) -> HashMap<usize, Vec<PinFunction>> {
+        let mut out: HashMap<usize, Vec<PinFunction>> = HashMap::new();
+        for (i, ch) in channels.iter().enumerate() {
+            out.insert(
+                i,
+                vec![PinFunction::TimerPwm {
+                    timer,
+                    channel: *ch,
+                }],
+            );
+        }
+        out.insert(
+            99,
+            vec![PinFunction::TimerPwm {
+                timer: timer + 1,
+                channel: 4,
+            }],
+        );
+        out
+    }
+
+    /// The hint names the channels actually left on THIS timer.
+    #[test]
+    fn free_channels_are_what_the_chip_has_minus_what_is_wired() {
+        let four = chip(2, &[1, 2, 3, 4]);
+        assert_eq!(
+            free_pwm_channels(2, &BTreeSet::from([1]), &four),
+            vec![2, 3, 4],
+            "the common case the old fixed text got right"
+        );
+        // …and the one it got wrong: CH1 freed, CH2 taken.
+        assert_eq!(
+            free_pwm_channels(2, &BTreeSet::from([2]), &four),
+            vec![1, 3, 4],
+            "CH1 is free and must be offered"
+        );
+    }
+
+    /// Nothing left to offer — the row disappears instead of advertising an
+    /// action that cannot be taken.
+    #[test]
+    fn a_fully_wired_timer_has_no_free_channel() {
+        let four = chip(2, &[1, 2, 3, 4]);
+        assert!(free_pwm_channels(2, &BTreeSet::from([1, 2, 3, 4]), &four).is_empty());
+    }
+
+    /// Not every timer has four channels, and not every package bonds the pads
+    /// it does have. TIM14 offers CH1 and nothing else.
+    #[test]
+    fn a_one_channel_timer_never_offers_channels_it_lacks() {
+        let tim14 = chip(14, &[1]);
+        assert!(
+            free_pwm_channels(14, &BTreeSet::from([1]), &tim14).is_empty(),
+            "CH2/3/4 do not exist on TIM14"
+        );
+        assert_eq!(free_pwm_channels(14, &BTreeSet::new(), &tim14), vec![1]);
+    }
+
+    /// Another timer's pads are not this module's business.
+    #[test]
+    fn other_timers_do_not_leak_into_the_hint() {
+        let tim2 = chip(2, &[1]);
+        assert_eq!(free_pwm_channels(2, &BTreeSet::new(), &tim2), vec![1]);
+        assert_eq!(free_pwm_channels(3, &BTreeSet::new(), &tim2), vec![4]);
+    }
 }
