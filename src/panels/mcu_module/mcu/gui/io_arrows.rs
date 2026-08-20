@@ -2,9 +2,13 @@
 //!
 //! A lightweight cousin of the virtual-module schematic ([`super::modules`]):
 //! every pin that becomes **its own variable** in the generated code gets an
-//! arrow and a rename field here — GPIO In/Out, PWM, ADC, MCO and the generic
+//! arrow and a rename field here — GPIO In/Out, ADC, MCO and the generic
 //! alternate functions. A BUS pin does not: it is consumed by its peripheral's
-//! `init_*` and is drawn as a wire to that module's box instead. The arrow
+//! `init_*` and is drawn as a wire to that module's box instead. Neither does a
+//! pin a virtual module already names: a Custom module carries its pins' fields
+//! inside its own box, and a PWM channel claimed by a Timer module disappears
+//! into that module's handle (see [`super::modules::module_owned_pins`]). The
+//! arrow
 //! points away from the chip for a driven signal, into it for one the MCU reads,
 //! and carries no head when the function's direction is unknown (see
 //! [`io_dir`]). Each arrow carries a small text field to rename the pin; the
@@ -127,16 +131,22 @@ fn io_dir(func: &PinFunction) -> Option<IoDir> {
     }
 }
 
-/// Whether any non-reserved pin is GPIO In/Out/PWM (so the canvas should reserve
-/// a margin for arrows).
+/// Whether any non-reserved pin gets a floating field (so the canvas should
+/// reserve a margin for arrows).
+///
+/// Module-owned pins are excluded for the same reason `draw_io_arrows` skips
+/// them: a chip whose only such pin is a PWM channel draws no field, and would
+/// otherwise reserve a gutter for arrows nobody paints.
 pub fn has_io_pins(mcu: &Mcu) -> bool {
-    mcu.iter_all_pins()
-        .any(|p| !p.reserved && io_dir(&p.selected_function).is_some())
+    let owned = super::modules::module_owned_pins(mcu);
+    mcu.iter_all_pins().any(|p| {
+        !p.reserved && !owned.contains(&p.number) && io_dir(&p.selected_function).is_some()
+    })
 }
 
-/// Draw an in/out arrow + rename field for every GPIO In/Out/PWM pin. The text
-/// field edits the pin's `custom_label` in place (regenerated into the binding
-/// name every frame by `update_main_rs`).
+/// Draw an in/out arrow + rename field for every independently-bound pin. The
+/// text field edits the pin's `custom_label` in place (regenerated into the
+/// binding name every frame by `update_main_rs`).
 pub fn draw_io_arrows(
     mcu: &mut Mcu,
     painter: &egui::Painter,
@@ -153,9 +163,10 @@ pub fn draw_io_arrows(
         color: egui::Color32,
         preview_base: String,
     }
-    // Pins belonging to a Custom module are rendered inside THAT module's box
-    // (grouped under its name), so they must not also get a floating field here.
-    let owned = super::modules::custom_module_pins(mcu);
+    // A pin whose name belongs to a virtual module gets no field here: a Custom
+    // module draws it inside its own box, and a Timer module owns the PWM
+    // handle the channel pad disappears into. See `module_owned_pins`.
+    let owned = super::modules::module_owned_pins(mcu);
     let mut items: Vec<Item> = Vec::new();
     for p in mcu.iter_all_pins() {
         if p.reserved || owned.contains(&p.number) {
@@ -487,6 +498,7 @@ pub fn draw_io_arrows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panels::mcu_module::modules::ModuleKind;
 
     /// Every pin that becomes its OWN variable gets a field; a bus pin (drawn as
     /// a wire to its module's box) and a pin that generates only a comment do
@@ -525,6 +537,103 @@ mod tests {
                 if want.is_some() { "get" } else { "not get" }
             );
         }
+    }
+
+    /// Build an F103 with the given functions applied, then let the virtual
+    /// modules reconcile against the wiring.
+    fn f103_with(pins: &[(&str, PinFunction)]) -> Mcu {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        let mut mcu = builtin_for("stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        for (name, func) in pins {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == *name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func.clone();
+            }
+        }
+        mcu.reconcile_modules();
+        mcu
+    }
+
+    fn pin_num(mcu: &Mcu, name: &str) -> usize {
+        mcu.iter_all_pins()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no pin {name}"))
+            .number
+    }
+
+    /// A PWM channel belongs to its Timer module, which already carries the
+    /// name that reaches the generated code (`_pwm2`). Floating a second
+    /// rename field beside the chip put two "name" boxes on one pin, and on
+    /// embassy the pin's one is dead - the pad is passed straight into
+    /// `init`, never bound.
+    #[test]
+    fn a_pwm_channel_owned_by_a_timer_gets_no_floating_field() {
+        let mcu = f103_with(&[
+            (
+                "PA0",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 1,
+                },
+            ),
+            ("PC13", PinFunction::GpioOutput),
+        ]);
+        // The module really did claim the channel.
+        assert!(
+            mcu.modules
+                .iter()
+                .any(|m| m.kind == ModuleKind::GenericInterfaceTimer),
+            "reconcile should have created the timer module"
+        );
+
+        let owned = super::super::modules::module_owned_pins(&mcu);
+        assert!(
+            owned.contains(&pin_num(&mcu, "PA0")),
+            "the PWM channel is the timer module's"
+        );
+        assert!(
+            !owned.contains(&pin_num(&mcu, "PC13")),
+            "a plain GPIO output still names itself"
+        );
+        // The function itself is unchanged - it is the OWNERSHIP that decides,
+        // so a PWM pin with no module (an older project) keeps its field.
+        assert!(
+            io_dir(&PinFunction::TimerPwm {
+                timer: 2,
+                channel: 1
+            }) == Some(IoDir::Out)
+        );
+    }
+
+    /// …and with nothing but that channel wired, the canvas reserves no gutter
+    /// for arrows it will not paint.
+    #[test]
+    fn a_timer_only_chip_reserves_no_arrow_margin() {
+        let pwm_only = f103_with(&[(
+            "PA0",
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 1,
+            },
+        )]);
+        assert!(!has_io_pins(&pwm_only), "no floating field, no margin");
+
+        let with_gpio = f103_with(&[
+            (
+                "PA0",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 1,
+                },
+            ),
+            ("PC13", PinFunction::GpioOutput),
+        ]);
+        assert!(has_io_pins(&with_gpio), "PC13 still needs its field");
     }
 
     /// A ball's field must leave the body — that is the whole point: a pad in

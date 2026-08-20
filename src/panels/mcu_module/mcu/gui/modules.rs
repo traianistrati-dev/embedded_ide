@@ -41,17 +41,36 @@ fn box_h(m: &VirtualModule) -> f32 {
     }
 }
 
-/// Every pin claimed by a Custom module — their rename fields are drawn INSIDE
-/// that module's box, so `io_arrows` must not also float one beside the chip.
-pub fn custom_module_pins(mcu: &Mcu) -> std::collections::HashSet<usize> {
-    mcu.modules
+/// Every pin whose NAME belongs to a virtual module, so `io_arrows` must not
+/// also float a rename field for it beside the chip.
+///
+/// Two different modules land a pin here, for two different reasons:
+///
+/// * a **Custom** module draws its pins' rename fields INSIDE its own box,
+///   grouped under the module name;
+/// * a **Timer** module owns the whole PWM handle (`_pwm1`), and its channel
+///   pads are handed straight to that handle's `init`. On embassy they never
+///   become a binding at all (`consumed` in the async backend), and on the F1
+///   they name a variable `pwm_hz` moves out on the next line — so a field
+///   beside the chip would edit a name the user cannot use either way, next to
+///   the module's own field, which is the one that counts.
+pub fn module_owned_pins(mcu: &Mcu) -> std::collections::HashSet<usize> {
+    let mut owned: std::collections::HashSet<usize> = mcu
+        .modules
         .iter()
         .filter(|m| m.kind.is_custom())
         .flat_map(|m| match &m.config {
             ModuleConfig::Custom(c) => c.pins.clone(),
             _ => Vec::new(),
         })
-        .collect()
+        .collect();
+    owned.extend(
+        mcu.modules
+            .iter()
+            .filter(|m| m.kind == ModuleKind::GenericInterfaceTimer)
+            .flat_map(|m| m.connections.iter().map(|c| c.mcu_pin)),
+    );
+    owned
 }
 
 /// Module path stem of a Custom module's generated file — `custom_<name>` at
@@ -812,7 +831,7 @@ pub fn draw_modules(
         let selected_pin = mcu.selected_pin;
         // A Custom module groups its PINS' rename fields inside the box, under
         // the module name — instead of each pin floating separately beside the
-        // chip (io_arrows skips them, see `custom_module_pins`).
+        // chip (io_arrows skips them, see `module_owned_pins`).
         if mcu.modules[i].kind.is_custom() {
             let pins: Vec<usize> = match &mcu.modules[i].config {
                 ModuleConfig::Custom(c) => c.pins.clone(),
