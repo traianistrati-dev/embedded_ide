@@ -12,8 +12,8 @@ use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, ModuleConfig, ModuleKind, ModuleSignal,
-    Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, StopBits, UsartDirection, UsartFlow,
-    UsartMode, UsartModuleConfig, VirtualModule,
+    Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, SpiBitOrder, StopBits, UsartDirection,
+    UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -1440,6 +1440,42 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
+                    // Right after baud rate, because the two are read together:
+                    // the buffer is only meaningful as "how many bytes at this
+                    // speed". Async only - the blocking paths have no buffer -
+                    // and hidden on a TX-only DMA link, which has none either.
+                    let tx_only_dma =
+                        cfg.mode == UsartMode::Dma && cfg.direction == UsartDirection::TxOnly;
+                    if is_async && !tx_only_dma {
+                        let dma = cfg.mode == UsartMode::Dma;
+                        ui.label(if dma { "RX DMA buffer" } else { "RX/TX buffer" });
+                        ui.horizontal(|ui| {
+                            // A drag value, not a combo: this is a number the
+                            // user sizes against their own read cadence, and a
+                            // list of powers of two would only pretend to know
+                            // it. Clamped to what the generated code can hold.
+                            ui.add(
+                                egui::DragValue::new(&mut cfg.buf_len)
+                                    .speed(16.0)
+                                    .range(16..=65_536)
+                                    .suffix(" B"),
+                            );
+                            let ms = cfg.buf_len as f32 * 10.0 / cfg.baud_rate.max(1) as f32
+                                * 1000.0;
+                            ui.label(
+                                egui::RichText::new(format!("~{ms:.0} ms at {} baud", cfg.baud_rate))
+                                    .size(10.5)
+                                    .color(egui::Color32::from_gray(130)),
+                            );
+                        })
+                        .response
+                        .on_hover_text(if dma {
+                            "The circular buffer the DMA controller fills on its own. Reception                              never stops, so this only has to cover the longest GAP between your                              reads - overrun it and the OLDEST bytes are dropped, silently."
+                        } else {
+                            "Size of both software ring buffers, TX and RX. The CPU copies byte                              by byte on each interrupt, so this has to cover what arrives between                              your reads."
+                        });
+                        ui.end_row();
+                    }
                     ui.label("Data bits");
                     egui::ComboBox::from_id_salt("databits")
                         .selected_text(cfg.data_bits.to_string())
@@ -1524,6 +1560,36 @@ pub fn module_config_ui(
                             }
                         });
                     ui.end_row();
+                    // Async only: the STM32F1 HAL's SPI takes no bit-order
+                    // argument, so the field would be a control that does
+                    // nothing there.
+                    if is_async {
+                        ui.label("Bit order");
+                        egui::ComboBox::from_id_salt("spibitorder")
+                            .selected_text(match cfg.bit_order {
+                                SpiBitOrder::MsbFirst => "MSB first",
+                                SpiBitOrder::LsbFirst => "LSB first",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut cfg.bit_order,
+                                    SpiBitOrder::MsbFirst,
+                                    "MSB first",
+                                )
+                                .on_hover_text(
+                                    "What nearly every device expects, and embassy's default.",
+                                );
+                                ui.selectable_value(
+                                    &mut cfg.bit_order,
+                                    SpiBitOrder::LsbFirst,
+                                    "LSB first",
+                                )
+                                .on_hover_text(
+                                    "Some sensors and shift registers. Getting this wrong gives                                      bit-reversed data rather than silence, which is why it is                                      worth setting deliberately.",
+                                );
+                            });
+                        ui.end_row();
+                    }
                     ui.label("Clock");
                     egui::ComboBox::from_id_salt("spiclk")
                         .selected_text(hz_label(cfg.clock_hz))
@@ -1846,6 +1912,34 @@ pub fn module_config_ui(
                             ui.selectable_value(&mut cfg.clock_hz, 400_000, "400 kHz");
                         });
                     ui.end_row();
+                    // Async only: `embassy_time::Duration` needs embassy-stm32's
+                    // `time` feature, which only the async dependency line pulls
+                    // in (through `time-driver-any`).
+                    if is_async {
+                        ui.label("Timeout");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cfg.timeout_ms)
+                                    .speed(10.0)
+                                    .range(0..=60_000)
+                                    .suffix(" ms"),
+                            );
+                            ui.label(
+                                egui::RichText::new(if cfg.timeout_ms == 0 {
+                                    "0 = embassy default (1000 ms)".to_string()
+                                } else {
+                                    String::new()
+                                })
+                                .size(10.5)
+                                .color(egui::Color32::from_gray(130)),
+                            );
+                        })
+                        .response
+                        .on_hover_text(
+                            "How long a transfer may take before it gives up. I2C hangs are a                              real failure mode - a device that stretches the clock forever, or a                              bus with no pull-ups, blocks for as long as this allows.",
+                        );
+                        ui.end_row();
+                    }
                     ui.label("Address (7-bit)");
                     ui.add(
                         egui::DragValue::new(&mut cfg.address)

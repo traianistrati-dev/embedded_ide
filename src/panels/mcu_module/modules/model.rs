@@ -804,6 +804,29 @@ pub struct UsartModuleConfig {
     /// Ignored on every other family and on the Async/Native/RTIC runtimes.
     #[serde(default, skip_serializing_if = "BlockingDma::is_off")]
     pub blocking_dma: BlockingDma,
+    /// Bytes of receive buffer, on the Async runtime.
+    ///
+    /// It means two different things depending on [`mode`](Self::mode), which
+    /// is why the label in the UI changes with it:
+    ///
+    /// * **Buffered** - the size of BOTH software ring buffers, TX and RX. The
+    ///   CPU copies byte by byte on each interrupt, so this has to cover what
+    ///   the peripheral produces between your reads.
+    /// * **DMA** - the circular buffer the controller fills on its own. It only
+    ///   has to cover the longest GAP between your reads; reception never
+    ///   stops, and overrunning it drops the oldest bytes silently.
+    ///
+    /// A TX-only DMA link has no buffer at all (the controller sends straight
+    /// from your slice), so the field is hidden there rather than shown doing
+    /// nothing.
+    #[serde(default = "default_usart_buf")]
+    pub buf_len: u32,
+}
+
+/// 256 bytes - about 22 ms of headroom at 115200 baud, and what every project
+/// generated before the size was configurable.
+fn default_usart_buf() -> u32 {
+    256
 }
 
 impl UsartModuleConfig {
@@ -828,7 +851,28 @@ impl UsartModuleConfig {
             mode: UsartMode::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),
+            buf_len: default_usart_buf(),
             blocking_dma: BlockingDma::default(),
+        }
+    }
+}
+
+/// Which end of a byte goes on the wire first (embassy's `spi::BitOrder`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpiBitOrder {
+    /// Most significant bit first - embassy's default and what nearly every
+    /// device expects.
+    #[default]
+    MsbFirst,
+    LsbFirst,
+}
+
+impl SpiBitOrder {
+    /// The `embassy_stm32::spi::BitOrder` variant name.
+    pub fn embassy(self) -> &'static str {
+        match self {
+            SpiBitOrder::MsbFirst => "MsbFirst",
+            SpiBitOrder::LsbFirst => "LsbFirst",
         }
     }
 }
@@ -877,6 +921,16 @@ pub struct SpiModuleConfig {
     /// Ignored on every other family and on the Async/Native/RTIC runtimes.
     #[serde(default, skip_serializing_if = "BlockingDma::is_off")]
     pub blocking_dma: BlockingDma,
+    /// Which end of a byte goes on the wire first.
+    ///
+    /// MSB first is what almost every device wants and embassy's default, but
+    /// it is not universal - some sensors and shift registers are LSB first,
+    /// and getting it wrong gives bit-reversed data rather than silence, which
+    /// is why it is worth a field instead of a comment.
+    ///
+    /// Async runtime only: the STM32F1 HAL takes no bit-order argument.
+    #[serde(default)]
+    pub bit_order: SpiBitOrder,
 }
 
 impl SpiModuleConfig {
@@ -891,6 +945,7 @@ impl SpiModuleConfig {
             custom_label: String::new(),
             api_style: ApiStyle::default(),
             async_mode: AsyncBusMode::default(),
+            bit_order: SpiBitOrder::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),
             blocking_dma: BlockingDma::default(),
@@ -931,6 +986,20 @@ pub struct I2cModuleConfig {
     pub dma_tx: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dma_rx: String,
+    /// How long a transfer may take before it gives up, in milliseconds.
+    ///
+    /// `0` = leave embassy's default (1000 ms) - and that is what it stays
+    /// unless you say otherwise, so no existing project's output moves.
+    ///
+    /// It matters because I2C hangs are a real failure mode: a device that
+    /// stretches the clock forever, or a bus with no pull-ups, blocks the
+    /// transfer for as long as the timeout allows.
+    ///
+    /// Async runtime only. `embassy_time::Duration` needs embassy-stm32's
+    /// `time` feature, which the async dependency line enables (via
+    /// `time-driver-any`) and the blocking one does not.
+    #[serde(default)]
+    pub timeout_ms: u32,
 }
 
 impl I2cModuleConfig {
@@ -945,6 +1014,7 @@ impl I2cModuleConfig {
             custom_label: String::new(),
             api_style: ApiStyle::default(),
             async_mode: AsyncBusMode::default(),
+            timeout_ms: 0,
             dma_tx: String::new(),
             dma_rx: String::new(),
         }

@@ -22,8 +22,8 @@ use super::nvic;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::modules::{
-    AsyncBusMode, I2cModuleConfig, Parity, PwmMode, PwmPolarity, SpiModuleConfig, StopBits,
-    TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, Parity, PwmMode, PwmPolarity, SpiBitOrder, SpiModuleConfig,
+    StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -138,7 +138,9 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-{EXTRA_CONSTS}// <<< GENERATED END >>>
+{EXTRA_CONSTS}// Byte capacity of the interrupt-driven TX/RX ring buffers.
+const BUF_LEN: usize = {BUF};
+// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -154,9 +156,6 @@ use embassy_stm32::usart::{
 {FLOW_USE}
 use embassy_stm32::{peripherals, Peri};
 use static_cell::StaticCell;
-
-/// Byte capacity of the interrupt-driven TX/RX ring buffers.
-const BUF_LEN: usize = 256;
 
 fn get_config() -> Config {
     let mut config = Config::default();
@@ -1203,7 +1202,9 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-{EXTRA_CONSTS}// <<< GENERATED END >>>
+{EXTRA_CONSTS}// Bytes the DMA controller can receive without the CPU touching them.
+const RX_DMA_BUF: usize = {BUF};
+// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -1222,10 +1223,6 @@ use embassy_stm32::usart::{
 {FLOW_USE}
 use embassy_stm32::{peripherals, Peri};
 use static_cell::StaticCell;
-
-/// Bytes the DMA controller can receive without the CPU touching them. Reception
-/// never stops, so this only has to cover the longest gap between your reads.
-const RX_DMA_BUF: usize = 256;
 
 fn get_config() -> Config {
     let mut config = Config::default();
@@ -1368,7 +1365,9 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-{EXTRA_CONSTS}// <<< GENERATED END >>>
+{EXTRA_CONSTS}// Bytes the DMA controller can receive without the CPU touching them.
+const RX_DMA_BUF: usize = {BUF};
+// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -1383,9 +1382,6 @@ use embassy_stm32::usart::{
 use embassy_stm32::{peripherals, Peri};
 use static_cell::StaticCell;
 {FLOW_USE}
-
-/// Bytes the DMA controller can receive without the CPU touching them.
-const RX_DMA_BUF: usize = 256;
 
 fn get_config() -> Config {
     let mut config = Config::default();
@@ -1613,6 +1609,11 @@ pub fn serial_config_file(
     line_extras: bool,
 ) -> String {
     let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
+    // Clamped, not trusted: a 0-byte `StaticCell<[u8; 0]>` compiles and then
+    // never delivers a byte, which reads as a dead link rather than as a
+    // setting. The UI clamps too; this is the backstop for a hand-edited
+    // `mcu.config`.
+    let buf = cfg.map(|c| c.buf_len).unwrap_or(256).clamp(16, 65_536);
     let data = cfg.map(|c| c.data_bits).unwrap_or(8);
     let parity = match cfg.map(|c| c.parity) {
         Some(Parity::Odd) => 'O',
@@ -1655,6 +1656,7 @@ pub fn serial_config_file(
         .replace("{DATA}", &data.to_string())
         .replace("{PARITY}", &parity.to_string())
         .replace("{STOP}", &stop.to_string())
+        .replace("{BUF}", &buf.to_string())
 }
 
 // ── Async PWM config file (embassy SimplePwm) ─────────────────────────────────
@@ -2127,7 +2129,7 @@ fn get_config() -> Config {
         _ => MODE_0,
     };
     config.frequency = Hertz(CLOCK_HZ);
-    config
+{EXTRA_CFG}    config
 }
 
 /// Initialise SPI{N} as a blocking `embedded-hal` 1.0 SpiBus value.
@@ -2184,7 +2186,7 @@ fn get_config() -> Config {
         _ => MODE_0,
     };
     config.frequency = Hertz(CLOCK_HZ);
-    config
+{EXTRA_CFG}    config
 }
 
 /// Initialise SPI{N} as an async `embedded-hal-async` SpiBus value (DMA-backed).
@@ -2227,6 +2229,18 @@ pub fn init<'d, TxD: TxDma<peripherals::SPI{N}>, RxD: RxDma<peripherals::SPI{N}>
 pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, tx_only: bool) -> String {
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let clk = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000);
+    let order = cfg.map(|c| c.bit_order).unwrap_or_default();
+    // Only written when it is NOT the default: an explicit `MsbFirst` line adds
+    // nothing and would move the output of every project that already exists.
+    let extra = if order == SpiBitOrder::MsbFirst {
+        String::new()
+    } else {
+        format!(
+            "    config.bit_order = embassy_stm32::spi::BitOrder::{};
+",
+            order.embassy()
+        )
+    };
     let tmpl = match (cfg.map(|c| c.async_mode).unwrap_or_default(), tx_only) {
         (AsyncBusMode::Blocking, false) => ASYNC_SPI_TMPL_BLOCKING,
         (AsyncBusMode::AsyncDma, false) => ASYNC_SPI_TMPL_DMA,
@@ -2241,6 +2255,7 @@ pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, tx_only: bool) -> S
     tmpl.replace("{HANDLE}", &format!("_spi{n}{sfx}"))
         .replace("{N}", &n.to_string())
         .replace("{MODE}", &mode.to_string())
+        .replace("{EXTRA_CFG}", &extra)
         .replace("{CLK}", &clk.to_string())
 }
 
@@ -2274,7 +2289,7 @@ use embassy_stm32::{peripherals, Peri};
 fn get_config() -> Config {
     let mut config = Config::default();
     config.frequency = Hertz(CLOCK_HZ);
-    config.mode = match SPI_MODE {
+{EXTRA_CFG}    config.mode = match SPI_MODE {
         1 => embassy_stm32::spi::MODE_1,
         2 => embassy_stm32::spi::MODE_2,
         3 => embassy_stm32::spi::MODE_3,
@@ -2322,7 +2337,7 @@ use embassy_stm32::{peripherals, Peri};
 fn get_config() -> Config {
     let mut config = Config::default();
     config.frequency = Hertz(CLOCK_HZ);
-    config.mode = match SPI_MODE {
+{EXTRA_CFG}    config.mode = match SPI_MODE {
         1 => embassy_stm32::spi::MODE_1,
         2 => embassy_stm32::spi::MODE_2,
         3 => embassy_stm32::spi::MODE_3,
@@ -2370,7 +2385,7 @@ use embassy_stm32::{peripherals, Peri};
 fn get_config() -> Config {
     let mut config = Config::default();
     config.frequency = Hertz(CLOCK_HZ);
-    config
+{EXTRA_CFG}    config
 }
 
 /// Initialise I2C{N} as a blocking `embedded-hal` 1.0 I2c value.
@@ -2424,7 +2439,7 @@ use embassy_stm32::{peripherals, Peri};
 fn get_config() -> Config {
     let mut config = Config::default();
     config.frequency = Hertz(CLOCK_HZ);
-    config
+{EXTRA_CFG}    config
 }
 
 /// Initialise I2C{N} as an async `embedded-hal-async` I2c value (DMA-backed).
@@ -2468,6 +2483,19 @@ pub fn init<'d, TxD: TxDma<peripherals::I2C{N}>, RxD: RxDma<peripherals::I2C{N}>
 /// async-DMA template from the module's [`AsyncBusMode`].
 pub fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
     let clk = cfg.map(|c| c.clock_hz).unwrap_or(100_000);
+    // 0 means "embassy's default", so nothing is written and the existing
+    // output is unchanged. Clamped otherwise: a 0 ms timeout would fail every
+    // transfer instantly, which reads as broken wiring.
+    let tmo = cfg.map(|c| c.timeout_ms).unwrap_or(0);
+    let extra = if tmo == 0 {
+        String::new()
+    } else {
+        format!(
+            "    config.timeout = embassy_time::Duration::from_millis({});
+",
+            tmo.clamp(1, 60_000)
+        )
+    };
     let tmpl = match cfg.map(|c| c.async_mode).unwrap_or_default() {
         AsyncBusMode::Blocking => ASYNC_I2C_TMPL_BLOCKING,
         AsyncBusMode::AsyncDma => ASYNC_I2C_TMPL_DMA,
@@ -2479,6 +2507,7 @@ pub fn i2c_config_file(n: u8, cfg: Option<&I2cModuleConfig>) -> String {
         .unwrap_or_default();
     tmpl.replace("{HANDLE}", &format!("_i2c{n}{sfx}"))
         .replace("{N}", &n.to_string())
+        .replace("{EXTRA_CFG}", &extra)
         .replace("{CLK}", &clk.to_string())
 }
 
@@ -2599,6 +2628,85 @@ mod usart_mode_tests {
             mode,
             ..UsartModuleConfig::new(1)
         }
+    }
+
+    /// The size the module carries reaches the generated file - in both modes,
+    /// under the name each one uses.
+    #[test]
+    fn the_module_buffer_size_reaches_the_generated_code() {
+        for (mode, name) in [
+            (UsartMode::Buffered, "BUF_LEN"),
+            (UsartMode::Dma, "RX_DMA_BUF"),
+        ] {
+            let c = UsartModuleConfig {
+                buf_len: 1024,
+                ..cfg(mode)
+            };
+            let f = serial_config_file("USART", 1, Some(&c), "USART1", true);
+            assert!(
+                f.contains(&format!("const {name}: usize = 1024;")),
+                "{mode:?} must carry the size:
+{f}"
+            );
+            assert!(
+                !f.contains("= 256;"),
+                "the old default must be gone:
+{f}"
+            );
+        }
+    }
+
+    /// …and it lands INSIDE the generated block. Left below the marker it would
+    /// be preserved across regeneration, so the module's value would be written
+    /// once and then silently ignored - a field that looks live and is not.
+    #[test]
+    fn the_size_is_regenerated_not_preserved() {
+        let f = serial_config_file(
+            "USART",
+            1,
+            Some(&UsartModuleConfig {
+                buf_len: 512,
+                ..cfg(UsartMode::Buffered)
+            }),
+            "USART1",
+            true,
+        );
+        let end = f.find("// <<< GENERATED END >>>").expect("marker");
+        let at = f.find("const BUF_LEN").expect("the constant");
+        assert!(
+            at < end,
+            "BUF_LEN must be above the END marker:
+{f}"
+        );
+    }
+
+    /// A hand-edited `mcu.config` cannot produce a buffer the code chokes on.
+    #[test]
+    fn an_absurd_size_is_clamped_rather_than_emitted() {
+        let zero = serial_config_file(
+            "USART",
+            1,
+            Some(&UsartModuleConfig {
+                buf_len: 0,
+                ..cfg(UsartMode::Buffered)
+            }),
+            "USART1",
+            true,
+        );
+        // A zero-length StaticCell compiles and then never delivers a byte,
+        // which reads as broken hardware rather than as a setting.
+        assert!(zero.contains("const BUF_LEN: usize = 16;"), "{zero}");
+        let huge = serial_config_file(
+            "USART",
+            1,
+            Some(&UsartModuleConfig {
+                buf_len: 10_000_000,
+                ..cfg(UsartMode::Buffered)
+            }),
+            "USART1",
+            true,
+        );
+        assert!(huge.contains("const BUF_LEN: usize = 65536;"), "{huge}");
     }
 
     #[test]
@@ -4181,5 +4289,85 @@ mod flow_and_direction_tests {
             "{}",
             out.init_calls
         );
+    }
+}
+
+#[cfg(test)]
+mod spi_i2c_option_tests {
+    use super::*;
+
+    /// The default writes NOTHING, so every project that already exists keeps
+    /// byte-identical output. That is the point of the `if default` guard.
+    #[test]
+    fn the_defaults_add_no_line_at_all() {
+        let spi = spi_config_file(1, Some(&SpiModuleConfig::new(1)), false);
+        assert!(!spi.contains("bit_order"), "{spi}");
+        let i2c = i2c_config_file(1, Some(&I2cModuleConfig::new(1)));
+        assert!(!i2c.contains("timeout"), "{i2c}");
+    }
+
+    /// LSB first reaches the config, fully qualified so no template needs a
+    /// conditional `use` line for a type it may not mention.
+    #[test]
+    fn lsb_first_reaches_every_spi_template() {
+        for tx_only in [false, true] {
+            for mode in [AsyncBusMode::Blocking, AsyncBusMode::AsyncDma] {
+                let c = SpiModuleConfig {
+                    bit_order: SpiBitOrder::LsbFirst,
+                    async_mode: mode,
+                    ..SpiModuleConfig::new(1)
+                };
+                let f = spi_config_file(1, Some(&c), tx_only);
+                assert!(
+                    f.contains("config.bit_order = embassy_stm32::spi::BitOrder::LsbFirst;"),
+                    "{mode:?} tx_only={tx_only}:\n{f}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_timeout_reaches_every_i2c_template() {
+        for mode in [AsyncBusMode::Blocking, AsyncBusMode::AsyncDma] {
+            let c = I2cModuleConfig {
+                timeout_ms: 250,
+                async_mode: mode,
+                ..I2cModuleConfig::new(1)
+            };
+            let f = i2c_config_file(1, Some(&c));
+            assert!(
+                f.contains("config.timeout = embassy_time::Duration::from_millis(250);"),
+                "{mode:?}:\n{f}"
+            );
+        }
+    }
+
+    /// A hand-edited `mcu.config` cannot produce a timeout that fails every
+    /// transfer instantly, which would read as broken wiring rather than as a
+    /// setting. (0 is not clamped — it is the "leave embassy's default" value.)
+    #[test]
+    fn an_absurd_timeout_is_clamped() {
+        let huge = i2c_config_file(
+            1,
+            Some(&I2cModuleConfig {
+                timeout_ms: 10_000_000,
+                ..I2cModuleConfig::new(1)
+            }),
+        );
+        assert!(huge.contains("from_millis(60000);"), "{huge}");
+    }
+
+    /// Neither setting leaves a placeholder behind — a stray `{MSB}` in a
+    /// user's file would be a syntax error they did not write.
+    #[test]
+    fn no_placeholder_survives_substitution() {
+        let spi = spi_config_file(2, Some(&SpiModuleConfig::new(2)), false);
+        let i2c = i2c_config_file(2, Some(&I2cModuleConfig::new(2)));
+        for f in [&spi, &i2c] {
+            assert!(!f.contains('{') || !f.contains("_CFG}"), "{f}");
+            for ph in ["{MSB}", "{TMO}", "{EXTRA_CFG}"] {
+                assert!(!f.contains(ph), "left {ph} behind:\n{f}");
+            }
+        }
     }
 }

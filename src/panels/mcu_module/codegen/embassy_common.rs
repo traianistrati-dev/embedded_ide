@@ -589,8 +589,16 @@ mod emit_for_manual_compile {
         for m in &mut f2mcu.modules {
             use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig, UsartMode};
             match &mut m.config {
-                ModuleConfig::Spi(c) => c.async_mode = AsyncBusMode::AsyncDma,
-                ModuleConfig::I2c(c) => c.async_mode = AsyncBusMode::AsyncDma,
+                ModuleConfig::Spi(c) => {
+                    c.async_mode = AsyncBusMode::AsyncDma;
+                    // Non-default on purpose: the default writes no line, so
+                    // only this proves the emitted one compiles.
+                    c.bit_order = crate::panels::mcu_module::modules::SpiBitOrder::LsbFirst;
+                }
+                ModuleConfig::I2c(c) => {
+                    c.async_mode = AsyncBusMode::AsyncDma;
+                    c.timeout_ms = 250;
+                }
                 ModuleConfig::Usart(c) => c.mode = UsartMode::Dma,
                 _ => {}
             }
