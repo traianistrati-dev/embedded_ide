@@ -269,6 +269,11 @@ pub struct McuDefinition {
     /// imported from the vendor database.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub irq_vectors: Vec<String>,
+    /// The chip's USART IP version as the vendor names it (`sci3_v2_1_Cube`).
+    /// The only thing that says whether the USART can swap/invert its lines —
+    /// see [`crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usart_ip: Option<String>,
     #[serde(default)]
     pub cpu: String,
     pub toolchain: ToolchainKind,
@@ -326,6 +331,7 @@ impl McuDefinition {
         mcu.id = self.id.clone();
         mcu.dma = self.dma.clone();
         mcu.irq_vectors = self.irq_vectors.clone();
+        mcu.usart_ip = self.usart_ip.clone();
         mcu.grid = self.pins.grid.as_ref().map(|g| PinGrid {
             rows: g.rows,
             cols: g.cols,

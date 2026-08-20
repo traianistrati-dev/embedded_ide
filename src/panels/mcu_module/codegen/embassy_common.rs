@@ -991,6 +991,7 @@ mod emit_for_manual_compile {
         def.dma = dma_data::dma_def_for(&xml, path.parent(), &mut c1);
         let mut c2 = std::collections::HashMap::new();
         def.irq_vectors = nvic::vectors_for(&xml, path.parent(), &mut c2);
+        def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
 
         let mut mcu = def.build_mcu();
         mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
@@ -1274,6 +1275,7 @@ mod emit_for_manual_compile {
             .to_definition();
         def.dma = dma;
         def.irq_vectors = irqs;
+        def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
         let mut mcu = def.build_mcu();
         mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
 
@@ -1340,6 +1342,10 @@ mod emit_for_manual_compile {
                 // different return type, so it needs its own compile.
                 ModuleConfig::Usart(c) => {
                     c.mode = UsartMode::Dma;
+                    // The line-level extras, on a chip that has the bits — the
+                    // assignments only compile where embassy declares the fields.
+                    c.swap_rx_tx = true;
+                    c.invert_rx = true;
                     c.direction = match std::env::var("EIDE_USART_DIR").as_deref() {
                         Ok("tx") => crate::panels::mcu_module::modules::UsartDirection::TxOnly,
                         Ok("rx") => crate::panels::mcu_module::modules::UsartDirection::RxOnly,

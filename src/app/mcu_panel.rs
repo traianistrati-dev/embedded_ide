@@ -599,6 +599,11 @@ impl AppIde {
                                 // borrowed mutably below.
                                 let chip_dma = mcu.dma.clone();
                                 let family = mcu.family.clone();
+                                // Read before `mcu.modules` is borrowed mutably.
+                                let usart_line_extras =
+                                    crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert(
+                                        mcu.usart_ip.as_deref(),
+                                    );
                                 let mut local_pending: std::collections::BTreeMap<
                                     String,
                                     (ApiStyle, AsyncBusMode),
@@ -697,6 +702,7 @@ impl AppIde {
                                                     &pin_funcs, &mut pin_fn_choice, is_async,
                                                     is_native, &family, pending,
                                                     chip_dma.as_ref(),
+                                                    usart_line_extras,
                                                 );
                                                 ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {

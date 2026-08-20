@@ -208,6 +208,9 @@ pub struct McuForm {
     pub dma: Option<super::mcu_def::DmaDef>,
     /// The chip's interrupt vectors, carried through untouched like `dma`.
     pub irq_vectors: Vec<String>,
+    /// The chip's USART IP version, carried verbatim from the vendor data —
+    /// the IDE never edits it, it only decides whether swap/invert are offered.
+    pub usart_ip: Option<String>,
     // Toolchain + target
     pub toolchain: ToolchainKind,
     pub target: String,
@@ -255,6 +258,7 @@ impl McuForm {
             package: String::new(),
             dma: None,
             irq_vectors: Vec::new(),
+            usart_ip: None,
             toolchain: ToolchainKind::RustEmbedded,
             target: "thumbv7m-none-eabi".into(),
             flash_origin: "0x08000000".into(),
@@ -359,6 +363,7 @@ impl McuForm {
             package: def.package.clone(),
             dma: def.dma.clone(),
             irq_vectors: def.irq_vectors.clone(),
+            usart_ip: def.usart_ip.clone(),
             toolchain: def.toolchain.clone(),
             target: def.project.target.clone(),
             flash_origin: def.project.flash_origin.clone(),
@@ -540,6 +545,7 @@ impl McuForm {
             package: self.package.trim().to_string(),
             dma: self.dma.clone(),
             irq_vectors: self.irq_vectors.clone(),
+            usart_ip: self.usart_ip.clone(),
             cpu: self.cpu.trim().to_string(),
             toolchain: self.toolchain.clone(),
             project: ProjectDef {

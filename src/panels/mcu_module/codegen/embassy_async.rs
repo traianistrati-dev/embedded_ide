@@ -27,6 +27,7 @@ use crate::panels::mcu_module::modules::{
 };
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+use crate::panels::mcu_module::stm32_pin_data;
 use std::collections::BTreeMap;
 
 /// Invariant file header for the async runtime (above `GEN_BEGIN`, rebuilt on
@@ -137,7 +138,7 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-// <<< GENERATED END >>>
+{EXTRA_CONSTS}// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -174,7 +175,7 @@ fn get_config() -> Config {
         2 => StopBits::STOP2,
         _ => StopBits::STOP1,
     };
-    config
+{EXTRA_CONFIG}    config
 }
 
 /// Initialise {PERI} as an async `embedded-io-async` Read + Write value.
@@ -498,6 +499,9 @@ fn manual_channels<'a, C>(
 /// part has, rather than what its family usually has.
 #[derive(Clone, Copy)]
 pub struct ChipData<'a> {
+    /// The chip's USART IP version, which decides whether the swap/invert
+    /// `Config` fields exist — see `stm32_pin_data::usart_has_swap_invert`.
+    pub usart_ip: Option<&'a str>,
     /// DMA channels + request table, or `None` when the chip carries neither.
     pub dma: Option<&'a crate::panels::mcu_module::mcu_def::DmaDef>,
     /// The chip's interrupt vector names; empty when it carries none.
@@ -960,7 +964,13 @@ pub fn async_peripherals(
             }
             files.push((
                 format!("{stem}{n}.rs"),
-                serial_config_file(peri, n, cfg, &serial_irq(chip.irq_vectors, peri, n)),
+                serial_config_file(
+                    peri,
+                    n,
+                    cfg,
+                    &serial_irq(chip.irq_vectors, peri, n),
+                    stm32_pin_data::usart_has_swap_invert(chip.usart_ip),
+                ),
             ));
         }
     }
@@ -1138,7 +1148,7 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-// <<< GENERATED END >>>
+{EXTRA_CONSTS}// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -1179,7 +1189,7 @@ fn get_config() -> Config {
         2 => StopBits::STOP2,
         _ => StopBits::STOP1,
     };
-    config
+{EXTRA_CONFIG}    config
 }
 
 /// Initialise {PERI} on DMA, as (TX, RX).
@@ -1233,7 +1243,7 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-// <<< GENERATED END >>>
+{EXTRA_CONSTS}// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -1263,7 +1273,7 @@ fn get_config() -> Config {
         2 => StopBits::STOP2,
         _ => StopBits::STOP1,
     };
-    config
+{EXTRA_CONFIG}    config
 }
 
 /// Initialise {PERI} as a TX-only DMA UART.
@@ -1290,7 +1300,7 @@ const BAUDRATE: u32 = {BAUD};
 const DATA_BITS: u8 = {DATA}; // 7, 8, 9
 const PARITY: char = '{PARITY}'; // 'N' None, 'O' Odd, 'E' Even
 const STOP_BITS: u8 = {STOP}; // 1, 2
-// <<< GENERATED END >>>
+{EXTRA_CONSTS}// <<< GENERATED END >>>
 
 // Everything below is editable — your changes are preserved on regeneration.
 //
@@ -1326,7 +1336,7 @@ fn get_config() -> Config {
         2 => StopBits::STOP2,
         _ => StopBits::STOP1,
     };
-    config
+{EXTRA_CONFIG}    config
 }
 
 /// Initialise {PERI} as an RX-only DMA UART with a ring buffer.
@@ -1490,7 +1500,50 @@ struct SerialShape {
     ctor: String,
 }
 
-pub fn serial_config_file(peri: &str, n: u8, cfg: Option<&UsartModuleConfig>, irq: &str) -> String {
+/// The line-level extras (`swap_rx_tx`, `invert_tx`, `invert_rx`) as a pair of
+/// `(consts, assignments)` — EMPTY unless the user turned one on, so a project
+/// that uses none generates exactly what it did before these existed.
+///
+/// `supported` is the chip gate: embassy declares these `Config` fields only
+/// under `#[cfg(any(usart_v3, usart_v4))]`, so on an older USART the assignment
+/// would not compile. Codegen re-checks it rather than trusting the UI — a
+/// project file can outlive the chip it was written for.
+fn serial_line_extras(cfg: Option<&UsartModuleConfig>, supported: bool) -> (String, String) {
+    let (mut consts, mut body) = (String::new(), String::new());
+    if !supported {
+        return (consts, body);
+    }
+    for (on, konst, field) in [
+        (
+            cfg.is_some_and(|c| c.swap_rx_tx),
+            "SWAP_RX_TX",
+            "swap_rx_tx",
+        ),
+        (cfg.is_some_and(|c| c.invert_tx), "INVERT_TX", "invert_tx"),
+        (cfg.is_some_and(|c| c.invert_rx), "INVERT_RX", "invert_rx"),
+    ] {
+        if on {
+            consts.push_str(&format!(
+                "const {konst}: bool = true;
+"
+            ));
+            body.push_str(&format!(
+                "    config.{field} = {konst};
+"
+            ));
+        }
+    }
+    (consts, body)
+}
+
+pub fn serial_config_file(
+    peri: &str,
+    n: u8,
+    cfg: Option<&UsartModuleConfig>,
+    irq: &str,
+    // Whether this CHIP's USART has the swap/invert bits at all.
+    line_extras: bool,
+) -> String {
     let baud = cfg.map(|c| c.baud_rate).unwrap_or(115_200);
     let data = cfg.map(|c| c.data_bits).unwrap_or(8);
     let parity = match cfg.map(|c| c.parity) {
@@ -1519,7 +1572,10 @@ pub fn serial_config_file(peri: &str, n: u8, cfg: Option<&UsartModuleConfig>, ir
     };
     let peri_ty = format!("{peri}{n}");
     let shape = serial_shape(&peri_ty, cfg);
-    tmpl.replace("{FLOW_USE}", shape.uses.trim_end())
+    let (extra_consts, extra_config) = serial_line_extras(cfg, line_extras);
+    tmpl.replace("{EXTRA_CONSTS}", &extra_consts)
+        .replace("{EXTRA_CONFIG}", &extra_config)
+        .replace("{FLOW_USE}", shape.uses.trim_end())
         .replace("{PIN_PARAMS}", &shape.pins)
         .replace("{FLOW_PARAMS}", &shape.flow_params)
         .replace("{CTOR}", &shape.ctor)
@@ -2019,7 +2075,7 @@ mod irq_key_tests {
     fn the_buffered_usart_binds_the_chips_vector_in_main() {
         // The config file no longer binds anything: a vector can be bound ONCE
         // per program, and on this chip USART3 shares one with USART4/LPUART1.
-        let f = serial_config_file("USART", 3, None, "USART3_4_LPUART1");
+        let f = serial_config_file("USART", 3, None, "USART3_4_LPUART1", true);
         assert!(!f.contains("bind_interrupts!(struct Irqs"), "{f}");
         assert!(f.contains("irqs: impl Binding<"), "{f}");
         // main.rs binds it, under the chip's own vector name.
@@ -2054,7 +2110,7 @@ mod usart_mode_tests {
     #[test]
     fn buffered_is_the_default_and_keeps_the_old_output() {
         assert_eq!(UsartMode::default(), UsartMode::Buffered);
-        let f = serial_config_file("USART", 1, Some(&cfg(UsartMode::Buffered)), "USART1");
+        let f = serial_config_file("USART", 1, Some(&cfg(UsartMode::Buffered)), "USART1", true);
         assert!(f.contains("BufferedUart::new("), "{f}");
         // The interrupt binding is main.rs's, for both forms — see
         // `the_buffered_usart_binds_the_chips_vector_in_main`.
@@ -2064,7 +2120,7 @@ mod usart_mode_tests {
 
     #[test]
     fn dma_splits_the_uart_so_read_survives() {
-        let f = serial_config_file("USART", 1, Some(&cfg(UsartMode::Dma)), "USART1");
+        let f = serial_config_file("USART", 1, Some(&cfg(UsartMode::Dma)), "USART1", true);
         // The whole point: a bare `Uart<Async>` has `embedded_io_async::Write`
         // but NOT `Read`, so the RX half must become a ring-buffered receiver.
         assert!(
@@ -2136,6 +2192,7 @@ mod usart_mode_tests {
             ChipData {
                 dma: Some(&chip),
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2236,6 +2293,7 @@ mod usart_mode_tests {
             ChipData {
                 dma: Some(&chip),
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2305,6 +2363,7 @@ mod usart_mode_tests {
             ChipData {
                 dma: None,
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2340,6 +2399,7 @@ mod usart_mode_tests {
             ChipData {
                 dma: None,
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2379,6 +2439,7 @@ mod usart_mode_tests {
             ChipData {
                 dma: None,
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2525,6 +2586,7 @@ mod comp_tests {
                 ChipData {
                     dma: None,
                     irq_vectors: &irqs,
+                    usart_ip: Some("sci3_v2_1_Cube"),
                 },
                 CompInputs {
                     settings: set,
@@ -2611,6 +2673,7 @@ mod lpuart_tests {
             ChipData {
                 dma: None,
                 irq_vectors: irqs,
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2671,6 +2734,7 @@ mod lpuart_tests {
             ChipData {
                 dma: None,
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2741,6 +2805,7 @@ mod pwm_tests {
             ChipData {
                 dma: None,
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -2863,6 +2928,7 @@ mod flow_and_direction_tests {
             ChipData {
                 dma: None,
                 irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
             },
             CompInputs {
                 settings: &Default::default(),
@@ -3060,6 +3126,59 @@ mod flow_and_direction_tests {
         // Still a full-duplex VALUE (both halves), so both DMA channels are
         // taken even though there is one pad.
         assert_eq!(out.dma_uses.len(), 2, "{:?}", out.dma_uses);
+    }
+
+    /// Swap / invert reach `get_config`, as consts, and ONLY when switched on —
+    /// so a project that uses none generates exactly what it did before.
+    #[test]
+    fn line_extras_are_opt_in_and_chip_gated() {
+        let plain = run(&full_duplex(), UsartModuleConfig::new(1));
+        let body = &plain.config_files[0].1;
+        assert!(!body.contains("swap_rx_tx"), "{body}");
+        assert!(!body.contains("invert"), "{body}");
+
+        let cfg = UsartModuleConfig {
+            swap_rx_tx: true,
+            invert_rx: true,
+            ..UsartModuleConfig::new(1)
+        };
+        let out = run(&full_duplex(), cfg.clone());
+        let body = &out.config_files[0].1;
+        assert!(body.contains("const SWAP_RX_TX: bool = true;"), "{body}");
+        assert!(
+            body.contains("    config.swap_rx_tx = SWAP_RX_TX;"),
+            "{body}"
+        );
+        assert!(body.contains("    config.invert_rx = INVERT_RX;"), "{body}");
+        // Only what was asked for: TX inversion was left off.
+        assert!(!body.contains("invert_tx"), "{body}");
+
+        // Same config on an OLD USART: the fields do not exist there, so nothing
+        // is emitted even though the module still carries the choice.
+        let pins = full_duplex();
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let old = async_peripherals(
+            "stm32f4",
+            ChipData {
+                dma: None,
+                irq_vectors: &[],
+                usart_ip: Some("sci2_v1_2_Cube"), // F411 — usart_v2
+            },
+            CompInputs {
+                settings: &Default::default(),
+                instances: &[],
+                pins: &[],
+            },
+            &refs,
+            &[(1u8, cfg)].into_iter().collect(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        let body = &old.config_files[0].1;
+        assert!(!body.contains("swap_rx_tx"), "{body}");
+        assert!(!body.contains("SWAP_RX_TX"), "{body}");
     }
 
     /// RX-only keeps the ring buffer, because a bare `UartRx` has no

@@ -82,6 +82,7 @@ mod tests {
             // `codegen::dma_map`; only imported ones carry vendor DMA data.
             dma: None,
             irq_vectors: Vec::new(),
+            usart_ip: None,
             cpu: cpu.into(),
             toolchain: m.toolchain.clone(),
             project,

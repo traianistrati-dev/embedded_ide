@@ -533,6 +533,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
         embassy_async::ChipData {
             dma: mcu.dma.as_ref(),
             irq_vectors: &mcu.irq_vectors,
+            usart_ip: mcu.usart_ip.as_deref(),
         },
         embassy_async::CompInputs {
             settings: &mcu.comp,

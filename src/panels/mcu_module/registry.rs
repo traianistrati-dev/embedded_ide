@@ -307,6 +307,7 @@ mod one_shot_import {
             let mut def = chip.form.to_definition();
             def.dma = dma.clone();
             def.irq_vectors = irqs.clone();
+            def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
             if let Some(db) = db {
                 match cubemx::graph_for_chip_xml(db, &xml, &def.family) {
                     Ok((gc, _missing)) => {

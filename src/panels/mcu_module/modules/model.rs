@@ -574,6 +574,18 @@ pub struct UsartModuleConfig {
     /// Hardware flow control. Default `None`, as before.
     #[serde(default)]
     pub flow: UsartFlow,
+    /// Swap the RX and TX pads in the peripheral, so a crossed cable (or a
+    /// board laid out the other way round) needs no rework. Chip-gated: the
+    /// register bit only exists on the newer USART.
+    #[serde(default)]
+    pub swap_rx_tx: bool,
+    /// Invert the TX line's idle/mark levels — for an inverting transceiver, or
+    /// an IR link, without an external inverter. Same chip gate.
+    #[serde(default)]
+    pub invert_tx: bool,
+    /// Invert the RX line, independently of TX.
+    #[serde(default)]
+    pub invert_rx: bool,
     /// Half duplex only: keep the receiver enabled while transmitting, so what
     /// this node sends is read back. Default OFF, which is what a bus with other
     /// talkers wants — the echo would otherwise land in the RX buffer.
@@ -625,6 +637,9 @@ impl UsartModuleConfig {
             api_style: ApiStyle::default(),
             direction: UsartDirection::default(),
             flow: UsartFlow::default(),
+            swap_rx_tx: false,
+            invert_tx: false,
+            invert_rx: false,
             half_duplex_readback: false,
             mode: UsartMode::default(),
             dma_tx: String::new(),

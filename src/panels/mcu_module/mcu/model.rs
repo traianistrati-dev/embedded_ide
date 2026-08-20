@@ -226,6 +226,9 @@ pub struct Mcu {
     /// The chip's interrupt vector names — see
     /// [`crate::panels::mcu_module::mcu_def::McuDefinition::irq_vectors`].
     pub irq_vectors: Vec<String>,
+    /// The chip's USART IP version — the gate on the swap/invert options, see
+    /// [`crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert`].
+    pub usart_ip: Option<String>,
     /// Currently selected pin number (None = no pin selected)
     pub selected_pin: Option<usize>,
     /// Pins-toolbar search box (next to "Rotate"). Pins that match stay bright,

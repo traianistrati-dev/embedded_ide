@@ -115,6 +115,7 @@ impl Mcu {
             grid: None,
             dma: None,
             irq_vectors: Vec::new(),
+            usart_ip: None,
             selected_pin: None,
             pin_search: String::new(),
             show_info: None,

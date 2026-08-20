@@ -948,6 +948,10 @@ pub fn module_config_ui(
     // The chip's DMA facts, for the channel picker. Cloned by the caller rather
     // than borrowed, because `m` is a mutable borrow out of the same `Mcu`.
     dma: Option<&crate::panels::mcu_module::mcu_def::DmaDef>,
+    // Whether this chip's USART has the swap / invert bits. Passed in rather
+    // than derived here, because it is a fact about the CHIP and this function
+    // only sees one module.
+    line_extras: bool,
 ) {
     // Read what we need off `m` BEFORE `m.config` is borrowed mutably below.
     let is_custom = m.kind.is_custom();
@@ -1110,6 +1114,26 @@ pub fn module_config_ui(
         ui.end_row();
     };
 
+    // What the BLOCKING stm32f1xx-hal cannot do, said out loud.
+    //
+    // Direction, flow control, half duplex and swap/invert are all async-only
+    // rows above. On the F1 they are not "not implemented yet": `Pins<USART>` is
+    // implemented ONLY for the (TX alternate, RX input) pair, `serial.rs` has no
+    // hdsel / rtse / ctse at all, and the SWAP / TXINV / RXINV bits do not exist
+    // in F1 silicon. Leaving the rows out silently makes a user who just used
+    // them on a G0 project hunt for them; this says why.
+    let f1_serial_note = |ui: &mut egui::Ui| {
+        ui.label("");
+        ui.label(
+            egui::RichText::new(
+                "stm32f1xx-hal has no flow control, half duplex or one-way UART                  (its Serial takes the TX+RX pair), and the F1 USART has no                  swap/invert bits",
+            )
+            .size(10.5)
+            .color(egui::Color32::from_gray(140)),
+        );
+        ui.end_row();
+    };
+
     // Data direction + hardware flow control. Both lists come from
     // `UsartDirection::options` / `UsartFlow::options`, i.e. from what embassy
     // has a CONSTRUCTOR for — never from what the silicon could in principle do.
@@ -1139,6 +1163,29 @@ pub fn module_config_ui(
                     }
                 });
         }
+        ui.end_row();
+        // Line-level extras. On an older USART the register bits do not exist —
+        // and neither do embassy's `Config` fields — so the row says that
+        // instead of offering a switch that cannot be generated.
+        ui.label("Line");
+        ui.vertical(|ui| {
+            if line_extras {
+                ui.checkbox(&mut cfg.swap_rx_tx, "Swap RX/TX pads")
+                    .on_hover_text(
+                        "The peripheral crosses the two itself — for a cable or a                          board that is wired the other way round, with no rework.",
+                    );
+                ui.checkbox(&mut cfg.invert_tx, "Invert TX")
+                    .on_hover_text("Idle low instead of idle high, for an inverting transceiver.");
+                ui.checkbox(&mut cfg.invert_rx, "Invert RX");
+            } else {
+                ui.label(
+                    egui::RichText::new("this USART has no swap / invert bits")
+                        .size(10.5)
+                        .italics()
+                        .color(egui::Color32::from_gray(140)),
+                );
+            }
+        });
         ui.end_row();
         // Readback is a half-duplex-only argument, so it appears only there.
         if cfg.direction.is_half_duplex() {
@@ -1314,6 +1361,7 @@ pub fn module_config_ui(
                     } else if let Some(chans) =
                         codegen::stm32::blocking_dma_channels(family, uart_bus, cfg.instance)
                     {
+                        f1_serial_note(ui);
                         transport_row(ui, &mut cfg.blocking_dma, &chans);
                         if cfg.blocking_dma {
                             api_row_locked_dma(ui);

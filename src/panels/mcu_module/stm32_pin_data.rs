@@ -328,6 +328,46 @@ pub fn gpio_ip_version(mcu_xml: &str) -> Option<String> {
         .map(|v| v.trim().to_owned())
 }
 
+/// The chip's USART IP version, as the vendor database names it
+/// (`sci2_v1_1_Cube`, `sci3_v2_1_Cube`, …).
+///
+/// Captured at import for one reason: it is the only data we have that says
+/// whether the USART has the SWAP / TXINV / RXINV bits — see
+/// [`usart_has_swap_invert`].
+pub fn usart_ip_version(mcu_xml: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(mcu_xml).ok()?;
+    doc.root_element()
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "IP")
+        .find(|n| n.attribute("Name") == Some("USART"))
+        .and_then(|n| n.attribute("Version"))
+        .map(|v| v.trim().to_owned())
+}
+
+/// Whether this chip's USART can swap RX/TX and invert the lines.
+///
+/// embassy exposes `Config::{swap_rx_tx, invert_tx, invert_rx}` only under
+/// `#[cfg(any(usart_v3, usart_v4))]` — on an older peripheral the FIELD does not
+/// exist, so generating an assignment for it does not compile. The IDE cannot
+/// read embassy's cfgs, but the vendor's IP version answers the same question:
+///
+/// | CubeMX IP | embassy | swap/invert |
+/// |---|---|---|
+/// | `sci2_v1_1` (F103) | v1 | no |
+/// | `sci2_v1_2` (F411) | v2 | no |
+/// | `sci2_v2_1` (F303), `sci2_v2_2` (F030) | v3 | yes |
+/// | `sci3_v1_1` (L432) | v3 | yes |
+/// | `sci3_v2_0` (H743/WBA/U5), `sci3_v2_1` (G071/WLE5) | v4 | yes |
+///
+/// So the rule is "everything except `sci2_v1_*`", checked against
+/// `stm32-metapac`'s own metadata for those nine families (see the test).
+/// `None` — a chip imported before this was captured, or a built-in — answers
+/// NO: refusing an option is recoverable, emitting a field that isn't there is
+/// a compile error in the user's project.
+pub fn usart_has_swap_invert(ip_version: Option<&str>) -> bool {
+    ip_version.is_some_and(|v| !v.starts_with("sci2_v1"))
+}
+
 /// The file name `version` maps to inside the vendor repo's `mcu/IP/` folder.
 pub fn gpio_ip_file_name(version: &str) -> String {
     format!("GPIO-{version}_Modes.xml")
@@ -1866,5 +1906,43 @@ mod bonded_pin_corpus {
             "{} chip(s) still rejected for a duplicate pin position: {dupes:?}",
             dupes.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod usart_ip_tests {
+    use super::*;
+
+    /// The rule is checked against `stm32-metapac`'s own metadata: the CubeMX IP
+    /// version on the left, the `usart_vN` metapac assigns on the right. Note
+    /// that the prefix alone is NOT the answer — an F303 is `sci2_v2_1` and has
+    /// the bits, an F411 is `sci2_v1_2` and does not.
+    #[test]
+    fn the_ip_version_says_whether_swap_invert_exist() {
+        for (ip, metapac, want) in [
+            ("sci2_v1_1_Cube", "v1 (F103)", false),
+            ("sci2_v1_2_Cube", "v2 (F411)", false),
+            ("sci2_v2_1_Cube", "v3 (F303)", true),
+            ("sci2_v2_2_Cube", "v3 (F030)", true),
+            ("sci3_v1_1_Cube", "v3 (L432)", true),
+            ("sci3_v2_0_Cube", "v4 (H743/WBA/U5)", true),
+            ("sci3_v2_1_Cube", "v4 (G071/WLE5)", true),
+        ] {
+            assert_eq!(usart_has_swap_invert(Some(ip)), want, "{ip} is {metapac}");
+        }
+        // Unknown provenance answers NO: refusing an option is recoverable,
+        // emitting a field that isn't there is a compile error downstream.
+        assert!(!usart_has_swap_invert(None));
+    }
+
+    #[test]
+    fn the_version_is_read_off_the_chip_xml() {
+        let xml = r#"<Mcu RefName="STM32G071RBTx" Family="STM32G0">
+            <IP InstanceName="GPIO" Name="GPIO" Version="STM32G0xx_gpio_v1_0"/>
+            <IP InstanceName="USART1" Name="USART" Version="sci3_v2_1_Cube"/>
+        </Mcu>"#;
+        assert_eq!(usart_ip_version(xml).as_deref(), Some("sci3_v2_1_Cube"));
+        // A chip file without a USART block simply has no answer.
+        assert_eq!(usart_ip_version(r#"<Mcu RefName="X"/>"#), None);
     }
 }
