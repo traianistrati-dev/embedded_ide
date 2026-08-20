@@ -1160,20 +1160,20 @@ mod emit_for_manual_compile {
         //   dm | dp  — only that pad wired, which is the case under test
         //   dm-gpio  — D- wired and PA12 given to a GPIO output, so the pad the
         //              USB block takes unasked is one the user spent elsewhere
-        let usb_pads: Option<Vec<(&str, PinFunction)>> =
-            match std::env::var("EIDE_USB").as_deref() {
-                Ok("both") => Some(vec![
-                    ("PA11", PinFunction::UsbDm),
-                    ("PA12", PinFunction::UsbDp),
-                ]),
-                Ok("dm") => Some(vec![("PA11", PinFunction::UsbDm)]),
-                Ok("dp") => Some(vec![("PA12", PinFunction::UsbDp)]),
-                Ok("dm-gpio") => Some(vec![
-                    ("PA11", PinFunction::UsbDm),
-                    ("PA12", PinFunction::GpioOutput),
-                ]),
-                _ => None,
-            };
+        let usb_pads: Option<Vec<(&str, PinFunction)>> = match std::env::var("EIDE_USB").as_deref()
+        {
+            Ok("both") => Some(vec![
+                ("PA11", PinFunction::UsbDm),
+                ("PA12", PinFunction::UsbDp),
+            ]),
+            Ok("dm") => Some(vec![("PA11", PinFunction::UsbDm)]),
+            Ok("dp") => Some(vec![("PA12", PinFunction::UsbDp)]),
+            Ok("dm-gpio") => Some(vec![
+                ("PA11", PinFunction::UsbDm),
+                ("PA12", PinFunction::GpioOutput),
+            ]),
+            _ => None,
+        };
         for (name, func) in [
             ("PA9", PinFunction::UsartTx(1)),
             ("PA10", PinFunction::UsartRx(1)),
@@ -1200,12 +1200,22 @@ mod emit_for_manual_compile {
             // Two channels of ONE timer — TIM2 CH3/CH4 on their default pads.
             // PA0/PA1 (CH1/CH2) are taken by the ADC above, which is exactly the
             // case the hardcoded `(pa0, pa1)` comment used to claim anyway.
-            ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 }),
-            ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 }),
+            (
+                "PA2",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 3,
+                },
+            ),
+            (
+                "PA3",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 4,
+                },
+            ),
         ] {
-            if usb_pads.is_some()
-                && matches!(func, PinFunction::CanTx | PinFunction::CanRx)
-            {
+            if usb_pads.is_some() && matches!(func, PinFunction::CanTx | PinFunction::CanRx) {
                 continue;
             }
             if func == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
@@ -1296,7 +1306,11 @@ mod emit_for_manual_compile {
         //    placeholder for it — USART1 is not built at all.
         //  · `EIDE_SPI_TXONLY=1` unwires MISO — the SPI keeps its TX half only.
         let usart_built = std::env::var("EIDE_USART_HALF").is_err();
-        let usart_halves = if usart_built { halves } else { BlockingDma::Off };
+        let usart_halves = if usart_built {
+            halves
+        } else {
+            BlockingDma::Off
+        };
         let spi_halves = if std::env::var("EIDE_SPI_TXONLY").is_ok() {
             halves.without_rx()
         } else {
@@ -1360,14 +1374,16 @@ mod emit_for_manual_compile {
                 assert!(main_rs.contains("UsbBus::new(usb_periph)"), "{main_rs}");
             } else {
                 assert!(
-                    !main_rs.contains("UsbBus::new")
-                        && main_rs.contains("USB is NOT initialised"),
+                    !main_rs.contains("UsbBus::new") && main_rs.contains("USB is NOT initialised"),
                     "half a USB must not be initialised, and must say so:\n{main_rs}"
                 );
                 // The whole point: the pad it used to take uninvited. Matched
                 // through the USB block's own binding, because a GPIO module on
                 // PA12 configures that pad legitimately.
-                assert!(!main_rs.contains("let mut usb_dp = gpioa.pa12"), "{main_rs}");
+                assert!(
+                    !main_rs.contains("let mut usb_dp = gpioa.pa12"),
+                    "{main_rs}"
+                );
             }
         } else if std::env::var("EIDE_CAN_HALF").is_ok() {
             assert!(
@@ -1458,8 +1474,20 @@ mod emit_for_manual_compile {
             ("PB6", PinFunction::I2cScl(1)),
             ("PB7", PinFunction::I2cSda(1)),
             ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
-            ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 }),
-            ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 }),
+            (
+                "PA2",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 3,
+                },
+            ),
+            (
+                "PA3",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 4,
+                },
+            ),
             ("PC13", PinFunction::GpioOutput),
             // An interrupt-enabled input is what makes this an RTIC project
             // rather than a blocking one with extra ceremony: it becomes a
@@ -1486,7 +1514,10 @@ mod emit_for_manual_compile {
         }
 
         let main_rs = mcu.fresh_main_rs();
-        assert!(main_rs.contains("#[rtic::app"), "not an RTIC project:\n{main_rs}");
+        assert!(
+            main_rs.contains("#[rtic::app"),
+            "not an RTIC project:\n{main_rs}"
+        );
 
         let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
         let configs = mcu.config_files();
@@ -1500,12 +1531,8 @@ mod emit_for_manual_compile {
             true,
             &[],
         );
-        files.cargo_toml = project_gen::ensure_rtic_deps(
-            &files.cargo_toml,
-            true,
-            &f1.project.target,
-            &[&main_rs],
-        );
+        files.cargo_toml =
+            project_gen::ensure_rtic_deps(&files.cargo_toml, true, &f1.project.target, &[&main_rs]);
         let mut user: Vec<(String, String)> = vec![
             ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
             (
@@ -1559,8 +1586,20 @@ mod emit_for_manual_compile {
             ("PB6", PinFunction::I2cScl(1)),
             ("PB7", PinFunction::I2cSda(1)),
             ("PA0", PinFunction::AdcChannel { adc: 1, channel: 0 }),
-            ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 }),
-            ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 }),
+            (
+                "PA2",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 3,
+                },
+            ),
+            (
+                "PA3",
+                PinFunction::TimerPwm {
+                    timer: 2,
+                    channel: 4,
+                },
+            ),
             ("PC13", PinFunction::GpioOutput),
             ("PB1", PinFunction::GpioInput),
         ] {

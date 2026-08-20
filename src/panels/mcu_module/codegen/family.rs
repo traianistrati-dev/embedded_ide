@@ -1116,7 +1116,11 @@ mod tests {
             let (blocking_main, blocking_cfgs) = (mcu.fresh_main_rs(), mcu.config_files());
             mcu.runtime = Runtime::Async;
             assert!(!mcu.is_async(), "async is not supported on stm32f1");
-            assert_eq!(mcu.fresh_main_rs(), blocking_main, "main.rs must not differ");
+            assert_eq!(
+                mcu.fresh_main_rs(),
+                blocking_main,
+                "main.rs must not differ"
+            );
             assert_eq!(mcu.config_files(), blocking_cfgs, "configs must not differ");
             // The two flags `AppIde::save` reads to pick the dependency set.
             assert!(!mcu.is_rtic());

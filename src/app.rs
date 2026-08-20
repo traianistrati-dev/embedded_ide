@@ -2554,8 +2554,7 @@ impl AppIde {
             // BOTH pads, matching what `gen_parts` will actually emit: one pad
             // alone generates no USB init, so the crates would be unused.
             let usb_pad = |want: PinFunction| all_pins.iter().any(|(_, _, f)| *f == want);
-            let needs_usb =
-                !is_async && usb_pad(PinFunction::UsbDm) && usb_pad(PinFunction::UsbDp);
+            let needs_usb = !is_async && usb_pad(PinFunction::UsbDm) && usb_pad(PinFunction::UsbDp);
             // The user's own sources — a dependency referenced by THIS code is
             // never stripped, whatever the feature flags say (a Runtime switch
             // used to silently delete a hand-added `embedded-hal`). See

@@ -22,24 +22,34 @@
 use eframe::egui;
 use std::collections::BTreeSet;
 
-/// A foldable `{ … }` region, as 0-based line indices. `end > head` always —
-/// a block that opens and closes on one line has nothing to hide.
+/// What kind of thing a foldable region delimits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionKind {
+    /// A function BODY — a `fn` keyword opened its signature. "Collapse all"
+    /// folds only these; folding every block at once shreds the file instead of
+    /// summarising it.
+    Fn,
+    /// Any other `{ … }`: an `impl`, a `match`, a `struct`, a bare block.
+    Block,
+    /// A `/* … */` comment.
+    Comment,
+}
+
+/// A foldable region, as 0-based line indices. `end > head` always — something
+/// that opens and closes on one line has nothing to hide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
-    /// The line carrying the opening `{`.
+    /// The line carrying the opening `{` or `/*`.
     pub head: usize,
-    /// The line carrying the matching `}`.
+    /// The line carrying the matching `}` or `*/`.
     pub end: usize,
-    /// This block is a function BODY — a `fn` keyword opened its signature.
-    /// "Collapse all" folds only these; a `match`, an `impl` or a bare block
-    /// still folds by hand, but folding every one of them at once shreds the
-    /// file instead of summarising it.
-    pub is_fn: bool,
+    pub kind: RegionKind,
 }
 
 impl Region {
     /// The lines this region hides when folded — the interior, so both the
-    /// header and the closing brace stay on screen.
+    /// header and the closing line stay on screen. The same rule for a comment
+    /// as for a block: one projection, no per-kind special case.
     pub fn hidden(&self) -> std::ops::RangeInclusive<usize> {
         (self.head + 1)..=(self.end - 1)
     }
@@ -79,14 +89,44 @@ pub fn regions(text: &str) -> Vec<Region> {
                 }
             }
             '/' if chars.get(i + 1) == Some(&'*') => {
-                i += 2;
-                while i < n && !(chars[i - 1] == '*' && chars[i] == '/') {
+                // Rust block comments NEST. Stopping at the first `*/` would
+                // both mis-report this comment's last line and drop the scanner
+                // back into "code" inside the outer comment, where it would
+                // invent brace regions out of prose.
+                let head = line;
+                let mut depth = 0usize;
+                let mut closed = false;
+                while i < n {
+                    if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            closed = true;
+                            break;
+                        }
+                        continue;
+                    }
                     if chars[i] == '\n' {
                         line += 1;
                     }
                     i += 1;
                 }
-                i += 1;
+                // An unterminated `/*` (mid-typing) folds nothing: emitting here
+                // would swallow the whole rest of the file.
+                if closed && line > head {
+                    out.push(Region {
+                        head,
+                        end: line,
+                        kind: RegionKind::Comment,
+                    });
+                }
+                // `pending_fn` is deliberately NOT cleared: `fn f() /* n */ {`
+                // is legal, and the body must still count as a function.
             }
             '"' => {
                 i = skip_string(&chars, i, &mut line);
@@ -112,7 +152,11 @@ pub fn regions(text: &str) -> Vec<Region> {
                         out.push(Region {
                             head,
                             end: line,
-                            is_fn,
+                            kind: if is_fn {
+                                RegionKind::Fn
+                            } else {
+                                RegionKind::Block
+                            },
                         });
                     }
                 }
@@ -146,7 +190,7 @@ pub fn regions(text: &str) -> Vec<Region> {
 pub fn fn_heads(text: &str) -> BTreeSet<usize> {
     regions(text)
         .into_iter()
-        .filter(|r| r.is_fn)
+        .filter(|r| r.kind == RegionKind::Fn)
         .map(|r| r.head)
         .collect()
 }
@@ -484,6 +528,77 @@ mod tests {
     fn unclosed_block_yields_no_region() {
         // Mid-typing: must not panic, must not invent a region.
         assert!(heads("fn f() {\n    x;\n").is_empty());
+    }
+
+    // ── Block comments ───────────────────────────────────────────────────────
+
+    fn kinds(src: &str) -> Vec<(usize, usize, RegionKind)> {
+        regions(src)
+            .into_iter()
+            .map(|r| (r.head, r.end, r.kind))
+            .collect()
+    }
+
+    #[test]
+    fn multi_line_block_comment_is_foldable() {
+        let src = "/* header\n * text\n */\nfn f() {}\n";
+        assert_eq!(kinds(src), [(0, 2, RegionKind::Comment)]);
+    }
+
+    #[test]
+    fn single_line_block_comment_is_not_foldable() {
+        assert!(kinds("let x = 1; /* note */\n").is_empty());
+    }
+
+    #[test]
+    fn unterminated_block_comment_folds_nothing() {
+        // Mid-typing: emitting here would swallow the rest of the file.
+        assert!(kinds("/* open\nstill open\n").is_empty());
+    }
+
+    #[test]
+    fn nested_block_comments_report_the_outer_end() {
+        // Stopping at the first `*/` would end the region on line 1 AND leave
+        // the scanner reading the tail as code.
+        let src = "/* outer\n/* inner */\nstill comment {\n*/\nfn f() {}\n";
+        assert_eq!(kinds(src), [(0, 3, RegionKind::Comment)]);
+    }
+
+    #[test]
+    fn a_comment_after_code_on_the_same_line_still_folds() {
+        let src = "let x = 1; /* why\n   this is here */\n";
+        assert_eq!(kinds(src), [(0, 1, RegionKind::Comment)]);
+    }
+
+    #[test]
+    fn a_comment_between_signature_and_brace_keeps_the_fn_kind() {
+        let src = "fn f() /* note\n   spanning */ {\n    x;\n}\n";
+        let k = kinds(src);
+        assert_eq!(k[0], (0, 1, RegionKind::Comment));
+        assert_eq!(k[1], (1, 3, RegionKind::Fn));
+    }
+
+    #[test]
+    fn a_comment_inside_a_function_is_its_own_region() {
+        let src = "fn f() {\n    /* a\n       b */\n    x;\n}\n";
+        assert_eq!(
+            kinds(src),
+            [(0, 4, RegionKind::Fn), (1, 2, RegionKind::Comment)]
+        );
+    }
+
+    #[test]
+    fn collapse_all_still_ignores_comments() {
+        let src = "/* a\n   b */\nfn f() {\n    x;\n}\n";
+        assert_eq!(fn_heads(src).into_iter().collect::<Vec<_>>(), [2]);
+    }
+
+    #[test]
+    fn folding_a_comment_hides_its_interior() {
+        let src = "/* a\n   b\n   c */\nfn f() {}\n";
+        let m = folded_of(src, &[0]);
+        assert_eq!(m.display(), "/* a\n   c */\nfn f() {}\n");
+        assert_eq!(m.line_numbers(), [1, 3, 4, 5]);
     }
 
     // ── Function bodies / collapse all ───────────────────────────────────────

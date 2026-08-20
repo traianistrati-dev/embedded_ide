@@ -1187,27 +1187,24 @@ pub fn module_config_ui(
     // `pads` is (first, second) in the order the pair is named, `wired` says
     // which of them the module actually has, and `why` is the reason clause —
     // three of these are a HAL `Pins` bound, the USB one is not.
-    let f1_half_bus_note = |ui: &mut egui::Ui,
-                            bus: &str,
-                            pads: (&str, &str),
-                            why: &str,
-                            wired: (bool, bool)| {
-        let missing = match wired {
-            (true, false) => pads.1,
-            (false, true) => pads.0,
-            _ => return,
-        };
-        ui.label("");
-        ui.label(
-            egui::RichText::new(format!(
-                "{missing} is not wired, so this {bus} is not initialised at all — \
+    let f1_half_bus_note =
+        |ui: &mut egui::Ui, bus: &str, pads: (&str, &str), why: &str, wired: (bool, bool)| {
+            let missing = match wired {
+                (true, false) => pads.1,
+                (false, true) => pads.0,
+                _ => return,
+            };
+            ui.label("");
+            ui.label(
+                egui::RichText::new(format!(
+                    "{missing} is not wired, so this {bus} is not initialised at all — \
                  {why}. Assign the {missing} pad on the canvas."
-            ))
-            .size(10.5)
-            .color(egui::Color32::from_rgb(220, 160, 70)),
-        );
-        ui.end_row();
-    };
+                ))
+                .size(10.5)
+                .color(egui::Color32::from_rgb(220, 160, 70)),
+            );
+            ui.end_row();
+        };
 
     // Data direction + hardware flow control. Both lists come from
     // `UsartDirection::options` / `UsartFlow::options`, i.e. from what embassy

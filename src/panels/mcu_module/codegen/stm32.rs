@@ -424,9 +424,7 @@ pub(super) fn gen_parts(
                 PinFunction::GpioInput
                 | PinFunction::GpioOutput
                 | PinFunction::GpioAnalog
-                | PinFunction::AdcChannel { .. } => {
-                    "    #[allow(unused_mut, unused_variables)]\n"
-                }
+                | PinFunction::AdcChannel { .. } => "    #[allow(unused_mut, unused_variables)]\n",
                 // NOT `TimerPwm`: `pwm_hz` consumes those pads, so one left
                 // unused means its timer did not generate (mixed remap sets) —
                 // the same signal an orphaned bus pad carries.
@@ -772,10 +770,11 @@ pub(super) fn gen_parts(
                 .iter()
                 .filter_map(|(c, _)| {
                     let p = configured.iter().find(|(p, _)| {
-                        p.selected_function == PinFunction::TimerPwm {
-                            timer: tim,
-                            channel: *c,
-                        }
+                        p.selected_function
+                            == PinFunction::TimerPwm {
+                                timer: tim,
+                                channel: *c,
+                            }
                     })?;
                     let m = parse_pin(&p.0.name)?;
                     Some(format!(
@@ -812,9 +811,13 @@ pub(super) fn gen_parts(
             // indentation once rustfmt joins it, and that indentation would
             // land in the user's file.
             let mut l: Vec<String> = vec![
-                format!("    // TIM{tim} {list} at {hz} Hz — one frequency for the timer, one duty"),
-                "    // per channel, both from the Virtual Module. `pwm_hz` takes the pins BY".into(),
-                "    // VALUE, and the remap type-state is what decides which pads it drives.".into(),
+                format!(
+                    "    // TIM{tim} {list} at {hz} Hz — one frequency for the timer, one duty"
+                ),
+                "    // per channel, both from the Virtual Module. `pwm_hz` takes the pins BY"
+                    .into(),
+                "    // VALUE, and the remap type-state is what decides which pads it drives."
+                    .into(),
                 format!("    let mut {h} = Timer::new(dp.TIM{tim}, &clocks)"),
                 format!(
                     "        .pwm_hz::<{remap}, _, _>({pins_expr}, &mut afio.mapr, {hz}.Hz());"
@@ -3000,9 +3003,8 @@ fn needs_mut_ref(func: &PinFunction) -> bool {
            // | PinFunction::SpiNss(_)
            // | PinFunction::I2cScl(_)
            // | PinFunction::I2cSda(_)
-            | PinFunction::Mco
-          //cd  | PinFunction::CanTx
-          //cd  | PinFunction::TimerPwm { .. }
+            | PinFunction::Mco //cd  | PinFunction::CanTx
+                               //cd  | PinFunction::TimerPwm { .. }
     )
 }
 
@@ -3227,7 +3229,10 @@ mod blocking_dma_tests {
         let rx = spi_config_file(1, Some(&cfg(BlockingDma::Rx)), &pins, false);
         assert!(!rx.contains("with_rx_dma"), "{rx}");
         assert!(!rx.contains("dma1::C2"), "{rx}");
-        assert!(rx.contains("MISO is not wired: this bus can only SEND"), "{rx}");
+        assert!(
+            rx.contains("MISO is not wired: this bus can only SEND"),
+            "{rx}"
+        );
 
         // With MISO wired, the note stays out of the way.
         let full = spi_config_file(1, Some(&cfg(BlockingDma::Off)), &pins, true);
@@ -3285,7 +3290,9 @@ mod blocking_dma_tests {
             let main_rs = mcu.fresh_main_rs();
             assert!(!main_rs.contains("configs::usart1::init"), "{main_rs}");
             assert!(
-                main_rs.contains(&format!("USART1 is NOT initialised: {missing} is not wired")),
+                main_rs.contains(&format!(
+                    "USART1 is NOT initialised: {missing} is not wired"
+                )),
                 "{main_rs}"
             );
             assert!(!main_rs.contains("dp.DMA1.split()"), "{main_rs}");
@@ -3370,7 +3377,10 @@ mod blocking_dma_tests {
         // the other pad, a moved-value error.
         let dm = ("PA11", PinFunction::UsbDm);
         let dp = ("PA12", PinFunction::UsbDp);
-        for (wired, missing) in [(vec![dm.clone()], "D+ (PA12)"), (vec![dp.clone()], "D- (PA11)")] {
+        for (wired, missing) in [
+            (vec![dm.clone()], "D+ (PA12)"),
+            (vec![dp.clone()], "D- (PA11)"),
+        ] {
             let mcu = build(&wired, BlockingDma::Off);
             let main_rs = mcu.fresh_main_rs();
             assert!(!main_rs.contains("UsbBus::new"), "{main_rs}");
@@ -3379,7 +3389,10 @@ mod blocking_dma_tests {
                 "{main_rs}"
             );
             // Neither pad is touched by a USB block that is not there.
-            assert!(!main_rs.contains("let mut usb_dp = gpioa.pa12"), "{main_rs}");
+            assert!(
+                !main_rs.contains("let mut usb_dp = gpioa.pa12"),
+                "{main_rs}"
+            );
             assert!(!main_rs.contains("pin_dm: gpioa.pa11"), "{main_rs}");
             // …and the `use`s that only the USB block needs stay out too.
             assert!(!main_rs.contains("usbd_serial"), "{main_rs}");
@@ -3395,7 +3408,9 @@ mod blocking_dma_tests {
         // warning there is one the reader cannot answer. Scoped to the
         // statement, so it goes inert rather than hiding anything later.
         assert_eq!(
-            main_rs.matches("#[allow(unused_mut, unused_variables)]").count(),
+            main_rs
+                .matches("#[allow(unused_mut, unused_variables)]")
+                .count(),
             2,
             "{main_rs}"
         );
@@ -3415,8 +3430,14 @@ mod blocking_dma_tests {
 
         // A remapped set is a DIFFERENT type-state, chosen by the pads.
         assert_eq!(pwm_remap(3, &[(1, "PB4")]), Some("Tim3PartialRemap"));
-        assert_eq!(pwm_remap(3, &[(1, "PC6"), (4, "PC9")]), Some("Tim3FullRemap"));
-        assert_eq!(pwm_remap(2, &[(1, "PA15"), (3, "PB10")]), Some("Tim2FullRemap"));
+        assert_eq!(
+            pwm_remap(3, &[(1, "PC6"), (4, "PC9")]),
+            Some("Tim3FullRemap")
+        );
+        assert_eq!(
+            pwm_remap(2, &[(1, "PA15"), (3, "PB10")]),
+            Some("Tim2FullRemap")
+        );
         // CH3/CH4 alone are the same pads in NoRemap and PartialRemap1, and the
         // earliest row wins — it leaves CH1/CH2 on their default pads.
         assert_eq!(pwm_remap(2, &[(3, "PA2"), (4, "PA3")]), Some("Tim2NoRemap"));
@@ -3468,11 +3489,26 @@ mod blocking_dma_tests {
             }
             mcu.fresh_main_rs()
         };
-        let ch3 = ("PA2", PinFunction::TimerPwm { timer: 2, channel: 3 });
-        let ch4 = ("PA3", PinFunction::TimerPwm { timer: 2, channel: 4 });
+        let ch3 = (
+            "PA2",
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 3,
+            },
+        );
+        let ch4 = (
+            "PA3",
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 4,
+            },
+        );
 
         let main_rs = build(&[ch3.clone(), ch4.clone()], true);
-        assert!(main_rs.contains("let mut _pwm2 = Timer::new(dp.TIM2, &clocks)"), "{main_rs}");
+        assert!(
+            main_rs.contains("let mut _pwm2 = Timer::new(dp.TIM2, &clocks)"),
+            "{main_rs}"
+        );
         assert!(
             main_rs.contains(
                 ".pwm_hz::<Tim2NoRemap, _, _>((pa2_tim2_ch3, pa3_tim2_ch4), &mut afio.mapr, 20000.Hz());"
@@ -3481,32 +3517,66 @@ mod blocking_dma_tests {
         );
         // A channel the user set, and one they never touched — 0 %, enabled,
         // pin low, which is the safe state the model documents.
-        assert!(main_rs.contains("_pwm2.set_duty(Channel::C3, (_pwm2_max as u32 * 75 / 100) as u16); // 75 %"), "{main_rs}");
-        assert!(main_rs.contains("_pwm2.set_duty(Channel::C4, (_pwm2_max as u32 * 0 / 100) as u16); // 0 %"), "{main_rs}");
+        assert!(
+            main_rs.contains(
+                "_pwm2.set_duty(Channel::C3, (_pwm2_max as u32 * 75 / 100) as u16); // 75 %"
+            ),
+            "{main_rs}"
+        );
+        assert!(
+            main_rs.contains(
+                "_pwm2.set_duty(Channel::C4, (_pwm2_max as u32 * 0 / 100) as u16); // 0 %"
+            ),
+            "{main_rs}"
+        );
         assert!(main_rs.contains("_pwm2.enable(Channel::C4);"), "{main_rs}");
         // Only what it names: `Channel`, `Timer`, and the ONE remap in use.
-        assert!(main_rs.contains("timer::{Channel, Tim2NoRemap, Timer},"), "{main_rs}");
+        assert!(
+            main_rs.contains("timer::{Channel, Tim2NoRemap, Timer},"),
+            "{main_rs}"
+        );
 
         // Defaults when the module has not been touched: 1 kHz, every duty 0.
         let main_rs = build(&[ch3.clone()], false);
         assert!(main_rs.contains("&mut afio.mapr, 1000.Hz());"), "{main_rs}");
         // ONE channel is not a 1-tuple — the HAL's `Pins` impl for a single pin
         // is the pin itself.
-        assert!(main_rs.contains(".pwm_hz::<Tim2NoRemap, _, _>(pa2_tim2_ch3,"), "{main_rs}");
+        assert!(
+            main_rs.contains(".pwm_hz::<Tim2NoRemap, _, _>(pa2_tim2_ch3,"),
+            "{main_rs}"
+        );
 
         // Pads from two different remap sets have no type-state, so nothing is
         // generated — and the pads stay bound, so the compiler names them too.
         let main_rs = build(
             &[
-                ("PA0", PinFunction::TimerPwm { timer: 2, channel: 1 }),
-                ("PB3", PinFunction::TimerPwm { timer: 2, channel: 2 }),
+                (
+                    "PA0",
+                    PinFunction::TimerPwm {
+                        timer: 2,
+                        channel: 1,
+                    },
+                ),
+                (
+                    "PB3",
+                    PinFunction::TimerPwm {
+                        timer: 2,
+                        channel: 2,
+                    },
+                ),
             ],
             false,
         );
         // The CALL, not the word — the refusal comment names `pwm_hz` too.
         assert!(!main_rs.contains(".pwm_hz::<"), "{main_rs}");
-        assert!(main_rs.contains("TIM2 CH1+CH2 is NOT initialised"), "{main_rs}");
-        assert!(!main_rs.contains("timer::{"), "no code, no import:\n{main_rs}");
+        assert!(
+            main_rs.contains("TIM2 CH1+CH2 is NOT initialised"),
+            "{main_rs}"
+        );
+        assert!(
+            !main_rs.contains("timer::{"),
+            "no code, no import:\n{main_rs}"
+        );
     }
 
     /// A GPIO pin is declared for the reader's loop, which a fresh project does

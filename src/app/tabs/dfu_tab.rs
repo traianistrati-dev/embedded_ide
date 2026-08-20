@@ -274,9 +274,12 @@ pub fn show_dfu_tab(
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new(format!("{} Stop Flash", ph::STOP_CIRCLE))
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(235, 120, 110)),
+                                        egui::RichText::new(format!(
+                                            "{} Stop Flash",
+                                            ph::STOP_CIRCLE
+                                        ))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(235, 120, 110)),
                                     )
                                     .min_size(egui::vec2(FLASH_W, ROW_H)),
                                 )
