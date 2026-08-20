@@ -1139,6 +1139,7 @@ mod emit_for_manual_compile {
     #[ignore = "writes a project to disk for a manual cross-compile"]
     fn emit_f1_dma_project() {
         use crate::panels::mcu_module::modules::ModuleConfig;
+        use crate::panels::mcu_module::modules::model::BlockingDma;
 
         let f1 = builtin_for("stm32f103c8t6").expect("built-in F103");
         let mut mcu = f1.build_mcu();
@@ -1158,10 +1159,20 @@ mod emit_for_manual_compile {
             }
         }
         mcu.reconcile_modules();
+        // `EIDE_F1_DMA=tx|rx|both` picks which halves run on DMA. Each is a
+        // DIFFERENT set of HAL types, so each needs its own compile - `TxDma`
+        // and `Tx` share no methods at all.
+        let halves = match std::env::var("EIDE_F1_DMA").as_deref() {
+            Ok("tx") => BlockingDma::Tx,
+            Ok("rx") => BlockingDma::Rx,
+            Ok("off") => BlockingDma::Off,
+            _ => BlockingDma::Both,
+        };
+        println!("halves: {halves:?}");
         for m in &mut mcu.modules {
             match &mut m.config {
-                ModuleConfig::Usart(c) => c.blocking_dma = true,
-                ModuleConfig::Spi(c) => c.blocking_dma = true,
+                ModuleConfig::Usart(c) => c.blocking_dma = halves,
+                ModuleConfig::Spi(c) => c.blocking_dma = halves,
                 _ => {}
             }
         }
@@ -1169,17 +1180,24 @@ mod emit_for_manual_compile {
         // One split for both peripherals, and the channels the HAL fixes.
         assert_eq!(
             main_rs.matches("dp.DMA1.split()").count(),
-            1,
+            usize::from(halves.any()),
             "the channels are moved out one at a time - a second split would be a \
              second owner:\n{main_rs}"
         );
+        // Only the halves in use contribute an argument, in `init`'s order.
+        let (usart_args, spi_args) = match halves {
+            BlockingDma::Both => ("&clocks, dma1.4, dma1.5)", "&clocks, dma1.2, dma1.3)"),
+            BlockingDma::Tx => ("&clocks, dma1.4)", "&clocks, dma1.3)"),
+            BlockingDma::Rx => ("&clocks, dma1.5)", "&clocks, dma1.2)"),
+            BlockingDma::Off => ("&clocks)", "&clocks)"),
+        };
         assert!(
-            main_rs.contains("&clocks, dma1.4, dma1.5)"),
-            "USART1 is fixed to C4 TX / C5 RX:\n{main_rs}"
+            main_rs.contains(usart_args),
+            "USART1 wants {usart_args}:\n{main_rs}"
         );
         assert!(
-            main_rs.contains("&clocks, dma1.2, dma1.3)"),
-            "SPI1 is fixed to C2 RX / C3 TX:\n{main_rs}"
+            main_rs.contains(spi_args),
+            "SPI1 wants {spi_args}:\n{main_rs}"
         );
 
         let mut files = project_gen::build_project_files(&f1.project, &f1.toolchain, &main_rs);
@@ -1303,23 +1321,36 @@ mod emit_for_manual_compile {
             // `new` and `new_with_*` forms).
             PinFunction::LpuartCts(1),
             PinFunction::LpuartRts(1),
-            // Two channels of ONE timer: the PWM module's whole premise is that
-            // they share a frequency, and only a compiler can confirm the
-            // `SimplePwm::new` slot order and the per-channel handles.
-            PinFunction::TimerPwm {
-                timer: 3,
-                channel: 1,
-            },
-            PinFunction::TimerPwm {
-                timer: 3,
-                channel: 2,
-            },
+            // The BUSES come before PWM: a timer channel has many candidate
+            // pads, SPI1's MISO has two, and first-come-first-served on a
+            // 64-pin part left the SPI without one - which then silently
+            // exercised the TX-only path instead of the full-duplex one.
             PinFunction::SpiSck(1),
             PinFunction::SpiMosi(1),
+            // `EIDE_SPI_TXONLY=1` leaves MISO unwired, which is a different
+            // constructor and a different return type - `Spi::new_txonly` and
+            // the concrete `Spi<'d, Async, Master>` rather than `impl SpiBus`.
             PinFunction::SpiMiso(1),
             PinFunction::I2cScl(1),
             PinFunction::I2cSda(1),
+            // Two channels of ONE timer: the PWM module's whole premise is that
+            // they share a frequency, and only a compiler can confirm the
+            // `SimplePwm::new` slot order and the per-channel handles.
+            // TIM2 rather than TIM3: TIM3.s channels compete with SPI1.s MISO
+            // on this package, and a PWM module with one channel would stop
+            // testing the thing it is here to test.
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 1,
+            },
+            PinFunction::TimerPwm {
+                timer: 2,
+                channel: 2,
+            },
         ] {
+            if want == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
+                continue;
+            }
             let num = mcu
                 .iter_all_pins()
                 .find(|p| {

@@ -2,6 +2,7 @@
 
 use super::super::clock::frequencies;
 use super::super::clock::model::{ClockConfig, PllSrc, Stm32f1Clock, SysclkSrc};
+use super::super::modules::model::BlockingDma;
 use super::super::modules::{
     ApiStyle, CanModuleConfig, I2cModuleConfig, Parity, SpiModuleConfig, StopBits,
     UsartModuleConfig, UsbModuleConfig,
@@ -463,19 +464,31 @@ pub(super) fn gen_parts(
         // instance (see `usart_dma_channels`).
         let dma = usart
             .get(&n)
-            .filter(|c| c.blocking_dma)
-            .and(usart_dma_channels(n));
-        let binding = if native || dma.is_some() {
+            .map(|c| c.blocking_dma)
+            .filter(|_| usart_dma_channels(n).is_some())
+            .unwrap_or_default();
+        // Both DMA and Native hand back a PAIR; only the types differ, and on
+        // DMA they differ per half.
+        let binding = if native || dma.any() {
             format!("let (mut _tx{n}{sfx}, mut _rx{n}{sfx})")
         } else {
             format!("let mut _serial{n}{sfx}")
         };
-        let chans = match dma {
-            Some((tx, rx)) => {
+        let chans = match usart_dma_channels(n) {
+            Some((tx, rx)) if dma.any() => {
                 dma1!();
-                format!(", {}, {}", channel_field(tx), channel_field(rx))
+                // Order follows `init`'s signature: TX first, and a half that
+                // is not on DMA contributes no argument at all.
+                let mut a = String::new();
+                if dma.tx() {
+                    a.push_str(&format!(", {}", channel_field(tx)));
+                }
+                if dma.rx() {
+                    a.push_str(&format!(", {}", channel_field(rx)));
+                }
+                a
             }
-            None => String::new(),
+            _ => String::new(),
         };
         fn_calls.push_str(&format!(
             "    {binding} = \
@@ -513,16 +526,25 @@ pub(super) fn gen_parts(
             .get(&n)
             .map(|c| module_label_sfx(&c.custom_label))
             .unwrap_or_default();
-        let chans = match spi
+        let spi_dma = spi
             .get(&n)
-            .filter(|c| c.blocking_dma)
-            .and(spi_dma_channels(n))
-        {
-            Some((rx, tx)) => {
+            .map(|c| c.blocking_dma)
+            .filter(|_| spi_dma_channels(n).is_some())
+            .unwrap_or_default();
+        let chans = match spi_dma_channels(n) {
+            Some((rx, tx)) if spi_dma.any() => {
                 dma1!();
-                format!(", {}, {}", channel_field(rx), channel_field(tx))
+                // RX first here, matching `with_rx_tx_dma`'s own order.
+                let mut a = String::new();
+                if spi_dma.rx() {
+                    a.push_str(&format!(", {}", channel_field(rx)));
+                }
+                if spi_dma.tx() {
+                    a.push_str(&format!(", {}", channel_field(tx)));
+                }
+                a
             }
-            None => String::new(),
+            _ => String::new(),
         };
         fn_calls.push_str(&format!(
             "    let _spi{n}{sfx} = \
@@ -1307,7 +1329,11 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
     // DMA is a third shape, not a third API style: the handles it returns are
     // the HAL's own DMA types, so `api_style` has nothing left to choose.
     let channels = usart_dma_channels(n);
-    let tmpl = if cfg.is_some_and(|c| c.blocking_dma) && channels.is_some() {
+    let dma = cfg
+        .map(|c| c.blocking_dma)
+        .filter(|_| channels.is_some())
+        .unwrap_or_default();
+    let tmpl = if dma.any() {
         USART_TMPL_DMA
     } else {
         match cfg.map(|c| c.api_style).unwrap_or_default() {
@@ -1321,7 +1347,23 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
     let sfx = cfg
         .map(|c| module_label_sfx(&c.custom_label))
         .unwrap_or_default();
-    tmpl.replace("{HANDLE}", &format!("_serial{n}{sfx}"))
+    let tx = format!("_tx{n}{sfx}");
+    let rx = format!("_rx{n}{sfx}");
+    tmpl.replace("{DMA_WHICH}", dma_which(dma))
+        .replace("{TX_TY}", &usart_half_ty(n, "Tx", dma.tx()))
+        .replace("{RX_TY}", &usart_half_ty(n, "Rx", dma.rx()))
+        .replace("{TXCH_PARAM}", &channel_param("tx_ch", txch, dma.tx()))
+        .replace("{RXCH_PARAM}", &channel_param("rx_ch", rxch, dma.rx()))
+        .replace(
+            "{TX_EXPR}",
+            if dma.tx() { "tx.with_dma(tx_ch)" } else { "tx" },
+        )
+        .replace(
+            "{RX_EXPR}",
+            if dma.rx() { "rx.with_dma(rx_ch)" } else { "rx" },
+        )
+        .replace("{USART_EXAMPLE}", &usart_example(n, dma, &tx, &rx))
+        .replace("{HANDLE}", &format!("_serial{n}{sfx}"))
         .replace("{TXCH}", txch)
         .replace("{RXCH}", rxch)
         .replace("{TX}", &format!("_tx{n}{sfx}"))
@@ -1331,6 +1373,176 @@ fn usart_config_file(n: u8, cfg: Option<&UsartModuleConfig>) -> String {
         .replace("{DATA}", &data.to_string())
         .replace("{PARITY}", &parity.to_string())
         .replace("{STOP}", &stop.to_string())
+}
+
+/// One line of prose naming which halves are on DMA, for the file's header.
+fn dma_which(dma: BlockingDma) -> &'static str {
+    match dma {
+        BlockingDma::Both => "both directions",
+        BlockingDma::Tx => "TX only, RX polled by the CPU",
+        BlockingDma::Rx => "RX only, TX written by the CPU",
+        BlockingDma::Off => "off",
+    }
+}
+
+/// `serial::TxDma1` when that half is on DMA, `serial::Tx<pac::USART1>` when it
+/// is not — the two are different types, which is the whole reason the halves
+/// can be chosen separately.
+fn usart_half_ty(n: u8, half: &str, on_dma: bool) -> String {
+    if on_dma {
+        format!("serial::{half}Dma{n}")
+    } else {
+        format!("serial::{half}<pac::USART{n}>")
+    }
+}
+
+/// A channel parameter for `init`, or nothing when that half is not on DMA.
+///
+/// Leading newline and indentation included, so the signature closes cleanly
+/// whichever combination is emitted.
+fn channel_param(name: &str, ty: &str, on_dma: bool) -> String {
+    if on_dma {
+        format!("\n    {name}: {ty},")
+    } else {
+        String::new()
+    }
+}
+
+/// The SPI handle's type. Three shapes, one per combination — the HAL puts the
+/// channels in the type, so `Spi1TxDma` and `Spi1RxTxDma` are different values
+/// with different methods.
+fn spi_handle_ty(n: u8, dma: BlockingDma) -> String {
+    let kind = match dma {
+        BlockingDma::Both => "RxTxDma",
+        BlockingDma::Tx => "TxDma",
+        _ => "RxDma",
+    };
+    format!("hal_spi::Spi{n}{kind}<SpiRemap, SpiPins, hal_spi::Master>")
+}
+
+/// The builder call that turns a plain `Spi` into the chosen DMA shape.
+fn spi_with(dma: BlockingDma) -> &'static str {
+    match dma {
+        BlockingDma::Both => "with_rx_tx_dma(rx_ch, tx_ch)",
+        BlockingDma::Tx => "with_tx_dma(tx_ch)",
+        _ => "with_rx_dma(rx_ch)",
+    }
+}
+
+/// The worked example for a USART, written for the halves this file actually
+/// has. A DMA half consumes its handle and hands it back from `wait()`; a
+/// polled half is the HAL's `nb` one, and they are used nothing alike — showing
+/// the wrong pair would be worse than showing none.
+///
+/// Built line by line rather than as one continued literal: a `\`-continuation
+/// keeps its source indentation once rustfmt joins the lines, and that
+/// indentation lands in the user's file.
+fn usart_example(n: u8, dma: BlockingDma, tx: &str, rx: &str) -> String {
+    let mut l: Vec<String> = vec![format!("// -- Using USART{n} --")];
+    let traits = match (dma.tx(), dma.rx()) {
+        (true, true) => Some("{ReadDma, WriteDma}"),
+        (true, false) => Some("WriteDma"),
+        (false, true) => Some("ReadDma"),
+        (false, false) => None,
+    };
+    if let Some(t) = traits {
+        l.push("// A DMA transfer CONSUMES its handle and gives it back from `wait()`, so".into());
+        l.push("// rebind it every time, and the buffer must outlive the transfer.".into());
+        l.push("//".into());
+        l.push(format!("//     use stm32f1xx_hal::dma::{t};"));
+    }
+    l.push("//".into());
+    l.push("// In main.rs, after the init above:".into());
+    l.push("//".into());
+    if dma.tx() {
+        l.push("//     // Send - the DMA reads straight out of the slice.".into());
+        l.push(format!(
+            "//     let (_, tx) = {tx}.write(&b\"hello\"[..]).wait();"
+        ));
+        l.push(format!("//     {tx} = tx;"));
+    } else {
+        l.push("//     // TX is not on DMA: the CPU writes each byte.".into());
+        l.push("//     use core::fmt::Write;".into());
+        l.push(format!("//     writeln!({tx}, \"hello\").ok();"));
+    }
+    l.push("//".into());
+    if dma.rx() {
+        l.push("//     // Receive 8 bytes into a 'static buffer.".into());
+        l.push("//     static mut RXBUF: [u8; 8] = [0; 8];".into());
+        l.push(
+            "//     let buf: &'static mut [u8; 8] = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };"
+                .into(),
+        );
+        l.push(format!("//     let (buf, rx) = {rx}.read(buf).wait();"));
+        l.push(format!("//     {rx} = rx;"));
+        l.push("//".into());
+        l.push("// For a receiver that never misses bytes between reads, use the circular".into());
+        l.push(format!(
+            "// form instead: `let mut circ = {rx}.circ_read(two_buffers);`."
+        ));
+    } else {
+        l.push("//     // RX is not on DMA: one byte at a time, blocking.".into());
+        l.push("//     use nb::block;".into());
+        l.push(format!(
+            "//     let byte = block!({rx}.read()).unwrap_or(0);"
+        ));
+    }
+    l.join("\n")
+}
+
+/// The worked example for an SPI. Each shape has ONE trait and one method:
+/// `write` for TX-only, `read` for RX-only, `read_write` for both.
+fn spi_example(n: u8, dma: BlockingDma, handle: &str) -> String {
+    let tr = match dma {
+        BlockingDma::Both => "ReadWriteDma",
+        BlockingDma::Tx => "WriteDma",
+        _ => "ReadDma",
+    };
+    let mut l: Vec<String> = vec![
+        format!("// -- Using SPI{n} on DMA --"),
+        "// A transfer CONSUMES the handle and gives it back from `wait()`, so rebind".into(),
+        "// it every time. The buffers must be 'static. In main.rs, after the init:".into(),
+        "//".into(),
+        format!("//     use stm32f1xx_hal::dma::{tr};"),
+        "//".into(),
+    ];
+    let decl = |name: &str, init: &str| {
+        vec![
+            format!("//     static mut {name}: [u8; 4] = {init};"),
+            format!(
+                "//     let {} : &'static mut [u8; 4] = unsafe {{ &mut *core::ptr::addr_of_mut!({name}) }};",
+                name.to_lowercase()
+            ),
+        ]
+    };
+    match dma {
+        BlockingDma::Both => {
+            l.extend(decl("RXBUF", "[0; 4]"));
+            l.extend(decl("TXBUF", "[0x9F, 0, 0, 0]"));
+            l.push(format!(
+                "//     let ((rxbuf, _txbuf), spi) = {handle}.read_write(rxbuf, txbuf).wait();"
+            ));
+            l.push(format!("//     {handle} = spi;"));
+            l.push("//     // rxbuf now holds the reply.".into());
+        }
+        BlockingDma::Tx => {
+            l.extend(decl("TXBUF", "[0x9F, 0, 0, 0]"));
+            l.push(format!(
+                "//     let (_txbuf, spi) = {handle}.write(txbuf).wait();"
+            ));
+            l.push(format!("//     {handle} = spi;"));
+            l.push("//     // Send only - nothing is captured from MISO.".into());
+        }
+        _ => {
+            l.extend(decl("RXBUF", "[0; 4]"));
+            l.push(format!(
+                "//     let (rxbuf, spi) = {handle}.read(rxbuf).wait();"
+            ));
+            l.push(format!("//     {handle} = spi;"));
+            l.push("//     // rxbuf holds what MISO clocked in.".into());
+        }
+    }
+    l.join("\n")
 }
 
 /// The `(tx, rx)` DMA channels `stm32f1xx-hal` binds to `USART{n}`.
@@ -1375,16 +1587,24 @@ pub fn blocking_dma_uses(mcu: &crate::panels::mcu_module::Mcu) -> Vec<super::dma
     };
     for m in &mcu.modules {
         match &m.config {
-            ModuleConfig::Usart(c) if c.blocking_dma => {
+            ModuleConfig::Usart(c) if c.blocking_dma.any() => {
                 if let Some((tx, rx)) = usart_dma_channels(c.instance) {
-                    push(tx, Bus::Usart, c.instance, "TX");
-                    push(rx, Bus::Usart, c.instance, "RX");
+                    if c.blocking_dma.tx() {
+                        push(tx, Bus::Usart, c.instance, "TX");
+                    }
+                    if c.blocking_dma.rx() {
+                        push(rx, Bus::Usart, c.instance, "RX");
+                    }
                 }
             }
-            ModuleConfig::Spi(c) if c.blocking_dma => {
+            ModuleConfig::Spi(c) if c.blocking_dma.any() => {
                 if let Some((rx, tx)) = spi_dma_channels(c.instance) {
-                    push(tx, Bus::Spi, c.instance, "TX");
-                    push(rx, Bus::Spi, c.instance, "RX");
+                    if c.blocking_dma.tx() {
+                        push(tx, Bus::Spi, c.instance, "TX");
+                    }
+                    if c.blocking_dma.rx() {
+                        push(rx, Bus::Spi, c.instance, "RX");
+                    }
                 }
             }
             _ => {}
@@ -1459,12 +1679,13 @@ const STOP_BITS: u8 = {STOP}; // 1, 2
 // <<< GENERATED END >>>
 
 // Everything below is editable - your changes are preserved on regeneration.
-// DMA transport (chosen in the Virtual Module): the peripheral moves bytes
-// without the CPU polling for each one. `init` returns the two DMA halves.
+// DMA transport (chosen in the Virtual Module): {DMA_WHICH}. A half on DMA
+// moves bytes without the CPU polling for each one; a half left off is the
+// ordinary `nb` handle, which is often the better trade for short bursts - and
+// it leaves that channel free for another peripheral.
 //
 // The channels are NOT a choice on this chip: stm32f1xx-hal puts them in the
-// type, fixing USART{N} to {TXCH} for TX and {RXCH} for RX, so main.rs passes
-// exactly those.
+// type, fixing USART{N} to {TXCH} for TX and {RXCH} for RX.
 use stm32f1xx_hal::{
     afio,
     dma::dma1,
@@ -1475,8 +1696,8 @@ use stm32f1xx_hal::{
 };
 
 /// The handles [`init`] hands back. Named so they can be struct fields.
-pub type TxHandle = serial::TxDma{N};
-pub type RxHandle = serial::RxDma{N};
+pub type TxHandle = {TX_TY};
+pub type RxHandle = {RX_TY};
 
 fn get_config() -> serial::Config {
     let mut config = Config::default().baudrate(BAUDRATE.bps());
@@ -1504,34 +1725,13 @@ pub fn init<PINS: serial::Pins<pac::USART{N}>>(
     usart: pac::USART{N},
     pins: PINS,
     afio: &mut afio::Parts,
-    clocks: &Clocks,
-    tx_ch: {TXCH},
-    rx_ch: {RXCH},
+    clocks: &Clocks,{TXCH_PARAM}{RXCH_PARAM}
 ) -> (TxHandle, RxHandle) {
     let (tx, rx) = Serial::new(usart, pins, &mut afio.mapr, get_config(), clocks).split();
-    (tx.with_dma(tx_ch), rx.with_dma(rx_ch))
+    ({TX_EXPR}, {RX_EXPR})
 }
 
-// -- Using USART{N} on DMA --
-// A transfer CONSUMES the handle and gives it back from `wait()`, so rebind it
-// every time. The buffer must outlive the transfer: `&'static` data for TX, a
-// `'static` buffer for RX. In main.rs, after the init above:
-//
-//     use stm32f1xx_hal::dma::{ReadDma, WriteDma};
-//
-//     // Send - the DMA reads straight out of the slice.
-//     let (_, tx) = {TX}.write(&b"hello"[..]).wait();
-//     {TX} = tx;
-//
-//     // Receive 8 bytes into a 'static buffer.
-//     static mut RXBUF: [u8; 8] = [0; 8];
-//     let buf: &'static mut [u8; 8] = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
-//     let (buf, rx) = {RX}.read(buf).wait();
-//     {RX} = rx;
-//
-// For a receiver that never misses bytes between reads, use the circular form
-// instead: `let mut circ = {RX}.circ_read(two_buffers);` then `circ.peek(...)`.
-
+{USART_EXAMPLE}
 "#;
 
 /// Blocking `stm32f1xx-hal` SPI on DMA. Returns the combined RX+TX handle.
@@ -1556,8 +1756,9 @@ pub type SpiRemap = {REMAP};
 // <<< GENERATED END >>>
 
 // Everything below is editable - your changes are preserved on regeneration.
-// DMA transport (chosen in the Virtual Module). The channels are NOT a choice
-// on this chip: stm32f1xx-hal fixes SPI{N} to {RXCH} for RX and {TXCH} for TX.
+// DMA transport (chosen in the Virtual Module): {DMA_WHICH}. The channels are
+// NOT a choice on this chip: stm32f1xx-hal fixes SPI{N} to {RXCH} for RX and
+// {TXCH} for TX.
 use stm32f1xx_hal::{
     afio,
     dma::dma1,
@@ -1576,36 +1777,20 @@ fn get_mode() -> Mode {
     }
 }
 
-/// The combined RX+TX DMA handle [`init`] hands back.
-pub type Handle = hal_spi::Spi{N}RxTxDma<SpiRemap, SpiPins, hal_spi::Master>;
+/// The DMA handle [`init`] hands back - its TYPE says which halves are on DMA.
+pub type Handle = {HANDLE_TY};
 
 pub fn init(
     spi: pac::SPI{N},
     pins: SpiPins,
     {AFIO_PARAM}: &mut afio::Parts,
-    clocks: &Clocks,
-    rx_ch: {RXCH},
-    tx_ch: {TXCH},
+    clocks: &Clocks,{RXCH_PARAM}{TXCH_PARAM}
 ) -> Handle {
     Spi::spi{N}(spi, pins, {AFIO_ARG}get_mode(), CLOCK_KHZ.kHz(), *clocks)
-        .with_rx_tx_dma(rx_ch, tx_ch)
+        .{WITH}
 }
 
-// -- Using SPI{N} on DMA --
-// A transfer CONSUMES the handle and gives it back from `wait()`, so rebind it
-// every time. Both buffers must be 'static, and they come back from `wait()`
-// with the handle. In main.rs, after the init above:
-//
-//     use stm32f1xx_hal::dma::ReadWriteDma;
-//
-//     static mut RXBUF: [u8; 4] = [0; 4];
-//     static mut TXBUF: [u8; 4] = [0x9F, 0, 0, 0];
-//     let rxb: &'static mut [u8; 4] = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
-//     let txb: &'static mut [u8; 4] = unsafe { &mut *core::ptr::addr_of_mut!(TXBUF) };
-//     let ((rxb, _txb), spi) = {HANDLE}.read_write(rxb, txb).wait();
-//     {HANDLE} = spi;
-//     // rxb now holds the reply.
-
+{SPI_EXAMPLE}
 "#;
 
 /// Native `stm32f1xx-hal` USART init (no embedded-io bridge). Returns the split
@@ -1834,7 +2019,11 @@ fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, Stri
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let khz = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000) / 1_000;
     let channels = spi_dma_channels(n);
-    let tmpl = if cfg.is_some_and(|c| c.blocking_dma) && channels.is_some() {
+    let dma = cfg
+        .map(|c| c.blocking_dma)
+        .filter(|_| channels.is_some())
+        .unwrap_or_default();
+    let tmpl = if dma.any() {
         SPI_TMPL_DMA
     } else {
         match cfg.map(|c| c.api_style).unwrap_or_default() {
@@ -1859,6 +2048,15 @@ fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, pin_tys: &(String, Stri
         .replace("{AFIO_ARG}", afio_arg)
         .replace("{RXCH}", rxch)
         .replace("{TXCH}", txch)
+        .replace("{DMA_WHICH}", dma_which(dma))
+        .replace("{HANDLE_TY}", &spi_handle_ty(n, dma))
+        .replace("{RXCH_PARAM}", &channel_param("rx_ch", rxch, dma.rx()))
+        .replace("{TXCH_PARAM}", &channel_param("tx_ch", txch, dma.tx()))
+        .replace("{WITH}", spi_with(dma))
+        .replace(
+            "{SPI_EXAMPLE}",
+            &spi_example(n, dma, &format!("_spi{n}{sfx}")),
+        )
 }
 
 /// `({AFIO_PARAM}, {AFIO_ARG})` for a config template.
@@ -2465,7 +2663,7 @@ mod blocking_dma_tests {
     #[test]
     fn the_flag_switches_the_template_whatever_the_api_style() {
         let dma_cfg = |style| UsartModuleConfig {
-            blocking_dma: true,
+            blocking_dma: BlockingDma::Both,
             api_style: style,
             ..UsartModuleConfig::new(1)
         };
@@ -2487,7 +2685,7 @@ mod blocking_dma_tests {
         let spi = spi_config_file(
             2,
             Some(&SpiModuleConfig {
-                blocking_dma: true,
+                blocking_dma: BlockingDma::Both,
                 ..SpiModuleConfig::new(2)
             }),
             &("()".into(), "Remap".into()),
@@ -2501,6 +2699,152 @@ mod blocking_dma_tests {
             spi.contains("rx_ch: dma1::C4,") && spi.contains("tx_ch: dma1::C5,"),
             "{spi}"
         );
+    }
+
+    /// The four states are four different sets of HAL types, and the file has
+    /// to match the one it claims: `TxDma1` has `write`, `Tx<USART1>` does not.
+    #[test]
+    fn each_half_gets_its_own_type_and_its_own_parameter() {
+        let cfg = |dma| UsartModuleConfig {
+            blocking_dma: dma,
+            ..UsartModuleConfig::new(1)
+        };
+
+        let both = usart_config_file(1, Some(&cfg(BlockingDma::Both)));
+        assert!(
+            both.contains("pub type TxHandle = serial::TxDma1;"),
+            "{both}"
+        );
+        assert!(
+            both.contains("pub type RxHandle = serial::RxDma1;"),
+            "{both}"
+        );
+        assert!(
+            both.contains("tx_ch: dma1::C4,") && both.contains("rx_ch: dma1::C5,"),
+            "{both}"
+        );
+        assert!(
+            both.contains("(tx.with_dma(tx_ch), rx.with_dma(rx_ch))"),
+            "{both}"
+        );
+
+        // RX only: the TX half is the HAL's plain `nb` one, and `init` takes no
+        // TX channel at all - that channel stays free for another peripheral.
+        let rx = usart_config_file(1, Some(&cfg(BlockingDma::Rx)));
+        assert!(
+            rx.contains("pub type TxHandle = serial::Tx<pac::USART1>;"),
+            "{rx}"
+        );
+        assert!(rx.contains("pub type RxHandle = serial::RxDma1;"), "{rx}");
+        assert!(!rx.contains("tx_ch"), "no TX channel anywhere:\n{rx}");
+        assert!(rx.contains("rx_ch: dma1::C5,"), "{rx}");
+        assert!(rx.contains("(tx, rx.with_dma(rx_ch))"), "{rx}");
+        // ...and the example teaches the halves it really has.
+        assert!(rx.contains("writeln!(_tx1, \"hello\").ok();"), "{rx}");
+        assert!(rx.contains("use stm32f1xx_hal::dma::ReadDma;"), "{rx}");
+        assert!(!rx.contains("WriteDma"), "{rx}");
+
+        let tx = usart_config_file(1, Some(&cfg(BlockingDma::Tx)));
+        assert!(tx.contains("pub type TxHandle = serial::TxDma1;"), "{tx}");
+        assert!(
+            tx.contains("pub type RxHandle = serial::Rx<pac::USART1>;"),
+            "{tx}"
+        );
+        assert!(!tx.contains("rx_ch"), "{tx}");
+        assert!(tx.contains("(tx.with_dma(tx_ch), rx)"), "{tx}");
+        assert!(tx.contains("block!(_rx1.read())"), "{tx}");
+
+        // Off keeps the old template entirely.
+        let off = usart_config_file(1, Some(&cfg(BlockingDma::Off)));
+        assert!(!off.contains("with_dma"), "{off}");
+    }
+
+    /// SPI's three DMA shapes are three TYPES, each with one method.
+    #[test]
+    fn the_spi_handle_type_says_which_halves_are_on_dma() {
+        let cfg = |dma| SpiModuleConfig {
+            blocking_dma: dma,
+            ..SpiModuleConfig::new(1)
+        };
+        let pins = ("()".to_owned(), "Remap".to_owned());
+
+        let both = spi_config_file(1, Some(&cfg(BlockingDma::Both)), &pins);
+        assert!(
+            both.contains("Spi1RxTxDma<SpiRemap, SpiPins, hal_spi::Master>"),
+            "{both}"
+        );
+        assert!(both.contains(".with_rx_tx_dma(rx_ch, tx_ch)"), "{both}");
+        assert!(both.contains("read_write(rxbuf, txbuf)"), "{both}");
+
+        let tx = spi_config_file(1, Some(&cfg(BlockingDma::Tx)), &pins);
+        assert!(
+            tx.contains("Spi1TxDma<SpiRemap, SpiPins, hal_spi::Master>"),
+            "{tx}"
+        );
+        assert!(tx.contains(".with_tx_dma(tx_ch)"), "{tx}");
+        assert!(!tx.contains("rx_ch"), "{tx}");
+        assert!(tx.contains("use stm32f1xx_hal::dma::WriteDma;"), "{tx}");
+
+        let rx = spi_config_file(1, Some(&cfg(BlockingDma::Rx)), &pins);
+        assert!(
+            rx.contains("Spi1RxDma<SpiRemap, SpiPins, hal_spi::Master>"),
+            "{rx}"
+        );
+        assert!(rx.contains(".with_rx_dma(rx_ch)"), "{rx}");
+        assert!(!rx.contains("tx_ch"), "{rx}");
+        assert!(rx.contains("use stm32f1xx_hal::dma::ReadDma;"), "{rx}");
+    }
+
+    /// The Configuration tab's list must show the halves actually taken -
+    /// reporting a channel the project left free is the drift the list exists
+    /// to avoid.
+    #[test]
+    fn only_the_halves_in_use_are_reported() {
+        use crate::panels::mcu_module::builtins::builtin_for;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let mut mcu = builtin_for("stm32f103c8t6")
+            .expect("built-in F103")
+            .build_mcu();
+        for (name, func) in [
+            ("PA9", PinFunction::UsartTx(1)),
+            ("PA10", PinFunction::UsartRx(1)),
+        ] {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            if let Some(p) = num.and_then(|n| mcu.find_pin_mut(n)) {
+                p.selected_function = func;
+            }
+        }
+        mcu.reconcile_modules();
+        let set = |mcu: &mut crate::panels::mcu_module::Mcu, d| {
+            for m in &mut mcu.modules {
+                if let ModuleConfig::Usart(c) = &mut m.config {
+                    c.blocking_dma = d;
+                }
+            }
+        };
+
+        set(&mut mcu, BlockingDma::Rx);
+        let rows: Vec<(String, String)> = blocking_dma_uses(&mcu)
+            .into_iter()
+            .map(|u| (u.peri, u.user))
+            .collect();
+        assert_eq!(rows, [("DMA1_CH5".to_owned(), "USART1 RX".to_owned())]);
+
+        set(&mut mcu, BlockingDma::Tx);
+        assert_eq!(
+            blocking_dma_uses(&mcu)
+                .into_iter()
+                .map(|u| u.peri)
+                .collect::<Vec<_>>(),
+            ["DMA1_CH4"]
+        );
+
+        set(&mut mcu, BlockingDma::Off);
+        assert!(blocking_dma_uses(&mcu).is_empty());
     }
 
     /// The Configuration tab's list, on the F1 blocking path: the same two
@@ -2536,8 +2880,8 @@ mod blocking_dma_tests {
 
         for m in &mut mcu.modules {
             match &mut m.config {
-                ModuleConfig::Usart(c) => c.blocking_dma = true,
-                ModuleConfig::Spi(c) => c.blocking_dma = true,
+                ModuleConfig::Usart(c) => c.blocking_dma = BlockingDma::Both,
+                ModuleConfig::Spi(c) => c.blocking_dma = BlockingDma::Both,
                 _ => {}
             }
         }

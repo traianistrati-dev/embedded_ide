@@ -7,6 +7,7 @@ use super::rotate::Rot;
 use crate::panels::mcu_module::codegen;
 use crate::panels::mcu_module::codegen::dma_map;
 use crate::panels::mcu_module::codegen::sanitize_label;
+use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, ModuleConfig, ModuleKind, ModuleSignal, Parity, StopBits,
@@ -1033,15 +1034,32 @@ pub fn module_config_ui(
     // A checkbox rather than a channel picker, because there is nothing to pick
     // — stm32f1xx-hal fixes the channel per peripheral in its types. The label
     // names them anyway, so the choice is not a black box.
-    let transport_row = |ui: &mut egui::Ui, on: &mut bool, chans: &str| {
+    let transport_row = |ui: &mut egui::Ui, on: &mut BlockingDma, chans: &str| {
         ui.label("Transport");
-        ui.checkbox(on, "DMA (stm32f1xx-hal)")
-            .on_hover_text(format!(
-                "Off: the CPU moves every byte. On: the peripheral talks to DMA on {chans} - \
-             fixed on this chip, so there is nothing to choose. `init` then returns the \
-             HAL's DMA handles, whose transfers consume the handle and give it back from \
-             `wait()`; the generated config file shows the shape."
-            ));
+        egui::ComboBox::from_id_salt("blocking_dma")
+            .selected_text(on.label())
+            .show_ui(ui, |ui| {
+                for v in BlockingDma::ALL {
+                    ui.selectable_value(on, v, v.label())
+                        .on_hover_text(match v {
+                            BlockingDma::Off => "The CPU moves every byte, both ways.".to_owned(),
+                            BlockingDma::Both => format!(
+                                "Both directions on DMA ({chans}), and both channels reserved."
+                            ),
+                            // The half-and-half cases are the interesting ones,
+                            // so each says what it buys.
+                            BlockingDma::Tx => format!(
+                                "TX on DMA, RX polled. Frees the RX channel; `init` returns a \
+                                 DMA transmitter and the HAL's ordinary `nb` receiver ({chans})."
+                            ),
+                            BlockingDma::Rx => format!(
+                                "RX on DMA, TX written by the CPU - the usual choice when \
+                                 receiving must not drop bytes but sending is short bursts. \
+                                 Frees the TX channel ({chans})."
+                            ),
+                        });
+                }
+            });
         ui.end_row();
     };
 
@@ -1108,7 +1126,13 @@ pub fn module_config_ui(
                     );
                 ui.selectable_value(mode, UsartMode::Dma, "DMA (ring buffer)")
                     .on_hover_text(
-                        "UartTx + RingBufferedUartRx -> the same embedded-io-async traits, but                          the peripheral talks to DMA directly and RX keeps filling a circular                          buffer between your reads, so bytes are not dropped in the gaps.                          Needs DMA channels: main.rs gets a TODO (won't compile until filled).",
+                        "UartTx + RingBufferedUartRx -> the same embedded-io-async traits, but the \
+                         peripheral talks to DMA directly and RX keeps filling a circular buffer \
+                         between your reads, so bytes are not dropped in the gaps. Takes TWO \
+                         channels on a bidirectional UART - embassy's constructor requires both. \
+                         To spend one, set Data Direction to RX only or TX only; to keep both \
+                         directions but send from the CPU, the generated file shows \
+                         `blocking_write` on the same handle.",
                     );
             });
         ui.end_row();
@@ -1363,7 +1387,7 @@ pub fn module_config_ui(
                     {
                         f1_serial_note(ui);
                         transport_row(ui, &mut cfg.blocking_dma, &chans);
-                        if cfg.blocking_dma {
+                        if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);
                         } else {
                             api_row(ui, &mut pending.0);
@@ -1414,7 +1438,7 @@ pub fn module_config_ui(
                         cfg.instance,
                     ) {
                         transport_row(ui, &mut cfg.blocking_dma, &chans);
-                        if cfg.blocking_dma {
+                        if cfg.blocking_dma.any() {
                             api_row_locked_dma(ui);
                         } else {
                             api_row(ui, &mut pending.0);

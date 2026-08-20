@@ -72,7 +72,10 @@ impl ModuleKind {
             // would make the module eat four pins whenever flow-control pads
             // happen to be free, which is not what adding a serial device means.
             ModuleKind::GenericInterfaceLpuart => (&[LpTx, LpRx], &[]),
-            ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi, Miso], &[Nss]),
+            // MISO is OPTIONAL, not absent: autowire still takes it when a
+            // pad is free, but a bus without one is a transmitter rather than
+            // a broken module — embassy's `new_txonly` is exactly that shape.
+            ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi], &[Miso, Nss]),
             ModuleKind::GenericInterfaceI2c => (&[Scl, Sda], &[]),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
@@ -547,6 +550,115 @@ impl UsartFlow {
     }
 }
 
+/// Which HALVES of a bus run on DMA, on the STM32F1 blocking runtime.
+///
+/// Not a bool, because the two directions are independent in the HAL and in
+/// practice: a receiver that must not drop bytes wants DMA, while a transmitter
+/// sending short bursts is often better off written straight from the CPU —
+/// `writeln!` on a plain `Tx` instead of a transfer that consumes the handle
+/// and hands it back from `wait()`. Leaving TX off also leaves its channel free
+/// for another peripheral, which matters on a chip with seven of them.
+///
+/// `stm32f1xx-hal` supports every combination directly: `Tx::with_dma` and
+/// `Rx::with_dma` are separate methods on the split halves, and SPI has
+/// `with_tx_dma` / `with_rx_dma` / `with_rx_tx_dma`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlockingDma {
+    /// Both directions polled by the CPU.
+    #[default]
+    Off,
+    /// Transmit on DMA, receive polled.
+    Tx,
+    /// Receive on DMA, transmit polled.
+    Rx,
+    /// Both directions on DMA.
+    Both,
+}
+
+impl BlockingDma {
+    pub const ALL: [BlockingDma; 4] = [
+        BlockingDma::Off,
+        BlockingDma::Tx,
+        BlockingDma::Rx,
+        BlockingDma::Both,
+    ];
+
+    pub fn tx(self) -> bool {
+        matches!(self, BlockingDma::Tx | BlockingDma::Both)
+    }
+
+    pub fn rx(self) -> bool {
+        matches!(self, BlockingDma::Rx | BlockingDma::Both)
+    }
+
+    /// Is any half on DMA? Decides whether the config file uses the DMA
+    /// template at all, and whether `main.rs` needs `DMA1.split()`.
+    pub fn any(self) -> bool {
+        self != BlockingDma::Off
+    }
+
+    /// For `skip_serializing_if`: the default never reaches `mcu.config`.
+    fn is_off(&self) -> bool {
+        *self == BlockingDma::Off
+    }
+
+    /// The persisted spelling. Round-trips through [`Self::from_token`].
+    pub fn token(self) -> &'static str {
+        match self {
+            BlockingDma::Off => "Off",
+            BlockingDma::Tx => "Tx",
+            BlockingDma::Rx => "Rx",
+            BlockingDma::Both => "Both",
+        }
+    }
+
+    /// The inverse. `None` for anything unrecognised, which the caller reads as
+    /// the default rather than as a reason to drop the whole module list.
+    pub fn from_token(t: &str) -> Option<BlockingDma> {
+        Self::ALL.into_iter().find(|v| v.token() == t)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BlockingDma::Off => "Off - the CPU moves every byte",
+            BlockingDma::Tx => "TX only",
+            BlockingDma::Rx => "RX only",
+            BlockingDma::Both => "TX and RX",
+        }
+    }
+}
+
+/// Written as a STRING rather than a RON enum, and read back from a string OR
+/// from the `true` / `false` this field held when it was a bool.
+///
+/// A string because serde's `untagged` shim below cannot recognise a bare RON
+/// identifier, so serialising as `Both` would round-trip into a parse error;
+/// and the compatibility matters because RON reads `@modules` as ONE value —
+/// a field that fails takes every Virtual Module with it, and the user finds an
+/// empty canvas.
+impl Serialize for BlockingDma {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.token())
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockingDma {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Shim {
+            Text(String),
+            Legacy(bool),
+        }
+        Ok(match Shim::deserialize(d)? {
+            Shim::Text(t) => BlockingDma::from_token(&t).unwrap_or_default(),
+            // The bool meant "both halves", which is all it could mean.
+            Shim::Legacy(true) => BlockingDma::Both,
+            Shim::Legacy(false) => BlockingDma::Off,
+        })
+    }
+}
+
 /// USART communication settings + the user's RX/TX data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsartModuleConfig {
@@ -609,17 +721,17 @@ pub struct UsartModuleConfig {
     pub dma_tx: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dma_rx: String,
-    /// Blocking runtime on STM32F1: run this bus on DMA instead of polling.
+    /// Blocking runtime on STM32F1: which halves of this bus run on DMA.
     ///
-    /// A separate flag from the async `mode` / `async_mode`, because it is a
-    /// different HAL: `stm32f1xx-hal`'s `Rx::with_dma` / `Spi::with_rx_tx_dma`,
-    /// not embassy's. There is no channel to choose here — the F1 HAL fixes it
-    /// per peripheral in its TYPES (USART1 is dma1::C4/C5, SPI1 dma1::C2/C3),
-    /// which is why this is a bool and not [`Self::dma_tx`].
+    /// A different HAL from the async `mode` / `async_mode`:
+    /// `stm32f1xx-hal`'s `with_dma`, not embassy's. There is no channel to
+    /// choose here — the F1 HAL fixes it per peripheral in its TYPES (USART1 is
+    /// dma1::C4/C5, SPI1 dma1::C2/C3), which is why this names DIRECTIONS and
+    /// not channels, unlike [`Self::dma_tx`].
     ///
     /// Ignored on every other family and on the Async/Native/RTIC runtimes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub blocking_dma: bool,
+    #[serde(default, skip_serializing_if = "BlockingDma::is_off")]
+    pub blocking_dma: BlockingDma,
 }
 
 impl UsartModuleConfig {
@@ -644,7 +756,7 @@ impl UsartModuleConfig {
             mode: UsartMode::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),
-            blocking_dma: false,
+            blocking_dma: BlockingDma::default(),
         }
     }
 }
@@ -682,17 +794,17 @@ pub struct SpiModuleConfig {
     pub dma_tx: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dma_rx: String,
-    /// Blocking runtime on STM32F1: run this bus on DMA instead of polling.
+    /// Blocking runtime on STM32F1: which halves of this bus run on DMA.
     ///
-    /// A separate flag from the async `mode` / `async_mode`, because it is a
-    /// different HAL: `stm32f1xx-hal`'s `Rx::with_dma` / `Spi::with_rx_tx_dma`,
-    /// not embassy's. There is no channel to choose here — the F1 HAL fixes it
-    /// per peripheral in its TYPES (USART1 is dma1::C4/C5, SPI1 dma1::C2/C3),
-    /// which is why this is a bool and not [`Self::dma_tx`].
+    /// A different HAL from the async `mode` / `async_mode`:
+    /// `stm32f1xx-hal`'s `with_dma`, not embassy's. There is no channel to
+    /// choose here — the F1 HAL fixes it per peripheral in its TYPES (USART1 is
+    /// dma1::C4/C5, SPI1 dma1::C2/C3), which is why this names DIRECTIONS and
+    /// not channels, unlike [`Self::dma_tx`].
     ///
     /// Ignored on every other family and on the Async/Native/RTIC runtimes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub blocking_dma: bool,
+    #[serde(default, skip_serializing_if = "BlockingDma::is_off")]
+    pub blocking_dma: BlockingDma,
 }
 
 impl SpiModuleConfig {
@@ -709,7 +821,7 @@ impl SpiModuleConfig {
             async_mode: AsyncBusMode::default(),
             dma_tx: String::new(),
             dma_rx: String::new(),
-            blocking_dma: false,
+            blocking_dma: BlockingDma::default(),
         }
     }
 }
@@ -1107,5 +1219,45 @@ impl VirtualModule {
     /// The peripheral instance this module targets.
     pub fn instance(&self) -> u8 {
         self.config.instance()
+    }
+}
+
+#[cfg(test)]
+mod blocking_dma_compat_tests {
+    use super::{BlockingDma, UsartModuleConfig};
+
+    /// A project saved when this field was a bool must still open. RON parses
+    /// `@modules` as ONE value, so a field that fails to read takes every
+    /// Virtual Module with it — the user would find an empty canvas.
+    #[test]
+    fn yesterdays_bool_still_reads() {
+        let legacy = concat!(
+            "(instance:1,baud_rate:115200,data_bits:8,parity:None,stop_bits:One,",
+            "rx_model:\"\",tx_model:\"\",blocking_dma:true)"
+        );
+        let c: UsartModuleConfig = ron::from_str(legacy).expect("legacy config parses");
+        assert_eq!(
+            c.blocking_dma,
+            BlockingDma::Both,
+            "the bool meant both halves"
+        );
+
+        let off = legacy.replace("blocking_dma:true", "blocking_dma:false");
+        let c: UsartModuleConfig = ron::from_str(&off).expect("legacy false parses");
+        assert_eq!(c.blocking_dma, BlockingDma::Off);
+    }
+
+    /// ...and the current spelling round-trips, halves included.
+    #[test]
+    fn every_state_survives_a_round_trip() {
+        for d in BlockingDma::ALL {
+            let c = UsartModuleConfig {
+                blocking_dma: d,
+                ..UsartModuleConfig::new(1)
+            };
+            let text = ron::to_string(&c).expect("serialises");
+            let back: UsartModuleConfig = ron::from_str(&text).expect("parses back");
+            assert_eq!(back.blocking_dma, d, "{text}");
+        }
     }
 }

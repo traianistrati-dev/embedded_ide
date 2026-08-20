@@ -301,9 +301,14 @@ fn serial_wires(
         .collect()
 }
 
-/// SPI instances with SCK + MOSI + MISO all wired (a full-duplex `SpiBus`).
-/// Returns `(instance, sck, mosi, miso)` sorted by instance.
-fn spi_wires(pins: &[&Pin]) -> Vec<(u8, String, String, String)> {
+/// SPI instances with at least SCK + MOSI wired. Returns
+/// `(instance, sck, mosi, miso)` sorted by instance, `miso` absent for a
+/// TRANSMIT-ONLY bus.
+///
+/// MISO used to be required, so wiring only SCK and MOSI generated nothing at
+/// all — no code and no complaint. embassy has `new_txonly` for exactly that
+/// shape, and it takes one DMA channel instead of two.
+fn spi_wires(pins: &[&Pin]) -> Vec<(u8, String, String, Option<String>)> {
     let find = |want: PinFunction| -> Option<String> {
         pins.iter()
             .find(|p| !p.reserved && p.selected_function == want)
@@ -323,8 +328,7 @@ fn spi_wires(pins: &[&Pin]) -> Vec<(u8, String, String, String)> {
         .filter_map(|n| {
             let sck = find(PinFunction::SpiSck(n))?;
             let mosi = find(PinFunction::SpiMosi(n))?;
-            let miso = find(PinFunction::SpiMiso(n))?;
-            Some((n, sck, mosi, miso))
+            Some((n, sck, mosi, find(PinFunction::SpiMiso(n))))
         })
         .collect()
 }
@@ -1006,7 +1010,17 @@ pub fn async_peripherals(
         any_spi_i2c = true;
         consumed.push(sck.clone());
         consumed.push(mosi.clone());
-        consumed.push(miso.clone());
+        if let Some(p) = &miso {
+            consumed.push(p.clone());
+        }
+        // No MISO pin, no receiver: embassy's `new_txonly` takes one channel,
+        // and `read`/`transfer` on such a bus would panic (`rx_dma.unwrap()`),
+        // which is why this returns a different value - see `spi_config_file`.
+        let tx_only = miso.is_none();
+        let miso_arg = miso
+            .as_ref()
+            .map(|p| format!(", p.{p}"))
+            .unwrap_or_default();
         let cfg = spi.get(&n);
         let sfx = cfg.map(|c| label_sfx(&c.custom_label)).unwrap_or_default();
         let dma = cfg.map(|c| is_dma(c.async_mode)).unwrap_or(false);
@@ -1020,20 +1034,20 @@ pub fn async_peripherals(
                 n,
                 &format!("SPI{n}"),
                 manual_channels(cfg, |c| (&c.dma_tx, &c.dma_rx)),
-                (true, true),
+                (true, !tx_only),
             );
             calls.push_str(&note);
             calls.push_str(&format!(
                 "    let mut _spi{n}{sfx} = \
-                 pins::configs::spi{n}::init(p.SPI{n}, p.{sck}, p.{mosi}, p.{miso}, {args});\n"
+                 pins::configs::spi{n}::init(p.SPI{n}, p.{sck}, p.{mosi}{miso_arg}, {args});\n"
             ));
         } else {
             calls.push_str(&format!(
                 "    let mut _spi{n}{sfx} = \
-                 pins::configs::spi{n}::init(p.SPI{n}, p.{sck}, p.{mosi}, p.{miso});\n"
+                 pins::configs::spi{n}::init(p.SPI{n}, p.{sck}, p.{mosi}{miso_arg});\n"
             ));
         }
-        files.push((format!("spi{n}.rs"), spi_config_file(n, cfg)));
+        files.push((format!("spi{n}.rs"), spi_config_file(n, cfg, tx_only)));
     }
 
     for (n, scl, sda) in i2c_wires(pins) {
@@ -1226,6 +1240,19 @@ pub fn init<'d, TxD: TxDma<peripherals::{PERI}>, RxD: RxDma<peripherals::{PERI}>
 //
 //     let mut buf = [0u8; 32];
 //     let n = rx.read(&mut buf).await.unwrap(); // as much as has arrived
+//
+// ── Sending without the DMA ──
+// The same handle also writes straight from the CPU, which is often the better
+// trade for a short burst: a DMA write costs a descriptor setup and an
+// interrupt, and it yields to the executor, so a handful of bytes can leave
+// sooner this way.
+//
+//     {HANDLE}_tx.blocking_write(b"hi\r\n").ok();
+//
+// It does NOT free the channel: embassy takes both when it builds a
+// bidirectional UART, and this handle keeps its TX one either way. To spend one
+// channel instead of two, set the module's Data Direction to RX only (or TX
+// only) — that builds half a UART, and half a UART takes half the channels.
 "#;
 
 /// `configs/usart{n}.rs` — or `configs/lpuart{n}.rs`, which is the same file
@@ -1835,12 +1862,14 @@ pub fn init<'d, TxD: TxDma<peripherals::SPI{N}>, RxD: RxDma<peripherals::SPI{N}>
 
 /// Render the SPI config file for instance `n`, picking the blocking or
 /// async-DMA template from the module's [`AsyncBusMode`].
-pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>) -> String {
+pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>, tx_only: bool) -> String {
     let mode = cfg.map(|c| c.mode).unwrap_or(0);
     let clk = cfg.map(|c| c.clock_hz).unwrap_or(1_000_000);
-    let tmpl = match cfg.map(|c| c.async_mode).unwrap_or_default() {
-        AsyncBusMode::Blocking => ASYNC_SPI_TMPL_BLOCKING,
-        AsyncBusMode::AsyncDma => ASYNC_SPI_TMPL_DMA,
+    let tmpl = match (cfg.map(|c| c.async_mode).unwrap_or_default(), tx_only) {
+        (AsyncBusMode::Blocking, false) => ASYNC_SPI_TMPL_BLOCKING,
+        (AsyncBusMode::AsyncDma, false) => ASYNC_SPI_TMPL_DMA,
+        (AsyncBusMode::Blocking, true) => ASYNC_SPI_TMPL_BLOCKING_TX,
+        (AsyncBusMode::AsyncDma, true) => ASYNC_SPI_TMPL_DMA_TX,
     };
     let sfx = cfg
         .map(|c| sanitize_label(&c.custom_label))
@@ -1852,6 +1881,109 @@ pub fn spi_config_file(n: u8, cfg: Option<&SpiModuleConfig>) -> String {
         .replace("{MODE}", &mode.to_string())
         .replace("{CLK}", &clk.to_string())
 }
+
+/// `configs/spi{n}.rs` for a **transmit-only** SPI on DMA: no MISO pin, ONE
+/// channel.
+///
+/// Returns the concrete `Spi<'d, Async>` rather than `impl SpiBus`, and that is
+/// the point: `SpiBus` promises `read` and `transfer`, and on a bus built
+/// without an RX channel those panic inside embassy (`rx_dma.unwrap()`).
+/// Handing back a trait that cannot keep half its contract would be worse than
+/// handing back a narrower type.
+const ASYNC_SPI_TMPL_DMA_TX: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+const CLOCK_HZ: u32 = {CLK};
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+//
+// TRANSMIT ONLY: MISO is not wired, so this bus can send and cannot receive.
+// It takes one DMA channel instead of two — the other stays free for another
+// peripheral. Wire a MISO pin to get the full-duplex `SpiBus` back.
+use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
+use embassy_stm32::mode::Async;
+use embassy_stm32::spi::mode::Master;
+use embassy_stm32::spi::{Config, MosiPin, SckPin, Spi, TxDma};
+use embassy_stm32::time::Hertz;
+use embassy_stm32::interrupt::typelevel::Binding;
+use embassy_stm32::{peripherals, Peri};
+
+fn get_config() -> Config {
+    let mut config = Config::default();
+    config.frequency = Hertz(CLOCK_HZ);
+    config.mode = match SPI_MODE {
+        1 => embassy_stm32::spi::MODE_1,
+        2 => embassy_stm32::spi::MODE_2,
+        3 => embassy_stm32::spi::MODE_3,
+        _ => embassy_stm32::spi::MODE_0,
+    };
+    config
+}
+
+/// Initialise SPI{N} as a transmit-only, DMA-backed bus.
+pub fn init<'d, TxD: TxDma<peripherals::SPI{N}>>(
+    spi: Peri<'d, peripherals::SPI{N}>,
+    sck: Peri<'d, impl SckPin<peripherals::SPI{N}>>,
+    mosi: Peri<'d, impl MosiPin<peripherals::SPI{N}>>,
+    tx_dma: Peri<'d, TxD>,
+    irqs: impl Binding<TxD::Interrupt, DmaInterruptHandler<TxD>> + 'd,
+) -> Spi<'d, Async, Master> {
+    Spi::new_txonly(spi, sck, mosi, tx_dma, irqs, get_config())
+}
+
+// ── Using SPI{N} ──
+// Send only. `read` and `transfer` exist on this type but would panic here —
+// there is no RX channel behind them.
+//
+//     {HANDLE}.write(&[0x9Fu8, 0x00]).await.ok();
+
+"#;
+
+/// The same shape without DMA: `new_blocking_txonly`, no channels at all.
+const ASYNC_SPI_TMPL_BLOCKING_TX: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const SPI_MODE: u8 = {MODE}; // 0..=3 (CPOL/CPHA)
+const CLOCK_HZ: u32 = {CLK};
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+//
+// TRANSMIT ONLY: MISO is not wired, so this bus can send and cannot receive.
+// Wire a MISO pin to get the full-duplex `SpiBus` back.
+use embassy_stm32::mode::Blocking;
+use embassy_stm32::spi::mode::Master;
+use embassy_stm32::spi::{Config, MosiPin, SckPin, Spi};
+use embassy_stm32::time::Hertz;
+use embassy_stm32::{peripherals, Peri};
+
+fn get_config() -> Config {
+    let mut config = Config::default();
+    config.frequency = Hertz(CLOCK_HZ);
+    config.mode = match SPI_MODE {
+        1 => embassy_stm32::spi::MODE_1,
+        2 => embassy_stm32::spi::MODE_2,
+        3 => embassy_stm32::spi::MODE_3,
+        _ => embassy_stm32::spi::MODE_0,
+    };
+    config
+}
+
+/// Initialise SPI{N} as a transmit-only, blocking bus.
+pub fn init<'d>(
+    spi: Peri<'d, peripherals::SPI{N}>,
+    sck: Peri<'d, impl SckPin<peripherals::SPI{N}>>,
+    mosi: Peri<'d, impl MosiPin<peripherals::SPI{N}>>,
+) -> Spi<'d, Blocking, Master> {
+    Spi::new_blocking_txonly(spi, sck, mosi, get_config())
+}
+
+// ── Using SPI{N} ──
+// Send only, and blocking — the CPU clocks each byte out.
+//
+//     {HANDLE}.blocking_write(&[0x9Fu8, 0x00]).ok();
+
+"#;
 
 // ── Async I2C config file (blocking | async-DMA) ──────────────────────────────
 
@@ -2467,6 +2599,133 @@ mod usart_mode_tests {
             "{}",
             out.dma_irqs
         );
+    }
+}
+
+#[cfg(test)]
+mod spi_txonly_tests {
+    use super::*;
+    use crate::panels::mcu_module::modules::AsyncBusMode;
+    use crate::panels::mcu_module::pins::logic::pin::Pin;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    fn pin(name: &str, f: PinFunction) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = f;
+        p
+    }
+
+    /// SCK + MOSI with no MISO is a TRANSMITTER, not an incomplete bus. It used
+    /// to generate nothing at all — no code, no complaint.
+    #[test]
+    fn sck_and_mosi_without_miso_is_a_transmitter() {
+        let pins = [
+            pin("PA5", PinFunction::SpiSck(1)),
+            pin("PA7", PinFunction::SpiMosi(1)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        assert_eq!(spi_wires(&refs).len(), 1, "the bus is generated");
+        assert!(spi_wires(&refs)[0].3.is_none(), "and it has no MISO");
+
+        // With MISO it is the full-duplex bus it always was.
+        let mut full = pins.to_vec();
+        full.push(pin("PA6", PinFunction::SpiMiso(1)));
+        let refs: Vec<&Pin> = full.iter().collect();
+        assert_eq!(spi_wires(&refs)[0].3.as_deref(), Some("PA6"));
+
+        // SCK alone is still nothing: a clock with no data line is not a bus.
+        let only_sck = [pin("PA5", PinFunction::SpiSck(1))];
+        let refs: Vec<&Pin> = only_sck.iter().collect();
+        assert!(spi_wires(&refs).is_empty());
+    }
+
+    /// A transmit-only bus takes ONE channel, and its `init` is a different
+    /// shape: no MISO argument, one channel, and the concrete `Spi` type
+    /// instead of `impl SpiBus` — `read` on such a bus panics inside embassy.
+    #[test]
+    fn a_transmitter_takes_one_channel_and_a_narrower_type() {
+        use crate::panels::mcu_module::codegen::dma_data::DmaChannel;
+        use crate::panels::mcu_module::mcu_def::DmaDef;
+        use crate::panels::mcu_module::modules::SpiModuleConfig;
+
+        let pins = [
+            pin("PA5", PinFunction::SpiSck(1)),
+            pin("PA7", PinFunction::SpiMosi(1)),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let chip = DmaDef {
+            mux: true,
+            channels: (1..=4)
+                .map(|i| DmaChannel {
+                    peri: format!("DMA1_CH{i}"),
+                    irq: format!("DMA1_CHANNEL{i}"),
+                })
+                .collect(),
+            requests: Vec::new(),
+        };
+        let spi: BTreeMap<u8, SpiModuleConfig> = [(
+            1u8,
+            SpiModuleConfig {
+                async_mode: AsyncBusMode::AsyncDma,
+                ..SpiModuleConfig::new(1)
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let out = async_peripherals(
+            "stm32g4",
+            ChipData {
+                dma: Some(&chip),
+                irq_vectors: &[],
+                usart_ip: None,
+            },
+            CompInputs {
+                settings: &Default::default(),
+                instances: &[],
+                pins: &[],
+            },
+            &refs,
+            &Default::default(),
+            &spi,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(
+            out.init_calls
+                .contains("init(p.SPI1, p.PA5, p.PA7, p.DMA1_CH1, Irqs)"),
+            "one channel, no MISO argument:\n{}",
+            out.init_calls
+        );
+        assert_eq!(out.dma_uses.len(), 1, "only a TX channel is taken");
+        assert_eq!(out.dma_uses[0].user, "SPI1 TX");
+
+        let f = &out.config_files[0].1;
+        assert!(
+            f.contains("Spi::new_txonly(spi, sck, mosi, tx_dma, irqs, get_config())"),
+            "{f}"
+        );
+        assert!(f.contains("-> Spi<'d, Async, Master>"), "{f}");
+        // The prose mentions `SpiBus` — it says how to get one back. What must
+        // not appear is the bus being RETURNED as one.
+        assert!(
+            !f.contains("impl embedded_hal_async::spi::SpiBus"),
+            "the trait promises reads this bus cannot do:\n{f}"
+        );
+    }
+
+    /// The same shape without DMA takes no channel at all.
+    #[test]
+    fn a_blocking_transmitter_takes_no_channel() {
+        use crate::panels::mcu_module::modules::SpiModuleConfig;
+        let f = spi_config_file(2, Some(&SpiModuleConfig::new(2)), true);
+        assert!(
+            f.contains("Spi::new_blocking_txonly(spi, sck, mosi, get_config())"),
+            "{f}"
+        );
+        assert!(f.contains("-> Spi<'d, Blocking, Master>"), "{f}");
+        assert!(f.contains("blocking_write"), "{f}");
     }
 }
 
