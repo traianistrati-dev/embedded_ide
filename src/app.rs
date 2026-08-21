@@ -3542,10 +3542,17 @@ impl eframe::App for AppIde {
                                 // banner tells you to delete a variable and
                                 // never says which one.
                                 if let Some(detail) = detail {
+                                    // A phosphor icon, never a raw `↳`: the
+                                    // bundled fonts have no arrow glyphs, so
+                                    // that renders as an empty box. Cost me a
+                                    // screenshot from the user to notice.
                                     ui.label(
-                                        egui::RichText::new(format!("     ↳ {detail}"))
-                                            .size(10.5)
-                                            .color(egui::Color32::from_rgb(245, 200, 130)),
+                                        egui::RichText::new(format!(
+                                            "     {} {detail}",
+                                            egui_phosphor::regular::ARROW_ELBOW_DOWN_RIGHT
+                                        ))
+                                        .size(10.5)
+                                        .color(egui::Color32::from_rgb(245, 200, 130)),
                                     );
                                 }
                             }

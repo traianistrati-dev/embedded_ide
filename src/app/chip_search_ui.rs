@@ -22,7 +22,7 @@ use egui_phosphor::regular as ph;
 
 use super::chip_filter_ui::{self, Facets};
 use crate::panels::mcu_module::chip_filter::{self, ChipFilter};
-use crate::panels::mcu_module::chip_search::{Catalogue, Origin, RegistryRow};
+use crate::panels::mcu_module::chip_search::{self, Catalogue, Origin, RegistryRow};
 use crate::panels::mcu_module::chip_sources;
 
 /// How many matches the list shows at once. The catalogue is thousands of parts
@@ -33,7 +33,22 @@ const MAX_ROWS: usize = 40;
 #[derive(Default)]
 pub(super) struct ChipSearchState {
     pub query: String,
+    /// The DRAFT the Filters panel edits. Nothing acts on it until Apply.
     pub filter: ChipFilter,
+    /// What the list is actually showing.
+    ///
+    /// Separate from `filter` because a slider fires a change on every frame it
+    /// is dragged, and each change is a fresh search over several thousand
+    /// parts. Committing on a button turns a drag from hundreds of searches
+    /// into one.
+    applied: ChipFilter,
+    /// The last search, with the inputs that produced it.
+    ///
+    /// `search` runs from the frame callback, so without this it re-runs at the
+    /// refresh rate even when nothing has changed — an Apply button alone would
+    /// have stopped the filter from CHANGING every frame while leaving it
+    /// re-evaluated every frame.
+    cached: Option<(String, ChipFilter, usize, chip_search::Results)>,
     /// What the catalogue offers to filter by — derived once it lands.
     facets: Facets,
     catalogue: Option<Catalogue>,
@@ -67,6 +82,8 @@ impl ChipSearchState {
                     // the moment the real catalogue arrives.
                     self.facets = Facets::of(&c);
                     self.filter.rebound(self.facets.bounds);
+                    self.applied.rebound(self.facets.bounds);
+                    self.cached = None;
                     self.catalogue = Some(c);
                     self.pending = None;
                 }
@@ -84,6 +101,7 @@ impl ChipSearchState {
         // The facets describe the OLD set of sources; keeping them would offer
         // filters for peripherals no remaining source mentions.
         self.facets = Facets::default();
+        self.cached = None;
     }
 }
 
@@ -225,6 +243,8 @@ impl super::AppIde {
         let ChipSearchState {
             query,
             filter,
+            applied,
+            cached,
             facets,
             catalogue,
             note,
@@ -234,7 +254,7 @@ impl super::AppIde {
             return;
         };
 
-        chip_filter_ui::show_filters(ui, filter, facets);
+        chip_filter_ui::show_filters(ui, filter, applied, facets);
 
         // The registry, in the shape the ranking wants.
         let registry: Vec<RegistryRow> = mcu_registry
@@ -251,8 +271,23 @@ impl super::AppIde {
                 package: d.package.as_str(),
             })
             .collect();
-        let found = cat.search(query, &registry, filter, MAX_ROWS);
+
+        // Re-run only when an input moved. The registry length is in the key
+        // because an import adds a chip, and the list must show it at once.
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|(q, f, n, _)| q == query && f == applied && *n == registry.len());
+        if !fresh {
+            *cached = Some((
+                query.clone(),
+                applied.clone(),
+                registry.len(),
+                cat.search(query, &registry, applied, MAX_ROWS),
+            ));
+        }
+        let found = &cached.as_ref().expect("just filled").3;
         let (hits, total) = (&found.hits, found.total);
+        let filter = &*applied;
 
         // Typing is no longer the only way to ask a question: with a filter set,
         // an empty query means "show me everything that fits".

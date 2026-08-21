@@ -262,9 +262,20 @@ pub fn show_diagnostics_overlay(
                     // Clickable link → opens the rust error index in the browser.
                     Some(url) => {
                         ui.hyperlink_to(
-                            egui::RichText::new(format!("[{c}]  open docs ↗"))
-                                .size(10.5)
-                                .color(egui::Color32::from_rgb(110, 165, 240)),
+                            // `ARROW_SQUARE_OUT`, not a raw `↗`. Reading the
+                            // bundled fonts' cmaps afterwards showed U+2197 is
+                            // one of the ten arrows NotoEmoji does carry, so
+                            // this one was probably rendering — the guard
+                            // flagged it on the block rule, not on measured
+                            // tofu. Kept as phosphor anyway: the standing rule
+                            // is icons in UI text, whatever the font happens to
+                            // cover today.
+                            egui::RichText::new(format!(
+                                "[{c}]  open docs {}",
+                                egui_phosphor::regular::ARROW_SQUARE_OUT
+                            ))
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(110, 165, 240)),
                             url,
                         );
                     }

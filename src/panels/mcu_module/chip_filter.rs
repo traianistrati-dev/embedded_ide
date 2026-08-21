@@ -1016,6 +1016,76 @@ mod tests {
         assert!(RowMetrics::default().is_empty());
     }
 
+    /// What ONE SEARCH of the chip picker costs. Ignored: needs real data.
+    ///
+    /// This used to be a frame budget: the search ran on every frame, and
+    /// browsing cost ~100 ms of it, which is what a dragged slider felt like.
+    /// Two things changed that - the dedup is a map instead of a linear scan of
+    /// the growing hit list, and a row is judged before it is built - and the
+    /// UI now caches the result and commits the filter on a button. So this is
+    /// the cost of a KEYSTROKE or a CLICK, not of a frame.
+    ///
+    /// The numbers still matter: typing runs one of these per character.
+    ///
+    /// `cargo test -- --ignored searching_the_real_catalogue_is_cheap --nocapture`
+    #[test]
+    #[ignore]
+    fn searching_the_real_catalogue_is_cheap() {
+        use super::super::chip_search::Catalogue;
+        use super::super::chip_sources;
+
+        let cat = Catalogue::build(chip_sources::all_sources());
+        if cat.is_empty() {
+            eprintln!("no chip data on this machine - skipping");
+            return;
+        }
+        let bounds = Bounds::of(cat.entries());
+        let time = |label: &str, q: &str, f: &ChipFilter| {
+            // One warm-up, then the median of five.
+            let _ = cat.search(q, &[], f, 40);
+            let mut runs: Vec<u128> = (0..5)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let r = cat.search(q, &[], f, 40);
+                    let us = t.elapsed().as_micros();
+                    std::hint::black_box(r);
+                    us
+                })
+                .collect();
+            runs.sort_unstable();
+            println!("{label:<34} {:>7} us (median of 5)", runs[2]);
+            runs[2]
+        };
+
+        let idle = ChipFilter::new(bounds);
+        time("empty query, no filter", "", &idle);
+        time("typing 'f1'", "f1", &idle);
+
+        let mut broad = ChipFilter::new(bounds);
+        broad.counts.insert("usart", 1);
+        let browse = time("browse: >=1 USART (worst case)", "", &broad);
+
+        let mut narrow = ChipFilter::new(bounds);
+        narrow.families.insert("stm32g4".to_owned());
+        narrow.counts.insert("spi", 3);
+        let narrow_us = time("browse: G4 + >=3 SPI", "", &narrow);
+
+        // Typing is the one path with no button in front of it, so it is the
+        // one with a real budget.
+        let typing = time("typing 'stm32g4'", "stm32g4", &idle);
+        assert!(typing < 16_000, "a keystroke costs {typing} us");
+        assert!(
+            narrow_us < 16_000,
+            "applying a narrow filter costs {narrow_us} us"
+        );
+        // The worst case is every part passing, where the work is building the
+        // rows rather than judging them. Behind a button, that is a click.
+        assert!(
+            browse < 200_000,
+            "applying a broad filter costs {browse} us"
+        );
+    }
+
     /// Against the real vendor data on this machine. Ignored: needs a CubeMX
     /// install.
     ///

@@ -24,7 +24,10 @@ pub fn builtin_definitions() -> Vec<McuDefinition> {
         .filter_map(|(id, ron)| match ron::from_str::<McuDefinition>(ron) {
             Ok(d) => Some(d),
             Err(e) => {
-                eprintln!("⚠ failed to parse built-in MCU '{id}': {e}");
+                // ASCII, not `⚠`: this goes to stderr, not to an egui label, and
+                // a Windows console on a non-UTF-8 code page prints the symbol
+                // as mojibake. The project's rule for log text is `[!]` / `[X]`.
+                eprintln!("[!] failed to parse built-in MCU '{id}': {e}");
                 None
             }
         })

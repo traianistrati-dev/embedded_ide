@@ -60,11 +60,40 @@ pub mod workspace;
 /// `->` and `<->`, or a phosphor `ph::` icon.
 #[cfg(test)]
 mod glyph_guard {
-    /// Arrow-class characters absent from the bundled font. Em dash, ellipsis
-    /// and `×` are deliberately NOT here — those do render.
-    const BANNED: [char; 7] = [
-        '\u{2192}', '\u{2190}', '\u{2194}', '\u{21c4}', '\u{21c6}', '\u{21d2}', '\u{21bb}',
+    /// The Unicode BLOCKS of arrows, none of which the bundled fonts cover.
+    ///
+    /// This was a list of seven specific characters, and that is exactly how it
+    /// failed: a `↳` (U+21B3) went into the dependency banner, was not one of
+    /// the seven, compiled, passed every test, and rendered as an empty box in
+    /// the user's screenshot. A denylist of characters only ever bans the ones
+    /// someone already reached for — the next person reaches for a different
+    /// one. Ranges close that door: the arrow blocks are absent from
+    /// Ubuntu-Light, Hack, NotoEmoji and phosphor alike, so no character in
+    /// them can render and banning them wholesale has no false positives.
+    ///
+    /// Em dash, ellipsis and `×` are deliberately NOT covered — those do
+    /// render, and none of them lives in these blocks.
+    const BANNED_RANGES: [(char, char); 7] = [
+        ('\u{2190}', '\u{21ff}'), // Arrows
+        ('\u{27f0}', '\u{27ff}'), // Supplemental Arrows-A
+        ('\u{2900}', '\u{297f}'), // Supplemental Arrows-B
+        ('\u{2300}', '\u{23ff}'), // Miscellaneous Technical (⌘ ⏎ ⏱)
+        ('\u{25a0}', '\u{25ff}'), // Geometric Shapes (▶ ▾ ▲ ● □)
+        ('\u{2600}', '\u{26ff}'), // Miscellaneous Symbols (⚠ ⛔ ★)
+        ('\u{2700}', '\u{27bf}'), // Dingbats (✔ ✗ ✕ ✘)
     ];
+
+    /// Symbols inside the banned blocks that the bundled fonts DO carry in both
+    /// the proportional and the monospace family, and that the code already
+    /// uses. Kept short on purpose: the project's rule is phosphor icons in UI
+    /// text, so this is an escape hatch, not a menu.
+    const ALLOWED: [char; 1] = [
+        '\u{25cb}', // ○ — the clock-graph port marker
+    ];
+
+    fn banned(c: char) -> bool {
+        !ALLOWED.contains(&c) && BANNED_RANGES.iter().any(|(lo, hi)| c >= *lo && c <= *hi)
+    }
 
     /// Does this line carry a banned glyph INSIDE a double-quoted literal?
     ///
@@ -81,7 +110,7 @@ mod glyph_guard {
                 }
                 '"' => in_str = !in_str,
                 '/' if !in_str && chars.peek() == Some(&'/') => return false,
-                c if in_str && BANNED.contains(&c) => return true,
+                c if in_str && banned(c) => return true,
                 _ => {}
             }
         }
@@ -111,16 +140,87 @@ mod glyph_guard {
 
     #[test]
     fn the_scanner_tells_comments_from_literals() {
-        let a = '\u{2192}';
-        assert!(in_literal(&format!("ui.label(\"a {a} b\");")));
-        assert!(in_literal(&format!("x(\"a {a} b\"); // fine")));
-        // Comments are allowed to use arrows, even alongside quotes.
-        assert!(!in_literal(&format!("// \"Restore\" {a} confirm")));
-        assert!(!in_literal(&format!("/// maps `\"x\"` {a} text")));
-        assert!(!in_literal(&format!("let x = 1; // re-open {a} promoted")));
-        // A `//` inside a string is not a comment.
-        assert!(in_literal(&format!("u(\"http://x {a} y\");")));
+        // Both the arrow this guard always knew about and the two that got past
+        // it — `↳` into the dependency banner, `↗` into the diagnostics link —
+        // so the widening is checked through the SCANNER, not just through
+        // `banned()`. The two have to agree for the test to mean anything.
+        for a in ['\u{2192}', '\u{21b3}', '\u{2197}'] {
+            assert!(in_literal(&format!("ui.label(\"a {a} b\");")));
+            assert!(in_literal(&format!("x(\"a {a} b\"); // fine")));
+            // Comments are allowed to use arrows, even alongside quotes.
+            assert!(!in_literal(&format!("// \"Restore\" {a} confirm")));
+            assert!(!in_literal(&format!("/// maps `\"x\"` {a} text")));
+            assert!(!in_literal(&format!("let x = 1; // re-open {a} promoted")));
+            // A `//` inside a string is not a comment.
+            assert!(in_literal(&format!("u(\"http://x {a} y\");")));
+        }
         assert!(!in_literal("nothing here at all"));
+        // The punctuation that renders must survive a literal untouched.
+        assert!(!in_literal("ui.label(\"Saving — 3 files… 2×\");"));
+    }
+
+    /// The whole point of the widening: the character that got through.
+    ///
+    /// `↳` was not one of the seven this guard used to list, so it shipped to a
+    /// screenshot. Each range is pinned at both ends too — an off-by-one there
+    /// is invisible until it is a box on someone's screen.
+    #[test]
+    fn every_arrow_block_is_covered_not_just_the_ones_seen_before() {
+        // The escapee.
+        assert!(banned('\u{21b3}'), "the arrow that reached the user");
+        // The original seven still count.
+        for c in [
+            '\u{2192}', '\u{2190}', '\u{2194}', '\u{21c4}', '\u{21c6}', '\u{21d2}', '\u{21bb}',
+        ] {
+            assert!(banned(c), "{c:?} was banned before and must stay banned");
+        }
+        // Both edges of each block.
+        for (lo, hi) in BANNED_RANGES {
+            assert!(banned(lo), "low edge {lo:?}");
+            assert!(banned(hi), "high edge {hi:?}");
+        }
+        // …and the characters just outside them, which DO render.
+        for c in [
+            '\u{218f}', '\u{2200}', '\u{27ef}', '\u{2800}', '\u{28ff}', '\u{2980}',
+        ] {
+            assert!(!banned(c), "{c:?} is outside the arrow blocks");
+        }
+        // The punctuation this guard has always allowed on purpose.
+        for c in ['—', '–', '…', '×', '·', '•', '°'] {
+            assert!(!banned(c), "{c:?} renders and must not be flagged");
+        }
+    }
+
+    /// The symbol blocks, added after the arrows.
+    ///
+    /// The four the user named are NOT one story, which is the point: reading
+    /// the bundled fonts' cmap tables says `✗` is missing everywhere, `▾` is in
+    /// Hack only — so it renders in a `.monospace()` label and is a box in the
+    /// proportional ones that most UI uses — while `✔` and `▶` are carried by
+    /// NotoEmoji and do render. The scanner cannot know which family a literal
+    /// ends up in, so "renders in EVERY family or it is banned" is the only
+    /// rule it can apply, and the phosphor-icons convention wants them gone
+    /// regardless.
+    #[test]
+    fn the_symbol_blocks_are_covered_too() {
+        // The four from the request, plus their neighbours.
+        for c in [
+            '✔', '✗', '▶', '▾', '✓', '✕', '✘', '▲', '▼', '●', '□', '★', '⚠',
+        ] {
+            assert!(banned(c), "{c:?} must not go into a UI literal");
+        }
+        // Block edges.
+        for (lo, hi) in BANNED_RANGES {
+            assert!(banned(lo), "low edge {lo:?}");
+            assert!(banned(hi), "high edge {hi:?}");
+        }
+        // The escape hatch, and only it.
+        assert!(!banned('\u{25cb}'), "the allow-list entry stays usable");
+        assert_eq!(ALLOWED.len(), 1, "keep this short — phosphor is the rule");
+        // Ordinary text is untouched by the new blocks.
+        for c in ['a', 'Z', '9', 'ă', 'ș', '"', '\'', '\u{22ff}', '\u{2b00}'] {
+            assert!(!banned(c), "{c:?} is not a symbol-block character");
+        }
     }
 
     #[test]

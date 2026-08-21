@@ -194,18 +194,35 @@ fn chips(
     });
 }
 
-/// Draw the twisty. `facets` is empty until indexing lands, which is fine — the
-/// ranges then span the placeholder bounds and nothing is offered to tick.
-pub(super) fn show_filters(ui: &mut egui::Ui, f: &mut ChipFilter, facets: &Facets) {
-    let n = f.active_count();
-    let title = if n == 0 {
+/// Draw the twisty.
+///
+/// `f` is the DRAFT and `applied` is what the list is showing. They are separate
+/// because every widget here reports a change on every frame it is touched, and
+/// a slider drag is hundreds of frames — each one otherwise a fresh search over
+/// several thousand parts. Nothing reaches the list until Apply.
+pub(super) fn show_filters(
+    ui: &mut egui::Ui,
+    f: &mut ChipFilter,
+    applied: &mut ChipFilter,
+    facets: &Facets,
+) {
+    // The badge counts what is NARROWING THE LIST, not what is drafted — it
+    // exists to explain a short list, and a draft explains nothing yet.
+    let n = applied.active_count();
+    let pending = f != applied;
+    let title = if n == 0 && !pending {
         egui::RichText::new(format!("{} Filters", ph::FUNNEL))
             .size(10.5)
             .color(egui::Color32::GRAY)
     } else {
         // Loud on purpose: this is the only thing on screen that explains a
         // list which has gone short or empty.
-        egui::RichText::new(format!("{} Filters ({n})", ph::FUNNEL))
+        let label = match (n, pending) {
+            (0, _) => format!("{} Filters (not applied)", ph::FUNNEL),
+            (n, false) => format!("{} Filters ({n})", ph::FUNNEL),
+            (n, true) => format!("{} Filters ({n}, edited)", ph::FUNNEL),
+        };
+        egui::RichText::new(label)
             .size(10.5)
             .strong()
             .color(egui::Color32::from_rgb(235, 185, 90))
@@ -215,15 +232,46 @@ pub(super) fn show_filters(ui: &mut egui::Ui, f: &mut ChipFilter, facets: &Facet
         .id_salt("chip_filters")
         .default_open(false)
         .show(ui, |ui| {
-            if f.is_active()
-                && ui
-                    .button(
-                        egui::RichText::new(format!("{} Clear filters", ph::FUNNEL_X)).size(11.0),
-                    )
+            ui.horizontal(|ui| {
+                // Enabled only when there is something to commit, so the button
+                // doubles as the answer to "is what I see what I picked?".
+                let apply = ui.add_enabled(
+                    pending,
+                    egui::Button::new(
+                        egui::RichText::new(format!("{} Apply", ph::CHECK))
+                            .size(11.0)
+                            .strong(),
+                    ),
+                );
+                if apply
+                    .on_hover_text("Search with these filters")
+                    .on_disabled_hover_text("The list already shows these filters")
                     .clicked()
-            {
-                *f = ChipFilter::new(f.bounds);
-            }
+                {
+                    *applied = f.clone();
+                }
+                if (f.is_active() || applied.is_active())
+                    && ui
+                        .button(
+                            egui::RichText::new(format!("{} Clear", ph::FUNNEL_X)).size(11.0),
+                        )
+                        .on_hover_text("Drop every filter, and search again now")
+                        .clicked()
+                {
+                    // Clearing applies immediately: there is no version of
+                    // "cleared, but not yet" worth making someone confirm.
+                    *f = ChipFilter::new(f.bounds);
+                    *applied = f.clone();
+                }
+                if pending {
+                    ui.label(
+                        egui::RichText::new("not applied yet")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(235, 185, 90)),
+                    );
+                }
+            });
+            ui.add_space(2.0);
 
             let b = f.bounds;
             egui::Grid::new("chip_filter_ranges")

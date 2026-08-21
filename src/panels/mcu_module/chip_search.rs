@@ -21,7 +21,7 @@
 //! search runs over several thousand entries on every keystroke, and lowercasing
 //! them per frame is the difference between free and noticeable.
 
-use super::chip_filter::{ChipFilter, RowMetrics, Verdict};
+use super::chip_filter::{ChipFilter, Metrics, RowMetrics, Verdict};
 use super::chip_sources::{ChipEntry, ChipSource};
 
 /// Where a hit can be acted on.
@@ -210,6 +210,7 @@ impl Catalogue {
                 unknown: 0,
             };
         }
+        let active = filter.is_active();
         let mut hits: Vec<Hit> = Vec::new();
 
         for r in registry {
@@ -246,6 +247,22 @@ impl Catalogue {
             });
         }
 
+        let registry_count = hits.len();
+
+        // Where each part already sits, keyed on the name that is ALREADY
+        // lowercased on both sides. This replaced a linear scan of the growing
+        // hit list, which browsing turned into ~15 million string comparisons
+        // per FRAME - 100 ms in a release build, and the search runs every frame.
+        let mut seen_at: std::collections::HashMap<String, usize> = hits
+            .iter()
+            .enumerate()
+            .map(|(ix, h)| (h.name.to_ascii_lowercase(), ix))
+            .collect();
+        // Parts a source could not answer for. Held as keys rather than counted
+        // on the spot: the SAME part often arrives again from an indexed source,
+        // and a row that is on screen is not a row that was hidden.
+        let mut silent: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
         for row in &self.rows {
             let Some(rank) = (if browsing {
                 Some(0)
@@ -256,10 +273,8 @@ impl Catalogue {
             };
             let has_clock = self.sources[row.source].has_clock();
             // Same part, already covered? Keep whichever offers more.
-            if let Some(seen) = hits
-                .iter_mut()
-                .find(|h| h.name.eq_ignore_ascii_case(&row.entry.ref_name))
-            {
+            if let Some(&ix) = seen_at.get(row.key.as_str()) {
+                let seen = &mut hits[ix];
                 let better = match &seen.origin {
                     // Nothing beats a chip that is already here - but keep
                     // WHERE it came from, so the row can offer to refresh it.
@@ -298,22 +313,46 @@ impl Catalogue {
                 }
                 continue;
             }
+            // Judged on the BORROWED entry, before a single string is cloned.
+            // Building the hit first and dropping it afterwards meant ~80,000
+            // wasted allocations per frame on a catalogue this size.
+            if active {
+                match filter.matches(&Metrics::of(&row.entry)) {
+                    Verdict::Pass => {}
+                    Verdict::Unknown => {
+                        silent.insert(row.key.as_str());
+                        continue;
+                    }
+                    Verdict::Fail => continue,
+                }
+            }
+            seen_at.insert(row.key.clone(), hits.len());
             hits.push(disk_hit(row, rank, has_clock));
         }
 
-        // Filtered LAST, so a registry row is judged on the vendor numbers it
-        // inherited above rather than on the little it knows by itself.
+        // The REGISTRY rows are the only ones still unjudged: they were built
+        // before the vendor metrics they inherit above could be known. Disk rows
+        // were judged on the way in.
         let mut unknown = 0usize;
-        if filter.is_active() {
-            hits.retain(|h| match filter.matches(&h.metrics.view(&h.family)) {
-                Verdict::Pass => true,
-                Verdict::Unknown => {
-                    unknown += 1;
-                    false
-                }
-                Verdict::Fail => false,
+        if active {
+            let mut ix = 0usize;
+            hits.retain(|h| {
+                let keep = ix >= registry_count
+                    || match filter.matches(&h.metrics.view(&h.family)) {
+                        Verdict::Pass => true,
+                        Verdict::Unknown => {
+                            unknown += 1;
+                            false
+                        }
+                        Verdict::Fail => false,
+                    };
+                ix += 1;
+                keep
             });
         }
+        // A part one source could not describe, but another could, was never
+        // hidden - so it must not be counted as such.
+        unknown += silent.iter().filter(|k| !seen_at.contains_key(**k)).count();
 
         let total = hits.len();
         // Rank first, then alphabetical, so the order is stable and the reason a
