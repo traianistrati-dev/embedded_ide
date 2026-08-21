@@ -715,6 +715,27 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
     if simple.is_some() {
         return simple;
     }
+    // `xspi_p1_io12` → XSPI port 1 data line 12. Same shape as the OCTOSPI
+    // tokens below, and lifted for the same reason.
+    if let Some(rest) = t.strip_prefix("xspi_") {
+        let (p, role) = rest.split_once('_')?;
+        let port = p.strip_prefix('p')?.parse().ok()?;
+        return match role {
+            "clk" => Some(PinFunction::XspiClk { port }),
+            _ => {
+                if let Some(cs) = role.strip_prefix("ncs").and_then(|c| c.parse().ok()) {
+                    return (cs == 1 || cs == 2).then_some(PinFunction::XspiNcs { port, cs });
+                }
+                if let Some(index) = role.strip_prefix("dqs").and_then(|c| c.parse().ok()) {
+                    return (index < 2).then_some(PinFunction::XspiDqs { port, index });
+                }
+                role.strip_prefix("io")
+                    .and_then(|l| l.parse().ok())
+                    .filter(|l| *l < 16)
+                    .map(|lane| PinFunction::XspiIo { port, lane })
+            }
+        };
+    }
     // `ospi_p1_io3` → OCTOSPI port 1 data line 3. Lifted for the same reason as
     // the QUADSPI tokens below: what varies is the PORT, not an instance.
     if let Some(rest) = t.strip_prefix("ospi_") {
@@ -884,6 +905,10 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::XspiClk { port } => format!("xspi_p{port}_clk"),
+        PinFunction::XspiNcs { port, cs } => format!("xspi_p{port}_ncs{cs}"),
+        PinFunction::XspiDqs { port, index } => format!("xspi_p{port}_dqs{index}"),
+        PinFunction::XspiIo { port, lane } => format!("xspi_p{port}_io{lane}"),
         PinFunction::OspiClk { port } => format!("ospi_p{port}_clk"),
         PinFunction::OspiNcs { port } => format!("ospi_p{port}_ncs"),
         PinFunction::OspiDqs { port } => format!("ospi_p{port}_dqs"),

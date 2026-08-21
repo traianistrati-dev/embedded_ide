@@ -15,7 +15,8 @@ use crate::panels::mcu_module::modules::{
     I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
     OspiMode, Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
     QspiAddressSize, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits,
-    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule, XspiMemoryType,
+    XspiMode,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -276,6 +277,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceSdmmc => PinFunction::SdmmcCk { unit: instance },
         ModuleKind::GenericInterfaceQspi => PinFunction::QspiClk,
         ModuleKind::GenericInterfaceOspi => PinFunction::OspiClk { port: instance },
+        ModuleKind::GenericInterfaceXspi => PinFunction::XspiClk { port: instance },
         ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
             timer: instance,
             channel: 1,
@@ -430,6 +432,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         // Single-instance peripheral, so no number in the handle.
         ModuleKind::GenericInterfaceQspi => format!("_qspi{sfx}"),
         ModuleKind::GenericInterfaceOspi => format!("_ospi{n}{sfx}"),
+        ModuleKind::GenericInterfaceXspi => format!("_xspi{n}{sfx}"),
         ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
@@ -1928,6 +1931,115 @@ pub fn module_config_ui(
                             egui::RichText::new(why)
                                 .size(10.5)
                                 .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                }
+                // One XSPI port — the OCTOSPI panel one step wider, with the
+                // strobes derived from the wiring rather than asked for.
+                ModuleConfig::Xspi(cfg) => {
+                    let lanes = conn_rows
+                        .iter()
+                        .filter(|(sig, _)| sig.starts_with("IO"))
+                        .count() as u8;
+                    let dqs0 = conn_rows.iter().any(|(sig, _)| *sig == "DQS0");
+                    let dqs1 = conn_rows.iter().any(|(sig, _)| *sig == "DQS1");
+
+                    ui.label("Mode");
+                    let fits: Vec<XspiMode> = XspiMode::ALL
+                        .into_iter()
+                        .filter(|m| m.lanes() == lanes)
+                        .collect();
+                    if fits.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{lanes} data line(s) wired — the controller takes 2, 4, 8 or 16"
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(200, 140, 60)),
+                        );
+                    } else {
+                        egui::ComboBox::from_id_salt("xspi_mode")
+                            .selected_text(cfg.mode.label())
+                            .show_ui(ui, |ui| {
+                                for m in &fits {
+                                    ui.selectable_value(&mut cfg.mode, *m, m.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Only the modes your wiring can carry. Single and dual share two \
+                                 pads, octal and dual-quad share eight — the pins cannot tell \
+                                 them apart, so this asks.",
+                            );
+                        if !fits.contains(&cfg.mode) {
+                            cfg.mode = fits[0];
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Device");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("xspi_size")
+                            .width(84.0)
+                            .selected_text(cfg.size_label())
+                            .show_ui(ui, |ui| {
+                                for (i, name) in QSPI_MEMORY_SIZES.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut cfg.device_size,
+                                        i as u8,
+                                        name.trim_start_matches('_'),
+                                    );
+                                }
+                            });
+                        egui::ComboBox::from_id_salt("xspi_type")
+                            .width(140.0)
+                            .selected_text(cfg.memory_type.label())
+                            .show_ui(ui, |ui| {
+                                for v in XspiMemoryType::ALL {
+                                    ui.selectable_value(&mut cfg.memory_type, v, v.label());
+                                }
+                            });
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.prescaler)
+                                .range(0..=255)
+                                .prefix("clk / "),
+                        );
+                    });
+                    ui.end_row();
+
+                    if dqs0 {
+                        ui.label("Strobe");
+                        let text = if !cfg.mode.takes_dqs() {
+                            "wired, but only the octal and hexadeca modes read it — it will be \
+                             left out of the call"
+                                .to_owned()
+                        } else if dqs1 && cfg.mode == XspiMode::Hexa {
+                            "DQS0 + DQS1 — the dual-strobe hexadeca call".to_owned()
+                        } else if dqs1 {
+                            "DQS1 needs the hexadeca mode; only DQS0 will be used".to_owned()
+                        } else {
+                            "DQS0".to_owned()
+                        };
+                        let warn = !cfg.mode.takes_dqs() || (dqs1 && cfg.mode != XspiMode::Hexa);
+                        ui.label(
+                            egui::RichText::new(text).size(10.5).color(if warn {
+                                egui::Color32::from_rgb(200, 140, 60)
+                            } else {
+                                egui::Color32::from_gray(160)
+                            }),
+                        );
+                        ui.end_row();
+                    }
+                    if !is_async {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "only the Async runtime emits XSPI code — the blocking backends \
+                                 generate GPIO and watchdogs only",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
                         );
                         ui.end_row();
                     }

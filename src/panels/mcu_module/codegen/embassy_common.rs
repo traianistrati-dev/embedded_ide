@@ -1746,6 +1746,36 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_XSPI=lanes` wires an XSPI device on port 1 with that many data
+        // lines (2, 4, 8 or 16); `EIDE_XSPI_DQS=1|2` adds one or both strobes,
+        // which only the wide modes read.
+        if let Ok(l) = std::env::var("EIDE_XSPI") {
+            let lanes: u8 = l.parse().unwrap_or(8);
+            let port = 1u8;
+            let mut want = vec![
+                PinFunction::XspiClk { port },
+                PinFunction::XspiNcs { port, cs: 1 },
+            ];
+            want.extend((0..lanes).map(|lane| PinFunction::XspiIo { port, lane }));
+            let dqs: u8 = std::env::var("EIDE_XSPI_DQS")
+                .ok()
+                .and_then(|d| d.parse().ok())
+                .unwrap_or(0);
+            want.extend((0..dqs).map(|index| PinFunction::XspiDqs { port, index }));
+            for want in want {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&want)
+                    })
+                    .map(|p| p.number);
+                match num.and_then(|n| mcu.find_pin_mut(n)) {
+                    Some(p) => p.selected_function = want,
+                    None => println!("chip has no pin for {want:?}"),
+                }
+            }
+        }
         // `EIDE_OSPI=lanes` wires an OCTOSPI device on port 1 with that many
         // data lines (2, 4 or 8); `EIDE_OSPI_DQS=1` adds the strobe, which only
         // the octal mode reads.
@@ -2048,6 +2078,19 @@ mod emit_for_manual_compile {
                             ..Default::default()
                         },
                     );
+                }
+                ModuleConfig::Xspi(c) => {
+                    use crate::panels::mcu_module::modules::{XspiMemoryType, XspiMode};
+                    // The mode has to match the pads `EIDE_XSPI` wired.
+                    c.mode = match std::env::var("EIDE_XSPI").as_deref() {
+                        Ok("2") => XspiMode::Dual,
+                        Ok("4") => XspiMode::Quad,
+                        Ok("16") => XspiMode::Hexa,
+                        _ => XspiMode::Octal,
+                    };
+                    c.memory_type = XspiMemoryType::ApMemory16Bits;
+                    c.device_size = 17; // _128MiB
+                    c.prescaler = 2;
                 }
                 ModuleConfig::Ospi(c) => {
                     use crate::panels::mcu_module::modules::{OspiMemoryType, OspiMode};

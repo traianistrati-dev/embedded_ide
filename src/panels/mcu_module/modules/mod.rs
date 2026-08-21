@@ -17,6 +17,7 @@ pub use model::{
     I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity,
     PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity, SaiBlockConfig, SaiDataSize,
     OspiMemoryType, OspiMode, OspiModuleConfig, QSPI_MEMORY_SIZES, QspiAddressSize,
+    XspiMemoryType, XspiMode, XspiModuleConfig,
     QspiModuleConfig, SaiMode, SaiModuleConfig,
     SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder,
     SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode,
@@ -69,6 +70,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// XSPI module configs keyed by PORT.
+pub fn xspi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, XspiModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Xspi(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

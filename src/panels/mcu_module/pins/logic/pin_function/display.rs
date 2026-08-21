@@ -35,6 +35,10 @@ impl PinFunction {
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
             PinFunction::DacOut { .. } => "dac",
+            PinFunction::XspiClk { .. } => "xspi_clk",
+            PinFunction::XspiNcs { .. } => "xspi_ncs",
+            PinFunction::XspiDqs { .. } => "xspi_dqs",
+            PinFunction::XspiIo { .. } => "xspi_io",
             PinFunction::OspiClk { .. } => "ospi_clk",
             PinFunction::OspiNcs { .. } => "ospi_ncs",
             PinFunction::OspiDqs { .. } => "ospi_dqs",
@@ -103,6 +107,10 @@ impl PinFunction {
                 format!("TIM{timer}  BKIN{n}  (break)")
             }
             PinFunction::DacOut { dac, channel } => format!("DAC{dac}  OUT{channel}"),
+            PinFunction::XspiClk { port } => format!("XSPI  P{port}  CLK"),
+            PinFunction::XspiNcs { port, cs } => format!("XSPI  P{port}  NCS{cs}"),
+            PinFunction::XspiDqs { port, index } => format!("XSPI  P{port}  DQS{index}"),
+            PinFunction::XspiIo { port, lane } => format!("XSPI  P{port}  IO{lane}"),
             PinFunction::OspiClk { port } => format!("OCTOSPI  P{port}  CLK"),
             PinFunction::OspiNcs { port } => format!("OCTOSPI  P{port}  NCS"),
             PinFunction::OspiDqs { port } => format!("OCTOSPI  P{port}  DQS"),
@@ -351,6 +359,10 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",
+            PinFunction::XspiClk { .. }
+            | PinFunction::XspiNcs { .. }
+            | PinFunction::XspiDqs { .. }
+            | PinFunction::XspiIo { .. } => "XSPI",
             PinFunction::OspiClk { .. }
             | PinFunction::OspiNcs { .. }
             | PinFunction::OspiDqs { .. }

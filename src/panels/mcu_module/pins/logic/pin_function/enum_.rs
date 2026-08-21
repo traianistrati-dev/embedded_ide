@@ -31,6 +31,30 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── XSPI ────────────────────────────────────────────────────────────────
+    // OCTOSPI's successor, on the H7RS and N6: up to SIXTEEN data lines, two
+    // chip selects and two strobes per port. Named after the manager's port,
+    // same as the OCTOSPI.
+    /// XSPI port {port} clock.
+    XspiClk {
+        port: u8,
+    },
+    /// XSPI port {port} chip select {cs} — 1 or 2, either drives the device.
+    XspiNcs {
+        port: u8,
+        cs: u8,
+    },
+    /// XSPI port {port} data strobe {index} — 0, or 1 for the dual-strobe mode.
+    XspiDqs {
+        port: u8,
+        index: u8,
+    },
+    /// XSPI port {port} data line {lane}, 0..=15.
+    XspiIo {
+        port: u8,
+        lane: u8,
+    },
+
     // ── OCTOSPI ─────────────────────────────────────────────────────────────
     // The vendor names these pads after the IO MANAGER's port (`OCTOSPIM_P1_*`),
     // not after the controller, so `port` is what travels here. The manager can

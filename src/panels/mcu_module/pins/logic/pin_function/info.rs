@@ -166,6 +166,48 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::XspiClk { port }
+            | PinFunction::XspiNcs { port, .. }
+            | PinFunction::XspiDqs { port, .. }
+            | PinFunction::XspiIo { port, .. } => {
+                let role = match self {
+                    PinFunction::XspiClk { .. } => "clock".to_owned(),
+                    PinFunction::XspiNcs { cs, .. } => format!("chip select {cs}"),
+                    PinFunction::XspiDqs { index, .. } => format!("data strobe {index}"),
+                    PinFunction::XspiIo { lane, .. } => format!("data line {lane}"),
+                    _ => String::new(),
+                };
+                FunctionInfo {
+                    description: format!(
+                        "XSPI port {port} {role}. OCTOSPI's successor: the same idea again, now \
+                         up to SIXTEEN data lines, with two chip selects and two strobes."
+                    ),
+                    specs: vec![
+                        (
+                            "Width".into(),
+                            "1, 2, 4, 8 or 16 data lines — the widest external-memory bus ST \
+                             ships"
+                                .into(),
+                        ),
+                        (
+                            "Chip select".into(),
+                            "NCS1 or NCS2 — either one drives the device; the controller is told \
+                             which"
+                                .into(),
+                        ),
+                        (
+                            "Strobe".into(),
+                            "DQS0 for the double-rate modes, DQS1 as well for a 16-line device"
+                                .into(),
+                        ),
+                        (
+                            "Typical use".into(),
+                            "HyperRAM, octal and hexadeca PSRAM, execute-in-place flash".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::OspiClk { port }
             | PinFunction::OspiNcs { port }
             | PinFunction::OspiDqs { port }

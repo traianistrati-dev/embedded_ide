@@ -613,6 +613,26 @@ fn native_token(sig: &str) -> Option<String> {
             return Some("can_tx".into());
         }
     }
+    // `XSPIM_P1_IO12`. `NCLK` is the inverted clock and no constructor takes
+    // it, so it stays a generic AF signal — same as the OCTOSPI's.
+    if let Some(rest) = sig.strip_prefix("XSPIM_") {
+        let (p, role) = rest.split_once('_')?;
+        let port = p.strip_prefix('P')?.parse::<u8>().ok()?;
+        if role == "CLK" {
+            return Some(format!("xspi_p{port}_clk"));
+        }
+        if let Some(cs) = role.strip_prefix("NCS").and_then(|c| c.parse::<u8>().ok()) {
+            return (cs == 1 || cs == 2).then(|| format!("xspi_p{port}_ncs{cs}"));
+        }
+        if let Some(i) = role.strip_prefix("DQS").and_then(|c| c.parse::<u8>().ok()) {
+            return (i < 2).then(|| format!("xspi_p{port}_dqs{i}"));
+        }
+        return role
+            .strip_prefix("IO")
+            .and_then(|l| l.parse::<u8>().ok())
+            .filter(|l| *l < 16)
+            .map(|l| format!("xspi_p{port}_io{l}"));
+    }
     // `OCTOSPIM_P1_IO3` — the vendor names the pads after the IO manager's
     // PORT. `NCLK` is the inverted clock of the DTR modes and no embassy
     // constructor takes it, so it stays a generic AF signal.

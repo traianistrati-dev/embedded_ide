@@ -41,6 +41,11 @@ impl PinFunction {
             | PinFunction::OspiNcs { .. }
             | PinFunction::OspiDqs { .. }
             | PinFunction::OspiIo { .. } => egui::Color32::from_rgb(175, 190, 80),
+            // The end of the same line: the widest external-memory bus.
+            PinFunction::XspiClk { .. }
+            | PinFunction::XspiNcs { .. }
+            | PinFunction::XspiDqs { .. }
+            | PinFunction::XspiIo { .. } => egui::Color32::from_rgb(195, 200, 70),
             // A fault input, not an output — read at a glance as the one pin on
             // the timer that stops everything.
             PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
@@ -114,6 +119,10 @@ impl PinFunction {
                 | PinFunction::OspiNcs { .. }
                 | PinFunction::OspiDqs { .. }
                 | PinFunction::OspiIo { .. }
+                | PinFunction::XspiClk { .. }
+                | PinFunction::XspiNcs { .. }
+                | PinFunction::XspiDqs { .. }
+                | PinFunction::XspiIo { .. }
                 | PinFunction::UsbDm
                 | PinFunction::UsbDp
                 | PinFunction::CanRx
