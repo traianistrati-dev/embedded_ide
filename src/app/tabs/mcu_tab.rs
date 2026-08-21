@@ -462,6 +462,19 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             }),
         },
         CategoryDef {
+            name: "QUADSPI".into(),
+            rgb: (150, 175, 95),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::QspiClk
+                        | PinFunction::QspiNcs { .. }
+                        | PinFunction::QspiIo { .. }
+                )
+            }),
+        },
+        CategoryDef {
             name: "SDMMC".into(),
             rgb: (120, 155, 110),
             complexity: Complex,
@@ -1003,7 +1016,10 @@ mod tests {
         let complex: Vec<&str> = complex.iter().map(String::as_str).collect();
         assert_eq!(
             complex,
-            ["USART", "SPI", "I2S", "SDMMC", "SAI", "I2C", "USB", "CAN", "SWD / Debug"]
+            [
+                "USART", "SPI", "I2S", "QUADSPI", "SDMMC", "SAI", "I2C", "USB", "CAN",
+                "SWD / Debug"
+            ]
         );
     }
 

@@ -13,8 +13,9 @@ use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, I2sClockPolarity, I2sDirection,
     I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity, PwmCounting,
-    PwmMode, PwmOutput, PwmPolarity, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder,
-    StopBits, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, SaiDataSize, SaiMode,
+    SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits, UsartDirection, UsartFlow, UsartMode,
+    UsartModuleConfig, VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -273,6 +274,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
             block: 1,
         },
         ModuleKind::GenericInterfaceSdmmc => PinFunction::SdmmcCk { unit: instance },
+        ModuleKind::GenericInterfaceQspi => PinFunction::QspiClk,
         ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
             timer: instance,
             channel: 1,
@@ -424,6 +426,8 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         // One handle per SUB-BLOCK: they are independent streams.
         ModuleKind::GenericInterfaceSai => format!("_sai{n}a{sfx}, _sai{n}b{sfx}"),
         ModuleKind::GenericInterfaceSdmmc => format!("_sd{n}{sfx}"),
+        // Single-instance peripheral, so no number in the handle.
+        ModuleKind::GenericInterfaceQspi => format!("_qspi{sfx}"),
         ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
@@ -1922,6 +1926,111 @@ pub fn module_config_ui(
                             egui::RichText::new(why)
                                 .size(10.5)
                                 .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                }
+                // The external-flash controller. Which BANKS are wired is
+                // which constructor embassy gets, so the panel reports the shape
+                // and asks only for what the flash chip dictates.
+                ModuleConfig::Qspi(cfg) => {
+                    let bank = |b: u8| {
+                        let tag = format!("BK{b} ");
+                        let ios = conn_rows
+                            .iter()
+                            .filter(|(sig, _)| sig.starts_with(&tag) && sig.contains("IO"))
+                            .count();
+                        let ncs = conn_rows.iter().any(|(sig, _)| *sig == format!("BK{b} NCS"));
+                        (ios, ncs)
+                    };
+                    let (io1, ncs1) = bank(1);
+                    let (io2, ncs2) = bank(2);
+                    let ok1 = io1 == 4 && ncs1;
+                    let ok2 = io2 == 4 && ncs2;
+                    let clk = conn_rows.iter().any(|(sig, _)| *sig == "CLK");
+
+                    ui.label("Wiring");
+                    let (text, colour) = match (clk, ok1, ok2) {
+                        (true, true, true) => (
+                            "both banks — dual flash, 8 lines wide".to_owned(),
+                            egui::Color32::from_gray(200),
+                        ),
+                        (true, true, false) => {
+                            ("bank 1".to_owned(), egui::Color32::from_gray(200))
+                        }
+                        (true, false, true) => {
+                            ("bank 2".to_owned(), egui::Color32::from_gray(200))
+                        }
+                        (false, _, _) => (
+                            "no CLK wired".to_owned(),
+                            egui::Color32::from_rgb(200, 140, 60),
+                        ),
+                        _ => (
+                            format!(
+                                "incomplete — a bank needs NCS and all four IO ({io1}/4 on BK1, \
+                                 {io2}/4 on BK2)"
+                            ),
+                            egui::Color32::from_rgb(200, 140, 60),
+                        ),
+                    };
+                    ui.label(egui::RichText::new(text).size(11.0).color(colour));
+                    ui.end_row();
+
+                    ui.label("Flash size");
+                    egui::ComboBox::from_id_salt("qspi_size")
+                        .selected_text(cfg.memory_size_label())
+                        .show_ui(ui, |ui| {
+                            for (i, name) in QSPI_MEMORY_SIZES.iter().enumerate() {
+                                ui.selectable_value(
+                                    &mut cfg.memory_size,
+                                    i as u8,
+                                    name.trim_start_matches('_'),
+                                );
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The size of the chip on the board. The controller needs it to know \
+                             where the memory-mapped window ends.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Address");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("qspi_addr")
+                            .width(88.0)
+                            .selected_text(cfg.address_size.label())
+                            .show_ui(ui, |ui| {
+                                for v in QspiAddressSize::ALL {
+                                    ui.selectable_value(&mut cfg.address_size, v, v.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "How many address bytes the chip expects. 24 bit covers up to \
+                                 16 MiB; bigger flash needs 32.",
+                            );
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.prescaler)
+                                .range(0..=255)
+                                .prefix("clk / "),
+                        )
+                        .on_hover_text(
+                            "The bus runs at kernel clock / (prescaler + 1). 0 is the fastest \
+                             the chip can do and often too fast for the flash.",
+                        );
+                    });
+                    ui.end_row();
+
+                    if !is_async {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "only the Async runtime emits QUADSPI code — the blocking \
+                                 backends generate GPIO and watchdogs only",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
                         );
                         ui.end_row();
                     }

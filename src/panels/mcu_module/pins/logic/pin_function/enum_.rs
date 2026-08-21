@@ -31,6 +31,22 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── QUADSPI ─────────────────────────────────────────────────────────────
+    // One peripheral, up to two BANKS, each with its own chip select and four
+    // data lines; the clock is shared. Which banks are wired decides the
+    // constructor, so the bank travels in the function.
+    /// QUADSPI clock — shared by both banks.
+    QspiClk,
+    /// QUADSPI bank {bank} chip select.
+    QspiNcs {
+        bank: u8,
+    },
+    /// QUADSPI bank {bank} data line {lane}, 0..=3.
+    QspiIo {
+        bank: u8,
+        lane: u8,
+    },
+
     // ── SDMMC / SDIO ────────────────────────────────────────────────────────
     // `unit` is the instance number, and 0 means the UN-NUMBERED `SDIO` that
     // F1/F2/F4/L1 carry — the same block the later families call SDMMC1.

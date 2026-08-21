@@ -709,10 +709,26 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
         "can_rx" => Some(PinFunction::CanRx),
         "can_tx" => Some(PinFunction::CanTx),
         "mco" => Some(PinFunction::Mco),
+        "qspi_clk" => Some(PinFunction::QspiClk),
         _ => None,
     };
     if simple.is_some() {
         return simple;
+    }
+    // `qspi_b1_io2` → QUADSPI bank 1 data line 2. Lifted ABOVE the instance
+    // split below, which needs a peripheral number: the chip has at most one
+    // QUADSPI, and what varies is the BANK.
+    if let Some(rest) = t.strip_prefix("qspi_") {
+        let (b, role) = rest.split_once('_')?;
+        let bank = b.strip_prefix('b')?.parse().ok()?;
+        return match role {
+            "ncs" => Some(PinFunction::QspiNcs { bank }),
+            _ => role
+                .strip_prefix("io")
+                .and_then(|l| l.parse().ok())
+                .filter(|l| *l < 4)
+                .map(|lane| PinFunction::QspiIo { bank, lane }),
+        };
     }
     // Parameterized `<peripheral><n>_<role>` and `<kind><a>_<b>`.
     let (head, tail) = t.split_once('_')?;
@@ -852,6 +868,9 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::QspiClk => "qspi_clk".into(),
+        PinFunction::QspiNcs { bank } => format!("qspi_b{bank}_ncs"),
+        PinFunction::QspiIo { bank, lane } => format!("qspi_b{bank}_io{lane}"),
         PinFunction::SdmmcCk { unit } => format!("sdmmc{unit}_ck"),
         PinFunction::SdmmcCmd { unit } => format!("sdmmc{unit}_cmd"),
         PinFunction::SdmmcD { unit, lane } => format!("sdmmc{unit}_d{lane}"),

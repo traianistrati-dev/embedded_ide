@@ -22,6 +22,11 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// External flash on the QUADSPI controller — "QSPI".
+    ///
+    /// One peripheral, up to two banks. Which banks are wired is which
+    /// constructor embassy gets, so the width of the module is the wiring.
+    GenericInterfaceQspi,
     /// SD card / eMMC on ONE SDMMC (or SDIO) controller — "SDMMC".
     ///
     /// The bus width is not a setting: wiring D0 alone, D0–D3 or D0–D7 IS the
@@ -69,7 +74,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 12] = [
+    pub const ALL: [ModuleKind; 13] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -77,6 +82,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceI2s,
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
+        ModuleKind::GenericInterfaceQspi,
         ModuleKind::GenericInterfaceDac,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
@@ -120,6 +126,12 @@ impl ModuleKind {
             // One data line: the 4- and 8-bit widths join by assigning the
             // other lanes, the same way a timer's channels do.
             ModuleKind::GenericInterfaceSdmmc => (&[SdCk, SdCmd, SdD0], &[]),
+            // A whole bank: a quad flash needs all four data lines, so
+            // taking fewer would auto-wire something that cannot work.
+            ModuleKind::GenericInterfaceQspi => (
+                &[QsClk, QsB1Ncs, QsB1Io0, QsB1Io1, QsB1Io2, QsB1Io3],
+                &[],
+            ),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
             // channels on a module the user added to blink one LED. The other
@@ -154,6 +166,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
+            ModuleKind::GenericInterfaceQspi => "QSPI",
             ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
@@ -181,6 +194,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSdmmc => {
                 ModuleConfig::Sdmmc(SdmmcModuleConfig::new(instance))
             }
+            ModuleKind::GenericInterfaceQspi => ModuleConfig::Qspi(QspiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceTimer => {
                 ModuleConfig::Timer(TimerModuleConfig::new(instance))
             }
@@ -275,6 +289,27 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             *sai,
             if *block == 1 { SaiMclkA } else { SaiMclkB },
         ),
+        // The QUADSPI is single-instance, so every pad joins module 1.
+        PinFunction::QspiClk => (GenericInterfaceQspi, 1, QsClk),
+        PinFunction::QspiNcs { bank } => (
+            GenericInterfaceQspi,
+            1,
+            if *bank == 1 { QsB1Ncs } else { QsB2Ncs },
+        ),
+        PinFunction::QspiIo { bank, lane } => (
+            GenericInterfaceQspi,
+            1,
+            match (bank, lane) {
+                (1, 0) => QsB1Io0,
+                (1, 1) => QsB1Io1,
+                (1, 2) => QsB1Io2,
+                (1, _) => QsB1Io3,
+                (_, 0) => QsB2Io0,
+                (_, 1) => QsB2Io1,
+                (_, 2) => QsB2Io2,
+                (_, _) => QsB2Io3,
+            },
+        ),
         PinFunction::SdmmcCk { unit } => (GenericInterfaceSdmmc, *unit, SdCk),
         PinFunction::SdmmcCmd { unit } => (GenericInterfaceSdmmc, *unit, SdCmd),
         PinFunction::SdmmcD { unit, lane } => (
@@ -347,6 +382,19 @@ pub enum ModuleSignal {
     SaiFsB,
     SaiMclkB,
     // SDMMC — a clock, a command line, and up to eight data lanes.
+    // QUADSPI — a shared clock, then a chip select and four data lines per
+    // bank.
+    QsClk,
+    QsB1Ncs,
+    QsB2Ncs,
+    QsB1Io0,
+    QsB1Io1,
+    QsB1Io2,
+    QsB1Io3,
+    QsB2Io0,
+    QsB2Io1,
+    QsB2Io2,
+    QsB2Io3,
     SdCk,
     SdCmd,
     SdD0,
@@ -413,6 +461,17 @@ impl ModuleSignal {
             ModuleSignal::SaiSdB => "B SD",
             ModuleSignal::SaiFsB => "B FS",
             ModuleSignal::SaiMclkB => "B MCLK",
+            ModuleSignal::QsClk => "CLK",
+            ModuleSignal::QsB1Ncs => "BK1 NCS",
+            ModuleSignal::QsB2Ncs => "BK2 NCS",
+            ModuleSignal::QsB1Io0 => "BK1 IO0",
+            ModuleSignal::QsB1Io1 => "BK1 IO1",
+            ModuleSignal::QsB1Io2 => "BK1 IO2",
+            ModuleSignal::QsB1Io3 => "BK1 IO3",
+            ModuleSignal::QsB2Io0 => "BK2 IO0",
+            ModuleSignal::QsB2Io1 => "BK2 IO1",
+            ModuleSignal::QsB2Io2 => "BK2 IO2",
+            ModuleSignal::QsB2Io3 => "BK2 IO3",
             ModuleSignal::SdCk => "CK",
             ModuleSignal::SdCmd => "CMD",
             ModuleSignal::SdD0 => "D0",
@@ -501,6 +560,41 @@ impl ModuleSignal {
             ModuleSignal::SaiMclkB => PinFunction::SaiMclk {
                 sai: instance,
                 block: 2,
+            },
+            ModuleSignal::QsClk => PinFunction::QspiClk,
+            ModuleSignal::QsB1Ncs => PinFunction::QspiNcs { bank: 1 },
+            ModuleSignal::QsB2Ncs => PinFunction::QspiNcs { bank: 2 },
+            ModuleSignal::QsB1Io0 => PinFunction::QspiIo {
+                bank: 1,
+                lane: 0,
+            },
+            ModuleSignal::QsB1Io1 => PinFunction::QspiIo {
+                bank: 1,
+                lane: 1,
+            },
+            ModuleSignal::QsB1Io2 => PinFunction::QspiIo {
+                bank: 1,
+                lane: 2,
+            },
+            ModuleSignal::QsB1Io3 => PinFunction::QspiIo {
+                bank: 1,
+                lane: 3,
+            },
+            ModuleSignal::QsB2Io0 => PinFunction::QspiIo {
+                bank: 2,
+                lane: 0,
+            },
+            ModuleSignal::QsB2Io1 => PinFunction::QspiIo {
+                bank: 2,
+                lane: 1,
+            },
+            ModuleSignal::QsB2Io2 => PinFunction::QspiIo {
+                bank: 2,
+                lane: 2,
+            },
+            ModuleSignal::QsB2Io3 => PinFunction::QspiIo {
+                bank: 2,
+                lane: 3,
             },
             ModuleSignal::SdCk => PinFunction::SdmmcCk { unit: instance },
             ModuleSignal::SdCmd => PinFunction::SdmmcCmd { unit: instance },
@@ -1779,6 +1873,114 @@ impl I2sClockPolarity {
     }
 }
 
+/// The flash sizes embassy names, in order — the index IS the setting.
+///
+/// A table rather than an enum with twenty-three variants: the picker and the
+/// generated constant read the same list, so they cannot name different things.
+/// The label is the constant without embassy's leading underscore.
+pub const QSPI_MEMORY_SIZES: [&str; 23] = [
+    "_1KiB",
+    "_2KiB",
+    "_4KiB",
+    "_8KiB",
+    "_16KiB",
+    "_32KiB",
+    "_64KiB",
+    "_128KiB",
+    "_256KiB",
+    "_512KiB",
+    "_1MiB",
+    "_2MiB",
+    "_4MiB",
+    "_8MiB",
+    "_16MiB",
+    "_32MiB",
+    "_64MiB",
+    "_128MiB",
+    "_256MiB",
+    "_512MiB",
+    "_1GiB",
+    "_2GiB",
+    "_4GiB",
+];
+
+/// How many address bytes the flash chip expects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum QspiAddressSize {
+    Bits8,
+    Bits16,
+    #[default]
+    Bits24,
+    Bits32,
+}
+
+impl QspiAddressSize {
+    pub const ALL: [Self; 4] = [Self::Bits8, Self::Bits16, Self::Bits24, Self::Bits32];
+
+    /// embassy's spelling, which is NOT uniform — `_8Bit` but `_24bit`.
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Bits8 => "_8Bit",
+            Self::Bits16 => "_16Bit",
+            Self::Bits24 => "_24bit",
+            Self::Bits32 => "_32bit",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bits8 => "8 bit",
+            Self::Bits16 => "16 bit",
+            Self::Bits24 => "24 bit",
+            Self::Bits32 => "32 bit",
+        }
+    }
+}
+
+/// External-flash controller settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QspiModuleConfig {
+    pub instance: u8,
+    /// Index into [`QSPI_MEMORY_SIZES`] — how big the flash chip is.
+    #[serde(default)]
+    pub memory_size: u8,
+    #[serde(default)]
+    pub address_size: QspiAddressSize,
+    /// Clock divider, 0..=255: the bus runs at kernel clock / (prescaler + 1).
+    pub prescaler: u8,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_qspi` handle.
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl QspiModuleConfig {
+    /// Defaults: 16 MiB, 24-bit addressing, kernel clock / 2 — a plain 128 Mbit
+    /// NOR flash, which is what most boards carry.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            memory_size: 14,
+            address_size: QspiAddressSize::default(),
+            prescaler: 1,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    /// The embassy `MemorySize` constant this size names, clamped so a
+    /// hand-edited config cannot produce an identifier that does not exist.
+    pub fn memory_size_embassy(&self) -> &'static str {
+        QSPI_MEMORY_SIZES[(self.memory_size as usize).min(QSPI_MEMORY_SIZES.len() - 1)]
+    }
+
+    pub fn memory_size_label(&self) -> &'static str {
+        self.memory_size_embassy().trim_start_matches('_')
+    }
+}
+
 /// SD card / eMMC controller settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdmmcModuleConfig {
@@ -2269,6 +2471,7 @@ pub enum ModuleConfig {
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
+    Qspi(QspiModuleConfig),
     Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
@@ -2286,6 +2489,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => c.instance,
             ModuleConfig::Sai(c) => c.instance,
             ModuleConfig::Sdmmc(c) => c.instance,
+            ModuleConfig::Qspi(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -2302,6 +2506,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => &c.rx_model,
             ModuleConfig::Sai(c) => &c.rx_model,
             ModuleConfig::Sdmmc(c) => &c.rx_model,
+            ModuleConfig::Qspi(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -2318,6 +2523,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => &c.tx_model,
             ModuleConfig::Sai(c) => &c.tx_model,
             ModuleConfig::Sdmmc(c) => &c.tx_model,
+            ModuleConfig::Qspi(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -2334,6 +2540,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => &mut c.rx_model,
             ModuleConfig::Sai(c) => &mut c.rx_model,
             ModuleConfig::Sdmmc(c) => &mut c.rx_model,
+            ModuleConfig::Qspi(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -2350,6 +2557,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => &mut c.tx_model,
             ModuleConfig::Sai(c) => &mut c.tx_model,
             ModuleConfig::Sdmmc(c) => &mut c.tx_model,
+            ModuleConfig::Qspi(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -2367,6 +2575,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => &c.custom_label,
             ModuleConfig::Sai(c) => &c.custom_label,
             ModuleConfig::Sdmmc(c) => &c.custom_label,
+            ModuleConfig::Qspi(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -2383,6 +2592,7 @@ impl ModuleConfig {
             ModuleConfig::Dac(c) => &mut c.custom_label,
             ModuleConfig::Sai(c) => &mut c.custom_label,
             ModuleConfig::Sdmmc(c) => &mut c.custom_label,
+            ModuleConfig::Qspi(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -2410,6 +2620,7 @@ impl ModuleConfig {
                 format!("SAI{}  ·  {} sub-block", c.instance, c.blocks.len().max(1))
             }
             ModuleConfig::Sdmmc(c) => sdmmc_name(c.instance),
+            ModuleConfig::Qspi(c) => format!("QUADSPI  ·  {}", c.memory_size_label()),
             ModuleConfig::I2s(c) => format!(
                 "I2S{}  ·  {}  ·  {}",
                 c.instance,

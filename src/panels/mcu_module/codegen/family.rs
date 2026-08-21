@@ -527,6 +527,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let dac = modules::dac_configs(&mcu.modules);
     let sai = modules::sai_configs(&mcu.modules);
     let sdmmc = modules::sdmmc_configs(&mcu.modules);
+    let qspi = modules::qspi_config(&mcu.modules);
     let comp_instances = comparator::instances(mcu);
     let comp_pins: Vec<(u8, String, Option<String>)> = mcu
         .comp
@@ -559,6 +560,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
         &dac,
         &sai,
         &sdmmc,
+        qspi.as_ref(),
     )
 }
 

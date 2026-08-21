@@ -2852,7 +2852,10 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
             format!("into_alternate_push_pull(&mut {pv}.{crx})")
         }
-        PinFunction::SdmmcCk { .. }
+        PinFunction::QspiClk
+        | PinFunction::QspiNcs { .. }
+        | PinFunction::QspiIo { .. }
+        | PinFunction::SdmmcCk { .. }
         | PinFunction::SdmmcCmd { .. }
         | PinFunction::SdmmcD { .. }
         | PinFunction::SaiSck { .. }

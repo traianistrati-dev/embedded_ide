@@ -16,7 +16,8 @@ pub use model::{
     Connection, DacModuleConfig, I2cModuleConfig, I2sClockPolarity, I2sDirection, I2sFormat,
     I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity,
     PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity, SaiBlockConfig, SaiDataSize,
-    SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder,
+    QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, SaiMode, SaiModuleConfig,
+    SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder,
     SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode,
     UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
 };
@@ -71,6 +72,14 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
         }
     }
     map
+}
+
+/// The QUADSPI module's config, if the project has one.
+pub fn qspi_config(modules: &[VirtualModule]) -> Option<QspiModuleConfig> {
+    modules.iter().find_map(|m| match &m.config {
+        ModuleConfig::Qspi(c) => Some(c.clone()),
+        _ => None,
+    })
 }
 
 /// SDMMC module configs keyed by controller instance.

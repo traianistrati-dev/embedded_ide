@@ -32,6 +32,10 @@ impl PinFunction {
             PinFunction::SdmmcCk { .. }
             | PinFunction::SdmmcCmd { .. }
             | PinFunction::SdmmcD { .. } => egui::Color32::from_rgb(120, 155, 110),
+            // Storage too, but external memory rather than a card socket.
+            PinFunction::QspiClk
+            | PinFunction::QspiNcs { .. }
+            | PinFunction::QspiIo { .. } => egui::Color32::from_rgb(150, 175, 95),
             // A fault input, not an output — read at a glance as the one pin on
             // the timer that stops everything.
             PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
@@ -98,6 +102,9 @@ impl PinFunction {
                 | PinFunction::SdmmcCk { .. }
                 | PinFunction::SdmmcCmd { .. }
                 | PinFunction::SdmmcD { .. }
+                | PinFunction::QspiClk
+                | PinFunction::QspiNcs { .. }
+                | PinFunction::QspiIo { .. }
                 | PinFunction::UsbDm
                 | PinFunction::UsbDp
                 | PinFunction::CanRx

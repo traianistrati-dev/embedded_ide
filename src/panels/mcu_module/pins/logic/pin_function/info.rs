@@ -166,6 +166,42 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::QspiClk | PinFunction::QspiNcs { .. } | PinFunction::QspiIo { .. } => {
+                let role = match self {
+                    PinFunction::QspiClk => "clock, shared by both banks".to_owned(),
+                    PinFunction::QspiNcs { bank } => format!("bank {bank} chip select"),
+                    PinFunction::QspiIo { bank, lane } => format!("bank {bank} data line {lane}"),
+                    _ => String::new(),
+                };
+                FunctionInfo {
+                    description: format!(
+                        "QUADSPI {role}. Four data lines instead of one, so an external flash \
+                         reads about four times faster than over plain SPI — and the controller \
+                         can map it straight into the address space."
+                    ),
+                    specs: vec![
+                        (
+                            "Bank".into(),
+                            "Two chip selects, each with its own four data lines; the clock is \
+                             shared"
+                                .into(),
+                        ),
+                        (
+                            "Per bank".into(),
+                            "6 pads: CLK, NCS and IO0-IO3".into(),
+                        ),
+                        (
+                            "Both banks".into(),
+                            "Dual-flash mode: two chips read as one, eight bits wide".into(),
+                        ),
+                        (
+                            "Typical use".into(),
+                            "External NOR flash, PSRAM, execute-in-place".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::SdmmcCk { unit }
             | PinFunction::SdmmcCmd { unit }
             | PinFunction::SdmmcD { unit, .. } => {

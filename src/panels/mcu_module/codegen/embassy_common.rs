@@ -1746,6 +1746,34 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_QSPI=1|2|dual` wires an external flash on that bank (or both,
+        // which is the 8-line dual-flash shape). Assigned first: the QUADSPI
+        // pads are the least interchangeable ones on any of these packages.
+        if let Ok(which) = std::env::var("EIDE_QSPI") {
+            let banks: Vec<u8> = match which.as_str() {
+                "2" => vec![2],
+                "dual" => vec![1, 2],
+                _ => vec![1],
+            };
+            let mut want = vec![PinFunction::QspiClk];
+            for b in banks {
+                want.push(PinFunction::QspiNcs { bank: b });
+                want.extend((0..4).map(|lane| PinFunction::QspiIo { bank: b, lane }));
+            }
+            for want in want {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&want)
+                    })
+                    .map(|p| p.number);
+                match num.and_then(|n| mcu.find_pin_mut(n)) {
+                    Some(p) => p.selected_function = want,
+                    None => println!("chip has no pin for {want:?}"),
+                }
+            }
+        }
         // `EIDE_SDMMC=w` wires an SD card at bus width `w` (1, 4 or 8) — on a
         // chip that has the controller, which the G431 does not. Assigned first
         // because the card pads are the least interchangeable ones here.

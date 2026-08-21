@@ -613,6 +613,27 @@ fn native_token(sig: &str) -> Option<String> {
             return Some("can_tx".into());
         }
     }
+    // QUADSPI, which has no instance number: what varies is the BANK. A chip
+    // with one bank drops the tag entirely (`QUADSPI_NCS`), so that spelling
+    // means bank 1.
+    if let Some(role) = sig.strip_prefix("QUADSPI_") {
+        return match role {
+            "CLK" => Some("qspi_clk".to_owned()),
+            "NCS" => Some("qspi_b1_ncs".to_owned()),
+            _ => {
+                let (bk, tail) = role.split_once('_')?;
+                let bank = bk.strip_prefix("BK")?.parse::<u8>().ok()?;
+                match tail {
+                    "NCS" => Some(format!("qspi_b{bank}_ncs")),
+                    _ => tail
+                        .strip_prefix("IO")
+                        .and_then(|l| l.parse::<u8>().ok())
+                        .filter(|l| *l < 4)
+                        .map(|l| format!("qspi_b{bank}_io{l}")),
+                }
+            }
+        };
+    }
     // The UN-NUMBERED `SDIO` of F1/F2/F4/L1 — the same block later families
     // call SDMMC1. Handled here because the instance split below needs a
     // number, and this one has none.
@@ -1647,7 +1668,7 @@ mod tests {
         assert_eq!(map_signal("FMC_A0").as_deref(), Some("af:fmc_a0"));
         assert_eq!(map_signal("SAI1_SD_A").as_deref(), Some("sai1_a_sd"));
         assert_eq!(map_signal("DCMI_D3").as_deref(), Some("af:dcmi_d3"));
-        assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("af:quadspi_clk"));
+        assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("qspi_clk"));
         assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("tim1_1n"));
         // The break inputs, per index …
         assert_eq!(map_signal("TIM1_BKIN").as_deref(), Some("tim1_bkin1"));
