@@ -802,6 +802,22 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             _ => None,
         },
         // `sdmmc1_d3` → SDMMC1 data line 3; `sdmmc0_ck` is the un-numbered SDIO.
+        // `hspi1_io3` → HSPI1 data line 3. Instance-numbered, so it goes
+        // through the ordinary split — unlike the OCTOSPI's and XSPI's, which
+        // are named after an IO-manager port.
+        "hspi" => match tail {
+            "clk" => Some(PinFunction::HspiClk { unit: n }),
+            "ncs" => Some(PinFunction::HspiNcs { unit: n }),
+            _ => {
+                if let Some(index) = tail.strip_prefix("dqs").and_then(|c| c.parse().ok()) {
+                    return (index < 2).then_some(PinFunction::HspiDqs { unit: n, index });
+                }
+                tail.strip_prefix("io")
+                    .and_then(|l| l.parse().ok())
+                    .filter(|l| *l < 16)
+                    .map(|lane| PinFunction::HspiIo { unit: n, lane })
+            }
+        },
         "sdmmc" => match tail {
             "ck" => Some(PinFunction::SdmmcCk { unit: n }),
             "cmd" => Some(PinFunction::SdmmcCmd { unit: n }),
@@ -905,6 +921,10 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::HspiClk { unit } => format!("hspi{unit}_clk"),
+        PinFunction::HspiNcs { unit } => format!("hspi{unit}_ncs"),
+        PinFunction::HspiDqs { unit, index } => format!("hspi{unit}_dqs{index}"),
+        PinFunction::HspiIo { unit, lane } => format!("hspi{unit}_io{lane}"),
         PinFunction::XspiClk { port } => format!("xspi_p{port}_clk"),
         PinFunction::XspiNcs { port, cs } => format!("xspi_p{port}_ncs{cs}"),
         PinFunction::XspiDqs { port, index } => format!("xspi_p{port}_dqs{index}"),

@@ -22,6 +22,11 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// External memory on the HSPI controller — "HSPI".
+    ///
+    /// The high-speed controller at the top of the U5 line. Sixteen data pads
+    /// in silicon, but embassy builds exactly two widths: single and octal.
+    GenericInterfaceHspi,
     /// External flash or RAM on an XSPI port — "XSPI".
     ///
     /// OCTOSPI's successor, on the H7RS and N6. Same shape as the OCTOSPI
@@ -86,7 +91,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 15] = [
+    pub const ALL: [ModuleKind; 16] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -97,6 +102,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceQspi,
         ModuleKind::GenericInterfaceOspi,
         ModuleKind::GenericInterfaceXspi,
+        ModuleKind::GenericInterfaceHspi,
         ModuleKind::GenericInterfaceDac,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
@@ -142,16 +148,18 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSdmmc => (&[SdCk, SdCmd, SdD0], &[]),
             // A whole bank: a quad flash needs all four data lines, so
             // taking fewer would auto-wire something that cannot work.
-            ModuleKind::GenericInterfaceQspi => (
-                &[QsClk, QsB1Ncs, QsB1Io0, QsB1Io1, QsB1Io2, QsB1Io3],
-                &[],
-            ),
+            ModuleKind::GenericInterfaceQspi => {
+                (&[QsClk, QsB1Ncs, QsB1Io0, QsB1Io1, QsB1Io2, QsB1Io3], &[])
+            }
             // The narrowest device embassy builds: two data lines. The
             // wider modes join by assigning IO2..IO7, so a module added
             // from the palette does not swallow eight pads.
             ModuleKind::GenericInterfaceOspi => (&[OsClk, OsNcs, OsIo0, OsIo1], &[]),
             // The same two-line minimum as the OCTOSPI, on NCS1.
             ModuleKind::GenericInterfaceXspi => (&[XsClk, XsNcs1, XsIo0, XsIo1], &[]),
+            // The single-line width: the octal one joins by assigning
+            // IO2..IO7 and the strobe, which it needs.
+            ModuleKind::GenericInterfaceHspi => (&[HsClk, HsNcs, HsIo0, HsIo1], &[]),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
             // channels on a module the user added to blink one LED. The other
@@ -189,6 +197,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceQspi => "QSPI",
             ModuleKind::GenericInterfaceOspi => "OSPI",
             ModuleKind::GenericInterfaceXspi => "XSPI",
+            ModuleKind::GenericInterfaceHspi => "HSPI",
             ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
@@ -219,6 +228,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceQspi => ModuleConfig::Qspi(QspiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceOspi => ModuleConfig::Ospi(OspiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceXspi => ModuleConfig::Xspi(XspiModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceHspi => ModuleConfig::Hspi(HspiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceTimer => {
                 ModuleConfig::Timer(TimerModuleConfig::new(instance))
             }
@@ -312,6 +322,35 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             GenericInterfaceSai,
             *sai,
             if *block == 1 { SaiMclkA } else { SaiMclkB },
+        ),
+        PinFunction::HspiClk { unit } => (GenericInterfaceHspi, *unit, HsClk),
+        PinFunction::HspiNcs { unit } => (GenericInterfaceHspi, *unit, HsNcs),
+        PinFunction::HspiDqs { unit, index } => (
+            GenericInterfaceHspi,
+            *unit,
+            if *index == 0 { HsDqs0 } else { HsDqs1 },
+        ),
+        PinFunction::HspiIo { unit, lane } => (
+            GenericInterfaceHspi,
+            *unit,
+            match lane {
+                0 => HsIo0,
+                1 => HsIo1,
+                2 => HsIo2,
+                3 => HsIo3,
+                4 => HsIo4,
+                5 => HsIo5,
+                6 => HsIo6,
+                7 => HsIo7,
+                8 => HsIo8,
+                9 => HsIo9,
+                10 => HsIo10,
+                11 => HsIo11,
+                12 => HsIo12,
+                13 => HsIo13,
+                14 => HsIo14,
+                _ => HsIo15,
+            },
         ),
         PinFunction::XspiClk { port } => (GenericInterfaceXspi, *port, XsClk),
         PinFunction::XspiNcs { port, cs } => (
@@ -461,6 +500,27 @@ pub enum ModuleSignal {
     // OCTOSPI — one port: a clock, a chip select, an optional strobe and up
     // to eight data lines.
     // XSPI — two chip selects, two strobes, up to sixteen data lines.
+    // HSPI — one instance, one chip select, two strobes, sixteen data pads.
+    HsClk,
+    HsNcs,
+    HsDqs0,
+    HsDqs1,
+    HsIo0,
+    HsIo1,
+    HsIo2,
+    HsIo3,
+    HsIo4,
+    HsIo5,
+    HsIo6,
+    HsIo7,
+    HsIo8,
+    HsIo9,
+    HsIo10,
+    HsIo11,
+    HsIo12,
+    HsIo13,
+    HsIo14,
+    HsIo15,
     XsClk,
     XsNcs1,
     XsNcs2,
@@ -570,6 +630,26 @@ impl ModuleSignal {
             ModuleSignal::SaiSdB => "B SD",
             ModuleSignal::SaiFsB => "B FS",
             ModuleSignal::SaiMclkB => "B MCLK",
+            ModuleSignal::HsClk => "CLK",
+            ModuleSignal::HsNcs => "NCS",
+            ModuleSignal::HsDqs0 => "DQS0",
+            ModuleSignal::HsDqs1 => "DQS1",
+            ModuleSignal::HsIo0 => "IO0",
+            ModuleSignal::HsIo1 => "IO1",
+            ModuleSignal::HsIo2 => "IO2",
+            ModuleSignal::HsIo3 => "IO3",
+            ModuleSignal::HsIo4 => "IO4",
+            ModuleSignal::HsIo5 => "IO5",
+            ModuleSignal::HsIo6 => "IO6",
+            ModuleSignal::HsIo7 => "IO7",
+            ModuleSignal::HsIo8 => "IO8",
+            ModuleSignal::HsIo9 => "IO9",
+            ModuleSignal::HsIo10 => "IO10",
+            ModuleSignal::HsIo11 => "IO11",
+            ModuleSignal::HsIo12 => "IO12",
+            ModuleSignal::HsIo13 => "IO13",
+            ModuleSignal::HsIo14 => "IO14",
+            ModuleSignal::HsIo15 => "IO15",
             ModuleSignal::XsClk => "CLK",
             ModuleSignal::XsNcs1 => "NCS1",
             ModuleSignal::XsNcs2 => "NCS2",
@@ -702,6 +782,80 @@ impl ModuleSignal {
                 sai: instance,
                 block: 2,
             },
+            ModuleSignal::HsClk => PinFunction::HspiClk { unit: instance },
+            ModuleSignal::HsNcs => PinFunction::HspiNcs { unit: instance },
+            ModuleSignal::HsDqs0 => PinFunction::HspiDqs {
+                unit: instance,
+                index: 0,
+            },
+            ModuleSignal::HsDqs1 => PinFunction::HspiDqs {
+                unit: instance,
+                index: 1,
+            },
+            ModuleSignal::HsIo0 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 0,
+            },
+            ModuleSignal::HsIo1 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 1,
+            },
+            ModuleSignal::HsIo2 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 2,
+            },
+            ModuleSignal::HsIo3 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 3,
+            },
+            ModuleSignal::HsIo4 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 4,
+            },
+            ModuleSignal::HsIo5 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 5,
+            },
+            ModuleSignal::HsIo6 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 6,
+            },
+            ModuleSignal::HsIo7 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 7,
+            },
+            ModuleSignal::HsIo8 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 8,
+            },
+            ModuleSignal::HsIo9 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 9,
+            },
+            ModuleSignal::HsIo10 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 10,
+            },
+            ModuleSignal::HsIo11 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 11,
+            },
+            ModuleSignal::HsIo12 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 12,
+            },
+            ModuleSignal::HsIo13 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 13,
+            },
+            ModuleSignal::HsIo14 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 14,
+            },
+            ModuleSignal::HsIo15 => PinFunction::HspiIo {
+                unit: instance,
+                lane: 15,
+            },
             ModuleSignal::XsClk => PinFunction::XspiClk { port: instance },
             ModuleSignal::XsNcs1 => PinFunction::XspiNcs {
                 port: instance,
@@ -821,38 +975,14 @@ impl ModuleSignal {
             ModuleSignal::QsClk => PinFunction::QspiClk,
             ModuleSignal::QsB1Ncs => PinFunction::QspiNcs { bank: 1 },
             ModuleSignal::QsB2Ncs => PinFunction::QspiNcs { bank: 2 },
-            ModuleSignal::QsB1Io0 => PinFunction::QspiIo {
-                bank: 1,
-                lane: 0,
-            },
-            ModuleSignal::QsB1Io1 => PinFunction::QspiIo {
-                bank: 1,
-                lane: 1,
-            },
-            ModuleSignal::QsB1Io2 => PinFunction::QspiIo {
-                bank: 1,
-                lane: 2,
-            },
-            ModuleSignal::QsB1Io3 => PinFunction::QspiIo {
-                bank: 1,
-                lane: 3,
-            },
-            ModuleSignal::QsB2Io0 => PinFunction::QspiIo {
-                bank: 2,
-                lane: 0,
-            },
-            ModuleSignal::QsB2Io1 => PinFunction::QspiIo {
-                bank: 2,
-                lane: 1,
-            },
-            ModuleSignal::QsB2Io2 => PinFunction::QspiIo {
-                bank: 2,
-                lane: 2,
-            },
-            ModuleSignal::QsB2Io3 => PinFunction::QspiIo {
-                bank: 2,
-                lane: 3,
-            },
+            ModuleSignal::QsB1Io0 => PinFunction::QspiIo { bank: 1, lane: 0 },
+            ModuleSignal::QsB1Io1 => PinFunction::QspiIo { bank: 1, lane: 1 },
+            ModuleSignal::QsB1Io2 => PinFunction::QspiIo { bank: 1, lane: 2 },
+            ModuleSignal::QsB1Io3 => PinFunction::QspiIo { bank: 1, lane: 3 },
+            ModuleSignal::QsB2Io0 => PinFunction::QspiIo { bank: 2, lane: 0 },
+            ModuleSignal::QsB2Io1 => PinFunction::QspiIo { bank: 2, lane: 1 },
+            ModuleSignal::QsB2Io2 => PinFunction::QspiIo { bank: 2, lane: 2 },
+            ModuleSignal::QsB2Io3 => PinFunction::QspiIo { bank: 2, lane: 3 },
             ModuleSignal::SdCk => PinFunction::SdmmcCk { unit: instance },
             ModuleSignal::SdCmd => PinFunction::SdmmcCmd { unit: instance },
             ModuleSignal::SdD0 => PinFunction::SdmmcD {
@@ -2130,6 +2260,91 @@ impl I2sClockPolarity {
     }
 }
 
+/// How the HSPI talks to the device.
+///
+/// Only two, and that is the driver's whole surface: embassy has
+/// `new_blocking_singlespi` and `new_blocking_octospi` and nothing between
+/// them, even though the silicon carries sixteen data pads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum HspiMode {
+    /// Plain SPI: IO0 out, IO1 in.
+    Single,
+    /// Eight lines — and the strobe, which this call REQUIRES.
+    #[default]
+    Octal,
+}
+
+impl HspiMode {
+    pub const ALL: [Self; 2] = [Self::Single, Self::Octal];
+
+    pub fn lanes(self) -> u8 {
+        match self {
+            Self::Single => 2,
+            Self::Octal => 8,
+        }
+    }
+
+    /// The embassy constructor stem, without the `new_blocking_` prefix.
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Single => "singlespi",
+            Self::Octal => "octospi",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Single => "Single (1 line)",
+            Self::Octal => "Octal (8 lines + DQS0)",
+        }
+    }
+}
+
+/// HSPI controller settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HspiModuleConfig {
+    pub instance: u8,
+    #[serde(default)]
+    pub mode: HspiMode,
+    /// The HSPI names the device families exactly as the OCTOSPI does, so the
+    /// two share one enum.
+    #[serde(default)]
+    pub memory_type: OspiMemoryType,
+    /// Index into [`QSPI_MEMORY_SIZES`].
+    #[serde(default)]
+    pub device_size: u8,
+    pub prescaler: u8,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_hspiN` handle.
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl HspiModuleConfig {
+    /// Defaults: octal, a standard 16 MiB device, kernel clock / 2.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            mode: HspiMode::default(),
+            memory_type: OspiMemoryType::default(),
+            device_size: 14,
+            prescaler: 1,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    pub fn size_embassy(&self) -> &'static str {
+        QSPI_MEMORY_SIZES[(self.device_size as usize).min(QSPI_MEMORY_SIZES.len() - 1)]
+    }
+
+    pub fn size_label(&self) -> &'static str {
+        self.size_embassy().trim_start_matches('_')
+    }
+}
+
 /// How the XSPI talks to the device — one embassy constructor each.
 ///
 /// The same ambiguity as the OCTOSPI's, one step wider: single and dual share
@@ -2451,29 +2666,9 @@ impl OspiModuleConfig {
 /// generated constant read the same list, so they cannot name different things.
 /// The label is the constant without embassy's leading underscore.
 pub const QSPI_MEMORY_SIZES: [&str; 23] = [
-    "_1KiB",
-    "_2KiB",
-    "_4KiB",
-    "_8KiB",
-    "_16KiB",
-    "_32KiB",
-    "_64KiB",
-    "_128KiB",
-    "_256KiB",
-    "_512KiB",
-    "_1MiB",
-    "_2MiB",
-    "_4MiB",
-    "_8MiB",
-    "_16MiB",
-    "_32MiB",
-    "_64MiB",
-    "_128MiB",
-    "_256MiB",
-    "_512MiB",
-    "_1GiB",
-    "_2GiB",
-    "_4GiB",
+    "_1KiB", "_2KiB", "_4KiB", "_8KiB", "_16KiB", "_32KiB", "_64KiB", "_128KiB", "_256KiB",
+    "_512KiB", "_1MiB", "_2MiB", "_4MiB", "_8MiB", "_16MiB", "_32MiB", "_64MiB", "_128MiB",
+    "_256MiB", "_512MiB", "_1GiB", "_2GiB", "_4GiB",
 ];
 
 /// How many address bytes the flash chip expects.
@@ -3046,6 +3241,7 @@ pub enum ModuleConfig {
     Qspi(QspiModuleConfig),
     Ospi(OspiModuleConfig),
     Xspi(XspiModuleConfig),
+    Hspi(HspiModuleConfig),
     Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
@@ -3066,6 +3262,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => c.instance,
             ModuleConfig::Ospi(c) => c.instance,
             ModuleConfig::Xspi(c) => c.instance,
+            ModuleConfig::Hspi(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -3085,6 +3282,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => &c.rx_model,
             ModuleConfig::Ospi(c) => &c.rx_model,
             ModuleConfig::Xspi(c) => &c.rx_model,
+            ModuleConfig::Hspi(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -3104,6 +3302,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => &c.tx_model,
             ModuleConfig::Ospi(c) => &c.tx_model,
             ModuleConfig::Xspi(c) => &c.tx_model,
+            ModuleConfig::Hspi(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -3123,6 +3322,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => &mut c.rx_model,
             ModuleConfig::Ospi(c) => &mut c.rx_model,
             ModuleConfig::Xspi(c) => &mut c.rx_model,
+            ModuleConfig::Hspi(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -3142,6 +3342,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => &mut c.tx_model,
             ModuleConfig::Ospi(c) => &mut c.tx_model,
             ModuleConfig::Xspi(c) => &mut c.tx_model,
+            ModuleConfig::Hspi(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -3162,6 +3363,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => &c.custom_label,
             ModuleConfig::Ospi(c) => &c.custom_label,
             ModuleConfig::Xspi(c) => &c.custom_label,
+            ModuleConfig::Hspi(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -3181,6 +3383,7 @@ impl ModuleConfig {
             ModuleConfig::Qspi(c) => &mut c.custom_label,
             ModuleConfig::Ospi(c) => &mut c.custom_label,
             ModuleConfig::Xspi(c) => &mut c.custom_label,
+            ModuleConfig::Hspi(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -3217,6 +3420,12 @@ impl ModuleConfig {
             ),
             ModuleConfig::Xspi(c) => format!(
                 "XSPI{}  ·  {}  ·  {}",
+                c.instance,
+                c.size_label(),
+                c.mode.label()
+            ),
+            ModuleConfig::Hspi(c) => format!(
+                "HSPI{}  ·  {}  ·  {}",
                 c.instance,
                 c.size_label(),
                 c.mode.label()

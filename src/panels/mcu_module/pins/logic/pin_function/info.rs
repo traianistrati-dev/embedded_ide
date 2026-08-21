@@ -166,6 +166,45 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::HspiClk { unit }
+            | PinFunction::HspiNcs { unit }
+            | PinFunction::HspiDqs { unit, .. }
+            | PinFunction::HspiIo { unit, .. } => {
+                let role = match self {
+                    PinFunction::HspiClk { .. } => "clock".to_owned(),
+                    PinFunction::HspiNcs { .. } => "chip select".to_owned(),
+                    PinFunction::HspiDqs { index, .. } => format!("data strobe {index}"),
+                    PinFunction::HspiIo { lane, .. } => format!("data line {lane}"),
+                    _ => String::new(),
+                };
+                FunctionInfo {
+                    description: format!(
+                        "HSPI{unit} {role}. The high-speed external-memory controller at the top \
+                         of the U5 line — sixteen data pads in silicon, of which embassy's \
+                         driver builds the first eight."
+                    ),
+                    specs: vec![
+                        (
+                            "embassy builds".into(),
+                            "Two widths only: single (2 lines) and octal (8 lines + DQS0)".into(),
+                        ),
+                        (
+                            "In silicon".into(),
+                            "IO0-IO15 and two strobes; the wider pads have no constructor yet"
+                                .into(),
+                        ),
+                        (
+                            "Strobe".into(),
+                            "DQS0 is REQUIRED by the octal call, not optional".into(),
+                        ),
+                        (
+                            "Typical use".into(),
+                            "HyperRAM and octal PSRAM at the high end of the U5".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::XspiClk { port }
             | PinFunction::XspiNcs { port, .. }
             | PinFunction::XspiDqs { port, .. }

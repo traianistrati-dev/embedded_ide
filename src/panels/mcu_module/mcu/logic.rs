@@ -1236,6 +1236,7 @@ mod module_support_tests {
                         | ModuleKind::GenericInterfaceQspi
                         | ModuleKind::GenericInterfaceOspi
                         | ModuleKind::GenericInterfaceXspi
+                        | ModuleKind::GenericInterfaceHspi
                         | ModuleKind::GenericInterfaceDac
                 );
                 assert_eq!(

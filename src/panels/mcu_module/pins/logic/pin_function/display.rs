@@ -35,6 +35,10 @@ impl PinFunction {
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
             PinFunction::DacOut { .. } => "dac",
+            PinFunction::HspiClk { .. } => "hspi_clk",
+            PinFunction::HspiNcs { .. } => "hspi_ncs",
+            PinFunction::HspiDqs { .. } => "hspi_dqs",
+            PinFunction::HspiIo { .. } => "hspi_io",
             PinFunction::XspiClk { .. } => "xspi_clk",
             PinFunction::XspiNcs { .. } => "xspi_ncs",
             PinFunction::XspiDqs { .. } => "xspi_dqs",
@@ -107,6 +111,10 @@ impl PinFunction {
                 format!("TIM{timer}  BKIN{n}  (break)")
             }
             PinFunction::DacOut { dac, channel } => format!("DAC{dac}  OUT{channel}"),
+            PinFunction::HspiClk { unit } => format!("HSPI{unit}  CLK"),
+            PinFunction::HspiNcs { unit } => format!("HSPI{unit}  NCS"),
+            PinFunction::HspiDqs { unit, index } => format!("HSPI{unit}  DQS{index}"),
+            PinFunction::HspiIo { unit, lane } => format!("HSPI{unit}  IO{lane}"),
             PinFunction::XspiClk { port } => format!("XSPI  P{port}  CLK"),
             PinFunction::XspiNcs { port, cs } => format!("XSPI  P{port}  NCS{cs}"),
             PinFunction::XspiDqs { port, index } => format!("XSPI  P{port}  DQS{index}"),
@@ -359,6 +367,10 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",
+            PinFunction::HspiClk { .. }
+            | PinFunction::HspiNcs { .. }
+            | PinFunction::HspiDqs { .. }
+            | PinFunction::HspiIo { .. } => "HSPI",
             PinFunction::XspiClk { .. }
             | PinFunction::XspiNcs { .. }
             | PinFunction::XspiDqs { .. }
@@ -367,9 +379,9 @@ impl PinFunction {
             | PinFunction::OspiNcs { .. }
             | PinFunction::OspiDqs { .. }
             | PinFunction::OspiIo { .. } => "OSPI",
-            PinFunction::QspiClk
-            | PinFunction::QspiNcs { .. }
-            | PinFunction::QspiIo { .. } => "QSPI",
+            PinFunction::QspiClk | PinFunction::QspiNcs { .. } | PinFunction::QspiIo { .. } => {
+                "QSPI"
+            }
             PinFunction::SdmmcCk { .. }
             | PinFunction::SdmmcCmd { .. }
             | PinFunction::SdmmcD { .. } => "SDMMC",

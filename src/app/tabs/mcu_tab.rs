@@ -462,6 +462,20 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             }),
         },
         CategoryDef {
+            name: "HSPI".into(),
+            rgb: (205, 185, 60),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::HspiClk { .. }
+                        | PinFunction::HspiNcs { .. }
+                        | PinFunction::HspiDqs { .. }
+                        | PinFunction::HspiIo { .. }
+                )
+            }),
+        },
+        CategoryDef {
             name: "XSPI".into(),
             rgb: (195, 200, 70),
             complexity: Complex,
@@ -496,9 +510,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             pred: Box::new(|f| {
                 matches!(
                     f,
-                    PinFunction::QspiClk
-                        | PinFunction::QspiNcs { .. }
-                        | PinFunction::QspiIo { .. }
+                    PinFunction::QspiClk | PinFunction::QspiNcs { .. } | PinFunction::QspiIo { .. }
                 )
             }),
         },
@@ -1029,8 +1041,9 @@ mod tests {
         // are per-chip and have their own test.
         for def in category_defs(&[]) {
             let expected = match def.name.as_str() {
-                "GPIO Output" | "GPIO Input" | "ADC" | "DAC" | "Timers / PWM"
-                | "MCO / Clock" => Complexity::Simple,
+                "GPIO Output" | "GPIO Input" | "ADC" | "DAC" | "Timers / PWM" | "MCO / Clock" => {
+                    Complexity::Simple
+                }
                 _ => Complexity::Complex,
             };
             assert_eq!(def.complexity, expected, "wrong column for {}", def.name);
@@ -1045,8 +1058,18 @@ mod tests {
         assert_eq!(
             complex,
             [
-                "USART", "SPI", "I2S", "XSPI", "OCTOSPI", "QUADSPI", "SDMMC", "SAI", "I2C",
-                "USB", "CAN",
+                "USART",
+                "SPI",
+                "I2S",
+                "HSPI",
+                "XSPI",
+                "OCTOSPI",
+                "QUADSPI",
+                "SDMMC",
+                "SAI",
+                "I2C",
+                "USB",
+                "CAN",
                 "SWD / Debug"
             ]
         );

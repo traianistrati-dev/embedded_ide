@@ -13,15 +13,14 @@ pub mod persist;
 
 pub use model::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakInputConfig, BreakPolarity, CanModuleConfig,
-    Connection, DacModuleConfig, I2cModuleConfig, I2sClockPolarity, I2sDirection, I2sFormat,
-    I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity,
-    PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity, SaiBlockConfig, SaiDataSize,
-    OspiMemoryType, OspiMode, OspiModuleConfig, QSPI_MEMORY_SIZES, QspiAddressSize,
-    XspiMemoryType, XspiMode, XspiModuleConfig,
-    QspiModuleConfig, SaiMode, SaiModuleConfig,
-    SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder,
-    SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode,
-    UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
+    Connection, DacModuleConfig, HspiMode, HspiModuleConfig, I2cModuleConfig, I2sClockPolarity,
+    I2sDirection, I2sFormat, I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind,
+    ModuleSignal, OspiMemoryType, OspiMode, OspiModuleConfig, Parity, PwmChannelConfig,
+    PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize,
+    QspiModuleConfig, SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono,
+    SaiTxRx, SdmmcModuleConfig, SpiBitOrder, SpiModuleConfig, StopBits, TimerModuleConfig,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, UsbModuleConfig, VirtualModule,
+    XspiMemoryType, XspiMode, XspiModuleConfig, module_signal_of,
 };
 
 use std::collections::BTreeMap;
@@ -70,6 +69,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// HSPI module configs keyed by controller instance.
+pub fn hspi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, HspiModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Hspi(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

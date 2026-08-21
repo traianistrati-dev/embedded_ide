@@ -1746,6 +1746,31 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_HSPI=lanes` wires an HSPI device on controller 1 with that many
+        // data lines (2 or 8 — embassy has nothing between); `EIDE_HSPI_DQS=1`
+        // adds the strobe, which the octal call REQUIRES.
+        if let Ok(l) = std::env::var("EIDE_HSPI") {
+            let lanes: u8 = l.parse().unwrap_or(8);
+            let unit = 1u8;
+            let mut want = vec![PinFunction::HspiClk { unit }, PinFunction::HspiNcs { unit }];
+            want.extend((0..lanes).map(|lane| PinFunction::HspiIo { unit, lane }));
+            if std::env::var("EIDE_HSPI_DQS").is_ok() {
+                want.push(PinFunction::HspiDqs { unit, index: 0 });
+            }
+            for want in want {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&want)
+                    })
+                    .map(|p| p.number);
+                match num.and_then(|n| mcu.find_pin_mut(n)) {
+                    Some(p) => p.selected_function = want,
+                    None => println!("chip has no pin for {want:?}"),
+                }
+            }
+        }
         // `EIDE_XSPI=lanes` wires an XSPI device on port 1 with that many data
         // lines (2, 4, 8 or 16); `EIDE_XSPI_DQS=1|2` adds one or both strobes,
         // which only the wide modes read.
@@ -2078,6 +2103,17 @@ mod emit_for_manual_compile {
                             ..Default::default()
                         },
                     );
+                }
+                ModuleConfig::Hspi(c) => {
+                    use crate::panels::mcu_module::modules::{HspiMode, OspiMemoryType};
+                    // The mode has to match the pads `EIDE_HSPI` wired.
+                    c.mode = match std::env::var("EIDE_HSPI").as_deref() {
+                        Ok("2") => HspiMode::Single,
+                        _ => HspiMode::Octal,
+                    };
+                    c.memory_type = OspiMemoryType::HyperBusMemory;
+                    c.device_size = 16; // _64MiB
+                    c.prescaler = 3;
                 }
                 ModuleConfig::Xspi(c) => {
                     use crate::panels::mcu_module::modules::{XspiMemoryType, XspiMode};

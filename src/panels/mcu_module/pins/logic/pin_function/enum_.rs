@@ -31,6 +31,30 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── HSPI ────────────────────────────────────────────────────────────────
+    // The high-speed external-memory controller on the top of the U5 line. The
+    // pads are instance-numbered (`HSPI1_IO3`), not routed through an IO
+    // manager the way the OCTOSPI's and XSPI's are.
+    /// HSPI{unit} clock.
+    HspiClk {
+        unit: u8,
+    },
+    /// HSPI{unit} chip select.
+    HspiNcs {
+        unit: u8,
+    },
+    /// HSPI{unit} data strobe {index}.
+    HspiDqs {
+        unit: u8,
+        index: u8,
+    },
+    /// HSPI{unit} data line {lane}, 0..=15 in silicon — embassy drives the
+    /// first eight.
+    HspiIo {
+        unit: u8,
+        lane: u8,
+    },
+
     // ── XSPI ────────────────────────────────────────────────────────────────
     // OCTOSPI's successor, on the H7RS and N6: up to SIXTEEN data lines, two
     // chip selects and two strobes per port. Named after the manager's port,

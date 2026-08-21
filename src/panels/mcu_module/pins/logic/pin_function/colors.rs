@@ -33,9 +33,9 @@ impl PinFunction {
             | PinFunction::SdmmcCmd { .. }
             | PinFunction::SdmmcD { .. } => egui::Color32::from_rgb(120, 155, 110),
             // Storage too, but external memory rather than a card socket.
-            PinFunction::QspiClk
-            | PinFunction::QspiNcs { .. }
-            | PinFunction::QspiIo { .. } => egui::Color32::from_rgb(150, 175, 95),
+            PinFunction::QspiClk | PinFunction::QspiNcs { .. } | PinFunction::QspiIo { .. } => {
+                egui::Color32::from_rgb(150, 175, 95)
+            }
             // The same family of job as QUADSPI, a shade further along.
             PinFunction::OspiClk { .. }
             | PinFunction::OspiNcs { .. }
@@ -46,6 +46,11 @@ impl PinFunction {
             | PinFunction::XspiNcs { .. }
             | PinFunction::XspiDqs { .. }
             | PinFunction::XspiIo { .. } => egui::Color32::from_rgb(195, 200, 70),
+            // Same job again, on its own controller.
+            PinFunction::HspiClk { .. }
+            | PinFunction::HspiNcs { .. }
+            | PinFunction::HspiDqs { .. }
+            | PinFunction::HspiIo { .. } => egui::Color32::from_rgb(205, 185, 60),
             // A fault input, not an output — read at a glance as the one pin on
             // the timer that stops everything.
             PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
@@ -123,6 +128,10 @@ impl PinFunction {
                 | PinFunction::XspiNcs { .. }
                 | PinFunction::XspiDqs { .. }
                 | PinFunction::XspiIo { .. }
+                | PinFunction::HspiClk { .. }
+                | PinFunction::HspiNcs { .. }
+                | PinFunction::HspiDqs { .. }
+                | PinFunction::HspiIo { .. }
                 | PinFunction::UsbDm
                 | PinFunction::UsbDp
                 | PinFunction::CanRx

@@ -729,6 +729,21 @@ fn native_token(sig: &str) -> Option<String> {
         // `SDMMC1_D3`. The voltage-translator pads (`CKIN`, `CDIR`, `D0DIR`,
         // `D123DIR`) are not arguments to any embassy constructor, so they stay
         // generic AF signals.
+        // `HSPI1_IO3`. `NCLK` is the inverted clock and no constructor takes
+        // it, so it stays a generic AF signal.
+        "HSPI" => match tail {
+            "CLK" => Some(format!("hspi{n}_clk")),
+            "NCS" => Some(format!("hspi{n}_ncs")),
+            _ => {
+                if let Some(i) = tail.strip_prefix("DQS").and_then(|c| c.parse::<u8>().ok()) {
+                    return (i < 2).then(|| format!("hspi{n}_dqs{i}"));
+                }
+                tail.strip_prefix("IO")
+                    .and_then(|l| l.parse::<u8>().ok())
+                    .filter(|l| *l < 16)
+                    .map(|l| format!("hspi{n}_io{l}"))
+            }
+        },
         "SDMMC" => sdmmc_role(tail).map(|r| format!("sdmmc{n}_{r}")),
         "SAI" => {
             let (role, letter) = tail.rsplit_once('_')?;
