@@ -51,6 +51,10 @@ struct CategoryDef {
     /// Owned, not `&'static str`: the peripherals derived from the chip's own
     /// signals (see [`other_categories`]) have names nobody could hardcode.
     name: String,
+    /// One line saying what the peripheral IS. Shown under the group name, so
+    /// a row nobody recognises still says what picking it would buy. Owned for
+    /// the same reason as `name`: a derived row builds its own.
+    blurb: String,
     rgb: (u8, u8, u8),
     complexity: Complexity,
     /// "Is this function mine?" Boxed for the same reason - a derived
@@ -96,6 +100,7 @@ impl PinEntry {
 /// A peripheral category and the pins that can serve it on this chip.
 struct CategoryView {
     name: String,
+    blurb: String,
     color: egui::Color32,
     complexity: Complexity,
     pins: Vec<PinEntry>,
@@ -137,6 +142,56 @@ fn other_peripherals(pins: &[&Pin]) -> Vec<(String, usize)> {
         }
     }
     by_name.into_iter().map(|(k, v)| (k, v.len())).collect()
+}
+
+/// What a derived peripheral is, plus the one thing that sets these rows
+/// apart: the IDE lists them, it does not generate them.
+///
+/// Keyed on the family, not the instance — `COMP1` and `COMP7` are one entry —
+/// and a peripheral nobody here has heard of still gets the second half, which
+/// is the half that changes what you do next.
+fn derived_blurb(name: &str) -> String {
+    let family = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    let what = match family {
+        "COMP" => "analog comparator",
+        "OPAMP" => "on-chip operational amplifier",
+        "VREF" | "VREFBUF" => "voltage reference for the analog blocks",
+        "RTC" => "calendar and alarms, off the slow clock",
+        "TAMP" => "tamper detection on the backup domain",
+        "FMC" | "FSMC" => "parallel bus to SRAM, NOR or SDRAM",
+        "LTDC" => "RGB TFT display controller",
+        "DSIHOST" | "DSI" => "MIPI DSI display link",
+        "DCMI" | "DCMIPP" => "parallel camera input",
+        "PSSI" => "parallel synchronous slave interface",
+        "ETH" => "Ethernet MAC (MII or RMII)",
+        "FDCAN" => "CAN FD — the faster CAN",
+        "SDIO" => "SD card interface, SDMMC under its old name",
+        "DFSDM" | "MDF" | "ADF" => "digital filter for sigma-delta mics",
+        "SPDIFRX" => "S/PDIF digital audio receiver",
+        "LPTIM" => "timer that keeps running in low-power modes",
+        "TIM" => "timer",
+        "UCPD" => "USB Type-C power delivery",
+        "CEC" => "HDMI consumer-electronics control",
+        "SWPMI" => "single-wire protocol master (SIM cards)",
+        "MDIOS" => "MDIO slave, for Ethernet PHY registers",
+        "TSC" => "capacitive touch sensing",
+        "CRS" => "clock recovery from an external reference",
+        "RCC" => "clock control",
+        "PWR" => "power control",
+        "SYS" | "DEBUG" => "system pins: debug, boot, wake",
+        "OTG_FS" | "OTG_HS" | "USB_OTG" => "USB on-the-go",
+        "HDMI" => "HDMI-CEC",
+        "OCTOSPIM" | "XSPIM" | "HSPIM" => "IO manager for the memory controller",
+        _ => "",
+    };
+    // The second half is the point of these rows and is never dropped: they
+    // come from the chip's own signal list, so assigning one wires the pad and
+    // stops there.
+    if what.is_empty() {
+        "from this chip's signal list — wires the pad, no code".into()
+    } else {
+        format!("{what} — wires the pad, no code")
+    }
 }
 
 /// A stable colour for a derived category.
@@ -377,30 +432,35 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
     let mut defs: Vec<CategoryDef> = vec![
         CategoryDef {
             name: "GPIO Output".into(),
+            blurb: "drive the pin high or low".into(),
             rgb: (200, 120, 50),
             complexity: Simple,
             pred: Box::new(|f| matches!(f, PinFunction::GpioOutput)),
         },
         CategoryDef {
             name: "GPIO Input".into(),
+            blurb: "read the level on the pin".into(),
             rgb: (70, 160, 70),
             complexity: Simple,
             pred: Box::new(|f| matches!(f, PinFunction::GpioInput)),
         },
         CategoryDef {
             name: "ADC".into(),
+            blurb: "measures a voltage, gives you a number".into(),
             rgb: (150, 70, 200),
             complexity: Simple,
             pred: Box::new(|f| matches!(f, PinFunction::AdcChannel { .. })),
         },
         CategoryDef {
             name: "DAC".into(),
+            blurb: "takes a number, puts out a voltage".into(),
             rgb: (180, 90, 160),
             complexity: Simple,
             pred: Box::new(|f| matches!(f, PinFunction::DacOut { .. })),
         },
         CategoryDef {
             name: "Timers / PWM".into(),
+            blurb: "a square wave: frequency, duty, dead time".into(),
             rgb: (190, 170, 30),
             complexity: Simple,
             pred: Box::new(|f| {
@@ -414,12 +474,14 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "MCO / Clock".into(),
+            blurb: "an internal clock, out on a pin".into(),
             rgb: (150, 150, 160),
             complexity: Simple,
             pred: Box::new(|f| matches!(f, PinFunction::Mco)),
         },
         CategoryDef {
             name: "USART".into(),
+            blurb: "asynchronous serial — console, GPS, modem".into(),
             rgb: (50, 110, 200),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -435,6 +497,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "SPI".into(),
+            blurb: "fast four-wire bus, one device per chip select".into(),
             rgb: (30, 170, 170),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -449,6 +512,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "I2S".into(),
+            blurb: "stereo audio, carried by the SPI block".into(),
             rgb: (90, 140, 200),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -463,6 +527,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "HSPI".into(),
+            blurb: "external memory, 1 or 8 lines (high-end U5)".into(),
             rgb: (205, 185, 60),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -477,6 +542,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "XSPI".into(),
+            blurb: "external memory, up to 16 lines".into(),
             rgb: (195, 200, 70),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -491,6 +557,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "OCTOSPI".into(),
+            blurb: "external flash or RAM, up to 8 lines".into(),
             rgb: (175, 190, 80),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -505,6 +572,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "QUADSPI".into(),
+            blurb: "external flash on four lines".into(),
             rgb: (150, 175, 95),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -516,6 +584,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "SDMMC".into(),
+            blurb: "SD card or eMMC, 1, 4 or 8 bits wide".into(),
             rgb: (120, 155, 110),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -529,6 +598,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "SAI".into(),
+            blurb: "multi-channel audio: I2S, TDM, PDM, AC'97".into(),
             rgb: (60, 110, 175),
             complexity: Complex,
             pred: Box::new(|f| {
@@ -543,24 +613,28 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         },
         CategoryDef {
             name: "I2C".into(),
+            blurb: "two wires, many devices, each with an address".into(),
             rgb: (60, 180, 100),
             complexity: Complex,
             pred: Box::new(|f| matches!(f, PinFunction::I2cScl(_) | PinFunction::I2cSda(_))),
         },
         CategoryDef {
             name: "USB".into(),
+            blurb: "device or host, on the D+/D- pair".into(),
             rgb: (190, 50, 160),
             complexity: Complex,
             pred: Box::new(|f| matches!(f, PinFunction::UsbDm | PinFunction::UsbDp)),
         },
         CategoryDef {
             name: "CAN".into(),
+            blurb: "differential bus for vehicles and industry".into(),
             rgb: (200, 130, 20),
             complexity: Complex,
             pred: Box::new(|f| matches!(f, PinFunction::CanRx | PinFunction::CanTx)),
         },
         CategoryDef {
             name: "SWD / Debug".into(),
+            blurb: "flash and debug the chip — usually keep it".into(),
             rgb: (190, 50, 50),
             complexity: Complex,
             pred: Box::new(|f| matches!(f, PinFunction::SwdIo | PinFunction::SwdClk)),
@@ -588,6 +662,7 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
         }
 
         defs.push(CategoryDef {
+            blurb: derived_blurb(&name),
             rgb: derived_color(&name),
             // A peripheral whose pins must be chosen as a set belongs on the
             // Complex side, and "more than one signal on this chip" is the only
@@ -636,6 +711,7 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
     defs.iter()
         .filter_map(|def| {
             let (name, (r, g, b), pred) = (def.name.clone(), def.rgb, &def.pred);
+            let blurb = def.blurb.clone();
             let mut pin_entries = Vec::new();
             for pin in &pins {
                 // A pin already configured for a function belongs to a single
@@ -680,6 +756,7 @@ fn build_categories(mcu: &Mcu) -> Vec<CategoryView> {
             } else {
                 Some(CategoryView {
                     name,
+                    blurb,
                     color: egui::Color32::from_rgb(r, g, b),
                     complexity: def.complexity,
                     pins: pin_entries,
@@ -721,25 +798,40 @@ fn category_row(
         .show_header(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, 2.0, cat.color);
-            ui.label(
-                egui::RichText::new(cat.name.clone())
-                    .size(13.0)
-                    .strong()
-                    .color(cat.color),
-            );
+            // Two lines, not two columns: the tab is already split in half, and
+            // the blurb has to survive there without pushing the count off the
+            // row.
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(cat.name.clone())
+                            .size(13.0)
+                            .strong()
+                            .color(cat.color),
+                    );
 
-            // With the group closed this badge is the only clue about what is
-            // already wired up, so it takes the category colour once something
-            // is assigned.
-            let (badge, badge_col) = if assigned > 0 {
-                (format!("{assigned}/{total} pins"), cat.color)
-            } else {
-                (
-                    format!("{total} pins"),
-                    egui::Color32::from_rgb(150, 150, 160),
-                )
-            };
-            ui.label(egui::RichText::new(badge).size(11.0).color(badge_col));
+                    // With the group closed this badge is the only clue about
+                    // what is already wired up, so it takes the category colour
+                    // once something is assigned.
+                    let (badge, badge_col) = if assigned > 0 {
+                        (format!("{assigned}/{total} pins"), cat.color)
+                    } else {
+                        (
+                            format!("{total} pins"),
+                            egui::Color32::from_rgb(150, 150, 160),
+                        )
+                    };
+                    ui.label(egui::RichText::new(badge).size(11.0).color(badge_col));
+                });
+                // Stays visible with the group closed: closed is the default,
+                // and a name alone is exactly what someone who does not already
+                // know the peripheral cannot read.
+                ui.label(
+                    egui::RichText::new(cat.blurb.clone())
+                        .size(10.0)
+                        .color(egui::Color32::from_gray(135)),
+                );
+            });
         })
         .body(|ui| {
             // ── One chip per pin; assigned ones highlighted ──
@@ -1075,6 +1167,60 @@ mod tests {
         );
     }
 
+    /// Every row says what the peripheral IS, not just its acronym. A name
+    /// alone is readable only by someone who already knows the answer.
+    #[test]
+    fn every_category_says_what_it_is() {
+        for def in category_defs(&[]) {
+            assert!(
+                !def.blurb.trim().is_empty(),
+                "{} has no description",
+                def.name
+            );
+            // Short enough to fit under the name in a half-width column - the
+            // point is a hint, not a datasheet.
+            assert!(
+                def.blurb.chars().count() <= 60,
+                "{} description is {} chars: {:?}",
+                def.name,
+                def.blurb.chars().count(),
+                def.blurb
+            );
+            // The description is not the name again.
+            assert_ne!(def.blurb, def.name, "{} describes itself", def.name);
+        }
+    }
+
+    /// A derived row always says the thing that changes what you do next: the
+    /// IDE lists it, it does not generate it. True whether or not the
+    /// peripheral is one this table has heard of.
+    #[test]
+    fn a_derived_row_admits_it_generates_nothing() {
+        assert!(
+            derived_blurb("COMP1").starts_with("analog comparator"),
+            "{}",
+            derived_blurb("COMP1")
+        );
+        for name in ["COMP1", "OPAMP2", "FMC", "LTDC", "WHAT_IS_THIS"] {
+            assert!(
+                derived_blurb(name).contains("no code"),
+                "{name}: {}",
+                derived_blurb(name)
+            );
+        }
+        // Keyed on the family: every instance of one peripheral reads alike.
+        assert_eq!(derived_blurb("COMP1"), derived_blurb("COMP7"));
+        // …and still fits under a name in a half-width column.
+        for name in ["COMP1", "DFSDM1", "OCTOSPIM", "SDIO", "WHAT_IS_THIS"] {
+            let b = derived_blurb(name);
+            assert!(
+                b.chars().count() <= 72,
+                "{name}: {} chars: {b:?}",
+                b.chars().count()
+            );
+        }
+    }
+
     fn other(sig: &str) -> PinFunction {
         PinFunction::Other(sig.to_owned())
     }
@@ -1342,6 +1488,7 @@ mod filter_tests {
         vec![
             CategoryView {
                 name: "USART".into(),
+                blurb: String::new(),
                 color: egui::Color32::WHITE,
                 complexity: Complexity::Complex,
                 pins: vec![
@@ -1351,6 +1498,7 @@ mod filter_tests {
             },
             CategoryView {
                 name: "SPI".into(),
+                blurb: String::new(),
                 color: egui::Color32::WHITE,
                 complexity: Complexity::Complex,
                 pins: vec![pin(7, "PA7", &["SPI1  MOSI"])],
