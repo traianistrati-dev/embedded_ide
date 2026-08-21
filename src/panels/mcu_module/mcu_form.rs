@@ -715,6 +715,22 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
     if simple.is_some() {
         return simple;
     }
+    // `ospi_p1_io3` → OCTOSPI port 1 data line 3. Lifted for the same reason as
+    // the QUADSPI tokens below: what varies is the PORT, not an instance.
+    if let Some(rest) = t.strip_prefix("ospi_") {
+        let (p, role) = rest.split_once('_')?;
+        let port = p.strip_prefix('p')?.parse().ok()?;
+        return match role {
+            "clk" => Some(PinFunction::OspiClk { port }),
+            "ncs" => Some(PinFunction::OspiNcs { port }),
+            "dqs" => Some(PinFunction::OspiDqs { port }),
+            _ => role
+                .strip_prefix("io")
+                .and_then(|l| l.parse().ok())
+                .filter(|l| *l < 8)
+                .map(|lane| PinFunction::OspiIo { port, lane }),
+        };
+    }
     // `qspi_b1_io2` → QUADSPI bank 1 data line 2. Lifted ABOVE the instance
     // split below, which needs a peripheral number: the chip has at most one
     // QUADSPI, and what varies is the BANK.
@@ -868,6 +884,10 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::OspiClk { port } => format!("ospi_p{port}_clk"),
+        PinFunction::OspiNcs { port } => format!("ospi_p{port}_ncs"),
+        PinFunction::OspiDqs { port } => format!("ospi_p{port}_dqs"),
+        PinFunction::OspiIo { port, lane } => format!("ospi_p{port}_io{lane}"),
         PinFunction::QspiClk => "qspi_clk".into(),
         PinFunction::QspiNcs { bank } => format!("qspi_b{bank}_ncs"),
         PinFunction::QspiIo { bank, lane } => format!("qspi_b{bank}_io{lane}"),

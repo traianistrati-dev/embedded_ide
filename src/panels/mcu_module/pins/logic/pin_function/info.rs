@@ -166,6 +166,46 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::OspiClk { port }
+            | PinFunction::OspiNcs { port }
+            | PinFunction::OspiDqs { port }
+            | PinFunction::OspiIo { port, .. } => {
+                let role = match self {
+                    PinFunction::OspiClk { .. } => "clock".to_owned(),
+                    PinFunction::OspiNcs { .. } => "chip select".to_owned(),
+                    PinFunction::OspiDqs { .. } => "data strobe (DQS)".to_owned(),
+                    PinFunction::OspiIo { lane, .. } => format!("data line {lane}"),
+                    _ => String::new(),
+                };
+                FunctionInfo {
+                    description: format!(
+                        "OCTOSPI port {port} {role}. QUADSPI's successor: up to EIGHT data lines, \
+                         and it speaks single, dual, quad and octal SPI as well as HyperBus."
+                    ),
+                    specs: vec![
+                        (
+                            "Width".into(),
+                            "1, 2, 4 or 8 data lines — how many you wire narrows the mode".into(),
+                        ),
+                        (
+                            "DQS".into(),
+                            "Only the octal double-rate modes read it; leave it unwired otherwise"
+                                .into(),
+                        ),
+                        (
+                            "Port".into(),
+                            "The IO manager routes a port to a controller; the default is \
+                             port 1 to OCTOSPI1"
+                                .into(),
+                        ),
+                        (
+                            "Typical use".into(),
+                            "Octal NOR flash, HyperRAM, PSRAM, execute-in-place".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::QspiClk | PinFunction::QspiNcs { .. } | PinFunction::QspiIo { .. } => {
                 let role = match self {
                     PinFunction::QspiClk => "clock, shared by both banks".to_owned(),

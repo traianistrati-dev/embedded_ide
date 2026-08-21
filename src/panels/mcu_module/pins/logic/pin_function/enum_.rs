@@ -31,6 +31,29 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── OCTOSPI ─────────────────────────────────────────────────────────────
+    // The vendor names these pads after the IO MANAGER's port (`OCTOSPIM_P1_*`),
+    // not after the controller, so `port` is what travels here. The manager can
+    // route either port to either controller; the IDE takes the default 1:1
+    // mapping, which is what CubeMX and the boards use.
+    /// OCTOSPI port {port} clock.
+    OspiClk {
+        port: u8,
+    },
+    /// OCTOSPI port {port} chip select.
+    OspiNcs {
+        port: u8,
+    },
+    /// OCTOSPI port {port} data strobe — only the octal DTR modes use it.
+    OspiDqs {
+        port: u8,
+    },
+    /// OCTOSPI port {port} data line {lane}, 0..=7.
+    OspiIo {
+        port: u8,
+        lane: u8,
+    },
+
     // ── QUADSPI ─────────────────────────────────────────────────────────────
     // One peripheral, up to two BANKS, each with its own chip select and four
     // data lines; the clock is shared. Which banks are wired decides the

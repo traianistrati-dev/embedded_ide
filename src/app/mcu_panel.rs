@@ -327,6 +327,7 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
                                         ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
                                         ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                        ModuleKind::GenericInterfaceOspi => "Add an external flash or RAM on an OCTOSPI port: it auto-wires the two-line minimum (CLK, NCS, IO0-IO1), and the quad and octal modes join by assigning IO2-IO7 on the canvas",
                                         ModuleKind::GenericInterfaceQspi => "Add an external-flash module on the QUADSPI: it auto-wires bank 1 whole (CLK, NCS, IO0-IO3), and bank 2 joins the same module when you assign its pads on the canvas",
                                         ModuleKind::GenericInterfaceSdmmc => "Add an SD card / eMMC module: it auto-wires CK, CMD and D0, and the wider buses join by assigning D1-D3 (4-bit) or D1-D7 (8-bit) on the canvas",
                                         ModuleKind::GenericInterfaceSai => "Add a SAI module for one audio unit: it auto-wires sub-block A (SCK/SD/FS), and sub-block B joins the same module when you assign its pads on the canvas",

@@ -613,6 +613,23 @@ fn native_token(sig: &str) -> Option<String> {
             return Some("can_tx".into());
         }
     }
+    // `OCTOSPIM_P1_IO3` — the vendor names the pads after the IO manager's
+    // PORT. `NCLK` is the inverted clock of the DTR modes and no embassy
+    // constructor takes it, so it stays a generic AF signal.
+    if let Some(rest) = sig.strip_prefix("OCTOSPIM_") {
+        let (p, role) = rest.split_once('_')?;
+        let port = p.strip_prefix('P')?.parse::<u8>().ok()?;
+        return match role {
+            "CLK" => Some(format!("ospi_p{port}_clk")),
+            "NCS" => Some(format!("ospi_p{port}_ncs")),
+            "DQS" => Some(format!("ospi_p{port}_dqs")),
+            _ => role
+                .strip_prefix("IO")
+                .and_then(|l| l.parse::<u8>().ok())
+                .filter(|l| *l < 8)
+                .map(|l| format!("ospi_p{port}_io{l}")),
+        };
+    }
     // QUADSPI, which has no instance number: what varies is the BANK. A chip
     // with one bank drops the tag entirely (`QUADSPI_NCS`), so that spelling
     // means bank 1.

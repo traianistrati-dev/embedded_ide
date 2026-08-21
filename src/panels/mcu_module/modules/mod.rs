@@ -16,7 +16,8 @@ pub use model::{
     Connection, DacModuleConfig, I2cModuleConfig, I2sClockPolarity, I2sDirection, I2sFormat,
     I2sMode, I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity,
     PwmChannelConfig, PwmCounting, PwmMode, PwmOutput, PwmPolarity, SaiBlockConfig, SaiDataSize,
-    QSPI_MEMORY_SIZES, QspiAddressSize, QspiModuleConfig, SaiMode, SaiModuleConfig,
+    OspiMemoryType, OspiMode, OspiModuleConfig, QSPI_MEMORY_SIZES, QspiAddressSize,
+    QspiModuleConfig, SaiMode, SaiModuleConfig,
     SaiStereoMono, SaiTxRx, SdmmcModuleConfig, SpiBitOrder,
     SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode,
     UsartModuleConfig, UsbModuleConfig, VirtualModule, module_signal_of,
@@ -68,6 +69,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// OCTOSPI module configs keyed by PORT.
+pub fn ospi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, OspiModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Ospi(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

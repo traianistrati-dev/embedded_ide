@@ -22,6 +22,12 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// External flash or RAM on an OCTOSPI port — "OSPI".
+    ///
+    /// The module is the PORT, because that is what the vendor names the pads
+    /// after; the IO manager maps it to a controller, and the IDE takes the
+    /// default 1:1 (port 1 to OCTOSPI1).
+    GenericInterfaceOspi,
     /// External flash on the QUADSPI controller — "QSPI".
     ///
     /// One peripheral, up to two banks. Which banks are wired is which
@@ -74,7 +80,7 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 13] = [
+    pub const ALL: [ModuleKind; 14] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
@@ -83,6 +89,7 @@ impl ModuleKind {
         ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceQspi,
+        ModuleKind::GenericInterfaceOspi,
         ModuleKind::GenericInterfaceDac,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
@@ -132,6 +139,10 @@ impl ModuleKind {
                 &[QsClk, QsB1Ncs, QsB1Io0, QsB1Io1, QsB1Io2, QsB1Io3],
                 &[],
             ),
+            // The narrowest device embassy builds: two data lines. The
+            // wider modes join by assigning IO2..IO7, so a module added
+            // from the palette does not swallow eight pads.
+            ModuleKind::GenericInterfaceOspi => (&[OsClk, OsNcs, OsIo0, OsIo1], &[]),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
             // channels on a module the user added to blink one LED. The other
@@ -167,6 +178,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceSdmmc => "SDMMC",
             ModuleKind::GenericInterfaceQspi => "QSPI",
+            ModuleKind::GenericInterfaceOspi => "OSPI",
             ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
@@ -195,6 +207,7 @@ impl ModuleKind {
                 ModuleConfig::Sdmmc(SdmmcModuleConfig::new(instance))
             }
             ModuleKind::GenericInterfaceQspi => ModuleConfig::Qspi(QspiModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceOspi => ModuleConfig::Ospi(OspiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceTimer => {
                 ModuleConfig::Timer(TimerModuleConfig::new(instance))
             }
@@ -288,6 +301,23 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             GenericInterfaceSai,
             *sai,
             if *block == 1 { SaiMclkA } else { SaiMclkB },
+        ),
+        PinFunction::OspiClk { port } => (GenericInterfaceOspi, *port, OsClk),
+        PinFunction::OspiNcs { port } => (GenericInterfaceOspi, *port, OsNcs),
+        PinFunction::OspiDqs { port } => (GenericInterfaceOspi, *port, OsDqs),
+        PinFunction::OspiIo { port, lane } => (
+            GenericInterfaceOspi,
+            *port,
+            match lane {
+                0 => OsIo0,
+                1 => OsIo1,
+                2 => OsIo2,
+                3 => OsIo3,
+                4 => OsIo4,
+                5 => OsIo5,
+                6 => OsIo6,
+                _ => OsIo7,
+            },
         ),
         // The QUADSPI is single-instance, so every pad joins module 1.
         PinFunction::QspiClk => (GenericInterfaceQspi, 1, QsClk),
@@ -384,6 +414,19 @@ pub enum ModuleSignal {
     // SDMMC — a clock, a command line, and up to eight data lanes.
     // QUADSPI — a shared clock, then a chip select and four data lines per
     // bank.
+    // OCTOSPI — one port: a clock, a chip select, an optional strobe and up
+    // to eight data lines.
+    OsClk,
+    OsNcs,
+    OsDqs,
+    OsIo0,
+    OsIo1,
+    OsIo2,
+    OsIo3,
+    OsIo4,
+    OsIo5,
+    OsIo6,
+    OsIo7,
     QsClk,
     QsB1Ncs,
     QsB2Ncs,
@@ -461,6 +504,17 @@ impl ModuleSignal {
             ModuleSignal::SaiSdB => "B SD",
             ModuleSignal::SaiFsB => "B FS",
             ModuleSignal::SaiMclkB => "B MCLK",
+            ModuleSignal::OsClk => "CLK",
+            ModuleSignal::OsNcs => "NCS",
+            ModuleSignal::OsDqs => "DQS",
+            ModuleSignal::OsIo0 => "IO0",
+            ModuleSignal::OsIo1 => "IO1",
+            ModuleSignal::OsIo2 => "IO2",
+            ModuleSignal::OsIo3 => "IO3",
+            ModuleSignal::OsIo4 => "IO4",
+            ModuleSignal::OsIo5 => "IO5",
+            ModuleSignal::OsIo6 => "IO6",
+            ModuleSignal::OsIo7 => "IO7",
             ModuleSignal::QsClk => "CLK",
             ModuleSignal::QsB1Ncs => "BK1 NCS",
             ModuleSignal::QsB2Ncs => "BK2 NCS",
@@ -560,6 +614,41 @@ impl ModuleSignal {
             ModuleSignal::SaiMclkB => PinFunction::SaiMclk {
                 sai: instance,
                 block: 2,
+            },
+            ModuleSignal::OsClk => PinFunction::OspiClk { port: instance },
+            ModuleSignal::OsNcs => PinFunction::OspiNcs { port: instance },
+            ModuleSignal::OsDqs => PinFunction::OspiDqs { port: instance },
+            ModuleSignal::OsIo0 => PinFunction::OspiIo {
+                port: instance,
+                lane: 0,
+            },
+            ModuleSignal::OsIo1 => PinFunction::OspiIo {
+                port: instance,
+                lane: 1,
+            },
+            ModuleSignal::OsIo2 => PinFunction::OspiIo {
+                port: instance,
+                lane: 2,
+            },
+            ModuleSignal::OsIo3 => PinFunction::OspiIo {
+                port: instance,
+                lane: 3,
+            },
+            ModuleSignal::OsIo4 => PinFunction::OspiIo {
+                port: instance,
+                lane: 4,
+            },
+            ModuleSignal::OsIo5 => PinFunction::OspiIo {
+                port: instance,
+                lane: 5,
+            },
+            ModuleSignal::OsIo6 => PinFunction::OspiIo {
+                port: instance,
+                lane: 6,
+            },
+            ModuleSignal::OsIo7 => PinFunction::OspiIo {
+                port: instance,
+                lane: 7,
             },
             ModuleSignal::QsClk => PinFunction::QspiClk,
             ModuleSignal::QsB1Ncs => PinFunction::QspiNcs { bank: 1 },
@@ -1873,6 +1962,156 @@ impl I2sClockPolarity {
     }
 }
 
+/// How the OCTOSPI talks to the device — one embassy constructor each.
+///
+/// Two of these cannot be told from the wiring: single and dual use the SAME
+/// two pads, and octal and dual-quad the same eight. That is why this is a
+/// setting and the width is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OspiMode {
+    /// Plain SPI over the octo controller: IO0 out, IO1 in.
+    Single,
+    /// Two lines, both driven.
+    Dual,
+    #[default]
+    Quad,
+    /// Two quad devices side by side on eight lines.
+    DualQuad,
+    Octal,
+}
+
+impl OspiMode {
+    pub const ALL: [Self; 5] = [
+        Self::Single,
+        Self::Dual,
+        Self::Quad,
+        Self::DualQuad,
+        Self::Octal,
+    ];
+
+    /// How many data lines this mode drives.
+    pub fn lanes(self) -> u8 {
+        match self {
+            Self::Single | Self::Dual => 2,
+            Self::Quad => 4,
+            Self::DualQuad | Self::Octal => 8,
+        }
+    }
+
+    /// The embassy constructor stem, without the `new_blocking_` prefix or the
+    /// `_with_dqs` suffix.
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Single => "singlespi",
+            Self::Dual => "dualspi",
+            Self::Quad => "quadspi",
+            Self::DualQuad => "dualquadspi",
+            Self::Octal => "octospi",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Single => "Single (1 line)",
+            Self::Dual => "Dual (2 lines)",
+            Self::Quad => "Quad (4 lines)",
+            Self::DualQuad => "Dual-quad (2 chips, 8 lines)",
+            Self::Octal => "Octal (8 lines)",
+        }
+    }
+}
+
+/// What kind of device is on the other end — it changes the command framing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OspiMemoryType {
+    Micron,
+    Macronix,
+    #[default]
+    Standard,
+    MacronixRam,
+    HyperBusMemory,
+    HyperBusRegister,
+}
+
+impl OspiMemoryType {
+    pub const ALL: [Self; 6] = [
+        Self::Micron,
+        Self::Macronix,
+        Self::Standard,
+        Self::MacronixRam,
+        Self::HyperBusMemory,
+        Self::HyperBusRegister,
+    ];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Micron => "Micron",
+            Self::Macronix => "Macronix",
+            Self::Standard => "Standard",
+            Self::MacronixRam => "MacronixRam",
+            Self::HyperBusMemory => "HyperBusMemory",
+            Self::HyperBusRegister => "HyperBusRegister",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Micron => "Micron",
+            Self::Macronix => "Macronix",
+            Self::Standard => "Standard",
+            Self::MacronixRam => "Macronix RAM",
+            Self::HyperBusMemory => "HyperBus memory",
+            Self::HyperBusRegister => "HyperBus register",
+        }
+    }
+}
+
+/// OCTOSPI port settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OspiModuleConfig {
+    /// The IO-manager PORT, which the IDE maps 1:1 onto the controller.
+    pub instance: u8,
+    #[serde(default)]
+    pub mode: OspiMode,
+    #[serde(default)]
+    pub memory_type: OspiMemoryType,
+    /// Index into [`QSPI_MEMORY_SIZES`] — the OCTOSPI names its sizes exactly
+    /// as the QUADSPI does, so the two share one table.
+    #[serde(default)]
+    pub device_size: u8,
+    /// Clock divider: the bus runs at kernel clock / (prescaler + 1).
+    pub prescaler: u8,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_ospiN` handle.
+    #[serde(default)]
+    pub custom_label: String,
+}
+
+impl OspiModuleConfig {
+    /// Defaults: quad, a standard 16 MiB flash, kernel clock / 2.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            mode: OspiMode::default(),
+            memory_type: OspiMemoryType::default(),
+            device_size: 14,
+            prescaler: 1,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+        }
+    }
+
+    pub fn size_embassy(&self) -> &'static str {
+        QSPI_MEMORY_SIZES[(self.device_size as usize).min(QSPI_MEMORY_SIZES.len() - 1)]
+    }
+
+    pub fn size_label(&self) -> &'static str {
+        self.size_embassy().trim_start_matches('_')
+    }
+}
+
 /// The flash sizes embassy names, in order — the index IS the setting.
 ///
 /// A table rather than an enum with twenty-three variants: the picker and the
@@ -2472,6 +2711,7 @@ pub enum ModuleConfig {
     Sai(SaiModuleConfig),
     Sdmmc(SdmmcModuleConfig),
     Qspi(QspiModuleConfig),
+    Ospi(OspiModuleConfig),
     Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
@@ -2490,6 +2730,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => c.instance,
             ModuleConfig::Sdmmc(c) => c.instance,
             ModuleConfig::Qspi(c) => c.instance,
+            ModuleConfig::Ospi(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -2507,6 +2748,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => &c.rx_model,
             ModuleConfig::Sdmmc(c) => &c.rx_model,
             ModuleConfig::Qspi(c) => &c.rx_model,
+            ModuleConfig::Ospi(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -2524,6 +2766,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => &c.tx_model,
             ModuleConfig::Sdmmc(c) => &c.tx_model,
             ModuleConfig::Qspi(c) => &c.tx_model,
+            ModuleConfig::Ospi(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -2541,6 +2784,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => &mut c.rx_model,
             ModuleConfig::Sdmmc(c) => &mut c.rx_model,
             ModuleConfig::Qspi(c) => &mut c.rx_model,
+            ModuleConfig::Ospi(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -2558,6 +2802,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => &mut c.tx_model,
             ModuleConfig::Sdmmc(c) => &mut c.tx_model,
             ModuleConfig::Qspi(c) => &mut c.tx_model,
+            ModuleConfig::Ospi(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -2576,6 +2821,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => &c.custom_label,
             ModuleConfig::Sdmmc(c) => &c.custom_label,
             ModuleConfig::Qspi(c) => &c.custom_label,
+            ModuleConfig::Ospi(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -2593,6 +2839,7 @@ impl ModuleConfig {
             ModuleConfig::Sai(c) => &mut c.custom_label,
             ModuleConfig::Sdmmc(c) => &mut c.custom_label,
             ModuleConfig::Qspi(c) => &mut c.custom_label,
+            ModuleConfig::Ospi(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -2621,6 +2868,12 @@ impl ModuleConfig {
             }
             ModuleConfig::Sdmmc(c) => sdmmc_name(c.instance),
             ModuleConfig::Qspi(c) => format!("QUADSPI  ·  {}", c.memory_size_label()),
+            ModuleConfig::Ospi(c) => format!(
+                "OCTOSPI{}  ·  {}  ·  {}",
+                c.instance,
+                c.size_label(),
+                c.mode.label()
+            ),
             ModuleConfig::I2s(c) => format!(
                 "I2S{}  ·  {}  ·  {}",
                 c.instance,

@@ -12,10 +12,10 @@ use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, I2sClockPolarity, I2sDirection,
-    I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity, PwmCounting,
-    PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES, QspiAddressSize, SaiDataSize, SaiMode,
-    SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits, UsartDirection, UsartFlow, UsartMode,
-    UsartModuleConfig, VirtualModule,
+    I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, OspiMemoryType,
+    OspiMode, Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, QSPI_MEMORY_SIZES,
+    QspiAddressSize, SaiDataSize, SaiMode, SaiStereoMono, SaiTxRx, SpiBitOrder, StopBits,
+    UsartDirection, UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -275,6 +275,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         },
         ModuleKind::GenericInterfaceSdmmc => PinFunction::SdmmcCk { unit: instance },
         ModuleKind::GenericInterfaceQspi => PinFunction::QspiClk,
+        ModuleKind::GenericInterfaceOspi => PinFunction::OspiClk { port: instance },
         ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
             timer: instance,
             channel: 1,
@@ -428,6 +429,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceSdmmc => format!("_sd{n}{sfx}"),
         // Single-instance peripheral, so no number in the handle.
         ModuleKind::GenericInterfaceQspi => format!("_qspi{sfx}"),
+        ModuleKind::GenericInterfaceOspi => format!("_ospi{n}{sfx}"),
         ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
@@ -1926,6 +1928,113 @@ pub fn module_config_ui(
                             egui::RichText::new(why)
                                 .size(10.5)
                                 .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                }
+                // One OCTOSPI port. The width narrows the mode but does not
+                // decide it: single and dual share two pads, octal and dual-quad
+                // share eight — so the mode is asked for, and only the modes the
+                // wiring can carry are offered.
+                ModuleConfig::Ospi(cfg) => {
+                    let lanes = conn_rows
+                        .iter()
+                        .filter(|(sig, _)| sig.starts_with("IO"))
+                        .count() as u8;
+                    let dqs = conn_rows.iter().any(|(sig, _)| *sig == "DQS");
+
+                    ui.label("Mode");
+                    let fits: Vec<OspiMode> = OspiMode::ALL
+                        .into_iter()
+                        .filter(|m| m.lanes() == lanes)
+                        .collect();
+                    if fits.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{lanes} data line(s) wired — the controller takes 2, 4 or 8"
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(200, 140, 60)),
+                        );
+                    } else {
+                        egui::ComboBox::from_id_salt("ospi_mode")
+                            .selected_text(cfg.mode.label())
+                            .show_ui(ui, |ui| {
+                                for m in &fits {
+                                    ui.selectable_value(&mut cfg.mode, *m, m.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Only the modes your wiring can carry. Single and dual use the \
+                                 same two pads, octal and dual-quad the same eight — the pins \
+                                 cannot tell them apart, so this asks.",
+                            );
+                        // Keep the setting inside what is wired: a mode the pads
+                        // cannot carry would be refused at generation anyway.
+                        if !fits.contains(&cfg.mode) {
+                            cfg.mode = fits[0];
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Device");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("ospi_size")
+                            .width(84.0)
+                            .selected_text(cfg.size_label())
+                            .show_ui(ui, |ui| {
+                                for (i, name) in QSPI_MEMORY_SIZES.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut cfg.device_size,
+                                        i as u8,
+                                        name.trim_start_matches('_'),
+                                    );
+                                }
+                            });
+                        egui::ComboBox::from_id_salt("ospi_type")
+                            .width(130.0)
+                            .selected_text(cfg.memory_type.label())
+                            .show_ui(ui, |ui| {
+                                for v in OspiMemoryType::ALL {
+                                    ui.selectable_value(&mut cfg.memory_type, v, v.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "The device family changes how commands are framed. Standard \
+                                 covers ordinary NOR flash; HyperBus is a different protocol \
+                                 altogether.",
+                            );
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.prescaler)
+                                .range(0..=255)
+                                .prefix("clk / "),
+                        );
+                    });
+                    ui.end_row();
+
+                    if dqs && cfg.mode != OspiMode::Octal {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "DQS is wired but only the octal mode reads it — the pad will \
+                                 be left out of the call",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_rgb(200, 140, 60)),
+                        );
+                        ui.end_row();
+                    }
+                    if !is_async {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "only the Async runtime emits OCTOSPI code — the blocking \
+                                 backends generate GPIO and watchdogs only",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
                         );
                         ui.end_row();
                     }

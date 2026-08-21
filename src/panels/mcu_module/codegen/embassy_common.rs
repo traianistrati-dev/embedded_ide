@@ -1746,6 +1746,31 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_OSPI=lanes` wires an OCTOSPI device on port 1 with that many
+        // data lines (2, 4 or 8); `EIDE_OSPI_DQS=1` adds the strobe, which only
+        // the octal mode reads.
+        if let Ok(l) = std::env::var("EIDE_OSPI") {
+            let lanes: u8 = l.parse().unwrap_or(4);
+            let port = 1u8;
+            let mut want = vec![PinFunction::OspiClk { port }, PinFunction::OspiNcs { port }];
+            want.extend((0..lanes).map(|lane| PinFunction::OspiIo { port, lane }));
+            if std::env::var("EIDE_OSPI_DQS").is_ok() {
+                want.push(PinFunction::OspiDqs { port });
+            }
+            for want in want {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&want)
+                    })
+                    .map(|p| p.number);
+                match num.and_then(|n| mcu.find_pin_mut(n)) {
+                    Some(p) => p.selected_function = want,
+                    None => println!("chip has no pin for {want:?}"),
+                }
+            }
+        }
         // `EIDE_QSPI=1|2|dual` wires an external flash on that bank (or both,
         // which is the 8-line dual-flash shape). Assigned first: the QUADSPI
         // pads are the least interchangeable ones on any of these packages.
@@ -2023,6 +2048,18 @@ mod emit_for_manual_compile {
                             ..Default::default()
                         },
                     );
+                }
+                ModuleConfig::Ospi(c) => {
+                    use crate::panels::mcu_module::modules::{OspiMemoryType, OspiMode};
+                    // The mode has to match the pads `EIDE_OSPI` wired.
+                    c.mode = match std::env::var("EIDE_OSPI").as_deref() {
+                        Ok("2") => OspiMode::Dual,
+                        Ok("8") => OspiMode::Octal,
+                        _ => OspiMode::Quad,
+                    };
+                    c.memory_type = OspiMemoryType::Macronix;
+                    c.device_size = 16; // _64MiB
+                    c.prescaler = 3;
                 }
                 ModuleConfig::Dac(c) => {
                     // Non-default start values, so the consts are exercised.

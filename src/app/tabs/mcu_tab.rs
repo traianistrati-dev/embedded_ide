@@ -462,6 +462,20 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             }),
         },
         CategoryDef {
+            name: "OCTOSPI".into(),
+            rgb: (175, 190, 80),
+            complexity: Complex,
+            pred: Box::new(|f| {
+                matches!(
+                    f,
+                    PinFunction::OspiClk { .. }
+                        | PinFunction::OspiNcs { .. }
+                        | PinFunction::OspiDqs { .. }
+                        | PinFunction::OspiIo { .. }
+                )
+            }),
+        },
+        CategoryDef {
             name: "QUADSPI".into(),
             rgb: (150, 175, 95),
             complexity: Complex,
@@ -1017,7 +1031,8 @@ mod tests {
         assert_eq!(
             complex,
             [
-                "USART", "SPI", "I2S", "QUADSPI", "SDMMC", "SAI", "I2C", "USB", "CAN",
+                "USART", "SPI", "I2S", "OCTOSPI", "QUADSPI", "SDMMC", "SAI", "I2C", "USB",
+                "CAN",
                 "SWD / Debug"
             ]
         );
