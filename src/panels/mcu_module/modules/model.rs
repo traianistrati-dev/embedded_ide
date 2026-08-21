@@ -21,6 +21,12 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// Audio device on an I2S bus (CK/WS/SD, optional MCK) — "I2S".
+    ///
+    /// The instance is the SPI block the I2S runs on: I2S2 IS SPI2, so a
+    /// `GI_SPI 2` and a `GI_I2S 2` describe the same silicon and only one of
+    /// them can be built.
+    GenericInterfaceI2s,
     /// PWM outputs driven by ONE timer — "PWM".
     ///
     /// The module is the TIMER, not the channel: every channel of a timer shares
@@ -43,11 +49,12 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 8] = [
+    pub const ALL: [ModuleKind; 9] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
+        ModuleKind::GenericInterfaceI2s,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
         ModuleKind::GenericInterfaceUsb,
@@ -77,6 +84,10 @@ impl ModuleKind {
             // a broken module — embassy's `new_txonly` is exactly that shape.
             ModuleKind::GenericInterfaceSpi => (&[Sck, Mosi], &[Miso, Nss]),
             ModuleKind::GenericInterfaceI2c => (&[Scl, Sda], &[]),
+            // MCK is optional: only a codec that wants a master clock needs
+            // the pad, and spending it by default would take a pin nobody
+            // asked for.
+            ModuleKind::GenericInterfaceI2s => (&[I2sCk, I2sWs, I2sSd], &[I2sMck]),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
             // channels on a module the user added to blink one LED. The other
@@ -107,6 +118,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceLpuart => "LPUART",
             ModuleKind::GenericInterfaceSpi => "SPI",
             ModuleKind::GenericInterfaceI2c => "I2C",
+            ModuleKind::GenericInterfaceI2s => "I2S",
             ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
@@ -128,6 +140,7 @@ impl ModuleKind {
             }
             ModuleKind::GenericInterfaceSpi => ModuleConfig::Spi(SpiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceTimer => {
                 ModuleConfig::Timer(TimerModuleConfig::new(instance))
             }
@@ -191,6 +204,10 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
         ),
         PinFunction::I2cScl(n) => (GenericInterfaceI2c, *n, Scl),
         PinFunction::I2cSda(n) => (GenericInterfaceI2c, *n, Sda),
+        PinFunction::I2sCk(n) => (GenericInterfaceI2s, *n, I2sCk),
+        PinFunction::I2sWs(n) => (GenericInterfaceI2s, *n, I2sWs),
+        PinFunction::I2sSd(n) => (GenericInterfaceI2s, *n, I2sSd),
+        PinFunction::I2sMck(n) => (GenericInterfaceI2s, *n, I2sMck),
         // CAN has a single instance on STM32F1 (CAN1) and pin functions without
         // an index, so the instance is fixed at 1.
         PinFunction::CanRx => (GenericInterfaceCan, 1, CanRx),
@@ -228,6 +245,12 @@ pub enum ModuleSignal {
     // I2C
     Scl,
     Sda,
+    // I2S — a clock, a word-select line, one data line, and an optional
+    // master clock for the codec.
+    I2sCk,
+    I2sWs,
+    I2sSd,
+    I2sMck,
     // PWM — one per timer channel.
     PwmCh1,
     PwmCh2,
@@ -270,6 +293,10 @@ impl ModuleSignal {
             ModuleSignal::Nss => "NSS",
             ModuleSignal::Scl => "SCL",
             ModuleSignal::Sda => "SDA",
+            ModuleSignal::I2sCk => "CK",
+            ModuleSignal::I2sWs => "WS",
+            ModuleSignal::I2sSd => "SD",
+            ModuleSignal::I2sMck => "MCK",
             ModuleSignal::PwmCh1 => "CH1",
             ModuleSignal::PwmCh2 => "CH2",
             ModuleSignal::PwmCh3 => "CH3",
@@ -305,6 +332,10 @@ impl ModuleSignal {
             ModuleSignal::Nss => PinFunction::SpiNss(instance),
             ModuleSignal::Scl => PinFunction::I2cScl(instance),
             ModuleSignal::Sda => PinFunction::I2cSda(instance),
+            ModuleSignal::I2sCk => PinFunction::I2sCk(instance),
+            ModuleSignal::I2sWs => PinFunction::I2sWs(instance),
+            ModuleSignal::I2sSd => PinFunction::I2sSd(instance),
+            ModuleSignal::I2sMck => PinFunction::I2sMck(instance),
             // `instance` is the TIMER for these, and the variant is the channel.
             ModuleSignal::PwmCh1 => PinFunction::TimerPwm {
                 timer: instance,
@@ -1379,6 +1410,230 @@ pub struct PwmChannelConfig {
     pub mode: PwmMode,
 }
 
+/// Which way the audio flows. embassy has a constructor per direction, and the
+/// pads differ: a receiver's SD is an input.
+///
+/// Full duplex is missing on purpose — embassy gates `new_full_duplex` on
+/// `spi_v4`/`spi_v5`, and the IDE has no SPI IP version to gate on the way it
+/// has `usart_ip` for the USART line extras.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum I2sDirection {
+    #[default]
+    Transmit,
+    Receive,
+}
+
+impl I2sDirection {
+    pub const ALL: [Self; 2] = [Self::Transmit, Self::Receive];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transmit => "Transmit",
+            Self::Receive => "Receive",
+        }
+    }
+
+    /// `true` when the data flows out of the MCU.
+    pub fn is_tx(self) -> bool {
+        matches!(self, Self::Transmit)
+    }
+}
+
+/// Who drives the clocks: this chip, or the device on the other end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum I2sMode {
+    #[default]
+    Master,
+    Slave,
+}
+
+impl I2sMode {
+    pub const ALL: [Self; 2] = [Self::Master, Self::Slave];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Master => "Master",
+            Self::Slave => "Slave",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Master => "Master (we clock)",
+            Self::Slave => "Slave (they clock)",
+        }
+    }
+}
+
+/// The frame convention on the wire — where the data sits relative to WS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum I2sStandard {
+    #[default]
+    Philips,
+    MsbFirst,
+    LsbFirst,
+    PcmLongSync,
+    PcmShortSync,
+}
+
+impl I2sStandard {
+    pub const ALL: [Self; 5] = [
+        Self::Philips,
+        Self::MsbFirst,
+        Self::LsbFirst,
+        Self::PcmLongSync,
+        Self::PcmShortSync,
+    ];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Philips => "Philips",
+            Self::MsbFirst => "MsbFirst",
+            Self::LsbFirst => "LsbFirst",
+            Self::PcmLongSync => "PcmLongSync",
+            Self::PcmShortSync => "PcmShortSync",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Philips => "Philips (I2S)",
+            Self::MsbFirst => "MSB first (left justified)",
+            Self::LsbFirst => "LSB first (right justified)",
+            Self::PcmLongSync => "PCM, long sync",
+            Self::PcmShortSync => "PCM, short sync",
+        }
+    }
+}
+
+/// How many bits of data ride in how wide a channel slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum I2sFormat {
+    #[default]
+    Data16Channel16,
+    Data16Channel32,
+    Data24Channel32,
+    Data32Channel32,
+}
+
+impl I2sFormat {
+    pub const ALL: [Self; 4] = [
+        Self::Data16Channel16,
+        Self::Data16Channel32,
+        Self::Data24Channel32,
+        Self::Data32Channel32,
+    ];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Data16Channel16 => "Data16Channel16",
+            Self::Data16Channel32 => "Data16Channel32",
+            Self::Data24Channel32 => "Data24Channel32",
+            Self::Data32Channel32 => "Data32Channel32",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Data16Channel16 => "16 bit in 16",
+            Self::Data16Channel32 => "16 bit in 32",
+            Self::Data24Channel32 => "24 bit in 32",
+            Self::Data32Channel32 => "32 bit in 32",
+        }
+    }
+
+    /// The Rust word the ring buffer holds — always `u16`.
+    ///
+    /// Not the frame width: embassy's `spi::Word` is implemented for `u8` and
+    /// `u16` (plus the odd bit widths), never `u32`, because the SPI data
+    /// register these blocks share is 16 bits wide. A 24- or 32-bit frame
+    /// therefore travels as TWO halves, which is also how the hardware moves it.
+    pub fn word(self) -> &'static str {
+        "u16"
+    }
+}
+
+/// Which level the bit clock idles at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum I2sClockPolarity {
+    #[default]
+    IdleLow,
+    IdleHigh,
+}
+
+impl I2sClockPolarity {
+    pub const ALL: [Self; 2] = [Self::IdleLow, Self::IdleHigh];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::IdleLow => "IdleLow",
+            Self::IdleHigh => "IdleHigh",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::IdleLow => "Idle low",
+            Self::IdleHigh => "Idle high",
+        }
+    }
+}
+
+/// I2S audio device settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct I2sModuleConfig {
+    /// The SPI block this I2S runs on — I2S2 is SPI2.
+    pub instance: u8,
+    /// Sample rate in Hz: 44_100, 48_000, …
+    pub sample_rate_hz: u32,
+    #[serde(default)]
+    pub direction: I2sDirection,
+    #[serde(default)]
+    pub mode: I2sMode,
+    #[serde(default)]
+    pub standard: I2sStandard,
+    #[serde(default)]
+    pub format: I2sFormat,
+    #[serde(default)]
+    pub clock_polarity: I2sClockPolarity,
+    /// Ring-buffer length in SAMPLES. embassy drives I2S from a ring buffer the
+    /// DMA owns for the program's lifetime; too short and the audio breaks up
+    /// under any scheduling hiccup.
+    pub buffer_len: u16,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_i2sN` handle.
+    #[serde(default)]
+    pub custom_label: String,
+    /// DMA channel chosen by hand, empty = let the IDE allocate. Only one is
+    /// used: the direction decides whether it is the TX or the RX channel.
+    #[serde(default)]
+    pub dma_tx: String,
+    #[serde(default)]
+    pub dma_rx: String,
+}
+
+impl I2sModuleConfig {
+    /// Defaults: 48 kHz Philips, 16-in-16, master, transmitting, 256 samples.
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            sample_rate_hz: 48_000,
+            direction: I2sDirection::default(),
+            mode: I2sMode::default(),
+            standard: I2sStandard::default(),
+            format: I2sFormat::default(),
+            clock_polarity: I2sClockPolarity::default(),
+            buffer_len: 256,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+            dma_tx: String::new(),
+            dma_rx: String::new(),
+        }
+    }
+}
+
 /// CAN device settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanModuleConfig {
@@ -1518,6 +1773,7 @@ pub enum ModuleConfig {
     Lpuart(UsartModuleConfig),
     Spi(SpiModuleConfig),
     I2c(I2cModuleConfig),
+    I2s(I2sModuleConfig),
     Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
@@ -1531,6 +1787,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => c.instance,
             ModuleConfig::Spi(c) => c.instance,
             ModuleConfig::I2c(c) => c.instance,
+            ModuleConfig::I2s(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -1543,6 +1800,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.rx_model,
             ModuleConfig::Spi(c) => &c.rx_model,
             ModuleConfig::I2c(c) => &c.rx_model,
+            ModuleConfig::I2s(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -1555,6 +1813,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.tx_model,
             ModuleConfig::Spi(c) => &c.tx_model,
             ModuleConfig::I2c(c) => &c.tx_model,
+            ModuleConfig::I2s(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -1567,6 +1826,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.rx_model,
             ModuleConfig::Spi(c) => &mut c.rx_model,
             ModuleConfig::I2c(c) => &mut c.rx_model,
+            ModuleConfig::I2s(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -1579,6 +1839,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.tx_model,
             ModuleConfig::Spi(c) => &mut c.tx_model,
             ModuleConfig::I2c(c) => &mut c.tx_model,
+            ModuleConfig::I2s(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -1592,6 +1853,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &c.custom_label,
             ModuleConfig::Spi(c) => &c.custom_label,
             ModuleConfig::I2c(c) => &c.custom_label,
+            ModuleConfig::I2s(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -1604,6 +1866,7 @@ impl ModuleConfig {
             ModuleConfig::Usart(c) | ModuleConfig::Lpuart(c) => &mut c.custom_label,
             ModuleConfig::Spi(c) => &mut c.custom_label,
             ModuleConfig::I2c(c) => &mut c.custom_label,
+            ModuleConfig::I2s(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -1626,6 +1889,12 @@ impl ModuleConfig {
                 )
             }
             ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
+            ModuleConfig::I2s(c) => format!(
+                "I2S{}  ·  {}  ·  {}",
+                c.instance,
+                hz_label(c.sample_rate_hz),
+                c.direction.label()
+            ),
             ModuleConfig::Custom(c) => format!(
                 "custom  ·  {} pin{}",
                 c.pins.len(),

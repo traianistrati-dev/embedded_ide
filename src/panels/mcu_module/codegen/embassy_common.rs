@@ -1802,6 +1802,13 @@ mod emit_for_manual_compile {
             // is the only pad whose alternate function the generated `init`
             // has to set by hand, and the only one it hands back.
             PinFunction::TimerBreak { timer: 1, input: 1 },
+            // A whole SPI block running as audio instead: the I2S path is a
+            // different driver, a constructor per direction, and the only place
+            // a `StaticCell` ring buffer meets a DMA binding.
+            PinFunction::I2sCk(2),
+            PinFunction::I2sWs(2),
+            PinFunction::I2sSd(2),
+            PinFunction::I2sMck(2),
         ] {
             if want == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
@@ -1890,6 +1897,18 @@ mod emit_for_manual_compile {
                             mode: PwmMode::Mode2,
                         },
                     );
+                }
+                // Non-default everything, so the template's substitutions are
+                // exercised rather than agreeing with `Config::default()`.
+                ModuleConfig::I2s(c) => {
+                    use crate::panels::mcu_module::modules::{
+                        I2sClockPolarity, I2sFormat, I2sStandard,
+                    };
+                    c.sample_rate_hz = 44_100;
+                    c.standard = I2sStandard::MsbFirst;
+                    c.format = I2sFormat::Data24Channel32;
+                    c.clock_polarity = I2sClockPolarity::IdleHigh;
+                    c.buffer_len = 512;
                 }
                 _ => {}
             }

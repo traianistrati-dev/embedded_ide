@@ -15,6 +15,12 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
                 egui::Color32::from_rgb(190, 170, 30)
             }
+            // Audio: near SPI's teal, since I2S rides the SPI block, but shifted
+            // enough that the two read apart on the chip.
+            PinFunction::I2sCk(_)
+            | PinFunction::I2sWs(_)
+            | PinFunction::I2sSd(_)
+            | PinFunction::I2sMck(_) => egui::Color32::from_rgb(90, 140, 200),
             // A fault input, not an output — read at a glance as the one pin on
             // the timer that stops everything.
             PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
@@ -70,6 +76,10 @@ impl PinFunction {
                 | PinFunction::SpiRdy(_)
                 | PinFunction::I2cScl(_)
                 | PinFunction::I2cSda(_)
+                | PinFunction::I2sCk(_)
+                | PinFunction::I2sWs(_)
+                | PinFunction::I2sSd(_)
+                | PinFunction::I2sMck(_)
                 | PinFunction::UsbDm
                 | PinFunction::UsbDp
                 | PinFunction::CanRx

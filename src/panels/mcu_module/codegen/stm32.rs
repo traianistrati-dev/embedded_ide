@@ -2852,6 +2852,12 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         // A break input is read, not driven — floating input, like any other
         // signal coming in from the board.
         PinFunction::TimerBreak { .. } => format!("into_floating_input(&mut {pv}.{crx})"),
+        // The F1 backend has no I2S codegen; the pads still take the alternate
+        // function so the pin is at least in the right mode.
+        PinFunction::I2sCk(_)
+        | PinFunction::I2sWs(_)
+        | PinFunction::I2sSd(_)
+        | PinFunction::I2sMck(_) => format!("into_alternate_push_pull(&mut {pv}.{crx})"),
         // LPUART / SPI-RDY don't exist on STM32F1; they're grouped with their
         // closest USART/SPI analogue so the mode stays sane if ever selected.
         PinFunction::UsartTx(_) | PinFunction::UsartCk(_) | PinFunction::LpuartTx(_) => {

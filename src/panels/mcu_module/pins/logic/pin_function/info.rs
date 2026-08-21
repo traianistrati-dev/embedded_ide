@@ -166,6 +166,45 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::I2sCk(n)
+            | PinFunction::I2sWs(n)
+            | PinFunction::I2sSd(n)
+            | PinFunction::I2sMck(n) => {
+                let role = match self {
+                    PinFunction::I2sCk(_) => "bit clock (CK) — one edge per data bit",
+                    PinFunction::I2sWs(_) => {
+                        "word select (WS/LRCK) — which channel this frame carries"
+                    }
+                    PinFunction::I2sSd(_) => "serial data (SD)",
+                    _ => "master clock out (MCK) — an oversampled clock for the codec",
+                };
+                FunctionInfo {
+                    description: format!(
+                        "I2S{n} {role}. Digital audio: a bit clock, a word-select line that \
+                         alternates left/right, and one data line per direction."
+                    ),
+                    specs: vec![
+                        (
+                            "Shares silicon with".into(),
+                            format!("SPI{n} — the same block, so only one of the two can run"),
+                        ),
+                        (
+                            "Needs".into(),
+                            "DMA: embassy drives I2S from a ring buffer, never byte by byte"
+                                .into(),
+                        ),
+                        (
+                            "MCK".into(),
+                            "Optional — only codecs that want a master clock need it".into(),
+                        ),
+                        (
+                            "Typical use".into(),
+                            "Audio codecs, DACs, MEMS microphones".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::UsartTx(n) => FunctionInfo {
                 description: format!(
                     "USART{n} transmit pin (TX). Sends serial data to an external device."

@@ -605,6 +605,20 @@ fn native_token(sig: &str) -> Option<String> {
             };
             Some(format!("spi{n}_{role}"))
         }
+        // `I2S2_CK`. `I2S_CKIN` has no instance and is dropped by the check
+        // above, which is right: it is a chip-level clock input, not a bus pad.
+        "I2S" => {
+            let role = match tail {
+                "CK" => "ck",
+                "WS" => "ws",
+                "SD" => "sd",
+                "MCK" => "mck",
+                // `I2S2_ext_SD`, the F4 full-duplex second data pad, stays a
+                // generic AF signal: embassy has no `I2Sext` driver.
+                _ => return None,
+            };
+            Some(format!("i2s{n}_{role}"))
+        }
         "I2C" => {
             let role = match tail {
                 "SCL" => "scl",

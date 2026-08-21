@@ -18,6 +18,10 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } => "pwm",
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
+            PinFunction::I2sCk(_) => "i2s_ck",
+            PinFunction::I2sWs(_) => "i2s_ws",
+            PinFunction::I2sSd(_) => "i2s_sd",
+            PinFunction::I2sMck(_) => "i2s_mck",
             PinFunction::UsartTx(_) => "uart_tx",
             PinFunction::UsartRx(_) => "uart_rx",
             PinFunction::UsartCts(_) => "uart_cts",
@@ -67,6 +71,10 @@ impl PinFunction {
                 };
                 format!("TIM{timer}  BKIN{n}  (break)")
             }
+            PinFunction::I2sCk(n) => format!("I2S{n}  CK"),
+            PinFunction::I2sWs(n) => format!("I2S{n}  WS"),
+            PinFunction::I2sSd(n) => format!("I2S{n}  SD"),
+            PinFunction::I2sMck(n) => format!("I2S{n}  MCK"),
             PinFunction::UsartTx(n) => format!("USART{n}  TX"),
             PinFunction::UsartRx(n) => format!("USART{n}  RX"),
             PinFunction::UsartCts(n) => format!("USART{n}  CTS"),
@@ -294,6 +302,10 @@ impl PinFunction {
             // channel, and CH1N reads as complementary on its own.
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::TimerBreak { .. } => "BRK",
+            PinFunction::I2sCk(_)
+            | PinFunction::I2sWs(_)
+            | PinFunction::I2sSd(_)
+            | PinFunction::I2sMck(_) => "I2S",
             PinFunction::UsartTx(_) => "TX",
             PinFunction::UsartRx(_) => "RX",
             PinFunction::UsartCts(_) => "CTS",

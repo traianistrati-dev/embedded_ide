@@ -22,8 +22,9 @@ use super::nvic;
 use super::{GEN_BEGIN, GEN_END, USER_TAIL, mcu_id_marker_line};
 use crate::panels::mcu_module::comparator;
 use crate::panels::mcu_module::modules::{
-    AsyncBusMode, I2cModuleConfig, Parity, PwmMode, PwmPolarity, SpiBitOrder, SpiModuleConfig,
-    StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode, UsartModuleConfig,
+    AsyncBusMode, I2cModuleConfig, I2sModuleConfig, Parity, PwmMode, PwmPolarity, SpiBitOrder,
+    SpiModuleConfig, StopBits, TimerModuleConfig, UsartDirection, UsartFlow, UsartMode,
+    UsartModuleConfig,
 };
 use crate::panels::mcu_module::pins::logic::pin::Pin;
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
@@ -825,6 +826,8 @@ pub fn async_peripherals(
     lpuart: &BTreeMap<u8, UsartModuleConfig>,
     // PWM, keyed by TIMER — one module per timer, whatever its channel count.
     timer: &BTreeMap<u8, TimerModuleConfig>,
+    // I2S, keyed by the SPI block it runs on — I2S2 IS SPI2.
+    i2s: &BTreeMap<u8, I2sModuleConfig>,
 ) -> AsyncPeriphs {
     let mut consumed = Vec::new();
     let mut calls = String::new();
@@ -847,6 +850,7 @@ pub fn async_peripherals(
         .map(|c| (&c.dma_tx, &c.dma_rx))
         .chain(spi.values().map(|c| (&c.dma_tx, &c.dma_rx)))
         .chain(i2c.values().map(|c| (&c.dma_tx, &c.dma_rx)))
+        .chain(i2s.values().map(|c| (&c.dma_tx, &c.dma_rx)))
     {
         alloc.reserve(tx);
         alloc.reserve(rx);
@@ -1044,6 +1048,61 @@ pub fn async_peripherals(
             format!("pwm{n}.rs"),
             pwm_config_file(n, &cfg, &wiring, &handle),
         ));
+    }
+
+    // ── I2S ──────────────────────────────────────────────────────────────
+    // One SPI block driven as audio, always through DMA: embassy has no
+    // blocking I2S at all.
+    for (n, w) in i2s_wires(pins) {
+        let cfg = i2s
+            .get(&n)
+            .cloned()
+            .unwrap_or_else(|| I2sModuleConfig::new(n));
+        let handle = format!("_i2s{n}{}", label_sfx(&cfg.custom_label));
+
+        // I2S{n} and SPI{n} are the same silicon. Both wired means the user
+        // described one block twice; SPI keeps it, because that is what the
+        // block is unless told otherwise, and the audio side says so out loud
+        // rather than emitting a second `p.SPI{n}` that will not compile.
+        if spi_wires(pins).iter().any(|(i, ..)| *i == n) {
+            calls.push_str(&format!(
+                "    // I2S{n} is NOT initialised: it runs on SPI{n}, which a SPI module already
+    // claims. One block cannot be both — remove one of the two modules.
+"
+            ));
+            continue;
+        }
+
+        let tx = cfg.direction.is_tx();
+        let (dma_arg, note) = dma_args(
+            &mut alloc,
+            &mut dma_binds,
+            &mut dma_uses,
+            dma_map::Bus::Spi,
+            n,
+            &format!("I2S{n}"),
+            manual_channels(Some(&cfg), |c| (&c.dma_tx, &c.dma_rx)),
+            (tx, !tx),
+        );
+        any_async_dma = true;
+        calls.push_str(&note);
+
+        let mck_arg = w
+            .mck
+            .as_ref()
+            .map(|p| format!(", p.{p}"))
+            .unwrap_or_default();
+        for pin in [Some(&w.sd), Some(&w.ws), Some(&w.ck), w.mck.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            consumed.push(pin.clone());
+        }
+        calls.push_str(&format!(
+            "    let mut {handle} = pins::configs::i2s{n}::init(p.SPI{n}, p.{}, p.{}, p.{}{mck_arg}, {dma_arg});\n",
+            w.sd, w.ws, w.ck
+        ));
+        files.push((format!("i2s{n}.rs"), i2s_config_file(n, &cfg, &w, &handle)));
     }
 
     for (n, sck, mosi, miso) in spi_wires(pins) {
@@ -2070,6 +2129,171 @@ impl PwmWiring {
     }
 }
 
+/// The pads of one I2S: the three it needs, and the master clock it may have.
+pub struct I2sWiring {
+    pub sd: String,
+    pub ws: String,
+    pub ck: String,
+    pub mck: Option<String>,
+}
+
+/// The I2S instances whose three required pads are all wired.
+///
+/// A half-wired I2S generates NOTHING rather than a call with a missing
+/// argument: embassy takes CK, WS and SD together or not at all.
+fn i2s_wires(pins: &[&Pin]) -> Vec<(u8, I2sWiring)> {
+    let mut by_inst: BTreeMap<
+        u8,
+        (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    > = BTreeMap::new();
+    for p in pins.iter().filter(|p| !p.reserved) {
+        let e = match p.selected_function {
+            PinFunction::I2sCk(n) => &mut by_inst.entry(n).or_default().0,
+            PinFunction::I2sWs(n) => &mut by_inst.entry(n).or_default().1,
+            PinFunction::I2sSd(n) => &mut by_inst.entry(n).or_default().2,
+            PinFunction::I2sMck(n) => &mut by_inst.entry(n).or_default().3,
+            _ => continue,
+        };
+        e.get_or_insert_with(|| p.gpio().to_owned());
+    }
+    by_inst
+        .into_iter()
+        .filter_map(|(n, (ck, ws, sd, mck))| {
+            Some((
+                n,
+                I2sWiring {
+                    sd: sd?,
+                    ws: ws?,
+                    ck: ck?,
+                    mck,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// `src/pins/configs/i2s{N}.rs`: embassy's `I2S` over the SPI{N} block.
+const ASYNC_I2S_TMPL: &str = r#"// <<< GENERATED>>>
+// Peripheral config (from the Virtual Module) — auto-updated; edit in the module.
+const SAMPLE_RATE_HZ: u32 = {RATE};
+const BUF_LEN: usize = {BUF};
+// <<< GENERATED END >>>
+
+// Everything below is editable — your changes are preserved on regeneration.
+//
+// I2S{N} IS the SPI{N} block: the same silicon, told to speak audio instead. It
+// runs from a ring buffer the DMA owns for the whole program — there is no
+// blocking I2S in embassy, so `init` always takes a channel.
+use embassy_stm32::dma::InterruptHandler as DmaInterruptHandler;
+use embassy_stm32::i2s::{ClockPolarity, Config, Format, I2S, Mode, Standard};
+use embassy_stm32::interrupt::typelevel::Binding;
+use embassy_stm32::spi::{CkPin, I2sSdPin, {DMA_TRAIT}, WsPin{MCK_USE}};
+use embassy_stm32::time::Hertz;
+use embassy_stm32::{peripherals, Peri};
+use static_cell::StaticCell;
+
+fn get_config() -> Config {
+    // `Config` is `#[non_exhaustive]`, so it is built by assignment rather than
+    // as a literal.
+    let mut config = Config::default();
+    config.frequency = Hertz(SAMPLE_RATE_HZ);
+    config.mode = Mode::{MODE};
+    config.standard = Standard::{STANDARD};
+    config.format = Format::{FORMAT};
+    config.clock_polarity = ClockPolarity::{POLARITY};
+    config.master_clock = {MASTER_CLOCK};
+    config
+}
+
+/// Initialise SPI{N} as I2S{N}, {DIRWORD}.
+pub fn init<'d, D: {DMA_TRAIT}<peripherals::SPI{N}>>(
+    spi: Peri<'d, peripherals::SPI{N}>,
+    sd: Peri<'d, impl I2sSdPin<peripherals::SPI{N}>>,
+    ws: Peri<'d, impl WsPin<peripherals::SPI{N}>>,
+    ck: Peri<'d, impl CkPin<peripherals::SPI{N}>>,
+{MCK_PARAM}    dma: Peri<'d, D>,
+    // Only `main.rs` knows WHICH channel this is, so the binding travels with
+    // it — same shape as the DMA-backed SPI next door.
+    irqs: impl Binding<D::Interrupt, DmaInterruptHandler<D>> + 'd,
+) -> I2S<'d, {WORD}> {
+    // `'static` so the DMA controller can own it for the program's lifetime.
+    static BUF: StaticCell<[{WORD}; BUF_LEN]> = StaticCell::new();
+    I2S::{CTOR}(
+        spi,
+        sd,
+        ws,
+        ck,
+{MCK_ARG}        dma,
+        BUF.init([0; BUF_LEN]),
+        irqs,
+        get_config(),
+    )
+}
+
+// ── Using I2S{N} ──
+// The handle streams through its ring buffer; `start()` opens the tap.
+//
+//     {HANDLE}.start();
+{USAGE}
+"#;
+
+/// Render [`ASYNC_I2S_TMPL`] for the I2S on SPI`n`.
+pub fn i2s_config_file(n: u8, cfg: &I2sModuleConfig, w: &I2sWiring, handle: &str) -> String {
+    let tx = cfg.direction.is_tx();
+    let has_mck = w.mck.is_some();
+    // embassy has a constructor per (direction × master clock): the pad is a
+    // parameter, not an option, so its absence changes the name.
+    let ctor = match (tx, has_mck) {
+        (true, true) => "new_txonly",
+        (true, false) => "new_txonly_nomck",
+        (false, true) => "new_rxonly",
+        (false, false) => "new_rxonly_nomck",
+    };
+    // Built line by line: a `\`-continued literal keeps its source indentation
+    // once rustfmt joins it, and that indentation lands in the user's file.
+    let usage = if tx {
+        let mut u = String::from("//\n");
+        u.push_str(&format!("//     let mut w = {handle}.writer();\n"));
+        u.push_str("//     w.write(&samples).await.ok();");
+        u
+    } else {
+        let mut u = String::from("//\n");
+        u.push_str(&format!("//     let mut r = {handle}.reader();\n"));
+        u.push_str("//     r.read(&mut samples).await.ok();");
+        u
+    };
+    ASYNC_I2S_TMPL
+        .replace("{RATE}", &cfg.sample_rate_hz.to_string())
+        .replace("{BUF}", &cfg.buffer_len.to_string())
+        .replace("{DMA_TRAIT}", if tx { "TxDma" } else { "RxDma" })
+        .replace("{MCK_USE}", if has_mck { ", MckPin" } else { "" })
+        .replace(
+            "{MCK_PARAM}",
+            if has_mck {
+                "    mck: Peri<'d, impl MckPin<peripherals::SPI{N}>>,\n"
+            } else {
+                ""
+            },
+        )
+        .replace("{MCK_ARG}", if has_mck { "        mck,\n" } else { "" })
+        .replace("{MODE}", cfg.mode.embassy())
+        .replace("{STANDARD}", cfg.standard.embassy())
+        .replace("{FORMAT}", cfg.format.embassy())
+        .replace("{POLARITY}", cfg.clock_polarity.embassy())
+        .replace("{MASTER_CLOCK}", if has_mck { "true" } else { "false" })
+        .replace("{WORD}", cfg.format.word())
+        .replace("{CTOR}", ctor)
+        .replace("{DIRWORD}", if tx { "transmitting" } else { "receiving" })
+        .replace("{USAGE}", &usage)
+        .replace("{HANDLE}", handle)
+        .replace("{N}", &n.to_string())
+}
+
 /// The timers with at least one PWM pad wired, plain or complementary.
 fn pwm_wires(pins: &[&Pin]) -> Vec<(u8, PwmWiring)> {
     let mut by_timer: BTreeMap<u8, PwmWiring> = BTreeMap::new();
@@ -2807,6 +3031,7 @@ mod usart_mode_tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert!(
             out.init_calls.contains("p.DMA1_CH1, p.DMA1_CH4, Irqs"),
@@ -2908,6 +3133,7 @@ mod usart_mode_tests {
             &i2c,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
 
         // Every channel the code takes, straight out of the emitted text.
@@ -2978,6 +3204,7 @@ mod usart_mode_tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         // A PAIR, not a single handle - the two halves have different types.
         assert!(
@@ -3010,6 +3237,7 @@ mod usart_mode_tests {
             },
             &refs,
             &usart,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -3050,6 +3278,7 @@ mod usart_mode_tests {
             },
             &refs,
             &usart,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -3158,6 +3387,7 @@ mod spi_txonly_tests {
             &refs,
             &Default::default(),
             &spi,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -3328,6 +3558,7 @@ mod comp_tests {
                 &Default::default(),
                 &Default::default(),
                 &Default::default(),
+                &Default::default(),
             )
         };
 
@@ -3415,6 +3646,7 @@ mod lpuart_tests {
             &Default::default(),
             &[(1u8, UsartModuleConfig::new(1))].into_iter().collect(),
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -3476,6 +3708,7 @@ mod lpuart_tests {
             &Default::default(),
             &[(1u8, UsartModuleConfig::new(1))].into_iter().collect(),
             &Default::default(),
+            &Default::default(),
         );
         assert!(
             out.init_calls.contains("let mut _serial1 ="),
@@ -3517,6 +3750,140 @@ mod lpuart_tests {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+mod i2s_tests {
+    use super::*;
+    use crate::panels::mcu_module::modules::{I2sDirection, I2sFormat, I2sStandard};
+    use crate::panels::mcu_module::pins::logic::pin::Pin;
+
+    fn mk(name: &str, f: PinFunction) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = f;
+        p
+    }
+
+    fn run(pins: &[Pin], i2s: BTreeMap<u8, I2sModuleConfig>) -> AsyncPeriphs {
+        let refs: Vec<&Pin> = pins.iter().collect();
+        async_peripherals(
+            "stm32g4",
+            ChipData {
+                dma: None,
+                irq_vectors: &[],
+                usart_ip: Some("sci3_v2_1_Cube"),
+            },
+            CompInputs {
+                settings: &Default::default(),
+                instances: &[],
+                pins: &[],
+            },
+            &refs,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &i2s,
+        )
+    }
+
+    fn three(n: u8) -> Vec<Pin> {
+        vec![
+            mk("PB13", PinFunction::I2sCk(n)),
+            mk("PB12", PinFunction::I2sWs(n)),
+            mk("PB15", PinFunction::I2sSd(n)),
+        ]
+    }
+
+    /// The three required pads make an I2S; the master clock is a fourth
+    /// parameter, and its absence changes the CONSTRUCTOR, not an argument.
+    #[test]
+    fn the_master_clock_pad_picks_the_constructor() {
+        let out = run(&three(2), Default::default());
+        let (name, body) = &out.config_files[0];
+        assert_eq!(name, "i2s2.rs");
+        assert!(body.contains("I2S::new_txonly_nomck("), "{body}");
+        assert!(body.contains("config.master_clock = false;"), "{body}");
+        assert!(!body.contains("MckPin"), "{body}");
+
+        let mut pins = three(2);
+        pins.push(mk("PC6", PinFunction::I2sMck(2)));
+        let out = run(&pins, Default::default());
+        let (_, body) = &out.config_files[0];
+        assert!(body.contains("I2S::new_txonly("), "{body}");
+        assert!(body.contains("config.master_clock = true;"), "{body}");
+        assert!(
+            body.contains("mck: Peri<'d, impl MckPin<peripherals::SPI2>>"),
+            "{body}"
+        );
+    }
+
+    /// The peripheral is the SPI block, and every setting reaches the config.
+    #[test]
+    fn the_settings_reach_the_generated_file() {
+        let mut cfg = I2sModuleConfig::new(2);
+        cfg.sample_rate_hz = 44_100;
+        cfg.direction = I2sDirection::Receive;
+        cfg.standard = I2sStandard::MsbFirst;
+        cfg.format = I2sFormat::Data24Channel32;
+        cfg.buffer_len = 512;
+        let out = run(&three(2), [(2u8, cfg)].into_iter().collect());
+        let (_, body) = &out.config_files[0];
+
+        assert!(
+            body.contains("const SAMPLE_RATE_HZ: u32 = 44100;"),
+            "{body}"
+        );
+        assert!(body.contains("const BUF_LEN: usize = 512;"), "{body}");
+        assert!(body.contains("Standard::MsbFirst"), "{body}");
+        assert!(body.contains("Format::Data24Channel32"), "{body}");
+        // Receiving: the other constructor, and the RX half of the DMA.
+        assert!(body.contains("I2S::new_rxonly_nomck("), "{body}");
+        assert!(body.contains("D: RxDma<peripherals::SPI2>"), "{body}");
+        // A 24-bit frame still moves as `u16` halves — `spi::Word` has no u32.
+        assert!(body.contains("I2S<'d, u16>"), "{body}");
+        // The peripheral handed in is the SPI block itself.
+        assert!(
+            out.init_calls.contains("pins::configs::i2s2::init(p.SPI2,"),
+            "{}",
+            out.init_calls
+        );
+    }
+
+    /// I2S2 and SPI2 are one block. Both wired is one block described twice —
+    /// SPI keeps it and the audio side says why, instead of emitting a second
+    /// `p.SPI2` that cannot compile.
+    #[test]
+    fn an_i2s_on_a_claimed_spi_block_is_refused_with_a_reason() {
+        let mut pins = three(2);
+        pins.push(mk("PA5", PinFunction::SpiSck(2)));
+        pins.push(mk("PA7", PinFunction::SpiMosi(2)));
+        let out = run(&pins, Default::default());
+        assert!(
+            out.init_calls
+                .contains("I2S2 is NOT initialised: it runs on SPI2"),
+            "{}",
+            out.init_calls
+        );
+        assert!(!out.init_calls.contains("i2s2::init"), "{}", out.init_calls);
+        assert!(
+            !out.config_files.iter().any(|(n, _)| n == "i2s2.rs"),
+            "no file for a block it does not own"
+        );
+    }
+
+    /// Half a bus is not a bus: CK, WS and SD go in together or not at all.
+    #[test]
+    fn a_half_wired_i2s_generates_nothing() {
+        let pins = vec![
+            mk("PB13", PinFunction::I2sCk(2)),
+            mk("PB12", PinFunction::I2sWs(2)),
+        ];
+        let out = run(&pins, Default::default());
+        assert!(out.config_files.is_empty(), "{:?}", out.config_files);
+        assert!(!out.init_calls.contains("i2s"), "{}", out.init_calls);
+    }
+}
+
 mod pwm_tests {
     use super::*;
     use crate::panels::mcu_module::pins::logic::pin::Pin;
@@ -3561,6 +3928,7 @@ mod pwm_tests {
             &Default::default(),
             &Default::default(),
             &timer,
+            &Default::default(),
         )
     }
 
@@ -4027,6 +4395,7 @@ mod flow_and_direction_tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -4257,6 +4626,7 @@ mod flow_and_direction_tests {
             },
             &refs,
             &[(1u8, cfg)].into_iter().collect(),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),

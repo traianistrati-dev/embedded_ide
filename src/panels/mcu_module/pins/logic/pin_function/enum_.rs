@@ -31,6 +31,19 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── I2S (audio) ─────────────────────────────────────────────────────────
+    /// I2S{n} bit clock — the pin the datasheet calls CK (SCK/BCLK elsewhere).
+    ///
+    /// I2S is not a peripheral of its own on STM32: the SPI blocks double as
+    /// I2S, so `I2S2` IS `SPI2` and the two cannot both be built.
+    I2sCk(u8),
+    /// I2S{n} word select — LRCK: which channel the current frame carries.
+    I2sWs(u8),
+    /// I2S{n} serial data.
+    I2sSd(u8),
+    /// I2S{n} master clock out — an oversampled clock for the codec, optional.
+    I2sMck(u8),
+
     // ── Timers / PWM ────────────────────────────────────────────────────────
     /// PWM output — TIM{timer} CH{channel}
     TimerPwm {

@@ -11,9 +11,10 @@ use crate::panels::mcu_module::codegen::sanitize_label;
 use crate::panels::mcu_module::modules::model::BlockingDma;
 use crate::panels::mcu_module::modules::model::hz_label;
 use crate::panels::mcu_module::modules::{
-    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, ModuleConfig, ModuleKind, ModuleSignal,
-    Parity, PwmCounting, PwmMode, PwmOutput, PwmPolarity, SpiBitOrder, StopBits, UsartDirection,
-    UsartFlow, UsartMode, UsartModuleConfig, VirtualModule,
+    ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakPolarity, I2sClockPolarity, I2sDirection,
+    I2sFormat, I2sMode, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity, PwmCounting,
+    PwmMode, PwmOutput, PwmPolarity, SpiBitOrder, StopBits, UsartDirection, UsartFlow, UsartMode,
+    UsartModuleConfig, VirtualModule,
 };
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
 use eframe::egui;
@@ -262,6 +263,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceLpuart => PinFunction::LpuartTx(instance),
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
+        ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
         ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
             timer: instance,
             channel: 1,
@@ -408,6 +410,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceLpuart => format!("_lpserial{n}{sfx}"),
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
+        ModuleKind::GenericInterfaceI2s => format!("_i2s{n}{sfx}"),
         ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
@@ -1371,15 +1374,17 @@ pub fn module_config_ui(
     // always — the row exists for the board that needs a SPECIFIC channel (to
     // leave a high-priority one free, to match an existing driver, to dodge an
     // erratum), which is not something the IDE can infer.
-    let dma_row = |ui: &mut egui::Ui,
+    // ONE direction's picker. Split out of `dma_row` because a peripheral can
+    // legitimately use a single channel — an I2S transmits or receives, never
+    // both — and offering the other one would invite a choice that moves no
+    // bytes.
+    let dma_one = |ui: &mut egui::Ui,
                    bus: dma_map::Bus,
                    inst: u8,
-                   tx: &mut String,
-                   rx: &mut String| {
-        for (dir, label, chosen) in [
-            (dma_map::Dir::Tx, "DMA TX", tx),
-            (dma_map::Dir::Rx, "DMA RX", rx),
-        ] {
+                   dir: dma_map::Dir,
+                   label: &str,
+                   chosen: &mut String| {
+        {
             let options = dma_map::channels_for(dma, bus, inst, dir);
             ui.label(label);
             if options.is_empty() {
@@ -1396,7 +1401,7 @@ pub fn module_config_ui(
                     "This chip carries no DMA channel data - re-import it from the                      STM32Cube database to choose a channel by hand.",
                 );
                 ui.end_row();
-                continue;
+                return;
             }
             egui::ComboBox::from_id_salt(format!("dma_{label}"))
                 .selected_text(if chosen.is_empty() {
@@ -1421,6 +1426,11 @@ pub fn module_config_ui(
             ui.end_row();
         }
     };
+    let dma_row =
+        |ui: &mut egui::Ui, bus: dma_map::Bus, inst: u8, tx: &mut String, rx: &mut String| {
+            dma_one(ui, bus, inst, dma_map::Dir::Tx, "DMA TX", tx);
+            dma_one(ui, bus, inst, dma_map::Dir::Rx, "DMA RX", rx);
+        };
 
     egui::Grid::new("module_cfg")
         .num_columns(2)
@@ -1902,6 +1912,124 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                }
+                // One SPI block running as audio. Every setting here is a
+                // field of embassy's `i2s::Config`, plus the ring buffer the
+                // DMA owns — there is no blocking I2S to fall back on.
+                ModuleConfig::I2s(cfg) => {
+                    ui.label("Sample rate");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut cfg.sample_rate_hz)
+                                .range(8_000..=192_000)
+                                .suffix(" Hz")
+                                .speed(100.0),
+                        );
+                        for (label, hz) in [("44.1k", 44_100u32), ("48k", 48_000), ("96k", 96_000)]
+                        {
+                            if ui.small_button(label).clicked() {
+                                cfg.sample_rate_hz = hz;
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Direction");
+                    egui::ComboBox::from_id_salt("i2s_dir")
+                        .selected_text(cfg.direction.label())
+                        .show_ui(ui, |ui| {
+                            for v in I2sDirection::ALL {
+                                ui.selectable_value(&mut cfg.direction, v, v.label());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "embassy has a constructor per direction. Full duplex needs the \
+                             newer SPI IP (spi_v4/v5) and a second data pad, neither of which \
+                             the IDE can check yet.",
+                        );
+                    ui.end_row();
+
+                    ui.label("Role");
+                    egui::ComboBox::from_id_salt("i2s_mode")
+                        .selected_text(cfg.mode.label())
+                        .show_ui(ui, |ui| {
+                            for v in I2sMode::ALL {
+                                ui.selectable_value(&mut cfg.mode, v, v.label());
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Standard");
+                    egui::ComboBox::from_id_salt("i2s_std")
+                        .selected_text(cfg.standard.label())
+                        .show_ui(ui, |ui| {
+                            for v in I2sStandard::ALL {
+                                ui.selectable_value(&mut cfg.standard, v, v.label());
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Format");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("i2s_fmt")
+                            .selected_text(cfg.format.label())
+                            .show_ui(ui, |ui| {
+                                for v in I2sFormat::ALL {
+                                    ui.selectable_value(&mut cfg.format, v, v.label());
+                                }
+                            });
+                        egui::ComboBox::from_id_salt("i2s_pol")
+                            .selected_text(cfg.clock_polarity.label())
+                            .show_ui(ui, |ui| {
+                                for v in I2sClockPolarity::ALL {
+                                    ui.selectable_value(&mut cfg.clock_polarity, v, v.label());
+                                }
+                            });
+                    });
+                    ui.end_row();
+
+                    ui.label("Ring buffer");
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.buffer_len)
+                            .range(32..=8192)
+                            .suffix(" samples"),
+                    )
+                    .on_hover_text(
+                        "The DMA owns this buffer for the whole program. Too short and the \
+                         audio breaks up on any scheduling hiccup; the samples are \
+                         `format`-wide words.",
+                    );
+                    ui.end_row();
+
+                    if is_async {
+                        let inst = cfg.instance;
+                        // The DMA requests are the SPI block's — same silicon,
+                        // same request lines.
+                        if cfg.direction.is_tx() {
+                            dma_one(ui, dma_map::Bus::Spi, inst, dma_map::Dir::Tx, "DMA", &mut cfg.dma_tx);
+                        } else {
+                            dma_one(ui, dma_map::Bus::Spi, inst, dma_map::Dir::Rx, "DMA", &mut cfg.dma_rx);
+                        }
+                    }
+
+                    ui.label("");
+                    ui.label(
+                        egui::RichText::new(if is_async {
+                            format!(
+                                "runs on SPI{} — an SPI module on the same instance describes \
+                                 the same block, and only one of the two is built",
+                                cfg.instance
+                            )
+                        } else {
+                            "only the Async runtime emits I2S — embassy drives it from a DMA \
+                             ring buffer, and there is no blocking form"
+                                .to_owned()
+                        })
+                        .size(10.5)
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.end_row();
                 }
                 ModuleConfig::I2c(cfg) => {
                     ui.label("Clock");

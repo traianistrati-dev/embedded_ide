@@ -1217,12 +1217,16 @@ mod module_support_tests {
     fn bundled_chips_support_every_kind_they_have_pins_for() {
         for mcu in [create_stm32f103c8tx(), create_esp32c3()] {
             for kind in ModuleKind::ALL {
-                // LPUART is the exception, and it is the RULE working: neither
-                // built-in has an LPUART (the F103 predates the peripheral, the
-                // ESP32-C3 has no such thing), so the pin-derived palette must
-                // not offer it. It shows up on the G0/L4/U5-class chips imported
-                // from ST's XML.
-                let want = kind != ModuleKind::GenericInterfaceLpuart;
+                // LPUART and I2S are the exceptions, and they are the RULE
+                // working: the palette is derived from the PINS, and neither
+                // built-in names those pads. No built-in has an LPUART (the F103
+                // predates the peripheral, the ESP32-C3 has no such thing), and
+                // neither hand-written definition spells out the I2S pads its
+                // SPI block could serve — the imported chips do, from ST's XML.
+                let want = !matches!(
+                    kind,
+                    ModuleKind::GenericInterfaceLpuart | ModuleKind::GenericInterfaceI2s
+                );
                 assert_eq!(
                     mcu.supports_module(kind),
                     want,
