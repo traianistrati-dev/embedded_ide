@@ -1744,6 +1744,33 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_SAI=1` gives the SAI pads FIRST pick. On this 48-pin part they
+        // collide with the pads the timer, SPI and USART want — SAI1_SCK_A is
+        // PA8, SCK_B is PB3 — and a sub-block needs three of them, so both
+        // layouts cannot fit at once. One fixture, two runs.
+        if std::env::var("EIDE_SAI").is_ok() {
+            for want in [
+                PinFunction::SaiSck { sai: 1, block: 1 },
+                PinFunction::SaiSd { sai: 1, block: 1 },
+                PinFunction::SaiFs { sai: 1, block: 1 },
+                PinFunction::SaiMclk { sai: 1, block: 1 },
+                PinFunction::SaiSck { sai: 1, block: 2 },
+                PinFunction::SaiSd { sai: 1, block: 2 },
+                PinFunction::SaiFs { sai: 1, block: 2 },
+            ] {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&want)
+                    })
+                    .map(|p| p.number);
+                match num.and_then(|n| mcu.find_pin_mut(n)) {
+                    Some(p) => p.selected_function = want,
+                    None => println!("chip has no pin for {want:?}"),
+                }
+            }
+        }
         for want in [
             PinFunction::UsartTx(un),
             PinFunction::UsartRx(un),
@@ -1913,6 +1940,31 @@ mod emit_for_manual_compile {
                     c.format = I2sFormat::Data24Channel32;
                     c.clock_polarity = I2sClockPolarity::IdleHigh;
                     c.buffer_len = 512;
+                }
+                ModuleConfig::Sai(c) => {
+                    // Non-default on both sub-blocks, and OPPOSITE directions —
+                    // the codec case, and the reason the module is the unit.
+                    use crate::panels::mcu_module::modules::{
+                        SaiBlockConfig, SaiDataSize, SaiTxRx,
+                    };
+                    c.set_block(
+                        1,
+                        SaiBlockConfig {
+                            tx_rx: SaiTxRx::Transmitter,
+                            data_size: SaiDataSize::Data24,
+                            frame_length: 64,
+                            buffer_len: 512,
+                            ..Default::default()
+                        },
+                    );
+                    c.set_block(
+                        2,
+                        SaiBlockConfig {
+                            tx_rx: SaiTxRx::Receiver,
+                            data_size: SaiDataSize::Data16,
+                            ..Default::default()
+                        },
+                    );
                 }
                 ModuleConfig::Dac(c) => {
                     // Non-default start values, so the consts are exercised.

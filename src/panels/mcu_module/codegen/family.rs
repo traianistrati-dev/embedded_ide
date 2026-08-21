@@ -525,6 +525,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let timer = modules::timer_configs(&mcu.modules);
     let i2s = modules::i2s_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
+    let sai = modules::sai_configs(&mcu.modules);
     let comp_instances = comparator::instances(mcu);
     let comp_pins: Vec<(u8, String, Option<String>)> = mcu
         .comp
@@ -554,6 +555,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
         &timer,
         &i2s,
         &dac,
+        &sai,
     )
 }
 

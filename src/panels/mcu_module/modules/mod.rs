@@ -14,6 +14,7 @@ pub mod persist;
 pub use model::{
     ApiStyle, AsyncBusMode, BREAK_FILTERS, BreakInputConfig, BreakPolarity, CanModuleConfig,
     Connection, DacModuleConfig, I2cModuleConfig, I2sClockPolarity, I2sDirection, I2sFormat,
+    SaiBlockConfig, SaiDataSize, SaiMode, SaiModuleConfig, SaiStereoMono, SaiTxRx,
     I2sMode,
     I2sModuleConfig, I2sStandard, ModuleConfig, ModuleKind, ModuleSignal, Parity, PwmChannelConfig,
     PwmCounting, PwmMode, PwmOutput, PwmPolarity, SpiBitOrder, SpiModuleConfig, StopBits,
@@ -67,6 +68,17 @@ pub fn spi_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SpiModuleConfig> {
     let mut map = BTreeMap::new();
     for m in modules {
         if let ModuleConfig::Spi(c) = &m.config {
+            map.insert(c.instance, c.clone());
+        }
+    }
+    map
+}
+
+/// SAI module configs keyed by unit.
+pub fn sai_configs(modules: &[VirtualModule]) -> BTreeMap<u8, SaiModuleConfig> {
+    let mut map = BTreeMap::new();
+    for m in modules {
+        if let ModuleConfig::Sai(c) = &m.config {
             map.insert(c.instance, c.clone());
         }
     }

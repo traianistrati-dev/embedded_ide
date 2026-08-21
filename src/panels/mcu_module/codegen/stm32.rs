@@ -2849,6 +2849,12 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
             format!("into_alternate_push_pull(&mut {pv}.{crx})")
         }
+        PinFunction::SaiSck { .. }
+        | PinFunction::SaiSd { .. }
+        | PinFunction::SaiFs { .. }
+        | PinFunction::SaiMclk { .. } => {
+            format!("into_alternate_push_pull(&mut {pv}.{crx})")
+        }
         // An analog OUTPUT pad is still analog mode: the digital buffer is off
         // and the block drives the pin.
         PinFunction::DacOut { .. } => format!("into_analog(&mut {pv}.{crx})"),

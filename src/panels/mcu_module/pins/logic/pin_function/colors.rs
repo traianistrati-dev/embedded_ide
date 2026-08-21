@@ -23,6 +23,11 @@ impl PinFunction {
             | PinFunction::I2sWs(_)
             | PinFunction::I2sSd(_)
             | PinFunction::I2sMck(_) => egui::Color32::from_rgb(90, 140, 200),
+            // Audio too, but a deeper blue: SAI is the bigger, multi-block one.
+            PinFunction::SaiSck { .. }
+            | PinFunction::SaiSd { .. }
+            | PinFunction::SaiFs { .. }
+            | PinFunction::SaiMclk { .. } => egui::Color32::from_rgb(60, 110, 175),
             // A fault input, not an output — read at a glance as the one pin on
             // the timer that stops everything.
             PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
@@ -82,6 +87,10 @@ impl PinFunction {
                 | PinFunction::I2sWs(_)
                 | PinFunction::I2sSd(_)
                 | PinFunction::I2sMck(_)
+                | PinFunction::SaiSck { .. }
+                | PinFunction::SaiSd { .. }
+                | PinFunction::SaiFs { .. }
+                | PinFunction::SaiMclk { .. }
                 | PinFunction::UsbDm
                 | PinFunction::UsbDp
                 | PinFunction::CanRx

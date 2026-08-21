@@ -229,6 +229,11 @@ use super::super::pins::logic::pin_function::PinFunction;
 /// The `<type>` half of a generated binding name `<pin>_<type>`, e.g.
 /// `out` / `in` / `i2c1_sda` / `spi2_sck` / `usart1_tx` / `adc1_in0`. So a
 /// PC13 output binds as `pc13_out`, a PB9 I2C1 SDA as `pb9_i2c1_sda`.
+/// The sub-block letter inside a generated SAI variable name.
+fn sai_tag(block: u8) -> &'static str {
+    if block == 1 { "a" } else { "b" }
+}
+
 pub fn var_suffix(func: &PinFunction) -> String {
     match func {
         PinFunction::GpioOutput => "out".into(),
@@ -253,6 +258,10 @@ pub fn var_suffix(func: &PinFunction) -> String {
         PinFunction::SpiNss(n) => format!("spi{n}_nss"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::SaiSck { sai, block } => format!("sai{sai}{}_sck", sai_tag(*block)),
+        PinFunction::SaiSd { sai, block } => format!("sai{sai}{}_sd", sai_tag(*block)),
+        PinFunction::SaiFs { sai, block } => format!("sai{sai}{}_fs", sai_tag(*block)),
+        PinFunction::SaiMclk { sai, block } => format!("sai{sai}{}_mclk", sai_tag(*block)),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),
         PinFunction::I2sWs(n) => format!("i2s{n}_ws"),
         PinFunction::I2sSd(n) => format!("i2s{n}_sd"),

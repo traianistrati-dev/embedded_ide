@@ -605,6 +605,24 @@ fn native_token(sig: &str) -> Option<String> {
             };
             Some(format!("spi{n}_{role}"))
         }
+        // `SAI1_SCK_A`. The PDM pads (`SAI1_CK1`, `SAI1_D2`) are a different
+        // interface with no embassy driver here, so they stay generic AF.
+        "SAI" => {
+            let (role, letter) = tail.rsplit_once('_')?;
+            let b = match letter {
+                "A" => "a",
+                "B" => "b",
+                _ => return None,
+            };
+            let r = match role {
+                "SCK" => "sck",
+                "SD" => "sd",
+                "FS" => "fs",
+                "MCLK" => "mclk",
+                _ => return None,
+            };
+            Some(format!("sai{n}_{b}_{r}"))
+        }
         // `DAC1_OUT2`. `DAC1_EXTI9` is a trigger line, not a pad we drive, so
         // it falls through to the generic AF path.
         "DAC" => {
@@ -1548,7 +1566,7 @@ mod tests {
         // Anything the IDE doesn't model natively is CARRIED as a generic
         // alternate function — never dropped.
         assert_eq!(map_signal("FMC_A0").as_deref(), Some("af:fmc_a0"));
-        assert_eq!(map_signal("SAI1_SD_A").as_deref(), Some("af:sai1_sd_a"));
+        assert_eq!(map_signal("SAI1_SD_A").as_deref(), Some("sai1_a_sd"));
         assert_eq!(map_signal("DCMI_D3").as_deref(), Some("af:dcmi_d3"));
         assert_eq!(map_signal("QUADSPI_CLK").as_deref(), Some("af:quadspi_clk"));
         assert_eq!(map_signal("TIM1_CH1N").as_deref(), Some("tim1_1n"));

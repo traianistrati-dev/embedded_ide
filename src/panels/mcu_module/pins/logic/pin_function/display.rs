@@ -2,6 +2,11 @@ use super::enum_::PinFunction;
 
 // ── Display helpers ──────────────────────────────────────────────────────────
 
+/// The letter a SAI sub-block goes by: 1 is A, everything else is B.
+pub fn sai_block(block: u8) -> &'static str {
+    if block == 1 { "A" } else { "B" }
+}
+
 impl PinFunction {
     /// Short, filesystem-safe token for the selected function, used as the
     /// suffix of a generated pin file name (`pin<n>_<name>_<token>.rs`, e.g.
@@ -19,6 +24,10 @@ impl PinFunction {
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
             PinFunction::DacOut { .. } => "dac",
+            PinFunction::SaiSck { .. } => "sai_sck",
+            PinFunction::SaiSd { .. } => "sai_sd",
+            PinFunction::SaiFs { .. } => "sai_fs",
+            PinFunction::SaiMclk { .. } => "sai_mclk",
             PinFunction::I2sCk(_) => "i2s_ck",
             PinFunction::I2sWs(_) => "i2s_ws",
             PinFunction::I2sSd(_) => "i2s_sd",
@@ -73,6 +82,12 @@ impl PinFunction {
                 format!("TIM{timer}  BKIN{n}  (break)")
             }
             PinFunction::DacOut { dac, channel } => format!("DAC{dac}  OUT{channel}"),
+            PinFunction::SaiSck { sai, block } => format!("SAI{sai}  {}  SCK", sai_block(*block)),
+            PinFunction::SaiSd { sai, block } => format!("SAI{sai}  {}  SD", sai_block(*block)),
+            PinFunction::SaiFs { sai, block } => format!("SAI{sai}  {}  FS", sai_block(*block)),
+            PinFunction::SaiMclk { sai, block } => {
+                format!("SAI{sai}  {}  MCLK", sai_block(*block))
+            }
             PinFunction::I2sCk(n) => format!("I2S{n}  CK"),
             PinFunction::I2sWs(n) => format!("I2S{n}  WS"),
             PinFunction::I2sSd(n) => format!("I2S{n}  SD"),
@@ -305,6 +320,10 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",
+            PinFunction::SaiSck { .. }
+            | PinFunction::SaiSd { .. }
+            | PinFunction::SaiFs { .. }
+            | PinFunction::SaiMclk { .. } => "SAI",
             PinFunction::I2sCk(_)
             | PinFunction::I2sWs(_)
             | PinFunction::I2sSd(_)

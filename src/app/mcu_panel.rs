@@ -327,6 +327,8 @@ impl AppIde {
                                         ModuleKind::GenericInterfaceLpuart => "Add a virtual LPUART device and auto-wire it to a free LPUART TX/RX pin pair (a peripheral of its own, not a USART instance)",
                                         ModuleKind::GenericInterfaceSpi => "Add a virtual SPI device and auto-wire it to free SPI SCK/MOSI/MISO(/NSS) pins",
                                         ModuleKind::GenericInterfaceI2c => "Add a virtual I2C device and auto-wire it to a free I2C SCL/SDA pin pair",
+                                        ModuleKind::GenericInterfaceSai => "Add a SAI module for one audio unit: it auto-wires sub-block A (SCK/SD/FS), and sub-block B joins the same module when you assign its pads on the canvas",
+                                        ModuleKind::GenericInterfaceSai => "Add a SAI module for one audio unit: it auto-wires sub-block A (SCK/SD/FS), and sub-block B joins the same module when you assign its pads on the canvas",
                                         ModuleKind::GenericInterfaceDac => "Add a DAC module for one peripheral: it takes a free OUT pad now, and the other channel of the SAME DAC joins it when you assign it on the canvas",
                                         ModuleKind::GenericInterfaceI2s => "Add a virtual I2S audio device and auto-wire it to free I2S CK/WS/SD pins (MCK stays free unless you assign it). I2Sn runs on SPIn, so the two cannot both be built",
                                         ModuleKind::GenericInterfaceTimer => "Add a PWM module for one TIMER: it takes a free channel now, and any other channel of the SAME timer you assign on the canvas joins it (they share the frequency)",

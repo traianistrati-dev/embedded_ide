@@ -166,6 +166,46 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::SaiSck { sai, block }
+            | PinFunction::SaiSd { sai, block }
+            | PinFunction::SaiFs { sai, block }
+            | PinFunction::SaiMclk { sai, block } => {
+                let letter = if *block == 1 { "A" } else { "B" };
+                let role = match self {
+                    PinFunction::SaiSck { .. } => "bit clock (SCK)",
+                    PinFunction::SaiSd { .. } => "serial data (SD)",
+                    PinFunction::SaiFs { .. } => "frame sync (FS)",
+                    _ => "master clock out (MCLK) — optional, for the codec",
+                };
+                FunctionInfo {
+                    description: format!(
+                        "SAI{sai} sub-block {letter} {role}. The bigger sibling of I2S: the same \
+                         kind of signals, but two INDEPENDENT sub-blocks per unit, so one can \
+                         transmit while the other receives."
+                    ),
+                    specs: vec![
+                        (
+                            "Sub-blocks".into(),
+                            format!("SAI{sai} A and B, each with its own pads and direction"),
+                        ),
+                        (
+                            "Needs".into(),
+                            "DMA: embassy drives SAI from a ring buffer per sub-block".into(),
+                        ),
+                        (
+                            "Frame".into(),
+                            "Slot count, slot size and frame length are all configurable — \
+                             I2S, TDM and PCM are all this block"
+                                .into(),
+                        ),
+                        (
+                            "Typical use".into(),
+                            "Audio codecs, multi-channel TDM, digital microphones".into(),
+                        ),
+                    ],
+                }
+            }
+
             PinFunction::DacOut { dac, channel } => FunctionInfo {
                 description: format!(
                     "Analog output — DAC{dac} channel {channel}. The program writes a number \

@@ -3211,13 +3211,15 @@ mod tests {
         // Grammar extension: LPUART / SPI-RDY / RTS_DE map to real tokens now.
         assert_eq!(
             find("PA2").functions,
-            "lpuart1_tx spi1_rdy usart3_rts af:sai1_sd_a in out",
-            "LPUART / SPI_RDY / RTS_DE map natively; SAI is carried generically"
+            "lpuart1_tx spi1_rdy usart3_rts sai1_a_sd in out",
+            "LPUART / SPI_RDY / RTS_DE and SAI all map natively now"
         );
-        // Signals with no native model are listed once, deduped, in the report…
-        assert!(r.raw_notes.iter().any(|n| n.contains("SAI1_SD_A")));
-        // An oscillator pin is one of those now: it is a real pin function
-        // carried generically, not noise, so it is reported like SAI is.
+        // …and SAI is no longer among the unmodelled ones: it has a function of
+        // its own since the Virtual Module landed.
+        assert!(!r.raw_notes.iter().any(|n| n.contains("SAI1_SD_A")));
+        // Signals with no native model are listed once, deduped, in the report.
+        // An oscillator pin is one of those: it is a real pin function carried
+        // generically, not noise, so it is reported.
         assert!(r.raw_notes.iter().any(|n| n.contains("RCC_OSC32_IN")));
         // …but not the ones the grammar covers natively, and not true noise.
         assert!(

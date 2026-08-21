@@ -31,6 +31,31 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── SAI (audio) ─────────────────────────────────────────────────────────
+    // One SAI carries TWO independent sub-blocks, A and B, each with its own
+    // pads and its own direction — a codec is usually TX on one and RX on the
+    // other. `block` is 1 for A and 2 for B.
+    /// SAI{sai} sub-block {block} bit clock.
+    SaiSck {
+        sai: u8,
+        block: u8,
+    },
+    /// SAI{sai} sub-block {block} serial data.
+    SaiSd {
+        sai: u8,
+        block: u8,
+    },
+    /// SAI{sai} sub-block {block} frame synchronisation.
+    SaiFs {
+        sai: u8,
+        block: u8,
+    },
+    /// SAI{sai} sub-block {block} master clock out — optional, for the codec.
+    SaiMclk {
+        sai: u8,
+        block: u8,
+    },
+
     // ── DAC ─────────────────────────────────────────────────────────────────
     /// Analog output — DAC{dac} channel {channel}.
     ///

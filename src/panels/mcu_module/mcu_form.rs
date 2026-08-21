@@ -744,6 +744,23 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             "rdy" => Some(PinFunction::SpiRdy(n)),
             _ => None,
         },
+        // `sai1_a_sck` → SAI1 sub-block A bit clock.
+        "sai" => {
+            let (letter, role) = tail.split_once('_')?;
+            let block = match letter {
+                "a" => 1u8,
+                "b" => 2,
+                _ => return None,
+            };
+            let sai = n;
+            match role {
+                "sck" => Some(PinFunction::SaiSck { sai, block }),
+                "sd" => Some(PinFunction::SaiSd { sai, block }),
+                "fs" => Some(PinFunction::SaiFs { sai, block }),
+                "mclk" => Some(PinFunction::SaiMclk { sai, block }),
+                _ => None,
+            }
+        }
         // `dac1_out2` → DAC1 channel 2.
         "dac" => tail
             .strip_prefix("out")
@@ -787,6 +804,11 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
     }
 }
 
+/// The lowercase sub-block letter used inside a SAI token.
+fn sai_letter(block: u8) -> &'static str {
+    if block == 1 { "a" } else { "b" }
+}
+
 /// One [`PinFunction`] → its canonical token (inverse of [`token_to_function`]).
 fn function_to_token(f: &PinFunction) -> Option<String> {
     Some(match f {
@@ -816,6 +838,10 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::SaiSck { sai, block } => format!("sai{sai}_{}_sck", sai_letter(*block)),
+        PinFunction::SaiSd { sai, block } => format!("sai{sai}_{}_sd", sai_letter(*block)),
+        PinFunction::SaiFs { sai, block } => format!("sai{sai}_{}_fs", sai_letter(*block)),
+        PinFunction::SaiMclk { sai, block } => format!("sai{sai}_{}_mclk", sai_letter(*block)),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),
         PinFunction::I2sWs(n) => format!("i2s{n}_ws"),
         PinFunction::I2sSd(n) => format!("i2s{n}_sd"),

@@ -21,6 +21,14 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// Audio on ONE SAI unit — "SAI".
+    ///
+    /// The module is the UNIT, and its two sub-blocks A and B are its channels:
+    /// same shape as the PWM module's timer and the DAC module's block. They are
+    /// independent — a codec is usually transmit on one and receive on the other
+    /// — but they are split off one peripheral, once, which is why they cannot
+    /// be two modules.
+    GenericInterfaceSai,
     /// Analog outputs of ONE DAC — "DAC".
     ///
     /// The module is the PERIPHERAL, not the channel, for the same reason the
@@ -55,12 +63,13 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 10] = [
+    pub const ALL: [ModuleKind; 11] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
         ModuleKind::GenericInterfaceI2s,
+        ModuleKind::GenericInterfaceSai,
         ModuleKind::GenericInterfaceDac,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
@@ -98,6 +107,9 @@ impl ModuleKind {
             // One channel, like the PWM module: taking the second pad by
             // default would spend a pin on a DAC the user added for one.
             ModuleKind::GenericInterfaceDac => (&[DacOut1], &[]),
+            // Sub-block A only: B is a second, independent audio stream and
+            // taking its three pads by default would spend them on nothing.
+            ModuleKind::GenericInterfaceSai => (&[SaiSckA, SaiSdA, SaiFsA], &[SaiMclkA]),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
             // channels on a module the user added to blink one LED. The other
@@ -130,6 +142,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => "I2C",
             ModuleKind::GenericInterfaceI2s => "I2S",
             ModuleKind::GenericInterfaceDac => "DAC",
+            ModuleKind::GenericInterfaceSai => "SAI",
             ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
@@ -153,6 +166,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2c => ModuleConfig::I2c(I2cModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceDac => ModuleConfig::Dac(DacModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceSai => ModuleConfig::Sai(SaiModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceTimer => {
                 ModuleConfig::Timer(TimerModuleConfig::new(instance))
             }
@@ -225,6 +239,28 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             *dac,
             if *channel == 1 { DacOut1 } else { DacOut2 },
         ),
+        // Both sub-blocks join the SAME module: one unit, one module, however
+        // many of its pads are wired.
+        PinFunction::SaiSck { sai, block } => (
+            GenericInterfaceSai,
+            *sai,
+            if *block == 1 { SaiSckA } else { SaiSckB },
+        ),
+        PinFunction::SaiSd { sai, block } => (
+            GenericInterfaceSai,
+            *sai,
+            if *block == 1 { SaiSdA } else { SaiSdB },
+        ),
+        PinFunction::SaiFs { sai, block } => (
+            GenericInterfaceSai,
+            *sai,
+            if *block == 1 { SaiFsA } else { SaiFsB },
+        ),
+        PinFunction::SaiMclk { sai, block } => (
+            GenericInterfaceSai,
+            *sai,
+            if *block == 1 { SaiMclkA } else { SaiMclkB },
+        ),
         // CAN has a single instance on STM32F1 (CAN1) and pin functions without
         // an index, so the instance is fixed at 1.
         PinFunction::CanRx => (GenericInterfaceCan, 1, CanRx),
@@ -271,6 +307,15 @@ pub enum ModuleSignal {
     // DAC — one pad per channel, nothing shared but the block.
     DacOut1,
     DacOut2,
+    // SAI — four pads per sub-block, and two sub-blocks per unit.
+    SaiSckA,
+    SaiSdA,
+    SaiFsA,
+    SaiMclkA,
+    SaiSckB,
+    SaiSdB,
+    SaiFsB,
+    SaiMclkB,
     // PWM — one per timer channel.
     PwmCh1,
     PwmCh2,
@@ -319,6 +364,14 @@ impl ModuleSignal {
             ModuleSignal::I2sMck => "MCK",
             ModuleSignal::DacOut1 => "OUT1",
             ModuleSignal::DacOut2 => "OUT2",
+            ModuleSignal::SaiSckA => "A SCK",
+            ModuleSignal::SaiSdA => "A SD",
+            ModuleSignal::SaiFsA => "A FS",
+            ModuleSignal::SaiMclkA => "A MCLK",
+            ModuleSignal::SaiSckB => "B SCK",
+            ModuleSignal::SaiSdB => "B SD",
+            ModuleSignal::SaiFsB => "B FS",
+            ModuleSignal::SaiMclkB => "B MCLK",
             ModuleSignal::PwmCh1 => "CH1",
             ModuleSignal::PwmCh2 => "CH2",
             ModuleSignal::PwmCh3 => "CH3",
@@ -365,6 +418,38 @@ impl ModuleSignal {
             ModuleSignal::DacOut2 => PinFunction::DacOut {
                 dac: instance,
                 channel: 2,
+            },
+            ModuleSignal::SaiSckA => PinFunction::SaiSck {
+                sai: instance,
+                block: 1,
+            },
+            ModuleSignal::SaiSdA => PinFunction::SaiSd {
+                sai: instance,
+                block: 1,
+            },
+            ModuleSignal::SaiFsA => PinFunction::SaiFs {
+                sai: instance,
+                block: 1,
+            },
+            ModuleSignal::SaiMclkA => PinFunction::SaiMclk {
+                sai: instance,
+                block: 1,
+            },
+            ModuleSignal::SaiSckB => PinFunction::SaiSck {
+                sai: instance,
+                block: 2,
+            },
+            ModuleSignal::SaiSdB => PinFunction::SaiSd {
+                sai: instance,
+                block: 2,
+            },
+            ModuleSignal::SaiFsB => PinFunction::SaiFs {
+                sai: instance,
+                block: 2,
+            },
+            ModuleSignal::SaiMclkB => PinFunction::SaiMclk {
+                sai: instance,
+                block: 2,
             },
             // `instance` is the TIMER for these, and the variant is the channel.
             ModuleSignal::PwmCh1 => PinFunction::TimerPwm {
@@ -1609,6 +1694,220 @@ impl I2sClockPolarity {
     }
 }
 
+/// Who drives the SAI clocks — this sub-block, or the device on the other end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SaiMode {
+    #[default]
+    Master,
+    Slave,
+}
+
+impl SaiMode {
+    pub const ALL: [Self; 2] = [Self::Master, Self::Slave];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Master => "Master",
+            Self::Slave => "Slave",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Master => "Master (we clock)",
+            Self::Slave => "Slave (they clock)",
+        }
+    }
+}
+
+/// Which way one sub-block's data flows. The two sub-blocks are independent, so
+/// a codec is usually one of each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SaiTxRx {
+    #[default]
+    Transmitter,
+    Receiver,
+}
+
+impl SaiTxRx {
+    pub const ALL: [Self; 2] = [Self::Transmitter, Self::Receiver];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Transmitter => "Transmitter",
+            Self::Receiver => "Receiver",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transmitter => "Transmit",
+            Self::Receiver => "Receive",
+        }
+    }
+}
+
+/// How many bits of audio ride in one slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SaiDataSize {
+    Data8,
+    Data10,
+    #[default]
+    Data16,
+    Data20,
+    Data24,
+    Data32,
+}
+
+impl SaiDataSize {
+    pub const ALL: [Self; 6] = [
+        Self::Data8,
+        Self::Data10,
+        Self::Data16,
+        Self::Data20,
+        Self::Data24,
+        Self::Data32,
+    ];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Data8 => "Data8",
+            Self::Data10 => "Data10",
+            Self::Data16 => "Data16",
+            Self::Data20 => "Data20",
+            Self::Data24 => "Data24",
+            Self::Data32 => "Data32",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Data8 => "8 bit",
+            Self::Data10 => "10 bit",
+            Self::Data16 => "16 bit",
+            Self::Data20 => "20 bit",
+            Self::Data24 => "24 bit",
+            Self::Data32 => "32 bit",
+        }
+    }
+
+    /// The Rust word the DMA ring buffer holds.
+    ///
+    /// Unlike I2S, this one really does widen: the SAI ring buffer is a DMA
+    /// buffer, and `dma::word::Word` covers `u8`, `u16` and `u32`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Data8 => "u8",
+            Self::Data10 | Self::Data16 => "u16",
+            _ => "u32",
+        }
+    }
+}
+
+/// Stereo (two slots) or mono (one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SaiStereoMono {
+    #[default]
+    Stereo,
+    Mono,
+}
+
+impl SaiStereoMono {
+    pub const ALL: [Self; 2] = [Self::Stereo, Self::Mono];
+
+    pub fn embassy(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Mono => "Mono",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Mono => "Mono",
+        }
+    }
+}
+
+/// One SAI sub-block's settings. A and B carry these independently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaiBlockConfig {
+    #[serde(default)]
+    pub mode: SaiMode,
+    #[serde(default)]
+    pub tx_rx: SaiTxRx,
+    #[serde(default)]
+    pub data_size: SaiDataSize,
+    #[serde(default)]
+    pub stereo_mono: SaiStereoMono,
+    /// Slots per frame, 1..=16.
+    pub slot_count: u8,
+    /// Frame length in BITS. embassy's default is 32 for a 16-bit stereo frame.
+    pub frame_length: u16,
+    /// Ring-buffer length in samples, in `data_size`-wide words.
+    pub buffer_len: u16,
+}
+
+impl Default for SaiBlockConfig {
+    fn default() -> Self {
+        Self {
+            mode: SaiMode::default(),
+            tx_rx: SaiTxRx::default(),
+            data_size: SaiDataSize::default(),
+            stereo_mono: SaiStereoMono::default(),
+            slot_count: 2,
+            frame_length: 32,
+            buffer_len: 256,
+        }
+    }
+}
+
+/// SAI unit settings + data model. The sub-blocks live inside it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaiModuleConfig {
+    pub instance: u8,
+    /// Sub-block (1 = A, 2 = B) → its settings. Absent = every default.
+    #[serde(default)]
+    pub blocks: std::collections::BTreeMap<u8, SaiBlockConfig>,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_saiN` handles.
+    #[serde(default)]
+    pub custom_label: String,
+    /// DMA channel per sub-block, chosen by hand; empty = let the IDE allocate.
+    #[serde(default)]
+    pub dma_a: String,
+    #[serde(default)]
+    pub dma_b: String,
+}
+
+impl SaiModuleConfig {
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            blocks: std::collections::BTreeMap::new(),
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+            dma_a: String::new(),
+            dma_b: String::new(),
+        }
+    }
+
+    /// One sub-block's settings, all defaults when untouched.
+    pub fn block_of(&self, block: u8) -> SaiBlockConfig {
+        self.blocks.get(&block).copied().unwrap_or_default()
+    }
+
+    /// Record a sub-block's settings, with the slot count clamped to the four
+    /// bits the register has.
+    pub fn set_block(&mut self, block: u8, mut cfg: SaiBlockConfig) {
+        cfg.slot_count = cfg.slot_count.clamp(1, 16);
+        self.blocks.insert(block, cfg);
+    }
+}
+
 /// Analog output settings + data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DacModuleConfig {
@@ -1848,6 +2147,7 @@ pub enum ModuleConfig {
     I2c(I2cModuleConfig),
     I2s(I2sModuleConfig),
     Dac(DacModuleConfig),
+    Sai(SaiModuleConfig),
     Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
@@ -1863,6 +2163,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => c.instance,
             ModuleConfig::I2s(c) => c.instance,
             ModuleConfig::Dac(c) => c.instance,
+            ModuleConfig::Sai(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -1877,6 +2178,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &c.rx_model,
             ModuleConfig::I2s(c) => &c.rx_model,
             ModuleConfig::Dac(c) => &c.rx_model,
+            ModuleConfig::Sai(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -1891,6 +2193,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &c.tx_model,
             ModuleConfig::I2s(c) => &c.tx_model,
             ModuleConfig::Dac(c) => &c.tx_model,
+            ModuleConfig::Sai(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -1905,6 +2208,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &mut c.rx_model,
             ModuleConfig::I2s(c) => &mut c.rx_model,
             ModuleConfig::Dac(c) => &mut c.rx_model,
+            ModuleConfig::Sai(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -1919,6 +2223,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &mut c.tx_model,
             ModuleConfig::I2s(c) => &mut c.tx_model,
             ModuleConfig::Dac(c) => &mut c.tx_model,
+            ModuleConfig::Sai(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -1934,6 +2239,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &c.custom_label,
             ModuleConfig::I2s(c) => &c.custom_label,
             ModuleConfig::Dac(c) => &c.custom_label,
+            ModuleConfig::Sai(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -1948,6 +2254,7 @@ impl ModuleConfig {
             ModuleConfig::I2c(c) => &mut c.custom_label,
             ModuleConfig::I2s(c) => &mut c.custom_label,
             ModuleConfig::Dac(c) => &mut c.custom_label,
+            ModuleConfig::Sai(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -1971,6 +2278,7 @@ impl ModuleConfig {
             }
             ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
             ModuleConfig::Dac(c) => format!("DAC{}  ·  {} ch", c.instance, c.values.len().max(1)),
+            ModuleConfig::Sai(c) => format!("SAI{}  ·  {} sub-block", c.instance, c.blocks.len().max(1)),
             ModuleConfig::I2s(c) => format!(
                 "I2S{}  ·  {}  ·  {}",
                 c.instance,
