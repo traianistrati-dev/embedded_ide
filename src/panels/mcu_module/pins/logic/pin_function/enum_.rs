@@ -31,6 +31,24 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── SDMMC / SDIO ────────────────────────────────────────────────────────
+    // `unit` is the instance number, and 0 means the UN-NUMBERED `SDIO` that
+    // F1/F2/F4/L1 carry — the same block the later families call SDMMC1.
+    /// SDMMC{unit} clock.
+    SdmmcCk {
+        unit: u8,
+    },
+    /// SDMMC{unit} command line.
+    SdmmcCmd {
+        unit: u8,
+    },
+    /// SDMMC{unit} data line {lane}. One, four or eight of them are wired, and
+    /// how many decides which constructor the codegen reaches for.
+    SdmmcD {
+        unit: u8,
+        lane: u8,
+    },
+
     // ── SAI (audio) ─────────────────────────────────────────────────────────
     // One SAI carries TWO independent sub-blocks, A and B, each with its own
     // pads and its own direction — a codec is usually TX on one and RX on the

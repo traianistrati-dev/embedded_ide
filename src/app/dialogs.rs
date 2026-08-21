@@ -827,6 +827,7 @@ impl AppIde {
                         def.dma = dma.clone();
                         def.irq_vectors = irq_vectors.clone();
                         def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
+                        def.sdmmc_ip = stm32_pin_data::sdmmc_ip_version(&xml);
                         // F4's real ceiling is per-chip (F401 84 … F429 180) —
                         // override the form's F411-class default.
                         if def.family == "stm32f4" {

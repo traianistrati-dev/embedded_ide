@@ -28,6 +28,10 @@ impl PinFunction {
             | PinFunction::SaiSd { .. }
             | PinFunction::SaiFs { .. }
             | PinFunction::SaiMclk { .. } => egui::Color32::from_rgb(60, 110, 175),
+            // Storage: a warm grey-green, apart from every audio blue.
+            PinFunction::SdmmcCk { .. }
+            | PinFunction::SdmmcCmd { .. }
+            | PinFunction::SdmmcD { .. } => egui::Color32::from_rgb(120, 155, 110),
             // A fault input, not an output — read at a glance as the one pin on
             // the timer that stops everything.
             PinFunction::TimerBreak { .. } => egui::Color32::from_rgb(200, 80, 60),
@@ -91,6 +95,9 @@ impl PinFunction {
                 | PinFunction::SaiSd { .. }
                 | PinFunction::SaiFs { .. }
                 | PinFunction::SaiMclk { .. }
+                | PinFunction::SdmmcCk { .. }
+                | PinFunction::SdmmcCmd { .. }
+                | PinFunction::SdmmcD { .. }
                 | PinFunction::UsbDm
                 | PinFunction::UsbDp
                 | PinFunction::CanRx

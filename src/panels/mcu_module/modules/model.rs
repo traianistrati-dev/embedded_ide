@@ -5,6 +5,7 @@
 //! the chip. This is the data model; auto-wiring lives in [`super::autowire`].
 
 use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+use crate::panels::mcu_module::pins::logic::pin_function::display::sdmmc_name;
 use serde::{Deserialize, Serialize};
 
 /// Kind of virtual module. New kinds are added here.
@@ -21,6 +22,11 @@ pub enum ModuleKind {
     GenericInterfaceSpi,
     /// Generic device on an I2C bus (SCL/SDA) — "I2C".
     GenericInterfaceI2c,
+    /// SD card / eMMC on ONE SDMMC (or SDIO) controller — "SDMMC".
+    ///
+    /// The bus width is not a setting: wiring D0 alone, D0–D3 or D0–D7 IS the
+    /// width, and each one is a different embassy constructor.
+    GenericInterfaceSdmmc,
     /// Audio on ONE SAI unit — "SAI".
     ///
     /// The module is the UNIT, and its two sub-blocks A and B are its channels:
@@ -63,13 +69,14 @@ pub enum ModuleKind {
 
 impl ModuleKind {
     /// Every kind, in palette order.
-    pub const ALL: [ModuleKind; 11] = [
+    pub const ALL: [ModuleKind; 12] = [
         ModuleKind::GenericInterfaceUsart,
         ModuleKind::GenericInterfaceLpuart,
         ModuleKind::GenericInterfaceSpi,
         ModuleKind::GenericInterfaceI2c,
         ModuleKind::GenericInterfaceI2s,
         ModuleKind::GenericInterfaceSai,
+        ModuleKind::GenericInterfaceSdmmc,
         ModuleKind::GenericInterfaceDac,
         ModuleKind::GenericInterfaceTimer,
         ModuleKind::GenericInterfaceCan,
@@ -110,6 +117,9 @@ impl ModuleKind {
             // Sub-block A only: B is a second, independent audio stream and
             // taking its three pads by default would spend them on nothing.
             ModuleKind::GenericInterfaceSai => (&[SaiSckA, SaiSdA, SaiFsA], &[SaiMclkA]),
+            // One data line: the 4- and 8-bit widths join by assigning the
+            // other lanes, the same way a timer's channels do.
+            ModuleKind::GenericInterfaceSdmmc => (&[SdCk, SdCmd, SdD0], &[]),
             // ONE channel, and no optional ones: "optional" here means "take it
             // if the pad is free", which would spend all four of a timer's
             // channels on a module the user added to blink one LED. The other
@@ -143,6 +153,7 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2s => "I2S",
             ModuleKind::GenericInterfaceDac => "DAC",
             ModuleKind::GenericInterfaceSai => "SAI",
+            ModuleKind::GenericInterfaceSdmmc => "SDMMC",
             ModuleKind::GenericInterfaceTimer => "PWM",
             ModuleKind::GenericInterfaceCan => "CAN",
             ModuleKind::GenericInterfaceUsb => "USB",
@@ -167,6 +178,9 @@ impl ModuleKind {
             ModuleKind::GenericInterfaceI2s => ModuleConfig::I2s(I2sModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceDac => ModuleConfig::Dac(DacModuleConfig::new(instance)),
             ModuleKind::GenericInterfaceSai => ModuleConfig::Sai(SaiModuleConfig::new(instance)),
+            ModuleKind::GenericInterfaceSdmmc => {
+                ModuleConfig::Sdmmc(SdmmcModuleConfig::new(instance))
+            }
             ModuleKind::GenericInterfaceTimer => {
                 ModuleConfig::Timer(TimerModuleConfig::new(instance))
             }
@@ -261,6 +275,22 @@ pub fn module_signal_of(func: &PinFunction) -> Option<(ModuleKind, u8, ModuleSig
             *sai,
             if *block == 1 { SaiMclkA } else { SaiMclkB },
         ),
+        PinFunction::SdmmcCk { unit } => (GenericInterfaceSdmmc, *unit, SdCk),
+        PinFunction::SdmmcCmd { unit } => (GenericInterfaceSdmmc, *unit, SdCmd),
+        PinFunction::SdmmcD { unit, lane } => (
+            GenericInterfaceSdmmc,
+            *unit,
+            match lane {
+                0 => SdD0,
+                1 => SdD1,
+                2 => SdD2,
+                3 => SdD3,
+                4 => SdD4,
+                5 => SdD5,
+                6 => SdD6,
+                _ => SdD7,
+            },
+        ),
         // CAN has a single instance on STM32F1 (CAN1) and pin functions without
         // an index, so the instance is fixed at 1.
         PinFunction::CanRx => (GenericInterfaceCan, 1, CanRx),
@@ -316,6 +346,17 @@ pub enum ModuleSignal {
     SaiSdB,
     SaiFsB,
     SaiMclkB,
+    // SDMMC — a clock, a command line, and up to eight data lanes.
+    SdCk,
+    SdCmd,
+    SdD0,
+    SdD1,
+    SdD2,
+    SdD3,
+    SdD4,
+    SdD5,
+    SdD6,
+    SdD7,
     // PWM — one per timer channel.
     PwmCh1,
     PwmCh2,
@@ -372,6 +413,16 @@ impl ModuleSignal {
             ModuleSignal::SaiSdB => "B SD",
             ModuleSignal::SaiFsB => "B FS",
             ModuleSignal::SaiMclkB => "B MCLK",
+            ModuleSignal::SdCk => "CK",
+            ModuleSignal::SdCmd => "CMD",
+            ModuleSignal::SdD0 => "D0",
+            ModuleSignal::SdD1 => "D1",
+            ModuleSignal::SdD2 => "D2",
+            ModuleSignal::SdD3 => "D3",
+            ModuleSignal::SdD4 => "D4",
+            ModuleSignal::SdD5 => "D5",
+            ModuleSignal::SdD6 => "D6",
+            ModuleSignal::SdD7 => "D7",
             ModuleSignal::PwmCh1 => "CH1",
             ModuleSignal::PwmCh2 => "CH2",
             ModuleSignal::PwmCh3 => "CH3",
@@ -450,6 +501,40 @@ impl ModuleSignal {
             ModuleSignal::SaiMclkB => PinFunction::SaiMclk {
                 sai: instance,
                 block: 2,
+            },
+            ModuleSignal::SdCk => PinFunction::SdmmcCk { unit: instance },
+            ModuleSignal::SdCmd => PinFunction::SdmmcCmd { unit: instance },
+            ModuleSignal::SdD0 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 0,
+            },
+            ModuleSignal::SdD1 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 1,
+            },
+            ModuleSignal::SdD2 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 2,
+            },
+            ModuleSignal::SdD3 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 3,
+            },
+            ModuleSignal::SdD4 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 4,
+            },
+            ModuleSignal::SdD5 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 5,
+            },
+            ModuleSignal::SdD6 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 6,
+            },
+            ModuleSignal::SdD7 => PinFunction::SdmmcD {
+                unit: instance,
+                lane: 7,
             },
             // `instance` is the TIMER for these, and the variant is the channel.
             ModuleSignal::PwmCh1 => PinFunction::TimerPwm {
@@ -1694,6 +1779,41 @@ impl I2sClockPolarity {
     }
 }
 
+/// SD card / eMMC controller settings + data model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SdmmcModuleConfig {
+    /// The controller instance. 0 is the un-numbered `SDIO` of F1/F2/F4/L1.
+    pub instance: u8,
+    /// `Config::data_transfer_timeout`, in card bus clock periods. embassy's
+    /// default is 5 000 000, which is a few seconds on a slow card.
+    pub data_timeout: u32,
+    pub rx_model: String,
+    pub tx_model: String,
+    /// User label appended to the generated `_sdN` handle.
+    #[serde(default)]
+    pub custom_label: String,
+    /// DMA channel chosen by hand; empty = let the IDE allocate. Only the
+    /// older controller takes one at all — the newer has its own inside.
+    #[serde(default)]
+    pub dma_tx: String,
+    #[serde(default)]
+    pub dma_rx: String,
+}
+
+impl SdmmcModuleConfig {
+    pub fn new(instance: u8) -> Self {
+        Self {
+            instance,
+            data_timeout: 5_000_000,
+            rx_model: String::new(),
+            tx_model: String::new(),
+            custom_label: String::new(),
+            dma_tx: String::new(),
+            dma_rx: String::new(),
+        }
+    }
+}
+
 /// Who drives the SAI clocks — this sub-block, or the device on the other end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SaiMode {
@@ -2148,6 +2268,7 @@ pub enum ModuleConfig {
     I2s(I2sModuleConfig),
     Dac(DacModuleConfig),
     Sai(SaiModuleConfig),
+    Sdmmc(SdmmcModuleConfig),
     Timer(TimerModuleConfig),
     Can(CanModuleConfig),
     Usb(UsbModuleConfig),
@@ -2164,6 +2285,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => c.instance,
             ModuleConfig::Dac(c) => c.instance,
             ModuleConfig::Sai(c) => c.instance,
+            ModuleConfig::Sdmmc(c) => c.instance,
             ModuleConfig::Timer(c) => c.instance,
             ModuleConfig::Can(c) => c.instance,
             ModuleConfig::Usb(c) => c.instance,
@@ -2179,6 +2301,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => &c.rx_model,
             ModuleConfig::Dac(c) => &c.rx_model,
             ModuleConfig::Sai(c) => &c.rx_model,
+            ModuleConfig::Sdmmc(c) => &c.rx_model,
             ModuleConfig::Timer(c) => &c.rx_model,
             ModuleConfig::Can(c) => &c.rx_model,
             ModuleConfig::Usb(c) => &c.rx_model,
@@ -2194,6 +2317,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => &c.tx_model,
             ModuleConfig::Dac(c) => &c.tx_model,
             ModuleConfig::Sai(c) => &c.tx_model,
+            ModuleConfig::Sdmmc(c) => &c.tx_model,
             ModuleConfig::Timer(c) => &c.tx_model,
             ModuleConfig::Can(c) => &c.tx_model,
             ModuleConfig::Usb(c) => &c.tx_model,
@@ -2209,6 +2333,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => &mut c.rx_model,
             ModuleConfig::Dac(c) => &mut c.rx_model,
             ModuleConfig::Sai(c) => &mut c.rx_model,
+            ModuleConfig::Sdmmc(c) => &mut c.rx_model,
             ModuleConfig::Timer(c) => &mut c.rx_model,
             ModuleConfig::Can(c) => &mut c.rx_model,
             ModuleConfig::Usb(c) => &mut c.rx_model,
@@ -2224,6 +2349,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => &mut c.tx_model,
             ModuleConfig::Dac(c) => &mut c.tx_model,
             ModuleConfig::Sai(c) => &mut c.tx_model,
+            ModuleConfig::Sdmmc(c) => &mut c.tx_model,
             ModuleConfig::Timer(c) => &mut c.tx_model,
             ModuleConfig::Can(c) => &mut c.tx_model,
             ModuleConfig::Usb(c) => &mut c.tx_model,
@@ -2240,6 +2366,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => &c.custom_label,
             ModuleConfig::Dac(c) => &c.custom_label,
             ModuleConfig::Sai(c) => &c.custom_label,
+            ModuleConfig::Sdmmc(c) => &c.custom_label,
             ModuleConfig::Timer(c) => &c.custom_label,
             ModuleConfig::Can(c) => &c.custom_label,
             ModuleConfig::Usb(c) => &c.custom_label,
@@ -2255,6 +2382,7 @@ impl ModuleConfig {
             ModuleConfig::I2s(c) => &mut c.custom_label,
             ModuleConfig::Dac(c) => &mut c.custom_label,
             ModuleConfig::Sai(c) => &mut c.custom_label,
+            ModuleConfig::Sdmmc(c) => &mut c.custom_label,
             ModuleConfig::Timer(c) => &mut c.custom_label,
             ModuleConfig::Can(c) => &mut c.custom_label,
             ModuleConfig::Usb(c) => &mut c.custom_label,
@@ -2278,7 +2406,10 @@ impl ModuleConfig {
             }
             ModuleConfig::I2c(c) => format!("I2C{}  ·  {}", c.instance, hz_label(c.clock_hz)),
             ModuleConfig::Dac(c) => format!("DAC{}  ·  {} ch", c.instance, c.values.len().max(1)),
-            ModuleConfig::Sai(c) => format!("SAI{}  ·  {} sub-block", c.instance, c.blocks.len().max(1)),
+            ModuleConfig::Sai(c) => {
+                format!("SAI{}  ·  {} sub-block", c.instance, c.blocks.len().max(1))
+            }
+            ModuleConfig::Sdmmc(c) => sdmmc_name(c.instance),
             ModuleConfig::I2s(c) => format!(
                 "I2S{}  ·  {}  ·  {}",
                 c.instance,

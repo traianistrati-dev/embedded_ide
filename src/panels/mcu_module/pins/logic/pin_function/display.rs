@@ -2,6 +2,17 @@ use super::enum_::PinFunction;
 
 // ── Display helpers ──────────────────────────────────────────────────────────
 
+/// What this chip calls its SD-card block: unit 0 is the un-numbered `SDIO`
+/// of F1/F2/F4/L1, everything else is `SDMMC{n}`. The same name the peripheral
+/// singleton goes by in embassy, which is why it lives in one place.
+pub fn sdmmc_name(unit: u8) -> String {
+    if unit == 0 {
+        "SDIO".to_owned()
+    } else {
+        format!("SDMMC{unit}")
+    }
+}
+
 /// The letter a SAI sub-block goes by: 1 is A, everything else is B.
 pub fn sai_block(block: u8) -> &'static str {
     if block == 1 { "A" } else { "B" }
@@ -24,6 +35,9 @@ impl PinFunction {
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
             PinFunction::DacOut { .. } => "dac",
+            PinFunction::SdmmcCk { .. } => "sdmmc_ck",
+            PinFunction::SdmmcCmd { .. } => "sdmmc_cmd",
+            PinFunction::SdmmcD { .. } => "sdmmc_d",
             PinFunction::SaiSck { .. } => "sai_sck",
             PinFunction::SaiSd { .. } => "sai_sd",
             PinFunction::SaiFs { .. } => "sai_fs",
@@ -82,6 +96,9 @@ impl PinFunction {
                 format!("TIM{timer}  BKIN{n}  (break)")
             }
             PinFunction::DacOut { dac, channel } => format!("DAC{dac}  OUT{channel}"),
+            PinFunction::SdmmcCk { unit } => format!("{}  CK", sdmmc_name(*unit)),
+            PinFunction::SdmmcCmd { unit } => format!("{}  CMD", sdmmc_name(*unit)),
+            PinFunction::SdmmcD { unit, lane } => format!("{}  D{lane}", sdmmc_name(*unit)),
             PinFunction::SaiSck { sai, block } => format!("SAI{sai}  {}  SCK", sai_block(*block)),
             PinFunction::SaiSd { sai, block } => format!("SAI{sai}  {}  SD", sai_block(*block)),
             PinFunction::SaiFs { sai, block } => format!("SAI{sai}  {}  FS", sai_block(*block)),
@@ -320,6 +337,9 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::TimerBreak { .. } => "BRK",
             PinFunction::DacOut { .. } => "DAC",
+            PinFunction::SdmmcCk { .. }
+            | PinFunction::SdmmcCmd { .. }
+            | PinFunction::SdmmcD { .. } => "SDMMC",
             PinFunction::SaiSck { .. }
             | PinFunction::SaiSd { .. }
             | PinFunction::SaiFs { .. }

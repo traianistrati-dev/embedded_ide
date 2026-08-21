@@ -272,10 +272,7 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
             sai: instance,
             block: 1,
         },
-        ModuleKind::GenericInterfaceSai => PinFunction::SaiSck {
-            sai: instance,
-            block: 1,
-        },
+        ModuleKind::GenericInterfaceSdmmc => PinFunction::SdmmcCk { unit: instance },
         ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
             timer: instance,
             channel: 1,
@@ -426,8 +423,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceDac => format!("_dac{n}{sfx}"),
         // One handle per SUB-BLOCK: they are independent streams.
         ModuleKind::GenericInterfaceSai => format!("_sai{n}a{sfx}, _sai{n}b{sfx}"),
-        // One handle per SUB-BLOCK: they are independent streams.
-        ModuleKind::GenericInterfaceSai => format!("_sai{n}a{sfx}, _sai{n}b{sfx}"),
+        ModuleKind::GenericInterfaceSdmmc => format!("_sd{n}{sfx}"),
         ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
@@ -1930,125 +1926,63 @@ pub fn module_config_ui(
                         ui.end_row();
                     }
                 }
-                // One SAI unit, two independent sub-blocks. Each one that has
-                // its three clock/data pads wired gets its own rows — the module
-                // is the unit because `split_subblocks` happens once.
-                ModuleConfig::Sai(cfg) => {
-                    let wired: Vec<u8> = [1u8, 2]
-                        .into_iter()
-                        .filter(|b| {
-                            let tag = if *b == 1 { "A " } else { "B " };
-                            conn_rows.iter().any(|(sig, _)| sig.starts_with(tag))
-                        })
+                // The SD-card controller. The bus WIDTH is not a setting: how
+                // many data lanes are wired is the width, and each width is a
+                // different embassy constructor — so the panel reports it
+                // instead of asking.
+                ModuleConfig::Sdmmc(cfg) => {
+                    let lanes: Vec<u8> = conn_rows
+                        .iter()
+                        .filter_map(|(sig, _)| sig.strip_prefix("D")?.parse::<u8>().ok())
                         .collect();
-                    if wired.is_empty() {
-                        ui.label("Sub-blocks");
-                        ui.label(
-                            egui::RichText::new("none wired yet")
+                    let width = match lanes.len() {
+                        1 => Some(1u8),
+                        4 => Some(4),
+                        8 => Some(8),
+                        _ => None,
+                    };
+                    ui.label("Bus width");
+                    match width {
+                        Some(w) => {
+                            ui.label(
+                                egui::RichText::new(format!("{w}-bit  ({} lanes wired)", lanes.len()))
+                                    .size(11.0),
+                            );
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} lanes wired — needs 1, 4 or 8",
+                                    lanes.len()
+                                ))
                                 .size(11.0)
-                                .italics()
-                                .color(egui::Color32::from_gray(140)),
-                        );
-                        ui.end_row();
-                    }
-                    for b in &wired {
-                        let letter = if *b == 1 { "A" } else { "B" };
-                        let before = cfg.block_of(*b);
-                        let mut blk = before;
-                        ui.label(format!("{letter} stream"));
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt(("sai_dir", b))
-                                .width(84.0)
-                                .selected_text(blk.tx_rx.label())
-                                .show_ui(ui, |ui| {
-                                    for v in SaiTxRx::ALL {
-                                        ui.selectable_value(&mut blk.tx_rx, v, v.label());
-                                    }
-                                });
-                            egui::ComboBox::from_id_salt(("sai_mode", b))
-                                .width(120.0)
-                                .selected_text(blk.mode.label())
-                                .show_ui(ui, |ui| {
-                                    for v in SaiMode::ALL {
-                                        ui.selectable_value(&mut blk.mode, v, v.label());
-                                    }
-                                });
-                            egui::ComboBox::from_id_salt(("sai_size", b))
-                                .width(74.0)
-                                .selected_text(blk.data_size.label())
-                                .show_ui(ui, |ui| {
-                                    for v in SaiDataSize::ALL {
-                                        ui.selectable_value(&mut blk.data_size, v, v.label());
-                                    }
-                                });
-                        });
-                        ui.end_row();
-
-                        ui.label(format!("{letter} frame"));
-                        ui.horizontal(|ui| {
-                            egui::ComboBox::from_id_salt(("sai_sm", b))
-                                .width(74.0)
-                                .selected_text(blk.stereo_mono.label())
-                                .show_ui(ui, |ui| {
-                                    for v in SaiStereoMono::ALL {
-                                        ui.selectable_value(&mut blk.stereo_mono, v, v.label());
-                                    }
-                                });
-                            ui.add(
-                                egui::DragValue::new(&mut blk.slot_count)
-                                    .range(1..=16)
-                                    .prefix("slots "),
-                            );
-                            ui.add(
-                                egui::DragValue::new(&mut blk.frame_length)
-                                    .range(8..=256)
-                                    .suffix(" bit"),
-                            )
-                            .on_hover_text(
-                                "Frame length in BITS — slots x slot size. 32 is one 16-bit \
-                                 stereo frame.",
-                            );
-                            ui.add(
-                                egui::DragValue::new(&mut blk.buffer_len)
-                                    .range(32..=8192)
-                                    .prefix("buf "),
-                            );
-                        });
-                        if blk != before {
-                            cfg.set_block(*b, blk);
-                        }
-                        ui.end_row();
-
-                        if is_async {
-                            let (dir, field) = if *b == 1 {
-                                (dma_map::Dir::Tx, &mut cfg.dma_a)
-                            } else {
-                                (dma_map::Dir::Rx, &mut cfg.dma_b)
-                            };
-                            // SAI has no entry in the hand-written DMA tables, so
-                            // the picker offers nothing and the allocator does the
-                            // choosing. The row is here for the day it does.
-                            dma_one(
-                                ui,
-                                dma_map::Bus::Spi,
-                                cfg.instance,
-                                dir,
-                                &format!("{letter} DMA"),
-                                field,
+                                .color(egui::Color32::from_rgb(200, 140, 60)),
                             );
                         }
                     }
-                    let free: Vec<&str> = [(1u8, "A"), (2, "B")]
-                        .into_iter()
-                        .filter(|(b, _)| !wired.contains(b))
-                        .map(|(_, l)| l)
+                    ui.end_row();
+
+                    ui.label("Data timeout");
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.data_timeout)
+                            .range(1_000..=100_000_000)
+                            .speed(10_000.0),
+                    )
+                    .on_hover_text(
+                        "In CARD bus clock periods, not microseconds — embassy's `Config` \
+                         counts them. The default 5 000 000 is a few seconds on a slow card.",
+                    );
+                    ui.end_row();
+
+                    let free: Vec<String> = (0..8u8)
+                        .filter(|l| !lanes.contains(l))
+                        .map(|l| format!("D{l}"))
                         .collect();
                     if !free.is_empty() {
                         ui.label("");
                         ui.label(
                             egui::RichText::new(format!(
-                                "add a stream by assigning SAI{} {} SCK/SD/FS on the canvas",
-                                cfg.instance,
+                                "widen the bus by assigning {} on the canvas",
                                 free.join(" / ")
                             ))
                             .size(10.5)
@@ -2056,20 +1990,18 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
-                    ui.label("");
-                    ui.label(
-                        egui::RichText::new(if is_async {
-                            "asynchronous mode only: a sub-block slaved to the other one \
-                             (`new_synchronous`) needs its clock pads left unwired, which is a \
-                             wiring rule of its own"
-                        } else {
-                            "only the Async runtime emits SAI — embassy drives it from a DMA \
-                             ring buffer per sub-block"
-                        })
-                        .size(10.5)
-                        .color(egui::Color32::from_gray(140)),
-                    );
-                    ui.end_row();
+                    if !is_async {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "only the Async runtime emits SD-card code — the blocking \
+                                 backends generate GPIO and watchdogs only",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
                 }
                 // One SAI unit, two independent sub-blocks. Each one that has
                 // its three clock/data pads wired gets its own rows — the module

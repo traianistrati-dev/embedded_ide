@@ -1000,6 +1000,7 @@ mod emit_for_manual_compile {
         let mut c2 = std::collections::HashMap::new();
         def.irq_vectors = nvic::vectors_for(&xml, path.parent(), &mut c2);
         def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
+        def.sdmmc_ip = stm32_pin_data::sdmmc_ip_version(&xml);
 
         let mut mcu = def.build_mcu();
         mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
@@ -1732,6 +1733,7 @@ mod emit_for_manual_compile {
         def.dma = dma;
         def.irq_vectors = irqs;
         def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
+        def.sdmmc_ip = stm32_pin_data::sdmmc_ip_version(&xml);
         let mut mcu = def.build_mcu();
         mcu.runtime = crate::panels::mcu_module::mcu::model::Runtime::Async;
 
@@ -1744,6 +1746,34 @@ mod emit_for_manual_compile {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        // `EIDE_SDMMC=w` wires an SD card at bus width `w` (1, 4 or 8) — on a
+        // chip that has the controller, which the G431 does not. Assigned first
+        // because the card pads are the least interchangeable ones here.
+        if let Ok(w) = std::env::var("EIDE_SDMMC") {
+            let lanes: u8 = w.parse().unwrap_or(4);
+            let unit = std::env::var("EIDE_SDMMC_UNIT")
+                .ok()
+                .and_then(|u| u.parse().ok())
+                .unwrap_or(1u8);
+            let mut want: Vec<PinFunction> = vec![
+                PinFunction::SdmmcCk { unit },
+                PinFunction::SdmmcCmd { unit },
+            ];
+            want.extend((0..lanes).map(|lane| PinFunction::SdmmcD { unit, lane }));
+            for want in want {
+                let num = mcu
+                    .iter_all_pins()
+                    .find(|p| {
+                        p.selected_function == PinFunction::Unset
+                            && p.available_functions.contains(&want)
+                    })
+                    .map(|p| p.number);
+                match num.and_then(|n| mcu.find_pin_mut(n)) {
+                    Some(p) => p.selected_function = want,
+                    None => println!("chip has no pin for {want:?}"),
+                }
+            }
+        }
         // `EIDE_SAI=1` gives the SAI pads FIRST pick. On this 48-pin part they
         // collide with the pads the timer, SPI and USART want — SAI1_SCK_A is
         // PA8, SCK_B is PB3 — and a sub-block needs three of them, so both

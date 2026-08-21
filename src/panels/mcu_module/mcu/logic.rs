@@ -116,6 +116,7 @@ impl Mcu {
             dma: None,
             irq_vectors: Vec::new(),
             usart_ip: None,
+            sdmmc_ip: None,
             selected_pin: None,
             pin_search: String::new(),
             show_info: None,
@@ -1222,7 +1223,7 @@ mod module_support_tests {
                 // built-in names those pads. No built-in has an LPUART (the F103
                 // predates the peripheral, the ESP32-C3 has no such thing), and
                 // neither hand-written definition spells out the I2S pads its
-                // SPI block could serve, nor the SAI pads, nor the DAC outputs
+                // SPI block could serve, nor the SAI or SD-card pads, nor the DAC outputs
                 // (the F103 has none of the three
                 // at all) — the imported chips do, from ST's XML.
                 let want = !matches!(
@@ -1230,6 +1231,7 @@ mod module_support_tests {
                     ModuleKind::GenericInterfaceLpuart
                         | ModuleKind::GenericInterfaceI2s
                         | ModuleKind::GenericInterfaceSai
+                        | ModuleKind::GenericInterfaceSdmmc
                         | ModuleKind::GenericInterfaceDac
                 );
                 assert_eq!(

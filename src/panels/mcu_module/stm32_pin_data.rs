@@ -335,13 +335,68 @@ pub fn gpio_ip_version(mcu_xml: &str) -> Option<String> {
 /// whether the USART has the SWAP / TXINV / RXINV bits — see
 /// [`usart_has_swap_invert`].
 pub fn usart_ip_version(mcu_xml: &str) -> Option<String> {
+    ip_version(mcu_xml, "USART")
+}
+
+/// The vendor's version string for the `<IP Name="…">` block, if the chip has
+/// one.
+///
+/// The IP version is the only thing in the vendor data that says WHICH
+/// generation of a peripheral a part carries, and embassy gates real API
+/// differences on exactly that (`usart_v3`, `sdmmc_v2`, …). Reading it per
+/// chip rather than guessing per family is not pedantry: the L4 series ships
+/// both SDMMC generations, so a family rule would be wrong on 64 of its 144
+/// parts.
+pub fn ip_version(mcu_xml: &str, name: &str) -> Option<String> {
     let doc = roxmltree::Document::parse(mcu_xml).ok()?;
     doc.root_element()
         .children()
         .filter(|n| n.is_element() && n.tag_name().name() == "IP")
-        .find(|n| n.attribute("Name") == Some("USART"))
+        .find(|n| n.attribute("Name") == Some(name))
         .and_then(|n| n.attribute("Version"))
         .map(|v| v.trim().to_owned())
+}
+
+/// The SDMMC IP version, under either of the two names the vendor uses.
+///
+/// F1/F2/F4/L1 call the block `SDIO` and everything since calls it `SDMMC`;
+/// the version string is the same shape either way.
+pub fn sdmmc_ip_version(mcu_xml: &str) -> Option<String> {
+    ip_version(mcu_xml, "SDMMC").or_else(|| ip_version(mcu_xml, "SDIO"))
+}
+
+/// Which shape embassy's SDMMC constructors take on this chip.
+///
+/// This is NOT a cosmetic gate like the USART's swap/invert: the two versions
+/// take different ARGUMENT LISTS. `sdmmc_v1` is fed a DMA channel and has to
+/// bind its interrupt as well as the peripheral's; `sdmmc_v2` has its own
+/// controller inside and takes neither. Generating one for the other does not
+/// compile, so a chip with no captured IP version generates nothing at all.
+///
+/// The whole vendor database splits cleanly on the version PREFIX:
+///
+/// | version | families | this |
+/// |---|---|---|
+/// | `sdmmc_v1_2_Cube`, `sdmmc_v1_3_Cube` | F1, F2, F4, L1, F7, some L4 | [`SdmmcKind::V1`] |
+/// | `sdmmc2_…` (incl. `STM32MP2_sdmmc2_…`) | other L4, L5, H5, H7, U3, U5, N6 | [`SdmmcKind::V2`] |
+pub fn sdmmc_kind(ip_version: &str) -> Option<SdmmcKind> {
+    if ip_version.contains("sdmmc2") {
+        Some(SdmmcKind::V2)
+    } else if ip_version.contains("sdmmc_v1") {
+        Some(SdmmcKind::V1)
+    } else {
+        None
+    }
+}
+
+/// The two shapes of embassy's SDMMC driver — see [`sdmmc_kind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SdmmcKind {
+    /// Takes a DMA channel, and binds both the peripheral's interrupt and the
+    /// channel's.
+    V1,
+    /// Has its own DMA controller: no channel, no channel interrupt.
+    V2,
 }
 
 /// Whether this chip's USART can swap RX/TX and invert the lines.
@@ -558,6 +613,12 @@ fn native_token(sig: &str) -> Option<String> {
             return Some("can_tx".into());
         }
     }
+    // The UN-NUMBERED `SDIO` of F1/F2/F4/L1 — the same block later families
+    // call SDMMC1. Handled here because the instance split below needs a
+    // number, and this one has none.
+    if let Some(role) = sig.strip_prefix("SDIO_") {
+        return sdmmc_role(role).map(|r| format!("sdmmc0_{r}"));
+    }
     // Main clock output (`RCC_MCO`, `RCC_MCO_1`).
     if sig.contains("_MCO") {
         return Some("mco".into());
@@ -607,6 +668,10 @@ fn native_token(sig: &str) -> Option<String> {
         }
         // `SAI1_SCK_A`. The PDM pads (`SAI1_CK1`, `SAI1_D2`) are a different
         // interface with no embassy driver here, so they stay generic AF.
+        // `SDMMC1_D3`. The voltage-translator pads (`CKIN`, `CDIR`, `D0DIR`,
+        // `D123DIR`) are not arguments to any embassy constructor, so they stay
+        // generic AF signals.
+        "SDMMC" => sdmmc_role(tail).map(|r| format!("sdmmc{n}_{r}")),
         "SAI" => {
             let (role, letter) = tail.rsplit_once('_')?;
             let b = match letter {
@@ -683,6 +748,20 @@ fn native_token(sig: &str) -> Option<String> {
             Some(format!("tim{n}_{ch}{suffix}"))
         }
         _ => None,
+    }
+}
+
+/// The token role of an SD-card signal, or `None` for a pad embassy's
+/// constructors do not take.
+fn sdmmc_role(tail: &str) -> Option<String> {
+    match tail {
+        "CK" => Some("ck".to_owned()),
+        "CMD" => Some("cmd".to_owned()),
+        _ => tail
+            .strip_prefix('D')
+            .and_then(|l| l.parse::<u8>().ok())
+            .filter(|l| *l < 8)
+            .map(|l| format!("d{l}")),
     }
 }
 

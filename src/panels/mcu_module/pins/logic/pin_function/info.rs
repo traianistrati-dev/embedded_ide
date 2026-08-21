@@ -166,6 +166,44 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::SdmmcCk { unit }
+            | PinFunction::SdmmcCmd { unit }
+            | PinFunction::SdmmcD { unit, .. } => {
+                let name = if *unit == 0 {
+                    "SDIO".to_owned()
+                } else {
+                    format!("SDMMC{unit}")
+                };
+                let role = match self {
+                    PinFunction::SdmmcCk { .. } => "clock".to_owned(),
+                    PinFunction::SdmmcCmd { .. } => "command line".to_owned(),
+                    PinFunction::SdmmcD { lane, .. } => format!("data line {lane}"),
+                    _ => String::new(),
+                };
+                FunctionInfo {
+                    description: format!(
+                        "{name} {role}. The SD card / eMMC controller: a clock, a command line, \
+                         and one, four or eight data lines — how many you wire IS the bus width."
+                    ),
+                    specs: vec![
+                        (
+                            "Bus width".into(),
+                            "1, 4 or 8 lines — wire D0 alone, D0–D3, or D0–D7".into(),
+                        ),
+                        (
+                            "Pull-ups".into(),
+                            "CMD and the data lines need them; the driver sets the internal ones"
+                                .into(),
+                        ),
+                        (
+                            "Needs".into(),
+                            "DMA on the older controllers; the newer ones have their own".into(),
+                        ),
+                        ("Typical use".into(), "SD cards, eMMC, SDIO radios".into()),
+                    ],
+                }
+            }
+
             PinFunction::SaiSck { sai, block }
             | PinFunction::SaiSd { sai, block }
             | PinFunction::SaiFs { sai, block }

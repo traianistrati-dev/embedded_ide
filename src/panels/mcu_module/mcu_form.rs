@@ -211,6 +211,7 @@ pub struct McuForm {
     /// The chip's USART IP version, carried verbatim from the vendor data —
     /// the IDE never edits it, it only decides whether swap/invert are offered.
     pub usart_ip: Option<String>,
+    pub sdmmc_ip: Option<String>,
     // Toolchain + target
     pub toolchain: ToolchainKind,
     pub target: String,
@@ -259,6 +260,7 @@ impl McuForm {
             dma: None,
             irq_vectors: Vec::new(),
             usart_ip: None,
+            sdmmc_ip: None,
             toolchain: ToolchainKind::RustEmbedded,
             target: "thumbv7m-none-eabi".into(),
             flash_origin: "0x08000000".into(),
@@ -364,6 +366,7 @@ impl McuForm {
             dma: def.dma.clone(),
             irq_vectors: def.irq_vectors.clone(),
             usart_ip: def.usart_ip.clone(),
+            sdmmc_ip: def.sdmmc_ip.clone(),
             toolchain: def.toolchain.clone(),
             target: def.project.target.clone(),
             flash_origin: def.project.flash_origin.clone(),
@@ -546,6 +549,7 @@ impl McuForm {
             dma: self.dma.clone(),
             irq_vectors: self.irq_vectors.clone(),
             usart_ip: self.usart_ip.clone(),
+            sdmmc_ip: self.sdmmc_ip.clone(),
             cpu: self.cpu.trim().to_string(),
             toolchain: self.toolchain.clone(),
             project: ProjectDef {
@@ -744,6 +748,16 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             "rdy" => Some(PinFunction::SpiRdy(n)),
             _ => None,
         },
+        // `sdmmc1_d3` → SDMMC1 data line 3; `sdmmc0_ck` is the un-numbered SDIO.
+        "sdmmc" => match tail {
+            "ck" => Some(PinFunction::SdmmcCk { unit: n }),
+            "cmd" => Some(PinFunction::SdmmcCmd { unit: n }),
+            _ => tail
+                .strip_prefix('d')
+                .and_then(|l| l.parse().ok())
+                .filter(|l| *l < 8)
+                .map(|lane| PinFunction::SdmmcD { unit: n, lane }),
+        },
         // `sai1_a_sck` → SAI1 sub-block A bit clock.
         "sai" => {
             let (letter, role) = tail.split_once('_')?;
@@ -838,6 +852,9 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
         PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
+        PinFunction::SdmmcCk { unit } => format!("sdmmc{unit}_ck"),
+        PinFunction::SdmmcCmd { unit } => format!("sdmmc{unit}_cmd"),
+        PinFunction::SdmmcD { unit, lane } => format!("sdmmc{unit}_d{lane}"),
         PinFunction::SaiSck { sai, block } => format!("sai{sai}_{}_sck", sai_letter(*block)),
         PinFunction::SaiSd { sai, block } => format!("sai{sai}_{}_sd", sai_letter(*block)),
         PinFunction::SaiFs { sai, block } => format!("sai{sai}_{}_fs", sai_letter(*block)),

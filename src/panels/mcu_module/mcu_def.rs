@@ -274,6 +274,11 @@ pub struct McuDefinition {
     /// see [`crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usart_ip: Option<String>,
+    /// The chip's SDMMC (or SDIO) IP version as the vendor names it. Decides
+    /// which of embassy's two constructor shapes the codegen may emit — see
+    /// [`crate::panels::mcu_module::stm32_pin_data::sdmmc_kind`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdmmc_ip: Option<String>,
     #[serde(default)]
     pub cpu: String,
     pub toolchain: ToolchainKind,
@@ -332,6 +337,7 @@ impl McuDefinition {
         mcu.dma = self.dma.clone();
         mcu.irq_vectors = self.irq_vectors.clone();
         mcu.usart_ip = self.usart_ip.clone();
+        mcu.sdmmc_ip = self.sdmmc_ip.clone();
         mcu.grid = self.pins.grid.as_ref().map(|g| PinGrid {
             rows: g.rows,
             cols: g.cols,

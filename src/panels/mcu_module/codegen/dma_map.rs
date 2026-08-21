@@ -68,6 +68,9 @@ pub enum Bus {
     Lpuart,
     Spi,
     I2c,
+    /// The SD-card controller. ST gives it ONE bidirectional request, so the
+    /// direction is ignored here.
+    Sdmmc,
 }
 
 impl Bus {
@@ -78,6 +81,7 @@ impl Bus {
             Bus::Lpuart => "LPUART",
             Bus::Spi => "SPI",
             Bus::I2c => "I2C",
+            Bus::Sdmmc => "SDMMC",
         }
     }
 }
@@ -399,6 +403,9 @@ fn request_names(bus: Bus, instance: u8, dir: Dir) -> Vec<String> {
         Dir::Rx => "RX",
     };
     match bus {
+        // One request, both directions, and named after the block — `SDIO`
+        // on the families that call it that.
+        Bus::Sdmmc => vec![format!("SDMMC{instance}"), "SDIO".to_owned()],
         Bus::Usart => vec![
             format!("USART{instance}_{d}"),
             format!("UART{instance}_{d}"),

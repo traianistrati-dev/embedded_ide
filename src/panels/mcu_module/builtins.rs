@@ -86,6 +86,7 @@ mod tests {
             dma: None,
             irq_vectors: Vec::new(),
             usart_ip: None,
+            sdmmc_ip: None,
             cpu: cpu.into(),
             toolchain: m.toolchain.clone(),
             project,

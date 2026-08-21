@@ -1952,6 +1952,9 @@ pub fn blocking_dma_channels(
         return None;
     }
     match bus {
+        // The F1 backend has no SD-card codegen; the arm exists so the match
+        // stays exhaustive.
+        super::dma_map::Bus::Sdmmc => None,
         super::dma_map::Bus::Usart => {
             usart_dma_channels(instance).map(|(tx, rx)| format!("{tx} TX / {rx} RX"))
         }
@@ -2849,7 +2852,10 @@ fn into_expr(func: &PinFunction, mode: Option<GpioMode>, pv: &str, crx: &str) ->
         PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
             format!("into_alternate_push_pull(&mut {pv}.{crx})")
         }
-        PinFunction::SaiSck { .. }
+        PinFunction::SdmmcCk { .. }
+        | PinFunction::SdmmcCmd { .. }
+        | PinFunction::SdmmcD { .. }
+        | PinFunction::SaiSck { .. }
         | PinFunction::SaiSd { .. }
         | PinFunction::SaiFs { .. }
         | PinFunction::SaiMclk { .. } => {

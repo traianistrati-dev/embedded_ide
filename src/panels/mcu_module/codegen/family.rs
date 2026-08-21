@@ -526,6 +526,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
     let i2s = modules::i2s_configs(&mcu.modules);
     let dac = modules::dac_configs(&mcu.modules);
     let sai = modules::sai_configs(&mcu.modules);
+    let sdmmc = modules::sdmmc_configs(&mcu.modules);
     let comp_instances = comparator::instances(mcu);
     let comp_pins: Vec<(u8, String, Option<String>)> = mcu
         .comp
@@ -541,6 +542,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
             dma: mcu.dma.as_ref(),
             irq_vectors: &mcu.irq_vectors,
             usart_ip: mcu.usart_ip.as_deref(),
+            sdmmc_ip: mcu.sdmmc_ip.as_deref(),
         },
         embassy_async::CompInputs {
             settings: &mcu.comp,
@@ -556,6 +558,7 @@ fn async_periphs(mcu: &Mcu) -> embassy_async::AsyncPeriphs {
         &i2s,
         &dac,
         &sai,
+        &sdmmc,
     )
 }
 

@@ -229,6 +229,10 @@ pub struct Mcu {
     /// The chip's USART IP version — the gate on the swap/invert options, see
     /// [`crate::panels::mcu_module::stm32_pin_data::usart_has_swap_invert`].
     pub usart_ip: Option<String>,
+    /// The chip's SDMMC IP version — the gate on WHICH constructor shape the
+    /// SDMMC codegen may emit, see
+    /// [`crate::panels::mcu_module::stm32_pin_data::sdmmc_kind`].
+    pub sdmmc_ip: Option<String>,
     /// Currently selected pin number (None = no pin selected)
     pub selected_pin: Option<usize>,
     /// Pins-toolbar search box (next to "Rotate"). Pins that match stay bright,
