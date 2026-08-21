@@ -56,11 +56,52 @@ pub fn load() -> Vec<RecentProject> {
 /// lose one entry, which is the right trade for a history — a lock would make
 /// every project open wait on another window.
 pub fn record(dir: &Path, mcu_id: Option<&str>) {
+    save(&promote(load(), dir, mcu_id, now_secs()));
+}
+
+/// Tooltip on every "forget this project" button. One constant because the
+/// startup picker and the Open Recent menu must say the SAME thing: a red X
+/// beside a project name invites the reading "delete the folder", and the two
+/// places that offer it cannot reassure the user differently.
+pub const FORGET_TIP: &str = "Remove from this list. The project folder stays exactly where it is - this forgets the entry, it deletes nothing.";
+
+/// Drop `dir` from the history and persist what is left.
+///
+/// Removing an entry is NOT the same as the folder being gone: [`load`] already
+/// prunes projects whose directory disappeared, silently. This is the user
+/// saying "stop offering me this one" about a project that still exists — a
+/// finished job, a checkout they will not return to — so it has to be an
+/// explicit act with a persistent effect, not a filesystem observation.
+///
+/// Nothing on disk is touched but the history file; the project itself stays
+/// exactly where it is.
+pub fn forget(dir: &Path) {
+    let before = load();
+    let after = without(before.clone(), dir);
+    // Only write when something actually left: a no-op rewrite would churn the
+    // file (and its mtime) for a click that did nothing.
+    if after.len() != before.len() {
+        save(&after);
+    }
+}
+
+/// `list` without `dir`. Pure — the matching contract lives here, next to
+/// [`promote`]'s, and by the same rule: same path, case-insensitively on
+/// Windows, so an entry recorded as `C:\Proj` is removed by a click on a row
+/// showing `c:\proj`.
+fn without(list: Vec<RecentProject>, dir: &Path) -> Vec<RecentProject> {
+    let target = normalize(dir);
+    list.into_iter()
+        .filter(|e| !same_path(&e.path, &target))
+        .collect()
+}
+
+/// Write the whole list, atomically. The single place the history is persisted.
+fn save(list: &[RecentProject]) {
     let Some(path) = file_path() else {
         return;
     };
-    let list = promote(load(), dir, mcu_id, now_secs());
-    let Ok(text) = ron::ser::to_string_pretty(&list, ron::ser::PrettyConfig::default()) else {
+    let Ok(text) = ron::ser::to_string_pretty(list, ron::ser::PrettyConfig::default()) else {
         return;
     };
     if let Some(parent) = path.parent() {
@@ -154,6 +195,40 @@ fn file_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The X on a picker row: that one goes, the others keep their order.
+    #[test]
+    fn forgetting_removes_exactly_one_entry() {
+        let list = vec![entry("/a/one"), entry("/a/two"), entry("/a/three")];
+        let out = without(list, Path::new("/a/two"));
+        assert_eq!(
+            out.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            ["/a/one", "/a/three"]
+        );
+    }
+
+    /// Same rule as `promote`'s, which is the point: reopening `C:\Proj` after
+    /// recording `c:\proj` matches there, so removing has to match here too -
+    /// otherwise the row would come straight back on the next refresh.
+    #[test]
+    fn forgetting_matches_a_path_the_same_way_recording_does() {
+        let list = vec![entry("/a/One")];
+        #[cfg(windows)]
+        assert!(
+            without(list.clone(), Path::new("/a/one")).is_empty(),
+            "Windows paths differing only in case are the same project"
+        );
+        // A different project is left alone, however similar the name.
+        assert_eq!(without(list, Path::new("/a/One_backup")).len(), 1);
+    }
+
+    /// Forgetting something that is not there changes nothing, which is what
+    /// lets `forget` skip the write entirely.
+    #[test]
+    fn forgetting_an_absent_entry_is_a_no_op() {
+        let list = vec![entry("/a/one")];
+        assert_eq!(without(list.clone(), Path::new("/a/nope")), list);
+    }
 
     fn entry(path: &str) -> RecentProject {
         RecentProject {

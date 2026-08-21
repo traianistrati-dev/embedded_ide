@@ -225,15 +225,55 @@ impl AppIde {
                                                     Some(id) => format!("{}   ({id})", entry.name),
                                                     None => entry.name.clone(),
                                                 };
-                                                if ui
-                                                    .button(label)
-                                                    .on_hover_text(&entry.path)
-                                                    .clicked()
-                                                {
-                                                    open_recent =
-                                                        Some(std::path::PathBuf::from(&entry.path));
-                                                    ui.close();
-                                                }
+                                                ui.horizontal(|ui| {
+                                                    // Same split as the startup
+                                                    // picker's rows: open on the
+                                                    // left, forget on the right.
+                                                    const X_W: f32 = 22.0;
+                                                    let open_w = (ui.available_width()
+                                                        - X_W
+                                                        - ui.spacing().item_spacing.x)
+                                                        .max(80.0);
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(label)
+                                                                .min_size(egui::vec2(open_w, 0.0)),
+                                                        )
+                                                        .on_hover_text(&entry.path)
+                                                        .clicked()
+                                                    {
+                                                        open_recent = Some(
+                                                            std::path::PathBuf::from(&entry.path),
+                                                        );
+                                                        ui.close();
+                                                    }
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                egui::RichText::new(ph::X)
+                                                                    .size(11.0)
+                                                                    .color(
+                                                                        egui::Color32::from_rgb(
+                                                                            220, 90, 80,
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                            .min_size(egui::vec2(X_W, 0.0)),
+                                                        )
+                                                        .on_hover_text(crate::recent::FORGET_TIP)
+                                                        .clicked()
+                                                    {
+                                                        crate::recent::forget(
+                                                            std::path::Path::new(&entry.path),
+                                                        );
+                                                        // NOT `ui.close()`: the
+                                                        // list is re-read every
+                                                        // frame the menu is open,
+                                                        // so the row vanishes on
+                                                        // its own and several can
+                                                        // be cleared in one go.
+                                                    }
+                                                });
                                             }
                                         },
                                     );

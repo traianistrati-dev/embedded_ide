@@ -50,6 +50,13 @@ impl StartupPicker {
         }
     }
 
+    /// Rebuild the rows now, whatever the clock says — for a change this
+    /// screen itself made, where waiting out [`REFRESH`] would look broken.
+    fn force_refresh(&mut self) {
+        self.rows = build_rows();
+        self.refreshed_at = std::time::Instant::now();
+    }
+
     /// Rebuild the rows if they are stale.
     fn refresh_if_due(&mut self) {
         if self.refreshed_at.elapsed() >= REFRESH {
@@ -107,6 +114,9 @@ impl AppIde {
         let state = &*state;
         let mut mode = state.mode;
         let mut choice: Option<Choice> = None;
+        // Deferred like `choice`: the loop below borrows `state.rows`, and
+        // dropping an entry has to rebuild them.
+        let mut forget: Option<String> = None;
         // The last project, split into the two things the UI does with it.
         let (resume, blocked) = match &state.last {
             crate::startup::LastProject::Available(dir) => (Some(dir.clone()), None),
@@ -182,18 +192,47 @@ impl AppIde {
                         .max_height(260.0)
                         .show(ui, |ui| {
                             for row in &state.rows {
-                                // A project another window holds can't be opened
-                                // here — say so on the row instead of letting the
-                                // click land and the conflict banner explain later.
-                                let resp = ui.add_enabled(
-                                    !row.taken,
-                                    egui::Button::new(egui::RichText::new(&row.label).size(12.5))
-                                        .min_size(egui::vec2(ui.available_width(), 0.0)),
-                                );
-                                if resp.on_hover_text(&row.path).clicked() {
-                                    choice =
-                                        Some(Choice::Open(std::path::PathBuf::from(&row.path)));
-                                }
+                                ui.horizontal(|ui| {
+                                    // Width taken from the open button so the two
+                                    // never overlap; the X keeps a fixed size so
+                                    // the column of them stays straight.
+                                    const X_W: f32 = 24.0;
+                                    let open_w =
+                                        (ui.available_width() - X_W - ui.spacing().item_spacing.x)
+                                            .max(60.0);
+                                    // A project another window holds can't be opened
+                                    // here — say so on the row instead of letting the
+                                    // click land and the conflict banner explain later.
+                                    let resp = ui.add_enabled(
+                                        !row.taken,
+                                        egui::Button::new(
+                                            egui::RichText::new(&row.label).size(12.5),
+                                        )
+                                        .min_size(egui::vec2(open_w, 0.0)),
+                                    );
+                                    if resp.on_hover_text(&row.path).clicked() {
+                                        choice =
+                                            Some(Choice::Open(std::path::PathBuf::from(&row.path)));
+                                    }
+                                    // Enabled even for a project another window
+                                    // holds: forgetting it touches only this
+                                    // history file, not the project, so there is
+                                    // nothing to conflict over.
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(ph::X)
+                                                    .size(12.0)
+                                                    .color(egui::Color32::from_rgb(220, 90, 80)),
+                                            )
+                                            .min_size(egui::vec2(X_W, 0.0)),
+                                        )
+                                        .on_hover_text(crate::recent::FORGET_TIP)
+                                        .clicked()
+                                    {
+                                        forget = Some(row.path.clone());
+                                    }
+                                });
                                 ui.label(
                                     egui::RichText::new(if row.taken {
                                         format!("   {}  open in another window", ph::LOCK_SIMPLE)
@@ -276,6 +315,16 @@ impl AppIde {
         // Keep the (possibly toggled) preference visible in the checkbox.
         if let Some(s) = &mut self.startup_picker {
             s.mode = mode;
+        }
+
+        // Dropping an entry rebuilds the rows NOW rather than waiting for the
+        // next `REFRESH`: two seconds of a row still sitting there reads as a
+        // click that did nothing.
+        if let Some(path) = forget {
+            crate::recent::forget(std::path::Path::new(&path));
+            if let Some(s) = &mut self.startup_picker {
+                s.force_refresh();
+            }
         }
 
         // ── Act ───────────────────────────────────────────────────────────────

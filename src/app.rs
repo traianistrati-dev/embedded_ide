@@ -3491,8 +3491,7 @@ impl eframe::App for AppIde {
             let (problems, details, any_missing) = {
                 let s = self.tools_state.lock().unwrap();
                 let p = s.blocking_problems(tc.as_ref());
-                let d: Vec<Option<String>> =
-                    p.iter().map(|(n, _, _)| s.status_detail(n)).collect();
+                let d: Vec<Option<String>> = p.iter().map(|(n, _, _)| s.status_detail(n)).collect();
                 let m = s.any_blocking_missing(tc.as_ref());
                 (p, d, m)
             };
