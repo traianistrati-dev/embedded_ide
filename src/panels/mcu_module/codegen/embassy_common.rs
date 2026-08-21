@@ -1809,6 +1809,10 @@ mod emit_for_manual_compile {
             PinFunction::I2sWs(2),
             PinFunction::I2sSd(2),
             PinFunction::I2sMck(2),
+            // Both DAC channels: that is the `Dac` + `DualValue` shape, the
+            // richer of the two the module can emit.
+            PinFunction::DacOut { dac: 1, channel: 1 },
+            PinFunction::DacOut { dac: 1, channel: 2 },
         ] {
             if want == PinFunction::SpiMiso(1) && std::env::var("EIDE_SPI_TXONLY").is_ok() {
                 continue;
@@ -1909,6 +1913,11 @@ mod emit_for_manual_compile {
                     c.format = I2sFormat::Data24Channel32;
                     c.clock_polarity = I2sClockPolarity::IdleHigh;
                     c.buffer_len = 512;
+                }
+                ModuleConfig::Dac(c) => {
+                    // Non-default start values, so the consts are exercised.
+                    c.set_value(1, 2048);
+                    c.set_value(2, 4095);
                 }
                 _ => {}
             }

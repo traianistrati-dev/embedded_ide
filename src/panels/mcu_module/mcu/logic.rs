@@ -1222,10 +1222,13 @@ mod module_support_tests {
                 // built-in names those pads. No built-in has an LPUART (the F103
                 // predates the peripheral, the ESP32-C3 has no such thing), and
                 // neither hand-written definition spells out the I2S pads its
-                // SPI block could serve — the imported chips do, from ST's XML.
+                // SPI block could serve, nor the DAC outputs (the F103 has none
+                // at all) — the imported chips do, from ST's XML.
                 let want = !matches!(
                     kind,
-                    ModuleKind::GenericInterfaceLpuart | ModuleKind::GenericInterfaceI2s
+                    ModuleKind::GenericInterfaceLpuart
+                        | ModuleKind::GenericInterfaceI2s
+                        | ModuleKind::GenericInterfaceDac
                 );
                 assert_eq!(
                     mcu.supports_module(kind),

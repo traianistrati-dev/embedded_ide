@@ -12,6 +12,8 @@ impl PinFunction {
             // to an analog block, it just doesn't name which one.
             PinFunction::GpioAnalog => egui::Color32::from_rgb(150, 70, 200),
             PinFunction::AdcChannel { .. } => egui::Color32::from_rgb(150, 70, 200),
+            // The mirror of the ADC's purple: analog, but driven, not read.
+            PinFunction::DacOut { .. } => egui::Color32::from_rgb(180, 90, 160),
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => {
                 egui::Color32::from_rgb(190, 170, 30)
             }

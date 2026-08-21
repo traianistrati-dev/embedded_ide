@@ -166,6 +166,28 @@ impl PinFunction {
                 ],
             },
 
+            PinFunction::DacOut { dac, channel } => FunctionInfo {
+                description: format!(
+                    "Analog output — DAC{dac} channel {channel}. The program writes a number \
+                     and the pin holds the matching voltage; the mirror of an ADC input."
+                ),
+                specs: vec![
+                    ("Resolution".into(), "12 bit (0 – 4095), or 8 bit".into()),
+                    (
+                        "Range".into(),
+                        "0 V to VREF+, buffered — it can drive a light load directly".into(),
+                    ),
+                    (
+                        "Shares the block with".into(),
+                        format!("the other DAC{dac} channel, if this part has one"),
+                    ),
+                    (
+                        "Typical use".into(),
+                        "Bias points, waveform generation, analog set-points".into(),
+                    ),
+                ],
+            },
+
             PinFunction::I2sCk(n)
             | PinFunction::I2sWs(n)
             | PinFunction::I2sSd(n)

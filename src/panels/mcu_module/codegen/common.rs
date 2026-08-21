@@ -252,6 +252,7 @@ pub fn var_suffix(func: &PinFunction) -> String {
         PinFunction::SpiMiso(n) => format!("spi{n}_miso"),
         PinFunction::SpiNss(n) => format!("spi{n}_nss"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
+        PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),
         PinFunction::I2sWs(n) => format!("i2s{n}_ws"),
         PinFunction::I2sSd(n) => format!("i2s{n}_sd"),

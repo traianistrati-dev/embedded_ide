@@ -605,6 +605,12 @@ fn native_token(sig: &str) -> Option<String> {
             };
             Some(format!("spi{n}_{role}"))
         }
+        // `DAC1_OUT2`. `DAC1_EXTI9` is a trigger line, not a pad we drive, so
+        // it falls through to the generic AF path.
+        "DAC" => {
+            let ch: u32 = tail.strip_prefix("OUT")?.parse().ok()?;
+            Some(format!("dac{n}_out{ch}"))
+        }
         // `I2S2_CK`. `I2S_CKIN` has no instance and is dropped by the check
         // above, which is right: it is a chip-level clock input, not a bus pad.
         "I2S" => {

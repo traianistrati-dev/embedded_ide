@@ -394,6 +394,12 @@ fn category_defs(pins: &[&Pin]) -> Vec<CategoryDef> {
             pred: Box::new(|f| matches!(f, PinFunction::AdcChannel { .. })),
         },
         CategoryDef {
+            name: "DAC".into(),
+            rgb: (180, 90, 160),
+            complexity: Simple,
+            pred: Box::new(|f| matches!(f, PinFunction::DacOut { .. })),
+        },
+        CategoryDef {
             name: "Timers / PWM".into(),
             rgb: (190, 170, 30),
             complexity: Simple,
@@ -955,9 +961,8 @@ mod tests {
         // are per-chip and have their own test.
         for def in category_defs(&[]) {
             let expected = match def.name.as_str() {
-                "GPIO Output" | "GPIO Input" | "ADC" | "Timers / PWM" | "MCO / Clock" => {
-                    Complexity::Simple
-                }
+                "GPIO Output" | "GPIO Input" | "ADC" | "DAC" | "Timers / PWM"
+                | "MCO / Clock" => Complexity::Simple,
                 _ => Complexity::Complex,
             };
             assert_eq!(def.complexity, expected, "wrong column for {}", def.name);

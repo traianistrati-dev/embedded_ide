@@ -31,6 +31,17 @@ pub enum PinFunction {
         channel: u8,
     },
 
+    // ── DAC ─────────────────────────────────────────────────────────────────
+    /// Analog output — DAC{dac} channel {channel}.
+    ///
+    /// The mirror of an ADC channel: the pin is driven to a voltage the program
+    /// writes, rather than read. One peripheral carries one or two of them, and
+    /// they share nothing but the block.
+    DacOut {
+        dac: u8,
+        channel: u8,
+    },
+
     // ── I2S (audio) ─────────────────────────────────────────────────────────
     /// I2S{n} bit clock — the pin the datasheet calls CK (SCK/BCLK elsewhere).
     ///

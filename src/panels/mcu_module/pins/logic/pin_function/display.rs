@@ -18,6 +18,7 @@ impl PinFunction {
             PinFunction::TimerPwm { .. } => "pwm",
             PinFunction::TimerPwmN { .. } => "pwmn",
             PinFunction::TimerBreak { .. } => "bkin",
+            PinFunction::DacOut { .. } => "dac",
             PinFunction::I2sCk(_) => "i2s_ck",
             PinFunction::I2sWs(_) => "i2s_ws",
             PinFunction::I2sSd(_) => "i2s_sd",
@@ -71,6 +72,7 @@ impl PinFunction {
                 };
                 format!("TIM{timer}  BKIN{n}  (break)")
             }
+            PinFunction::DacOut { dac, channel } => format!("DAC{dac}  OUT{channel}"),
             PinFunction::I2sCk(n) => format!("I2S{n}  CK"),
             PinFunction::I2sWs(n) => format!("I2S{n}  WS"),
             PinFunction::I2sSd(n) => format!("I2S{n}  SD"),
@@ -302,6 +304,7 @@ impl PinFunction {
             // channel, and CH1N reads as complementary on its own.
             PinFunction::TimerPwm { .. } | PinFunction::TimerPwmN { .. } => "PWM",
             PinFunction::TimerBreak { .. } => "BRK",
+            PinFunction::DacOut { .. } => "DAC",
             PinFunction::I2sCk(_)
             | PinFunction::I2sWs(_)
             | PinFunction::I2sSd(_)

@@ -744,6 +744,11 @@ fn token_to_function(tok: &str) -> Option<PinFunction> {
             "rdy" => Some(PinFunction::SpiRdy(n)),
             _ => None,
         },
+        // `dac1_out2` → DAC1 channel 2.
+        "dac" => tail
+            .strip_prefix("out")
+            .and_then(|c| c.parse().ok())
+            .map(|channel| PinFunction::DacOut { dac: n, channel }),
         "i2s" => match tail {
             "ck" => Some(PinFunction::I2sCk(n)),
             "ws" => Some(PinFunction::I2sWs(n)),
@@ -810,6 +815,7 @@ fn function_to_token(f: &PinFunction) -> Option<String> {
         PinFunction::SpiMiso(n) => format!("spi{n}_miso"),
         PinFunction::SpiMosi(n) => format!("spi{n}_mosi"),
         PinFunction::SpiRdy(n) => format!("spi{n}_rdy"),
+        PinFunction::DacOut { dac, channel } => format!("dac{dac}_out{channel}"),
         PinFunction::I2sCk(n) => format!("i2s{n}_ck"),
         PinFunction::I2sWs(n) => format!("i2s{n}_ws"),
         PinFunction::I2sSd(n) => format!("i2s{n}_sd"),

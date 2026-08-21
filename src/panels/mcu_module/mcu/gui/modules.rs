@@ -264,6 +264,10 @@ pub fn module_color(kind: ModuleKind, instance: u8) -> egui::Color32 {
         ModuleKind::GenericInterfaceSpi => PinFunction::SpiSck(instance),
         ModuleKind::GenericInterfaceI2c => PinFunction::I2cScl(instance),
         ModuleKind::GenericInterfaceI2s => PinFunction::I2sCk(instance),
+        ModuleKind::GenericInterfaceDac => PinFunction::DacOut {
+            dac: instance,
+            channel: 1,
+        },
         ModuleKind::GenericInterfaceTimer => PinFunction::TimerPwm {
             timer: instance,
             channel: 1,
@@ -411,6 +415,7 @@ fn handle_preview(m: &VirtualModule, native_forced: bool) -> String {
         ModuleKind::GenericInterfaceSpi => format!("_spi{n}{sfx}"),
         ModuleKind::GenericInterfaceI2c => format!("_i2c{n}{sfx}"),
         ModuleKind::GenericInterfaceI2s => format!("_i2s{n}{sfx}"),
+        ModuleKind::GenericInterfaceDac => format!("_dac{n}{sfx}"),
         ModuleKind::GenericInterfaceTimer => format!("_pwm{n}{sfx}"),
         ModuleKind::GenericInterfaceCan => format!("_can{n}{sfx}"),
         ModuleKind::GenericInterfaceUsb => format!("usb_dev{sfx}, serial{sfx}"),
@@ -1909,6 +1914,74 @@ pub fn module_config_ui(
                             egui::RichText::new(why)
                                 .size(10.5)
                                 .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                }
+                // One DAC block. The channel rows come from the module's own
+                // connections, so they mirror the canvas — same shape as the
+                // PWM module's duty rows, for the same reason.
+                ModuleConfig::Dac(cfg) => {
+                    let chans: Vec<(u8, String)> = conn_rows
+                        .iter()
+                        .filter_map(|(sig, pin)| {
+                            Some((sig.strip_prefix("OUT")?.parse::<u8>().ok()?, pin.clone()))
+                        })
+                        .collect();
+                    if chans.is_empty() {
+                        ui.label("Channels");
+                        ui.label(
+                            egui::RichText::new("none wired yet")
+                                .size(11.0)
+                                .italics()
+                                .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                    for (ch, pin) in &chans {
+                        ui.label(format!("OUT{ch} start  ({pin})"));
+                        let mut v = cfg.value_of(*ch);
+                        ui.horizontal(|ui| {
+                            if ui.add(egui::Slider::new(&mut v, 0..=4095)).changed() {
+                                cfg.set_value(*ch, v);
+                            }
+                            if ui.small_button("mid").clicked() {
+                                cfg.set_value(*ch, 2048);
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The value the pad holds once `init` returns. There is no unset:                              the channel drives the pin the moment it is enabled, so the only                              honest choice is to say what it drives.",
+                        );
+                        ui.end_row();
+                    }
+                    let free: Vec<u8> = (1..=2u8)
+                        .filter(|c| !chans.iter().any(|(w, _)| w == c))
+                        .collect();
+                    if !free.is_empty() {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "add a channel by assigning DAC{} OUT{} on the canvas",
+                                cfg.instance,
+                                free.iter()
+                                    .map(|c| c.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            ))
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
+                    if !is_async {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "only the Async runtime emits DAC code today — the blocking                                  backends generate GPIO and watchdogs only",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
                         );
                         ui.end_row();
                     }
