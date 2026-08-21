@@ -1,6 +1,7 @@
 //! Helper utilities for the IDE — theme, file row rendering, throttled spinner.
 
 pub mod file_row;
+pub mod forget_button;
 pub mod help_panel;
 pub mod spinner;
 pub mod theme;

@@ -21,6 +21,7 @@
 //! search runs over several thousand entries on every keystroke, and lowercasing
 //! them per frame is the difference between free and noticeable.
 
+use super::chip_filter::{ChipFilter, RowMetrics, Verdict};
 use super::chip_sources::{ChipEntry, ChipSource};
 
 /// Where a hit can be acted on.
@@ -70,13 +71,45 @@ pub struct Hit {
     /// so the row keeps the location for a secondary "re-import" that
     /// overwrites the stored `.ron`.
     pub reimport: Option<Origin>,
+    /// What [`ChipFilter`] judges this row on.
+    ///
+    /// Owned, because a registry row has no catalogue entry of its own: it
+    /// inherits the numbers of the vendor file it shadows, and falls back to
+    /// whatever its `memory.x` sizes say when there is no such file.
+    pub metrics: RowMetrics,
 }
 
-/// A registry entry, as the search needs to see it: `(id, display name, family)`.
+/// A registry entry, as the search needs to see it.
 ///
-/// A tuple slice rather than the real `McuDefinition`, so the ranking can be
+/// A borrowed row rather than the real `McuDefinition`, so the ranking can be
 /// tested without building chip definitions.
-pub type RegistryRow<'a> = (&'a str, &'a str, &'a str);
+#[derive(Clone, Copy, Debug)]
+pub struct RegistryRow<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub family: &'a str,
+    /// From the definition's `memory.x` sizes — see
+    /// [`chip_filter::parse_memory_kb`](super::chip_filter::parse_memory_kb).
+    /// The only memory figure a registry entry holds, and absent on chips whose
+    /// definition leaves them blank.
+    pub flash_kb: Option<u32>,
+    pub ram_kb: Option<u32>,
+    /// As the definition records it, e.g. `LQFP48`; empty when it does not.
+    pub package: &'a str,
+}
+
+/// A search, and what it had to leave out.
+pub struct Results {
+    pub hits: Vec<Hit>,
+    /// How many rows matched in total, before `limit` truncated them.
+    pub total: usize,
+    /// Rows excluded ONLY because their source could not answer an active
+    /// facet — an open-pin-data checkout ships part numbers and nothing else.
+    ///
+    /// Reported rather than absorbed: a filter that quietly deletes a whole
+    /// source is indistinguishable from a filter that found nothing.
+    pub unknown: usize,
+}
 
 /// Every catalogued chip, ready to search.
 pub struct Catalogue {
@@ -136,6 +169,11 @@ impl Catalogue {
         self.rows.is_empty()
     }
 
+    /// Every catalogued part, for deriving the filter's ranges and facets.
+    pub fn entries(&self) -> impl Iterator<Item = &ChipEntry> {
+        self.rows.iter().map(|r| &r.entry)
+    }
+
     /// How many parts a given source contributed.
     pub fn count_of(&self, source: usize) -> usize {
         self.rows.iter().filter(|r| r.source == source).count()
@@ -149,34 +187,71 @@ impl Catalogue {
     /// question. Between two disk sources, the one that can also deliver a clock
     /// tree wins, for the same reason: same part, more of it.
     ///
-    /// An empty query returns nothing. The catalogue is thousands of parts long;
-    /// a list that starts by offering all of them is a list nobody reads.
-    pub fn search(&self, query: &str, registry: &[RegistryRow], limit: usize) -> (Vec<Hit>, usize) {
+    /// An empty query returns nothing — UNLESS a filter is narrowing the list.
+    ///
+    /// The catalogue is thousands of parts long and a list that starts by
+    /// offering all of them is a list nobody reads. A filter is exactly what
+    /// makes such a list readable, which is why it is the one thing that turns
+    /// browsing on: "every G4 with three SPIs and 256K" is a question with a
+    /// short answer. With no filter set, the behaviour is unchanged.
+    pub fn search(
+        &self,
+        query: &str,
+        registry: &[RegistryRow],
+        filter: &ChipFilter,
+        limit: usize,
+    ) -> Results {
         let q = query.trim().to_ascii_lowercase();
-        if q.is_empty() {
-            return (Vec::new(), 0);
+        let browsing = q.is_empty();
+        if browsing && !filter.is_active() {
+            return Results {
+                hits: Vec::new(),
+                total: 0,
+                unknown: 0,
+            };
         }
         let mut hits: Vec<Hit> = Vec::new();
 
-        for (id, name, family) in registry {
-            let key = name.to_ascii_lowercase();
+        for r in registry {
+            let key = r.name.to_ascii_lowercase();
             let short = key.strip_prefix("stm32").unwrap_or(&key);
-            if let Some(rank) = rank(&key, short, &q) {
-                hits.push(Hit {
-                    name: (*name).to_owned(),
-                    family: (*family).to_owned(),
-                    detail: String::new(),
-                    origin: Origin::Registry {
-                        id: (*id).to_owned(),
-                    },
-                    rank,
-                    reimport: None,
-                });
-            }
+            // While browsing every row is equally relevant; the sort below is
+            // alphabetical anyway.
+            let Some(rank) = (if browsing {
+                Some(0)
+            } else {
+                rank(&key, short, &q)
+            }) else {
+                continue;
+            };
+            hits.push(Hit {
+                name: r.name.to_owned(),
+                family: r.family.to_owned(),
+                detail: String::new(),
+                origin: Origin::Registry {
+                    id: r.id.to_owned(),
+                },
+                rank,
+                reimport: None,
+                // Only what the definition itself holds. The dedup below
+                // upgrades this the moment a vendor file for the same part
+                // turns up, which is the usual case — the chip got here by
+                // being imported from one.
+                metrics: RowMetrics {
+                    flash_kb: r.flash_kb,
+                    ram_kb: r.ram_kb,
+                    package: r.package.to_owned(),
+                    ..Default::default()
+                },
+            });
         }
 
         for row in &self.rows {
-            let Some(rank) = rank(&row.key, &row.short, &q) else {
+            let Some(rank) = (if browsing {
+                Some(0)
+            } else {
+                rank(&row.key, &row.short, &q)
+            }) else {
                 continue;
             };
             let has_clock = self.sources[row.source].has_clock();
@@ -189,6 +264,17 @@ impl Catalogue {
                     // Nothing beats a chip that is already here - but keep
                     // WHERE it came from, so the row can offer to refresh it.
                     Origin::Registry { .. } => {
+                        // …and take its NUMBERS, which the registry entry does
+                        // not carry. Without this a chip already imported would
+                        // be excluded by every peripheral filter, which is the
+                        // one chip the user certainly has.
+                        if row.entry.knows_peripherals() {
+                            let own = std::mem::take(&mut seen.metrics.package);
+                            seen.metrics = RowMetrics::of(&row.entry);
+                            if seen.metrics.package.is_empty() {
+                                seen.metrics.package = own;
+                            }
+                        }
                         let keep = match &seen.reimport {
                             // Same rule as between two disk rows: more data wins.
                             Some(Origin::Disk {
@@ -215,12 +301,31 @@ impl Catalogue {
             hits.push(disk_hit(row, rank, has_clock));
         }
 
+        // Filtered LAST, so a registry row is judged on the vendor numbers it
+        // inherited above rather than on the little it knows by itself.
+        let mut unknown = 0usize;
+        if filter.is_active() {
+            hits.retain(|h| match filter.matches(&h.metrics.view(&h.family)) {
+                Verdict::Pass => true,
+                Verdict::Unknown => {
+                    unknown += 1;
+                    false
+                }
+                Verdict::Fail => false,
+            });
+        }
+
         let total = hits.len();
         // Rank first, then alphabetical, so the order is stable and the reason a
-        // row is near the top is visible.
+        // row is near the top is visible. Browsing gives every row rank 0, which
+        // leaves the list plainly alphabetical.
         hits.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
         hits.truncate(limit);
-        (hits, total)
+        Results {
+            hits,
+            total,
+            unknown,
+        }
     }
 }
 
@@ -236,6 +341,7 @@ fn disk_hit(row: &Indexed, rank: u8, has_clock: bool) -> Hit {
         },
         rank,
         reimport: None,
+        metrics: RowMetrics::of(&row.entry),
     }
 }
 
@@ -259,19 +365,38 @@ fn rank(key: &str, short: &str, q: &str) -> Option<u8> {
 }
 
 /// The one-line summary shown beside a part, from whatever the source knew.
+///
+/// The core is in here because it is FILTERABLE: being able to narrow the list
+/// to Cortex-M33 parts, and then not being told which core any row has, leaves
+/// the filter with no visible effect. It is also the one field where a part can
+/// legitimately give two answers - see [`ChipEntry::cores`].
 fn detail_of(e: &ChipEntry) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !e.package.is_empty() {
         parts.push(e.package.clone());
     }
-    if e.flash_kb > 0 {
-        parts.push(format!("{}K flash", e.flash_kb));
+    if !e.cores.is_empty() {
+        // "Arm Cortex-M4" is four words of which one is the answer, and a
+        // dual-core part would otherwise spend half the line saying "Arm"
+        // twice.
+        parts.push(
+            e.cores
+                .iter()
+                .map(|c| c.trim_start_matches("Arm ").trim_start_matches("Cortex-"))
+                .collect::<Vec<_>>()
+                .join("+"),
+        );
     }
-    if e.ram_kb > 0 {
-        parts.push(format!("{}K RAM", e.ram_kb));
+    // `Some(0)` is printed, because an MP1 with no internal flash is a fact
+    // worth showing; `None` is skipped, because it is only our ignorance.
+    if let Some(v) = e.flash_kb {
+        parts.push(format!("{v}K flash"));
     }
-    if e.mhz > 0 {
-        parts.push(format!("{} MHz", e.mhz));
+    if let Some(v) = e.ram_kb {
+        parts.push(format!("{v}K RAM"));
+    }
+    if let Some(v) = e.mhz {
+        parts.push(format!("{v} MHz"));
     }
     parts.join(" · ")
 }
@@ -286,15 +411,35 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// A registry row, as the definitions the IDE already has produce one.
+    fn reg_row<'a>(id: &'a str, name: &'a str, family: &'a str) -> RegistryRow<'a> {
+        RegistryRow {
+            id,
+            name,
+            family,
+            flash_kb: None,
+            ram_kb: None,
+            package: "",
+        }
+    }
+
+    /// Search with no filter — the shape these tests were written against, and
+    /// the behaviour that must not have changed.
+    fn find(c: &Catalogue, q: &str, reg: &[RegistryRow], limit: usize) -> (Vec<Hit>, usize) {
+        let r = c.search(q, reg, &ChipFilter::default(), limit);
+        (r.hits, r.total)
+    }
+
     fn entry(ref_name: &str, family: &str) -> ChipEntry {
         ChipEntry {
             ref_name: ref_name.into(),
             file: ref_name.into(),
             family: family.into(),
             package: "LQFP48".into(),
-            flash_kb: 64,
-            ram_kb: 20,
-            mhz: 72,
+            cores: vec!["Arm Cortex-M3".into()],
+            flash_kb: Some(64),
+            ram_kb: Some(20),
+            mhz: Some(72),
             ..Default::default()
         }
     }
@@ -340,19 +485,19 @@ mod tests {
             ],
         );
 
-        let (hits, total) = c.search("f103c8", &[], 10);
+        let (hits, total) = find(&c, "f103c8", &[], 10);
         assert_eq!(hits[0].name, "STM32F103C8Tx");
         assert_eq!(hits[0].rank, 2, "matched past the STM32 prefix");
         assert_eq!(total, 1);
 
         // Typing the whole thing is an exact hit.
-        assert_eq!(c.search("stm32f103c8tx", &[], 10).0[0].rank, 0);
+        assert_eq!(find(&c, "stm32f103c8tx", &[], 10).0[0].rank, 0);
         // …and so is typing it without the prefix.
-        assert_eq!(c.search("f103c8tx", &[], 10).0[0].rank, 0);
+        assert_eq!(find(&c, "f103c8tx", &[], 10).0[0].rank, 0);
 
         // A part that merely CONTAINS the query sorts below one that starts with
         // it, however the user typed it.
-        let (hits, _) = c.search("f103", &[], 10);
+        let (hits, _) = find(&c, "f103", &[], 10);
         assert_eq!(
             hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
             ["STM32F103C8Tx", "STM32F103CBTx", "STM32L4F103Zx"]
@@ -367,8 +512,8 @@ mod tests {
             vec![source(SourceKind::CubeMxDb, true)],
             vec![(0, entry("STM32F103C8Tx", "stm32f1"))],
         );
-        assert_eq!(c.search("", &[], 10).0.len(), 0);
-        assert_eq!(c.search("   ", &[], 10).0.len(), 0);
+        assert_eq!(find(&c, "", &[], 10).0.len(), 0);
+        assert_eq!(find(&c, "   ", &[], 10).0.len(), 0);
     }
 
     /// The same part in several places is ONE row — the richest one.
@@ -387,7 +532,7 @@ mod tests {
             ],
         );
 
-        let (hits, _) = c.search("f103c8", &[], 10);
+        let (hits, _) = find(&c, "f103c8", &[], 10);
         assert_eq!(hits.len(), 1, "one part, one row: {hits:?}");
         assert_eq!(
             hits[0].origin,
@@ -410,12 +555,12 @@ mod tests {
                 (1, entry("STM32F103C8Tx", "stm32f1")),
             ],
         );
-        let (hits, _) = flipped.search("f103c8", &[], 10);
+        let (hits, _) = find(&flipped, "f103c8", &[], 10);
         assert_eq!(hits.len(), 1);
         assert!(matches!(hits[0].origin, Origin::Disk { source: 0, .. }));
 
         // A part only one source has is unaffected.
-        assert_eq!(c.search("h563", &[], 10).0.len(), 1);
+        assert_eq!(find(&c, "h563", &[], 10).0.len(), 1);
     }
 
     /// A chip the IDE already has needs no import, and says so.
@@ -425,9 +570,9 @@ mod tests {
             vec![source(SourceKind::CubeMxDb, true)],
             vec![(0, entry("STM32F103C8Tx", "stm32f1"))],
         );
-        let reg = [("stm32f103c8tx", "STM32F103C8Tx", "stm32f1")];
+        let reg = [reg_row("stm32f103c8tx", "STM32F103C8Tx", "stm32f1")];
 
-        let (hits, _) = c.search("f103c8", &reg, 10);
+        let (hits, _) = find(&c, "f103c8", &reg, 10);
         assert_eq!(hits.len(), 1, "not offered twice: {hits:?}");
         assert_eq!(
             hits[0].origin,
@@ -438,8 +583,8 @@ mod tests {
         assert!(hits[0].origin.is_registry());
 
         // A registry chip with no vendor file still shows up.
-        let reg = [("esp32c3", "ESP32-C3", "esp32c3")];
-        let (hits, _) = c.search("esp32", &reg, 10);
+        let reg = [reg_row("esp32c3", "ESP32-C3", "esp32c3")];
+        let (hits, _) = find(&c, "esp32", &reg, 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "ESP32-C3");
     }
@@ -452,7 +597,7 @@ mod tests {
             .collect();
         let c = catalogue(vec![source(SourceKind::CubeMxDb, true)], rows);
 
-        let (hits, total) = c.search("f103", &[], 10);
+        let (hits, total) = find(&c, "f103", &[], 10);
         assert_eq!(hits.len(), 10, "a screenful");
         assert_eq!(total, 40, "out of this many");
         assert_eq!(c.len(), 40);
@@ -483,7 +628,7 @@ mod tests {
         }
         assert!(!c.is_empty(), "no chips found on this machine");
 
-        let (hits, total) = c.search("f103c8", &[], 20);
+        let (hits, total) = find(&c, "f103c8", &[], 20);
         println!("f103c8 -> {total} hit(s): {:?}", hits.first());
         let blue_pill = hits
             .iter()
@@ -502,8 +647,13 @@ mod tests {
     fn the_detail_line_skips_what_is_unknown() {
         assert_eq!(
             detail_of(&entry("STM32F103C8Tx", "stm32f1")),
-            "LQFP48 · 64K flash · 20K RAM · 72 MHz"
+            "LQFP48 · M3 · 64K flash · 20K RAM · 72 MHz"
         );
+
+        // A dual-core part says both, in one field rather than two.
+        let mut h7 = entry("STM32H747XIHx", "stm32h7");
+        h7.cores = vec!["Arm Cortex-M7".into(), "Arm Cortex-M4".into()];
+        assert!(detail_of(&h7).contains("M7+M4"), "got {:?}", detail_of(&h7));
         // A listing-derived entry knows only the part number.
         let bare = ChipEntry {
             ref_name: "STM32H563ZITx".into(),
@@ -522,8 +672,8 @@ mod tests {
             vec![source(SourceKind::CubeMxDb, true)],
             vec![(0, entry("STM32F358CCTx", "stm32f3"))],
         );
-        let registry = [("stm32f358cc", "STM32F358CCTx", "stm32f3")];
-        let (hits, _) = cat.search("358cc", &registry, 10);
+        let registry = [reg_row("stm32f358cc", "STM32F358CCTx", "stm32f3")];
+        let (hits, _) = find(&cat, "358cc", &registry, 10);
         let hit = hits
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("STM32F358CCTx"))
@@ -543,8 +693,8 @@ mod tests {
     #[test]
     fn a_registry_only_chip_offers_no_re_import() {
         let cat = catalogue(vec![source(SourceKind::CubeMxDb, true)], vec![]);
-        let registry = [("mystery1", "MYSTERYCHIP1", "custom")];
-        let (hits, _) = cat.search("mystery", &registry, 10);
+        let registry = [reg_row("mystery1", "MYSTERYCHIP1", "custom")];
+        let (hits, _) = find(&cat, "mystery", &registry, 10);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].reimport.is_none());
     }

@@ -23,6 +23,7 @@ pub(crate) mod tabs;
 pub(crate) mod helpers;
 use helpers::apply_dark_theme;
 
+mod chip_filter_ui;
 mod chip_search_ui;
 mod clock_import_dialog;
 mod clone_project_dialog;
@@ -1569,6 +1570,11 @@ pub struct AppIde {
     /// generated project; this covers the other half — the same project opened
     /// twice, where both windows save over the user's real files.
     project_lock: Option<crate::workspace::ProjectLock>,
+    /// Which recent-list entry is one click away from being forgotten, and
+    /// since when — see [`helpers::forget_button`]. One slot for BOTH offers
+    /// (the startup picker and the Open Recent menu): they are the same list,
+    /// and two independent arms could leave one of them loaded out of sight.
+    recent_forget_confirm: helpers::forget_button::Armed,
     /// `Some(name)` while the open project is claimed by ANOTHER window: the
     /// project is loaded anyway (refusing would be worse than warning), with a
     /// banner up. Cleared as soon as a retry succeeds.
@@ -1969,6 +1975,7 @@ impl AppIde {
             // one title, so what the window shows can't drift from what this
             // app computes (a restored project renames it immediately anyway).
             window_title: String::new(),
+            recent_forget_confirm: None,
             project_lock: None,
             project_lock_conflict: None,
             project_lock_retry: None,

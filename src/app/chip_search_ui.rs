@@ -20,7 +20,9 @@
 use eframe::egui;
 use egui_phosphor::regular as ph;
 
-use crate::panels::mcu_module::chip_search::{Catalogue, Origin};
+use super::chip_filter_ui::{self, Facets};
+use crate::panels::mcu_module::chip_filter::{self, ChipFilter};
+use crate::panels::mcu_module::chip_search::{Catalogue, Origin, RegistryRow};
 use crate::panels::mcu_module::chip_sources;
 
 /// How many matches the list shows at once. The catalogue is thousands of parts
@@ -31,6 +33,9 @@ const MAX_ROWS: usize = 40;
 #[derive(Default)]
 pub(super) struct ChipSearchState {
     pub query: String,
+    pub filter: ChipFilter,
+    /// What the catalogue offers to filter by — derived once it lands.
+    facets: Facets,
     catalogue: Option<Catalogue>,
     /// The worker's channel while indexing is in flight.
     pending: Option<std::sync::mpsc::Receiver<Catalogue>>,
@@ -56,6 +61,12 @@ impl ChipSearchState {
             }
             Some(rx) => match rx.try_recv() {
                 Ok(c) => {
+                    // The dialog can be drawn before indexing finishes, so the
+                    // sliders start on placeholder bounds. Re-spanning them here
+                    // is what stops an untouched filter from reading as active
+                    // the moment the real catalogue arrives.
+                    self.facets = Facets::of(&c);
+                    self.filter.rebound(self.facets.bounds);
                     self.catalogue = Some(c);
                     self.pending = None;
                 }
@@ -70,6 +81,9 @@ impl ChipSearchState {
     fn reload(&mut self) {
         self.catalogue = None;
         self.pending = None;
+        // The facets describe the OLD set of sources; keeping them would offer
+        // filters for peripherals no remaining source mentions.
+        self.facets = Facets::default();
     }
 }
 
@@ -206,33 +220,68 @@ impl super::AppIde {
             }
         });
 
-        let Some(cat) = &chip_search.catalogue else {
+        // The fields apart: the filter panel WRITES `filter` while the search
+        // READS `catalogue`, and they live in the same struct.
+        let ChipSearchState {
+            query,
+            filter,
+            facets,
+            catalogue,
+            note,
+            ..
+        } = chip_search;
+        let Some(cat) = catalogue.as_ref() else {
             return;
         };
 
-        // The registry, in the shape the ranking wants.
-        let registry: Vec<(&str, &str, &str)> = mcu_registry
-            .iter()
-            .map(|d| (d.id.as_str(), d.display_name.as_str(), d.family.as_str()))
-            .collect();
-        let (hits, total) = cat.search(&chip_search.query, &registry, MAX_ROWS);
+        chip_filter_ui::show_filters(ui, filter, facets);
 
-        if !chip_search.query.trim().is_empty() {
+        // The registry, in the shape the ranking wants.
+        let registry: Vec<RegistryRow> = mcu_registry
+            .iter()
+            .map(|d| RegistryRow {
+                id: d.id.as_str(),
+                name: d.display_name.as_str(),
+                family: d.family.as_str(),
+                // A registry entry carries no vendor row of its own; its
+                // `memory.x` sizes are all it knows about itself. The search
+                // upgrades these from the vendor file whenever one exists.
+                flash_kb: chip_filter::parse_memory_kb(&d.project.flash_size),
+                ram_kb: chip_filter::parse_memory_kb(&d.project.ram_size),
+                package: d.package.as_str(),
+            })
+            .collect();
+        let found = cat.search(query, &registry, filter, MAX_ROWS);
+        let (hits, total) = (&found.hits, found.total);
+
+        // Typing is no longer the only way to ask a question: with a filter set,
+        // an empty query means "show me everything that fits".
+        if !query.trim().is_empty() || filter.is_active() {
             if hits.is_empty() {
+                // WHICH of the two narrowed it to nothing, because they are
+                // fixed differently: one by typing less, the other by a Clear
+                // button the user may not have noticed is on.
+                let why = match (query.trim().is_empty(), filter.active_count()) {
+                    (_, 0) => "No chip matches that.".to_owned(),
+                    (true, n) => format!("No chip matches those {n} filter(s)."),
+                    (false, n) => format!("No chip matches that, with {n} filter(s) on."),
+                };
                 ui.label(
-                    egui::RichText::new(format!("{}  No chip matches that.", ph::MAGNIFYING_GLASS))
+                    egui::RichText::new(format!("{}  {why}", ph::MAGNIFYING_GLASS))
                         .size(11.0)
                         .color(egui::Color32::GRAY),
                 );
             } else {
                 if total > hits.len() {
+                    let how = if query.trim().is_empty() {
+                        "narrow the filters or type a part number"
+                    } else {
+                        "keep typing to narrow it"
+                    };
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{} of {total} matches — keep typing to narrow it",
-                            hits.len()
-                        ))
-                        .size(10.5)
-                        .color(egui::Color32::GRAY),
+                        egui::RichText::new(format!("{} of {total} matches — {how}", hits.len()))
+                            .size(10.5)
+                            .color(egui::Color32::GRAY),
                     );
                 }
                 egui::ScrollArea::vertical()
@@ -240,7 +289,7 @@ impl super::AppIde {
                     .max_height(200.0)
                     .show(ui, |ui| {
                         ui.set_min_width(500.0);
-                        for hit in &hits {
+                        for hit in hits {
                             ui.horizontal(|ui| {
                                 let known = hit.origin.is_registry();
                                 let selected = match &hit.origin {
@@ -343,6 +392,22 @@ impl super::AppIde {
                         }
                     });
             }
+
+            // Said out loud rather than absorbed. An open-pin-data checkout
+            // ships part numbers and nothing else, so ANY filter hides all of
+            // it - and a source vanishing without a word looks exactly like a
+            // filter that found nothing.
+            if found.unknown > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  {} more hidden: their source has no index, so nothing is                          known about their memory or peripherals.",
+                        ph::INFO,
+                        found.unknown
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(150, 158, 172)),
+                );
+            }
         }
 
         // ── Sources ───────────────────────────────────────────────────────────
@@ -430,9 +495,9 @@ impl super::AppIde {
                     .color(egui::Color32::from_rgb(220, 120, 90)),
             );
         }
-        if !chip_search.note.is_empty() {
+        if !note.is_empty() {
             ui.label(
-                egui::RichText::new(&chip_search.note)
+                egui::RichText::new(&*note)
                     .size(10.5)
                     .color(egui::Color32::from_rgb(150, 200, 160)),
             );

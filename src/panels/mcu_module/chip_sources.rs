@@ -90,11 +90,32 @@ pub struct ChipEntry {
     /// The XML file stem, e.g. `STM32F103C(8-B)Tx` — what gets opened.
     pub file: String,
     pub package: String,
-    pub core: String,
-    pub mhz: u32,
-    pub flash_kb: u32,
-    pub ram_kb: u32,
-    pub io: u32,
+    /// Every core the part has, in the order the vendor lists them.
+    ///
+    /// A `Vec` rather than a `String` because 231 parts are dual-core — an MP1
+    /// is a Cortex-A7 *and* a Cortex-M4, an H7 an M7 *and* an M4 — and reading
+    /// only the first would file half of each of them under a core it does not
+    /// have.
+    pub cores: Vec<String>,
+    /// `None` when the index does not state it, which is NOT the same as zero.
+    ///
+    /// 764 of the 2781 catalogued parts — the whole STM32C0 series among them —
+    /// carry no `<Frequency>` tag at all, while 260 carry a `<Flash>` of
+    /// genuinely zero because an MP1 has no internal flash. Collapsing both to
+    /// `0` made a filter answer "too slow" for a quarter of the catalogue on a
+    /// question the vendor never asked.
+    pub mhz: Option<u32>,
+    pub flash_kb: Option<u32>,
+    pub ram_kb: Option<u32>,
+    pub io: Option<u32>,
+    /// `("USART", 3)` — the vendor's `<Peripheral Type MaxOccurs>`, sorted by
+    /// type so two entries can be compared and a lookup can stop early.
+    ///
+    /// **`MaxOccurs` is not always an instance count.** For `USART` it is: an
+    /// F411 says 3 and has USART1/2/6. For `ADC 12-bit` it is CHANNELS — the
+    /// same F411 says 16 and has exactly one ADC. Which is why the filter reads
+    /// ADC as presence, never as a number. See [`ChipEntry::count_of`].
+    pub peripherals: Vec<(String, u16)>,
     /// The IDE's family key, e.g. `stm32f1`.
     ///
     /// Lowercased verbatim from the vendor data, exactly as `convert_xml` does
@@ -103,6 +124,37 @@ pub struct ChipEntry {
     /// rather than being quietly folded into `stm32l4` — prettying it up here
     /// would make the catalogue disagree with the import.
     pub family: String,
+}
+
+impl ChipEntry {
+    /// How many of `ty` the part has, or 0 — including when the source had no
+    /// index and therefore said nothing about any peripheral.
+    ///
+    /// Use [`ChipEntry::knows_peripherals`] to tell those two apart: a filter
+    /// that reads "no index" as "zero USARTs" would quietly drop every part
+    /// from a source that ships part numbers only.
+    pub fn count_of(&self, ty: &str) -> u16 {
+        self.peripherals
+            .iter()
+            .find(|(t, _)| t == ty)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    }
+
+    /// Whether the source could say anything at all about this part's
+    /// peripherals.
+    ///
+    /// Every catalogued STM32 has at least `SPI`, `RTC` and a 16-bit timer — all
+    /// 2781 of them do — so an empty list means "not indexed", never "a part
+    /// with no peripherals".
+    pub fn knows_peripherals(&self) -> bool {
+        !self.peripherals.is_empty()
+    }
+
+    /// The first core, for a one-line label. Empty when the source has none.
+    pub fn core_label(&self) -> &str {
+        self.cores.first().map(String::as_str).unwrap_or("")
+    }
 }
 
 /// Every source this machine offers without being told where to look.
@@ -275,11 +327,32 @@ pub fn parse_families(xml: &str) -> Result<Vec<ChipEntry>, String> {
                     .and_then(|c| c.text())
                     .map(|t| t.trim().to_owned())
             };
-            let num = |tag: &str| -> u32 {
-                text(tag)
-                    .and_then(|t| t.split('.').next().unwrap_or("").parse().ok())
-                    .unwrap_or(0)
+            // `None` for an absent tag, `Some(0)` for one that says zero — the
+            // difference the whole filter rests on.
+            let num = |tag: &str| -> Option<u32> {
+                text(tag).and_then(|t| t.split('.').next().unwrap_or("").parse().ok())
             };
+            // Sorted, so two entries compare equal regardless of the order the
+            // vendor happened to write them in - and so a lookup reads the same
+            // way it is stored.
+            let mut peripherals: Vec<(String, u16)> = mcu
+                .children()
+                .filter(|c| c.has_tag_name("Peripheral"))
+                .filter_map(|p| {
+                    let ty = p.attribute("Type")?.trim();
+                    if ty.is_empty() {
+                        return None;
+                    }
+                    // A peripheral with no readable count is still a peripheral
+                    // the part HAS, so it lands as 1 rather than being dropped.
+                    let n = p
+                        .attribute("MaxOccurs")
+                        .and_then(|v| v.trim().parse::<u16>().ok())
+                        .unwrap_or(1);
+                    Some((ty.to_owned(), n))
+                })
+                .collect();
+            peripherals.sort();
             out.push(ChipEntry {
                 ref_name: ref_name.to_owned(),
                 // `Name` is the file; it falls back to the part number, because
@@ -295,11 +368,20 @@ pub fn parse_families(xml: &str) -> Result<Vec<ChipEntry>, String> {
                     .unwrap_or_default()
                     .trim()
                     .to_owned(),
-                core: text("Core").unwrap_or_default(),
+                // ALL of them - see [`ChipEntry::cores`]; a dual-core part has
+                // two <Core> children and the second is not a detail.
+                cores: mcu
+                    .children()
+                    .filter(|c| c.has_tag_name("Core"))
+                    .filter_map(|c| c.text())
+                    .map(|t| t.trim().to_owned())
+                    .filter(|t| !t.is_empty())
+                    .collect(),
                 mhz: num("Frequency"),
                 flash_kb: num("Flash"),
                 ram_kb: num("Ram"),
                 io: num("IONb"),
+                peripherals,
                 family: key.clone(),
             });
         }
@@ -393,9 +475,24 @@ mod tests {
     <SubFamily Name="STM32F103">
       <Mcu Name="STM32F103C(8-B)Tx" PackageName="LQFP48" RefName="STM32F103C8Tx" RPN="STM32F103C8">
         <Core>Arm Cortex-M3</Core><Frequency>72</Frequency><Ram>20</Ram><IONb>37</IONb><Flash>64</Flash>
+        <Peripheral Type="USART" MaxOccurs="3"/><Peripheral Type="SPI" MaxOccurs="2"/>
+        <Peripheral Type="ADC 12-bit" MaxOccurs="10"/><Peripheral Type="RTC"/>
       </Mcu>
       <Mcu Name="STM32F103C(8-B)Tx" PackageName="LQFP48" RefName="STM32F103CBTx" RPN="STM32F103CB">
         <Core>Arm Cortex-M3</Core><Frequency>72</Frequency><Ram>20</Ram><IONb>37</IONb><Flash>128</Flash>
+        <Peripheral Type="USART" MaxOccurs="3"/><Peripheral Type="SPI" MaxOccurs="2"/>
+      </Mcu>
+      <Mcu Name="STM32H747XIHx" PackageName="TFBGA240" RefName="STM32H747XIHx" RPN="STM32H747XI">
+        <Core>Arm Cortex-M7</Core><Core>Arm Cortex-M4</Core>
+        <Frequency>480</Frequency><Ram>1024</Ram><IONb>168</IONb><Flash>2048</Flash>
+      </Mcu>
+      <Mcu Name="STM32C051C6Tx" PackageName="LQFP48" RefName="STM32C051C6Tx" RPN="STM32C051C6">
+        <Core>Arm Cortex-M0+</Core><Ram>12</Ram><IONb>39</IONb><Flash>32</Flash>
+        <Peripheral Type="USART" MaxOccurs="2"/>
+      </Mcu>
+      <Mcu Name="STM32MP157AAAx" PackageName="TFBGA361" RefName="STM32MP157AAAx" RPN="STM32MP157AA">
+        <Core>Arm Cortex-A7</Core><Frequency>650</Frequency><Ram>708</Ram><IONb>172</IONb><Flash>0</Flash>
+        <Peripheral Type="USART" MaxOccurs="4"/>
       </Mcu>
     </SubFamily>
   </Family>
@@ -413,23 +510,83 @@ mod tests {
     #[test]
     fn one_file_yields_every_part_it_covers() {
         let all = parse_families(FAMILIES).unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 6);
 
         let c8 = &all[0];
         assert_eq!(c8.ref_name, "STM32F103C8Tx");
         assert_eq!(c8.file, "STM32F103C(8-B)Tx", "the RANGE names the file");
         assert_eq!(c8.family, "stm32f1");
-        assert_eq!((c8.mhz, c8.flash_kb, c8.ram_kb, c8.io), (72, 64, 20, 37));
+        assert_eq!(
+            (c8.mhz, c8.flash_kb, c8.ram_kb, c8.io),
+            (Some(72), Some(64), Some(20), Some(37))
+        );
         assert_eq!(c8.package, "LQFP48");
-        assert_eq!(c8.core, "Arm Cortex-M3");
+        assert_eq!(c8.cores, ["Arm Cortex-M3"]);
 
         // Same file, different part — and the flash that separates them.
         let cb = &all[1];
         assert_eq!(cb.ref_name, "STM32F103CBTx");
         assert_eq!(cb.file, c8.file);
-        assert_eq!(cb.flash_kb, 128);
+        assert_eq!(cb.flash_kb, Some(128));
 
-        assert_eq!(all[2].family, "stm32wba");
+        assert_eq!(all[5].family, "stm32wba");
+    }
+
+    /// The distinction 764 parts depend on: no `<Frequency>` tag is not 0 MHz,
+    /// while `<Flash>0</Flash>` really is no internal flash.
+    #[test]
+    fn an_absent_tag_and_a_zero_are_different_answers() {
+        let all = parse_families(FAMILIES).unwrap();
+        let c0 = all.iter().find(|e| e.ref_name == "STM32C051C6Tx").unwrap();
+        assert_eq!(c0.mhz, None, "the C0 series states no frequency");
+        assert_eq!(c0.flash_kb, Some(32), "…but it does state its flash");
+
+        let mp1 = all.iter().find(|e| e.ref_name == "STM32MP157AAAx").unwrap();
+        assert_eq!(mp1.flash_kb, Some(0), "no internal flash IS the answer");
+        assert_eq!(mp1.mhz, Some(650));
+    }
+
+    /// 231 catalogued parts are dual-core. Reading only the first `<Core>` filed
+    /// every one of them under a core it half has.
+    #[test]
+    fn both_cores_of_a_dual_core_part_are_kept() {
+        let all = parse_families(FAMILIES).unwrap();
+        let h7 = all.iter().find(|e| e.ref_name == "STM32H747XIHx").unwrap();
+        assert_eq!(h7.cores, ["Arm Cortex-M7", "Arm Cortex-M4"]);
+        assert_eq!(
+            h7.core_label(),
+            "Arm Cortex-M7",
+            "the label takes the first"
+        );
+    }
+
+    #[test]
+    fn peripheral_counts_are_read_and_sorted() {
+        let all = parse_families(FAMILIES).unwrap();
+        let c8 = &all[0];
+        assert_eq!(
+            c8.peripherals,
+            [
+                ("ADC 12-bit".to_owned(), 10),
+                ("RTC".to_owned(), 1),
+                ("SPI".to_owned(), 2),
+                ("USART".to_owned(), 3),
+            ],
+            "sorted by type, and a countless <Peripheral> lands as 1"
+        );
+        assert_eq!(c8.count_of("USART"), 3);
+        assert_eq!(c8.count_of("I2C"), 0, "absent reads as zero");
+        assert!(c8.knows_peripherals());
+    }
+
+    /// The distinction the whole filter rests on: a part with no peripheral data
+    /// is not a part with no peripherals.
+    #[test]
+    fn a_part_with_no_peripheral_data_says_so() {
+        let all = parse_families(FAMILIES).unwrap();
+        let h7 = all.iter().find(|e| e.ref_name == "STM32H747XIHx").unwrap();
+        assert!(!h7.knows_peripherals());
+        assert_eq!(h7.count_of("USART"), 0, "still zero — hence the flag");
     }
 
     #[test]
@@ -527,7 +684,7 @@ mod tests {
             .expect("the blue-pill part is in there");
         assert_eq!(f103.file, "STM32F103C(8-B)Tx");
         assert_eq!(f103.family, "stm32f1");
-        assert_eq!(f103.mhz, 72);
+        assert_eq!(f103.mhz, Some(72));
         assert!(
             src.chip_file(f103).is_file(),
             "and its file is where we say"

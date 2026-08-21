@@ -12,6 +12,7 @@
 //! is loading while the picker is up.
 
 use super::AppIde;
+use crate::app::helpers::forget_button::forget_button;
 use crate::startup::StartupMode;
 use eframe::egui;
 use egui_phosphor::regular as ph;
@@ -117,6 +118,9 @@ impl AppIde {
         // Deferred like `choice`: the loop below borrows `state.rows`, and
         // dropping an entry has to rebuild them.
         let mut forget: Option<String> = None;
+        // Taken out of the picker for the frame: `state` is reborrowed
+        // immutably for the loop, so the armed slot cannot live behind it.
+        let mut armed = std::mem::take(&mut self.recent_forget_confirm);
         // The last project, split into the two things the UI does with it.
         let (resume, blocked) = match &state.last {
             crate::startup::LastProject::Available(dir) => (Some(dir.clone()), None),
@@ -193,13 +197,14 @@ impl AppIde {
                         .show(ui, |ui| {
                             for row in &state.rows {
                                 ui.horizontal(|ui| {
-                                    // Width taken from the open button so the two
-                                    // never overlap; the X keeps a fixed size so
-                                    // the column of them stays straight.
-                                    const X_W: f32 = 24.0;
-                                    let open_w =
-                                        (ui.available_width() - X_W - ui.spacing().item_spacing.x)
-                                            .max(60.0);
+                                    // Forget FIRST: laid out before the project
+                                    // button, every one starts at the same x.
+                                    // After it they stepped across the panel,
+                                    // because the project button's width is a
+                                    // minimum a long name grows past.
+                                    if forget_button(ui, &row.path, &mut armed) {
+                                        forget = Some(row.path.clone());
+                                    }
                                     // A project another window holds can't be opened
                                     // here — say so on the row instead of letting the
                                     // click land and the conflict banner explain later.
@@ -208,29 +213,11 @@ impl AppIde {
                                         egui::Button::new(
                                             egui::RichText::new(&row.label).size(12.5),
                                         )
-                                        .min_size(egui::vec2(open_w, 0.0)),
+                                        .min_size(egui::vec2(ui.available_width(), 0.0)),
                                     );
                                     if resp.on_hover_text(&row.path).clicked() {
                                         choice =
                                             Some(Choice::Open(std::path::PathBuf::from(&row.path)));
-                                    }
-                                    // Enabled even for a project another window
-                                    // holds: forgetting it touches only this
-                                    // history file, not the project, so there is
-                                    // nothing to conflict over.
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                egui::RichText::new(ph::X)
-                                                    .size(12.0)
-                                                    .color(egui::Color32::from_rgb(220, 90, 80)),
-                                            )
-                                            .min_size(egui::vec2(X_W, 0.0)),
-                                        )
-                                        .on_hover_text(crate::recent::FORGET_TIP)
-                                        .clicked()
-                                    {
-                                        forget = Some(row.path.clone());
                                     }
                                 });
                                 ui.label(
@@ -320,6 +307,8 @@ impl AppIde {
         // Dropping an entry rebuilds the rows NOW rather than waiting for the
         // next `REFRESH`: two seconds of a row still sitting there reads as a
         // click that did nothing.
+        // Back into `self`, so the arm survives to the next frame.
+        self.recent_forget_confirm = armed;
         if let Some(path) = forget {
             crate::recent::forget(std::path::Path::new(&path));
             if let Some(s) = &mut self.startup_picker {

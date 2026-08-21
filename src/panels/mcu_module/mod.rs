@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod chip_filter;
 pub mod chip_search;
 pub mod chip_sources;
 pub mod clock;

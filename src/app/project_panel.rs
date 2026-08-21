@@ -139,6 +139,9 @@ impl AppIde {
     ) -> ProjectPanelSignals {
         let mut open_project_clicked = false;
         let mut open_recent: Option<std::path::PathBuf> = None;
+        // Same one-slot arm as the startup picker's, taken out for the frame so
+        // the menu closure can borrow it while `self` is borrowed for the tree.
+        let mut armed = std::mem::take(&mut self.recent_forget_confirm);
         let mut new_project_clicked = false;
         let mut save_project_clicked = ctrl_s_pressed; // Ctrl+S triggers save
         let mut extract_folder: Option<String> = None;
@@ -226,43 +229,15 @@ impl AppIde {
                                                     None => entry.name.clone(),
                                                 };
                                                 ui.horizontal(|ui| {
-                                                    // Same split as the startup
-                                                    // picker's rows: open on the
-                                                    // left, forget on the right.
-                                                    const X_W: f32 = 22.0;
-                                                    let open_w = (ui.available_width()
-                                                        - X_W
-                                                        - ui.spacing().item_spacing.x)
-                                                        .max(80.0);
-                                                    if ui
-                                                        .add(
-                                                            egui::Button::new(label)
-                                                                .min_size(egui::vec2(open_w, 0.0)),
-                                                        )
-                                                        .on_hover_text(&entry.path)
-                                                        .clicked()
-                                                    {
-                                                        open_recent = Some(
-                                                            std::path::PathBuf::from(&entry.path),
-                                                        );
-                                                        ui.close();
-                                                    }
-                                                    if ui
-                                                        .add(
-                                                            egui::Button::new(
-                                                                egui::RichText::new(ph::X)
-                                                                    .size(11.0)
-                                                                    .color(
-                                                                        egui::Color32::from_rgb(
-                                                                            220, 90, 80,
-                                                                        ),
-                                                                    ),
-                                                            )
-                                                            .min_size(egui::vec2(X_W, 0.0)),
-                                                        )
-                                                        .on_hover_text(crate::recent::FORGET_TIP)
-                                                        .clicked()
-                                                    {
+                                                    // Forget FIRST, so every one
+                                                    // of them starts at the same
+                                                    // x — see the module note in
+                                                    // `helpers::forget_button`.
+                                                    if crate::app::helpers::forget_button::forget_button(
+                                                        ui,
+                                                        &entry.path,
+                                                        &mut armed,
+                                                    ) {
                                                         crate::recent::forget(
                                                             std::path::Path::new(&entry.path),
                                                         );
@@ -272,6 +247,23 @@ impl AppIde {
                                                         // so the row vanishes on
                                                         // its own and several can
                                                         // be cleared in one go.
+                                                    }
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(label).min_size(
+                                                                egui::vec2(
+                                                                    ui.available_width(),
+                                                                    0.0,
+                                                                ),
+                                                            ),
+                                                        )
+                                                        .on_hover_text(&entry.path)
+                                                        .clicked()
+                                                    {
+                                                        open_recent = Some(
+                                                            std::path::PathBuf::from(&entry.path),
+                                                        );
+                                                        ui.close();
                                                     }
                                                 });
                                             }
@@ -422,6 +414,7 @@ impl AppIde {
         }
         self.tree_width = tree_width;
 
+        self.recent_forget_confirm = armed;
         ProjectPanelSignals {
             open_clicked: open_project_clicked,
             open_recent,
