@@ -480,7 +480,7 @@ impl AppIde {
                                 if ui
                                     .button(
                                         egui::RichText::new(icon)
-                                            .size(12.0)
+                                            .size(11.0)
                                             .color(egui::Color32::from_rgb(160, 185, 215)),
                                     )
                                     .on_hover_text(tip)
@@ -532,10 +532,16 @@ impl AppIde {
                                     // hurt text clarity), matching the list names below.
                                     let added = mcu.modules.iter().any(|m| m.kind == kind);
                                     let label = format!("{} {}", ph::PLUS, kind.short());
+                                    // 11, like every other button on this bar.
+                                    // Without an explicit size they took the
+                                    // global `TextStyle::Button` (12.5) and were
+                                    // visibly bigger than the rest of the row.
                                     let text = if added {
-                                        egui::RichText::new(label).color(mod_gui::module_color(kind, 1))
-                                    } else {
                                         egui::RichText::new(label)
+                                            .size(11.0)
+                                            .color(mod_gui::module_color(kind, 1))
+                                    } else {
+                                        egui::RichText::new(label).size(11.0)
                                     };
                                     if ui
                                         .add_enabled(can_add, egui::Button::new(text))
