@@ -2475,9 +2475,30 @@ pub fn init(tim: pac::TIM{N}, pins: PwmPins, afio: &mut afio::Parts, clocks: &Cl
 {SETS}    pwm
 }
 
+/// Set CH1's duty in the same units the `DUTY_*` constants above use —
+/// HUNDREDTHS of a percent, so `10_000` is 100 % and `750` is 7.5 %.
+///
+/// A trait rather than an inherent method because `Handle` is an alias for the
+/// HAL's own `PwmHz`, which this crate does not own.
+pub trait DutyHandle {
+    fn set_duty_tim_{N}(&mut self, value: u32);
+}
+
+impl DutyHandle for Handle {
+    fn set_duty_tim_{N}(&mut self, value: u32) {
+        self.set_duty(Channel::C1, (self.get_max_duty() as u32 * value / 10_000) as u16);
+    }
+}
+
 // ── Using TIM{N} ──
 // The duty is already set and the channels are already running. To change one
 // from your loop:
+//
+//     use pins::configs::pwm{N}::DutyHandle;
+//     {HANDLE}.set_duty_tim_{N}(2_500); // 25 %
+//
+// or through the HAL directly, which is what the trait does and reaches every
+// channel rather than CH1:
 //
 //     use stm32f1xx_hal::timer::Channel;
 //
