@@ -338,9 +338,29 @@ impl AppIde {
                     // Set when the Rotate toggle is clicked → re-fit the Pins
                     // canvas so the re-oriented chip isn't left off-screen.
                     let mut rotate_toggled = false;
+                    // How tall the panel has to be for the open config to be
+                    // readable, as the panel's MINIMUM — not as a nudge applied
+                    // for a few frames. `default_size`/`size_range` only clamp
+                    // the height while they are in force; the stored height is
+                    // never written back, so a temporary minimum grows the panel
+                    // and loses it again the moment it relaxes.
+                    //
+                    // Measured LAST frame: a config's height is only known once
+                    // it has been laid out, and the panel is built before that.
+                    // Capped at 45 % of the zone so a tall config (a USART with
+                    // its DMA rows) cannot swallow the chip canvas — past the
+                    // cap the right column scrolls, and collapsing the module
+                    // hands the space straight back.
+                    let min_h = if self.vmod_needed_h > 0.0 {
+                        self.vmod_needed_h.clamp(190.0, ui.available_height() * 0.45)
+                    } else {
+                        80.0
+                    };
+                    let mut needed_h = 0.0_f32;
                     egui::TopBottomPanel::bottom("vmodules_panel")
                         .resizable(true)
                         .default_height(190.0)
+                        .height_range(min_h..=f32::INFINITY)
                         .show_inside(ui, |ui| {
                             let Some(mcu) = &mut self.mcu else { return };
                             use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
@@ -679,42 +699,175 @@ impl AppIde {
                                         (m.id.clone(), cur)
                                     })
                                     .collect();
-                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                                    for m in &mut mcu.modules {
-                                        let title = mod_gui::module_title(m);
-                                        // The entry's name carries the module's
-                                        // peripheral colour + a 10%-opacity tint
-                                        // behind it, matching its box on the canvas.
-                                        let mod_color = mod_gui::module_color(m.kind, m.instance());
-                                        let toggle = to_open.as_deref() == Some(m.id.as_str());
-                                        // Drive the section via CollapsingState so a canvas
-                                        // click can TOGGLE (not just force-open) the entry.
-                                        let cs_id =
-                                            ui.make_persistent_id(("vmod_hdr", m.id.as_str()));
-                                        let mut state =
-                                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                                ui.ctx(),
-                                                cs_id,
-                                                false,
-                                            );
-                                        // "Collapse everything" outranks the
-                                        // per-module toggle: both can't be true
-                                        // in one frame (a canvas click either hit
-                                        // a box or the background), but if they
-                                        // ever were, closing is the safe answer.
-                                        if collapse_all {
-                                            state.set_open(false);
-                                        } else if toggle {
-                                            state.toggle(ui);
-                                        }
-                                        state
-                                            .show_header(ui, |ui| {
+                                // ── Two columns: the list on the LEFT, the
+                                //    open modules' configs on the RIGHT, one
+                                //    under another.
+                                //
+                                // One column could not hold both: a USART's
+                                // config is a dozen rows, so an expanded module
+                                // pushed every other one off the bottom of the
+                                // panel and the list stopped being a list.
+                                //
+                                // The open/closed bit still lives in a
+                                // `CollapsingState`, but keyed off the MODULE ID
+                                // rather than the Ui: the header and the body are
+                                // in different Uis now, so a Ui-derived id would
+                                // no longer find the state the other one stored.
+                                let cs_id =
+                                    |id: &str| egui::Id::new(("vmod_hdr", id));
+                                let list_w = (ui.available_width() * 0.32).clamp(160.0, 260.0);
+                                // Filled by the left column, read by the right —
+                                // the two loops borrow `mcu.modules` in turn.
+                                let mut open_ids: Vec<String> = Vec::new();
+                                let mut clicked: Option<String> = None;
+                                // Everything the panel spends ABOVE the columns
+                                // — the Apply bar, the palette row, the spacing.
+                                // Measured, not guessed: a new button in that
+                                // toolbar would otherwise start clipping the
+                                // bottom of every config.
+                                let chrome_h = ui.min_rect().height();
+
+                                ui.horizontal_top(|ui| {
+                                    // ── left: the list ──
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(list_w, ui.available_height()),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            egui::ScrollArea::vertical()
+                                                .id_salt("vmod_list")
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    for m in &mcu.modules {
+                                                        let mut st =
+                                                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                                                ui.ctx(),
+                                                                cs_id(&m.id),
+                                                                false,
+                                                            );
+                                                        // "Collapse everything"
+                                                        // outranks the per-module
+                                                        // toggle: both can't be
+                                                        // true in one frame, but
+                                                        // if they ever were,
+                                                        // closing is the safe
+                                                        // answer.
+                                                        if collapse_all {
+                                                            st.set_open(false);
+                                                        } else if to_open.as_deref()
+                                                            == Some(m.id.as_str())
+                                                        {
+                                                            let now = st.is_open();
+                                                            st.set_open(!now);
+                                                        }
+                                                        let open = st.is_open();
+                                                        st.store(ui.ctx());
+                                                        if open {
+                                                            open_ids.push(m.id.clone());
+                                                        }
+
+                                                        let title = mod_gui::module_title(m);
+                                                        let c = mod_gui::module_color(
+                                                            m.kind,
+                                                            m.instance(),
+                                                        );
+                                                        // Same 10 %-opacity tint as
+                                                        // the module's box on the
+                                                        // canvas; the OPEN one is
+                                                        // brighter, so the list says
+                                                        // which config is on the right.
+                                                        let bg = egui::Color32::from_rgba_unmultiplied(
+                                                            c.r(),
+                                                            c.g(),
+                                                            c.b(),
+                                                            if open { 56 } else { 26 },
+                                                        );
+                                                        let resp = egui::Frame::new()
+                                                            .fill(bg)
+                                                            .inner_margin(egui::Margin::symmetric(6, 3))
+                                                            .corner_radius(egui::CornerRadius::same(4))
+                                                            .show(ui, |ui| {
+                                                                ui.set_width(ui.available_width());
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label(
+                                                                        egui::RichText::new(if open {
+                                                                            ph::CARET_DOWN
+                                                                        } else {
+                                                                            ph::CARET_RIGHT
+                                                                        })
+                                                                        .size(11.0)
+                                                                        .color(c),
+                                                                    );
+                                                                    ui.label(
+                                                                        egui::RichText::new(title)
+                                                                            .strong()
+                                                                            .color(c),
+                                                                    );
+                                                                });
+                                                            })
+                                                            .response
+                                                            .interact(egui::Sense::click());
+                                                        if resp
+                                                            .on_hover_cursor(
+                                                                egui::CursorIcon::PointingHand,
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            clicked = Some(m.id.clone());
+                                                        }
+                                                        ui.add_space(2.0);
+                                                    }
+                                                });
+                                        },
+                                    );
+                                    ui.separator();
+
+                                    // ── right: one config block per open module ──
+                                    //
+                                    // The explicit `top_down` is load-bearing: a
+                                    // `ScrollArea` inherits its parent's layout,
+                                    // and the parent here is a HORIZONTAL one —
+                                    // so without it the title and the Name row
+                                    // laid out side by side and the config's grid
+                                    // had nowhere left to go.
+                                    let cfg_size =
+                                        egui::vec2(ui.available_width(), ui.available_height());
+                                    let out = ui
+                                        .allocate_ui_with_layout(
+                                            cfg_size,
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                egui::ScrollArea::vertical()
+                                                    .id_salt("vmod_cfg")
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                            if open_ids.is_empty() {
+                                                ui.add_space(6.0);
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        "Click a module on the left to configure it here.",
+                                                    )
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_gray(130)),
+                                                );
+                                                return;
+                                            }
+                                            for m in &mut mcu.modules {
+                                                if !open_ids.iter().any(|id| id == &m.id) {
+                                                    continue;
+                                                }
+                                                let title = mod_gui::module_title(m);
+                                                let mod_color =
+                                                    mod_gui::module_color(m.kind, m.instance());
                                                 let bg = egui::Color32::from_rgba_unmultiplied(
                                                     mod_color.r(),
                                                     mod_color.g(),
                                                     mod_color.b(),
-                                                    26, // ~10% opacity
+                                                    26,
                                                 );
+                                                // The title rides along with the
+                                                // config: with several open at
+                                                // once, an unlabelled block would
+                                                // not say whose it is.
                                                 egui::Frame::new()
                                                     .fill(bg)
                                                     .inner_margin(egui::Margin::symmetric(6, 2))
@@ -726,8 +879,6 @@ impl AppIde {
                                                                 .color(mod_color),
                                                         );
                                                     });
-                                            })
-                                            .body(|ui| {
                                                 // Rename field — appended to the generated
                                                 // variable name(s); also shown in the title.
                                                 ui.horizontal(|ui| {
@@ -807,9 +958,31 @@ impl AppIde {
                                                 {
                                                     arm_confirm = Some(m.id.clone());
                                                 }
-                                            });
-                                    }
+                                                ui.add_space(10.0);
+                                            }
+                                                    })
+                                            },
+                                        )
+                                        .inner;
+                                    // + a row of slack so the last button is not
+                                    // flush against the window edge.
+                                    needed_h = out.content_size.y + chrome_h + 28.0;
                                 });
+
+                                // Applied after both loops — each borrowed
+                                // `mcu.modules`, and the toggle only touches
+                                // egui's own state.
+                                if let Some(id) = clicked {
+                                    let mut st =
+                                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                                            ui.ctx(),
+                                            cs_id(&id),
+                                            false,
+                                        );
+                                    let now = st.is_open();
+                                    st.set_open(!now);
+                                    st.store(ui.ctx());
+                                }
                                 // Write the edited staged styles back onto the MCU.
                                 mcu.pending_module_styles = local_pending;
                                 // A function picked from a Custom module's pin
@@ -851,6 +1024,14 @@ impl AppIde {
                                 }
                             }
                         });
+
+                    // One frame late by construction (see `min_h` above), so a
+                    // change has to repaint — otherwise the panel only settles
+                    // on the next mouse move.
+                    if (self.vmod_needed_h - needed_h).abs() > 0.5 {
+                        self.vmod_needed_h = needed_h;
+                        ui.ctx().request_repaint();
+                    }
 
                     if modules_changed {
                         if let Some(mcu) = &self.mcu {

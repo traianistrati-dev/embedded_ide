@@ -955,6 +955,13 @@ pub struct AppIde {
     /// so the wheel handler uses this to scroll the list instead of zooming.
     /// Written each frame from `Mcu::draw`; transient.
     mcu_fn_list_rect: egui::Rect,
+    /// How tall the Virtual-module panel needed to be last frame for its OPEN
+    /// configs to fit: the right column's content, plus the toolbar above it.
+    ///
+    /// Read one frame late on purpose — a config's height is only known after
+    /// it has been laid out once, and the bottom panel is built before that.
+    /// Zero when nothing is open.
+    vmod_needed_h: f32,
     /// The header's "Reset pins" is ARMED and waiting for confirmation.
     ///
     /// It wipes every pin function on the chip — and with them the Virtual
@@ -1759,6 +1766,7 @@ impl AppIde {
             mcu_scene_bounds: egui::Rect::NOTHING,
             mcu_view_adjusted: false,
             mcu_fn_list_rect: egui::Rect::NOTHING,
+            vmod_needed_h: 0.0,
             reset_pins_confirm: false,
             structure_cache: None,
             structure_view: Default::default(),
