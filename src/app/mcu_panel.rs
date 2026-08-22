@@ -338,30 +338,60 @@ impl AppIde {
                     // Set when the Rotate toggle is clicked → re-fit the Pins
                     // canvas so the re-oriented chip isn't left off-screen.
                     let mut rotate_toggled = false;
-                    // How tall the panel has to be for the open config to be
-                    // readable, as the panel's MINIMUM — not as a nudge applied
-                    // for a few frames. `default_size`/`size_range` only clamp
-                    // the height while they are in force; the stored height is
-                    // never written back, so a temporary minimum grows the panel
-                    // and loses it again the moment it relaxes.
-                    //
-                    // Measured LAST frame: a config's height is only known once
-                    // it has been laid out, and the panel is built before that.
-                    // Capped at 45 % of the zone so a tall config (a USART with
-                    // its DMA rows) cannot swallow the chip canvas — past the
-                    // cap the right column scrolls, and collapsing the module
-                    // hands the space straight back.
-                    let min_h = if self.vmod_needed_h > 0.0 {
-                        self.vmod_needed_h.clamp(190.0, ui.available_height() * 0.45)
-                    } else {
-                        80.0
-                    };
+                    // The panel keeps a real MINIMUM of one bar, so the border
+                    // is always draggable and the diagram can always be given
+                    // the space back. Making room for a freshly opened config is
+                    // a one-shot RESIZE further down instead of a floor here: a
+                    // floor cannot be dragged past, and this panel sits on top of
+                    // the chip.
                     let mut needed_h = 0.0_f32;
+                    let mut open_sig = 0_u64;
+                    // The panel hugs its content (an egui bottom panel stores
+                    // the CONTENT's rect, not the size it was given), so the body
+                    // height is ours to set — and ours to offer a drag handle for.
+                    // Two ceilings, on purpose. The DRAG may go nearly to the
+                    // top — it is a deliberate act, and someone configuring six
+                    // modules wants the room. Growing BY ITSELF stops at 45 %:
+                    // a panel that takes the whole zone the moment you open a
+                    // config has stopped being a panel.
+                    let body_cap = (ui.available_height() - 90.0).max(120.0);
+                    let auto_cap = (ui.available_height() * 0.45).min(body_cap);
+                    let mut body_h = self.vmod_body_h.min(body_cap);
+                    let mut collapsed = self.vmod_collapsed;
                     egui::TopBottomPanel::bottom("vmodules_panel")
-                        .resizable(true)
-                        .default_height(190.0)
-                        .height_range(min_h..=f32::INFINITY)
+                        // NOT `resizable`: the handle below does the resizing,
+                        // and egui's own can only cap a content-sized panel.
+                        .resizable(false)
                         .show_inside(ui, |ui| {
+                            // ── The panel's top border, as a real handle ──
+                            // Drag it up to make room, down to give it back to
+                            // the diagram. Drawn before anything else so it sits
+                            // on the panel's top edge, where the pointer expects
+                            // the boundary to be.
+                            if !collapsed {
+                                let (hid, hrect) =
+                                    ui.allocate_space(egui::vec2(ui.available_width(), 6.0));
+                                let h = ui.interact(hrect, hid, egui::Sense::drag());
+                                if h.dragged() {
+                                    body_h = (body_h - h.drag_delta().y).clamp(60.0, body_cap);
+                                }
+                                let live = h.hovered() || h.dragged();
+                                if live {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                                }
+                                ui.painter().hline(
+                                    hrect.x_range(),
+                                    hrect.center().y,
+                                    egui::Stroke::new(
+                                        if live { 2.0 } else { 1.0 },
+                                        if live {
+                                            egui::Color32::from_rgb(120, 160, 210)
+                                        } else {
+                                            egui::Color32::from_gray(70)
+                                        },
+                                    ),
+                                );
+                            }
                             let Some(mcu) = &mut self.mcu else { return };
                             use crate::panels::mcu_module::mcu::gui::modules as mod_gui;
                             use crate::panels::mcu_module::modules::ModuleKind;
@@ -376,6 +406,34 @@ impl AppIde {
 
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
+                                // Disclosure for the WHOLE panel, left of its
+                                // name. Collapsed it keeps only this bar, which
+                                // is the difference between a panel that can be
+                                // put away and one that permanently costs the
+                                // diagram a third of its height.
+                                let (icon, tip) = if collapsed {
+                                    (
+                                        ph::CARET_RIGHT,
+                                        "Expand the Virtual-modules panel.",
+                                    )
+                                } else {
+                                    (
+                                        ph::CARET_DOWN,
+                                        "Collapse the panel to this bar and give the height back \
+                                         to the diagram. Drag the top border to resize it instead.",
+                                    )
+                                };
+                                if ui
+                                    .button(
+                                        egui::RichText::new(icon)
+                                            .size(12.0)
+                                            .color(egui::Color32::from_rgb(160, 185, 215)),
+                                    )
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    collapsed = !collapsed;
+                                }
                                 ui.label(
                                     egui::RichText::new("Virtual modules:")
                                         .size(12.0)
@@ -568,6 +626,13 @@ impl AppIde {
                             // TOGGLE its list entry this frame (expand if closed,
                             // collapse if open), then it's user-controlled again.
                             let to_open = mcu.expand_module.take();
+                            // Clicking a module box on the canvas has to REACH
+                            // something: with the panel put away, the request
+                            // would be taken here and quietly dropped, and the
+                            // click would look broken.
+                            if to_open.is_some() {
+                                collapsed = false;
+                            }
                             // Empty-canvas click last frame → close EVERY entry
                             // (the canvas cleared its selection at the same time).
                             let collapse_all = std::mem::take(&mut mcu.collapse_modules);
@@ -587,7 +652,7 @@ impl AppIde {
                                 );
                             let is_native = mcu.pending_is_native();
 
-                            if !mcu.modules.is_empty() {
+                            if !mcu.modules.is_empty() && !collapsed {
                                 use crate::panels::mcu_module::mcu::logic::module_style;
                                 use crate::panels::mcu_module::modules::{ApiStyle, AsyncBusMode};
                                 let pin_names: std::collections::HashMap<usize, String> = mcu
@@ -725,8 +790,12 @@ impl AppIde {
                                 // Measured, not guessed: a new button in that
                                 // toolbar would otherwise start clipping the
                                 // bottom of every config.
-                                let chrome_h = ui.min_rect().height();
 
+                                // The body is allocated at OUR height, so the
+                                // panel that hugs it ends up exactly as tall as
+                                // the handle says.
+                                let body = egui::vec2(ui.available_width(), body_h);
+                                ui.allocate_ui(body, |ui| {
                                 ui.horizontal_top(|ui| {
                                     // ── left: the list ──
                                     ui.allocate_ui_with_layout(
@@ -753,11 +822,26 @@ impl AppIde {
                                                         // answer.
                                                         if collapse_all {
                                                             st.set_open(false);
-                                                        } else if to_open.as_deref()
-                                                            == Some(m.id.as_str())
+                                                        } else if let Some(t) =
+                                                            to_open.as_deref()
                                                         {
-                                                            let now = st.is_open();
-                                                            st.set_open(!now);
+                                                            // A click on the CANVAS
+                                                            // means "show me this
+                                                            // one": every other
+                                                            // config closes, so the
+                                                            // right column holds
+                                                            // exactly the module
+                                                            // whose box was hit.
+                                                            // Several at once is a
+                                                            // deliberate act, and
+                                                            // the list is where you
+                                                            // do it.
+                                                            if t == m.id {
+                                                                let now = st.is_open();
+                                                                st.set_open(!now);
+                                                            } else {
+                                                                st.set_open(false);
+                                                            }
                                                         }
                                                         let open = st.is_open();
                                                         st.store(ui.ctx());
@@ -907,14 +991,30 @@ impl AppIde {
                                                 let pending = local_pending
                                                     .get_mut(&m.id)
                                                     .expect("pending entry seeded above");
-                                                mod_gui::module_config_ui(
-                                                    ui, m, &pin_names, &pin_sigs, &pin_blocked,
-                                                    &mut pin_labels, &pin_funcs_current,
-                                                    &pin_funcs, &mut pin_fn_choice, is_async,
-                                                    is_native, &family, pending,
-                                                    chip_dma.as_ref(),
-                                                    usart_line_extras,
-                                                );
+                                                // One id namespace per module.
+                                                // `module_config_ui` builds a
+                                                // `Grid::new("module_cfg")` and
+                                                // salt-less combo boxes, so two
+                                                // configs drawn in the SAME frame
+                                                // — which is what the right column
+                                                // does — collide on every one of
+                                                // them, and egui paints an
+                                                // "ID clash" banner across the
+                                                // panel.
+                                                // Owned: the closure needs `m`
+                                                // mutably, so the salt cannot
+                                                // borrow out of it.
+                                                let salt = m.id.clone();
+                                                ui.push_id(salt, |ui| {
+                                                    mod_gui::module_config_ui(
+                                                        ui, m, &pin_names, &pin_sigs,
+                                                        &pin_blocked, &mut pin_labels,
+                                                        &pin_funcs_current, &pin_funcs,
+                                                        &mut pin_fn_choice, is_async, is_native,
+                                                        &family, pending, chip_dma.as_ref(),
+                                                        usart_line_extras,
+                                                    );
+                                                });
                                                 ui.add_space(4.0);
                                                 if confirm_id.as_deref() == Some(m.id.as_str()) {
                                                     // Armed → inline confirm (removing
@@ -965,10 +1065,18 @@ impl AppIde {
                                         )
                                         .inner;
                                     // + a row of slack so the last button is not
-                                    // flush against the window edge.
-                                    needed_h = out.content_size.y + chrome_h + 28.0;
+                                    // flush against the panel edge.
+                                    needed_h = out.content_size.y + 16.0;
+                                });
                                 });
 
+                                // Which modules are open, as one number, so the
+                                // panel can be resized ONCE when the set changes.
+                                open_sig = open_ids.iter().fold(0u64, |h, id| {
+                                    id.bytes().fold(h.wrapping_mul(31).wrapping_add(1), |h, b| {
+                                        h.wrapping_mul(131).wrapping_add(u64::from(b))
+                                    })
+                                });
                                 // Applied after both loops — each borrowed
                                 // `mcu.modules`, and the toggle only touches
                                 // egui's own state.
@@ -1025,13 +1133,25 @@ impl AppIde {
                             }
                         });
 
-                    // One frame late by construction (see `min_h` above), so a
-                    // change has to repaint — otherwise the panel only settles
-                    // on the next mouse move.
+                    // One frame late by construction (the height of a config is
+                    // only known once it has been laid out), so a change has to
+                    // repaint — otherwise the panel settles on the next mouse
+                    // move instead of now.
                     if (self.vmod_needed_h - needed_h).abs() > 0.5 {
                         self.vmod_needed_h = needed_h;
                         ui.ctx().request_repaint();
                     }
+                    // Make room ONCE, when the set of open configs changes —
+                    // never every frame, or the handle could not be dragged back
+                    // down. Growing only: nobody wants the panel they just
+                    // widened snapping shut because the next config is shorter.
+                    if self.vmod_open_sig != open_sig && !collapsed {
+                        body_h = body_h.max(self.vmod_needed_h.min(auto_cap));
+                        ui.ctx().request_repaint();
+                    }
+                    self.vmod_open_sig = open_sig;
+                    self.vmod_collapsed = collapsed;
+                    self.vmod_body_h = body_h;
 
                     if modules_changed {
                         if let Some(mcu) = &self.mcu {

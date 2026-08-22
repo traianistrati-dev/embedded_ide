@@ -962,6 +962,21 @@ pub struct AppIde {
     /// it has been laid out once, and the bottom panel is built before that.
     /// Zero when nothing is open.
     vmod_needed_h: f32,
+    /// Height of the Virtual-module panel's BODY — the list and the configs,
+    /// not the toolbar above them.
+    ///
+    /// Owned here rather than left to the panel, because an `egui` bottom panel
+    /// shrinks to its content: its own resize handle can only ever cap the room
+    /// the content may take, so dragging it does nothing to a body that sizes
+    /// itself. This value is what the panel's drag handle actually moves.
+    vmod_body_h: f32,
+    /// Which modules were open last frame, as a cheap signature. The panel is
+    /// resized when this CHANGES — once — so it makes room for a config you
+    /// just opened and then leaves the splitter entirely to you.
+    vmod_open_sig: u64,
+    /// The Virtual-module panel is collapsed to its toolbar, giving the height
+    /// back to the chip diagram. The bar stays visible; the caret reopens it.
+    vmod_collapsed: bool,
     /// The header's "Reset pins" is ARMED and waiting for confirmation.
     ///
     /// It wipes every pin function on the chip — and with them the Virtual
@@ -1767,6 +1782,9 @@ impl AppIde {
             mcu_view_adjusted: false,
             mcu_fn_list_rect: egui::Rect::NOTHING,
             vmod_needed_h: 0.0,
+            vmod_body_h: 150.0,
+            vmod_open_sig: 0,
+            vmod_collapsed: false,
             reset_pins_confirm: false,
             structure_cache: None,
             structure_view: Default::default(),
