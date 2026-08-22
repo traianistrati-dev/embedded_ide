@@ -411,9 +411,14 @@ impl AppIde {
                                 // is the difference between a panel that can be
                                 // put away and one that permanently costs the
                                 // diagram a third of its height.
+                                // Same pair as the panel under the editor
+                                // (`diag_panel`): double-up to reopen, plain
+                                // caret-down to put away. One collapse control,
+                                // one shape — a right-caret reads as "unfold
+                                // sideways", which is not what this does.
                                 let (icon, tip) = if collapsed {
                                     (
-                                        ph::CARET_RIGHT,
+                                        ph::CARET_DOUBLE_UP,
                                         "Expand the Virtual-modules panel.",
                                     )
                                 } else {
