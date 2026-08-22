@@ -345,6 +345,14 @@ impl AppIde {
                     // floor cannot be dragged past, and this panel sits on top of
                     // the chip.
                     let mut needed_h = 0.0_f32;
+                    // Height the module LIST needs to show every row.
+                    let mut list_h = 0.0_f32;
+                    // Set when the caret button (not the handle) expands the
+                    // panel — that is the gesture that means "show me all of it".
+                    let mut expand_clicked = false;
+                    // A module added from the palette: its config is opened, and
+                    // a collapsed panel opens with it.
+                    let mut open_after_add: Option<String> = None;
                     let mut open_sig = 0_u64;
                     // The panel hugs its content (an egui bottom panel stores
                     // the CONTENT's rect, not the size it was given), so the body
@@ -358,22 +366,61 @@ impl AppIde {
                     let auto_cap = (ui.available_height() * 0.45).min(body_cap);
                     let mut body_h = self.vmod_body_h.min(body_cap);
                     let mut collapsed = self.vmod_collapsed;
+                    // The handle below IS this panel's top border, so egui's
+                    // own separator line would be a second bar right above it —
+                    // which is exactly what it looked like.
+                    // Collapsed, it hugs its content on purpose. Forcing it to
+                    // the OTHER panel's exact box lined the two outlines up but
+                    // left dead space under these buttons, which pushed the
+                    // buttons off the line — and the buttons are what you see.
+                    // Both bars are bottom-anchored, so equal content is what
+                    // puts equal rows on one line.
                     egui::TopBottomPanel::bottom("vmodules_panel")
                         // NOT `resizable`: the handle below does the resizing,
                         // and egui's own can only cap a content-sized panel.
                         .resizable(false)
+                        .show_separator_line(false)
                         .show_inside(ui, |ui| {
                             // ── The panel's top border, as a real handle ──
                             // Drag it up to make room, down to give it back to
                             // the diagram. Drawn before anything else so it sits
                             // on the panel's top edge, where the pointer expects
                             // the boundary to be.
-                            if !collapsed {
+                            {
+                                /// Smallest body worth showing, and how far past
+                                /// it the handle must be pulled DOWN before the
+                                /// panel collapses itself — same pair as the
+                                /// panel under the editor, so both borders
+                                /// behave identically.
+                                const MIN_BODY_H: f32 = 60.0;
+                                const COLLAPSE_SLACK: f32 = 14.0;
                                 let (hid, hrect) =
                                     ui.allocate_space(egui::vec2(ui.available_width(), 6.0));
                                 let h = ui.interact(hrect, hid, egui::Sense::drag());
                                 if h.dragged() {
-                                    body_h = (body_h - h.drag_delta().y).clamp(60.0, body_cap);
+                                    let dy = h.drag_delta().y;
+                                    if collapsed {
+                                        // Only upward opens it: a collapsed bar
+                                        // has nowhere to shrink to. The caret
+                                        // button flips on its own — it renders
+                                        // straight from this flag.
+                                        if dy < 0.0 {
+                                            collapsed = false;
+                                            body_h =
+                                                (MIN_BODY_H - dy).clamp(MIN_BODY_H, body_cap);
+                                        }
+                                    } else {
+                                        let want = body_h - dy;
+                                        // Pulled past the smallest useful body:
+                                        // finish the gesture by collapsing
+                                        // rather than jamming against the floor.
+                                        // The slack keeps a drag that merely
+                                        // BOTTOMS OUT from snapping it shut.
+                                        if want < MIN_BODY_H - COLLAPSE_SLACK {
+                                            collapsed = true;
+                                        }
+                                        body_h = want.clamp(MIN_BODY_H, body_cap);
+                                    }
                                 }
                                 let live = h.hovered() || h.dragged();
                                 if live {
@@ -404,7 +451,9 @@ impl AppIde {
                             // unsure whether the Init-API switch took effect.
                             Self::runtime_apply_bar(ui, mcu);
 
-                            ui.add_space(4.0);
+                            if !collapsed {
+                                ui.add_space(4.0);
+                            }
                             ui.horizontal(|ui| {
                                 // Disclosure for the WHOLE panel, left of its
                                 // name. Collapsed it keeps only this bar, which
@@ -438,6 +487,7 @@ impl AppIde {
                                     .clicked()
                                 {
                                     collapsed = !collapsed;
+                                    expand_clicked = !collapsed;
                                 }
                                 ui.label(
                                     egui::RichText::new("Virtual modules:")
@@ -502,6 +552,15 @@ impl AppIde {
                                         mcu.push_module_undo(format!("Add {}", kind.short()));
                                         if mcu.add_module(kind) {
                                             modules_changed = true;
+                                            // Adding from a collapsed bar means
+                                            // "I want to set this up" — so the
+                                            // panel opens with the new module's
+                                            // config already unfolded, instead
+                                            // of leaving the click looking like
+                                            // it did nothing.
+                                            open_after_add =
+                                                mcu.modules.last().map(|m| m.id.clone());
+                                            collapsed = false;
                                         } else {
                                             mcu.discard_last_module_undo();
                                         }
@@ -807,7 +866,7 @@ impl AppIde {
                                         egui::vec2(list_w, ui.available_height()),
                                         egui::Layout::top_down(egui::Align::Min),
                                         |ui| {
-                                            egui::ScrollArea::vertical()
+                                            let list_out = egui::ScrollArea::vertical()
                                                 .id_salt("vmod_list")
                                                 .auto_shrink([false, false])
                                                 .show(ui, |ui| {
@@ -906,6 +965,10 @@ impl AppIde {
                                                         ui.add_space(2.0);
                                                     }
                                                 });
+                                            // What "show me the whole list"
+                                            // costs — the caret button opens the
+                                            // panel to exactly this.
+                                            list_h = list_out.content_size.y + 8.0;
                                         },
                                     );
                                     ui.separator();
@@ -1096,6 +1159,22 @@ impl AppIde {
                                     st.set_open(!now);
                                     st.store(ui.ctx());
                                 }
+                                // A module added this frame is not in the list
+                                // yet (it was built after the loop ran), so its
+                                // config is opened here and shows next frame —
+                                // by which time `open_sig` has changed and the
+                                // panel has already grown to fit it.
+                                if let Some(id) = &open_after_add {
+                                    let mut st =
+                                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                                            ui.ctx(),
+                                            cs_id(id),
+                                            false,
+                                        );
+                                    st.set_open(true);
+                                    st.store(ui.ctx());
+                                    ui.ctx().request_repaint();
+                                }
                                 // Write the edited staged styles back onto the MCU.
                                 mcu.pending_module_styles = local_pending;
                                 // A function picked from a Custom module's pin
@@ -1152,6 +1231,23 @@ impl AppIde {
                     // widened snapping shut because the next config is shorter.
                     if self.vmod_open_sig != open_sig && !collapsed {
                         body_h = body_h.max(self.vmod_needed_h.min(auto_cap));
+                        ui.ctx().request_repaint();
+                    }
+                    if (self.vmod_list_h - list_h).abs() > 0.5 && list_h > 0.0 {
+                        self.vmod_list_h = list_h;
+                    }
+                    // Expanded with the caret button: open tall enough for the
+                    // whole module list, and close every config on the way —
+                    // the gesture means "show me what modules there are", not
+                    // "restore the six-row form I was last editing". Uses the
+                    // height measured on a PREVIOUS frame (this one was laid out
+                    // collapsed, so the list has no size yet); `body_cap` still
+                    // has the last word, since the diagram above needs to live.
+                    if expand_clicked {
+                        body_h = self.vmod_list_h.clamp(60.0, body_cap);
+                        if let Some(mcu) = &mut self.mcu {
+                            mcu.collapse_modules = true;
+                        }
                         ui.ctx().request_repaint();
                     }
                     self.vmod_open_sig = open_sig;

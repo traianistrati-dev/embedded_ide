@@ -170,6 +170,18 @@ pub fn diag_highlight_color(sev: lsp::DiagSeverity) -> egui::Color32 {
     }
 }
 
+/// Height of a bottom panel that has been collapsed to its bar: the button /
+/// tab row, the frame's vertical margin, and the drag handle above it.
+///
+/// Only the panel under the editor needs it — that one is `exact_size`d and so
+/// cannot shrink to its content. The Virtual-modules panel hugs its own content
+/// instead: forcing it into this same box lined the outlines up but left dead
+/// space under its buttons, which is what you actually see.
+pub fn collapsed_panel_height(ui: &egui::Ui, handle_h: f32) -> f32 {
+    const FRAME_V_MARGIN: f32 = 4.0; // `Frame::side_top_panel` is symmetric(8, 2)
+    ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + FRAME_V_MARGIN + handle_h
+}
+
 /// Background of a diagnostic row in the bottom panel. Every one of those rows
 /// navigates to the code it names, so hovering has to say so: the row lights up,
 /// its `file:line` is underlined, and the cursor becomes a pointing hand (see
@@ -962,6 +974,10 @@ pub struct AppIde {
     /// it has been laid out once, and the bottom panel is built before that.
     /// Zero when nothing is open.
     vmod_needed_h: f32,
+    /// Height the Virtual-modules LIST column needs to show every module at
+    /// once. Measured while rendering, so it is applied one frame later — the
+    /// caret button opens the panel to exactly this.
+    vmod_list_h: f32,
     /// Height of the Virtual-module panel's BODY — the list and the configs,
     /// not the toolbar above them.
     ///
@@ -1782,6 +1798,7 @@ impl AppIde {
             mcu_view_adjusted: false,
             mcu_fn_list_rect: egui::Rect::NOTHING,
             vmod_needed_h: 0.0,
+            vmod_list_h: 0.0,
             vmod_body_h: 150.0,
             vmod_open_sig: 0,
             vmod_collapsed: false,

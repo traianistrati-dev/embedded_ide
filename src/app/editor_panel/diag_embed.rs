@@ -62,6 +62,10 @@ impl AppIde {
         // the caret button, and collapsing hides only the tab CONTENT.
         const HANDLE_H: f32 = 6.0;
         const MIN_H: f32 = 56.0;
+        /// How far past `MIN_H` the handle must be dragged DOWN before the panel
+        /// collapses itself. Without the slack, every drag that simply reaches
+        /// the bottom limit would snap it shut.
+        const COLLAPSE_SLACK: f32 = 14.0;
         /// The panel's top edge at rest — one colour for both states, so
         /// collapsing only removes the grip dots, never the boundary itself.
         const EDGE_IDLE: egui::Color32 = egui::Color32::from_gray(65);
@@ -73,14 +77,16 @@ impl AppIde {
         let max_h = (avail_h - 60.0).max(MIN_H);
         self.diag_panel_height = self.diag_panel_height.clamp(MIN_H, max_h);
 
-        // Collapsed height = the tab-button row plus the panel frame's vertical
-        // inner margin. Both parts matter: `Panel` never shrinks to fit its
-        // content (it takes the size it is given), and `exact_size` INCLUDES
-        // the frame margins — `Frame::side_top_panel` is `Margin::symmetric(8,
-        // 2)`. Style-derived rather than a magic number so it follows spacing.
-        const PANEL_FRAME_V_MARGIN: f32 = 4.0; // 2 top + 2 bottom
-        let collapsed_h =
-            ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + PANEL_FRAME_V_MARGIN;
+        // Collapsed height = the tab-button row, the panel frame's vertical
+        // inner margin and the handle. Both parts matter: `Panel` never shrinks
+        // to fit its content (it takes the size it is given) and `exact_size`
+        // INCLUDES the frame margins. Style-derived rather than a magic number
+        // so it follows spacing — and shared with the Virtual-modules panel, so
+        // the two collapsed bars sit on the same line.
+        let collapsed_h = crate::app::collapsed_panel_height(ui, HANDLE_H);
+        // The handle is part of BOTH states — collapsed, it is the only way to
+        // pull the panel back open by dragging — so its strip is included here
+        // too, or allocating it would clip the tab row `collapsed_h` measures.
         let panel_h = if collapsed {
             collapsed_h
         } else {
@@ -183,27 +189,19 @@ impl AppIde {
             .map(|(p, _)| p.probe_chip)
             .unwrap_or_default();
         let project_dir = self.project_dir.clone();
+        // Set when the HANDLE opened the panel, so the button's "reopen at 30 %"
+        // below doesn't hijack a drag that is already sizing it by hand.
+        let mut drag_opened = false;
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(panel_h)
             .show_inside(ui, |ui| {
-                // ── Top edge of the panel ─────────────────
-                // Collapsed: the resize handle is skipped (there is nothing to
-                // resize, and a resize cursor over a fixed bar would be a lie)
-                // — but the EDGE still has to be drawn. Without it the tab bar
-                // bleeds straight into the editor and the tabs lose their top
-                // border. Painted, never allocated: `collapsed_h` was measured
-                // to fit the tab row exactly, so taking layout space here would
-                // clip the row it is meant to frame.
-                if collapsed {
-                    let top = ui.max_rect().top();
-                    ui.painter().hline(
-                        ui.max_rect().x_range(),
-                        top,
-                        egui::Stroke::new(1.0, EDGE_IDLE),
-                    );
-                }
                 // ── Drag handle (top edge of panel) ───────
-                if !collapsed {
+                // Drawn in BOTH states. Collapsed it is the panel's top border
+                // (without it the tab bar bleeds into the editor and the tabs
+                // lose their top edge) AND the grip that pulls the panel back
+                // open — dragging it up expands and resizes in one gesture,
+                // instead of forcing a trip to the caret button first.
+                {
                     let (handle_rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), HANDLE_H),
                         egui::Sense::hover(),
@@ -237,9 +235,35 @@ impl AppIde {
                     }
 
                     if drag_resp.dragged() {
-                        // Dragging up → negative delta.y → panel grows
-                        self.diag_panel_height =
-                            (self.diag_panel_height - drag_resp.drag_delta().y).clamp(MIN_H, max_h);
+                        // Dragging up → negative delta.y → panel grows.
+                        let dy = drag_resp.drag_delta().y;
+                        if collapsed {
+                            // Only upward opens it: a collapsed bar has nowhere
+                            // to shrink to. The first pixel pops it to MIN_H,
+                            // after which the drag tracks the pointer — and the
+                            // caret button flips to "collapse" on its own, since
+                            // it renders straight from this flag.
+                            if dy < 0.0 {
+                                self.diag_collapsed = false;
+                                drag_opened = true;
+                                self.diag_panel_height = (MIN_H - dy).clamp(MIN_H, max_h);
+                            }
+                        } else {
+                            let want = self.diag_panel_height - dy;
+                            // Pulled down past the smallest useful panel: finish
+                            // the gesture by collapsing, instead of jamming
+                            // against MIN_H and making the user go find the
+                            // caret button. The slack keeps a drag that merely
+                            // BOTTOMS OUT from collapsing — you have to keep
+                            // pulling to mean it.
+                            if want < MIN_H - COLLAPSE_SLACK {
+                                self.diag_collapsed = true;
+                            }
+                            // Left at MIN_H either way, so re-opening (button,
+                            // tab click or an upward drag) lands on a usable
+                            // size rather than a sliver.
+                            self.diag_panel_height = want.clamp(MIN_H, max_h);
+                        }
                     }
                 }
 
@@ -336,6 +360,16 @@ impl AppIde {
         if tab_clicked && collapsed {
             self.diag_collapsed = false;
             self.diag_panel_height = (avail_h * 0.2).clamp(MIN_H, max_h);
+        }
+        // Expanded with the caret button: open at 30 % of the WINDOW, not at
+        // whatever sliver the panel was last left at. Measured on the window
+        // rather than the editor region, so the panel comes back the same size
+        // whichever side panels happen to be open. A drag that opened it is
+        // excluded — there the pointer is already choosing the height — and so
+        // is a tab click, which keeps its smaller "just show me this tab" size.
+        if collapsed && !self.diag_collapsed && !drag_opened && !tab_clicked {
+            let window_h = ui.ctx().content_rect().height();
+            self.diag_panel_height = (window_h * 0.30).clamp(MIN_H, max_h);
         }
         // "Restore this file" → open the confirm; the write happens once the
         // user agrees (queued like the discard confirm, applied next frame so

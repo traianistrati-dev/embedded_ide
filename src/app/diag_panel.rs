@@ -526,10 +526,14 @@ pub(super) fn show_diag_panel(
                      The bar stays visible; click any tab to reopen.",
                 )
             };
+            // Same text size as the "More" button beside it: a button is as
+            // tall as its content once that content passes the standard row
+            // height, so a 12 pt icon next to an 11 pt label left the two boxes
+            // visibly different heights on the collapsed bar.
             if ui
                 .button(
                     egui::RichText::new(icon)
-                        .size(12.0)
+                        .size(11.0)
                         .color(egui::Color32::from_rgb(160, 185, 215)),
                 )
                 .on_hover_text(tip)
