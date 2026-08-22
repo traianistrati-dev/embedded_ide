@@ -31,22 +31,63 @@ pub struct DmaChannel {
 /// the channels out one at a time.
 pub fn channels_from_nvic(nvic_xml: &str) -> Vec<DmaChannel> {
     let mut out: Vec<DmaChannel> = Vec::new();
-    for vector in super::nvic::vectors(nvic_xml) {
-        let Some((ctrl, indices)) = parse_vector(&vector) else {
-            continue;
-        };
-        let irq = vector.to_ascii_uppercase();
+    let mut push = |ctrl: &str, indices: Vec<u8>, irq: &str| {
         for i in indices {
             let peri = format!("{ctrl}_CH{i}");
             if !out.iter().any(|c| c.peri == peri) {
                 out.push(DmaChannel {
                     peri,
-                    irq: irq.clone(),
+                    irq: irq.to_owned(),
                 });
             }
         }
+    };
+    // The `Value=` attribute states the controller and the channel range
+    // outright; the vector NAME only implies them. Both were always in the
+    // file, and for every chip whose name parses they agree — but a family can
+    // stop spelling channels in the vector name, and STM32WL3 did: its whole
+    // controller is one `DMA_IRQn` vector, whose name says nothing at all,
+    // while its value still says `…:DMA:DMA1:0,7`. Reading the field first is
+    // what gives that family its eight channels.
+    for chunk in nvic_xml.split("Value=\"").skip(1) {
+        let Some(value) = chunk.split('"').next() else {
+            continue;
+        };
+        if let Some((vector, ctrl, indices)) = parse_value(value) {
+            push(&ctrl, indices, &vector.to_ascii_uppercase());
+        }
+    }
+    // Fallback for anything whose value carries no DMA descriptor — the
+    // open-pin-data files, and any future shape.
+    for vector in super::nvic::vectors(nvic_xml) {
+        if let Some((ctrl, indices)) = parse_vector(&vector) {
+            push(&ctrl, indices, &vector.to_ascii_uppercase());
+        }
     }
     out
+}
+
+/// `("DMA1_Channel2_3", "DMA1", [2, 3])` for
+/// `DMA1_Channel2_3_IRQn:Y,DMAL0:DMA:DMA1:2,3`.
+///
+/// The shape is the same on every family that has DMA at all:
+/// `<vector>_IRQn:…:DMA:<controller>:<first>,<last>`. `None` when the entry is
+/// not a DMA one — a plain `USART1_IRQn:Y:USART1::` has no `:DMA:` segment.
+fn parse_value(value: &str) -> Option<(String, String, Vec<u8>)> {
+    let vector = value.split("_IRQn").next()?;
+    if vector.is_empty() {
+        return None;
+    }
+    let tail = value.split(":DMA:").nth(1)?;
+    let mut parts = tail.split(':');
+    let ctrl = parts.next()?;
+    if !is_controller(ctrl) {
+        return None;
+    }
+    let range = parts.next()?;
+    let (a, b) = range.split_once(',')?;
+    let (a, b): (u8, u8) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    (a <= b).then(|| (vector.to_owned(), ctrl.to_owned(), (a..=b).collect()))
 }
 
 /// `("DMA1", [2, 3])` for `DMA1_Channel2_3`; `None` when the vector is not a
@@ -423,6 +464,118 @@ pub fn dma_def_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// STM32WL3 puts its whole controller behind ONE `DMA_IRQn`, whose name
+    /// carries no channel at all. The `Value=` field still does, which is why
+    /// the parser reads that first — before this, the chip reported zero
+    /// channels and every `init` got a `p.DMA_TX_TODO` placeholder.
+    #[test]
+    fn a_single_global_vector_still_yields_its_channels() {
+        let xml = "<IP>\
+             <RefParameter><PossibleValue Comment=\"USART1 Interrupt\" \
+             Value=\"USART1_IRQn:Y:USART1::\"/>\
+             <PossibleValue Comment=\"DMA global interrupt\" \
+             Value=\"DMA_IRQn:Y,DMAL0:DMA:DMA1:0,7\"/></RefParameter></IP>";
+        let ch = channels_from_nvic(xml);
+        assert_eq!(ch.len(), 8, "0..7 inclusive: {ch:?}");
+        assert_eq!(ch[0].peri, "DMA1_CH0");
+        assert_eq!(ch[7].peri, "DMA1_CH7");
+        // One vector, so every channel binds through the same interrupt.
+        assert!(ch.iter().all(|c| c.irq == "DMA"), "{ch:?}");
+    }
+
+    /// The field and the name must not disagree where both can be read — the
+    /// value is now the primary source for chips the name route already
+    /// handled, so a mismatch would silently re-map existing projects.
+    #[test]
+    fn the_value_field_agrees_with_the_vector_name() {
+        for (value, name) in [
+            ("DMA1_Channel1_IRQn:Y,DMAL0:DMA:DMA1:1,1", "DMA1_Channel1"),
+            ("DMA1_Channel2_3_IRQn:Y,DMAL0:DMA:DMA1:2,3", "DMA1_Channel2_3"),
+            (
+                "DMA1_Ch4_5_DMAMUX1_OVR_IRQn:Y,DMAL0_DMAMUX:DMA:DMA1:4,5",
+                "DMA1_Ch4_5_DMAMUX1_OVR",
+            ),
+        ] {
+            let (vector, ctrl, idx) = parse_value(value).expect("value parses");
+            assert_eq!(vector, name);
+            let (n_ctrl, n_idx) = parse_vector(name).expect("name parses");
+            assert_eq!((ctrl, idx), (n_ctrl, n_idx), "disagreement on {value}");
+        }
+        // A non-DMA vector has no descriptor and must be ignored.
+        assert!(parse_value("USART1_IRQn:Y:USART1::").is_none());
+        assert!(parse_value("").is_none());
+    }
+
+    /// Every NVIC table in the vendor database, both ways.
+    ///
+    /// The value field became the PRIMARY source, so the question is not "does
+    /// it work" but "does it move anything that already worked". Answered over
+    /// the whole database rather than on the three shapes above:
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 value_and_name_agree_across_the_database -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the STM32Cube database"]
+    fn value_and_name_agree_across_the_database() {
+        let dir = std::path::Path::new(
+            &std::env::var("EIDE_CUBE_DB").unwrap_or_else(|_| {
+                "H:/stm32cube-database-master/stm32cube-database-master/db/mcu".into()
+            }),
+        )
+        .join("IP");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            eprintln!("no database at {} - nothing checked", dir.display());
+            return;
+        };
+        let (mut files, mut gained, mut moved) = (0usize, Vec::new(), Vec::new());
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with("NVIC") && n.ends_with("_Modes.xml")
+            }) {
+                continue;
+            }
+            let Ok(xml) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            files += 1;
+            // What the name route alone would have produced.
+            let mut by_name: Vec<String> = Vec::new();
+            for v in super::super::nvic::vectors(&xml) {
+                if let Some((ctrl, idx)) = parse_vector(&v) {
+                    for i in idx {
+                        let peri = format!("{ctrl}_CH{i}");
+                        if !by_name.contains(&peri) {
+                            by_name.push(peri);
+                        }
+                    }
+                }
+            }
+            let now: Vec<String> = channels_from_nvic(&xml)
+                .into_iter()
+                .map(|c| c.peri)
+                .collect();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            // A channel the name route never saw is the WHOLE point.
+            if now.len() > by_name.len() {
+                gained.push(format!("{name}: {} -> {}", by_name.len(), now.len()));
+            }
+            // A channel it saw and now does not, or one that changed identity,
+            // would silently re-map an existing project.
+            if let Some(lost) = by_name.iter().find(|c| !now.contains(c)) {
+                moved.push(format!("{name}: lost {lost}"));
+            }
+        }
+        println!("NVIC tables: {files}");
+        println!("gained channels ({}):", gained.len());
+        for g in &gained {
+            println!("  {g}");
+        }
+        assert!(files > 0, "database found but no NVIC tables read");
+        assert!(moved.is_empty(), "the value route MOVED channels:\n{moved:#?}");
+    }
 
     /// One vector per channel — the STM32G4 shape.
     #[test]
