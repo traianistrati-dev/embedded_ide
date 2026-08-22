@@ -62,6 +62,9 @@ impl AppIde {
         // the caret button, and collapsing hides only the tab CONTENT.
         const HANDLE_H: f32 = 6.0;
         const MIN_H: f32 = 56.0;
+        /// The panel's top edge at rest — one colour for both states, so
+        /// collapsing only removes the grip dots, never the boundary itself.
+        const EDGE_IDLE: egui::Color32 = egui::Color32::from_gray(65);
 
         let collapsed = self.diag_collapsed;
         // The editor+panel region: `ui` hasn't given the panel its slice yet.
@@ -183,9 +186,23 @@ impl AppIde {
         let panel = egui::Panel::bottom("diag_panel")
             .exact_size(panel_h)
             .show_inside(ui, |ui| {
+                // ── Top edge of the panel ─────────────────
+                // Collapsed: the resize handle is skipped (there is nothing to
+                // resize, and a resize cursor over a fixed bar would be a lie)
+                // — but the EDGE still has to be drawn. Without it the tab bar
+                // bleeds straight into the editor and the tabs lose their top
+                // border. Painted, never allocated: `collapsed_h` was measured
+                // to fit the tab row exactly, so taking layout space here would
+                // clip the row it is meant to frame.
+                if collapsed {
+                    let top = ui.max_rect().top();
+                    ui.painter().hline(
+                        ui.max_rect().x_range(),
+                        top,
+                        egui::Stroke::new(1.0, EDGE_IDLE),
+                    );
+                }
                 // ── Drag handle (top edge of panel) ───────
-                // Skipped while collapsed: there is nothing to resize, and a
-                // resize cursor over a fixed bar would be a lie.
                 if !collapsed {
                     let (handle_rect, _) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), HANDLE_H),
@@ -202,7 +219,7 @@ impl AppIde {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                         egui::Color32::from_rgb(100, 140, 200)
                     } else {
-                        egui::Color32::from_gray(65)
+                        EDGE_IDLE
                     };
 
                     // Line + three grip dots
