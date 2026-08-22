@@ -1905,6 +1905,17 @@ pub fn module_config_ui(
                         );
                         ui.end_row();
                     }
+                    if family.starts_with("esp") {
+                        ui.label("");
+                        ui.label(
+                            egui::RichText::new(
+                                "esp-hal's LEDC takes duty in WHOLE percent — a fraction is                                  rounded up in the generated file",
+                            )
+                            .size(10.5)
+                            .color(egui::Color32::from_gray(140)),
+                        );
+                        ui.end_row();
+                    }
                     let free = free_pwm_channels(cfg.instance, &wired, pin_funcs);
                     if !free.is_empty() {
                         let list = free.join(" / ");
@@ -1922,7 +1933,9 @@ pub fn module_config_ui(
                     // Say why the output controls are absent instead of just
                     // dropping them: the reason differs per backend, and the
                     // second one is worth knowing before wiring a pad.
-                    if !is_async {
+                    // The ESP is the exception: its LEDC driver is the same on
+                    // both runtimes, so there is nothing missing to explain.
+                    if !is_async && !family.starts_with("esp") {
                         ui.label("");
                         let why = if family == "stm32f1" {
                             "counter mode, drive, polarity and PWM mode need the Async runtime                              — stm32f1xx-hal's `pwm_hz` cannot set them"

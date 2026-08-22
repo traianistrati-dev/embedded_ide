@@ -955,6 +955,13 @@ pub struct AppIde {
     /// so the wheel handler uses this to scroll the list instead of zooming.
     /// Written each frame from `Mcu::draw`; transient.
     mcu_fn_list_rect: egui::Rect,
+    /// The header's "Reset pins" is ARMED and waiting for confirmation.
+    ///
+    /// It wipes every pin function on the chip — and with them the Virtual
+    /// Modules, which `reconcile_modules` drops once their pins are gone — so it
+    /// asks first, the same way removing one module does. Transient: a click
+    /// anywhere else disarms it.
+    reset_pins_confirm: bool,
     /// Cached module graph for the Structure tab: `(content hash, graph,
     /// layout)`. Rebuilt only when a file's content or the file list changes.
     structure_cache: Option<(
@@ -1752,6 +1759,7 @@ impl AppIde {
             mcu_scene_bounds: egui::Rect::NOTHING,
             mcu_view_adjusted: false,
             mcu_fn_list_rect: egui::Rect::NOTHING,
+            reset_pins_confirm: false,
             structure_cache: None,
             structure_view: Default::default(),
             structure_calls: None,

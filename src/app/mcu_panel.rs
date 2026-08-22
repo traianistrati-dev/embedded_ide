@@ -161,24 +161,76 @@ impl AppIde {
                     }
                 }
                 // Reset pins — a chip operation, shown with the MCU group only.
+                //
+                // It ASKS first, like removing a single module does, because it
+                // is the widest destructive action in the app: every pin function
+                // goes, and with the pins go the Virtual Modules that were wired
+                // to them (`reconcile_modules` drops a peripheral module whose
+                // pins are gone). The confirm names the count, so the question
+                // carries the size of the loss instead of just repeating itself.
                 if mcu_active {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let reset_btn = ui
-                            .add(egui::Button::new(
-                                egui::RichText::new(format!(
-                                    "{} Reset pins",
-                                    ph::ARROW_COUNTER_CLOCKWISE
-                                ))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(220, 100, 80)),
-                            ))
-                            .on_hover_text("Clear all pin function selections");
-                        if reset_btn.clicked() {
-                            if let Some(mcu) = &mut self.mcu {
-                                mcu.reset_all_pins();
+                        let configured =
+                            self.mcu.as_ref().map_or(0, |m| m.configured_pin_count());
+                        if self.reset_pins_confirm {
+                            // Right-to-left: Cancel is added first, so it lands
+                            // on the OUTSIDE — the safe choice is the one nearest
+                            // the edge, away from where the pointer already is.
+                            if ui.button("Cancel").clicked() {
+                                self.reset_pins_confirm = false;
+                            }
+                            if ui
+                                .button(
+                                    egui::RichText::new(format!(
+                                        "{} Reset {configured} pin{}",
+                                        ph::ARROW_COUNTER_CLOCKWISE,
+                                        if configured == 1 { "" } else { "s" }
+                                    ))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(220, 100, 80)),
+                                )
+                                .clicked()
+                            {
+                                if let Some(mcu) = &mut self.mcu {
+                                    mcu.reset_all_pins();
+                                }
+                                self.reset_pins_confirm = false;
+                            }
+                            ui.label(
+                                egui::RichText::new("also removes the Virtual Modules")
+                                    .size(10.5)
+                                    .color(egui::Color32::from_rgb(220, 180, 90)),
+                            );
+                        } else {
+                            // Nothing configured → nothing to ask about, and a
+                            // live button would only invite a pointless confirm.
+                            let btn = ui.add_enabled(
+                                configured > 0,
+                                egui::Button::new(
+                                    egui::RichText::new(format!(
+                                        "{} Reset pins",
+                                        ph::ARROW_COUNTER_CLOCKWISE
+                                    ))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(220, 100, 80)),
+                                ),
+                            );
+                            let btn = if configured > 0 {
+                                btn.on_hover_text(
+                                    "Clear every pin function on this chip (asks first)",
+                                )
+                            } else {
+                                btn.on_disabled_hover_text("No pin is configured")
+                            };
+                            if btn.clicked() {
+                                self.reset_pins_confirm = true;
                             }
                         }
                     });
+                } else {
+                    // Left the MCU group with the question open: disarm, so it
+                    // is not still waiting when the user comes back much later.
+                    self.reset_pins_confirm = false;
                 }
             });
 

@@ -88,6 +88,10 @@ const BUS_HANDLES: &[(&str, &str, bool)] = &[
     ("_spi", "spi", true),
     ("_i2c", "i2c", true),
     ("_can", "can1", false),
+    // PWM joined the list when the timers got their own config module: the
+    // frequency, the duty and the remap live in `pwm{N}.rs`, and with them a
+    // `Handle` alias — so RTIC no longer needs the type spelled out by hand.
+    ("_pwm", "pwm", true),
 ];
 
 /// Promote the bus handles in `fn_calls` from dropped temporaries to named

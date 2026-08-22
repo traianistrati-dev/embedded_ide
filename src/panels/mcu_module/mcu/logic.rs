@@ -810,6 +810,17 @@ impl Mcu {
     }
 
     /// Resets all non-reserved pins to Unset and clears selection/info state.
+    /// How many pins "Reset pins" would actually clear.
+    ///
+    /// The header button asks before wiping, and this is what makes the question
+    /// worth asking: it names the loss, and it is 0 exactly when the button has
+    /// nothing to do.
+    pub fn configured_pin_count(&self) -> usize {
+        self.iter_all_pins()
+            .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
+            .count()
+    }
+
     pub fn reset_all_pins(&mut self) {
         for pin in self.iter_all_pins_mut() {
             if !pin.reserved {
@@ -1073,6 +1084,43 @@ impl Mcu {
     /// Finds a pin by number (mutable)
     pub fn find_pin_mut(&mut self, number: usize) -> Option<&mut Pin> {
         self.iter_all_pins_mut().find(|p| p.number == number)
+    }
+}
+
+#[cfg(test)]
+mod reset_pins_tests {
+    use crate::panels::mcu_module::create_stm32f103c8tx;
+    use crate::panels::mcu_module::modules::ModuleKind;
+    use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
+
+    /// The count the header's confirm names, and the reset it confirms.
+    ///
+    /// Reserved pins (VDD/VSS/NRST) never count: they carry no function to
+    /// clear, so including them would inflate the number the question shows.
+    #[test]
+    fn the_count_is_what_reset_actually_clears() {
+        let mut mcu = create_stm32f103c8tx();
+        assert_eq!(mcu.configured_pin_count(), 0, "a fresh chip has none");
+
+        mcu.apply_pin_function(10, PinFunction::GpioOutput);
+        mcu.apply_pin_function(11, PinFunction::GpioInput);
+        assert_eq!(mcu.configured_pin_count(), 2);
+
+        // A module wires several pins at once — all of them count.
+        assert!(mcu.add_module(ModuleKind::GenericInterfaceUsart));
+        let with_module = mcu.configured_pin_count();
+        assert!(with_module > 2, "the USART's pins count too: {with_module}");
+
+        mcu.reset_all_pins();
+        assert_eq!(mcu.configured_pin_count(), 0);
+        assert!(
+            mcu.iter_all_pins()
+                .all(|p| p.reserved || p.selected_function == PinFunction::Unset)
+        );
+        // And the modules go with the pins they were wired to — which is the
+        // part of the loss the confirm has to warn about.
+        mcu.reconcile_modules();
+        assert!(mcu.modules.is_empty(), "{:?}", mcu.modules.len());
     }
 }
 

@@ -491,7 +491,10 @@ mod tests {
     fn the_value_field_agrees_with_the_vector_name() {
         for (value, name) in [
             ("DMA1_Channel1_IRQn:Y,DMAL0:DMA:DMA1:1,1", "DMA1_Channel1"),
-            ("DMA1_Channel2_3_IRQn:Y,DMAL0:DMA:DMA1:2,3", "DMA1_Channel2_3"),
+            (
+                "DMA1_Channel2_3_IRQn:Y,DMAL0:DMA:DMA1:2,3",
+                "DMA1_Channel2_3",
+            ),
             (
                 "DMA1_Ch4_5_DMAMUX1_OVR_IRQn:Y,DMAL0_DMAMUX:DMA:DMA1:4,5",
                 "DMA1_Ch4_5_DMAMUX1_OVR",
@@ -519,11 +522,9 @@ mod tests {
     #[test]
     #[ignore = "needs the STM32Cube database"]
     fn value_and_name_agree_across_the_database() {
-        let dir = std::path::Path::new(
-            &std::env::var("EIDE_CUBE_DB").unwrap_or_else(|_| {
-                "H:/stm32cube-database-master/stm32cube-database-master/db/mcu".into()
-            }),
-        )
+        let dir = std::path::Path::new(&std::env::var("EIDE_CUBE_DB").unwrap_or_else(|_| {
+            "H:/stm32cube-database-master/stm32cube-database-master/db/mcu".into()
+        }))
         .join("IP");
         let Ok(entries) = std::fs::read_dir(&dir) else {
             eprintln!("no database at {} - nothing checked", dir.display());
@@ -532,9 +533,11 @@ mod tests {
         let (mut files, mut gained, mut moved) = (0usize, Vec::new(), Vec::new());
         for e in entries.flatten() {
             let p = e.path();
-            if !p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                n.starts_with("NVIC") && n.ends_with("_Modes.xml")
-            }) {
+            if !p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("NVIC") && n.ends_with("_Modes.xml"))
+            {
                 continue;
             }
             let Ok(xml) = std::fs::read_to_string(&p) else {
@@ -574,7 +577,10 @@ mod tests {
             println!("  {g}");
         }
         assert!(files > 0, "database found but no NVIC tables read");
-        assert!(moved.is_empty(), "the value route MOVED channels:\n{moved:#?}");
+        assert!(
+            moved.is_empty(),
+            "the value route MOVED channels:\n{moved:#?}"
+        );
     }
 
     /// One vector per channel — the STM32G4 shape.

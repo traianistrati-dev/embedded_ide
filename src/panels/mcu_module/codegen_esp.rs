@@ -39,7 +39,7 @@
 use super::clock::ClockConfig;
 use super::clock::graph::evaluate;
 use super::codegen::{GEN_BEGIN, GEN_END, mcu_id_marker_line, pin_binding, sanitize_label};
-use super::modules::{I2cModuleConfig, SpiModuleConfig, UsartModuleConfig};
+use super::modules::{I2cModuleConfig, SpiModuleConfig, TimerModuleConfig, UsartModuleConfig};
 use super::pins::logic::pin::Pin;
 use super::pins::logic::pin_function::PinFunction;
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,10 +154,11 @@ pub fn fresh_esp32c3_main_rs(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     runtime: EspRuntime,
 ) -> String {
-    let section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits, runtime);
+    let section = make_gen_section(pins, clock, usart, spi, i2c, timer, custom_inits, runtime);
     format!(
         "{}{section}\n{USER_TAIL}",
         invariant_header(mcu_name, id, runtime)
@@ -175,10 +176,11 @@ pub fn update_esp32c3_main_rs(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    timer: &BTreeMap<u8, TimerModuleConfig>,
     custom_inits: &str,
     runtime: EspRuntime,
 ) -> String {
-    let new_section = make_gen_section(pins, clock, usart, spi, i2c, custom_inits, runtime);
+    let new_section = make_gen_section(pins, clock, usart, spi, i2c, timer, custom_inits, runtime);
     if let (Some(begin), Some(end_start)) = (existing.find(GEN_BEGIN), existing.find(GEN_END)) {
         let end = end_start + GEN_END.len();
         // Strip ALL leading newlines after GEN_END, then re-add exactly one
@@ -289,6 +291,8 @@ fn make_gen_section(
     usart: &BTreeMap<u8, UsartModuleConfig>,
     spi: &BTreeMap<u8, SpiModuleConfig>,
     i2c: &BTreeMap<u8, I2cModuleConfig>,
+    // PWM (LEDC) module settings, keyed by LEDC timer.
+    timer: &BTreeMap<u8, TimerModuleConfig>,
     // Custom-module `let x = Foo::new(…);` lines (see `Mcu::custom_module_inits`).
     custom_inits: &str,
     runtime: EspRuntime,
@@ -342,8 +346,11 @@ fn make_gen_section(
         .any(|p| matches!(p.selected_function, PinFunction::UsbDm | PinFunction::UsbDp));
 
     // ── use block ─────────────────────────────────────────────────────────────
+    let has_pwm = configured
+        .iter()
+        .any(|p| matches!(p.selected_function, PinFunction::TimerPwm { .. }));
     let use_block = build_use_block(
-        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, runtime,
+        has_output, has_input, has_adc, has_uart, has_spi, has_i2c, has_pwm, runtime,
     );
 
     // ── fn main() body ────────────────────────────────────────────────────────
@@ -433,6 +440,44 @@ fn make_gen_section(
         body.push_str(&calls);
     }
 
+    // ── PWM (LEDC) ───────────────────────────────────────────────────────────
+    // The LEDC is ONE peripheral for the whole chip: `Ledc::new` may be called
+    // once, and every timer and channel comes out of it. So it is built here,
+    // not inside a config module, and lent to each.
+    let pwm = pwm_channels(&configured);
+    if !pwm.is_empty() {
+        body.push('\n');
+        body.push_str("    // ── PWM (LEDC) ──\n");
+        body.push_str("    let ledc = Ledc::new(peripherals.LEDC);\n");
+        for (t, chans) in &pwm {
+            let sfx = timer
+                .get(t)
+                .map(|c| module_label_sfx(&c.custom_label))
+                .unwrap_or_default();
+            // Each pad keeps its own `let … = peripherals.GPIOn; // LABEL` line:
+            // that is the only record `parse_main_rs` has of the wiring.
+            let mut args = Vec::new();
+            for (_, p) in chans {
+                let var = esp_binding(p);
+                body.push_str(&format!(
+                    "    let {var} = peripherals.{gpio}; // {label}\n",
+                    gpio = p.name,
+                    label = p.selected_function.label(),
+                ));
+                args.push(var);
+            }
+            // The timer is a NAMED local because the channels borrow it for as
+            // long as they live — `pwm{t}::init` takes it by reference.
+            body.push_str(&format!(
+                "    let lstimer{t} = pins::configs::pwm{t}::timer(&ledc);\n"
+            ));
+            body.push_str(&format!(
+                "    let mut _pwm{t}{sfx} = pins::configs::pwm{t}::init(&ledc, &lstimer{t}, {});\n",
+                args.join(", ")
+            ));
+        }
+    }
+
     // ── TWAI (CAN-compatible) — comment only ─────────────────────────────────
     if has_twai {
         let twai_tx = configured
@@ -488,7 +533,7 @@ fn make_default_gen_section(clock: &ClockConfig, runtime: EspRuntime) -> String 
          {start}\n\
              // Select pins in the MCU Configurator to generate code here.\n\
          {GEN_END}\n",
-        use_block = build_use_block(false, false, false, false, false, false, runtime),
+        use_block = build_use_block(false, false, false, false, false, false, false, runtime),
         entry = runtime.entry(),
         init = esp_init_line(clock),
         start = runtime.start_block(),
@@ -504,6 +549,7 @@ fn build_use_block(
     has_uart: bool,
     has_spi: bool,
     has_i2c: bool,
+    has_pwm: bool,
     runtime: EspRuntime,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -531,6 +577,11 @@ fn build_use_block(
 
     if has_adc {
         lines.push("use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};".into());
+    }
+    // The LEDC is the one peripheral `main.rs` builds itself: it is a single
+    // chip-wide block, so `Ledc::new` cannot live in a per-timer config module.
+    if has_pwm {
+        lines.push("use esp_hal::ledc::Ledc;".into());
     }
     // No bus imports: UART/SPI/I2C are built inside `pins/configs/<bus>.rs`, and
     // `main.rs` only hands them peripherals it already has in scope.
@@ -561,6 +612,25 @@ fn pin_var(pin_name: &str) -> String {
 /// ESP analogue of the STM32 `<pin>_<type>` format.
 fn esp_binding(p: &Pin) -> String {
     pin_binding(&pin_var(&p.name), &p.selected_function, &p.custom_label)
+}
+
+/// The LEDC timers with at least one channel wired, each with its channels in
+/// ascending order.
+///
+/// On the ESP32-C3 every one of the six channels belongs to `timer: 0` in the
+/// pin table, so in practice this is one entry — but the shape is the model's,
+/// not the chip's, and a part with four LEDC timers would fill it out.
+pub fn pwm_channels<'a>(configured: &[&'a Pin]) -> Vec<(u8, Vec<(u8, &'a Pin)>)> {
+    let mut by_timer: BTreeMap<u8, BTreeMap<u8, &Pin>> = BTreeMap::new();
+    for p in configured {
+        if let PinFunction::TimerPwm { timer, channel } = p.selected_function {
+            by_timer.entry(timer).or_default().insert(channel, p);
+        }
+    }
+    by_timer
+        .into_iter()
+        .map(|(t, chans)| (t, chans.into_iter().collect()))
+        .collect()
 }
 
 /// The wired instances of each bus, as `(instance, signal → pin)` maps. One
@@ -758,6 +828,98 @@ fn module_label_sfx(label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pwm_pin(name: &str, f: PinFunction) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = f;
+        p
+    }
+
+    /// The LEDC is ONE peripheral for the whole chip, so `Ledc::new` belongs in
+    /// `main.rs` — a per-timer config module could only build it once, and the
+    /// second timer would have nothing to build from.
+    #[test]
+    fn the_ledc_is_built_once_in_main() {
+        let mut pins = vec![
+            pwm_pin(
+                "GPIO19",
+                PinFunction::TimerPwm {
+                    timer: 0,
+                    channel: 1,
+                },
+            ),
+            pwm_pin(
+                "GPIO18",
+                PinFunction::TimerPwm {
+                    timer: 0,
+                    channel: 2,
+                },
+            ),
+        ];
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let mut timer = BTreeMap::new();
+        let mut cfg = TimerModuleConfig::new(0);
+        cfg.custom_label = "power led".into();
+        timer.insert(0u8, cfg);
+        let code = fresh_esp32c3_main_rs(
+            &refs,
+            &ClockConfig::None,
+            "ESP32-C3",
+            "esp32c3",
+            &no_usart(),
+            &no_spi(),
+            &no_i2c(),
+            &timer,
+            "",
+            EspRuntime::Blocking,
+        );
+        assert_eq!(
+            code.matches("Ledc::new(peripherals.LEDC)").count(),
+            1,
+            "{code}"
+        );
+        assert!(code.contains("use esp_hal::ledc::Ledc;"), "{code}");
+        // The pads keep their own `let … = peripherals.GPIOn;` lines: they are
+        // the only record `parse_main_rs` rebuilds the diagram from.
+        assert!(
+            code.contains("let gpio19_tim0_ch1 = peripherals.GPIO19;"),
+            "{code}"
+        );
+        assert!(
+            code.contains("let gpio18_tim0_ch2 = peripherals.GPIO18;"),
+            "{code}"
+        );
+        // The timer is a NAMED local — the channels borrow it for as long as
+        // they live, so it cannot be a temporary.
+        assert!(
+            code.contains("let lstimer0 = pins::configs::pwm0::timer(&ledc);"),
+            "{code}"
+        );
+        assert!(
+            code.contains(
+                "let mut _pwm0_power_led = pins::configs::pwm0::init(&ledc, &lstimer0, \
+                 gpio19_tim0_ch1, gpio18_tim0_ch2);"
+            ),
+            "{code}"
+        );
+        // No PWM wired → no LEDC at all, and no stray import.
+        pins.clear();
+        pins.push(pwm_pin("GPIO8", PinFunction::GpioOutput));
+        let refs: Vec<&Pin> = pins.iter().collect();
+        let code = fresh_esp32c3_main_rs(
+            &refs,
+            &ClockConfig::None,
+            "ESP32-C3",
+            "esp32c3",
+            &no_usart(),
+            &no_spi(),
+            &no_i2c(),
+            &Default::default(),
+            "",
+            EspRuntime::Blocking,
+        );
+        assert!(!code.contains("Ledc"), "{code}");
+    }
     use crate::panels::mcu_module::clock::graph::NodeState;
     use crate::panels::mcu_module::clock::graph::{GraphClock, esp32c3_graph, esp32c3_layout};
     use crate::panels::mcu_module::codegen::parse_mcu_id;
@@ -794,6 +956,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );
@@ -815,6 +978,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );
@@ -836,6 +1000,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );
@@ -854,6 +1019,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );
@@ -867,6 +1033,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );
@@ -889,6 +1056,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );
@@ -913,6 +1081,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Async,
         );
@@ -945,6 +1114,7 @@ mod tests {
             &no_usart(),
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Async,
         );
@@ -984,6 +1154,7 @@ mod tests {
                 &no_usart(),
                 &no_spi(),
                 &no_i2c(),
+                &Default::default(),
                 "",
                 runtime,
             );
@@ -1057,6 +1228,7 @@ mod tests {
             &usart,
             &no_spi(),
             &no_i2c(),
+            &Default::default(),
             "",
             EspRuntime::Blocking,
         );

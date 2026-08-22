@@ -854,6 +854,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &crate::panels::mcu_module::clock::ClockConfig::None,
             true,
         )
@@ -1637,6 +1638,7 @@ mod tests {
             &mcu.clock,
             "ESP32-C3",
             "esp32c3",
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),

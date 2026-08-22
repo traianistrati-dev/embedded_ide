@@ -36,7 +36,9 @@
 //! Real-compile verified on ESP32-C3 / esp-hal 1.1, both runtimes.
 
 use super::codegen_esp::EspRuntime;
-use super::modules::{I2cModuleConfig, Parity, SpiModuleConfig, StopBits, UsartModuleConfig};
+use super::modules::{
+    I2cModuleConfig, Parity, SpiModuleConfig, StopBits, TimerModuleConfig, UsartModuleConfig,
+};
 use std::collections::BTreeMap;
 
 /// Marker pair bounding the auto-updated half of a config file. Identical to the
@@ -490,6 +492,180 @@ fn i2c_file(n: u8, sigs: &[&str], cfg: Option<&I2cModuleConfig>, rt: EspRuntime)
 /// generated `init` then uses esp-hal's defaults. `rt` decides whether an
 /// `init_async` twin joins each `init`.
 #[allow(clippy::too_many_arguments)]
+/// The LEDC source clock. Fixed at 80 MHz on the ESP32-C3 — `APB_CLK` does not
+/// follow `CpuClock`, so this is a constant and not something read off the
+/// clock config.
+const LEDC_APB_HZ: u32 = 80_000_000;
+
+/// The widest duty resolution `freq_hz` leaves room for, in bits.
+///
+/// Not a free choice: esp-hal computes `divisor = (apb << 8) / freq / 2^bits`
+/// and REFUSES a divisor under 256, so `2^bits` may not exceed `apb / freq`. At
+/// 20 kHz that is 4000, so 11 bits fit and 12 do not — and picking 12 anyway
+/// makes `configure` return `Err(Divisor)` at boot rather than at build time.
+/// Fourteen is the ceiling the ESP32-C3's enum offers.
+pub fn ledc_duty_bits(freq_hz: u32) -> u32 {
+    let ratio = LEDC_APB_HZ / freq_hz.max(1);
+    if ratio == 0 {
+        return 1;
+    }
+    (u32::BITS - ratio.leading_zeros() - 1).clamp(1, 14)
+}
+
+/// `src/pins/configs/pwm{n}.rs`: one LEDC timer and the channels wired to it.
+///
+/// Two functions, not one, and the hardware is the reason: a `Channel` BORROWS
+/// its timer for as long as it lives (`Config { timer: &dyn TimerIFace }`), so
+/// a single `init` returning both would be a self-referential struct. `timer()`
+/// hands the timer back to `main.rs`, which owns it and lends it to `init()`.
+fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> String {
+    let freq = cfg.map_or(1_000, |c| c.freq_hz);
+    let bits = ledc_duty_bits(freq);
+
+    let mut consts = format!("const FREQUENCY_HZ: u32 = {freq};\n");
+    // One `push_str` per line on purpose: rustfmt joins a `\`-continued literal
+    // and keeps the SOURCE indentation, which drops the `//` off every line but
+    // the first — inside a generated file that is a syntax error, not a typo.
+    consts.push_str(
+        "// Duty resolution. Tied to FREQUENCY_HZ: 2^bits must stay under
+",
+    );
+    consts.push_str(
+        "// 80_000_000 / FREQUENCY_HZ (the LEDC runs off the 80 MHz APB
+",
+    );
+    consts.push_str(
+        "// clock), or `configure` returns Err(Divisor). Change one, check
+",
+    );
+    consts.push_str(
+        "// the other.
+",
+    );
+    consts.push_str(&format!(
+        "const DUTY_RESOLUTION: timer::config::Duty = timer::config::Duty::Duty{bits}Bit;\n"
+    ));
+    // esp-hal takes duty in WHOLE percent, so a module set to 7.5 % cannot be
+    // carried across as-is. Say so in the file rather than silently rounding.
+    for (ch, x100) in chans {
+        let pct = (*x100 as u32).div_ceil(100).min(100);
+        consts.push_str(&format!("const DUTY_CH{ch}_PCT: u8 = {pct};"));
+        if x100 % 100 != 0 {
+            consts.push_str(&format!(
+                " // {}.{:02} % rounded up — esp-hal's LEDC takes whole percent",
+                x100 / 100,
+                x100 % 100
+            ));
+        }
+        consts.push('\n');
+    }
+
+    let mut params = String::new();
+    let mut body = String::new();
+    let mut rets = Vec::new();
+    for (ch, _) in chans {
+        params.push_str(&format!("    ch{ch}: impl PeripheralOutput<'d>,\n"));
+        body.push_str(&format!(
+            "    let mut ch{ch} = ledc.channel(channel::Number::Channel{ch}, ch{ch});\n\
+             \x20   ch{ch}\n\
+             \x20       .configure(channel::config::Config {{\n\
+             \x20           timer,\n\
+             \x20           duty_pct: DUTY_CH{ch}_PCT,\n\
+             \x20           drive_mode: DriveMode::PushPull,\n\
+             \x20       }})\n\
+             \x20       .unwrap();\n"
+        ));
+        rets.push(format!("ch{ch}"));
+    }
+    // One channel is a bare value, not a 1-tuple — same rule the STM32 pin
+    // tuples follow, and it keeps the common case readable.
+    let (ret_ty, ret_expr) = if rets.len() == 1 {
+        ("channel::Channel<'d, LowSpeed>".to_owned(), rets[0].clone())
+    } else {
+        (
+            format!(
+                "({})",
+                vec!["channel::Channel<'d, LowSpeed>"; rets.len()].join(", ")
+            ),
+            format!("({})", rets.join(", ")),
+        )
+    };
+
+    let list = chans
+        .iter()
+        .map(|(c, _)| format!("CH{c}"))
+        .collect::<Vec<_>>()
+        .join("+");
+    let handle = format!("_pwm{n}");
+    let func = format!(
+        "/// The LEDC timer PWM{n} runs on. One frequency for every channel on it.\n\
+         ///\n\
+         /// `main.rs` keeps the value alive and lends it to `init` — the channels\n\
+         /// hold a reference to it for as long as they exist.\n\
+         pub fn timer<'d>(ledc: &Ledc<'d>) -> timer::Timer<'d, LowSpeed> {{\n\
+         \x20   let mut t = ledc.timer::<LowSpeed>(timer::Number::Timer{n});\n\
+         \x20   t.configure(timer::config::Config {{\n\
+         \x20       duty: DUTY_RESOLUTION,\n\
+         \x20       clock_source: timer::LSClockSource::APBClk,\n\
+         \x20       frequency: Rate::from_hz(FREQUENCY_HZ),\n\
+         \x20   }})\n\
+         \x20   .unwrap();\n\
+         \x20   t\n\
+         }}\n\
+         \n\
+         /// PWM{n} {list} — the channels wired on the canvas, at their module duty.\n\
+         pub fn init<'d>(\n\
+         \x20   ledc: &Ledc<'d>,\n\
+         \x20   timer: &'d timer::Timer<'d, LowSpeed>,\n\
+         {params}) -> {ret_ty} {{\n\
+         {body}\x20   {ret_expr}\n\
+         }}\n"
+    );
+
+    let first = chans.first().map(|(c, _)| *c).unwrap_or(0);
+    let mut usage = vec![
+        "In main.rs, after the init above:".to_owned(),
+        String::new(),
+        "    // Duty is whole percent, 0..=100.".to_owned(),
+    ];
+    if chans.len() == 1 {
+        usage.push("    {H}.set_duty(50).ok();".to_owned());
+    } else {
+        usage.push(format!("    let (ch{first}, ..) = &{{H}};"));
+        usage.push(format!("    ch{first}.set_duty(50).ok();"));
+    }
+    usage.extend([
+        String::new(),
+        "    // Or let the hardware fade for you — no CPU involved:".to_owned(),
+        if chans.len() == 1 {
+            "    {H}.start_duty_fade(0, 100, 1000).ok();".to_owned()
+        } else {
+            format!("    ch{first}.start_duty_fade(0, 100, 1000).ok();")
+        },
+    ]);
+    let usage: Vec<&str> = usage.iter().map(String::as_str).collect();
+    // The LEDC has no async driver in esp-hal, so both runtimes read the same.
+    let example = example_for(
+        &format!("Using PWM{n}"),
+        &handle,
+        &usage,
+        &usage,
+        EspRuntime::Blocking,
+    );
+
+    file(
+        "use esp_hal::gpio::DriveMode;\n\
+         use esp_hal::gpio::interconnect::PeripheralOutput;\n\
+         use esp_hal::ledc::channel::{self, ChannelIFace};\n\
+         use esp_hal::ledc::timer::{self, TimerIFace};\n\
+         use esp_hal::ledc::{Ledc, LowSpeed};\n\
+         use esp_hal::time::Rate;\n",
+        &consts,
+        &func,
+        &example,
+    )
+}
+
 pub fn config_files(
     uart: &[(u8, Vec<&'static str>)],
     spi: &[(u8, Vec<&'static str>)],
@@ -497,6 +673,10 @@ pub fn config_files(
     usart_cfg: &BTreeMap<u8, UsartModuleConfig>,
     spi_cfg: &BTreeMap<u8, SpiModuleConfig>,
     i2c_cfg: &BTreeMap<u8, I2cModuleConfig>,
+    // LEDC timer → the channels wired on it, with each channel duty in
+    // hundredths of a percent.
+    pwm: &[(u8, Vec<(u8, u16)>)],
+    timer_cfg: &BTreeMap<u8, TimerModuleConfig>,
     rt: EspRuntime,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -511,6 +691,9 @@ pub fn config_files(
     }
     for (n, sigs) in i2c {
         out.push((format!("i2c{n}.rs"), i2c_file(*n, sigs, i2c_cfg.get(n), rt)));
+    }
+    for (n, chans) in pwm {
+        out.push((format!("pwm{n}.rs"), pwm_file(*n, chans, timer_cfg.get(n))));
     }
     out
 }
@@ -655,6 +838,105 @@ mod tests {
         assert!(!spi.contains("{H}.write_async"), "{spi}");
     }
 
+    /// The duty resolution is not a taste question: too many bits and the
+    /// divisor falls under 256, which esp-hal refuses AT BOOT.
+    #[test]
+    fn the_duty_resolution_follows_the_frequency() {
+        // 80 MHz / 20 kHz = 4000, so 2^11 fits and 2^12 does not.
+        assert_eq!(ledc_duty_bits(20_000), 11);
+        // Plenty of room at 1 kHz — capped at what the enum offers.
+        assert_eq!(ledc_duty_bits(1_000), 14);
+        assert_eq!(ledc_duty_bits(50), 14);
+        // And no panic at the far end, where the ratio collapses to nothing.
+        assert_eq!(ledc_duty_bits(40_000_000), 1);
+        assert_eq!(ledc_duty_bits(100_000_000), 1);
+        // Zero is nonsense, not a crash: it reads as "as slow as possible",
+        // so it lands on the widest resolution rather than dividing by zero.
+        assert_eq!(ledc_duty_bits(0), 14);
+    }
+
+    /// The LEDC's shape decides the file's: a `Channel` borrows its timer, so
+    /// the timer cannot be built and returned in the same call.
+    #[test]
+    fn the_timer_and_the_channels_are_separate_functions() {
+        let mut cfg = TimerModuleConfig::new(0);
+        cfg.freq_hz = 20_000;
+        cfg.set_duty_x100(1, 2_000);
+        let f = pwm_file(0, &[(1, 2_000)], Some(&cfg));
+
+        assert!(f.contains("const FREQUENCY_HZ: u32 = 20000;"), "{f}");
+        assert!(
+            f.contains(
+                "const DUTY_RESOLUTION: timer::config::Duty = timer::config::Duty::Duty11Bit;"
+            ),
+            "{f}"
+        );
+        assert!(f.contains("const DUTY_CH1_PCT: u8 = 20;"), "{f}");
+        assert!(
+            f.contains("pub fn timer<'d>(ledc: &Ledc<'d>) -> timer::Timer<'d, LowSpeed>"),
+            "{f}"
+        );
+        assert!(f.contains("timer::Number::Timer0"), "{f}");
+        // The channel takes the timer BY REFERENCE, for its own lifetime.
+        assert!(f.contains("timer: &'d timer::Timer<'d, LowSpeed>,"), "{f}");
+        assert!(f.contains("channel::Number::Channel1"), "{f}");
+        // One channel is a bare value, not a 1-tuple.
+        assert!(f.contains(") -> channel::Channel<'d, LowSpeed> {"), "{f}");
+    }
+
+    /// esp-hal's LEDC takes WHOLE percent. A module set to 7.5 % cannot be
+    /// carried across, so the file says what it did instead of pretending.
+    #[test]
+    fn a_fractional_duty_is_rounded_and_says_so() {
+        let f = pwm_file(0, &[(0, 750)], None);
+        assert!(f.contains("const DUTY_CH0_PCT: u8 = 8;"), "{f}");
+        assert!(
+            f.contains("7.50 % rounded up — esp-hal's LEDC takes whole percent"),
+            "{f}"
+        );
+        // A whole percent gets no note — there is nothing to explain.
+        let f = pwm_file(0, &[(0, 2_000)], None);
+        assert!(f.contains("const DUTY_CH0_PCT: u8 = 20;\n"), "{f}");
+        assert!(!f.contains("rounded up"), "{f}");
+    }
+
+    /// Several channels on one timer come back as a tuple, in channel order.
+    #[test]
+    fn several_channels_come_back_as_a_tuple() {
+        let f = pwm_file(0, &[(0, 1_000), (1, 5_000), (2, 0)], None);
+        assert!(
+            f.contains(
+                ") -> (channel::Channel<'d, LowSpeed>, channel::Channel<'d, LowSpeed>, \
+                 channel::Channel<'d, LowSpeed>) {"
+            ),
+            "{f}"
+        );
+        assert!(f.contains("    (ch0, ch1, ch2)\n"), "{f}");
+        for ch in 0..3 {
+            assert!(f.contains(&format!("channel::Number::Channel{ch}")), "{f}");
+        }
+    }
+
+    /// Every line of the generated file is a line: no `\`-continued literal has
+    /// swallowed a comment marker on its way through rustfmt.
+    #[test]
+    fn no_generated_comment_lost_its_marker() {
+        let f = pwm_file(0, &[(1, 2_000)], None);
+        for line in f.lines() {
+            assert!(
+                !line.starts_with(' ') || line.starts_with("    ") || line.starts_with("     "),
+                "stray indentation: {line:?}"
+            );
+            // A line that starts with whitespace then `//` inside the GENERATED
+            // block is exactly the joined-literal bug.
+            let t = line.trim_start();
+            assert!(
+                !(line != t && t.starts_with("// ") && t.contains("FREQUENCY_HZ")),
+                "comment lost its column: {line:?}"
+            );
+        }
+    }
+
     #[test]
     fn one_file_per_wired_instance() {
         let files = config_files(
@@ -664,9 +946,11 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &[(0, vec![(1, 2_000)])],
+            &BTreeMap::new(),
             EspRuntime::Blocking,
         );
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["uart1.rs", "spi2.rs", "i2c0.rs"]);
+        assert_eq!(names, vec!["uart1.rs", "spi2.rs", "i2c0.rs", "pwm0.rs"]);
     }
 }

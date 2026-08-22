@@ -1305,9 +1305,22 @@ mod emit_for_manual_compile {
             }
         }
         let main_rs = mcu.fresh_main_rs();
+        // The numbers live in the timer's config module now; main.rs only calls
+        // its `init`. Both halves are checked, so neither can quietly go missing.
         assert!(
-            main_rs.contains("20000.Hz()") && main_rs.contains("* 7500 / 10_000"),
-            "the module's frequency and duty must reach the code:\n{main_rs}"
+            main_rs.contains("pins::configs::pwm2::init(dp.TIM2"),
+            "main.rs must call the timer's init:\n{main_rs}"
+        );
+        let pwm2 = mcu
+            .config_files()
+            .into_iter()
+            .find(|(n, _)| n == "pwm2.rs")
+            .map(|(_, b)| b)
+            .unwrap_or_default();
+        assert!(
+            pwm2.contains("const FREQUENCY_HZ: u32 = 20000;")
+                && pwm2.contains("const DUTY_CH3_X100: u32 = 7500;"),
+            "the module's frequency and duty must reach the code:\n{pwm2}"
         );
         // What each peripheral is left asking for once its WIRING has had its
         // say, which is not always what its module says:
@@ -1672,6 +1685,119 @@ mod emit_for_manual_compile {
             .expect("write f1 native project");
         println!("wrote {}", dir.display());
         println!("target: {}", f1.project.target);
+    }
+
+    /// The ESP32-C3, with the LEDC wired. Nothing here is a question of taste:
+    /// the `Channel` borrows its timer, the duty resolution has to leave the
+    /// divisor above 256, and both are things only a compiler settles.
+    ///
+    /// `EIDE_ESP_RUNTIME=async` builds the esp-rtos variant instead;
+    /// `EIDE_ESP_PWM=0,1,2` picks which LEDC channels are wired (default 1).
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 emit_esp32c3_project -- --ignored --nocapture
+    /// cd %TEMP%\eide_esp_check && cargo build --release
+    /// ```
+    #[test]
+    #[ignore = "writes a project to disk for a manual cross-compile"]
+    fn emit_esp32c3_project() {
+        use crate::panels::mcu_module::mcu::model::Runtime;
+        use crate::panels::mcu_module::modules::ModuleConfig;
+
+        let esp = builtin_for("esp32c3").expect("built-in ESP32-C3");
+        let mut mcu = esp.build_mcu();
+        if std::env::var("EIDE_ESP_RUNTIME").as_deref() == Ok("async") {
+            mcu.runtime = Runtime::Async;
+            mcu.pending_runtime = Runtime::Async;
+        }
+        let chans: Vec<u8> = std::env::var("EIDE_ESP_PWM")
+            .unwrap_or_else(|_| "1".into())
+            .split(',')
+            .filter_map(|c| c.trim().parse().ok())
+            .collect();
+
+        let mut want: Vec<(String, PinFunction)> = vec![
+            ("GPIO8".into(), PinFunction::GpioOutput),
+            ("GPIO0".into(), PinFunction::GpioInput),
+            ("GPIO4".into(), PinFunction::UsartTx(1)),
+            ("GPIO5".into(), PinFunction::UsartRx(1)),
+            ("GPIO20".into(), PinFunction::I2cSda(0)),
+            ("GPIO21".into(), PinFunction::I2cScl(0)),
+        ];
+        // One pad per channel, from the top of the range so they cannot collide
+        // with the buses above.
+        for (i, ch) in chans.iter().enumerate() {
+            want.push((
+                format!("GPIO{}", 19 - i),
+                PinFunction::TimerPwm {
+                    timer: 0,
+                    channel: *ch,
+                },
+            ));
+        }
+        for (name, func) in want {
+            let num = mcu
+                .iter_all_pins()
+                .find(|p| p.name == name)
+                .map(|p| p.number);
+            match num.and_then(|n| mcu.find_pin_mut(n)) {
+                Some(p) => p.selected_function = func,
+                None => println!("no pin {name} for {func:?}"),
+            }
+        }
+        mcu.reconcile_modules();
+        for m in &mut mcu.modules {
+            if let ModuleConfig::Timer(c) = &mut m.config {
+                c.freq_hz = 20_000;
+                c.custom_label = "power led".into();
+                for ch in &chans {
+                    c.set_duty_x100(*ch, 2_000);
+                }
+            }
+        }
+
+        let main_rs = mcu.fresh_main_rs();
+        assert!(
+            main_rs.contains("pins::configs::pwm0::init(&ledc"),
+            "no PWM in main.rs:\n{main_rs}"
+        );
+
+        let mut files = project_gen::build_project_files(&esp.project, &esp.toolchain, &main_rs);
+        let configs = mcu.config_files();
+        // What `AppIde::save` computes: the Async runtime pulls esp-rtos and the
+        // executor in, and without them main.rs does not even parse.
+        files.cargo_toml = project_gen::ensure_async_deps(
+            &files.cargo_toml,
+            mcu.runtime == Runtime::Async,
+            project_gen::AsyncFlavor::Esp("esp32c3"),
+            configs
+                .iter()
+                .any(|(n, b)| n.starts_with("uart") && b.contains("init_async")),
+            false,
+            false,
+            &[],
+        );
+        let mut user: Vec<(String, String)> = vec![
+            ("src/pins/mod.rs".into(), "pub mod configs;\n".into()),
+            (
+                "src/pins/configs/mod.rs".into(),
+                configs
+                    .iter()
+                    .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+                    .collect(),
+            ),
+        ];
+        user.extend(
+            configs
+                .into_iter()
+                .map(|(name, body)| (format!("src/pins/configs/{name}"), body)),
+        );
+        let dir = std::env::temp_dir().join("eide_esp_check");
+        let _ = std::fs::remove_dir_all(&dir);
+        project_gen::write_project(&dir, &files, &user, &mcu.mcu_config_text(), "")
+            .expect("write esp project");
+        println!("wrote {}", dir.display());
+        println!("target: {}", esp.project.target);
     }
 
     /// A REAL chip imported from the vendor database, with USART/SPI/I2C all on

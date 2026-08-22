@@ -179,6 +179,7 @@ impl FamilyBackend for Stm32f1Backend {
             &spi,
             &i2c,
             &can,
+            &modules::timer_configs(&mcu.modules),
             &mcu.clock,
             mcu.gpio_native(),
         );
@@ -227,6 +228,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
+    let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::fresh_esp32c3_main_rs(
         &pins_of(mcu),
         &mcu.clock,
@@ -235,6 +237,7 @@ fn esp_fresh_main_rs(mcu: &Mcu, runtime: EspRuntime) -> String {
         &usart,
         &spi,
         &i2c,
+        &timer,
         &mcu.custom_module_inits(),
         runtime,
     )
@@ -252,6 +255,20 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         .filter(|p| !p.reserved && p.selected_function != PinFunction::Unset)
         .collect();
     let (uart, spi_n, i2c_n) = codegen_esp::bus_instances(&configured);
+    // The config file needs the duty per channel, not the pin: the pins stay in
+    // `main.rs` (they are the only record of the wiring) and arrive as `init`
+    // arguments.
+    let timers = modules::timer_configs(&mcu.modules);
+    let pwm: Vec<(u8, Vec<(u8, u16)>)> = codegen_esp::pwm_channels(&configured)
+        .into_iter()
+        .map(|(t, chans)| {
+            let duties = chans
+                .iter()
+                .map(|(c, _)| (*c, timers.get(&t).map_or(0, |cfg| cfg.duty_x100_of(*c))))
+                .collect();
+            (t, duties)
+        })
+        .collect();
     crate::panels::mcu_module::codegen_esp_configs::config_files(
         &uart,
         &spi_n,
@@ -259,6 +276,8 @@ fn esp_config_files(mcu: &Mcu, runtime: EspRuntime) -> Vec<(String, String)> {
         &modules::usart_configs(&mcu.modules),
         &modules::spi_configs(&mcu.modules),
         &modules::i2c_configs(&mcu.modules),
+        &pwm,
+        &timers,
         runtime,
     )
 }
@@ -268,6 +287,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
     let usart = modules::usart_configs(&mcu.modules);
     let spi = modules::spi_configs(&mcu.modules);
     let i2c = modules::i2c_configs(&mcu.modules);
+    let timer = modules::timer_configs(&mcu.modules);
     codegen_esp::update_esp32c3_main_rs(
         existing,
         &pins_of(mcu),
@@ -277,6 +297,7 @@ fn esp_update_main_rs(mcu: &Mcu, existing: &str, runtime: EspRuntime) -> String 
         &usart,
         &spi,
         &i2c,
+        &timer,
         &mcu.custom_module_inits(),
         runtime,
     )
