@@ -122,6 +122,32 @@ change it:
   `GENERATED` block (using each file's own comment style — `//`, `#`, `/* */`),
   and anything you add outside is kept when the block is regenerated.
 
+### Checking that the generated code builds
+
+Unit tests can tell you the generator produced the *text* you expected. Only a
+compiler can tell you that text is a program. `scripts/verify-codegen.ps1`
+emits a matrix of configurations and cross-compiles each one:
+
+```powershell
+pwsh scripts/verify-codegen.ps1              # representative subset
+pwsh scripts/verify-codegen.ps1 -Full        # every case
+pwsh scripts/verify-codegen.ps1 -Warnings    # treat warnings as failures too
+```
+
+It covers each runtime (Blocking, RTIC, Native, and Async where it is inert) and
+each half-wired shape — a bus with one pad missing, a SPI without MISO, a USB
+with one data pin — because those are the paths that break without anyone
+noticing: the peripheral you configured simply does not appear in `main.rs`, or
+appears naming a binding that was never declared.
+
+Adding a case is one row in the script's `$CASES` table. The emit harnesses
+themselves are `#[ignore]`d tests (`cargo test <name> -- --ignored`) that print
+`wrote <path>` and `target: <triple>`; the script reads those lines rather than
+keeping its own copy of where anything lands.
+
+Cross-compiling needs the chip's target installed, e.g.
+`rustup target add thumbv7m-none-eabi`.
+
 ---
 
 ## Code editor
