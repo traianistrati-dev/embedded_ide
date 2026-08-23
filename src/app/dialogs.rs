@@ -1463,3 +1463,89 @@ mod feature_verdict_tests {
         assert_eq!(feature_verdict("stm32f411re", Some(&[])), FeatureVerdict::Missing);
     }
 }
+
+    /// Every route that puts a chip definition into the registry must have
+    /// decided about its HAL feature — or be listed here as knowingly exempt.
+    ///
+    /// Written after getting this wrong TWICE in one afternoon, in opposite
+    /// directions: first "the check does not exist", then "chip search does not
+    /// call it". Both were reasoning about which function delegates to which,
+    /// and both were wrong. This answers the question by reading the source
+    /// instead, and it fails the day a fourth route is added — which is when
+    /// nobody will be thinking about the third.
+    #[test]
+    fn every_import_route_decides_about_the_hal_feature() {
+        // fn name -> why it does not check. Anything not here must check.
+        const EXEMPT: &[(&str, &str)] = &[
+            (
+                "show_mcu_form_dialog",
+                "the user typed the dependency line themselves, in the form",
+            ),
+            (
+                "save_clock_to_definition",
+                "re-saves a chip already in the registry; the dep line is untouched",
+            ),
+            (
+                "show_new_project_dialog",
+                "imports someone else's .ron - the dep line is theirs, and is NOT verified today",
+            ),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+        let mut files = vec![root.join("dialogs.rs"), root.join("mcu_form_dialog.rs")];
+        files.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"));
+
+        let mut unchecked: Vec<String> = Vec::new();
+        for path in files {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            // (line, name) of every `fn`, in order — the owner of a call is the
+            // last one declared before it.
+            let fns: Vec<(usize, String)> = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(i, l)| {
+                    let rest = l.trim_start().split_once("fn ")?.1;
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    (!name.is_empty()).then_some((i, name))
+                })
+                .collect();
+
+            for (i, line) in lines.iter().enumerate() {
+                if !(line.contains("registry::merge_def(")
+                    || line.contains("registry::save_definition("))
+                {
+                    continue;
+                }
+                let Some((start, name)) = fns.iter().rev().find(|(f, _)| *f < i) else {
+                    continue;
+                };
+                if EXEMPT.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                let end = fns
+                    .iter()
+                    .find(|(f, _)| f > start)
+                    .map_or(lines.len(), |(f, _)| *f);
+                if !lines[*start..end].iter().any(|l| l.contains("feature_verdict")) {
+                    unchecked.push(format!(
+                        "{}:{}  fn {name} stores a definition without checking its HAL feature",
+                        path.file_name().unwrap().to_string_lossy(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+        assert!(
+            unchecked.is_empty(),
+            "a chip can reach the registry without its embassy feature being \
+             checked.\nEither call `feature_verdict`, or add the function to \
+             EXEMPT with the reason:\n{}",
+            unchecked.join("\n")
+        );
+    }
