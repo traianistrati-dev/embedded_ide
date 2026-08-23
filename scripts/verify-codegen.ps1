@@ -96,6 +96,11 @@ $CASES = @(
     # be wrong: esp-hal bindings, and the esp-rtos scheduler on the async one.
     @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ ESP_ASYNC_RUNTIME = "blocking" }; q = $true }
     @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{};                       q = $true }
+    # The harness wires ONE LEDC channel by default, so the two cases above only
+    # ever reach the single-channel shape. Two channels is a different file: the
+    # return type becomes a tuple, and the duty trait addresses it by POSITION,
+    # which is not the channel number.
+    @{ n = "ESP32-C3, two PWM channels";   t = "emit_esp32c3_project";       e = @{ EIDE_ESP_PWM = "0,2" }; q = $true }
 
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
@@ -109,11 +114,22 @@ $CASES = @(
     # machine without the database is a normal machine.
     @{ n = "imported chip, async DMA";     t = "emit_imported_dma_project";  e = @{}; q = $true; p = $CUBE_DB }
     @{ n = "imported chip, comparators";   t = "emit_comp_project";          e = @{}; q = $true; p = $CUBE_DB }
+
+    # Not a project: a VERDICT (`v`). STM32WL30 is the chip the import preflight
+    # was written for — `embassy-stm32` publishes no `stm32wl3*` feature, its
+    # clock tree is an architecture no recipe can read, and its DMA channels
+    # only appeared once `parse_value` started reading the vendor's own range.
+    # It cannot be cross-compiled BECAUSE of the first of those, so what is
+    # pinned here is the verdict itself, with G071 alongside as the control.
+    # This case fails the day a `stm32wl3` recipe lands and the answer has to
+    # change — which is the only way anyone would remember to change it.
+    @{ n = "WL30 preflight verdict";       t = "wl30_is_the_chip_this_preflight_exists_for"; e = @{}; q = $true; p = $CUBE_DB; v = $true }
 )
 
 # Every knob any case sets, so one case cannot leak into the next.
 $KNOBS = @("EIDE_F1_DMA", "EIDE_SPI_TXONLY", "EIDE_USART_HALF", "EIDE_I2C_HALF",
-           "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME", "ESP_ASYNC_RUNTIME")
+           "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME", "ESP_ASYNC_RUNTIME",
+           "EIDE_ESP_PWM")
 
 $cases = if ($Full) { $CASES } else { $CASES | Where-Object { $_.q } }
 Write-Host ("running {0} of {1} cases{2}" -f $cases.Count, $CASES.Count,
@@ -141,6 +157,14 @@ foreach ($c in $cases) {
     # nothing" — a wrong diagnosis pointing at the wrong file.
     if (-not ($out | Select-String -Pattern "test result: ok\. [1-9]")) {
         $results += [pscustomobject]@{ Case = $c.n; Status = "NO SUCH TEST"; Detail = "cargo ran 0 tests for filter '$($c.t)'" }
+        continue
+    }
+
+    # A verdict case has nothing to build: the two checks above — the test ran,
+    # and it did not fail — ARE the case. Everything below is about projects.
+    if ($c.v) {
+        $results += [pscustomobject]@{ Case = $c.n; Status = "ok (verdict)"; Detail = "" }
+        Write-Host ("  {0,-34} ok (verdict)" -f $c.n) -ForegroundColor Green
         continue
     }
 
@@ -217,6 +241,6 @@ if ($bad) {
 }
 $skipped = @($results | Where-Object { $_.Status -eq "skipped" })
 $ran = $results.Count - $skipped.Count
-Write-Host ("all {0} cases compile{1}" -f $ran,
+Write-Host ("all {0} cases pass{1}" -f $ran,
     $(if ($skipped) { " ($($skipped.Count) skipped)" } else { "" })) -ForegroundColor Green
 exit 0

@@ -1328,11 +1328,17 @@ impl AppIde {
 
                         // Last import result (persists until the popup closes).
                         if let Some(msg) = &self.mcu_import_status {
-                            let ok = msg.starts_with(ph::CHECK);
-                            let col = if ok {
-                                egui::Color32::from_rgb(120, 200, 120)
-                            } else {
+                            // Three outcomes, not two. The gap report is APPENDED
+                            // to a message that starts with the tick, so keying
+                            // the colour on the first glyph alone painted "2
+                            // chip(s) imported with gaps" in success green — the
+                            // one line the user most needs to stop and read.
+                            let col = if !msg.starts_with(ph::CHECK) {
                                 egui::Color32::from_rgb(220, 120, 90)
+                            } else if msg.contains(ph::WARNING) {
+                                egui::Color32::from_rgb(230, 190, 90)
+                            } else {
+                                egui::Color32::from_rgb(120, 200, 120)
                             };
                             ui.add_space(2.0);
                             ui.label(egui::RichText::new(msg).size(11.0).color(col));
@@ -1692,8 +1698,12 @@ mod chip_gaps_tests {
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".xml"))
             }) else {
-                println!("no {prefix} in this installation — skipped");
-                continue;
+                // NOT a skip. The database is present (the matrix gates this
+                // case on that), so a part missing from it means the search is
+                // wrong, or the installation is too old to answer the question
+                // this test is named after. Passing quietly would report a
+                // verdict nobody checked.
+                panic!("{prefix} is not in the database at {}", src.chips.display());
             };
             let xml = std::fs::read_to_string(file).unwrap();
             let family = convert_xml(&xml).unwrap()[0].form.family.clone();

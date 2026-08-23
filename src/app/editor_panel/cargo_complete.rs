@@ -1504,3 +1504,53 @@ foo = \"1\"
         }
     }
 }
+
+#[cfg(test)]
+mod unknowable_lookup_tests {
+    use super::*;
+
+    /// The composition `known_features` performs, on a body the index did not
+    /// really give us.
+    fn features_for(body: &str, req: &str) -> Option<Vec<String>> {
+        let data = parse_index(body);
+        let version = pick_version(&data.versions, Some(req))?;
+        data.features.get(version).cloned()
+    }
+
+    /// An unreadable answer must come back as `None`, NEVER as `Some(vec![])`.
+    ///
+    /// The difference is the whole import preflight. `None` means "we could not
+    /// check", which the report says out loud; `Some(vec![])` means "the crate
+    /// publishes no such feature", which would put a false "no HAL support" on
+    /// every chip imported behind a captive portal or a proxy that answers 200
+    /// with a login page. A false alarm on every import is worse than the
+    /// missing warning this check was added to fix.
+    #[test]
+    fn an_unreadable_index_answer_is_unknowable_not_empty() {
+        for body in [
+            "",
+            "   \n\n  ",
+            "<html><body>Sign in to continue</body></html>",
+            // Valid JSON, but not an index entry.
+            r#"{"message":"rate limited"}"#,
+            // An entry whose only version is yanked: nothing left to match.
+            r#"{"vers":"0.6.0","features":{"stm32g071cb":[]},"yanked":true}"#,
+        ] {
+            assert_eq!(
+                features_for(body, "0.6"),
+                None,
+                "this body must be unknowable, not an empty feature list: {body:?}"
+            );
+        }
+    }
+
+    /// And the control: a real-shaped entry DOES answer, so the test above is
+    /// pinning the failure path rather than a parser that never works.
+    #[test]
+    fn a_real_index_entry_still_answers() {
+        let body = r#"{"vers":"0.6.0","features":{"stm32g071cb":[],"time":[]}}"#;
+        let f = features_for(body, "0.6").expect("a well-formed entry answers");
+        assert!(f.contains(&"stm32g071cb".to_owned()), "{f:?}");
+        assert!(!f.contains(&"stm32wl30kb".to_owned()), "{f:?}");
+    }
+}
