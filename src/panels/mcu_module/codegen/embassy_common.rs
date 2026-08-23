@@ -248,9 +248,46 @@ mod emit_for_manual_compile {
     use crate::panels::mcu_module::pins::logic::pin_function::PinFunction;
     use crate::panels::mcu_module::{project_gen, stm32_pin_data};
 
+    /// Say something when a codegen matrix run is in progress.
+    ///
+    /// These harnesses REWRITE fixed directories under the temp dir, and the
+    /// matrix cross-compiles those same directories. Running one by hand during
+    /// a matrix run corrupts both, and the damage does not read as concurrency:
+    /// it comes out as `could not write output`, `failed to write fingerprint`,
+    /// `link.exe: 1104` — errors that look like a codegen regression and point
+    /// at the wrong file. That is exactly how the first of two collisions in one
+    /// evening happened.
+    ///
+    /// A WARNING, not a wait: whoever runs a single emit test should not be held
+    /// for the twenty-odd minutes a matrix takes. The matrix sets
+    /// `EIDE_MATRIX_RUN` for the harnesses it drives itself, so its own runs
+    /// stay quiet.
+    ///
+    /// The probe is Windows-shaped on purpose. The script holds the lock with no
+    /// sharing, so a plain write-open fails here and succeeds on unix, where
+    /// there is no mandatory locking — and the matrix is a PowerShell script, so
+    /// staying silent there costs nothing.
+    fn warn_if_matrix_running() {
+        if std::env::var_os("EIDE_MATRIX_RUN").is_some() {
+            return;
+        }
+        let lock = std::env::temp_dir().join("eide-codegen-matrix.lock");
+        if !lock.exists() || std::fs::OpenOptions::new().write(true).open(&lock).is_ok() {
+            return;
+        }
+        for line in [
+            "a codegen matrix run is holding the lock RIGHT NOW",
+            "this harness rewrites the very projects it is cross-compiling",
+            "both runs will report errors that look like codegen bugs",
+            "wait for it to finish, or expect to re-run both",
+        ] {
+            eprintln!("!!! {line}");
+        }
+    }
     #[test]
     #[ignore = "writes a project to disk for a manual cross-compile"]
     fn emit_embassy_project() {
+        warn_if_matrix_running();
         // No embassy chip is bundled (the two built-ins are F1 and ESP32-C3), so
         // build the F411 the XML importer would: same pin data, the family and
         // dependency line an import produces.
@@ -976,6 +1013,7 @@ mod emit_for_manual_compile {
     #[test]
     #[ignore = "needs the STM32Cube database, writes a project for a manual cross-compile"]
     fn emit_comp_project() {
+        warn_if_matrix_running();
         use crate::panels::mcu_module::codegen::{dma_data, nvic};
         use crate::panels::mcu_module::comparator::{
             self, CompConfig, Hysteresis, InvertingInput, PowerMode,
@@ -1156,6 +1194,7 @@ mod emit_for_manual_compile {
     #[test]
     #[ignore = "writes a project to disk for a manual cross-compile"]
     fn emit_f1_dma_project() {
+        warn_if_matrix_running();
         use crate::panels::mcu_module::modules::ModuleConfig;
         use crate::panels::mcu_module::modules::model::BlockingDma;
 
@@ -1488,6 +1527,7 @@ mod emit_for_manual_compile {
     #[test]
     #[ignore = "writes a project to disk for a manual cross-compile"]
     fn emit_f1_rtic_project() {
+        warn_if_matrix_running();
         use crate::panels::mcu_module::mcu::model::Runtime;
         use crate::panels::mcu_module::modules::ModuleConfig;
         use crate::panels::mcu_module::pins::logic::pin::Edge;
@@ -1601,6 +1641,7 @@ mod emit_for_manual_compile {
     #[test]
     #[ignore = "writes a project to disk for a manual cross-compile"]
     fn emit_f1_native_project() {
+        warn_if_matrix_running();
         use crate::panels::mcu_module::mcu::model::Runtime;
         use crate::panels::mcu_module::modules::ModuleConfig;
 
@@ -1710,6 +1751,7 @@ mod emit_for_manual_compile {
     #[test]
     #[ignore = "writes a project to disk for a manual cross-compile"]
     fn emit_esp32c3_project() {
+        warn_if_matrix_running();
         use crate::panels::mcu_module::mcu::model::Runtime;
         use crate::panels::mcu_module::modules::ModuleConfig;
 
@@ -1825,6 +1867,7 @@ mod emit_for_manual_compile {
     #[test]
     #[ignore = "needs the STM32Cube database, writes a project for a manual cross-compile"]
     fn emit_imported_dma_project() {
+        warn_if_matrix_running();
         use crate::panels::mcu_module::codegen::dma_data;
         use crate::panels::mcu_module::modules::{AsyncBusMode, ModuleConfig, UsartMode};
 

@@ -49,6 +49,51 @@ if ($leaked) {
         $leaked.Count, ($leaked.Name -join ", ")) -ForegroundColor DarkYellow
 }
 
+# ONE run at a time, machine-wide.
+#
+# Every case writes to a FIXED directory under %TEMP%, so two runs share one
+# `target/` and tear each other's artifacts apart. The damage does not look like
+# concurrency: it surfaces as `could not write output`, `failed to write dep
+# info`, `failed to write fingerprint`, `link.exe: 1104` — six "ERRORS" that
+# read as a codegen regression and point at the wrong file entirely.
+#
+# Not hypothetical, and not rare either: it happened twice in one evening, the
+# second time because a `git push` fired the pre-push hook while a run was
+# already going. Anyone with the hook installed can trigger it without knowing
+# a run exists.
+#
+# WAIT rather than refuse: this runs inside a pre-push hook, and a hook that
+# exits non-zero ABORTS THE PUSH. Making someone's push fail because a matrix
+# was running is a worse answer than making it wait.
+#
+# The lock is an OS file handle, so it is released even if this script is killed
+# — the same reason `src/workspace.rs` locks that way rather than with a
+# pid file.
+$lockPath = Join-Path $env:TEMP "eide-codegen-matrix.lock"
+$script:lock = $null
+$waited = 0
+while (-not $script:lock) {
+    try {
+        $script:lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
+    } catch {
+        if ($waited -eq 0) {
+            Write-Host "another codegen matrix run holds $lockPath - waiting for it" -ForegroundColor DarkYellow
+        }
+        if ($waited -ge 2400) {
+            Write-Host "gave up after 40 min waiting for $lockPath" -ForegroundColor Red
+            exit 1
+        }
+        Start-Sleep -Seconds 5
+        $waited += 5
+    }
+}
+if ($waited -gt 0) { Write-Host ("waited {0}s for the lock" -f $waited) -ForegroundColor DarkYellow }
+
+# The harnesses warn when they find this lock held, because running one by hand
+# during a matrix run corrupts both. Our own children are exactly the case that
+# is fine, so tell them so.
+$env:EIDE_MATRIX_RUN = "1"
+
 # Where the STM32Cube database is, if it is anywhere. The two importer cases
 # need it; everything else is built from definitions bundled in the repo.
 $CUBE_DB = if ($env:EIDE_CUBE_DB) { $env:EIDE_CUBE_DB }
