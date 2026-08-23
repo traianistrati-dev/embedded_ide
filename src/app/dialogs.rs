@@ -730,22 +730,20 @@ impl AppIde {
         let mut skipped = 0usize;
         let mut last_id: Option<String> = None;
         let mut first_err: Option<String> = None;
-        // Chip features that `embassy-stm32` does not publish. The dependency
-        // line is DERIVED from the part number, so a part the crate doesn't
-        // support (or a name our derivation gets wrong) produces a manifest
-        // cargo cannot resolve — which kills rust-analyzer for the whole project
-        // and used to surface only as "failed to select a version". Checking here
-        // turns that into a sentence at import time. One index lookup per import,
-        // cached below.
-        let mut bad_features: Vec<String> = Vec::new();
-        // Chips whose feature could NOT be checked, because the index was not
-        // readable — offline, or past the 4 s timeout this runs under on the UI
-        // thread. Counted rather than passed over: "we could not check" and
-        // "it is fine" are different answers, and reporting the first as the
-        // second is how a chip whose feature does not exist arrives looking
-        // verified. That is what happened to an STM32WL30 import, where
-        // embassy-stm32 publishes no `stm32wl3*` feature at all.
-        let mut unverified_features = 0usize;
+        // Everything an imported chip arrives missing, per chip, in ONE verdict:
+        // a HAL chip feature `embassy-stm32` does not publish, a clock tree no
+        // RCC recipe can turn into code, or no DMA channels at all.
+        //
+        // One list rather than three counters because STM32WL30 had all three at
+        // once and the import reported none of them — each was found separately,
+        // in generated code, days apart. A chip that fails every check should say
+        // so in one sentence, at the moment it is imported.
+        //
+        // The HAL half costs one index lookup per import, cached below; when the
+        // index is unreadable (offline, or past the 4 s timeout this runs under
+        // on the UI thread) the verdict is `Unverified`, which is its own line —
+        // "we could not check" and "it is fine" are different answers.
+        let mut gap_chips: Vec<String> = Vec::new();
         // GPIO IP version -> its AF table (None = the file was not found).
         let mut af_tables: std::collections::HashMap<
             String,
@@ -859,21 +857,36 @@ impl AppIde {
                                 crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc.clone());
                             clocks += 1;
                         }
-                        if let Some(feat) = stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
+                        let hal = match stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
                         {
-                            let known = embassy_features.get_or_insert_with(|| {
-                                crate::app::editor_panel::cargo_complete::known_features(
-                                    stm32_pin_data::EMBASSY_CRATE,
-                                    stm32_pin_data::EMBASSY_VERSION,
-                                )
-                            });
-                            match feature_verdict(feat, known.as_deref()) {
-                                FeatureVerdict::Missing => {
-                                    bad_features.push(format!("{} ({feat})", def.display_name));
-                                }
-                                FeatureVerdict::Unverified => unverified_features += 1,
-                                FeatureVerdict::Present => {}
+                            Some(feat) => {
+                                let known = embassy_features.get_or_insert_with(|| {
+                                    crate::app::editor_panel::cargo_complete::known_features(
+                                        stm32_pin_data::EMBASSY_CRATE,
+                                        stm32_pin_data::EMBASSY_VERSION,
+                                    )
+                                });
+                                feature_verdict(feat, known.as_deref())
                             }
+                            // No embassy feature in the HAL line at all (STM32F1
+                            // uses `stm32f1xx-hal`): nothing to check, nothing
+                            // missing.
+                            None => FeatureVerdict::Present,
+                        };
+                        // `to_config` rather than the XML tree: an F1 chip carries
+                        // `ClockDef::Stm32f1` and generates clock code even though
+                        // `convert_xml` gave it nothing, and reporting that as a
+                        // gap would be a false alarm on the family that works best.
+                        let gaps = chip_gaps(
+                            &hal,
+                            crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                                &def.family,
+                                &def.clock.to_config(&def.clock_limits),
+                            ),
+                            def.dma.as_ref().map_or(0, |d| d.channels.len()),
+                        );
+                        if !gaps.is_empty() {
+                            gap_chips.push(format!("{} ({})", def.display_name, gaps.join(", ")));
                         }
                         match registry::save_definition(&def) {
                             Ok(_) => {
@@ -933,35 +946,26 @@ impl AppIde {
                     unbound_ids.join(", ")
                 ));
             }
-            if !bad_features.is_empty() {
-                // Named here, at import, because the alternative is finding out
-                // when a project on that chip refuses to load.
-                let shown: Vec<&str> = bad_features.iter().take(3).map(String::as_str).collect();
+            if !gap_chips.is_empty() {
+                // Named here, at import, because every alternative is worse: the
+                // HAL gap surfaces as a project that will not resolve, the clock
+                // gap as commented-out code in `main.rs`, and the DMA gap as a
+                // `DMA_TX_TODO` placeholder — three separate mysteries, none of
+                // which names the chip as the cause.
+                let shown: Vec<&str> = gap_chips.iter().take(3).map(String::as_str).collect();
                 msg.push_str(&format!(
-                    "\n{}  {} chip(s) ask for an {} feature that version {} does not \
-                     publish: {}{}. A project on one of these will not resolve — fix \
-                     the HAL line in its Cargo.toml.",
+                    "
+{}  {} chip(s) imported with gaps — a project on one of these will                      not fully build: {}{}. HAL features checked against {} {}.",
                     ph::WARNING,
-                    bad_features.len(),
-                    stm32_pin_data::EMBASSY_CRATE,
-                    stm32_pin_data::EMBASSY_VERSION,
-                    shown.join(", "),
-                    if bad_features.len() > shown.len() {
-                        ", …"
+                    gap_chips.len(),
+                    shown.join(" | "),
+                    if gap_chips.len() > shown.len() {
+                        " | …"
                     } else {
                         ""
-                    }
-                ));
-            }
-            if unverified_features > 0 {
-                msg.push_str(&format!(
-                    "\n{}  {} chip(s) could NOT be checked against the {} index \
-                     (offline, or the lookup timed out) — their HAL feature may \
-                     not exist. Re-import with a connection, or check the \
-                     features = [..] line in the project's Cargo.toml.",
-                    ph::WARNING,
-                    unverified_features,
+                    },
                     stm32_pin_data::EMBASSY_CRATE,
+                    stm32_pin_data::EMBASSY_VERSION,
                 ));
             }
             msg
@@ -1178,33 +1182,37 @@ impl AppIde {
                                                 let name = def.display_name.clone();
                                                 let fam = def.family.clone();
                                                 // Checked here too, though the line came from
-                                                // someone else's file: whoever wrote it, a feature
-                                                // the crate does not publish fails the same way for
-                                                // the person importing it. "It is their file"
-                                                // explains where the line came from; it does not
-                                                // help the user whose project will not resolve.
-                                                let feat_note = match stm32_pin_data::embassy_feature_in(
+                                                // someone else's file: whoever wrote it, a chip the
+                                                // crate does not publish, whose tree makes no clock
+                                                // code, or that has no DMA channels fails the same
+                                                // way for the person importing it. "It is their
+                                                // file" explains where it came from; it does not
+                                                // help the user whose project will not build.
+                                                let hal = match stm32_pin_data::embassy_feature_in(
                                                     &def.project.hal_dep,
                                                 ) {
-                                                    None => String::new(),
-                                                    Some(feat) => {
-                                                        let known = crate::app::editor_panel::cargo_complete::known_features(
+                                                    Some(feat) => feature_verdict(
+                                                        feat,
+                                                        crate::app::editor_panel::cargo_complete::known_features(
                                                             stm32_pin_data::EMBASSY_CRATE,
                                                             stm32_pin_data::EMBASSY_VERSION,
-                                                        );
-                                                        match feature_verdict(feat, known.as_deref()) {
-                                                            FeatureVerdict::Present => String::new(),
-                                                            FeatureVerdict::Missing => format!(
-                                                                " — {} does not publish the feature '{feat}'; \
-                                                                 a project on this chip will not resolve",
-                                                                stm32_pin_data::EMBASSY_CRATE
-                                                            ),
-                                                            FeatureVerdict::Unverified => format!(
-                                                                " — could not check its '{feat}' feature \
-                                                                 (offline?); verify the HAL line before building"
-                                                            ),
-                                                        }
-                                                    }
+                                                        )
+                                                        .as_deref(),
+                                                    ),
+                                                    None => FeatureVerdict::Present,
+                                                };
+                                                let gaps = chip_gaps(
+                                                    &hal,
+                                                    crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                                                        &def.family,
+                                                        &def.clock.to_config(&def.clock_limits),
+                                                    ),
+                                                    def.dma.as_ref().map_or(0, |d| d.channels.len()),
+                                                );
+                                                let feat_note = if gaps.is_empty() {
+                                                    String::new()
+                                                } else {
+                                                    format!(" — {}", gaps.join("; "))
                                                 };
                                                 registry::merge_def(&mut self.mcu_registry, def);
                                                 self.pending_mcu_id = Some(id);
@@ -1578,3 +1586,150 @@ mod feature_verdict_tests {
             unchecked.join("\n")
         );
     }
+
+/// Everything about a chip that will not work, in one list.
+///
+/// Three independent gaps, and the STM32WL30 that started this had all three at
+/// once: `embassy-stm32` publishes no `stm32wl3*` feature, its RCC is a
+/// different architecture so no clock reaches `main.rs`, and its single global
+/// `DMA_IRQn` yielded no channels. The import reported none of them, so they
+/// were found one at a time, in generated code, over two days.
+///
+/// Pure and primitive-taking on purpose: the callers already hold these three
+/// facts, and a function that took a definition would need a network lookup to
+/// be testable.
+pub(super) fn chip_gaps(hal: &FeatureVerdict, clock_generates: bool, dma_channels: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    match hal {
+        FeatureVerdict::Missing => out.push("no HAL support (the crate publishes no such chip feature)".into()),
+        FeatureVerdict::Unverified => out.push("HAL feature unverified (offline?)".into()),
+        FeatureVerdict::Present => {}
+    }
+    if !clock_generates {
+        out.push("no clock code (its tree cannot be turned into an RCC config)".into());
+    }
+    if dma_channels == 0 {
+        out.push("no DMA channels found for it".into());
+    }
+    out
+}
+
+#[cfg(test)]
+mod chip_gaps_tests {
+    use super::*;
+
+    #[test]
+    fn a_chip_with_everything_reports_nothing() {
+        assert!(chip_gaps(&FeatureVerdict::Present, true, 8).is_empty());
+    }
+
+    /// The WL30 case, which is why this exists: three gaps, and the import used
+    /// to mention none of them.
+    #[test]
+    fn all_three_gaps_are_reported_together() {
+        let g = chip_gaps(&FeatureVerdict::Missing, false, 0);
+        assert_eq!(g.len(), 3, "{g:?}");
+        assert!(g[0].contains("no HAL support"), "{g:?}");
+        assert!(g[1].contains("no clock code"), "{g:?}");
+        assert!(g[2].contains("no DMA"), "{g:?}");
+    }
+
+    /// "Could not check" is its own line, never silence and never a clean bill.
+    #[test]
+    fn an_unverified_feature_is_still_said_out_loud() {
+        let g = chip_gaps(&FeatureVerdict::Unverified, true, 4);
+        assert_eq!(g.len(), 1);
+        assert!(g[0].contains("unverified"), "{g:?}");
+    }
+
+    /// The two halves that can be checked WITHOUT the network, run against the
+    /// real vendor database: STM32WL30 must show both gaps, and a control chip
+    /// neither.
+    ///
+    /// This is the case that motivated the whole preflight. Its clock tree is a
+    /// different architecture (`PLL64RC` / `ROOTClkSource` / `SYSCLKDIV`, no
+    /// `sw` or `ahb` node) so `generic_recipe` declines it, and it has no family
+    /// recipe either — the generated `main.rs` kept a commented skeleton. The
+    /// DMA half is here as a REGRESSION guard the other way round: WL30 had 0
+    /// channels until `parse_value` started reading the vendor's own range, and
+    /// a test asserting "WL30 has no channels" would now be asserting the bug.
+    ///
+    /// Ignored because it needs the database:
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 wl30_is_the_chip_this_preflight_exists_for -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs the STM32Cube database"]
+    fn wl30_is_the_chip_this_preflight_exists_for() {
+        use crate::panels::mcu_module::chip_sources;
+        use crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml;
+        use crate::panels::mcu_module::clock::model::ClockConfig;
+        use crate::panels::mcu_module::codegen::rcc::generates_clock_code_for;
+        use crate::panels::mcu_module::stm32_pin_data::convert_xml;
+
+        let Some(src) = chip_sources::all_sources()
+            .into_iter()
+            .find(|s| s.has_clock())
+        else {
+            println!("no CubeMX installation — nothing checked");
+            return;
+        };
+        let db = src.db.as_deref().unwrap();
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&src.chips)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        let mut cache = std::collections::HashMap::new();
+
+        // (prefix, expected clock code, expected "has DMA channels")
+        for (prefix, want_clock, want_dma) in
+            [("STM32WL30", false, true), ("STM32G071", true, true)]
+        {
+            let Some(file) = files.iter().find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".xml"))
+            }) else {
+                println!("no {prefix} in this installation — skipped");
+                continue;
+            };
+            let xml = std::fs::read_to_string(file).unwrap();
+            let family = convert_xml(&xml).unwrap()[0].form.family.clone();
+
+            let clock = match graph_for_chip_xml(db, &xml, &family) {
+                Ok((gc, _)) => ClockConfig::Graph(gc),
+                // No tree at all is itself a clock gap, not a test failure.
+                Err(e) => {
+                    println!("  no tree: {e}");
+                    ClockConfig::None
+                }
+            };
+            let has_clock = generates_clock_code_for(&family, &clock);
+            let channels = dma_def_channels(&xml, file, &mut cache);
+            println!("{prefix} ({family}): clock={has_clock} dma_channels={channels}");
+
+            assert_eq!(has_clock, want_clock, "{prefix} clock verdict");
+            assert_eq!(channels > 0, want_dma, "{prefix} DMA verdict ({channels})");
+
+            // And the verdict the import actually prints, built from those two.
+            let gaps = chip_gaps(&FeatureVerdict::Present, has_clock, channels);
+            println!("  gaps: {gaps:?}");
+            assert_eq!(gaps.is_empty(), want_clock && want_dma);
+        }
+    }
+
+    /// `dma_def_for` wants the chip directory, not the file.
+    fn dma_def_channels(
+        xml: &str,
+        file: &std::path::Path,
+        cache: &mut std::collections::HashMap<
+            String,
+            Option<crate::panels::mcu_module::mcu_def::DmaDef>,
+        >,
+    ) -> usize {
+        crate::panels::mcu_module::codegen::dma_data::dma_def_for(xml, file.parent(), cache)
+            .map_or(0, |d| d.channels.len())
+    }
+}
