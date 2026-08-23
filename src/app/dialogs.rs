@@ -1177,6 +1177,35 @@ impl AppIde {
                                                 let id = def.id.clone();
                                                 let name = def.display_name.clone();
                                                 let fam = def.family.clone();
+                                                // Checked here too, though the line came from
+                                                // someone else's file: whoever wrote it, a feature
+                                                // the crate does not publish fails the same way for
+                                                // the person importing it. "It is their file"
+                                                // explains where the line came from; it does not
+                                                // help the user whose project will not resolve.
+                                                let feat_note = match stm32_pin_data::embassy_feature_in(
+                                                    &def.project.hal_dep,
+                                                ) {
+                                                    None => String::new(),
+                                                    Some(feat) => {
+                                                        let known = crate::app::editor_panel::cargo_complete::known_features(
+                                                            stm32_pin_data::EMBASSY_CRATE,
+                                                            stm32_pin_data::EMBASSY_VERSION,
+                                                        );
+                                                        match feature_verdict(feat, known.as_deref()) {
+                                                            FeatureVerdict::Present => String::new(),
+                                                            FeatureVerdict::Missing => format!(
+                                                                " — {} does not publish the feature '{feat}'; \
+                                                                 a project on this chip will not resolve",
+                                                                stm32_pin_data::EMBASSY_CRATE
+                                                            ),
+                                                            FeatureVerdict::Unverified => format!(
+                                                                " — could not check its '{feat}' feature \
+                                                                 (offline?); verify the HAL line before building"
+                                                            ),
+                                                        }
+                                                    }
+                                                };
                                                 registry::merge_def(&mut self.mcu_registry, def);
                                                 self.pending_mcu_id = Some(id);
                                                 let note = if codegen::family::backend_for(&fam)
@@ -1184,7 +1213,7 @@ impl AppIde {
                                                 {
                                                     format!(" — no codegen backend for '{fam}'")
                                                 } else {
-                                                    String::new()
+                                                    feat_note
                                                 };
                                                 self.mcu_import_status = Some(format!(
                                                     "{}  Imported {name}{note}",
@@ -1485,10 +1514,10 @@ mod feature_verdict_tests {
                 "save_clock_to_definition",
                 "re-saves a chip already in the registry; the dep line is untouched",
             ),
-            (
-                "show_new_project_dialog",
-                "imports someone else's .ron - the dep line is theirs, and is NOT verified today",
-            ),
+            // `show_new_project_dialog` used to be exempt here, importing
+            // someone else's `.ron` unchecked. It now checks like the rest —
+            // an exemption is a decision, and that one did not survive being
+            // written down and looked at.
         ];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
