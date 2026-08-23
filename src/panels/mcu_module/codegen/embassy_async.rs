@@ -2151,7 +2151,7 @@ pub fn init<'d>(
     );
 {ENABLES}    {RET_EXPR}
 }
-
+{DUTY_TRAIT}
 // ── Using TIM{N} ──
 {USAGE}
 "#;
@@ -2453,6 +2453,79 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
         )
     };
 
+    // The same duty trait the F1 backend generates, so switching runtime does
+    // not rename the call sites. The channel is part of the METHOD NAME rather
+    // than an argument for the same reason it is on F1: there, asking for a
+    // channel with no pad PANICS (`PINS::check_used`); here the driver accepts
+    // it and silently drives nothing, which is quieter and no more useful.
+    let active = wiring.active_channels();
+    let duty_trait = if active.is_empty() {
+        String::new()
+    } else {
+        let first = active[0];
+        let list = active
+            .iter()
+            .map(|c| format!("CH{c}"))
+            .collect::<Vec<_>>()
+            .join("+");
+        let mut t = String::new();
+        t.push_str("\n/// Set a channel's duty in the same units the `DUTY_*` constants above\n");
+        t.push_str("/// use \u{2014} HUNDREDTHS of a percent, so `10_000` is 100 % and `750` is 7.5 %.\n");
+        t.push_str("///\n");
+        t.push_str("/// A trait rather than an inherent method because the handle is embassy's\n");
+        t.push_str("/// own type, which this crate does not own. One method per WIRED channel\n");
+        t.push_str(&format!(
+            "/// ({list}); a channel this timer has no pad for cannot be named at all.\n"
+        ));
+        if !wiring.breaks.is_empty() {
+            t.push_str("///\n");
+            t.push_str("/// The impl is on the DRIVER, not on the tuple `init` returns here \u{2014}\n");
+            t.push_str("/// the break pads ride along in it. `main.rs` destructures that tuple,\n");
+            t.push_str(&format!("/// so `{handle}` is already the driver.\n"));
+        }
+        t.push_str("pub trait DutyHandle {\n");
+        t.push_str(&format!("    /// Ch{first}, the lowest channel wired to TIM{n}.\n"));
+        t.push_str(&format!("    fn set_duty_tim_{n}(&mut self, value: u32);\n"));
+        for ch in &active {
+            let both = if complementary {
+                format!(" and CH{ch}N")
+            } else {
+                String::new()
+            };
+            t.push_str(&format!("\n    /// CH{ch}{both}.\n"));
+            t.push_str(&format!(
+                "    fn set_duty_tim_{n}_ch{ch}(&mut self, value: u32);\n"
+            ));
+        }
+        t.push_str("}\n\n");
+        t.push_str(&format!(
+            "impl<'d> DutyHandle for {driver}<'d, peripherals::TIM{n}> {{\n"
+        ));
+        t.push_str(&format!("    fn set_duty_tim_{n}(&mut self, value: u32) {{\n"));
+        t.push_str(&format!("        self.set_duty_tim_{n}_ch{first}(value);\n"));
+        t.push_str("    }\n");
+        for ch in &active {
+            t.push_str(&format!(
+                "\n    fn set_duty_tim_{n}_ch{ch}(&mut self, value: u32) {{\n"
+            ));
+            // Each body is copied from the `enables` line above it, which is
+            // already proven to compile against that driver's API: the two
+            // drivers do NOT share one.
+            if complementary {
+                t.push_str(&format!(
+                    "        self.set_duty(Channel::Ch{ch}, self.get_max_duty() * value / 10_000);\n"
+                ));
+            } else {
+                t.push_str(&format!(
+                    "        self.ch{ch}().set_duty_cycle_fraction(value, 10_000);\n"
+                ));
+            }
+            t.push_str("    }\n");
+        }
+        t.push_str("}\n");
+        t
+    };
+
     ASYNC_PWM_TMPL
         .replace("{GPIO_USE}", &use_line("gpio", &dedup(gpio_items)))
         .replace("{BREAK_STRUCT}", &break_struct)
@@ -2467,6 +2540,7 @@ pub fn pwm_config_file(n: u8, cfg: &TimerModuleConfig, wiring: &PwmWiring, handl
         .replace("{DRIVER_USE}", &driver_use)
         .replace("{TIMER_USE}", &timer_use)
         .replace("{DRIVER}", driver)
+        .replace("{DUTY_TRAIT}", &duty_trait)
         .replace("{DUTY_CONSTS}", &duty_consts)
         .replace("{PARAMS}", &params)
         .replace("{CH_ARGS}", &ch_args)
@@ -7557,5 +7631,66 @@ mod spi_i2c_option_tests {
                 assert!(!f.contains(ph), "left {ph} behind:\n{f}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod async_duty_handle_tests {
+    use super::*;
+
+    fn wiring(chans: &[u8], comp: &[u8]) -> PwmWiring {
+        PwmWiring {
+            chans: chans.iter().map(|c| (*c, format!("pa{c}"))).collect(),
+            comp: comp.iter().map(|c| (*c, format!("pb{c}"))).collect(),
+            breaks: Vec::new(),
+        }
+    }
+
+    /// `DutyHandle` may never name a channel the timer has no pad for.
+    ///
+    /// The same rule as the F1 backend, for a different reason: there, asking
+    /// for an unwired channel PANICS; here embassy takes it and drives nothing,
+    /// which is quieter and no more useful. Both are answered by putting the
+    /// channel in the method NAME.
+    #[test]
+    fn simple_pwm_only_reaches_wired_channels() {
+        let cfg = TimerModuleConfig::new(3);
+        let f = pwm_config_file(3, &cfg, &wiring(&[2, 4], &[]), "_pwm3");
+
+        assert!(f.contains("impl<'d> DutyHandle for SimplePwm<'d, peripherals::TIM3>"), "{f}");
+        assert!(f.contains("fn set_duty_tim_3_ch2(&mut self, value: u32);"), "{f}");
+        assert!(f.contains("fn set_duty_tim_3_ch4(&mut self, value: u32);"), "{f}");
+        // CH1 and CH3 have no pad, so nothing may reach them.
+        for ch in [1, 3] {
+            assert!(
+                !f.contains(&format!("set_duty_tim_3_ch{ch}")),
+                "TIM3 CH{ch} is unwired:\n{f}"
+            );
+            assert!(!f.contains(&format!("self.ch{ch}()")), "{f}");
+        }
+        // The bare method delegates to the lowest wired channel, not to CH1.
+        assert!(f.contains("        self.set_duty_tim_3_ch2(value);"), "{f}");
+    }
+
+    /// The complementary driver has a DIFFERENT duty API — `set_duty(Channel,
+    /// value)` against `get_max_duty()`, not `.chN()` — so the trait body is
+    /// generated per driver rather than shared. Getting that backwards compiles
+    /// nowhere, which is exactly why it is worth pinning.
+    #[test]
+    fn complementary_pwm_uses_its_own_duty_api() {
+        let cfg = TimerModuleConfig::new(1);
+        let f = pwm_config_file(1, &cfg, &wiring(&[1], &[1]), "_pwm1");
+
+        assert!(
+            f.contains("impl<'d> DutyHandle for ComplementaryPwm<'d, peripherals::TIM1>"),
+            "{f}"
+        );
+        assert!(
+            f.contains("        self.set_duty(Channel::Ch1, self.get_max_duty() * value / 10_000);"),
+            "{f}"
+        );
+        assert!(!f.contains("set_duty_cycle_fraction(value"), "wrong driver's API:\n{f}");
+        // A complementary channel means BOTH its pads, and the doc says so.
+        assert!(f.contains("/// CH1 and CH1N."), "{f}");
     }
 }

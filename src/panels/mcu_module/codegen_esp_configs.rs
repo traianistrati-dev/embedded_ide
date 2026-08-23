@@ -597,7 +597,7 @@ fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> Stri
         .collect::<Vec<_>>()
         .join("+");
     let handle = format!("_pwm{n}");
-    let func = format!(
+    let mut func = format!(
         "/// The LEDC timer PWM{n} runs on. One frequency for every channel on it.\n\
          ///\n\
          /// `main.rs` keeps the value alive and lends it to `init` — the channels\n\
@@ -623,6 +623,61 @@ fn pwm_file(n: u8, chans: &[(u8, u16)], cfg: Option<&TimerModuleConfig>) -> Stri
     );
 
     let first = chans.first().map(|(c, _)| *c).unwrap_or(0);
+
+    // The same duty trait the STM32 backends generate, so a call site reads the
+    // same on any chip. TWO things about it differ, and esp-hal forces both:
+    // `set_duty` takes `&self`, and it returns a `Result` \u{2014} a duty above what
+    // DUTY_RESOLUTION allows is a real failure, and swallowing it inside a
+    // generated helper would hide it.
+    if !chans.is_empty() {
+        func.push_str("\n/// Hundredths of a percent into the whole percent esp-hal's LEDC takes,\n");
+        func.push_str("/// rounded UP and clamped \u{2014} the same rounding the `DUTY_CH*_PCT`\n");
+        func.push_str("/// constants above already show.\n");
+        func.push_str("fn whole_percent(x100: u32) -> u8 {\n");
+        func.push_str("    x100.div_ceil(100).min(100) as u8\n");
+        func.push_str("}\n\n");
+        func.push_str("/// Set a channel's duty in the same units the STM32 backends use \u{2014}\n");
+        func.push_str("/// HUNDREDTHS of a percent \u{2014} so the call site reads the same on any chip.\n");
+        func.push_str("///\n");
+        func.push_str("/// The channel is part of the NAME rather than an argument, and the value\n");
+        func.push_str("/// is rounded UP to whole percent, because that is all the LEDC takes.\n");
+        func.push_str(&format!(
+            "pub trait DutyHandle {{\n    /// CH{first}, the lowest channel wired to PWM{n}.\n"
+        ));
+        func.push_str(&format!(
+            "    fn set_duty_tim_{n}(&self, value: u32) -> Result<(), channel::Error>;\n"
+        ));
+        for (c, _) in chans {
+            func.push_str(&format!("\n    /// CH{c}.\n"));
+            func.push_str(&format!(
+                "    fn set_duty_tim_{n}_ch{c}(&self, value: u32) -> Result<(), channel::Error>;\n"
+            ));
+        }
+        func.push_str("}\n\n");
+        func.push_str(&format!("impl<'d> DutyHandle for {ret_ty} {{\n"));
+        func.push_str(&format!(
+            "    fn set_duty_tim_{n}(&self, value: u32) -> Result<(), channel::Error> {{\n"
+        ));
+        func.push_str(&format!(
+            "        self.set_duty_tim_{n}_ch{first}(value)\n    }}\n"
+        ));
+        for (i, (c, _)) in chans.iter().enumerate() {
+            // One channel is a bare value, not a 1-tuple \u{2014} the same rule the
+            // return type follows two dozen lines up.
+            let this = if chans.len() == 1 {
+                "self".to_owned()
+            } else {
+                format!("self.{i}")
+            };
+            func.push_str(&format!(
+                "\n    fn set_duty_tim_{n}_ch{c}(&self, value: u32) -> Result<(), channel::Error> {{\n"
+            ));
+            func.push_str(&format!(
+                "        {this}.set_duty(whole_percent(value))\n    }}\n"
+            ));
+        }
+        func.push_str("}\n");
+    }
     let mut usage = vec![
         "In main.rs, after the init above:".to_owned(),
         String::new(),
@@ -952,5 +1007,58 @@ mod tests {
         );
         let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["uart1.rs", "spi2.rs", "i2c0.rs", "pwm0.rs"]);
+    }
+}
+
+#[cfg(test)]
+mod esp_duty_handle_tests {
+    use super::*;
+
+    /// One channel is a bare `Channel`, not a 1-tuple, so the impl target and
+    /// the method body both lose the index.
+    #[test]
+    fn a_single_channel_impls_on_the_bare_type() {
+        let f = pwm_file(0, &[(2, 750)], None);
+        assert!(
+            f.contains("impl<'d> DutyHandle for channel::Channel<'d, LowSpeed> {"),
+            "{f}"
+        );
+        assert!(f.contains("        self.set_duty(whole_percent(value))"), "{f}");
+        // CH2 is the only pad, so it is also what the bare method drives.
+        assert!(f.contains("        self.set_duty_tim_0_ch2(value)"), "{f}");
+        for ch in [0, 1, 3] {
+            assert!(!f.contains(&format!("set_duty_tim_0_ch{ch}")), "{f}");
+        }
+    }
+
+    /// The trap this test exists for: the TUPLE POSITION is not the channel
+    /// number. CH0+CH2 wired means `self.0` drives CH0 and `self.1` drives CH2;
+    /// writing `self.2` there would compile on a 3-channel timer and drive the
+    /// wrong pad on this one.
+    #[test]
+    fn the_tuple_index_is_the_position_not_the_channel() {
+        let f = pwm_file(0, &[(0, 1_000), (2, 5_000)], None);
+        assert!(
+            f.contains("_ch0(&self, value: u32) -> Result<(), channel::Error> {\n        self.0.set_duty("),
+            "{f}"
+        );
+        assert!(
+            f.contains("_ch2(&self, value: u32) -> Result<(), channel::Error> {\n        self.1.set_duty("),
+            "{f}"
+        );
+        assert!(!f.contains("self.2."), "there is no third channel:\n{f}");
+    }
+
+    /// esp-hal takes WHOLE percent, so the trait rounds up rather than losing
+    /// the hundredths silently, and hands the `Result` back rather than eating
+    /// a duty the resolution cannot hold.
+    #[test]
+    fn the_duty_is_rounded_up_and_the_result_survives() {
+        let f = pwm_file(0, &[(0, 750)], None);
+        assert!(f.contains("    x100.div_ceil(100).min(100) as u8"), "{f}");
+        assert!(
+            f.contains("fn set_duty_tim_0(&self, value: u32) -> Result<(), channel::Error>;"),
+            "{f}"
+        );
     }
 }
