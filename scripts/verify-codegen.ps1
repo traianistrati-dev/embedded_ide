@@ -70,6 +70,10 @@ if ($leaked) {
 # — the same reason `src/workspace.rs` locks that way rather than with a
 # pid file.
 $lockPath = Join-Path $env:TEMP "eide-codegen-matrix.lock"
+# The lock is held with NO sharing, so the holder cannot describe itself through
+# it — a waiter cannot even read it. Hence a sidecar, written just after the
+# lock is taken: it is the only way "who am I waiting for" can be answered.
+$ownerPath = Join-Path $env:TEMP "eide-codegen-matrix.owner"
 $script:lock = $null
 $waited = 0
 while (-not $script:lock) {
@@ -77,7 +81,26 @@ while (-not $script:lock) {
         $script:lock = [System.IO.File]::Open($lockPath, 'OpenOrCreate', 'ReadWrite', 'None')
     } catch {
         if ($waited -eq 0) {
-            Write-Host "another codegen matrix run holds $lockPath - waiting for it" -ForegroundColor DarkYellow
+            # Say WHO, and say how to leave. A pre-push hook that goes quiet for
+            # a quarter of an hour is indistinguishable from a hung push, and
+            # the person waiting has no way to find out which it is.
+            #
+            # Not a prompt: a hook's stdin is git's ref list, so `Read-Host`
+            # reads EOF, and reading the console instead would hang every
+            # BACKGROUND run of this script forever. A long wait is a nuisance;
+            # an unbounded one is a regression.
+            $who = ""
+            if (Test-Path $ownerPath) {
+                $who = (Get-Content $ownerPath -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+            if ($who) {
+                Write-Host "another codegen matrix run holds the lock ($who)" -ForegroundColor DarkYellow
+            } else {
+                Write-Host "another codegen matrix run holds $lockPath" -ForegroundColor DarkYellow
+            }
+            Write-Host "waiting for it. To push without waiting: Ctrl+C, then 'git push --no-verify'" -ForegroundColor DarkYellow
+        } elseif ($waited % 60 -eq 0) {
+            Write-Host ("  still waiting - {0} min so far" -f [math]::Floor($waited / 60)) -ForegroundColor DarkGray
         }
         if ($waited -ge 2400) {
             Write-Host "gave up after 40 min waiting for $lockPath" -ForegroundColor Red
@@ -87,7 +110,10 @@ while (-not $script:lock) {
         $waited += 5
     }
 }
-if ($waited -gt 0) { Write-Host ("waited {0}s for the lock" -f $waited) -ForegroundColor DarkYellow }
+if ($waited -gt 0) { Write-Host ("waited {0} min for the lock" -f [math]::Round($waited / 60, 1)) -ForegroundColor DarkYellow }
+# Whoever waits next reads this. Stale entries are harmless: it is only ever
+# read by someone who has just seen the lock held.
+"PID $PID, started $(Get-Date -Format 'HH:mm:ss')" | Set-Content -Path $ownerPath -Encoding utf8
 
 # The harnesses warn when they find this lock held, because running one by hand
 # during a matrix run corrupts both. Our own children are exactly the case that
