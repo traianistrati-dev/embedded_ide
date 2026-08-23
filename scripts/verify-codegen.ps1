@@ -150,7 +150,24 @@ $CASES = @(
     # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
     # individually rather than forced onto one triple.
-    @{ n = "embassy (9 projects)";         t = "emit_embassy_project";       e = @{};                       q = $true }
+    # 346s of the quick set's 933s came from THIS ONE case — nine projects, nine
+    # dependency graphs, nothing shared. `only` names the four that quick mode
+    # cross-compiles; `-Full` still builds all nine.
+    #
+    # Chosen as one project per TARGET, plus one per thing no other project in
+    # the quick set exercises:
+    #   _dma      thumbv7em — the richest wiring (DMA + every bus)
+    #   _async    thumbv7em — the async runtime, which is a different emitter
+    #   _dma_f2   thumbv7m  — F2's own PLL floor, a documented trap
+    #   wba_wdg   thumbv8m  — a different family AND the watchdog arithmetic
+    # Dropped from quick: the base GPIO project, _usart, _dma_f7 and the F4
+    # watchdog (all thumbv7em, all shapes the four above already cover), and
+    # eide_f1_check_usart — F1 already has thirteen cases of its own here.
+    #
+    # The harness still WRITES all nine: writing is free, `cargo check` is not,
+    # and a harness that emits less under a flag is a harness that can rot.
+    @{ n = "embassy (9 projects)";         t = "emit_embassy_project";       e = @{};                       q = $true
+       only = @("eide_embassy_check_dma", "eide_embassy_check_async", "eide_embassy_check_dma_f2", "eide_wba_check_wdg") }
 
     # These two build from a REAL part in the vendor database rather than from a
     # bundled definition, which is the only way to exercise the importer's own
@@ -244,6 +261,22 @@ foreach ($c in $cases) {
         continue
     }
 
+    # Quick mode may check only some of what a multi-project harness wrote.
+    $wrote = $projects.Count
+    if ($c.only -and -not $Full) {
+        $projects = @($projects | Where-Object { $c.only -contains (Split-Path $_.Dir -Leaf) })
+        # A name that matches nothing would SHRINK the case silently and still
+        # report ok — the same shape as the "filter matched no tests" bug this
+        # script already guards against, so it gets the same treatment.
+        if ($projects.Count -ne $c.only.Count) {
+            $results += [pscustomobject]@{ Case = $c.n; Status = "BAD SUBSET"
+                Detail = "only lists $($c.only.Count) project(s), $($projects.Count) matched what the harness wrote"
+                Seconds = $sw.Elapsed.TotalSeconds }
+            Write-Host ("  {0,-34} BAD SUBSET" -f $c.n) -ForegroundColor Red
+            continue
+        }
+    }
+
     $status = "ok"
     $detail = ""
     $seen = 0
@@ -266,6 +299,9 @@ foreach ($c in $cases) {
         if ($seen -lt $allowed) { $detail = "fewer warnings than declared - lower `w` on this case" }
     } elseif ($status -eq "ok" -and $seen -gt 0) {
         $status = "ok ($seen expected)"
+    }
+    if ($projects.Count -lt $wrote) {
+        $status = "$status, $($projects.Count) of $wrote"
     }
     $results += [pscustomobject]@{ Case = $c.n; Status = $status; Detail = $detail; Seconds = $sw.Elapsed.TotalSeconds }
     $colour = if ($status -like "*ERROR*") { "Red" } elseif ($status -like "*warn*") { "Yellow" } else { "Green" }
