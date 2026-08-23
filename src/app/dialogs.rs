@@ -736,8 +736,16 @@ impl AppIde {
         // cargo cannot resolve — which kills rust-analyzer for the whole project
         // and used to surface only as "failed to select a version". Checking here
         // turns that into a sentence at import time. One index lookup per import,
-        // cached below; unknowable (offline) means no warning.
+        // cached below.
         let mut bad_features: Vec<String> = Vec::new();
+        // Chips whose feature could NOT be checked, because the index was not
+        // readable — offline, or past the 4 s timeout this runs under on the UI
+        // thread. Counted rather than passed over: "we could not check" and
+        // "it is fine" are different answers, and reporting the first as the
+        // second is how a chip whose feature does not exist arrives looking
+        // verified. That is what happened to an STM32WL30 import, where
+        // embassy-stm32 publishes no `stm32wl3*` feature at all.
+        let mut unverified_features = 0usize;
         // GPIO IP version -> its AF table (None = the file was not found).
         let mut af_tables: std::collections::HashMap<
             String,
@@ -859,10 +867,12 @@ impl AppIde {
                                     stm32_pin_data::EMBASSY_VERSION,
                                 )
                             });
-                            if let Some(list) = known {
-                                if !list.iter().any(|f| f == feat) {
+                            match feature_verdict(feat, known.as_deref()) {
+                                FeatureVerdict::Missing => {
                                     bad_features.push(format!("{} ({feat})", def.display_name));
                                 }
+                                FeatureVerdict::Unverified => unverified_features += 1,
+                                FeatureVerdict::Present => {}
                             }
                         }
                         match registry::save_definition(&def) {
@@ -941,6 +951,17 @@ impl AppIde {
                     } else {
                         ""
                     }
+                ));
+            }
+            if unverified_features > 0 {
+                msg.push_str(&format!(
+                    "\n{}  {} chip(s) could NOT be checked against the {} index \
+                     (offline, or the lookup timed out) — their HAL feature may \
+                     not exist. Re-import with a connection, or check the \
+                     features = [..] line in the project's Cargo.toml.",
+                    ph::WARNING,
+                    unverified_features,
+                    stm32_pin_data::EMBASSY_CRATE,
                 ));
             }
             msg
@@ -1386,5 +1407,59 @@ impl AppIde {
                 self.open_mcu_form(Some(seed));
             }
         }
+    }
+}
+
+/// What the crates.io index says about one chip's `embassy-stm32` feature.
+///
+/// Pulled out of the import loop so it can be TESTED. The distinction that
+/// matters is the third variant: for a long time "we could not look it up" and
+/// "it is fine" were the same branch, so a chip whose feature does not exist —
+/// an STM32WL30, where embassy-stm32 publishes no `stm32wl3*` at all — arrived
+/// looking verified whenever the index lookup timed out.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum FeatureVerdict {
+    /// The index lists it.
+    Present,
+    /// The index was read, and does not list it. The project will not resolve.
+    Missing,
+    /// The index could not be read — offline, or past the lookup timeout.
+    Unverified,
+}
+
+/// `known` is `None` when the index lookup failed, `Some(list)` when it worked.
+pub(super) fn feature_verdict(feat: &str, known: Option<&[String]>) -> FeatureVerdict {
+    match known {
+        None => FeatureVerdict::Unverified,
+        Some(list) if list.iter().any(|f| f == feat) => FeatureVerdict::Present,
+        Some(_) => FeatureVerdict::Missing,
+    }
+}
+
+#[cfg(test)]
+mod feature_verdict_tests {
+    use super::*;
+
+    /// Reading the code was not enough to be sure of this — twice. So it is a
+    /// test: a failed lookup must NOT be reported as a good feature.
+    #[test]
+    fn a_failed_lookup_is_not_a_pass() {
+        let known: Vec<String> = vec!["stm32f411re".into(), "stm32g431cb".into()];
+        assert_eq!(
+            feature_verdict("stm32f411re", Some(&known)),
+            FeatureVerdict::Present
+        );
+        assert_eq!(
+            feature_verdict("stm32wl30kb", Some(&known)),
+            FeatureVerdict::Missing,
+            "the index was read and does not have it"
+        );
+        assert_eq!(
+            feature_verdict("stm32wl30kb", None),
+            FeatureVerdict::Unverified,
+            "offline is not proof of anything"
+        );
+        // An empty list is still an ANSWER, and the answer is no.
+        assert_eq!(feature_verdict("stm32f411re", Some(&[])), FeatureVerdict::Missing);
     }
 }
