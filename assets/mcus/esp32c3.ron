@@ -3,6 +3,7 @@ McuDefinition(
     display_name: "ESP32-C3",
     family: "esp32c3",
     package: "QFN32",
+    max_mhz: Some(160),
     cpu: "RISC-V 32-bit",
     toolchain: EspRust,
     project: ProjectDef(

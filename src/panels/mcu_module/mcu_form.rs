@@ -202,6 +202,9 @@ pub struct McuForm {
     pub family: String,
     pub cpu: String,
     pub package: String,
+    /// Datasheet maximum core frequency in MHz. `None` when the vendor file
+    /// states none — shown as nothing, never as a family guess.
+    pub max_mhz: Option<u32>,
     /// The chip's DMA channels, carried through untouched: imported from the
     /// vendor database, not authorable here (see [`super::mcu_def::DmaDef`]).
     /// Editing a chip in this form must not silently drop them.
@@ -257,6 +260,7 @@ impl McuForm {
             family: "stm32f1".into(),
             cpu: "Cortex-M3".into(),
             package: String::new(),
+            max_mhz: None,
             dma: None,
             irq_vectors: Vec::new(),
             usart_ip: None,
@@ -363,6 +367,7 @@ impl McuForm {
             family: def.family.clone(),
             cpu: def.cpu.clone(),
             package: def.package.clone(),
+            max_mhz: def.max_mhz,
             dma: def.dma.clone(),
             irq_vectors: def.irq_vectors.clone(),
             usart_ip: def.usart_ip.clone(),
@@ -546,6 +551,7 @@ impl McuForm {
             display_name: self.display_name.trim().to_string(),
             family: self.family.trim().to_string(),
             package: self.package.trim().to_string(),
+            max_mhz: self.max_mhz,
             dma: self.dma.clone(),
             irq_vectors: self.irq_vectors.clone(),
             usart_ip: self.usart_ip.clone(),

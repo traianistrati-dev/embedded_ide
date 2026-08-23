@@ -3,6 +3,7 @@ McuDefinition(
     display_name: "STM32F103C8Tx",
     family: "stm32f1",
     package: "LQFP48",
+    max_mhz: Some(72),
     cpu: "ARM Cortex-M3",
     toolchain: RustEmbedded,
     project: ProjectDef(

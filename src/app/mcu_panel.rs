@@ -244,11 +244,14 @@ impl AppIde {
                             .strong()
                             .color(egui::Color32::LIGHT_BLUE),
                     );
-                    ui.label(
-                        egui::RichText::new(format!("·  {}", self.selected_family()))
-                            .color(egui::Color32::GRAY)
-                            .size(11.0),
-                    );
+                    let facts = self.chip_facts();
+                    if !facts.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("·  {}", facts.join("  ·  ")))
+                                .color(egui::Color32::GRAY)
+                                .size(11.0),
+                        );
+                    }
                 });
             }
 

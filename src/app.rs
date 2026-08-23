@@ -2151,11 +2151,37 @@ impl AppIde {
             .unwrap_or_default()
     }
 
-    /// CPU family string of the selected chip (empty if none).
-    fn selected_family(&self) -> String {
-        self.selected_def()
-            .map(|d| d.cpu.clone())
-            .unwrap_or_default()
+    /// The grey facts that follow the chip name in the header: core, package,
+    /// package pin count, datasheet maximum frequency — values only, no field
+    /// labels.
+    ///
+    /// Each is dropped when it is not KNOWN rather than filled with a
+    /// plausible default: `max_mhz` is absent for roughly a third of the
+    /// vendor database (the whole C0 series states no frequency), and the
+    /// two built-in chips carry neither package nor frequency.
+    fn chip_facts(&self) -> Vec<String> {
+        let Some(def) = self.selected_def() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if !def.cpu.trim().is_empty() {
+            out.push(def.cpu.trim().to_owned());
+        }
+        if !def.package.trim().is_empty() {
+            out.push(def.package.trim().to_owned());
+        }
+        // Counted off the LIVE chip, not the package name: `iter_all_pins` is
+        // layout-blind, so a ball grid answers as readily as a QFP, and the
+        // power/reset pads count as the package pins they are.
+        if let Some(n) = self.mcu.as_ref().map(|m| m.iter_all_pins().count()) {
+            if n > 0 {
+                out.push(format!("{n} pins"));
+            }
+        }
+        if let Some(mhz) = def.max_mhz {
+            out.push(format!("{mhz} MHz"));
+        }
+        out
     }
 
     /// Toolchain of the selected chip (None if no chip selected).

@@ -64,6 +64,7 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
     let line = mcu.attribute("Line").unwrap_or("").trim().to_string();
 
     let mut core = String::new();
+    let mut max_mhz: Option<u32> = None;
     let mut rams: Vec<u64> = Vec::new();
     let mut flashes: Vec<u64> = Vec::new();
     let mut pin_rows: Vec<PinRow> = Vec::new();
@@ -74,6 +75,12 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
     for ch in mcu.children().filter(|n| n.is_element()) {
         match ch.tag_name().name() {
             "Core" => core = ch.text().unwrap_or("").trim().to_string(),
+            // A DISPLAY fact only: the clock editor's ceilings come from
+            // `ClockLimits`, which is a per-family table. Roughly a third of
+            // the database states no <Frequency> at all (the whole C0 series
+            // among them), so this stays an Option and an absent number is
+            // shown as nothing rather than guessed from the family.
+            "Frequency" => max_mhz = ch.text().and_then(|t| t.trim().parse::<u32>().ok()),
             "Ram" => {
                 if let Some(v) = ch.text().and_then(|t| t.trim().parse::<u64>().ok()) {
                     rams.push(v);
@@ -240,6 +247,7 @@ pub fn convert_xml_with_af(xml: &str, af: Option<&GpioAf>) -> Result<Vec<Convert
         form.family = family.clone();
         form.cpu = cpu.clone();
         form.package = package.clone();
+        form.max_mhz = max_mhz;
         form.toolchain = ToolchainKind::RustEmbedded;
         form.target = target.clone();
         form.flash_origin = "0x08000000".into();
@@ -1582,6 +1590,27 @@ mod tests {
             assert_eq!(c.form.ram_size, "20K");
             assert_eq!(c.form.flash_origin, "0x08000000");
             assert_eq!(c.form.clock, ClockChoice::Stm32f1);
+        }
+    }
+
+    /// The datasheet frequency is captured when the vendor states one and left
+    /// EMPTY when it does not — a third of the database (the whole C0 series)
+    /// has no `<Frequency>`, and the header would rather show nothing than the
+    /// family default, which is 72 MHz for every chip without its own graph.
+    #[test]
+    fn the_max_frequency_is_read_when_stated_and_absent_otherwise() {
+        assert_eq!(
+            convert_xml(F103).unwrap()[0].form.max_mhz,
+            None,
+            "this fixture states no frequency"
+        );
+        let with_freq = F103.replace(
+            "<Core>Arm Cortex-M3</Core>",
+            "<Core>Arm Cortex-M3</Core>
+    <Frequency>72</Frequency>",
+        );
+        for chip in convert_xml(&with_freq).unwrap() {
+            assert_eq!(chip.form.max_mhz, Some(72), "every variant of the range");
         }
     }
 

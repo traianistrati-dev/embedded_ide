@@ -69,6 +69,7 @@ mod tests {
         family: &str,
         package: &str,
         cpu: &str,
+        max_mhz: u32,
         m: &Mcu,
         project: ProjectDef,
     ) -> McuDefinition {
@@ -81,6 +82,7 @@ mod tests {
             display_name: m.name.clone(),
             family: family.into(),
             package: package.into(),
+            max_mhz: Some(max_mhz),
             // Built-in chips keep using the hand-written family tables in
             // `codegen::dma_map`; only imported ones carry vendor DMA data.
             dma: None,
@@ -108,7 +110,7 @@ mod tests {
         let pretty = PrettyConfig::default().struct_names(true);
 
         let stm = def_of(
-            "stm32f103c8t6", "stm32f1", "LQFP48", "ARM Cortex-M3",
+            "stm32f103c8t6", "stm32f1", "LQFP48", "ARM Cortex-M3", 72,
             &create_stm32f103c8tx(),
             ProjectDef {
                 pkg_name: "stm32f103c8t6".into(),
@@ -127,6 +129,7 @@ mod tests {
             "esp32c3",
             "QFN32",
             "RISC-V 32-bit",
+            160,
             &create_esp32c3(),
             ProjectDef {
                 pkg_name: "esp32c3".into(),
@@ -387,7 +390,7 @@ mod tests {
         );
 
         let mut def = def_of(
-            "stm32f103rb", "stm32f1", "LQFP64", "ARM Cortex-M3",
+            "stm32f103rb", "stm32f1", "LQFP64", "ARM Cortex-M3", 72,
             &m,
             ProjectDef {
                 pkg_name: "stm32f103rb".into(),

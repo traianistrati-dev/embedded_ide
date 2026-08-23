@@ -259,6 +259,13 @@ pub struct McuDefinition {
     pub family: String,
     #[serde(default)]
     pub package: String,
+    /// Datasheet maximum core frequency in MHz, captured at import from
+    /// the vendor file's `<Frequency>`. A display fact only — the clock
+    /// editor's ceilings live in [`ClockLimits`], which is a per-FAMILY
+    /// table and would say 72 MHz for any chip without its own graph.
+    /// `None` when the vendor states none (the whole C0 series does not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_mhz: Option<u32>,
     /// DMA channels + whether they are muxed. See [`DmaDef`].
     #[serde(default)]
     pub dma: Option<DmaDef>,
