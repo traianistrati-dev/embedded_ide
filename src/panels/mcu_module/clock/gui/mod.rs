@@ -45,6 +45,9 @@ pub struct ClockUiState {
     /// Show the FIELDS list beside the diagram. Persisted per project — it is a
     /// working preference, not a momentary one.
     pub fields: bool,
+    /// Filter for the Fields list. Session-only, unlike `fields`: a search is
+    /// something you are doing right now, not how you like the tab set up.
+    pub field_search: String,
 }
 
 /// What the Clock tab wants the app to do after this frame.
@@ -89,6 +92,7 @@ pub fn draw_graph_clock(
         positions,
         note,
         fields,
+        field_search,
     } = state;
     let mut out = ClockTabOut::default();
     let mut changed = false;
@@ -478,7 +482,7 @@ pub fn draw_graph_clock(
             .resizable(true)
             .default_width(300.0)
             .show_inside(ui, |ui| {
-                if fields_panel(ui, gc, limits, &freqs) {
+                if fields_panel(ui, gc, limits, &freqs, field_search) {
                     changed = true;
                 }
             });
@@ -978,11 +982,62 @@ fn bound_import(
 /// which is the order the datasheet reads in, not alphabetical.
 ///
 /// Returns `true` when a value changed.
+/// Does a Fields row answer `query`?
+///
+/// A row is three things a user might remember it by — its NAME, the value
+/// SELECTED in it, and the frequency it PRODUCES — and any of them should find
+/// it. Someone hunting for where 258 MHz comes from types `258`; someone
+/// looking for what feeds the RTC types `rtc`; someone checking which mux is
+/// still on the internal RC types `msirc`.
+///
+/// Words are ANDed, so `pll 258` narrows instead of widening. An empty query
+/// matches everything — a filter nobody has typed into must hide nothing.
+fn field_matches(query: &str, name: &str, selected: &str, hz: u32) -> bool {
+    let q = query.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    // The frequency has two renderings, because the tab shows both: this list
+    // prints a 32 kHz output as `0.03 MHz` while the diagram tags it `32 kHz`.
+    // Someone searching for the number they can see should not have to know
+    // which panel they read it in.
+    //
+    // They are matched as ALTERNATIVES rather than being concatenated: with one
+    // haystack holding both, `32 mhz` would find a 32 kHz row by taking `32`
+    // from one rendering and `mhz` from the other.
+    let khz = if hz.is_multiple_of(1_000) {
+        format!("{} kHz", hz / 1_000)
+    } else {
+        format!("{:.1} kHz", hz as f64 / 1_000.0)
+    };
+    [fmt_mhz(hz), khz].iter().any(|freq| {
+        let hay = format!("{name} {selected} {freq}").to_ascii_lowercase();
+        q.split_whitespace().all(|word| hay.contains(word))
+    })
+}
+
+/// What a node currently SHOWS in its Fields row — the selected option's label,
+/// or empty for a row that has nothing to pick.
+fn selected_label(gc: &GraphClock, id: &str) -> String {
+    use super::graph::auto_layout::options_for;
+    let Some(node) = gc.graph.node(id) else {
+        return String::new();
+    };
+    options_for(&gc.graph, node)
+        .and_then(|opts| {
+            opts.iter()
+                .find(|(_, s)| *s == node.state)
+                .map(|(l, _)| l.clone())
+        })
+        .unwrap_or_default()
+}
+
 fn fields_panel(
     ui: &mut egui::Ui,
     gc: &mut GraphClock,
     limits: &ClockLimits,
     freqs: &std::collections::BTreeMap<String, u32>,
+    query: &mut String,
 ) -> bool {
     use super::graph::auto_layout::{options_for, place};
     use super::graph::model::{NodeKind, NodeState};
@@ -995,6 +1050,22 @@ fn fields_panel(
                 .size(10.0)
                 .color(egui::Color32::GRAY),
         );
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(ph::MAGNIFYING_GLASS).size(11.0));
+        ui.add(
+            egui::TextEdit::singleline(query)
+                .hint_text("name or value")
+                .desired_width(140.0),
+        );
+        if !query.is_empty()
+            && ui
+                .small_button(ph::X)
+                .on_hover_text("Clear the filter")
+                .clicked()
+        {
+            query.clear();
+        }
     });
     ui.separator();
 
@@ -1021,14 +1092,31 @@ fn fields_panel(
         .map(|n| n.id.clone())
         .collect();
     ids.sort_by_key(|id| rank(id));
+    let total = ids.len();
+    ids.retain(|id| {
+        field_matches(
+            query,
+            id,
+            &selected_label(gc, id),
+            freqs.get(id).copied().unwrap_or(0),
+        )
+    });
+    let filtered = !query.trim().is_empty();
 
-    if ids.is_empty() {
+    if ids.is_empty() && !filtered {
         ui.label(
             egui::RichText::new("This tree has nothing to select.")
                 .size(11.0)
                 .color(egui::Color32::GRAY),
         );
         return false;
+    }
+    if filtered {
+        ui.label(
+            egui::RichText::new(format!("{} of {total} fields", ids.len()))
+                .size(10.0)
+                .color(egui::Color32::GRAY),
+        );
     }
 
     let mut pending: Option<(String, NodeState)> = None;
@@ -1122,7 +1210,10 @@ fn fields_panel(
                     // panel — the outputs are not selectable, so `options_for`
                     // excludes them and removing that panel would have taken the
                     // only place they were listed.
-                    let outs = output_rows(gc, limits, freqs);
+                    let outs: Vec<_> = output_rows(gc, limits, freqs)
+                        .into_iter()
+                        .filter(|(name, hz, _)| field_matches(query, name, "", *hz))
+                        .collect();
                     if !outs.is_empty() {
                         ui.end_row();
                         ui.label(
@@ -1149,6 +1240,14 @@ fn fields_panel(
                     }
                 });
         });
+
+    if filtered && ids.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("{}  Nothing matches that.", ph::MAGNIFYING_GLASS))
+                .size(11.0)
+                .color(egui::Color32::GRAY),
+        );
+    }
 
     if let Some((id, state)) = pending
         && let Some(n) = gc.graph.node_mut(&id)
@@ -2046,6 +2145,34 @@ fn mhz_num(hz: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Three ways to remember a field, all of which must find it.
+    #[test]
+    fn a_field_is_found_by_name_value_or_frequency() {
+        use super::field_matches;
+
+        // A mux called `SysClkSource`, currently on `MSIRC`, producing 4 MHz.
+        let row = |q: &str| field_matches(q, "SysClkSource", "MSIRC", 4_000_000);
+
+        assert!(row(""), "an empty filter hides nothing");
+        assert!(row("sysclk"), "by name");
+        assert!(row("msirc"), "by the value selected in it");
+        assert!(row("4 mhz"), "by the frequency it produces");
+        assert!(row("SYSCLK"), "case does not matter");
+        assert!(!row("pll"), "and a miss is a miss");
+
+        // Words are ANDed, so a second word narrows.
+        assert!(row("sysclk msirc"));
+        assert!(!row("sysclk hsi"));
+
+        // An output row has no selection, and is still findable both ways.
+        assert!(field_matches("iwdg", "IWDGOutput", "", 32_000));
+        // A sub-MHz value is printed `0.03 MHz` in this list and `32 kHz` on
+        // the diagram; both spellings have to find it.
+        assert!(field_matches("32 khz", "IWDGOutput", "", 32_000));
+        assert!(field_matches("0.03 mhz", "IWDGOutput", "", 32_000));
+        assert!(!field_matches("32 mhz", "IWDGOutput", "", 32_000));
+    }
+
     use super::*;
     use crate::panels::mcu_module::clock::graph::{
         ClockGraph, Edge, Node, NodeKind, NodeState, auto_layout,
