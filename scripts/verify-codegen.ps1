@@ -145,6 +145,7 @@ foreach ($c in $cases) {
     }
     foreach ($k in $KNOBS) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue }
     foreach ($k in $c.e.Keys) { Set-Item ("Env:\" + $k) $c.e[$k] }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     Set-Location $repo
     $out = cargo test --bin embedded_ide_0 $c.t -- --ignored --nocapture 2>&1
@@ -163,8 +164,8 @@ foreach ($c in $cases) {
     # A verdict case has nothing to build: the two checks above — the test ran,
     # and it did not fail — ARE the case. Everything below is about projects.
     if ($c.v) {
-        $results += [pscustomobject]@{ Case = $c.n; Status = "ok (verdict)"; Detail = "" }
-        Write-Host ("  {0,-34} ok (verdict)" -f $c.n) -ForegroundColor Green
+        $results += [pscustomobject]@{ Case = $c.n; Status = "ok (verdict)"; Detail = ""; Seconds = $sw.Elapsed.TotalSeconds }
+        Write-Host ("  {0,-34} {1,-22} {2,5:N0}s" -f $c.n, "ok (verdict)", $sw.Elapsed.TotalSeconds) -ForegroundColor Green
         continue
     }
 
@@ -221,9 +222,9 @@ foreach ($c in $cases) {
     } elseif ($status -eq "ok" -and $seen -gt 0) {
         $status = "ok ($seen expected)"
     }
-    $results += [pscustomobject]@{ Case = $c.n; Status = $status; Detail = $detail }
+    $results += [pscustomobject]@{ Case = $c.n; Status = $status; Detail = $detail; Seconds = $sw.Elapsed.TotalSeconds }
     $colour = if ($status -like "*ERROR*") { "Red" } elseif ($status -like "*warn*") { "Yellow" } else { "Green" }
-    Write-Host ("  {0,-34} {1}" -f $c.n, $status) -ForegroundColor $colour
+    Write-Host ("  {0,-34} {1,-22} {2,5:N0}s" -f $c.n, $status, $sw.Elapsed.TotalSeconds) -ForegroundColor $colour
 }
 
 Set-Location $repo
@@ -241,6 +242,13 @@ if ($bad) {
 }
 $skipped = @($results | Where-Object { $_.Status -eq "skipped" })
 $ran = $results.Count - $skipped.Count
+$timed = @($results | Where-Object { $_.Seconds })
+if ($timed) {
+    $total = ($timed | Measure-Object -Property Seconds -Sum).Sum
+    $worst = $timed | Sort-Object -Property Seconds -Descending | Select-Object -First 3
+    Write-Host ("{0:N0}s total; slowest: {1}" -f $total,
+        (($worst | ForEach-Object { "{0} {1:N0}s" -f $_.Case, $_.Seconds }) -join ", ")) -ForegroundColor DarkGray
+}
 Write-Host ("all {0} cases pass{1}" -f $ran,
     $(if ($skipped) { " ($($skipped.Count) skipped)" } else { "" })) -ForegroundColor Green
 exit 0
