@@ -134,19 +134,25 @@ pwsh scripts/verify-codegen.ps1 -Full        # every case
 pwsh scripts/verify-codegen.ps1 -Warnings    # treat warnings as failures too
 ```
 
-It covers each runtime (Blocking, RTIC, Native, and Async where it is inert) and
-each half-wired shape — a bus with one pad missing, a SPI without MISO, a USB
-with one data pin — because those are the paths that break without anyone
-noticing: the peripheral you configured simply does not appear in `main.rs`, or
-appears naming a binding that was never declared.
+It covers every runtime (Blocking, RTIC, Native, and Async where it is inert),
+both HALs (`stm32f1xx-hal` and embassy-stm32, plus `esp-hal`), and each
+half-wired shape — a bus with one pad missing, a SPI without MISO, a USB with
+one data pin. Those last ones are the paths that break without anyone noticing:
+the peripheral you configured simply does not appear in `main.rs`, or appears
+naming a binding that was never declared.
 
 Adding a case is one row in the script's `$CASES` table. The emit harnesses
 themselves are `#[ignore]`d tests (`cargo test <name> -- --ignored`) that print
 `wrote <path>` and `target: <triple>`; the script reads those lines rather than
-keeping its own copy of where anything lands.
+keeping its own copy of where anything lands, and a harness that emits several
+projects for several targets is paired up line by line.
 
-Cross-compiling needs the chip's target installed, e.g.
-`rustup target add thumbv7m-none-eabi`.
+Two cases build from a real part in the STM32Cube database. Point
+`EIDE_CUBE_DB` at your copy, or let them be skipped — a machine without the
+database reports them as skipped rather than failed.
+
+Cross-compiling needs each chip's target installed, e.g.
+`rustup target add thumbv7m-none-eabi thumbv7em-none-eabihf riscv32imc-unknown-none-elf`.
 
 ---
 
