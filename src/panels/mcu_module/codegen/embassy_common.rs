@@ -322,6 +322,7 @@ mod emit_for_manual_compile {
         let _ = std::fs::remove_dir_all(&dir);
         project_gen::write_project(&dir, &files, &pins_mod, "", "").expect("write project");
         println!("wrote {}", dir.display());
+        println!("target: {}", def.project.target);
         println!("hal_dep: {}", def.project.hal_dep);
 
         // ── The ASYNC variant ────────────────────────────────────────────────
@@ -344,6 +345,7 @@ mod emit_for_manual_compile {
         let _ = std::fs::remove_dir_all(&adir);
         project_gen::write_project(&adir, &files, &pins_mod, "", "").expect("write async project");
         println!("wrote {}", adir.display());
+        println!("target: {}", def.project.target);
 
         // ── Async + USART ────────────────────────────────────────────────────
         // `BufferedUart` is the embassy API most likely to move between
@@ -408,6 +410,7 @@ mod emit_for_manual_compile {
         project_gen::write_project(&udir, &files, &user, &mcu.mcu_config_text(), "")
             .expect("write usart project");
         println!("wrote {}", udir.display());
+        println!("target: {}", def.project.target);
 
         // ── Async + SPI/I2C on DMA ────────────────────────────────────
         // The path that had NEVER been compiled: every assertion on it was a
@@ -553,6 +556,7 @@ mod emit_for_manual_compile {
         project_gen::write_project(&ddir, &files, &user, &mcu.mcu_config_text(), "")
             .expect("write dma project");
         println!("wrote {}", ddir.display());
+        println!("target: {}", def.project.target);
 
         // -- The same, on an F2 --------------------------------------------
         // Its DMA request map is its OWN (six entries differ from F4 despite
@@ -647,6 +651,7 @@ mod emit_for_manual_compile {
         project_gen::write_project(&f2dir, &f2files, &f2user, &f2mcu.mcu_config_text(), "")
             .expect("write f2 dma project");
         println!("wrote {}", f2dir.display());
+        println!("target: {}", f2def.project.target);
 
         // -- and on an F7 --------------------------------------------------
         // STM32F767ZI: the part that used to fail in embassy's build script
@@ -735,6 +740,7 @@ mod emit_for_manual_compile {
         project_gen::write_project(&f7dir, &f7files, &f7user, &f7mcu.mcu_config_text(), "")
             .expect("write f7 dma project");
         println!("wrote {}", f7dir.display());
+        println!("target: {}", f7def.project.target);
 
         // -- Watchdogs, on the same F4 -------------------------------------
         // Pin-less, so they exercise a path nothing else does: a config file
@@ -805,6 +811,7 @@ mod emit_for_manual_compile {
             project_gen::write_project(&wdir, &wfiles, &wuser, &w.mcu_config_text(), "")
                 .expect("write watchdog project");
             println!("wrote {}", wdir.display());
+            println!("target: {}", def.project.target);
         }
 
         // -- Watchdogs on the WBA ------------------------------------------
@@ -870,6 +877,7 @@ mod emit_for_manual_compile {
             project_gen::write_project(&bdir, &wfiles, &wuser, &w.mcu_config_text(), "")
                 .expect("write wba watchdog project");
             println!("wrote {}", bdir.display());
+            println!("target: {}", wdef.project.target);
         }
 
         // ── The F1 blocking USART, unchanged by this migration ───────────────
@@ -951,6 +959,7 @@ mod emit_for_manual_compile {
         project_gen::write_project(&f1dir, &files, &user, &m1.mcu_config_text(), "")
             .expect("write f1 project");
         println!("wrote {}", f1dir.display());
+        println!("target: {}", f1.project.target);
     }
 
     /// Comparators on a real STM32G474, both constructors.

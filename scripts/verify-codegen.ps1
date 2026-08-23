@@ -77,6 +77,11 @@ $CASES = @(
     # be wrong: esp-hal bindings, and the esp-rtos scheduler on the async one.
     @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ ESP_ASYNC_RUNTIME = "blocking" }; q = $true }
     @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{};                       q = $true }
+
+    # ONE test, NINE projects, four targets — GPIO, async, USART, DMA on F4/F2/F7,
+    # the watchdogs and WBA. Each prints its own `target:`, so they are paired
+    # individually rather than forced onto one triple.
+    @{ n = "embassy (9 projects)";         t = "emit_embassy_project";       e = @{};                       q = $true }
 )
 
 # Every knob any case sets, so one case cannot leak into the next.

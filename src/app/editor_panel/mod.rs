@@ -817,10 +817,16 @@ impl AppIde {
                 }
                 out
             };
-            // Unfolded: the editor owns the text, so adopt what it produced.
-            // Folded: it was handed a projection — discard it (nothing can have
-            // edited it; see the unfold-first rule above).
-            if !folded {
+            // Adopt what the editor produced — but ONLY on the Rust path, which
+            // is the one handed `editor_text`. A config file (Cargo.toml,
+            // memory.x, .gitignore) goes through the stock `CodeEditor` in the
+            // branch above, which edits `display_code` DIRECTLY; assigning
+            // `editor_text` over it there wrote back the pre-edit clone and
+            // erased every keystroke as it was typed.
+            //
+            // Folded: the editor was handed a projection — discard it (nothing
+            // can have edited it; see the unfold-first rule above).
+            if is_rust_file && !folded {
                 display_code = editor_text;
             }
 
