@@ -2416,6 +2416,31 @@ fn pwm_config_file(
         .map(|c| module_label_sfx(&c.custom_label))
         .unwrap_or_default();
 
+    // The channel goes in the METHOD NAME, never in a parameter: `set_duty`
+    // panics on a channel the timer has no pin for (`PINS::check_used` —
+    // "Unused channel"), so a setter that took one could be handed a panic.
+    // Naming them after what is wired makes that unreachable.
+    let mut duty_decls = String::new();
+    let mut duty_impls = String::new();
+    for (c, p) in chans {
+        duty_decls.push_str(&format!(
+            "
+    /// CH{c}, on {}.
+    fn set_duty_tim_{tim}_ch{c}(&mut self, value: u32);
+",
+            p.name
+        ));
+        duty_impls.push_str(&format!(
+            "
+    fn set_duty_tim_{tim}_ch{c}(&mut self, value: u32) {{
+        self.set_duty(Channel::C{c}, (self.get_max_duty() as u32 * value / 10_000) as u16);
+    }}
+"
+        ));
+    }
+    // `pwm_timers` only yields timers with a channel, so this fallback is for a
+    // caller that does not exist yet — but indexing here would panic the IDE.
+    let first = chans.first().map_or(1, |(c, _)| *c);
     PWM_TMPL
         .replace("{HANDLE}", &format!("_pwm{tim}{sfx}"))
         .replace("{N}", &tim.to_string())
@@ -2426,6 +2451,10 @@ fn pwm_config_file(
         .replace("{CHS}", &ch_markers)
         .replace("{REMAP}", remap)
         .replace("{LIST}", &list)
+        .replace("{DUTY_DECLS}", &duty_decls)
+        .replace("{DUTY_IMPLS}", &duty_impls)
+        .replace("{CH1ST}", &format!("C{first}"))
+        .replace("{CH1N}", &first.to_string())
 }
 
 /// One `stm32f1xx-hal` timer in PWM mode. `pwm_hz` takes the pins BY VALUE and
@@ -2475,20 +2504,27 @@ pub fn init(tim: pac::TIM{N}, pins: PwmPins, afio: &mut afio::Parts, clocks: &Cl
 {SETS}    pwm
 }
 
-/// Set CH1's duty in the same units the `DUTY_*` constants above use —
+/// Set a channel's duty in the same units the `DUTY_*` constants above use —
 /// HUNDREDTHS of a percent, so `10_000` is 100 % and `750` is 7.5 %.
 ///
 /// A trait rather than an inherent method because `Handle` is an alias for the
 /// HAL's own `PwmHz`, which this crate does not own.
+///
+/// One method per WIRED channel ({LIST}). The channel is part of the NAME
+/// rather than an argument on purpose: `set_duty` PANICS on a channel this
+/// timer has no pin for — `PINS::check_used` says "Unused channel" — and a duty
+/// setter should not be able to reach a panic. `set_duty_tim_{N}` drives
+/// {CH1ST} — the lowest channel you wired.
 pub trait DutyHandle {
+    /// {CH1ST}, the lowest channel wired to TIM{N}.
     fn set_duty_tim_{N}(&mut self, value: u32);
-}
+{DUTY_DECLS}}
 
 impl DutyHandle for Handle {
     fn set_duty_tim_{N}(&mut self, value: u32) {
-        self.set_duty(Channel::C1, (self.get_max_duty() as u32 * value / 10_000) as u16);
+        self.set_duty_tim_{N}_ch{CH1N}(value);
     }
-}
+{DUTY_IMPLS}}
 
 // ── Using TIM{N} ──
 // The duty is already set and the channels are already running. To change one
@@ -2497,16 +2533,16 @@ impl DutyHandle for Handle {
 //     use pins::configs::pwm{N}::DutyHandle;
 //     {HANDLE}.set_duty_tim_{N}(2_500); // 25 %
 //
-// or through the HAL directly, which is what the trait does and reaches every
-// channel rather than CH1:
+// or through the HAL directly, which is what the trait does — except that the
+// channel is then yours to get right: {LIST} are wired, and any other panics.
 //
 //     use stm32f1xx_hal::timer::Channel;
 //
 //     let max = {HANDLE}.get_max_duty();
-//     {HANDLE}.set_duty(Channel::C1, max / 2); // 50 %
+//     {HANDLE}.set_duty(Channel::{CH1ST}, max / 2); // 50 %
 //
 //     // …and to stop driving a pad without tearing the timer down:
-//     {HANDLE}.disable(Channel::C1);
+//     {HANDLE}.disable(Channel::{CH1ST});
 "#;
 
 /// `({AFIO_PARAM}, {AFIO_ARG})` for a config template.
@@ -3977,5 +4013,53 @@ mod blocking_dma_tests {
         }
         let main_rs = mcu.fresh_main_rs();
         assert!(main_rs.contains("let _spi1 ="), "{main_rs}");
+    }
+}
+
+#[cfg(test)]
+mod duty_handle_tests {
+    use super::*;
+
+    fn pwm_pin(name: &str, channel: u8) -> Pin {
+        let mut p = Pin::new(1, name);
+        p.selected_function = PinFunction::TimerPwm { timer: 2, channel };
+        p
+    }
+
+    /// `DutyHandle` may never name a channel the timer has no pin for.
+    ///
+    /// The trait shipped with `Channel::C1` hardcoded, which is a RUNTIME PANIC
+    /// on this exact wiring — `PINS::check_used` says "Unused channel" — and it
+    /// is the one defect in the F1 chain that a cross-compile cannot catch, so
+    /// it gets a test instead. TIM2 on CH3+CH4 is the harness's own wiring:
+    /// PA0/PA1 belong to the ADC there, which is why CH1 is free to be wrong.
+    #[test]
+    fn the_duty_trait_only_reaches_wired_channels() {
+        let (p3, p4) = (pwm_pin("PA2", 3), pwm_pin("PA3", 4));
+        let file = pwm_config_file(2, None, &[(3, &p3), (4, &p4)], "Tim2NoRemap");
+
+        // The whole point: no unwired channel anywhere in the file.
+        for ch in ["C1", "C2"] {
+            assert!(
+                !file.contains(&format!("Channel::{ch}")),
+                "TIM2 has no {ch} pin, so nothing may name it:\n{file}"
+            );
+        }
+        // One method per wired channel, and the bare one delegates rather than
+        // repeating the arithmetic.
+        assert!(file.contains("fn set_duty_tim_2_ch3(&mut self, value: u32) {"), "{file}");
+        assert!(file.contains("fn set_duty_tim_2_ch4(&mut self, value: u32) {"), "{file}");
+        assert!(file.contains("        self.set_duty_tim_2_ch3(value);"), "{file}");
+        assert!(file.contains("/// CH3, on PA2."), "{file}");
+    }
+
+    /// With CH1 wired the bare method still drives C1 — the fix moved the
+    /// channel, it did not make the common case take a detour.
+    #[test]
+    fn ch1_is_still_the_default_when_it_is_wired() {
+        let (p1, p2) = (pwm_pin("PA0", 1), pwm_pin("PA1", 2));
+        let file = pwm_config_file(2, None, &[(1, &p1), (2, &p2)], "Tim2NoRemap");
+        assert!(file.contains("        self.set_duty_tim_2_ch1(value);"), "{file}");
+        assert!(file.contains("Channel::C1"), "{file}");
     }
 }
