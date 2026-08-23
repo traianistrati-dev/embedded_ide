@@ -72,11 +72,16 @@ $CASES = @(
     @{ n = "F1 Async (inert, = blocking)"; t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_F1_RUNTIME = "async" }; q = $true }
     @{ n = "F1 RTIC";                      t = "emit_f1_rtic_project";   e = @{};                       q = $true }
     @{ n = "F1 Native";                    t = "emit_f1_native_project"; e = @{};                       q = $true }
+
+    # A different HAL and a different entry point, so a different set of ways to
+    # be wrong: esp-hal bindings, and the esp-rtos scheduler on the async one.
+    @{ n = "ESP32-C3 blocking";            t = "emit_esp32c3_project";       e = @{ ESP_ASYNC_RUNTIME = "blocking" }; q = $true }
+    @{ n = "ESP32-C3 async (esp-rtos)";    t = "emit_esp32c3_project";       e = @{};                       q = $true }
 )
 
 # Every knob any case sets, so one case cannot leak into the next.
 $KNOBS = @("EIDE_F1_DMA", "EIDE_SPI_TXONLY", "EIDE_USART_HALF", "EIDE_I2C_HALF",
-           "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME")
+           "EIDE_CAN_HALF", "EIDE_USB", "EIDE_F1_RUNTIME", "ESP_ASYNC_RUNTIME")
 
 $cases = if ($Full) { $CASES } else { $CASES | Where-Object { $_.q } }
 Write-Host ("running {0} of {1} cases{2}" -f $cases.Count, $CASES.Count,
@@ -94,22 +99,49 @@ foreach ($c in $cases) {
         $results += [pscustomobject]@{ Case = $c.n; Status = "EMIT FAILED"; Detail = "the harness's own assertions" }
         continue
     }
+    # A filter that matches nothing is a SUCCESSFUL cargo run of zero tests, so
+    # a typo in the test name would otherwise read as "the harness printed
+    # nothing" — a wrong diagnosis pointing at the wrong file.
+    if (-not ($out | Select-String -Pattern "test result: ok\. [1-9]")) {
+        $results += [pscustomobject]@{ Case = $c.n; Status = "NO SUCH TEST"; Detail = "cargo ran 0 tests for filter '$($c.t)'" }
+        continue
+    }
 
-    # The harness prints where it wrote and what to build it for; trusting those
+    # The harness says where it wrote and what to build it for; trusting those
     # lines is what keeps this script from duplicating the directory table.
-    $dirs = @($out | Select-String -Pattern "^wrote (.+)$" | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })
-    $target = ($out | Select-String -Pattern "^target: (.+)$" | Select-Object -First 1)
-    $target = if ($target) { $target.Matches[0].Groups[1].Value.Trim() } else { $null }
-    if (-not $dirs -or -not $target) {
-        $results += [pscustomobject]@{ Case = $c.n; Status = "NO OUTPUT"; Detail = "harness printed no 'wrote'/'target:' line" }
+    #
+    # Three shapes exist today and all three are accepted, because normalising
+    # them means editing a dozen tests to fix a script:
+    #   wrote <path>                    F1, ESP — followed by its own `target:`
+    #   wrote <path> (Display Name)     the chip-database harnesses
+    #   wrote <path>  …no target line   the embassy harness, several projects
+    # A `target:` line applies to the `wrote` above it, so a harness emitting
+    # several projects for several targets pairs up correctly. `t2` on the case
+    # is the fallback for the ones that print none.
+    $projects = @()
+    foreach ($line in $out) {
+        $l = "$line"
+        if ($l -match "^wrote (\S+)") {
+            $projects += [pscustomobject]@{ Dir = $matches[1]; Target = $c.t2 }
+        } elseif ($l -match "^target: (\S+)" -and $projects.Count -gt 0) {
+            $projects[-1].Target = $matches[1]
+        }
+    }
+    $projects = @($projects | Where-Object { $_.Dir -and (Test-Path $_.Dir) })
+    if (-not $projects) {
+        $results += [pscustomobject]@{ Case = $c.n; Status = "NO OUTPUT"; Detail = "harness printed no usable 'wrote' line" }
+        continue
+    }
+    if ($projects | Where-Object { -not $_.Target }) {
+        $results += [pscustomobject]@{ Case = $c.n; Status = "NO TARGET"; Detail = "harness printed no 'target:' and the case declares no t2" }
         continue
     }
 
     $status = "ok"
     $detail = ""
-    foreach ($d in $dirs) {
-        Set-Location $d
-        $r = cargo check --target $target 2>&1
+    foreach ($p in $projects) {
+        Set-Location $p.Dir
+        $r = cargo check --target $p.Target 2>&1
         $errs = @($r | Select-String -Pattern "^error(\[|:)").Count
         $warns = @($r | Select-String -Pattern "^warning: ").Count
         if ($errs -gt 0) {
