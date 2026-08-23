@@ -1328,18 +1328,7 @@ impl AppIde {
 
                         // Last import result (persists until the popup closes).
                         if let Some(msg) = &self.mcu_import_status {
-                            // Three outcomes, not two. The gap report is APPENDED
-                            // to a message that starts with the tick, so keying
-                            // the colour on the first glyph alone painted "2
-                            // chip(s) imported with gaps" in success green — the
-                            // one line the user most needs to stop and read.
-                            let col = if !msg.starts_with(ph::CHECK) {
-                                egui::Color32::from_rgb(220, 120, 90)
-                            } else if msg.contains(ph::WARNING) {
-                                egui::Color32::from_rgb(230, 190, 90)
-                            } else {
-                                egui::Color32::from_rgb(120, 200, 120)
-                            };
+                            let col = import_status_colour(msg);
                             ui.add_space(2.0);
                             ui.label(egui::RichText::new(msg).size(11.0).color(col));
                         }
@@ -1471,6 +1460,30 @@ pub(super) enum FeatureVerdict {
 }
 
 /// `known` is `None` when the index lookup failed, `Some(list)` when it worked.
+/// What colour the import report is painted.
+///
+/// Three outcomes, not two, and the third is why this is a function rather than
+/// a line inside the `ui` closure: the gap report is APPENDED to a message that
+/// starts with the tick, so keying the colour on the first glyph alone painted
+/// "2 chip(s) imported with gaps — a project on one of these will not fully
+/// build" in success green. That is the one line the reader most needs to stop
+/// at.
+///
+/// Extracted because the alternative was a rule nothing could check. Whether
+/// egui paints it is still something only a person can see; WHICH colour it is
+/// told to paint no longer is.
+pub(super) fn import_status_colour(msg: &str) -> egui::Color32 {
+    if !msg.starts_with(ph::CHECK) {
+        // Nothing was imported at all.
+        egui::Color32::from_rgb(220, 120, 90)
+    } else if msg.contains(ph::WARNING) {
+        // Imported, but something in it has to be read.
+        egui::Color32::from_rgb(230, 190, 90)
+    } else {
+        egui::Color32::from_rgb(120, 200, 120)
+    }
+}
+
 pub(super) fn feature_verdict(feat: &str, known: Option<&[String]>) -> FeatureVerdict {
     match known {
         None => FeatureVerdict::Unverified,
@@ -1741,5 +1754,52 @@ mod chip_gaps_tests {
     ) -> usize {
         crate::panels::mcu_module::codegen::dma_data::dma_def_for(xml, file.parent(), cache)
             .map_or(0, |d| d.channels.len())
+    }
+}
+
+#[cfg(test)]
+mod import_status_colour_tests {
+    use super::*;
+
+    const RED: egui::Color32 = egui::Color32::from_rgb(220, 120, 90);
+    const AMBER: egui::Color32 = egui::Color32::from_rgb(230, 190, 90);
+    const GREEN: egui::Color32 = egui::Color32::from_rgb(120, 200, 120);
+
+    #[test]
+    fn a_clean_import_is_green() {
+        assert_eq!(
+            import_status_colour(&format!("{}  Imported 3 chip(s) from 1 file(s)", ph::CHECK)),
+            GREEN
+        );
+    }
+
+    /// THE case this exists for: the gap report is appended to a message that
+    /// already starts with the tick, so it used to come out in success green.
+    #[test]
+    fn an_import_carrying_gaps_is_amber_not_green() {
+        let msg = format!(
+            "{}  Imported 3 chip(s) from 1 file(s)
+{}  2 chip(s) imported with gaps",
+            ph::CHECK,
+            ph::WARNING
+        );
+        assert_eq!(import_status_colour(&msg), AMBER, "a warning may not read as success");
+    }
+
+    #[test]
+    fn importing_nothing_is_red() {
+        assert_eq!(
+            import_status_colour(&format!("{}  No chips imported", ph::WARNING)),
+            RED
+        );
+    }
+
+    /// The three are distinct: a test that passed while two of them were the
+    /// same colour would be checking nothing.
+    #[test]
+    fn the_three_outcomes_do_not_share_a_colour() {
+        assert_ne!(RED, AMBER);
+        assert_ne!(AMBER, GREEN);
+        assert_ne!(RED, GREEN);
     }
 }
