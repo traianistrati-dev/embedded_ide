@@ -133,6 +133,11 @@ pwsh scripts/verify-codegen.ps1          # representative subset
 pwsh scripts/verify-codegen.ps1 -Full    # every case
 ```
 
+The quick set is 20 cases and takes about 12 minutes on a warm tree. Each case
+prints its own time, and the run ends with a total and the three most expensive
+— which is how you find out that one case, `embassy`, was a third of the bill
+before it was trimmed.
+
 Warnings count as failures. Not by a switch — each case declares how many it is
 allowed (`w`, default none), and any other number fails, in either direction.
 Generated code is meant to be warning-free; the few that are deliberate (a
@@ -155,6 +160,29 @@ half-wired shape — a bus with one pad missing, a SPI without MISO, a USB with
 one data pin. Those last ones are the paths that break without anyone noticing:
 the peripheral you configured simply does not appear in `main.rs`, or appears
 naming a binding that was never declared.
+
+**One run at a time, machine-wide.** Every case writes to a fixed directory
+under the temp dir, so two runs share one `target/` and tear each other's
+artifacts apart — and the damage does not look like concurrency. It surfaces as
+`could not write output`, `failed to write fingerprint`, `link.exe: 1104`:
+errors that read as a codegen regression and point at the wrong file. The script
+therefore takes a lock and *waits* rather than refusing, because a pre-push hook
+that exits non-zero aborts the push. While waiting it names the run it is
+waiting for and how to stop waiting. The emit harnesses warn (they do not block)
+when you start one by hand into a live run — the other half of the same trap.
+
+The give-away that a failure is concurrency and not codegen is the **timing**: a
+case that reports seven errors in six seconds never compiled anything.
+
+Two kinds of case exist. Most emit a project and cross-compile it. A **verdict**
+case (`v`) runs a host test and stops there, for a chip that *cannot* be
+compiled: `WL30 preflight verdict` pins that STM32WL30 has no clock code and no
+`embassy-stm32` feature, with an STM32G071 alongside as the control. It fails
+the day a `stm32wl3` recipe lands and the answer has to change.
+
+A case whose harness writes several projects may cross-compile only some of them
+in quick mode (`only`), with all of them still built by `-Full`. A name in that
+list matching nothing fails the case outright rather than quietly shrinking it.
 
 Adding a case is one row in the script's `$CASES` table. The emit harnesses
 themselves are `#[ignore]`d tests (`cargo test <name> -- --ignored`) that print
