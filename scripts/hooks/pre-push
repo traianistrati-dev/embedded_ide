@@ -33,6 +33,7 @@ fi
 # one case that matters.
 changed=""
 saw_ref=0
+verify_sha=""
 while read -r _local_ref local_sha _remote_ref remote_sha; do
     # Strip any trailing CR. Git writes these lines itself and uses LF, but a
     # hook is also run by hand and by other tooling, and a stray `\r` turns the
@@ -43,6 +44,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     remote_sha=$(printf '%s' "$remote_sha" | tr -d '\r')
     [ -z "$local_sha" ] && continue
     saw_ref=1
+    if [ -z "$verify_sha" ]; then verify_sha="$local_sha"; fi
     case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # deleting a ref
     case "$remote_sha" in
         *[!0]*) range="$remote_sha..$local_sha" ;;
@@ -71,6 +73,52 @@ if [ "$saw_ref" = "0" ] || [ "$changed" = "unknown" ]; then
 elif ! printf '%s' "$changed" | grep -qE '^(src/panels/mcu_module/|scripts/verify-codegen)'; then
     echo "pre-push: no codegen changes in what is being pushed - matrix skipped"
     exit 0
+fi
+
+# Verify WHAT IS BEING PUSHED, in a worktree of its own.
+#
+# Running the matrix over the working tree tests whatever happens to be on disk,
+# which is NOT what the push carries: commit, edit, push, and the hook blesses
+# the edit while the commits go out unchecked. A pre-push hook that tests
+# something other than the push gives a guarantee it does not have.
+#
+# It also removes a whole class of accident. The matrix drives `cargo test` in
+# the repo, so anyone editing a source file — or running cargo — during a run
+# changes what it is compiling underneath it. That is not hypothetical: it cost
+# a push. A detached worktree at the pushed sha cannot be edited by accident,
+# because nobody is working in it.
+#
+# CARGO_TARGET_DIR is kept OUTSIDE the worktree and reused between pushes. A
+# fresh worktree starts with an empty target/, and paying a full rebuild of the
+# IDE on every push would make this hook the thing people disable.
+worktree=""
+repo_root=$(git rev-parse --show-toplevel)
+cleanup_worktree() {
+    if [ -n "$worktree" ]; then
+        # Leave the worktree BEFORE removing it. Windows will not delete a
+        # directory that is some process's working directory, and this trap runs
+        # with the shell still inside it — so without this the worktree survives
+        # every push and `git worktree list` fills up with corpses.
+        cd "$repo_root" 2>/dev/null || cd /
+        git -C "$repo_root" worktree remove --force "$worktree" >/dev/null 2>&1 || rm -rf "$worktree"
+    fi
+}
+trap cleanup_worktree EXIT
+
+if [ -n "$verify_sha" ]; then
+    worktree="${TMP:-${TEMP:-/tmp}}/eide-push-check"
+    rm -rf "$worktree"
+    if git worktree add --detach "$worktree" "$verify_sha" >/dev/null 2>&1; then
+        echo "pre-push: checking ${verify_sha%${verify_sha#???????}} in its own worktree"
+        CARGO_TARGET_DIR="${TMP:-${TEMP:-/tmp}}/eide-hook-target"
+        export CARGO_TARGET_DIR
+        cd "$worktree"
+    else
+        # Honest degradation: a worktree we cannot make is a reason to check the
+        # working tree, never a reason to block the push.
+        echo "pre-push: could not add a worktree for $verify_sha - checking the working tree"
+        worktree=""
+    fi
 fi
 
 echo "pre-push: cross-compiling the generated projects…"
