@@ -129,10 +129,25 @@ compiler can tell you that text is a program. `scripts/verify-codegen.ps1`
 emits a matrix of configurations and cross-compiles each one:
 
 ```powershell
-pwsh scripts/verify-codegen.ps1              # representative subset
-pwsh scripts/verify-codegen.ps1 -Full        # every case
-pwsh scripts/verify-codegen.ps1 -Warnings    # treat warnings as failures too
+pwsh scripts/verify-codegen.ps1          # representative subset
+pwsh scripts/verify-codegen.ps1 -Full    # every case
 ```
+
+Warnings count as failures. Not by a switch — each case declares how many it is
+allowed (`w`, default none), and any other number fails, in either direction.
+Generated code is meant to be warning-free; the few that are deliberate (a
+half-wired bus leaves its pad bound and unused, which is the compiler naming the
+same pad the generated comment names) are written down as numbers instead of
+being waved through.
+
+To run it before every push:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+The hook only fires when something under `src/panels/mcu_module/` changed, so a
+README edit costs nothing; `git push --no-verify` skips it outright.
 
 It covers every runtime (Blocking, RTIC, Native, and Async where it is inert),
 both HALs (`stm32f1xx-hal` and embassy-stm32, plus `esp-hal`), and each

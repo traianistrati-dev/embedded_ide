@@ -377,7 +377,15 @@ fn make_gen_section(
     if !outputs.is_empty() || !inputs.is_empty() {
         body.push('\n');
         body.push_str("    // ── GPIO ──\n");
+        // A GPIO is declared for the reader's loop, which a fresh project does
+        // not have yet, so every pin they have not got to warns — twice for an
+        // output (`unused_variables` and `unused_mut`). These lines are INSIDE
+        // the generated block, so that is a warning they cannot answer by
+        // editing the line. Scoped to the one statement, it goes inert the
+        // moment the pin is used. Same rule as the STM32F1 backend.
+        const ALLOW: &str = "    #[allow(unused_mut, unused_variables)]\n";
         for p in &outputs {
+            body.push_str(ALLOW);
             body.push_str(&format!(
                 "    let mut {var} = Output::new(peripherals.{gpio}, Level::High, OutputConfig::default()); // GPIO Output\n",
                 var = esp_binding(p),
@@ -385,6 +393,7 @@ fn make_gen_section(
             ));
         }
         for p in &inputs {
+            body.push_str(ALLOW);
             body.push_str(&format!(
                 "    let {var} = Input::new(peripherals.{gpio}, InputConfig::default()); // GPIO Input\n",
                 var = esp_binding(p),
@@ -568,7 +577,11 @@ fn build_use_block(
     if has_input {
         gpio_types.insert("Input");
         gpio_types.insert("InputConfig");
-        gpio_types.insert("Pull");
+        // NOT `Pull`: the generated `Input::new` takes `InputConfig::default()`
+        // and never names a pull, so importing it earned every ESP project with
+        // an input an unused-import warning. It belongs here the day the
+        // generator emits `InputConfig::default().with_pull(..)`, and not before
+        // — an import is a claim that the code below uses it.
     }
     if !gpio_types.is_empty() {
         let types = gpio_types.iter().copied().collect::<Vec<_>>().join(", ");

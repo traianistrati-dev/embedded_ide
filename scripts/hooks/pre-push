@@ -1,0 +1,81 @@
+#!/bin/sh
+# Cross-compile the generated projects before anything leaves this machine.
+#
+# Enable once, per clone:
+#
+#     git config core.hooksPath scripts/hooks
+#
+# `core.hooksPath` rather than copying into .git/hooks so the hook is versioned
+# with the code it guards — a hook that lives only in one working copy protects
+# only one working copy.
+#
+# Skip a single push with `git push --no-verify` when you know the codegen is
+# untouched and you do not want to wait for the embassy builds.
+
+set -e
+
+if [ "$EIDE_SKIP_CODEGEN_CHECK" = "1" ]; then
+    echo "pre-push: codegen matrix skipped (EIDE_SKIP_CODEGEN_CHECK=1)"
+    exit 0
+fi
+
+# Only when something that FEEDS the generators changed. A README edit should
+# not cost ten minutes of cross-compiling, and a hook that always costs that
+# much is a hook people disable.
+#
+# What is being pushed comes from STDIN — git feeds a pre-push hook one
+# `<local ref> <local sha> <remote ref> <remote sha>` line per ref. That is the
+# only authoritative answer. Comparing against a branch name instead looks
+# equivalent and is not: this repo has no `origin/HEAD`, so the obvious
+# `origin/HEAD..HEAD` degrades to `git diff HEAD`, which diffs the WORKING TREE
+# — it would fire on uncommitted edits that are not being pushed, and skip
+# silently when you commit the codegen and push with a clean tree, which is the
+# one case that matters.
+changed=""
+saw_ref=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    # Strip any trailing CR. Git writes these lines itself and uses LF, but a
+    # hook is also run by hand and by other tooling, and a stray `\r` turns the
+    # range into `<sha>\r..<sha>` — a rev git rejects, which under `set -e`
+    # killed this script silently. A pre-push hook that dies ABORTS THE PUSH, so
+    # a cosmetic input problem became a blocked push with no explanation.
+    local_sha=$(printf '%s' "$local_sha" | tr -d '\r')
+    remote_sha=$(printf '%s' "$remote_sha" | tr -d '\r')
+    [ -z "$local_sha" ] && continue
+    saw_ref=1
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac   # deleting a ref
+    case "$remote_sha" in
+        *[!0]*) range="$remote_sha..$local_sha" ;;
+        *)      range="" ;;                               # new branch: unknown
+    esac
+    if [ -z "$range" ]; then
+        changed="unknown"
+        break
+    fi
+    # `|| range unusable` rather than letting `set -e` end it: this filter is an
+    # OPTIMISATION. When it cannot answer, the honest outcome is to run the
+    # matrix, never to block the push over a range we failed to read.
+    if ! diff_out=$(git diff --name-only "$range" 2>/dev/null); then
+        changed="unknown"
+        break
+    fi
+    changed="$changed$diff_out
+"
+done
+
+# Run outside a push (manual invocation, or a shell that gave us no stdin) and
+# for a brand-new branch: no reliable range, so do the safe thing rather than
+# the cheap one.
+if [ "$saw_ref" = "0" ] || [ "$changed" = "unknown" ]; then
+    echo "pre-push: no usable push range - running the matrix to be safe"
+elif ! printf '%s' "$changed" | grep -qE '^(src/panels/mcu_module/|scripts/verify-codegen)'; then
+    echo "pre-push: no codegen changes in what is being pushed - matrix skipped"
+    exit 0
+fi
+
+echo "pre-push: cross-compiling the generated projects…"
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -File scripts/verify-codegen.ps1
+else
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-codegen.ps1
+fi

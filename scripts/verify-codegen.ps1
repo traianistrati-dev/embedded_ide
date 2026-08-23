@@ -19,18 +19,19 @@
   Run every case. Without it, a representative subset that still covers each
   runtime and each "half-wired" shape.
 
-.PARAMETER Warnings
-  Fail a case that compiles with warnings, not just one that errors. Generated
-  code is meant to be warning-free; this is how that stays true.
+.NOTES
+  Warnings are checked too, and by COUNT: each case declares how many it is
+  allowed (`w`, default none) and anything else fails. There is no "warnings are
+  fine" mode — that is precisely how five of them lived in the ESP backend, on
+  the fully-wired path, until this matrix first covered it.
 
 .EXAMPLE
   pwsh scripts/verify-codegen.ps1
-  pwsh scripts/verify-codegen.ps1 -Full -Warnings
+  pwsh scripts/verify-codegen.ps1 -Full
 #>
 [CmdletBinding()]
 param(
-    [switch]$Full,
-    [switch]$Warnings
+    [switch]$Full
 )
 
 $ErrorActionPreference = "Continue"
@@ -53,7 +54,17 @@ if ($leaked) {
 $CUBE_DB = if ($env:EIDE_CUBE_DB) { $env:EIDE_CUBE_DB }
            else { "H:\stm32cube-database-master\stm32cube-database-master\db\mcu" }
 
-# label, emit test, environment for the run, quick?, prerequisite path
+# label, emit test, environment for the run, quick?, prerequisite path, and `w`
+# — how many warnings the case is allowed, default none.
+#
+# EXACTLY that many, not "at most": generated code is meant to be warning-free,
+# and the few that remain are deliberate (a half-wired bus leaves its pad bound
+# and unused, which is the compiler naming the same pad the generated comment
+# names). Writing the number down is what makes a NEW warning fail the run —
+# a threshold of "warnings are fine" is how five of them lived in the ESP
+# backend, on the fully-wired path, until this matrix first covered it.
+# It also fails when a case stops warning, so a fixed one cannot quietly keep
+# its allowance.
 #
 # The env hash is the case: every key is a knob the emit test reads, and an
 # empty hash means "as wired by default".
@@ -63,17 +74,20 @@ $CASES = @(
     @{ n = "F1 blocking, DMA rx";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "rx" };   q = $false }
     @{ n = "F1 blocking, DMA both";        t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both" }; q = $true }
     @{ n = "F1 SPI without MISO";          t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_SPI_TXONLY = "1" }; q = $true }
-    @{ n = "F1 USART TX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "tx" }; q = $true }
-    @{ n = "F1 USART RX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "rx" }; q = $false }
-    @{ n = "F1 I2C SCL only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "scl" };  q = $true }
-    @{ n = "F1 I2C SDA only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "sda" };  q = $false }
-    @{ n = "F1 CAN TX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "tx" };   q = $true }
-    @{ n = "F1 CAN RX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "rx" };   q = $false }
+    # `w` is how many warnings this case is ALLOWED — see the note above $CASES.
+    # A half-wired bus leaves its pad bound and unused on purpose, and that
+    # warning is the compiler naming the same pad the generated comment does.
+    @{ n = "F1 USART TX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "tx" }; q = $true;  w = 2 }
+    @{ n = "F1 USART RX only";             t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USART_HALF = "rx" }; q = $false; w = 2 }
+    @{ n = "F1 I2C SCL only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "scl" };  q = $true;  w = 2 }
+    @{ n = "F1 I2C SDA only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_I2C_HALF = "sda" };  q = $false; w = 2 }
+    @{ n = "F1 CAN TX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "tx" };   q = $true;  w = 2 }
+    @{ n = "F1 CAN RX only";               t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_CAN_HALF = "rx" };   q = $false; w = 2 }
     @{ n = "F1 USB, both pads";            t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "both" };      q = $true }
     @{ n = "F1 USB, D- only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dm" };        q = $true }
     @{ n = "F1 USB, D+ only";              t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dp" };        q = $false }
     @{ n = "F1 USB D- + GPIO on its pad";  t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_USB = "dm-gpio" };   q = $true }
-    @{ n = "F1 every bus half-wired";      t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_USART_HALF = "rx"; EIDE_SPI_TXONLY = "1"; EIDE_I2C_HALF = "scl" }; q = $true }
+    @{ n = "F1 every bus half-wired";      t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "both"; EIDE_USART_HALF = "rx"; EIDE_SPI_TXONLY = "1"; EIDE_I2C_HALF = "scl" }; q = $true; w = 3 }
     @{ n = "F1 Async (inert, = blocking)"; t = "emit_f1_dma_project";    e = @{ EIDE_F1_DMA = "off"; EIDE_F1_RUNTIME = "async" }; q = $true }
     @{ n = "F1 RTIC";                      t = "emit_f1_rtic_project";   e = @{};                       q = $true }
     @{ n = "F1 Native";                    t = "emit_f1_native_project"; e = @{};                       q = $true }
@@ -162,20 +176,26 @@ foreach ($c in $cases) {
 
     $status = "ok"
     $detail = ""
+    $seen = 0
     foreach ($p in $projects) {
         Set-Location $p.Dir
         $r = cargo check --target $p.Target 2>&1
         $errs = @($r | Select-String -Pattern "^error(\[|:)").Count
-        $warns = @($r | Select-String -Pattern "^warning: ").Count
+        $w = @($r | Select-String -Pattern "^warning: ")
+        $seen += $w.Count
         if ($errs -gt 0) {
             $status = "$errs ERRORS"
             $detail = ($r | Select-String -Pattern "^error(\[|:)" | Select-Object -First 1).Line.Trim()
             break
         }
-        if ($warns -gt 0) {
-            if ($Warnings) { $status = "$warns warnings" } elseif ($status -eq "ok") { $status = "ok ($warns warn)" }
-            $detail = ($r | Select-String -Pattern "^warning: " | Select-Object -First 1).Line.Trim()
-        }
+        if ($w.Count -gt 0 -and -not $detail) { $detail = $w[0].Line.Trim() }
+    }
+    $allowed = if ($null -ne $c.w) { [int]$c.w } else { 0 }
+    if ($status -eq "ok" -and $seen -ne $allowed) {
+        $status = "$seen warn, expected $allowed"
+        if ($seen -lt $allowed) { $detail = "fewer warnings than declared - lower `w` on this case" }
+    } elseif ($status -eq "ok" -and $seen -gt 0) {
+        $status = "ok ($seen expected)"
     }
     $results += [pscustomobject]@{ Case = $c.n; Status = $status; Detail = $detail }
     $colour = if ($status -like "*ERROR*") { "Red" } elseif ($status -like "*warn*") { "Yellow" } else { "Green" }
@@ -187,8 +207,8 @@ foreach ($k in $KNOBS) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinu
 
 Write-Host ""
 $bad = @($results | Where-Object {
-    $_.Status -like "*ERROR*" -or $_.Status -like "*FAILED*" -or $_.Status -eq "NO OUTPUT" -or
-    ($Warnings -and $_.Status -like "*warnings")
+    $_.Status -like "*ERROR*" -or $_.Status -like "*FAILED*" -or
+    $_.Status -like "NO *" -or $_.Status -like "*expected*" -and $_.Status -notlike "ok *"
 })
 if ($bad) {
     Write-Host "FAILED:" -ForegroundColor Red
