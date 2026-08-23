@@ -113,7 +113,9 @@ while (-not $script:lock) {
 if ($waited -gt 0) { Write-Host ("waited {0} min for the lock" -f [math]::Round($waited / 60, 1)) -ForegroundColor DarkYellow }
 # Whoever waits next reads this. Stale entries are harmless: it is only ever
 # read by someone who has just seen the lock held.
-"PID $PID, started $(Get-Date -Format 'HH:mm:ss')" | Set-Content -Path $ownerPath -Encoding utf8
+# ASCII, not utf8: Windows PowerShell writes a BOM for `-Encoding utf8`, and it
+# shows up inside the "(PID ...)" the next waiter prints. The content is ASCII.
+"PID $PID, started $(Get-Date -Format 'HH:mm:ss')" | Set-Content -Path $ownerPath -Encoding ascii
 
 # The harnesses warn when they find this lock held, because running one by hand
 # during a matrix run corrupts both. Our own children are exactly the case that

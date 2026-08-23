@@ -75,6 +75,43 @@ elif ! printf '%s' "$changed" | grep -qE '^(src/panels/mcu_module/|scripts/verif
     exit 0
 fi
 
+# If a matrix run is already going, ask before spending a quarter of an hour
+# behind it.
+#
+# The script itself WAITS when it finds the lock held, which is right for it: it
+# has no idea whether anyone is watching. A hook does — someone just typed
+# `git push` — so it can offer the choice the script cannot.
+#
+# `/dev/tty`, not stdin: a pre-push hook's stdin is git's ref list, already read
+# above, so `read` there returns EOF instantly. And `-t 30` because a prompt
+# with no deadline would hang every non-interactive push forever, which is a far
+# worse failure than the wait it is trying to save.
+lock="${TMP:-${TEMP:-/tmp}}/eide-codegen-matrix.lock"
+if [ -e "$lock" ] && ! (: >> "$lock") 2>/dev/null; then
+    # `tr -d` strips a UTF-8 BOM: owner files written before the encoding was
+    # fixed still have one, and it lands in the middle of the message.
+    owner=$(cat "${lock%.lock}.owner" 2>/dev/null | tr -d '\357\273\277' || true)
+    # Not `[ -r /dev/tty ]`: on Git Bash that test passes for a device that
+    # cannot actually be opened, so every non-interactive push printed two
+    # "No such device or address" lines before falling back. Try the open
+    # instead, in a subshell, and let the failure be the answer.
+    if (exec 3< /dev/tty) 2>/dev/null && (exec 3> /dev/tty) 2>/dev/null; then
+        {
+            echo "pre-push: a codegen matrix run is already going${owner:+ ($owner)}."
+            printf 'pre-push: [w]ait for it, [s]kip the check, or [a]bort the push? [w] '
+        } > /dev/tty
+        answer=""
+        read -t 30 -r answer < /dev/tty || answer=""
+        case "$answer" in
+            s|S) echo "pre-push: matrix skipped - you asked"; exit 0 ;;
+            a|A) echo "pre-push: push aborted - you asked"; exit 1 ;;
+            *)   echo "pre-push: waiting for the other run" ;;
+        esac
+    else
+        echo "pre-push: a codegen matrix run is already going${owner:+ ($owner)} - waiting"
+    fi
+fi
+
 # Verify WHAT IS BEING PUSHED, in a worktree of its own.
 #
 # Running the matrix over the working tree tests whatever happens to be on disk,
