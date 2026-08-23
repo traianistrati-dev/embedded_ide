@@ -48,7 +48,12 @@ if ($leaked) {
         $leaked.Count, ($leaked.Name -join ", ")) -ForegroundColor DarkYellow
 }
 
-# label, emit test, environment for the run, quick?
+# Where the STM32Cube database is, if it is anywhere. The two importer cases
+# need it; everything else is built from definitions bundled in the repo.
+$CUBE_DB = if ($env:EIDE_CUBE_DB) { $env:EIDE_CUBE_DB }
+           else { "H:\stm32cube-database-master\stm32cube-database-master\db\mcu" }
+
+# label, emit test, environment for the run, quick?, prerequisite path
 #
 # The env hash is the case: every key is a knob the emit test reads, and an
 # empty hash means "as wired by default".
@@ -82,6 +87,14 @@ $CASES = @(
     # the watchdogs and WBA. Each prints its own `target:`, so they are paired
     # individually rather than forced onto one triple.
     @{ n = "embassy (9 projects)";         t = "emit_embassy_project";       e = @{};                       q = $true }
+
+    # These two build from a REAL part in the vendor database rather than from a
+    # bundled definition, which is the only way to exercise the importer's own
+    # output — channel names, interrupt names, the `bind_interrupts!` grouping.
+    # `p` is what they need; without it they are skipped, not failed, because a
+    # machine without the database is a normal machine.
+    @{ n = "imported chip, async DMA";     t = "emit_imported_dma_project";  e = @{}; q = $true; p = $CUBE_DB }
+    @{ n = "imported chip, comparators";   t = "emit_comp_project";          e = @{}; q = $true; p = $CUBE_DB }
 )
 
 # Every knob any case sets, so one case cannot leak into the next.
@@ -95,6 +108,11 @@ Write-Host ""
 
 $results = @()
 foreach ($c in $cases) {
+    if ($c.p -and -not (Test-Path $c.p)) {
+        $results += [pscustomobject]@{ Case = $c.n; Status = "skipped"; Detail = "no vendor database at $($c.p)" }
+        Write-Host ("  {0,-34} skipped (no database)" -f $c.n) -ForegroundColor DarkGray
+        continue
+    }
     foreach ($k in $KNOBS) { Remove-Item ("Env:\" + $k) -ErrorAction SilentlyContinue }
     foreach ($k in $c.e.Keys) { Set-Item ("Env:\" + $k) $c.e[$k] }
 
@@ -177,5 +195,8 @@ if ($bad) {
     $bad | ForEach-Object { Write-Host ("  {0}: {1}`n      {2}" -f $_.Case, $_.Status, $_.Detail) -ForegroundColor Red }
     exit 1
 }
-Write-Host ("all {0} cases compile" -f $results.Count) -ForegroundColor Green
+$skipped = @($results | Where-Object { $_.Status -eq "skipped" })
+$ran = $results.Count - $skipped.Count
+Write-Host ("all {0} cases compile{1}" -f $ran,
+    $(if ($skipped) { " ($($skipped.Count) skipped)" } else { "" })) -ForegroundColor Green
 exit 0
