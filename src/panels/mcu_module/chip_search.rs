@@ -121,6 +121,37 @@ pub struct Catalogue {
     /// Sources that failed to index, as `(source index, reason)` — surfaced in
     /// the UI instead of silently shrinking the catalogue.
     pub errors: Vec<(usize, String)>,
+    /// Indices into `rows`: one per DISTINCT part, the copy that knows the most
+    /// about it. This is the set a search actually walks.
+    ///
+    /// Computed once here rather than per keystroke: the same part number
+    /// appears in every source that carries it, and picking between them by
+    /// hand — first one wins — silently preferred whichever source happened to
+    /// be listed first over whichever one had the data.
+    unified: Vec<usize>,
+}
+
+/// One winner per part: the source that knows the most about it.
+///
+/// A clock tree outranks every other fact — it is the difference between a Clock
+/// tab that works and one that says the chip has no clock — and beyond that it
+/// is simply how many facts the source carries. Ties keep the earlier source,
+/// so a re-index cannot reshuffle the catalogue for no reason.
+fn pick_unified(rows: &[Indexed], sources: &[ChipSource]) -> Vec<usize> {
+    let score = |r: &Indexed| (sources[r.source].has_clock(), r.entry.completeness());
+    let mut best: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (ix, row) in rows.iter().enumerate() {
+        match best.get(&row.key) {
+            Some(&cur) if score(&rows[cur]) >= score(row) => {}
+            _ => {
+                best.insert(row.key.clone(), ix);
+            }
+        }
+    }
+    let mut out: Vec<usize> = best.into_values().collect();
+    out.sort_unstable();
+    out
 }
 
 struct Indexed {
@@ -153,11 +184,26 @@ impl Catalogue {
                 Err(e) => errors.push((ix, e)),
             }
         }
+        // One winner per part: the source that knows the most about it. A clock
+        // tree outranks every other fact — it is the difference between a Clock
+        // tab that works and one that says the chip has no clock — and beyond
+        // that it is simply how many facts the source carries.
+        let unified = pick_unified(&rows, &sources);
+
         Self {
             sources,
             rows,
             errors,
+            unified,
         }
+    }
+
+    /// How many DISTINCT parts the sources describe between them.
+    ///
+    /// Not the sum of the per-source counts: a part in three sources is one
+    /// part. This is the number a search can actually return.
+    pub fn unified_len(&self) -> usize {
+        self.unified.len()
     }
 
     /// How many parts are catalogued, across every source.
@@ -263,7 +309,7 @@ impl Catalogue {
         // and a row that is on screen is not a row that was hidden.
         let mut silent: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-        for row in &self.rows {
+        for row in self.unified.iter().map(|&ix| &self.rows[ix]) {
             let Some(rank) = (if browsing {
                 Some(0)
             } else {
@@ -485,6 +531,7 @@ mod tests {
 
     fn source(kind: SourceKind, clock: bool) -> ChipSource {
         ChipSource {
+            user_added: false,
             kind,
             chips: PathBuf::from("chips"),
             db: clock.then(|| PathBuf::from("db")),
@@ -493,22 +540,27 @@ mod tests {
 
     /// Builds a catalogue directly, bypassing the filesystem.
     fn catalogue(sources: Vec<ChipSource>, rows: Vec<(usize, ChipEntry)>) -> Catalogue {
+        let rows: Vec<Indexed> = rows
+            .into_iter()
+            .map(|(source, entry)| {
+                let key = entry.ref_name.to_ascii_lowercase();
+                let short = key.strip_prefix("stm32").unwrap_or(&key).to_owned();
+                Indexed {
+                    source,
+                    entry,
+                    key,
+                    short,
+                }
+            })
+            .collect();
+        // The same winner pass the real constructor runs — a test catalogue that
+        // skipped it would search a set no user ever sees.
+        let unified = pick_unified(&rows, &sources);
         Catalogue {
             sources,
-            rows: rows
-                .into_iter()
-                .map(|(source, entry)| {
-                    let key = entry.ref_name.to_ascii_lowercase();
-                    let short = key.strip_prefix("stm32").unwrap_or(&key).to_owned();
-                    Indexed {
-                        source,
-                        entry,
-                        key,
-                        short,
-                    }
-                })
-                .collect(),
+            rows,
             errors: Vec::new(),
+            unified,
         }
     }
 
@@ -699,6 +751,42 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(detail_of(&bare), "");
+    }
+
+    /// The same part in two sources is ONE part, and the copy that survives is
+    /// the one that knows more — not the one whose source was listed first.
+    ///
+    /// This is what two CubeMX folders on one machine actually look like: both
+    /// carry the part, and picking by position threw away flash, RAM and the
+    /// peripheral table roughly half the time.
+    #[test]
+    fn a_part_in_two_sources_is_one_part_and_keeps_the_better_copy() {
+        let thin = ChipEntry {
+            ref_name: "STM32WL30KBVx".into(),
+            file: "STM32WL30KBVx".into(),
+            family: "stm32wl3".into(),
+            ..Default::default()
+        };
+        let rich = entry("STM32WL30KBVx", "stm32wl3");
+        assert!(rich.completeness() > thin.completeness(), "the fixture is the point");
+
+        // Thin source listed FIRST, so "first wins" would pick the wrong one.
+        let cat = catalogue(
+            vec![
+                source(SourceKind::OpenPinData, false),
+                source(SourceKind::CubeMxDb, true),
+            ],
+            vec![(0, thin), (1, rich)],
+        );
+
+        assert_eq!(cat.len(), 2, "both copies are still catalogued");
+        assert_eq!(cat.unified_len(), 1, "but they are ONE part");
+
+        let (hits, total) = find(&cat, "wl30", &[], 10);
+        assert_eq!(total, 1, "and a search returns it once");
+        assert_eq!(hits.len(), 1);
+        // The surviving row is the one with the data.
+        assert!(hits[0].detail.contains("64"), "kept the thin copy: {:?}", hits[0].detail);
     }
 
     /// A part that is BOTH in the registry and on disk keeps its disk

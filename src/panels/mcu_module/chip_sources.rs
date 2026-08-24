@@ -63,6 +63,12 @@ pub struct ChipSource {
     /// it — it reads `db/plugins/clock` and `db/mcu/IP` from here — so its
     /// presence IS the answer to "can this source give me a clock tree".
     pub db: Option<PathBuf>,
+    /// The user pointed at this folder, so the user can take it away again.
+    ///
+    /// An auto-detected install cannot meaningfully be removed — `detect()`
+    /// would simply find it again next launch — so the difference has to be
+    /// visible where the remove button is drawn, not guessed at.
+    pub user_added: bool,
 }
 
 impl ChipSource {
@@ -127,6 +133,30 @@ pub struct ChipEntry {
 }
 
 impl ChipEntry {
+    /// How much this source actually knows about the part, 0..=7.
+    ///
+    /// The same part number turns up in more than one source, and the copies are
+    /// NOT equivalent: a CubeMX install carries frequency, flash, RAM, I/O and a
+    /// peripheral table, while an open-pin-data checkout may carry a name and a
+    /// package and nothing else. Picking whichever source happened to be listed
+    /// first therefore threw away real data about half the time.
+    ///
+    /// A count, not a weighting: every fact here is one the filter can actually
+    /// use, and inventing a ranking among them would be a guess about which
+    /// question the user is going to ask.
+    ///
+    /// `Some(0)` counts as KNOWN — an MP1 really has no internal flash, and
+    /// that is an answer, not a silence.
+    pub fn completeness(&self) -> u32 {
+        u32::from(self.mhz.is_some())
+            + u32::from(self.flash_kb.is_some())
+            + u32::from(self.ram_kb.is_some())
+            + u32::from(self.io.is_some())
+            + u32::from(!self.package.is_empty())
+            + u32::from(!self.cores.is_empty())
+            + u32::from(!self.peripherals.is_empty())
+    }
+
     /// How many of `ty` the part has, or 0 — including when the source had no
     /// index and therefore said nothing about any peripheral.
     ///
@@ -217,9 +247,10 @@ pub fn save_paths(paths: &[PathBuf]) -> Result<(), String> {
 pub fn all_sources() -> Vec<ChipSource> {
     let mut out = detect();
     for path in saved_paths() {
-        if let Some(src) = from_path(&path)
+        if let Some(mut src) = from_path(&path)
             && !out.iter().any(|s| s.chips == src.chips)
         {
+            src.user_added = true;
             out.push(src);
         }
     }
@@ -234,6 +265,7 @@ pub fn all_sources() -> Vec<ChipSource> {
 /// a puzzle, not a validation.
 pub fn from_path(path: &Path) -> Option<ChipSource> {
     let cube = |db: PathBuf| ChipSource {
+        user_added: false,
         kind: SourceKind::CubeMxDb,
         chips: db.join("mcu"),
         db: Some(db),
@@ -257,6 +289,7 @@ pub fn from_path(path: &Path) -> Option<ChipSource> {
     for chips in [path.join("mcu"), path.to_path_buf()] {
         if has_chip_xml(&chips) {
             return Some(ChipSource {
+                user_added: false,
                 kind: SourceKind::OpenPinData,
                 chips,
                 db: None,

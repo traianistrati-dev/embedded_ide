@@ -200,6 +200,9 @@ impl super::AppIde {
 
         let mut action: Option<Action> = None;
         let mut add_folder = false;
+        // Deferred like `add_folder`: acting on it needs `&mut self`, which the
+        // closure drawing the rows does not have.
+        let mut remove_source: Option<std::path::PathBuf> = None;
 
         // Borrow the three fields apart, so the list can read the registry while
         // writing the selection.
@@ -487,6 +490,21 @@ impl super::AppIde {
                     .color(egui::Color32::from_rgb(225, 185, 60)),
                 );
             }
+                // The number that actually answers "how many chips can I search":
+            // not the sum of the rows above, because a part in two sources is
+            // one part, and the copy that survives is the one that knows more.
+            if cat.sources.len() > 1 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  {} distinct parts in all sources together — searched and filtered as one set",
+                        ph::FUNNEL,
+                        cat.unified_len()
+                    ))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(150, 200, 160)),
+                );
+                ui.add_space(2.0);
+            }
             for (ix, src) in cat.sources.iter().enumerate() {
                 let (what, color) = if src.has_clock() {
                     ("pins + clock trees", egui::Color32::from_rgb(120, 190, 200))
@@ -494,6 +512,36 @@ impl super::AppIde {
                     ("pins only", egui::Color32::from_rgb(225, 185, 60))
                 };
                 ui.horizontal(|ui| {
+                    // Removal is only honest for a folder the user added: an
+                    // auto-detected install would be found again next launch, so
+                    // a button promising to remove it would be a lie.
+                    if src.user_added {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(ph::X)
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(220, 110, 90)),
+                                )
+                                .small()
+                                .frame(false),
+                            )
+                            .on_hover_text("Forget this folder")
+                            .clicked()
+                        {
+                            remove_source = Some(src.chips.clone());
+                        }
+                    } else {
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new(egui::RichText::new(ph::X).size(10.0))
+                                .small()
+                                .frame(false),
+                        )
+                        .on_disabled_hover_text(
+                            "Found automatically — uninstall it to stop it being used",
+                        );
+                    }
                     ui.label(
                         egui::RichText::new(format!(
                             "{} — {} parts,",
@@ -542,6 +590,9 @@ impl super::AppIde {
         if add_folder {
             self.add_chip_source();
         }
+        if let Some(path) = remove_source {
+            self.remove_chip_source(&path);
+        }
         match action {
             Some(Action::Select(id)) => self.pending_mcu_id = Some(id),
             Some(Action::Import { path, source, part }) => {
@@ -552,6 +603,36 @@ impl super::AppIde {
     }
 
     /// Ask for a folder, keep it if it is a usable source, and re-index.
+    /// Forget a folder the user added.
+    ///
+    /// Only the remembered list is touched — nothing on disk is deleted, and an
+    /// auto-detected install is unaffected because it was never in that list.
+    fn remove_chip_source(&mut self, chips: &std::path::Path) {
+        let before = chip_sources::saved_paths();
+        // The saved path may be the folder the user PICKED (a CubeMX root),
+        // while `chips` is the `db/mcu` inside it — so match on either being a
+        // prefix of the other rather than on equality, which would silently
+        // remove nothing.
+        let after: Vec<std::path::PathBuf> = before
+            .iter()
+            .filter(|p| !(chips.starts_with(p.as_path()) || p.starts_with(chips)))
+            .cloned()
+            .collect();
+        if after.len() == before.len() {
+            self.chip_search.note = format!(
+                "{}  {} is not one of the remembered folders",
+                ph::WARNING,
+                chips.display()
+            );
+            return;
+        }
+        self.chip_search.note = match chip_sources::save_paths(&after) {
+            Ok(()) => format!("{}  Forgot {}", ph::CHECK, chips.display()),
+            Err(e) => format!("{}  Could not forget that folder: {e}", ph::WARNING),
+        };
+        self.chip_search.reload();
+    }
+
     fn add_chip_source(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("Add a chip data folder")
