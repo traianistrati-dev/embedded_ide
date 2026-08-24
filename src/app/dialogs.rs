@@ -744,21 +744,13 @@ impl AppIde {
         // on the UI thread) the verdict is `Unverified`, which is its own line —
         // "we could not check" and "it is fine" are different answers.
         let mut gap_chips: Vec<String> = Vec::new();
-        // GPIO IP version -> its AF table (None = the file was not found).
-        let mut af_tables: std::collections::HashMap<
-            String,
-            Option<std::sync::Arc<stm32_pin_data::GpioAf>>,
-        > = std::collections::HashMap::new();
+        // The supporting-file caches, now owned by one struct so the routine
+        // that uses them can live outside this method.
+        let mut caches = ImportCaches::default();
+        // Stays HERE, not in the extracted routine: it is one network lookup for
+        // the whole run, and a function that can be called from a test has no
+        // business reaching for the crates.io index.
         let mut embassy_features: Option<Option<Vec<String>>> = None;
-        // DMA controller + NVIC version -> the chip's channels. Same idea as the
-        // AF cache: a whole family shares one pair of files.
-        let mut dma_tables: std::collections::HashMap<
-            String,
-            Option<crate::panels::mcu_module::mcu_def::DmaDef>,
-        > = std::collections::HashMap::new();
-        // NVIC version -> the chip's interrupt vector names.
-        let mut irq_tables: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
 
         for path in paths {
             let xml = match std::fs::read_to_string(path) {
@@ -769,94 +761,17 @@ impl AppIde {
                     continue;
                 }
             };
-            // Once per file: a range file's variants are the same silicon and
-            // therefore the same clock tree.
-            let mut clock: Option<crate::panels::mcu_module::clock::graph::GraphClock> = None;
-            if let Some(db) = clock_src.and_then(|s| s.db.as_deref()) {
-                let family = stm32_pin_data::convert_xml(&xml)
-                    .ok()
-                    .and_then(|c| c.first().map(|c| c.form.family.clone()))
-                    .unwrap_or_default();
-                match crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml(
-                    db, &xml, &family,
-                ) {
-                    Ok((gc, missing)) => {
-                        unbound_ids.extend(missing);
-                        clock = Some(gc);
-                    }
-                    Err(e) => {
-                        clock_err.get_or_insert(e);
-                    }
-                }
+            let made = definitions_from_file(path, &xml, clock_src, &mut caches);
+            unbound_ids.extend(made.unbound);
+            if let Some(e) = made.clock_err {
+                clock_err.get_or_insert(e);
             }
-            // The AF indices live in a sibling file, `<mcu dir>/IP/GPIO-<ver>_Modes.xml`.
-            // Cached per GPIO IP version: 98 files serve 2240 chips, so a bulk
-            // import of a whole family reads each one once.
-            let af = stm32_pin_data::gpio_ip_version(&xml).and_then(|ver| {
-                if let Some(t) = af_tables.get(&ver) {
-                    return t.as_ref().map(std::sync::Arc::clone);
-                }
-                let file = path
-                    .parent()
-                    .map(|d| d.join("IP").join(stm32_pin_data::gpio_ip_file_name(&ver)));
-                let table = file
-                    .and_then(|f| std::fs::read_to_string(f).ok())
-                    .map(|text| std::sync::Arc::new(stm32_pin_data::GpioAf::parse(&text)));
-                af_tables.insert(ver, table.clone());
-                table
-            });
-            // The DMA channels come from two more files in that same `IP/`
-            // folder. Only the STM32Cube database ships them — importing from
-            // the public open-pin-data repo leaves this `None`, and codegen
-            // falls back to the hand-written family tables.
-            let irq_vectors = crate::panels::mcu_module::codegen::nvic::vectors_for(
-                &xml,
-                path.parent(),
-                &mut irq_tables,
-            );
-            let dma = crate::panels::mcu_module::codegen::dma_data::dma_def_for(
-                &xml,
-                path.parent(),
-                &mut dma_tables,
-            );
-            match stm32_pin_data::convert_xml_with_af(&xml, af.as_deref()) {
-                Ok(chips) => {
-                    for chip in chips {
-                        let errs = chip.form.errors();
-                        if !errs.is_empty() {
-                            skipped += 1;
-                            first_err
-                                .get_or_insert(format!("{}: {}", chip.form.display_name, errs[0]));
-                            continue;
-                        }
-                        let mut def = chip.form.to_definition();
-                        def.dma = dma.clone();
-                        def.irq_vectors = irq_vectors.clone();
-                        def.usart_ip = stm32_pin_data::usart_ip_version(&xml);
-                        def.sdmmc_ip = stm32_pin_data::sdmmc_ip_version(&xml);
-                        // F4's real ceiling is per-chip (F401 84 … F429 180) —
-                        // override the form's F411-class default.
-                        if def.family == "stm32f4" {
-                            def.clock_limits = stm32_pin_data::f4_limits_for_chip(&def.id);
-                        }
-                        // F2 shares the F4 clock TREE but none of its ceilings:
-                        // 120 MHz HCLK with APB /4 and /2, per embassy's own
-                        // `#[cfg(stm32f2)] mod max` — which is `rcc_assert!`, so
-                        // exceeding it panics at boot on a debug build. Imports
-                        // before this carried F4's 100/50/100.
-                        if def.family == "stm32f2" {
-                            def.clock_limits =
-                                crate::panels::mcu_module::clock::graph::stm32f2_limits();
-                        }
-                        // The vendor's own tree replaces the family template.
-                        // `convert_xml` can only offer what the IDE ships for
-                        // the family — `ClockChoice::None` for most of them —
-                        // so this is where a chip stops arriving clock-less.
-                        if let Some(gc) = &clock {
-                            def.clock =
-                                crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc.clone());
-                            clocks += 1;
-                        }
+            clocks += made.clocks;
+            for e in made.errors {
+                skipped += 1;
+                first_err.get_or_insert(e);
+            }
+            for def in made.defs {
                         let hal = match stm32_pin_data::embassy_feature_in(&def.project.hal_dep)
                         {
                             Some(feat) => {
@@ -900,12 +815,6 @@ impl AppIde {
                                 first_err.get_or_insert(e);
                             }
                         }
-                    }
-                }
-                Err(e) => {
-                    skipped += 1;
-                    first_err.get_or_insert(format!("{}: {e}", path.display()));
-                }
             }
         }
 
@@ -1643,6 +1552,133 @@ mod feature_verdict_tests {
         );
     }
 
+/// The per-file caches the importer carries across a bulk run.
+///
+/// 98 GPIO AF tables serve 2240 chips and a DMA table serves a whole family, so
+/// a family import reads each supporting file once instead of once per part.
+#[derive(Default)]
+pub(super) struct ImportCaches {
+    af: std::collections::HashMap<String, Option<std::sync::Arc<stm32_pin_data::GpioAf>>>,
+    irq: std::collections::HashMap<String, Vec<String>>,
+    dma: std::collections::HashMap<String, Option<crate::panels::mcu_module::mcu_def::DmaDef>>,
+}
+
+/// What one vendor file yields.
+#[derive(Default)]
+pub(super) struct FileImport {
+    pub defs: Vec<crate::panels::mcu_module::mcu_def::McuDefinition>,
+    /// How many of `defs` carry the vendor's own clock tree.
+    pub clocks: usize,
+    pub unbound: Vec<String>,
+    pub clock_err: Option<String>,
+    /// One line per chip that could not be made, ready for the status line.
+    pub errors: Vec<String>,
+}
+
+/// Everything the importer knows how to build from ONE vendor XML.
+///
+/// Extracted from the dialog method so it can be called without an `AppIde` —
+/// which is to say, so it can be TESTED and scripted. The GUI method keeps what
+/// is genuinely its own: the counters, the status line, the registry, and the
+/// HAL-feature lookup that needs the network.
+pub(super) fn definitions_from_file(
+    path: &std::path::Path,
+    xml: &str,
+    clock_src: Option<&crate::panels::mcu_module::chip_sources::ChipSource>,
+    caches: &mut ImportCaches,
+) -> FileImport {
+    let mut out = FileImport::default();
+
+    // Once per file: a range file's variants are the same silicon and therefore
+    // the same clock tree.
+    let mut clock: Option<crate::panels::mcu_module::clock::graph::GraphClock> = None;
+    if let Some(db) = clock_src.and_then(|s| s.db.as_deref()) {
+        let family = stm32_pin_data::convert_xml(xml)
+            .ok()
+            .and_then(|c| c.first().map(|c| c.form.family.clone()))
+            .unwrap_or_default();
+        match crate::panels::mcu_module::clock::graph::cubemx::graph_for_chip_xml(db, xml, &family)
+        {
+            Ok((gc, missing)) => {
+                out.unbound.extend(missing);
+                clock = Some(gc);
+            }
+            Err(e) => {
+                out.clock_err.get_or_insert(e);
+            }
+        }
+    }
+
+    // The AF indices live in a sibling file, `<mcu dir>/IP/GPIO-<ver>_Modes.xml`.
+    let af = stm32_pin_data::gpio_ip_version(xml).and_then(|ver| {
+        if let Some(t) = caches.af.get(&ver) {
+            return t.as_ref().map(std::sync::Arc::clone);
+        }
+        let file = path
+            .parent()
+            .map(|d| d.join("IP").join(stm32_pin_data::gpio_ip_file_name(&ver)));
+        let table = file
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .map(|text| std::sync::Arc::new(stm32_pin_data::GpioAf::parse(&text)));
+        caches.af.insert(ver, table.clone());
+        table
+    });
+
+    // The DMA channels come from two more files in that same `IP/` folder. Only
+    // the STM32Cube database ships them — importing from the public
+    // open-pin-data repo leaves this `None`, and codegen falls back to the
+    // hand-written family tables.
+    let irq_vectors =
+        crate::panels::mcu_module::codegen::nvic::vectors_for(xml, path.parent(), &mut caches.irq);
+    let dma = crate::panels::mcu_module::codegen::dma_data::dma_def_for(
+        xml,
+        path.parent(),
+        &mut caches.dma,
+    );
+
+    let chips = match stm32_pin_data::convert_xml_with_af(xml, af.as_deref()) {
+        Ok(chips) => chips,
+        Err(e) => {
+            out.errors.push(format!("{}: {e}", path.display()));
+            return out;
+        }
+    };
+    for chip in chips {
+        let errs = chip.form.errors();
+        if !errs.is_empty() {
+            out.errors
+                .push(format!("{}: {}", chip.form.display_name, errs[0]));
+            continue;
+        }
+        let mut def = chip.form.to_definition();
+        def.dma = dma.clone();
+        def.irq_vectors = irq_vectors.clone();
+        def.usart_ip = stm32_pin_data::usart_ip_version(xml);
+        def.sdmmc_ip = stm32_pin_data::sdmmc_ip_version(xml);
+        // F4's real ceiling is per-chip (F401 84 … F429 180) — override the
+        // form's F411-class default.
+        if def.family == "stm32f4" {
+            def.clock_limits = stm32_pin_data::f4_limits_for_chip(&def.id);
+        }
+        // F2 shares the F4 clock TREE but none of its ceilings: 120 MHz HCLK
+        // with APB /4 and /2, per embassy's own `#[cfg(stm32f2)] mod max` —
+        // which is `rcc_assert!`, so exceeding it panics at boot on a debug
+        // build. Imports before this carried F4's 100/50/100.
+        if def.family == "stm32f2" {
+            def.clock_limits = crate::panels::mcu_module::clock::graph::stm32f2_limits();
+        }
+        // The vendor's own tree replaces the family template. `convert_xml` can
+        // only offer what the IDE ships for the family — `ClockChoice::None`
+        // for most of them — so this is where a chip stops arriving clock-less.
+        if let Some(gc) = &clock {
+            def.clock = crate::panels::mcu_module::mcu_def::ClockDef::Graph(gc.clone());
+            out.clocks += 1;
+        }
+        out.defs.push(def);
+    }
+    out
+}
+
 /// Does this family's codegen actually allocate from the definition's DMA table?
 ///
 /// Only the embassy backends do. STM32F1 takes its channel from the HAL, which
@@ -1784,6 +1820,77 @@ pub(super) fn verdict_for(
 /// is a commented skeleton and their DMA a `TODO`.
 pub(super) fn local_chip_gaps(clock_generates: bool, dma_channels: Option<usize>) -> Vec<String> {
     chip_gaps(&FeatureVerdict::Present, clock_generates, dma_channels)
+}
+
+#[cfg(test)]
+mod real_import_tests {
+    use super::*;
+
+    /// Import STM32WL30KBVx for real, through the SAME routine the dialog uses.
+    ///
+    /// Not a mock and not a parallel implementation — that is the whole point of
+    /// `definitions_from_file` existing: until it was pulled out of the dialog
+    /// method, nothing about importing a chip could be run without a window.
+    ///
+    /// Writes to the user's chip registry, so it is `#[ignore]`d:
+    ///
+    /// ```text
+    /// cargo test --bin embedded_ide_0 import_wl30_for_real -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes a definition into the user's chip registry"]
+    fn import_wl30_for_real() {
+        use crate::panels::mcu_module::chip_sources;
+
+        let Some(src) = chip_sources::all_sources()
+            .into_iter()
+            .find(|s| s.has_clock())
+        else {
+            println!("no source with clock trees - nothing imported");
+            return;
+        };
+        let path = src.chips.join("STM32WL30KBVx.xml");
+        if !path.is_file() {
+            println!("{} is not in {}", path.display(), src.chips.display());
+            return;
+        }
+        let xml = std::fs::read_to_string(&path).expect("read the vendor file");
+
+        let mut caches = ImportCaches::default();
+        let made = definitions_from_file(&path, &xml, Some(&src), &mut caches);
+        println!(
+            "from {}: {} definition(s), {} with a clock tree, {} unbound id(s), errors={:?}",
+            src.chips.display(),
+            made.defs.len(),
+            made.clocks,
+            made.unbound.len(),
+            made.errors
+        );
+        assert!(made.errors.is_empty(), "{:?}", made.errors);
+        assert_eq!(made.defs.len(), 1, "one part in this file");
+
+        let def = &made.defs[0];
+        let channels = def.dma.as_ref().map_or(0, |d| d.channels.len());
+        println!(
+            "  {} family={} dma_channels={} irq_vectors={} clock={}",
+            def.display_name,
+            def.family,
+            channels,
+            def.irq_vectors.len(),
+            matches!(
+                def.clock,
+                crate::panels::mcu_module::mcu_def::ClockDef::Graph(_)
+            )
+        );
+        // The reason the old stored definition was wrong: it predated the
+        // `parse_value` fix and carried no channels at all.
+        assert!(channels > 0, "the DMA channels must survive the import");
+
+        match registry::save_definition(def) {
+            Ok(p) => println!("  saved: {p:?}"),
+            Err(e) => panic!("could not save: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]
