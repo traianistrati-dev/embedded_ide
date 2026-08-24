@@ -695,6 +695,89 @@ mod tests {
         assert_eq!(c.count_of(0), 40);
     }
 
+    /// The unified set, against the real sources on this machine.
+    ///
+    /// Answers the question two CubeMX folders actually raise: is a part that
+    /// exists in BOTH of them one entry or two, and does the copy that survives
+    /// come from the folder that knows more — or merely from the one listed
+    /// first?
+    ///
+    /// `cargo test --bin embedded_ide_0 the_unified_set -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs real vendor data on this machine"]
+    fn the_unified_set_keeps_one_copy_of_each_part() {
+        use super::super::chip_sources;
+
+        let c = Catalogue::build(chip_sources::all_sources());
+        if c.sources.is_empty() {
+            println!("no chip sources on this machine - nothing to check");
+            return;
+        }
+        for (ix, src) in c.sources.iter().enumerate() {
+            println!(
+                "source {ix}: {} parts, clock={}, user_added={}  {}",
+                c.count_of(ix),
+                src.has_clock(),
+                src.user_added,
+                src.chips.display()
+            );
+        }
+        println!("rows={}  unified={}", c.len(), c.unified_len());
+        // Which source each surviving part came from. A source contributing a
+        // handful of parts nothing else has is usually not a chip catalogue at
+        // all — CubeMX keeps clock trees and memory maps in folders whose files
+        // are also named STM32*.xml.
+        let mut per_source = vec![0usize; c.sources.len()];
+        for &ix in &c.unified {
+            per_source[c.rows[ix].source] += 1;
+        }
+        for (ix, n) in per_source.iter().enumerate() {
+            println!("  source {ix} won {n} of the unified set");
+        }
+        assert!(c.unified_len() <= c.len(), "unifying cannot invent parts");
+        assert!(c.unified_len() > 0);
+
+        // Every part appears exactly once in the unified set.
+        let mut seen = std::collections::HashSet::new();
+        for &ix in &c.unified {
+            assert!(seen.insert(c.rows[ix].key.clone()), "duplicate: {}", c.rows[ix].key);
+        }
+
+        // And the part this was all about.
+        let wl30: Vec<&Indexed> = c
+            .unified
+            .iter()
+            .map(|&ix| &c.rows[ix])
+            .filter(|r| r.key == "stm32wl30kbvx")
+            .collect();
+        if wl30.is_empty() {
+            println!("STM32WL30KBVx is not in these sources - skipped");
+            return;
+        }
+        assert_eq!(wl30.len(), 1, "WL30 must be ONE entry, not one per source");
+        let w = wl30[0];
+        let copies = c.rows.iter().filter(|r| r.key == w.key).count();
+        println!(
+            "STM32WL30KBVx: {copies} copy(ies) catalogued, kept the one from source {}              (clock={}, completeness={}/7)",
+            w.source,
+            c.sources[w.source].has_clock(),
+            w.entry.completeness()
+        );
+        // The winner may not be beaten by any other copy.
+        let best = c
+            .rows
+            .iter()
+            .filter(|r| r.key == w.key)
+            .map(|r| (c.sources[r.source].has_clock(), r.entry.completeness()))
+            .max()
+            .unwrap();
+        assert_eq!(
+            (c.sources[w.source].has_clock(), w.entry.completeness()),
+            best,
+            "a better copy of WL30 was catalogued and thrown away"
+        );
+    }
+
     /// Against every source this machine has. Ignored: needs real vendor data.
     ///
     /// Also times the build, because that cost lands on the frame that opens the
