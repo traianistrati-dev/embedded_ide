@@ -1559,7 +1559,8 @@ impl AppIde {
                 &mcu.family,
                 &mcu.clock,
             );
-            let channels = mcu.dma.as_ref().map_or(0, |d| d.channels.len());
+            let channels = crate::app::dialogs::uses_dma_def(&mcu.family)
+                .then(|| mcu.dma.as_ref().map_or(0, |d| d.channels.len()));
             // All three once the index has answered; the two free ones until
             // then, and forever on a chip whose HAL line has no feature to look
             // up. Never a guess in the gap: `local_chip_gaps` says nothing at

@@ -883,7 +883,8 @@ impl AppIde {
                                 &def.family,
                                 &def.clock.to_config(&def.clock_limits),
                             ),
-                            def.dma.as_ref().map_or(0, |d| d.channels.len()),
+                            uses_dma_def(&def.family)
+                                .then(|| def.dma.as_ref().map_or(0, |d| d.channels.len())),
                         );
                         if !gaps.is_empty() {
                             gap_chips.push(format!("{} ({})", def.display_name, gaps.join(", ")));
@@ -1234,7 +1235,9 @@ impl AppIde {
                                                         &def.family,
                                                         &def.clock.to_config(&def.clock_limits),
                                                     ),
-                                                    def.dma.as_ref().map_or(0, |d| d.channels.len()),
+                                                    uses_dma_def(&def.family).then(|| {
+                                                        def.dma.as_ref().map_or(0, |d| d.channels.len())
+                                                    }),
                                                 );
                                                 let feat_note = if gaps.is_empty() {
                                                     String::new()
@@ -1640,6 +1643,19 @@ mod feature_verdict_tests {
         );
     }
 
+/// Does this family's codegen actually allocate from the definition's DMA table?
+///
+/// Only the embassy backends do. STM32F1 takes its channel from the HAL, which
+/// fixes it in the TYPE, and ESP32 gets its own from esp-hal — so an empty
+/// `DmaDef` there means nothing at all, and reporting it as a gap is a false
+/// alarm on the two families most likely to be installed.
+///
+/// The same two names `generates_clock_code` special-cases, for the same
+/// underlying reason: they are the families that do not go through embassy.
+pub(super) fn uses_dma_def(family: &str) -> bool {
+    !matches!(family, "stm32f1" | "esp32c3")
+}
+
 /// Everything about a chip that will not work, in one list.
 ///
 /// Three independent gaps, and the STM32WL30 that started this had all three at
@@ -1651,7 +1667,11 @@ mod feature_verdict_tests {
 /// Pure and primitive-taking on purpose: the callers already hold these three
 /// facts, and a function that took a definition would need a network lookup to
 /// be testable.
-pub(super) fn chip_gaps(hal: &FeatureVerdict, clock_generates: bool, dma_channels: usize) -> Vec<String> {
+pub(super) fn chip_gaps(
+    hal: &FeatureVerdict,
+    clock_generates: bool,
+    dma_channels: Option<usize>,
+) -> Vec<String> {
     let mut out = Vec::new();
     match hal {
         FeatureVerdict::Missing => out.push("no HAL support (the crate publishes no such chip feature)".into()),
@@ -1661,7 +1681,8 @@ pub(super) fn chip_gaps(hal: &FeatureVerdict, clock_generates: bool, dma_channel
     if !clock_generates {
         out.push("no clock code (its tree cannot be turned into an RCC config)".into());
     }
-    if dma_channels == 0 {
+    // `None` is not zero: it means the question does not apply here.
+    if dma_channels == Some(0) {
         out.push("no DMA channels found for it".into());
     }
     out
@@ -1712,7 +1733,8 @@ impl AppIde {
                             &d.family,
                             &d.clock.to_config(&d.clock_limits),
                         ),
-                        d.dma.as_ref().map_or(0, |x| x.channels.len()),
+                        uses_dma_def(&d.family)
+                            .then(|| d.dma.as_ref().map_or(0, |x| x.channels.len())),
                     )
                 })
                 .unwrap_or_default();
@@ -1760,7 +1782,7 @@ pub(super) fn verdict_for(
 /// arrive from a shared `.ron`, from the recent-projects list, or in a project
 /// someone else made — and then nothing had ever told the user why their clock
 /// is a commented skeleton and their DMA a `TODO`.
-pub(super) fn local_chip_gaps(clock_generates: bool, dma_channels: usize) -> Vec<String> {
+pub(super) fn local_chip_gaps(clock_generates: bool, dma_channels: Option<usize>) -> Vec<String> {
     chip_gaps(&FeatureVerdict::Present, clock_generates, dma_channels)
 }
 
@@ -1770,14 +1792,14 @@ mod chip_gaps_tests {
 
     #[test]
     fn a_chip_with_everything_reports_nothing() {
-        assert!(chip_gaps(&FeatureVerdict::Present, true, 8).is_empty());
+        assert!(chip_gaps(&FeatureVerdict::Present, true, Some(8)).is_empty());
     }
 
     /// The WL30 case, which is why this exists: three gaps, and the import used
     /// to mention none of them.
     #[test]
     fn all_three_gaps_are_reported_together() {
-        let g = chip_gaps(&FeatureVerdict::Missing, false, 0);
+        let g = chip_gaps(&FeatureVerdict::Missing, false, Some(0));
         assert_eq!(g.len(), 3, "{g:?}");
         assert!(g[0].contains("no HAL support"), "{g:?}");
         assert!(g[1].contains("no clock code"), "{g:?}");
@@ -1797,26 +1819,45 @@ mod chip_gaps_tests {
         assert_eq!(verdict_for("stm32wl30kb", "stm32wl30kb", None), None);
     }
 
+    /// A family that does not allocate from `DmaDef` must never be told it has
+    /// no DMA.
+    ///
+    /// STM32F1 takes its channel from the HAL (fixed in the TYPE) and ESP32
+    /// from esp-hal, so their definitions carry no channel list and never
+    /// needed one. Counting that as a gap put a false warning on the two
+    /// families most likely to be installed — which is where it was found.
+    #[test]
+    fn only_embassy_families_are_asked_about_dma() {
+        assert!(!uses_dma_def("stm32f1"), "F1 fixes the channel in the type");
+        assert!(!uses_dma_def("esp32c3"), "esp-hal brings its own");
+        assert!(uses_dma_def("stm32g0"), "embassy allocates from the table");
+        assert!(uses_dma_def("stm32wl3"));
+
+        // `None` is the shape those families pass, and it must stay silent.
+        assert!(local_chip_gaps(true, None).is_empty(), "no DMA question to answer");
+        assert_eq!(local_chip_gaps(false, None).len(), 1, "clock gap still reported");
+    }
+
     /// The local variant must never say anything about the HAL feature — it did
     /// not ask. It passes `Present` to reuse one list-builder, and a reader
     /// could easily mistake that for an answer; this is what stops it becoming
     /// one.
     #[test]
     fn the_local_variant_is_silent_about_the_hal() {
-        for (clock, dma) in [(true, 8), (false, 0), (true, 0), (false, 8)] {
+        for (clock, dma) in [(true, Some(8)), (false, Some(0)), (true, Some(0)), (false, Some(8))] {
             for line in local_chip_gaps(clock, dma) {
                 assert!(!line.contains("HAL"), "it did not check the HAL: {line}");
             }
         }
         // It still reports the two it DID ask about.
-        assert_eq!(local_chip_gaps(false, 0).len(), 2);
-        assert!(local_chip_gaps(true, 8).is_empty());
+        assert_eq!(local_chip_gaps(false, Some(0)).len(), 2);
+        assert!(local_chip_gaps(true, Some(8)).is_empty());
     }
 
     /// "Could not check" is its own line, never silence and never a clean bill.
     #[test]
     fn an_unverified_feature_is_still_said_out_loud() {
-        let g = chip_gaps(&FeatureVerdict::Unverified, true, 4);
+        let g = chip_gaps(&FeatureVerdict::Unverified, true, Some(4));
         assert_eq!(g.len(), 1);
         assert!(g[0].contains("unverified"), "{g:?}");
     }
@@ -1897,7 +1938,7 @@ mod chip_gaps_tests {
             assert_eq!(channels > 0, want_dma, "{prefix} DMA verdict ({channels})");
 
             // And the verdict the import actually prints, built from those two.
-            let gaps = chip_gaps(&FeatureVerdict::Present, has_clock, channels);
+            let gaps = chip_gaps(&FeatureVerdict::Present, has_clock, Some(channels));
             println!("  gaps: {gaps:?}");
             assert_eq!(gaps.is_empty(), want_clock && want_dma);
         }
