@@ -145,7 +145,18 @@ trap cleanup_worktree EXIT
 if [ -n "$verify_sha" ]; then
     worktree="${TMP:-${TEMP:-/tmp}}/eide-push-check"
     rm -rf "$worktree"
-    if git worktree add --detach "$worktree" "$verify_sha" >/dev/null 2>&1; then
+    # `rm -rf` deletes the DIRECTORY; git keeps its own registration under
+    # .git/worktrees, and an orphaned one makes every later `add` fail with
+    # "missing but already registered". A push interrupted after the worktree
+    # was made leaves exactly that — and from then on this hook falls back to
+    # the working tree silently, on every push, forever. Prune is safe: it only
+    # drops entries whose directory is already gone.
+    git worktree prune
+    # Keep the error. Falling back silently is what made a real failure here
+    # look like the feature simply not existing: the matrix ran, the push
+    # passed, and nothing said the worktree had never been made.
+    wt_err=$(git worktree add --detach "$worktree" "$verify_sha" 2>&1) && wt_ok=1 || wt_ok=0
+    if [ "$wt_ok" = "1" ]; then
         echo "pre-push: checking ${verify_sha%${verify_sha#???????}} in its own worktree"
         CARGO_TARGET_DIR="${TMP:-${TEMP:-/tmp}}/eide-hook-target"
         export CARGO_TARGET_DIR
@@ -154,6 +165,9 @@ if [ -n "$verify_sha" ]; then
         # Honest degradation: a worktree we cannot make is a reason to check the
         # working tree, never a reason to block the push.
         echo "pre-push: could not add a worktree for $verify_sha - checking the working tree"
+        echo "pre-push:   git said: $(printf '%s' "$wt_err" | head -2 | tr '
+' ' ')"
+        echo "pre-push:   (path tried: $worktree)"
         worktree=""
     fi
 fi
