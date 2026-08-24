@@ -1503,10 +1503,23 @@ impl AppIde {
                     no_mcu = Some("Peripheral configuration");
                 }
                 McuTab::Configuration => self.show_configuration_tab(ui),
-                McuTab::System => match &mut self.mcu {
-                    Some(mcu) => Self::show_system_tab(ui, mcu),
-                    None => no_mcu = Some("System configuration"),
-                },
+                McuTab::System => {
+                    // Read the shared slot BEFORE borrowing `self.mcu` mutably.
+                    let hal = self.hal_verdict_now();
+                    // A background thread finishing does not wake egui. Without
+                    // this nudge the verdict would sit in the slot unseen until
+                    // something else happened to cause a repaint — which, if the
+                    // user picked a chip and then just looked at the screen,
+                    // could be never.
+                    if hal.is_none() && self.hal_check.is_some() {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
+                    }
+                    match &mut self.mcu {
+                        Some(mcu) => Self::show_system_tab(ui, mcu, hal),
+                        None => no_mcu = Some("System configuration"),
+                    }
+                }
                 // Module-relationship diagram — chip-agnostic (works with no
                 // MCU selected), so it doesn't gate on `self.mcu`.
                 McuTab::Structure => self.show_structure_tab(ui),
@@ -1525,7 +1538,11 @@ impl AppIde {
     /// Async), which re-targets code generation and the embassy deps. Takes the
     /// MCU by `&mut` (not `&mut self`) so the caller can hand it the already
     /// borrowed `self.mcu` without a second borrow of `self`.
-    fn show_system_tab(ui: &mut egui::Ui, mcu: &mut crate::panels::mcu_module::mcu::Mcu) {
+    fn show_system_tab(
+        ui: &mut egui::Ui,
+        mcu: &mut crate::panels::mcu_module::mcu::Mcu,
+        hal: Option<crate::app::dialogs::FeatureVerdict>,
+    ) {
         use crate::panels::mcu_module::codegen::family;
         use crate::panels::mcu_module::mcu::Runtime;
 
@@ -1538,13 +1555,19 @@ impl AppIde {
             // nothing ever explained why the clock in `main.rs` is a commented
             // skeleton and the DMA a `TODO`. The verdict now travels with the
             // chip instead of with the moment it was imported.
-            let gaps = crate::app::dialogs::local_chip_gaps(
-                crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
-                    &mcu.family,
-                    &mcu.clock,
-                ),
-                mcu.dma.as_ref().map_or(0, |d| d.channels.len()),
+            let clock_ok = crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                &mcu.family,
+                &mcu.clock,
             );
+            let channels = mcu.dma.as_ref().map_or(0, |d| d.channels.len());
+            // All three once the index has answered; the two free ones until
+            // then, and forever on a chip whose HAL line has no feature to look
+            // up. Never a guess in the gap: `local_chip_gaps` says nothing at
+            // all about the HAL rather than assuming it is fine.
+            let gaps = match hal {
+                Some(v) => crate::app::dialogs::chip_gaps(&v, clock_ok, channels),
+                None => crate::app::dialogs::local_chip_gaps(clock_ok, channels),
+            };
             if !gaps.is_empty() {
                 ui.add_space(10.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {

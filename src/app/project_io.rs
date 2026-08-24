@@ -88,6 +88,12 @@ impl AppIde {
             if id != self.selected_mcu_id {
                 self.selected_mcu_id = id;
                 self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                // The same HAL lookup the chip picker starts. Opening a project
+                // is how you meet a chip someone ELSE chose — the case the
+                // verdict exists for — and it does not pass through the picker,
+                // so without this line the one gap that stops a project
+                // compiling would be the one gap never reported here.
+                self.start_hal_check();
                 // Re-fit the Pins canvas to the new chip (drop any persisted view).
                 self.mcu_view_adjusted = false;
                 // Reset LSP — it was attached to the previous chip's workspace.

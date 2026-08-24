@@ -1437,6 +1437,14 @@ pub struct AppIde {
     /// Chip `id` staged inside the "New Project" popup.
     /// `None` = "Empty" (no chip change on confirm).
     pending_mcu_id: Option<String>,
+    /// The selected chip's HAL-feature verdict, looked up OFF the UI thread.
+    ///
+    /// `(chip id, slot)`; `None` inside the slot means the answer has not landed
+    /// yet. The lookup hits the crates.io index and takes up to four seconds, so
+    /// doing it inline would freeze the app on every chip pick — and doing it in
+    /// the `ui` function would do that on every repaint. Same shape as
+    /// `ensure_version_fetch`, for the same reason.
+    hal_check: Option<(String, std::sync::Arc<std::sync::Mutex<Option<dialogs::FeatureVerdict>>>)>,
     /// The New Project chip-search field: its query, the catalogue of vendor
     /// chips on this machine, and the worker indexing it.
     chip_search: chip_search_ui::ChipSearchState,
@@ -1965,6 +1973,7 @@ impl AppIde {
             renaming_folder: None,
             confirm_new_project: false,
             pending_mcu_id: None,
+            hal_check: None,
             chip_search: Default::default(),
             mcu_import_status: None,
             mcu_form: None,

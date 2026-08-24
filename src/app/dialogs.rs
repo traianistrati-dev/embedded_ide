@@ -1352,6 +1352,13 @@ impl AppIde {
                         // main.rs tail in a project that says it is new.
                         self.selected_mcu_id = self.pending_mcu_id.take().unwrap_or_default();
                         self.mcu = Self::build_mcu_for(&self.mcu_registry, &self.selected_mcu_id);
+                        // Ask the index what this chip's HAL feature is, once,
+                        // off-thread. Picking a chip is the last moment before
+                        // a project exists on it — after this the answer only
+                        // arrives as a manifest cargo cannot resolve, which
+                        // kills rust-analyzer for the whole project and says
+                        // nothing about the chip.
+                        self.start_hal_check();
                         // A new chip starts in the default orientation — never
                         // inherit the previous chip's rotation (its package may
                         // differ). The fresh build already clears it; kept
@@ -1449,7 +1456,7 @@ impl AppIde {
 /// "it is fine" were the same branch, so a chip whose feature does not exist —
 /// an STM32WL30, where embassy-stm32 publishes no `stm32wl3*` at all — arrived
 /// looking verified whenever the index lookup timed out.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FeatureVerdict {
     /// The index lists it.
     Present,
@@ -1633,6 +1640,57 @@ pub(super) fn chip_gaps(hal: &FeatureVerdict, clock_generates: bool, dma_channel
     out
 }
 
+impl AppIde {
+    /// Start the off-thread HAL-feature lookup for the selected chip.
+    ///
+    /// Does nothing when the chip's HAL line carries no `embassy-stm32` feature
+    /// (STM32F1 uses `stm32f1xx-hal`, ESP32 its own): there is nothing to look
+    /// up, and an empty slot would read as "still loading" forever.
+    pub(super) fn start_hal_check(&mut self) {
+        self.hal_check = None;
+        let Some(mcu) = &self.mcu else { return };
+        let Some(def) = self.mcu_registry.iter().find(|d| d.id == mcu.id) else {
+            return;
+        };
+        let Some(feat) = stm32_pin_data::embassy_feature_in(&def.project.hal_dep) else {
+            return;
+        };
+        let feat = feat.to_owned();
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.hal_check = Some((mcu.id.clone(), slot.clone()));
+        std::thread::spawn(move || {
+            let known = crate::app::editor_panel::cargo_complete::known_features(
+                stm32_pin_data::EMBASSY_CRATE,
+                stm32_pin_data::EMBASSY_VERSION,
+            );
+            *slot.lock().unwrap() = Some(feature_verdict(&feat, known.as_deref()));
+        });
+    }
+
+    /// The verdict, if it has landed AND belongs to the chip on screen.
+    ///
+    /// The chip check is not paranoia: pick a chip, pick another before the
+    /// lookup returns, and without it the second chip would wear the first
+    /// one's answer.
+    pub(super) fn hal_verdict_now(&self) -> Option<FeatureVerdict> {
+        let (id, slot) = self.hal_check.as_ref()?;
+        verdict_for(&self.mcu.as_ref()?.id, id, *slot.lock().ok()?)
+    }
+}
+
+/// A verdict is only shown when it belongs to the chip currently on screen.
+///
+/// Not paranoia — a real race: pick a chip, pick another before the index
+/// answers, and the second chip wears the first one's verdict. A wrong verdict
+/// is worse than none, because it is exactly as confident.
+pub(super) fn verdict_for(
+    on_screen: &str,
+    was_checked: &str,
+    landed: Option<FeatureVerdict>,
+) -> Option<FeatureVerdict> {
+    (on_screen == was_checked).then_some(landed).flatten()
+}
+
 /// The half of [`chip_gaps`] that costs nothing to ask.
 ///
 /// The HAL feature lives in the crates.io index, and the caller for this one is
@@ -1667,6 +1725,19 @@ mod chip_gaps_tests {
         assert!(g[0].contains("no HAL support"), "{g:?}");
         assert!(g[1].contains("no clock code"), "{g:?}");
         assert!(g[2].contains("no DMA"), "{g:?}");
+    }
+
+    #[test]
+    fn a_verdict_never_leaks_onto_another_chip() {
+        let v = Some(FeatureVerdict::Missing);
+        assert_eq!(verdict_for("stm32wl30kb", "stm32wl30kb", v), v, "same chip");
+        assert_eq!(
+            verdict_for("stm32g071cb", "stm32wl30kb", v),
+            None,
+            "a verdict for another chip must not be shown"
+        );
+        // Still looking: no answer either way.
+        assert_eq!(verdict_for("stm32wl30kb", "stm32wl30kb", None), None);
     }
 
     /// The local variant must never say anything about the HAL feature — it did
