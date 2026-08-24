@@ -1530,6 +1530,54 @@ impl AppIde {
         use crate::panels::mcu_module::mcu::Runtime;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // What this chip cannot do, said where the project actually starts.
+            //
+            // The import report already says it — but the import report is not
+            // where most chips are met. One arrives from a shared `.ron`, from
+            // the recent list, or inside a project someone else made, and then
+            // nothing ever explained why the clock in `main.rs` is a commented
+            // skeleton and the DMA a `TODO`. The verdict now travels with the
+            // chip instead of with the moment it was imported.
+            let gaps = crate::app::dialogs::local_chip_gaps(
+                crate::panels::mcu_module::codegen::rcc::generates_clock_code_for(
+                    &mcu.family,
+                    &mcu.clock,
+                ),
+                mcu.dma.as_ref().map_or(0, |d| d.channels.len()),
+            );
+            if !gaps.is_empty() {
+                ui.add_space(10.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  {} is missing {} of what codegen needs",
+                            ph::WARNING,
+                            mcu.name,
+                            if gaps.len() == 1 { "one piece" } else { "pieces" }
+                        ))
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(230, 190, 90)),
+                    );
+                    for g in &gaps {
+                        ui.label(
+                            egui::RichText::new(format!("    {}  {g}", ph::ARROW_ELBOW_DOWN_RIGHT))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(200, 170, 100)),
+                        );
+                    }
+                    // Not a refusal. The rest of the chip works, and half a
+                    // project is worth more than none — the point is that you
+                    // find out now rather than from generated code.
+                    ui.label(
+                        egui::RichText::new(
+                            "    Everything else still generates; these parts come out as comments or TODOs.",
+                        )
+                        .size(10.5)
+                        .color(egui::Color32::GRAY),
+                    );
+                });
+            }
+
             ui.add_space(10.0);
             ui.heading(format!("{}  Runtime", ph::GEAR));
             ui.add_space(2.0);

@@ -1633,6 +1633,22 @@ pub(super) fn chip_gaps(hal: &FeatureVerdict, clock_generates: bool, dma_channel
     out
 }
 
+/// The half of [`chip_gaps`] that costs nothing to ask.
+///
+/// The HAL feature lives in the crates.io index, and the caller for this one is
+/// a `ui` function that runs on every repaint — a lookup there would be a network
+/// stall per frame. So this asks only the two questions answerable from the
+/// chip's own data, and **does not claim anything about the HAL feature**: the
+/// import path checks that one, once, and says so in its report.
+///
+/// It exists because the import report is not where most chips are met. One can
+/// arrive from a shared `.ron`, from the recent-projects list, or in a project
+/// someone else made — and then nothing had ever told the user why their clock
+/// is a commented skeleton and their DMA a `TODO`.
+pub(super) fn local_chip_gaps(clock_generates: bool, dma_channels: usize) -> Vec<String> {
+    chip_gaps(&FeatureVerdict::Present, clock_generates, dma_channels)
+}
+
 #[cfg(test)]
 mod chip_gaps_tests {
     use super::*;
@@ -1651,6 +1667,22 @@ mod chip_gaps_tests {
         assert!(g[0].contains("no HAL support"), "{g:?}");
         assert!(g[1].contains("no clock code"), "{g:?}");
         assert!(g[2].contains("no DMA"), "{g:?}");
+    }
+
+    /// The local variant must never say anything about the HAL feature — it did
+    /// not ask. It passes `Present` to reuse one list-builder, and a reader
+    /// could easily mistake that for an answer; this is what stops it becoming
+    /// one.
+    #[test]
+    fn the_local_variant_is_silent_about_the_hal() {
+        for (clock, dma) in [(true, 8), (false, 0), (true, 0), (false, 8)] {
+            for line in local_chip_gaps(clock, dma) {
+                assert!(!line.contains("HAL"), "it did not check the HAL: {line}");
+            }
+        }
+        // It still reports the two it DID ask about.
+        assert_eq!(local_chip_gaps(false, 0).len(), 2);
+        assert!(local_chip_gaps(true, 8).is_empty());
     }
 
     /// "Could not check" is its own line, never silence and never a clean bill.
